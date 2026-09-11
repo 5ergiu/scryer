@@ -11,6 +11,8 @@ import {
 test("normalizes supported locale aliases and falls back to English", () => {
   assert.equal(normalizeLocale("pt-BR"), "por");
   assert.equal(normalizeLocale("zh-CN"), "zho");
+  assert.equal(normalizeLocale("nl-NL"), "nld");
+  assert.equal(normalizeLocale("nl-BE"), "nld");
   assert.equal(normalizeLocale("unknown"), "eng");
 });
 
@@ -36,7 +38,7 @@ test("loads and caches a deferred locale atomically", async () => {
 });
 
 test("every deferred locale has a valid loader", async () => {
-  const locales = ["fra", "deu", "ita", "por", "kor", "zho", "jpn", "rus"];
+  const locales = ["fra", "deu", "ita", "por", "kor", "zho", "jpn", "rus", "nld"];
   for (const locale of locales) {
     const dictionary = await loadLocaleDictionary(locale);
     assert.equal(typeof dictionary["label.language"], "string");

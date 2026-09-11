@@ -14,7 +14,8 @@ export type LocaleCode =
   | "kor"
   | "zho"
   | "jpn"
-  | "rus";
+  | "rus"
+  | "nld";
 
 export type LanguageOption = {
   code: LocaleCode;
@@ -40,6 +41,9 @@ const LOCALE_ALIASES: Record<string, LocaleCode> = {
 
   ru: "rus",
   "ru-ru": "rus",
+  nl: "nld",
+  "nl-nl": "nld",
+  "nl-be": "nld",
 };
 
 const localeLoaders = new Map<DeferredLocaleCode, LocaleLoader>([
@@ -52,6 +56,7 @@ const localeLoaders = new Map<DeferredLocaleCode, LocaleLoader>([
   ["zho", () => import("./locales/zh_CN.ts")],
   ["jpn", () => import("./locales/ja.ts")],
   ["rus", () => import("./locales/ru.ts")],
+  ["nld", () => import("./locales/nl.ts")],
 ]);
 
 const locales = new Map<LocaleCode, LocaleDictionary>([["eng", en]]);
@@ -68,6 +73,7 @@ export const AVAILABLE_LANGUAGES: LanguageOption[] = [
   { code: "zho", label: "简体中文" },
   { code: "jpn", label: "日本語" },
   { code: "rus", label: "Русский" },
+  { code: "nld", label: "Nederlands" },
 ];
 
 export function getLanguageLabel(code: string): string {
