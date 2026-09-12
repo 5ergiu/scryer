@@ -507,6 +507,11 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// The unattended caps pass (startup and daily). It is not an operator
+    /// action, so it holds off every indexer that search dispatch is holding
+    /// off: a caps request is a counted API hit, and a restart inside a quota
+    /// backoff must not buy a send. Saving or testing an indexer is the
+    /// operator's explicit retry and still fetches caps.
     pub async fn refresh_enabled_direct_nab_caps_snapshots(
         &self,
         actor: &User,
@@ -514,17 +519,37 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
-        let configs = self
-            .services
-            .integrations
-            .indexer_configs
-            .list(None)
-            .await?;
+        let indexer_configs = &self.services.integrations.indexer_configs;
+        let configs = indexer_configs.list(None).await?;
+        // Without the persisted backoffs the pass cannot tell which indexers
+        // may be contacted, so it fails rather than risk a send; every indexer
+        // keeps its last known snapshot until the next pass.
+        let system_backoffs = indexer_configs.list_system_backoffs().await?;
+        let now = Utc::now();
         let mut refreshed = 0_u32;
         let mut failures = Vec::new();
 
         for config in configs {
             if !config.is_enabled || !config.is_direct_nab() {
+                continue;
+            }
+            if let Some(disabled_until) = config
+                .disabled_until
+                .into_iter()
+                .chain(
+                    system_backoffs
+                        .get(&config.id)
+                        .map(|backoff| backoff.disabled_until),
+                )
+                .filter(|until| *until > now)
+                .max()
+            {
+                tracing::info!(
+                    config_id = %config.id,
+                    indexer = %config.name,
+                    disabled_until = %disabled_until,
+                    "skipping direct indexer caps refresh while the indexer is backed off"
+                );
                 continue;
             }
 
