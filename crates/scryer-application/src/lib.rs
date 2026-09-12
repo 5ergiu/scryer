@@ -398,13 +398,15 @@ pub use request_rules::{
 };
 pub use security::backup::{AutoBackupRunOutcome, start_background_auto_backup_scheduler};
 pub use security::backup_bundle::{
-    BACKUP_TABLE_CATALOG, BLOB_MARKER_BASE64, BLOB_MARKER_TYPE, BackupBundleExportRequest,
-    BackupBundleInspectSummary, BackupBundleRestorePayload, BackupBundleStaging,
-    BackupExportOutcome, BackupExportSecrets, BackupInstanceSecrets, BackupRestorePreparedBundle,
+    BACKUP_RESTORE_HYDRATION_DERIVED_TABLES, BACKUP_TABLE_CATALOG, BLOB_MARKER_BASE64,
+    BLOB_MARKER_TYPE, BackupBundleExportRequest, BackupBundleInspectSummary,
+    BackupBundleRestorePayload, BackupBundleStaging, BackupExportOutcome, BackupExportSecrets,
+    BackupHydrationDerivedTable, BackupInstanceSecrets, BackupRestorePreparedBundle,
     BackupTableCatalogEntry, BackupTableClassification, EXPORT_BATCH_SIZE,
     PreparedBackupBundleDirectory, RESTORE_VERSION_CONTRACT_HINT, backup_export_table_names,
     backup_table_part_filename, inspect_backup_bundle, prepare_backup_restore_payload,
-    validate_inspected_bundle_is_restorable, validate_restore_manifest_table_set,
+    restore_resets_hydration_derived_state, validate_inspected_bundle_is_restorable,
+    validate_restore_manifest_table_set,
 };
 pub use security::external_accounts::{ExternalAuthRuntimeConnection, ExternalAuthRuntimeSettings};
 pub use settings::settings::{

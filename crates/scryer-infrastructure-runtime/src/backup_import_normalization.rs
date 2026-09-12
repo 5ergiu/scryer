@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use scryer_application::{AppError, AppResult};
+use scryer_application::{AppError, AppResult, restore_resets_hydration_derived_state};
+use scryer_domain::MediaFacet;
 use scryer_infrastructure_library::media::libraries::state_store::encode_release_decision_explanation;
 use scryer_infrastructure_sql::domain_event_payload::{
     derive_domain_event_projections, encode_domain_event_payload,
@@ -390,15 +391,35 @@ fn normalize_title_import_object(object: &mut JsonMap<String, JsonValue>, now: D
     }
     if requires_metadata_rehydration {
         object.insert("metadata_fetched_at".to_string(), JsonValue::Null);
-        object.insert(
-            "metadata_hydration_next_attempt_at".to_string(),
-            JsonValue::String(now.to_rfc3339()),
-        );
-        object.insert(
-            "metadata_hydration_attempt_count".to_string(),
-            JsonValue::Number(0.into()),
-        );
+        schedule_title_hydration_now(object, now);
+    } else if title_lost_hydration_derived_state(object) {
+        // The restore resets rows only hydration writes, yet the title keeps
+        // its fetched marker and would not be refreshed for weeks. It keeps
+        // that marker — its reset rows are caches it can work without — and
+        // is scheduled so hydration rebuilds them.
+        schedule_title_hydration_now(object, now);
     }
+}
+
+fn title_lost_hydration_derived_state(object: &JsonMap<String, JsonValue>) -> bool {
+    let was_hydrated = !missing_or_blank(object.get("metadata_fetched_at"));
+    was_hydrated
+        && object
+            .get("facet")
+            .and_then(JsonValue::as_str)
+            .and_then(MediaFacet::parse)
+            .is_some_and(|facet| restore_resets_hydration_derived_state(&facet))
+}
+
+fn schedule_title_hydration_now(object: &mut JsonMap<String, JsonValue>, now: DateTime<Utc>) {
+    object.insert(
+        "metadata_hydration_next_attempt_at".to_string(),
+        JsonValue::String(now.to_rfc3339()),
+    );
+    object.insert(
+        "metadata_hydration_attempt_count".to_string(),
+        JsonValue::Number(0.into()),
+    );
 }
 
 fn is_local_title_image_route(value: &str) -> bool {
@@ -779,6 +800,55 @@ mod tests {
             object.get("metadata_hydration_attempt_count"),
             Some(&JsonValue::Number(0.into()))
         );
+    }
+
+    /// Shared by the SQLite and PostgreSQL restores: only a hydrated title of a
+    /// facet whose hydration-only rows the restore resets is scheduled.
+    #[test]
+    fn title_import_normalization_schedules_hydration_for_reset_derived_state() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 15, 9, 30, 0)
+            .single()
+            .expect("fixed timestamp");
+        let title = |facet: &str, fetched_at: JsonValue| {
+            let mut object = JsonMap::from_iter([
+                ("facet".to_string(), JsonValue::String(facet.to_string())),
+                ("metadata_fetched_at".to_string(), fetched_at),
+                (
+                    "metadata_hydration_next_attempt_at".to_string(),
+                    JsonValue::Null,
+                ),
+                ("metadata_hydration_attempt_count".to_string(), json!(3)),
+            ]);
+            normalize_title_import_object(&mut object, now);
+            object
+        };
+        let fetched = JsonValue::String("2026-05-14T00:00:00Z".to_string());
+
+        let anime = title("anime", fetched.clone());
+        assert_eq!(anime.get("metadata_fetched_at"), Some(&fetched));
+        assert_eq!(
+            anime.get("metadata_hydration_next_attempt_at"),
+            Some(&JsonValue::String(now.to_rfc3339()))
+        );
+        assert_eq!(
+            anime.get("metadata_hydration_attempt_count"),
+            Some(&json!(0))
+        );
+
+        for untouched in [
+            title("series", fetched.clone()),
+            title("anime", JsonValue::Null),
+        ] {
+            assert_eq!(
+                untouched.get("metadata_hydration_next_attempt_at"),
+                Some(&JsonValue::Null)
+            );
+            assert_eq!(
+                untouched.get("metadata_hydration_attempt_count"),
+                Some(&json!(3))
+            );
+        }
     }
 
     #[test]

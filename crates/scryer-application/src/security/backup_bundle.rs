@@ -1204,6 +1204,41 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
     },
 ];
 
+/// A `ResetOnRestore` table whose rows only title metadata hydration writes.
+#[derive(Clone, Copy, Debug)]
+pub struct BackupHydrationDerivedTable {
+    pub table: &'static str,
+    /// Facets whose hydration populates the table.
+    pub facets: &'static [scryer_domain::MediaFacet],
+}
+
+/// `ResetOnRestore` tables that nothing but title metadata hydration rebuilds.
+///
+/// `titles` is exported with `metadata_fetched_at`, so a restored title reads
+/// as freshly hydrated: neither background hydration nor a user refresh
+/// re-fetches it before its metadata refresh interval lapses. A restore
+/// therefore schedules hydration for every previously hydrated title of a
+/// listed facet.
+///
+/// The other title-scoped reset tables rebuild without hydration and are
+/// deliberately absent: the title image cache refills from each title's source
+/// URLs, and more-like-this recommendations (with their cards) refresh
+/// whenever a title has none. A new reset table that only hydration writes
+/// belongs here.
+pub const BACKUP_RESTORE_HYDRATION_DERIVED_TABLES: &[BackupHydrationDerivedTable] =
+    &[BackupHydrationDerivedTable {
+        table: "title_anime_numbering_bridges",
+        facets: &[scryer_domain::MediaFacet::Anime],
+    }];
+
+/// Whether a restore drops state for titles of `facet` that only hydration
+/// can rebuild.
+pub fn restore_resets_hydration_derived_state(facet: &scryer_domain::MediaFacet) -> bool {
+    BACKUP_RESTORE_HYDRATION_DERIVED_TABLES
+        .iter()
+        .any(|entry| entry.facets.contains(facet))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupBundleInspectSummary {
     pub format_version: String,
@@ -2096,6 +2131,25 @@ mod tests {
             .map(|entry| entry.classification);
 
         assert_eq!(classification, Some(BackupTableClassification::Export));
+    }
+
+    /// A hydration-derived entry that is not actually reset would schedule
+    /// needless re-hydration; one missing from the catalog names nothing.
+    #[test]
+    fn restore_hydration_derived_tables_are_reset_on_restore() {
+        for entry in BACKUP_RESTORE_HYDRATION_DERIVED_TABLES {
+            let classification = BACKUP_TABLE_CATALOG
+                .iter()
+                .find(|catalog| catalog.table == entry.table)
+                .map(|catalog| catalog.classification);
+            assert_eq!(
+                classification,
+                Some(BackupTableClassification::ResetOnRestore),
+                "{}",
+                entry.table
+            );
+            assert!(!entry.facets.is_empty(), "{}", entry.table);
+        }
     }
 
     #[test]

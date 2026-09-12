@@ -853,6 +853,8 @@ mod tests {
     }
 
     #[cfg(feature = "runtime-backups")]
+    mod hydration_derived_reset;
+    #[cfg(feature = "runtime-backups")]
     mod search_rebuild;
 
     /// Every table the migrations create must be classified in the backup
