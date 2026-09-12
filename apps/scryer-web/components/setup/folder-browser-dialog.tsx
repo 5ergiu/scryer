@@ -70,16 +70,25 @@ export function FolderBrowserDialog({
   const [browsedPath, setBrowsedPath] = useState<string | null>(null);
   const breadcrumbRef = useRef<HTMLDivElement | null>(null);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
+  // Only the latest browse may land. The listing on open can still be in
+  // flight when the user navigates; answering late, it would replace the
+  // folder they moved to with the one they left, and leave Select disabled
+  // because the listing no longer matches the path shown.
+  const browseRequest = useRef(0);
 
   const browse = useCallback(
     async (path: string) => {
       const nextPath = path.trim() || "/";
+      const request = ++browseRequest.current;
       setCurrentPath(nextPath);
       setLoading(true);
       setError(null);
       const { data, error: gqlError } = await client
         .query(browsePathQuery, { path: nextPath, includeFiles: canSelectFiles })
         .toPromise();
+      if (request !== browseRequest.current) {
+        return;
+      }
       setLoading(false);
       if (gqlError) {
         setEntries([]);
