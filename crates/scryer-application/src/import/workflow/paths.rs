@@ -661,6 +661,49 @@ fn parsed_usable_release_from_file_stem(path: &Path) -> Option<ParsedReleaseMeta
     parse_usable_release_title(stem.as_str())
 }
 
+/// Proof that the manual import executor's own content probe qualified a
+/// source as video. Only that executor builds one, from the video facts its
+/// re-qualification returned, so automatic imports never carry it and keep
+/// rejecting sources outside the known video extensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContentQualifiedVideo {
+    /// Destination extension for the probed container, when it maps to one.
+    container_extension: Option<&'static str>,
+}
+
+impl ContentQualifiedVideo {
+    pub(crate) fn from_video_facts(facts: &ManualImportVideoFacts) -> Self {
+        // Container names the probe reports, onto `VIDEO_EXTENSIONS`.
+        let container_extension = match facts.container_format.as_deref() {
+            Some("matroska") => Some("mkv"),
+            Some("webm") => Some("webm"),
+            Some("mp4") => Some("mp4"),
+            Some("mov") => Some("mov"),
+            Some("avi") => Some("avi"),
+            Some("mpegts") => Some("ts"),
+            Some("mpeg") => Some("mpg"),
+            Some("asf") => Some("wmv"),
+            Some("ogg") => Some("ogv"),
+            Some("flv") => Some("flv"),
+            _ => None,
+        };
+        Self {
+            container_extension,
+        }
+    }
+}
+
+/// Destination extension for an imported video: the source's own known video
+/// extension, else the content-qualified container's, else `mkv`.
+pub(crate) fn import_video_destination_extension(
+    source_video: &Path,
+    content_qualified: Option<ContentQualifiedVideo>,
+) -> &'static str {
+    scryer_domain::canonical_video_extension(source_video)
+        .or_else(|| content_qualified.and_then(|video| video.container_extension))
+        .unwrap_or("mkv")
+}
+
 /// A video file an import is about to process, plus the name parsing should
 /// read for it.
 ///
@@ -675,6 +718,7 @@ pub(crate) struct ImportVideoFile {
     pub(crate) physical: PathBuf,
     pub(crate) logical_name: Option<String>,
     pub(crate) disc_selection: Option<scryer_media_types::DiscSelection>,
+    pub(crate) content_qualified: Option<ContentQualifiedVideo>,
 }
 
 impl ImportVideoFile {
@@ -685,6 +729,7 @@ impl ImportVideoFile {
             physical,
             logical_name: None,
             disc_selection: None,
+            content_qualified: None,
         }
     }
 
@@ -693,6 +738,14 @@ impl ImportVideoFile {
         selection: Option<scryer_media_types::DiscSelection>,
     ) -> Self {
         self.disc_selection = selection;
+        self
+    }
+
+    pub(crate) fn with_content_qualified(
+        mut self,
+        content_qualified: Option<ContentQualifiedVideo>,
+    ) -> Self {
+        self.content_qualified = content_qualified;
         self
     }
 

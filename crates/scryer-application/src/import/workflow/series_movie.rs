@@ -1035,6 +1035,7 @@ async fn import_additional_movie_download(
     completed: &CompletedDownload,
     release_evidence: &ReleaseEvidence,
     source_video: &Path,
+    content_qualified: Option<ContentQualifiedVideo>,
     source_size: i64,
     parsed: &ParsedReleaseMetadata,
     media_root: &str,
@@ -1053,9 +1054,7 @@ async fn import_additional_movie_download(
     let canonical_dest_path = if let Some(canonical_dest_path) = canonical_dest_path {
         canonical_dest_path.to_path_buf()
     } else {
-        let ext = scryer_domain::canonical_video_extension(source_video)
-            .unwrap_or("mkv")
-            .to_string();
+        let ext = import_video_destination_extension(source_video, content_qualified).to_string();
         let tokens = build_rename_tokens(title, parsed, &ext);
         let rendered_filename = if rename_enabled {
             render_rename_template(rename_template, &tokens)
@@ -1087,6 +1086,7 @@ async fn import_additional_movie_download(
         source_size: source_size as u64,
         parsed,
         existing_files,
+        content_qualified_video: content_qualified.is_some(),
     };
     if let crate::import_checks::ImportVerdict::Reject { reason, code } =
         crate::import_checks::run_import_checks(&check_ctx)
@@ -1330,6 +1330,7 @@ async fn import_movie_download(
             completed,
             release_evidence,
             &source_video,
+            largest.content_qualified,
             source_size,
             &parsed,
             &media_root,
@@ -1466,9 +1467,8 @@ async fn import_movie_download(
         }
     };
 
-    let ext = scryer_domain::canonical_video_extension(&source_video)
-        .unwrap_or("mkv")
-        .to_string();
+    let ext =
+        import_video_destination_extension(&source_video, largest.content_qualified).to_string();
     let tokens = build_rename_tokens(title, &prepared.parsed, &ext);
     let rendered_filename = if rename_enabled {
         render_rename_template(&rename_template, &tokens)
@@ -1495,6 +1495,7 @@ async fn import_movie_download(
         source_size: source_size as u64,
         parsed: &prepared.parsed,
         existing_files: &existing_files,
+        content_qualified_video: largest.content_qualified.is_some(),
     };
     if let crate::import_checks::ImportVerdict::Reject { reason, code } =
         crate::import_checks::run_import_checks(&check_ctx)
@@ -2170,6 +2171,7 @@ async fn import_series_movie_download(
             completed,
             release_evidence,
             &source_video,
+            None,
             source_size,
             &parsed,
             &media_root,
