@@ -26,7 +26,7 @@ use crate::queries::sql_runtime::{
 };
 use crate::types::WorkflowOperationRecord;
 
-use super::download_submission_store::claim_or_create_binding_download_id_tx;
+use super::download_submission_store::{BindingClaim, claim_or_create_binding_download_id_tx};
 
 pub const DOMAIN_EVENT_COLUMNS: &str = "sequence, event_id, occurred_at, actor_kind, actor_user_id, actor_display_name, title_id, facet, correlation_id, causation_id, schema_version, stream_kind, stream_id, event_type, payload_json, import_status, media_file_delete_reason, download_id";
 pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
@@ -396,9 +396,16 @@ async fn record_download_submission_tx_inner(
         && !submission.download_client_item_id.trim().is_empty()
     {
         let locator = ClientJobLocator::from_submission(&submission);
+        // The tracker's observation stub adopts the job's binding like any
+        // recording, but it is not a Scryer submission and must leave a foreign
+        // download foreign.
+        let claim = if submission.is_observation_stub() {
+            BindingClaim::Observation(Some(submission.download_id))
+        } else {
+            BindingClaim::Submission(submission.download_id)
+        };
         submission.download_id =
-            claim_or_create_binding_download_id_tx(tx, &locator, Some(submission.download_id))
-                .await?;
+            claim_or_create_binding_download_id_tx(tx, &locator, claim).await?;
     }
     let (episode_id, collection_id, series_movie_link_id) =
         persisted_submission_scope(&submission.scope);

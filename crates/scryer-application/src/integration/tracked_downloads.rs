@@ -1021,7 +1021,10 @@ impl TrackedDownloadService {
         }
 
         // Persist an observation row before accepting a provisional parse match.
-        // It carries durable tracked state without claiming Scryer provenance.
+        // It carries durable tracked state without claiming Scryer provenance:
+        // the store keeps the job foreign only while this row stays
+        // `DownloadSubmission::is_observation_stub`, so it carries no release
+        // metadata.
         let category_admission = app.download_client_category_admission_snapshot().await;
         if existing_submission.is_none()
             && crate::services::download_observation_is_admitted(
@@ -5039,6 +5042,9 @@ mod tests {
             recorded[0].download_client_item_id,
             "job-unmatched-repeat".to_string()
         );
+        // The store keeps a foreign job foreign only for this shape; a stub that
+        // gained release metadata would be recorded as a Scryer submission.
+        assert!(recorded[0].is_observation_stub());
     }
 
     #[tokio::test]
