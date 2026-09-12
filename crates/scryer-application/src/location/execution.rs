@@ -401,6 +401,17 @@ impl RootMoveFileMover {
 
 #[async_trait]
 impl TitleFileMover for RootMoveFileMover {
+    fn file_abandoned(
+        &self,
+        operation_id: &str,
+        title: &PlannedTitle,
+        file: &crate::location::executor::PlannedFile,
+    ) {
+        if let Some(resolver) = &self.resolver {
+            resolver.media_abandoned(operation_id, title, file);
+        }
+    }
+
     async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile> {
         if let Some(resolver) = &self.resolver {
             let mut placement = self.clone();

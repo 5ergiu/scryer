@@ -301,6 +301,13 @@ pub struct FileMoveRequest<'a> {
 #[async_trait]
 pub trait TitleFileMover: Send + Sync {
     async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile>;
+
+    /// The runner stopped trying to place `file` without a verified copy: its
+    /// retries ran out, a cancel arrived while it waited for storage, or its
+    /// proof failed. A transient failure inside [`Self::move_file`] is not
+    /// this; the runner may still retry it, so only the runner can say when a
+    /// file is given up on.
+    fn file_abandoned(&self, _operation_id: &str, _title: &PlannedTitle, _file: &PlannedFile) {}
 }
 
 /// Whether a title may still be processed as planned.
@@ -491,7 +498,7 @@ impl FileMoveRetry {
 }
 
 /// Whether an error is the transient, I/O-shaped kind a retry can help with.
-fn move_error_is_transient(error: &AppError) -> bool {
+pub(super) fn move_error_is_transient(error: &AppError) -> bool {
     matches!(error, AppError::Repository(_))
 }
 
@@ -2964,6 +2971,158 @@ mod tests {
                 .contains(&TitleCheckpointState::Failed)
         );
         assert!(!hub.has_storage_waiters("op-1"));
+        assert!(reconciler.cleaned.lock().unwrap().is_empty());
+    }
+
+    /// A placement whose media files meet a storage failure on the attempts
+    /// `fails` selects, and otherwise copy for real, so the resolver in front
+    /// of it can prove and record what landed.
+    struct MediaOutagePlacement {
+        destination: PathBuf,
+        detached: Option<PathBuf>,
+        media_attempts: AtomicU64,
+        fails: fn(u64) -> bool,
+    }
+
+    #[async_trait]
+    impl TitleFileMover for MediaOutagePlacement {
+        async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile> {
+            if request.file.media_file_id.is_some() {
+                let attempt = self.media_attempts.fetch_add(1, Ordering::SeqCst);
+                if (self.fails)(attempt) {
+                    if attempt == 0
+                        && let Some(detached) = &self.detached
+                    {
+                        std::fs::rename(&self.destination, detached).unwrap();
+                    }
+                    return Err(AppError::Repository("storage disconnected".into()));
+                }
+            }
+            std::fs::copy(&request.file.source_path, &request.file.destination_path).unwrap();
+            Ok(VerifiedFile {
+                source_path: request.file.source_path.clone(),
+                destination_path: request.file.destination_path.clone(),
+                hashes: None,
+                depth: AppliedVerificationDepth::exact(request.depth),
+                outcome: FileVerificationOutcome::Verified,
+                detail: None,
+            })
+        }
+    }
+
+    /// The production wiring in miniature: conflict resolution in front of
+    /// the placement, and the runner's give-up reaching the resolver.
+    struct ResolvingMover {
+        resolver: crate::location::resolution::ConflictResolver,
+        placement: MediaOutagePlacement,
+    }
+
+    #[async_trait]
+    impl TitleFileMover for ResolvingMover {
+        async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile> {
+            self.resolver.resolve(&self.placement, request).await
+        }
+
+        fn file_abandoned(&self, operation_id: &str, title: &PlannedTitle, file: &PlannedFile) {
+            self.resolver.media_abandoned(operation_id, title, file);
+        }
+    }
+
+    /// One movie and its subtitle, both on disk under `temp/source`, planned
+    /// into `temp/destination`.
+    fn movie_with_subtitle(
+        temp: &tempfile::TempDir,
+        fails: fn(u64) -> bool,
+        detach: bool,
+    ) -> (OperationWorkPlan, ResolvingMover) {
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("movie.mkv"), b"movie").unwrap();
+        std::fs::write(source.join("movie.en.srt"), b"subtitle").unwrap();
+        let mut title = planned_title("first", 0, 2);
+        title.files[0].source_path = source.join("movie.mkv");
+        title.files[0].destination_path = destination.join("movie.mkv");
+        title.files[1].media_file_id = None;
+        title.files[1].source_path = source.join("movie.en.srt");
+        title.files[1].destination_path = destination.join("movie.en.srt");
+        let mover = ResolvingMover {
+            resolver: crate::location::resolution::ConflictResolver::new(
+                Arc::new(crate::location::test_support::InMemoryLocationOperationStore::new()),
+                BTreeMap::from([("first".to_string(), "Movies".to_string())]),
+            ),
+            placement: MediaOutagePlacement {
+                detached: detach.then(|| temp.path().join("detached")),
+                destination,
+                media_attempts: AtomicU64::new(0),
+                fails,
+            },
+        };
+        (OperationWorkPlan::new(vec![title]), mover)
+    }
+
+    /// FR-088: while a media file waits out a storage outage, its subtitle
+    /// waits with it rather than failing the title on the attempt the runner
+    /// is about to retry. Both land once the storage is back.
+    #[tokio::test(start_paused = true)]
+    async fn pipeline_companion_waits_out_its_media_file_storage_outage() {
+        let temp = tempfile::tempdir().unwrap();
+        let (plan, mover) = movie_with_subtitle(&temp, |attempt| attempt == 0, true);
+        let store = FakeStore::with_operation(operation());
+        let admission = ScriptedAdmission::new(&[]);
+        let reconciler = RecordingReconciler::default();
+        let hub = crate::location::live::TransferHub::default();
+        let runner = LocationOperationRunner::new(&store, &mover, &admission, &reconciler)
+            .with_transfers(&hub);
+        let placement = &mover.placement;
+        let reconnect = async {
+            while !hub.has_storage_waiters("op-1") {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            std::fs::rename(placement.detached.as_ref().unwrap(), &placement.destination).unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::join!(runner.run("op-1", &plan), reconnect)
+        })
+        .await
+        .expect("the run finishes once the storage is back");
+        let result = result.unwrap();
+        assert_eq!(
+            result.state,
+            LocationOperationState::Completed,
+            "a retried outage fails nothing: {:?}",
+            result.detail
+        );
+        assert_eq!(result.counters.files_processed, 2);
+        assert!(placement.destination.join("movie.en.srt").exists());
+    }
+
+    /// A media file the runner gives up on settles the companions waiting on
+    /// it: the title fails with the explanation, and the run ends instead of
+    /// waiting on a subtitle whose media file nothing will retry.
+    #[tokio::test(start_paused = true)]
+    async fn pipeline_media_file_given_up_on_releases_its_companion() {
+        let temp = tempfile::tempdir().unwrap();
+        let (plan, mover) = movie_with_subtitle(&temp, |_| true, false);
+        let store = FakeStore::with_operation(operation());
+        let admission = ScriptedAdmission::new(&[]);
+        let reconciler = RecordingReconciler::default();
+        let hub = crate::location::live::TransferHub::default();
+        let runner = LocationOperationRunner::new(&store, &mover, &admission, &reconciler)
+            .with_transfers(&hub);
+        let result = tokio::time::timeout(Duration::from_secs(600), runner.run("op-1", &plan))
+            .await
+            .expect("a given-up media file never strands its companion")
+            .unwrap();
+        assert_eq!(result.state, LocationOperationState::Failed);
+        assert!(
+            store
+                .checkpoint_states("first")
+                .contains(&TitleCheckpointState::Failed)
+        );
+        assert!(temp.path().join("source/movie.en.srt").exists());
         assert!(reconciler.cleaned.lock().unwrap().is_empty());
     }
 

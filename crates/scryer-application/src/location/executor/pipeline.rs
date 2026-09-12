@@ -338,6 +338,18 @@ impl LocationOperationRunner<'_> {
                                 .unwrap_or_else(|_| {
                                     Err(AppError::Repository("file transfer task panicked".into()))
                                 });
+                                // Every way out except a placed, proven copy is
+                                // this file given up on. Siblings waiting on it
+                                // (a media file's companions) are told here, not
+                                // on the transient failures retried above, and
+                                // never left waiting on a file nothing retries.
+                                if !matches!(
+                                    &result,
+                                    Ok(PipelineFileOutcome::Verified(verified))
+                                        if verified.permits_source_removal()
+                                ) {
+                                    self.mover.file_abandoned(&operation.id, title, file);
+                                }
                                 signal.store(true, Ordering::Release);
                                 wake.notify_one();
                                 (title, file, result)
