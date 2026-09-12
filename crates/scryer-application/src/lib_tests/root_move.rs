@@ -12,7 +12,7 @@
 
 use super::*;
 
-use crate::location::classify::DestinationRequest;
+use crate::location::classify::{DestinationRequest, TitleLocationClass};
 use crate::location::model::{
     LocationExecutionMode, LocationOperation, LocationOperationState, LocationOperationType,
     VerificationDepth,
@@ -2731,6 +2731,70 @@ async fn a_vanished_source_folder_blocks_the_title_instead_of_failing_the_previe
     assert!(
         detail.contains("Files are already there"),
         "the refusal points at the adoption mode: {detail}"
+    );
+}
+
+/// The title a vanished source folder blocks is *listed* as blocked, not only
+/// counted: the preview's classification groups are what the move dialog
+/// renders its blocked rows and deselect controls from (FR-016), so a title the
+/// counts call needs-resolution but the groups still call a root move would
+/// block the start with nothing on screen to deselect.
+#[tokio::test]
+async fn a_vanished_source_folder_moves_the_title_into_the_needs_resolution_group() {
+    let fixture = RootMoveFixture::new().await;
+    let gone = fixture
+        .seed_title(
+            "Gone By Hand",
+            2024,
+            &fixture.root_a_id,
+            &fixture.root_a(),
+            "Gone By Hand (2024)",
+            &[("Gone.By.Hand.2024.1080p.mkv", 4096)],
+        )
+        .await;
+    let still_here = fixture
+        .seed_title(
+            "Still Here",
+            2023,
+            &fixture.root_a_id,
+            &fixture.root_a(),
+            "Still Here (2023)",
+            &[("Still.Here.2023.1080p.mkv", 4096)],
+        )
+        .await;
+
+    std::fs::remove_dir_all(fixture.root_a().join("Gone By Hand (2024)"))
+        .expect("remove the source folder the way a user's mv would");
+
+    let preview = fixture.preview(&[&gone.id, &still_here.id]).await;
+
+    let classification = &preview.classification;
+    assert_eq!(
+        classification.title_ids_in(TitleLocationClass::NeedsResolution),
+        vec![gone.id.clone()],
+        "the unreadable title is grouped as blocked"
+    );
+    assert_eq!(
+        classification.title_ids_in(TitleLocationClass::RootMove),
+        vec![still_here.id.clone()],
+        "the readable title still moves"
+    );
+    assert_eq!(classification.blocking_title_ids(), vec![gone.id.clone()]);
+    assert_eq!(
+        classification.counts, preview.plan.classification,
+        "the groups and the plan's counts are the same numbers"
+    );
+    let blocked = classification
+        .classification_of(&gone.id)
+        .expect("the blocked title is classified");
+    assert_eq!(
+        blocked.reason_code.as_deref(),
+        Some(crate::location::classify::reason_codes::SOURCE_FOLDER_UNREADABLE)
+    );
+    let reason = blocked.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("could not be read") && reason.contains("Gone By Hand"),
+        "the group carries the planner's reason, naming the title: {reason}"
     );
 }
 

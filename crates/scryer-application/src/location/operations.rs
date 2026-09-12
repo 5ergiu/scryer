@@ -65,7 +65,7 @@ use crate::location::adoption::{
 };
 use crate::location::classify::{
     DestinationLibraryFacts, DestinationRequest, SelectionClassification, TitleClassificationFacts,
-    TitleLocationClass, classify_selection,
+    TitleLocationClass, classify_selection, reason_codes,
 };
 use crate::location::collisions::{
     CollisionNaming, ContentFacts, DestinationItem, FullHash, PathCaseRule,
@@ -159,9 +159,10 @@ struct RootMoveDraftContext<'a> {
 /// selection order once the bounded gather hands it back.
 struct RootMoveTitleOutcome {
     draft: RootMoveTitleDraft,
-    /// The class the draft was downgraded from to needs-resolution, so the
-    /// reported counts follow the drafts.
-    downgraded_from: Option<TitleLocationClass>,
+    /// The reason code the draft was downgraded to needs-resolution under, so
+    /// the selection's classification (its groups and its counts) follows the
+    /// drafts. The reason itself is the draft's `blocked_reason`.
+    downgraded: Option<&'static str>,
     /// Bytes this title writes at the destination (zero for a same-volume
     /// rename and for titles that move nothing).
     moved_bytes: u64,
@@ -174,10 +175,10 @@ struct RootMoveTitleOutcome {
 }
 
 impl RootMoveTitleOutcome {
-    fn settled(draft: RootMoveTitleDraft, downgraded_from: Option<TitleLocationClass>) -> Self {
+    fn settled(draft: RootMoveTitleDraft, downgraded: Option<&'static str>) -> Self {
         Self {
             draft,
-            downgraded_from,
+            downgraded,
             moved_bytes: 0,
             anchor_source: None,
             anchor_destination: None,
@@ -2124,23 +2125,15 @@ impl AppUseCase {
             media_files_by_title.insert(title.id.clone(), media_files);
         }
 
-        let classification =
+        let mut classification =
             classify_selection(&facts, &request.destination, Some(&destination_facts));
-        // The counts the plan reports. Draft building below can downgrade a
-        // classified title to needs-resolution (a vanished source folder, a
-        // destination root with no path), and the counts must follow the drafts
-        // or the preview would claim a moving title it produced no work for.
-        let mut classification_counts = classification.counts;
-        let downgrade_to_needs_resolution =
-            |counts: &mut crate::location::classify::ClassificationCounts,
-             was: TitleLocationClass| {
-                match was {
-                    TitleLocationClass::RootMove => counts.root_move -= 1,
-                    TitleLocationClass::CrossLibraryTransfer => counts.cross_library_transfer -= 1,
-                    _ => {}
-                }
-                counts.needs_resolution += 1;
-            };
+        // Draft building below can downgrade a classified title to
+        // needs-resolution (a vanished source folder, a destination root with no
+        // path). The downgrades are applied to the classification once the
+        // drafts are in, so its groups and its counts both follow the drafts:
+        // the preview must neither claim a moving title it produced no work for
+        // nor count a blocked title it does not list for the user to deselect.
+        let mut downgrades: Vec<(String, &'static str, String)> = Vec::new();
 
         // The destination titles this selection merges into, read once. Their
         // folders are where the merging titles' files land (FR-063: the
@@ -2189,8 +2182,12 @@ impl AppUseCase {
         let mut outcomes = stream::iter(pending).buffered(LOCATION_PREVIEW_TITLE_CONCURRENCY);
         while let Some(outcome) = outcomes.next().await {
             let outcome = outcome?;
-            if let Some(was) = outcome.downgraded_from {
-                downgrade_to_needs_resolution(&mut classification_counts, was);
+            if let Some(reason_code) = outcome.downgraded {
+                downgrades.push((
+                    outcome.draft.title_id.clone(),
+                    reason_code,
+                    outcome.draft.blocked_reason.clone().unwrap_or_default(),
+                ));
             }
             moved_bytes = moved_bytes.saturating_add(outcome.moved_bytes);
             if a_source_path.is_none() {
@@ -2205,6 +2202,9 @@ impl AppUseCase {
             drafts.push(outcome.draft);
         }
         drop(outcomes);
+        for (title_id, reason_code, reason) in downgrades {
+            classification.downgrade_to_needs_resolution(&title_id, reason_code, reason);
+        }
 
         // FR-080: free space, including the recycle-copy cost when the bin is on
         // another volume.
@@ -2264,7 +2264,7 @@ impl AppUseCase {
             selection,
             titles: drafts,
             mode,
-            classification: classification_counts,
+            classification: classification.counts,
             verification_depth: depth,
             free_space,
             case_rule,
@@ -2333,7 +2333,7 @@ impl AppUseCase {
             media_files_by_title,
             mode,
         } = context;
-        let mut downgraded_from = None;
+        let mut downgraded = None;
         let classified = classification
             .classification_of(&title.id)
             .expect("every selected title is classified");
@@ -2387,17 +2387,17 @@ impl AppUseCase {
             && classified.class == TitleLocationClass::CatalogOnly
             && source_folder_path.is_some();
         if !classified.class.moves_files() && !manual_folder_mapping {
-            return Ok(RootMoveTitleOutcome::settled(draft, downgraded_from));
+            return Ok(RootMoveTitleOutcome::settled(draft, downgraded));
         }
 
         let Some(destination_root_path) = destination_root_path else {
-            downgraded_from = Some(draft.class);
+            downgraded = Some(reason_codes::DESTINATION_ROOT_UNCONFIGURED);
             draft.class = TitleLocationClass::NeedsResolution;
             draft.blocked_reason = Some(format!(
                 "destination root {} has no configured path",
                 classified.destination_root_id
             ));
-            return Ok(RootMoveTitleOutcome::settled(draft, downgraded_from));
+            return Ok(RootMoveTitleOutcome::settled(draft, downgraded));
         };
 
         // FR-013 for a transfer, FR-063 for a merge.
@@ -2518,7 +2518,7 @@ impl AppUseCase {
                     source_content: super::model::KnownSourceContent::from_media_file(media),
                 });
             }
-            return Ok(RootMoveTitleOutcome::settled(draft, downgraded_from));
+            return Ok(RootMoveTitleOutcome::settled(draft, downgraded));
         }
         if mode == LocationExecutionMode::FilesAlreadyThere {
             let adoption_folder = resolve_adoption_folder(
@@ -2540,7 +2540,7 @@ impl AppUseCase {
             return Ok(RootMoveTitleOutcome {
                 anchor_source: source_folder_path.clone().or(source_root_path.clone()),
                 anchor_destination: Some(destination_root_path.clone()),
-                ..RootMoveTitleOutcome::settled(draft, downgraded_from)
+                ..RootMoveTitleOutcome::settled(draft, downgraded)
             });
         }
 
@@ -2565,14 +2565,14 @@ impl AppUseCase {
         {
             Ok(facts) => facts,
             Err(error) => {
-                downgraded_from = Some(draft.class);
+                downgraded = Some(reason_codes::SOURCE_FOLDER_UNREADABLE);
                 draft.class = TitleLocationClass::NeedsResolution;
                 draft.blocked_reason = Some(format!(
                     "the source folder for \"{}\" could not be read ({}); if its files \
                      were moved by hand, use \"Files are already there\"",
                     title.name, error
                 ));
-                return Ok(RootMoveTitleOutcome::settled(draft, downgraded_from));
+                return Ok(RootMoveTitleOutcome::settled(draft, downgraded));
             }
         };
         draft.files = facts.files;
@@ -2599,7 +2599,7 @@ impl AppUseCase {
             recycle_source_root: source_root_path
                 .as_deref()
                 .map(|path| path.to_string_lossy().to_string()),
-            ..RootMoveTitleOutcome::settled(draft, downgraded_from)
+            ..RootMoveTitleOutcome::settled(draft, downgraded)
         })
     }
 
