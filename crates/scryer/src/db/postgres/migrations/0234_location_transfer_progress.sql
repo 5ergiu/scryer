@@ -1,10 +1,10 @@
 CREATE TABLE location_transfer_runtime (
-    id BIGINT PRIMARY KEY CHECK (id = 1),
+    id BIGINT PRIMARY KEY NOT NULL CHECK (id = 1),
     generation BIGINT NOT NULL
 );
 INSERT INTO location_transfer_runtime (id, generation) VALUES (1, 0);
 CREATE TABLE location_transfer_progress (
-    operation_id TEXT PRIMARY KEY REFERENCES location_operations(id) ON DELETE CASCADE,
+    operation_id TEXT PRIMARY KEY NOT NULL REFERENCES location_operations(id) ON DELETE CASCADE,
     progress_basis_points BIGINT NOT NULL DEFAULT 0,
     titles_initialized BOOLEAN NOT NULL DEFAULT FALSE
 );

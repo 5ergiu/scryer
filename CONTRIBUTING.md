@@ -95,6 +95,11 @@ tasks discoverable through `cargo xtask --help` and current CI.
   the same pull request.
 - Use transactions for multi-step mutations and preserve equivalent logical
   behavior across engines.
+- Declare a primary key on every ordinary table and explicit `NOT NULL` on
+  every key component in both engines, including integer and composite keys.
+  Migration bundle compilation enforces this for SQL migrations after 0211
+  and new baselines. The 0.19.17 compatibility boundary is fixed; do not advance
+  it to exempt new migrations. Virtual tables have module-defined schemas.
 - Released migrations are immutable. Add a new migration for every correction
   or evolution.
 - Consider backup, restore, upgrade, rollback, and restart behavior whenever a

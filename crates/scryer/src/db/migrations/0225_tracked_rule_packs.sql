@@ -1,5 +1,5 @@
 CREATE TABLE rule_pack_installations (
-    pack_id TEXT PRIMARY KEY,
+    pack_id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     version TEXT NOT NULL,
     digest TEXT NOT NULL,
