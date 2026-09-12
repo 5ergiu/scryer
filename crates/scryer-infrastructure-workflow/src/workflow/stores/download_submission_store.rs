@@ -101,11 +101,38 @@ async fn active_binding_download_id(
     .transpose()
 }
 
+/// What a locator claim records, which decides whether it may claim Scryer
+/// provenance for the bound download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BindingClaim {
+    /// An accepted Scryer submission under its pre-allocated id.
+    Submission(DownloadId),
+    /// Tracked state for a client job Scryer did not submit: the tracked-state
+    /// stub writer, or the tracker's observation stub row, which brings the
+    /// id it pre-allocated for an unbound locator.
+    Observation(Option<DownloadId>),
+}
+
+impl BindingClaim {
+    fn requested_download_id(self) -> Option<DownloadId> {
+        match self {
+            Self::Submission(download_id) => Some(download_id),
+            Self::Observation(download_id) => download_id,
+        }
+    }
+
+    fn claims_scryer_provenance(self) -> bool {
+        matches!(self, Self::Submission(_))
+    }
+}
+
 /// Resolve a locator to its active canonical download, or bind a new canonical
-/// row to it. A caller-provided id denotes an accepted Scryer submission;
-/// existing locator bindings are adopted and their parent is upgraded to
-/// `scryer_submission`. Without one, this preserves the tracked-state stub
-/// behavior by creating a foreign-observation parent.
+/// row to it. A [`BindingClaim::Submission`] adopts an existing locator binding
+/// and upgrades its parent to `scryer_submission`, or binds a new
+/// `scryer_submission` parent under its id. A [`BindingClaim::Observation`]
+/// adopts the binding without touching its origin, or binds a new
+/// `foreign_observation` parent: observing a client job must never turn a
+/// foreign download into a Scryer-owned one.
 ///
 /// Adoption covers the live job: dedup-by-hash clients hand back the same
 /// native job for a re-submitted release, and one active binding per locator is
@@ -115,8 +142,8 @@ async fn active_binding_download_id(
 /// fresh grab a download id that already carries an import or failure history,
 /// so the whole grab reads as already finished. Such a binding is ended here
 /// and the claim proceeds as if the locator were unbound — for an accepted
-/// grab whatever the parent's origin, and on the tracked-state stub path only
-/// for foreign parents (see below).
+/// grab whatever the parent's origin, and for an observation only for foreign
+/// parents (see below).
 ///
 /// The read-then-insert is not atomic under a datastore with concurrent
 /// writers: two claimants can both find the locator unbound (or both end the
@@ -129,8 +156,9 @@ async fn active_binding_download_id(
 pub(super) async fn claim_or_create_binding_download_id_tx(
     tx: &mut SqlTx<'_>,
     locator: &ClientJobLocator,
-    requested_download_id: Option<DownloadId>,
+    claim: BindingClaim,
 ) -> AppResult<DownloadId> {
+    let requested_download_id = claim.requested_download_id();
     if let Some(download_id) = active_binding_download_id(SqlExec::Tx(tx), locator).await? {
         // Re-claiming the same identity is not a stale adopt: there is no other
         // download's history to inherit, and the binding row is that identity's
@@ -138,15 +166,15 @@ pub(super) async fn claim_or_create_binding_download_id_tx(
         let reclaims_bound_identity = requested_download_id == Some(download_id);
         let stale = !reclaims_bound_identity
             && bound_download_is_terminal_tx(tx, &download_id).await?
-            // On the stub path the guard is for foreign re-adds only. A
+            // For an observation the guard is for foreign re-adds only. A
             // Scryer-owned binding ends through the queue-delete /
             // authoritative-absence lifecycle, and a duplicate terminal-state
             // write for a job that is still in the client must not detach it
             // from its submission and seed goals.
-            && (requested_download_id.is_some()
+            && (claim.claims_scryer_provenance()
                 || !bound_download_is_scryer_submission_tx(tx, &download_id).await?);
         if !stale {
-            if requested_download_id.is_some() {
+            if claim.claims_scryer_provenance() {
                 SqlRuntime::execute(
                     SqlExec::Tx(tx),
                     "UPDATE downloads
@@ -163,7 +191,7 @@ pub(super) async fn claim_or_create_binding_download_id_tx(
 
     let now = Utc::now();
     let download_id = requested_download_id.unwrap_or_else(DownloadId::new);
-    if requested_download_id.is_some() {
+    if claim.claims_scryer_provenance() {
         SqlRuntime::execute(
             SqlExec::Tx(tx),
             "INSERT INTO downloads (id, origin, created_at)
@@ -255,7 +283,7 @@ async fn bound_download_is_terminal_tx(
 }
 
 /// Is the bound parent a Scryer-owned download rather than a foreign
-/// observation? Only the no-requested-id (tracked-state stub) path asks.
+/// observation? Only a [`BindingClaim::Observation`] asks.
 async fn bound_download_is_scryer_submission_tx(
     tx: &mut SqlTx<'_>,
     download_id: &DownloadId,
@@ -1613,8 +1641,12 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let identity = identity.clone();
                 let tracked_state = tracked_state.clone();
                 Box::pin(async move {
-                    let canonical_download_id =
-                        claim_or_create_binding_download_id_tx(tx, &identity, None).await?;
+                    let canonical_download_id = claim_or_create_binding_download_id_tx(
+                        tx,
+                        &identity,
+                        BindingClaim::Observation(None),
+                    )
+                    .await?;
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
                         "INSERT INTO download_submissions
@@ -2564,6 +2596,136 @@ mod seed_goal_tests {
         assert_eq!(row.text("tracked_state").expect("tracked state"), "ignored");
     }
 
+    /// The row `TrackedDownloadService::resolve_title` records for an admitted
+    /// client job with no Scryer submission.
+    fn observation_stub(item_id: &str) -> DownloadSubmission {
+        DownloadSubmission {
+            download_id: DownloadId::new(),
+            title_id: String::new(),
+            facet: String::new(),
+            download_client_id: Some("primary".to_string()),
+            download_client_type: "qbittorrent".to_string(),
+            download_client_item_id: item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: None,
+            source_title: None,
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            scope: SubmissionScope::Orphan,
+            purpose: DownloadSubmissionPurpose::Standard,
+        }
+    }
+
+    async fn download_origin(store: &DownloadSubmissionStore, download_id: &DownloadId) -> String {
+        SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT origin FROM downloads WHERE id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("download should read")
+        .expect("download should exist")
+        .text("origin")
+        .expect("origin should decode")
+    }
+
+    /// Poll-time observation binds a foreign job first; the tracker's stub row
+    /// for it must adopt that identity without claiming Scryer provenance.
+    #[tokio::test]
+    async fn observation_stub_adopts_a_foreign_binding_without_claiming_scryer_provenance() {
+        let store = store().await;
+        let locator = ClientJobLocator::new(Some("primary"), "qbittorrent", "foreign-job");
+        let foreign_download_id = DownloadId::new();
+        insert_committed_winner(&store, &foreign_download_id, &locator).await;
+
+        store
+            .record_submission(observation_stub("foreign-job"))
+            .await
+            .expect("observation stub should persist");
+
+        assert_eq!(
+            download_origin(&store, &foreign_download_id).await,
+            "foreign_observation"
+        );
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &locator)
+                .await
+                .expect("active binding should load"),
+            Some(foreign_download_id)
+        );
+        assert_eq!(count_rows(&store, "downloads").await, 1);
+        assert_eq!(count_rows(&store, "download_client_bindings").await, 1);
+        let stub = store
+            .find_by_client_item_id(&locator)
+            .await
+            .expect("stub lookup should succeed")
+            .expect("stub row should share the foreign identity");
+        assert_eq!(stub.download_id, foreign_download_id);
+        assert!(stub.title_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn observation_stub_on_an_unbound_locator_mints_a_foreign_observation() {
+        let store = store().await;
+        let locator = ClientJobLocator::new(Some("primary"), "qbittorrent", "unseen-job");
+        let stub = observation_stub("unseen-job");
+        let stub_download_id = stub.download_id;
+
+        store
+            .record_submission(stub)
+            .await
+            .expect("observation stub should persist");
+
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &locator)
+                .await
+                .expect("active binding should load"),
+            Some(stub_download_id)
+        );
+        assert_eq!(
+            download_origin(&store, &stub_download_id).await,
+            "foreign_observation"
+        );
+        let first_observed_at = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT first_observed_at FROM downloads WHERE id = {}",
+            &[SqlArg::Text(stub_download_id.to_string())],
+        )
+        .await
+        .expect("download should read")
+        .expect("download should exist")
+        .opt_text("first_observed_at")
+        .expect("first_observed_at should decode");
+        assert!(first_observed_at.is_some());
+    }
+
+    /// The observation carve-out is the stub shape only: an orphan row that
+    /// carries release metadata is Scryer's own interactive grab.
+    #[tokio::test]
+    async fn orphan_grab_with_release_metadata_still_claims_scryer_provenance() {
+        let store = store().await;
+        let locator = ClientJobLocator::new(Some("primary"), "qbittorrent", "grabbed-job");
+        let bound_download_id = DownloadId::new();
+        insert_committed_winner(&store, &bound_download_id, &locator).await;
+        let mut orphan_grab = submission(DownloadId::new(), "grabbed-job", "");
+        orphan_grab.scope = SubmissionScope::Orphan;
+        orphan_grab.purpose = DownloadSubmissionPurpose::OperatorQueued;
+        assert!(!orphan_grab.is_observation_stub());
+
+        store
+            .record_submission(orphan_grab)
+            .await
+            .expect("orphan grab should persist");
+
+        assert_eq!(
+            download_origin(&store, &bound_download_id).await,
+            "scryer_submission"
+        );
+    }
+
     #[tokio::test]
     async fn failed_identity_state_uses_the_canonical_key_and_preserves_compatibility_columns() {
         let store = store().await;
@@ -2782,8 +2944,12 @@ mod seed_goal_tests {
                 let locator = locator.clone();
                 let attempts = Arc::clone(&attempts);
                 Box::pin(async move {
-                    let claimed =
-                        claim_or_create_binding_download_id_tx(tx, &locator, None).await?;
+                    let claimed = claim_or_create_binding_download_id_tx(
+                        tx,
+                        &locator,
+                        BindingClaim::Observation(None),
+                    )
+                    .await?;
                     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         return Err(AppError::Repository(ACTIVE_LOCATOR_VIOLATION.to_string()));
                     }
@@ -2831,7 +2997,12 @@ mod seed_goal_tests {
                         // winner committed, so its insert lost the race.
                         return Err(AppError::Repository(ACTIVE_LOCATOR_VIOLATION.to_string()));
                     }
-                    claim_or_create_binding_download_id_tx(tx, &locator, None).await
+                    claim_or_create_binding_download_id_tx(
+                        tx,
+                        &locator,
+                        BindingClaim::Observation(None),
+                    )
+                    .await
                 })
             },
         )

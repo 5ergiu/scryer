@@ -447,6 +447,95 @@ async fn tracked_state_stub_over_a_terminal_foreign_binding_mints_a_fresh_identi
     fixture.cleanup();
 }
 
+/// The poll-time path end to end: the registry binds a foreign job, then the
+/// tracker records its observation stub row. That row must not upgrade the job
+/// to `scryer_submission`, or the foreign re-add guard above stops applying and
+/// a reused native id inherits the finished download's history.
+#[tokio::test]
+async fn observation_stub_keeps_a_foreign_job_foreign_through_a_native_id_reuse() {
+    let fixture = StaleBindingFixture::new("observation_stub").await;
+    let submissions = fixture.submissions();
+    let registry = fixture.registry();
+    let locator = locator();
+
+    let scryer_application::ObservationResolution::Resolved {
+        download_id: foreign_download_id,
+        newly_foreign,
+        ..
+    } = registry
+        .resolve_observation(&scryer_application::ObservedClientJob {
+            locator: locator.clone(),
+            wire_token: None,
+            observed_name: Some("foreign torrent".to_string()),
+            observed_at: Utc::now(),
+        })
+        .await
+        .expect("foreign observation should resolve")
+    else {
+        panic!("foreign observation should produce a resolved identity");
+    };
+    assert!(newly_foreign);
+
+    submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: String::new(),
+            facet: String::new(),
+            download_client_id: Some(CLIENT_ID.to_string()),
+            download_client_type: CLIENT_TYPE.to_string(),
+            download_client_item_id: ITEM_ID.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: None,
+            source_title: None,
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            purpose: DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Orphan,
+        })
+        .await
+        .expect("observation stub should persist");
+    assert_eq!(
+        registry
+            .load_download(&foreign_download_id)
+            .await
+            .expect("foreign parent should load")
+            .expect("foreign parent should exist")
+            .origin,
+        scryer_application::DownloadOrigin::ForeignObservation
+    );
+    assert_eq!(fixture.binding_rows().await.len(), 1);
+
+    submissions
+        .update_tracked_state(&locator, "imported")
+        .await
+        .expect("terminal state should land on the foreign identity");
+    assert_eq!(
+        fixture
+            .tracked_state_of(&foreign_download_id.to_string())
+            .await,
+        Some("imported".to_string())
+    );
+
+    submissions
+        .update_tracked_state(&locator, "downloading")
+        .await
+        .expect("the re-added job should claim a fresh identity");
+    let active = registry
+        .find_active_binding_by_locator(&locator)
+        .await
+        .expect("active binding lookup should succeed")
+        .expect("the re-added job should own an active binding");
+    assert_ne!(
+        active.download_id, foreign_download_id,
+        "the imported foreign download must not be reused for the re-added job"
+    );
+
+    fixture.cleanup();
+}
+
 /// The stub writer is also what *records* terminal states, so a duplicate
 /// terminal write for a Scryer-owned job that is still in the client must keep
 /// the submission identity: minting a fresh one would detach the entry from

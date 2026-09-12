@@ -211,6 +211,30 @@ pub struct DownloadSubmission {
     pub scope: SubmissionScope,
 }
 
+impl DownloadSubmission {
+    /// Is this the tracker's observation stub rather than a Scryer submission?
+    ///
+    /// `TrackedDownloadService` persists an orphan, title-less row with no
+    /// release metadata for an admitted client job Scryer did not submit, so its
+    /// tracked state survives a restart. Plan 147 classifies exactly that shape
+    /// ("an empty `title_id` and no source metadata") as a tracking stub, not a
+    /// submission: recording it must leave the job's canonical download a
+    /// `foreign_observation`. Any release metadata — an interactive orphan grab —
+    /// or an assigned title makes the row a real submission.
+    pub fn is_observation_stub(&self) -> bool {
+        matches!(self.scope, SubmissionScope::Orphan)
+            && self.title_id.trim().is_empty()
+            && self.source_hint.is_none()
+            && self.source_provider_id.is_none()
+            && self.source_provider_name.is_none()
+            && self.source_kind.is_none()
+            && self.source_title.is_none()
+            && self.info_hash.is_none()
+            && self.release_size_bytes.is_none()
+            && self.request_signature.is_none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DownloadSubmissionActorSnapshot {
     pub kind: scryer_domain::DomainEventActorKind,
