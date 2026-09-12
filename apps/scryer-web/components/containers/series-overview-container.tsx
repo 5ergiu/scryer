@@ -81,7 +81,10 @@ import { useJobRunToasts } from "@/components/root/job-run-provider";
 import { normalizeJobRun } from "@/lib/utils/job-runs";
 import { mediaFileOwnerKeys } from "@/lib/utils/media-file-owners";
 import type { JobRun } from "@/lib/types/jobs";
-import type { DeleteEpisodeFilesPreview } from "@/lib/types/delete-preview";
+import {
+  episodeIdsCoveredByEpisodeFileDelete,
+  type DeleteEpisodeFilesPreview,
+} from "@/lib/types/delete-preview";
 import {
   assertNoReplaceConflict,
   retryWithReplaceOnConflict,
@@ -1803,8 +1806,8 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     // Captured before the request so the terminal handler can restore exactly
     // the rows this run locked, and drop their cached files if the run does not
     // report which files it removed.
-    const targetedEpisodeIds = new Set(
-      (episodeFilesDeletePreviewPayload?.items ?? []).map((item) => item.episodeId),
+    const targetedEpisodeIds = episodeIdsCoveredByEpisodeFileDelete(
+      episodeFilesDeletePreviewPayload?.items ?? [],
     );
     setEpisodeFilesDeleteLoading(true);
     try {
@@ -1902,12 +1905,11 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     (mediaFileDeletePreview.requiresTypedConfirmation &&
       mediaFileDeleteTypedConfirmation.trim() !== "DELETE");
   // Selected episodes without any media file contribute nothing to the delete,
-  // so the summary counts the episodes the preview actually resolved files for.
+  // so the summary counts the episodes the preview actually resolved files for,
+  // including every episode a shared multi-episode file covers.
   const episodeFilesDeleteEpisodeCount = React.useMemo(
     () =>
-      new Set(
-        (episodeFilesDeletePreviewPayload?.items ?? []).map((item) => item.episodeId),
-      ).size,
+      episodeIdsCoveredByEpisodeFileDelete(episodeFilesDeletePreviewPayload?.items ?? []).size,
     [episodeFilesDeletePreviewPayload],
   );
   const deleteEpisodeFilesConfirmDisabled =

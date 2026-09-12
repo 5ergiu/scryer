@@ -564,8 +564,11 @@ pub struct DeleteTitlesPreviewPayload {
 pub struct DeleteEpisodeFilePreviewResultPayload {
     /// Media-file identity that would be deleted.
     pub file_id: ID,
-    /// Episode identity the media file is linked to.
+    /// First requested episode the media file is linked to.
     pub episode_id: ID,
+    /// Every requested episode the media file is linked to. A multi-episode
+    /// file is deleted once but covers each of these episodes.
+    pub episode_ids: Vec<ID>,
     /// Deletion preview for this file, or null when preview generation failed.
     pub preview: Option<DeletePreviewPayload>,
     /// Error message, or null when preview generation succeeded.

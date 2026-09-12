@@ -1273,7 +1273,7 @@ impl AppUseCase {
                 .await;
 
             if let Some(error) = item.error.as_deref() {
-                failed_episode_ids.insert(item.episode_id.clone());
+                failed_episode_ids.extend(item.episode_ids.iter().cloned());
                 outcome.failed.push(DeleteEpisodeFileFailure {
                     file_id: item.file_id.clone(),
                     error: error.to_string(),
@@ -1285,16 +1285,16 @@ impl AppUseCase {
                 .await
             {
                 Ok(()) => {
-                    deleted_episode_ids.insert(item.episode_id.clone());
+                    deleted_episode_ids.extend(item.episode_ids.iter().cloned());
                     outcome.deleted_file_ids.push(item.file_id.clone());
                 }
                 Err(error) => {
-                    failed_episode_ids.insert(item.episode_id.clone());
+                    failed_episode_ids.extend(item.episode_ids.iter().cloned());
                     warn!(
                         error = %error,
                         title_id = %title_id,
                         file_id = %item.file_id,
-                        episode_id = %item.episode_id,
+                        episode_ids = ?item.episode_ids,
                         "failed to delete episode media file in batch"
                     );
                     outcome.failed.push(DeleteEpisodeFileFailure {
