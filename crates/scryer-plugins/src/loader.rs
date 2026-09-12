@@ -1008,8 +1008,13 @@ impl DynamicPluginProvider {
             .write()
             .expect("DynamicPluginProvider lock poisoned");
         // Reloads rebuild the provider from the plugin set alone; the host
-        // services wired in at bootstrap have to survive them.
+        // services wired in at bootstrap have to survive them. Dropping the
+        // request tracker or the error recorder would leave every plugin
+        // indexer uncounted on the dashboard and absent from error history
+        // after the startup compatibility pass reloads the providers.
         new_provider.archive_provider = guard.archive_provider.clone();
+        new_provider.indexer_error_recorder = Arc::clone(&guard.indexer_error_recorder);
+        new_provider.indexer_stats = Arc::clone(&guard.indexer_stats);
         *guard = new_provider;
         // Clear the client cache — WASM bytes may have changed.
         if let Ok(mut cache) = self.client_cache.lock() {
@@ -4999,6 +5004,27 @@ mod tests {
                 .iter()
                 .any(|provider_type| provider_type == "example_indexer")
         );
+    }
+
+    #[test]
+    fn indexer_reload_keeps_bootstrap_request_tracker_and_error_recorder() {
+        let indexer_stats: Arc<dyn IndexerStatsTracker> = Arc::new(NullIndexerStatsTracker);
+        let indexer_error_recorder: Arc<dyn IndexerErrorRecorder> =
+            Arc::new(NullIndexerErrorRecorder);
+        let provider = DynamicPluginProvider::new(
+            build_indexer_plugin_provider(&[], &[])
+                .with_indexer_stats_tracker(Arc::clone(&indexer_stats))
+                .with_indexer_error_recorder(Arc::clone(&indexer_error_recorder)),
+        );
+
+        provider.reload(build_indexer_plugin_provider(&[], &[]));
+
+        let guard = provider.inner.read().expect("indexer provider lock");
+        assert!(Arc::ptr_eq(&guard.indexer_stats, &indexer_stats));
+        assert!(Arc::ptr_eq(
+            &guard.indexer_error_recorder,
+            &indexer_error_recorder
+        ));
     }
 
     #[test]
