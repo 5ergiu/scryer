@@ -687,7 +687,7 @@ async fn an_abandoned_media_file_releases_its_waiting_companions() {
             .is_err()
     );
 
-    resolver.media_abandoned("op", &title, &title.files[0]);
+    resolver.media_abandoned("op", &title, &title.files[0], FileAbandonment::GivenUp);
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), companion)
         .await
         .expect("abandoning the media file releases its companion")
@@ -696,5 +696,34 @@ async fn an_abandoned_media_file_releases_its_waiting_companions() {
         error.to_string().contains("could not be transferred"),
         "got {error}"
     );
+    assert!(title.files[1].source_path.exists());
+}
+
+/// FR-092: a media file handed back on a cancel is not a failed transfer. The
+/// companion waiting on it is released as canceled, so the runner reads it as
+/// the cancel it is rather than as a title failure, and its source stays put.
+#[tokio::test]
+async fn a_media_file_canceled_while_waiting_releases_its_companions_as_canceled() {
+    let temp = tempfile::tempdir().unwrap();
+    let (resolver, title) = media_with_subtitle(&temp);
+    let outage = StorageOutage::failing(u32::MAX);
+
+    resolve_with(&resolver, &outage, &title, 0)
+        .await
+        .expect_err("the media file meets the outage");
+    let companion = resolve_with(&resolver, &outage, &title, 1);
+    tokio::pin!(companion);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut companion)
+            .await
+            .is_err()
+    );
+
+    resolver.media_abandoned("op", &title, &title.files[0], FileAbandonment::Canceled);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), companion)
+        .await
+        .expect("a canceled media file releases its companion")
+        .expect_err("a companion of a media file that never moved does not move");
+    assert!(matches!(error, AppError::Canceled(_)), "got {error}");
     assert!(title.files[1].source_path.exists());
 }
