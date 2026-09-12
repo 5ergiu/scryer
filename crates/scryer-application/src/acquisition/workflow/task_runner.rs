@@ -1124,6 +1124,14 @@ impl GrabFailureTally {
         self.failed = true;
         self.submit_unavailable |= error.is_retryable_download_submit_failure();
     }
+
+    /// A saved search result the download client refused. It is kept for when
+    /// the client recovers, but the submission itself failed, and a submit error
+    /// is always of failure class.
+    fn record_refused_submission(&mut self, refused: super::pending::RefusedSubmission) {
+        self.failed = true;
+        self.submit_unavailable |= refused.submit_unavailable;
+    }
 }
 
 impl TitleWalkStats {
@@ -1766,7 +1774,7 @@ async fn commit_series_pack_proposal(
         let (scope, standby_start, recovered) = match outcome {
             StandbyRecoveryOutcome::Recovered { scope } => (Some(scope), candidate_index + 1, true),
             StandbyRecoveryOutcome::Active { scope } => (Some(scope), candidate_index + 1, false),
-            StandbyRecoveryOutcome::Deferred { scope } => (scope, candidate_index, false),
+            StandbyRecoveryOutcome::Deferred { scope, .. } => (scope, candidate_index, false),
             StandbyRecoveryOutcome::Parked { scope } => {
                 let candidate_is_parked = scope.as_ref() == Some(&candidate_scope);
                 (
@@ -3086,12 +3094,23 @@ async fn process_single_target(
                     );
                     return Ok(());
                 }
-                StandbyRecoveryOutcome::Deferred { .. } => {
+                StandbyRecoveryOutcome::Deferred { refused, .. } => {
                     info!(
                         title = title.name.as_str(),
                         scope_key = target.scope_key.as_str(),
                         "saved search result kept pending until the download client recovers"
                     );
+                    // A refused saved result is a failed submission, counted like
+                    // the same refusal on the search lane. Only the episode's own
+                    // `Scope` stage counts it: every pack stage's anchor has one,
+                    // so the scope counts once however many stages walked it.
+                    if let Some(refused) = refused
+                        && !pack_stage_only
+                    {
+                        let mut tally = GrabFailureTally::default();
+                        tally.record_refused_submission(refused);
+                        session.stats.record_grab_failures(tally);
+                    }
                     return Ok(());
                 }
                 StandbyRecoveryOutcome::Parked { .. } => {

@@ -12626,6 +12626,126 @@ async fn a_title_walk_whose_only_download_client_is_disabled_fails_the_job() {
     );
 }
 
+/// The saved-results lane is a submission too: a job whose only candidate is a
+/// saved search result the disabled download client refuses must fail.
+///
+/// A scope that already holds ranked results — the remainder a background walk
+/// saved when the same client refused it — walks them before it would spend an
+/// indexer query. That walk submits, the client refuses, and the release is
+/// kept `Standby` for when the client recovers. It is the same refused
+/// submission the search lane counts, so it counts against the job the same
+/// way; otherwise the job reads COMPLETED with nothing grabbed, which is what
+/// the `indexer-download-client-mapping` e2e gate caught once the background
+/// walk of a newly added title reached the scope before the operator's search.
+#[tokio::test]
+async fn a_title_walk_whose_saved_result_the_disabled_client_refuses_fails_the_job() {
+    // The indexers hold nothing, so the saved result is the job's only
+    // candidate and its refusal the only submission the job can make.
+    let (app, title, _, download_client) = seed_recent_failed_season_pack_fixture_with_indexer(
+        Arc::new(TrackingIndexerClient::default().returning_no_results()),
+    )
+    .await;
+    let job_runs = Arc::new(RecordingJobRunRepo::default());
+    let app = app.with_test_overrides(|services| services.with_job_runs(job_runs.clone()));
+    attach_default_library_to_scope_states(&app, MediaFacet::Anime).await;
+    download_client
+        .set_submit_error(Some(StubSubmitError::SubmitUnavailable(
+            "mapped download client is globally disabled".to_string(),
+        )))
+        .await;
+
+    let episodes = app
+        .services
+        .catalog
+        .shows
+        .list_episodes_for_title(&title.id)
+        .await
+        .expect("list the fixture episodes");
+    let first_episode = episodes
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("23"))
+        .expect("the fixture has S07E23");
+    let first_scope = app
+        .services
+        .workflow
+        .acquisition_scope_states
+        .list_acquisition_scope_states(AcquisitionScopeStatesQuery {
+            limit: i64::MAX,
+            ..AcquisitionScopeStatesQuery::default()
+        })
+        .await
+        .expect("list seeded scope states")
+        .into_iter()
+        .find(|state| state.episode_id.as_deref() == Some(first_episode.id.as_str()))
+        .expect("S07E23 has a wanted scope");
+    let saved = pending_movie_release(
+        &first_scope.id,
+        &title,
+        "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-SAVED",
+        PendingReleaseStatus::Standby,
+    );
+    app.services
+        .workflow
+        .pending_releases
+        .insert_pending_release(&saved)
+        .await
+        .expect("seed the saved search result");
+
+    let actor = test_admin_user();
+    let run = app
+        .start_acquisition_search_job(
+            &actor,
+            AcquisitionSearchRequest {
+                title_id: Some(title.id.clone()),
+                season_number: Some(7),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start the season-scoped acquisition search");
+
+    let view = await_acquisition_search_job(&app, &actor, &run.id).await;
+    let saved_status = app
+        .services
+        .workflow
+        .pending_releases
+        .get_pending_release(&saved.id)
+        .await
+        .expect("load the saved result")
+        .expect("the saved result still exists")
+        .status;
+    let submitted = download_client
+        .submitted_release_titles
+        .lock()
+        .await
+        .clone();
+    assert!(
+        !submitted.is_empty()
+            && submitted
+                .iter()
+                .all(|release| release == &saved.release_title),
+        "the job submitted the saved result, and nothing else: {submitted:?}"
+    );
+    assert_eq!(
+        saved_status,
+        PendingReleaseStatus::Standby,
+        "the refused saved result is kept for when the client recovers, never expired"
+    );
+    assert_eq!(
+        view.state, "failed",
+        "the only submission the job made was refused: {view:?}"
+    );
+    assert_eq!(view.grabbed_count, 0);
+    assert_eq!(
+        view.failed_count, 1,
+        "one episode scope could not submit, counted once however many stages tried it: {view:?}"
+    );
+    assert_eq!(
+        view.processed, view.total,
+        "the walk ran every work item it announced: {view:?}"
+    );
+}
+
 /// A request narrows by wanted kind; the target derivation does not. The walk
 /// therefore runs the scopes the *request* resolved to, not everything derived
 /// for the title — otherwise "search cutoff-unmet for this title" would go on to
