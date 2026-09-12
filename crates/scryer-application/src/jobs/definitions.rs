@@ -453,7 +453,7 @@ impl JobKey {
             Self::ArtworkEncoding => "Daily 03:00–09:00 host local time",
             Self::PendingReleaseProcessing => "Re-evaluated during RSS sync",
             Self::StagedNzbPrune => "Every hour",
-            Self::FullHashBackfill => "Every 30 minutes",
+            Self::FullHashBackfill => "Every 30 minutes, midnight–06:00 host local time",
             Self::MaintenanceRuleEvaluation => "Every 8 hours",
             Self::LifecycleActionHandling => "Every 12 hours",
             Self::MediaServerSignalSync => "Every 6 hours",
@@ -501,9 +501,7 @@ impl JobKey {
             Self::SubtitleSearch => Some(120),
             Self::HealthChecks => Some(30),
             Self::DiscoverySync => Some(30 * 60),
-            // Avoid competing with startup work: the first CPU-heavy hash sweep
-            // waits two hours, then resumes its normal thirty-minute cadence.
-            Self::FullHashBackfill => Some(2 * 60 * 60),
+            Self::FullHashBackfill => None,
             _ => None,
         }
     }
@@ -932,11 +930,11 @@ mod tests {
     }
 
     #[test]
-    fn full_hash_backfill_waits_two_hours_after_startup() {
+    fn full_hash_backfill_has_no_artificial_startup_delay() {
         let definition = JobDefinition::from_key(JobKey::FullHashBackfill, None);
 
         assert_eq!(definition.schedule.interval_seconds, Some(30 * 60));
-        assert_eq!(definition.schedule.initial_delay_seconds, Some(2 * 60 * 60));
+        assert_eq!(definition.schedule.initial_delay_seconds, None);
     }
 
     #[test]

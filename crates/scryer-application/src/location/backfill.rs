@@ -46,7 +46,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Local, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::location::model::PersistedContentHashes;
@@ -58,37 +58,82 @@ use crate::{AppError, AppResult, AppUseCase, MediaFileHashCandidate};
 
 /// Hashing has its own cadence and lifetime; acquisition, RSS and pending
 /// releases never await this worker.
+const FULL_HASH_BACKFILL_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const FULL_HASH_BACKFILL_WINDOW_END_HOUR: u32 = 6;
+
+pub(crate) fn full_hash_backfill_window_open<T: TimeZone>(now: &DateTime<T>) -> bool {
+    now.hour() < FULL_HASH_BACKFILL_WINDOW_END_HOUR
+}
+
+/// Resolves the next local midnight independently so daylight-saving changes
+/// never turn the overnight window into a fixed 24-hour delay.
+pub(crate) fn next_full_hash_backfill_window<T: TimeZone>(
+    now: &DateTime<T>,
+    include_current: bool,
+) -> Option<DateTime<Utc>> {
+    if include_current && full_hash_backfill_window_open(now) {
+        return Some(now.with_timezone(&Utc));
+    }
+
+    let zone = now.timezone();
+    let mut date = now.date_naive();
+    if now.hour() >= FULL_HASH_BACKFILL_WINDOW_END_HOUR {
+        date = date.succ_opt()?;
+    }
+    for _ in 0..3 {
+        // If midnight is skipped locally, use the first valid minute in the window.
+        for minute in 0..FULL_HASH_BACKFILL_WINDOW_END_HOUR * 60 {
+            let local = date.and_hms_opt(minute / 60, minute % 60, 0)?;
+            if let Some(candidate) = zone.from_local_datetime(&local).earliest()
+                && candidate > *now
+            {
+                return Some(candidate.with_timezone(&Utc));
+            }
+        }
+        date = date.succ_opt()?;
+    }
+    None
+}
+
+pub(crate) fn next_full_hash_backfill_run<T: TimeZone>(now: &DateTime<T>) -> Option<DateTime<Utc>> {
+    let next_tick = now.with_timezone(&Utc)
+        + chrono::Duration::from_std(FULL_HASH_BACKFILL_INTERVAL)
+            .expect("full-hash backfill interval fits chrono duration");
+    if full_hash_backfill_window_open(&next_tick.with_timezone(&now.timezone())) {
+        Some(next_tick)
+    } else {
+        next_full_hash_backfill_window(now, false)
+    }
+}
+
 pub async fn start_full_hash_backfill_worker(
     app: AppUseCase,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    let delay = Duration::from_secs(
-        crate::JobKey::FullHashBackfill
-            .initial_delay_seconds()
-            .unwrap_or(900)
-            .max(0) as u64,
-    );
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + delay,
-        Duration::from_secs(1800),
-    );
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    app.set_job_next_run_at(
-        crate::JobKey::FullHashBackfill,
-        Utc::now() + chrono::Duration::from_std(delay).unwrap_or_default(),
-    )
-    .await;
+    let mut next_run =
+        next_full_hash_backfill_window(&app.runtime.environment.now().with_timezone(&Local), true)
+            .expect("a future full-hash backfill window must be available");
     loop {
+        app.set_job_next_run_at(crate::JobKey::FullHashBackfill, next_run)
+            .await;
+        let wait = (next_run - app.runtime.environment.now())
+            .to_std()
+            .unwrap_or_default();
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => break,
-            _ = interval.tick() => {},
+            _ = tokio::time::sleep(wait) => {},
         }
-        app.set_job_next_run_at(
-            crate::JobKey::FullHashBackfill,
-            Utc::now() + chrono::Duration::minutes(30),
-        )
-        .await;
+
+        let now = app.runtime.environment.now().with_timezone(&Local);
+        if !full_hash_backfill_window_open(&now) {
+            next_run = next_full_hash_backfill_window(&now, false)
+                .expect("a future full-hash backfill window must be available");
+            continue;
+        }
+
+        next_run = next_full_hash_backfill_run(&now)
+            .expect("a future full-hash backfill run must be available");
         let run_app = app.clone();
         let mut run = tokio::spawn(async move {
             run_app
@@ -634,4 +679,52 @@ pub(super) fn same_file_version(before: &std::fs::Metadata, after: &std::fs::Met
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn full_hash_backfill_window_follows_local_midnight_to_six() {
+        let zone = FixedOffset::west_opt(6 * 60 * 60).unwrap();
+        for (hour, open) in [(23, false), (0, true), (5, true), (6, false)] {
+            let now = zone.with_ymd_and_hms(2026, 9, 12, hour, 0, 0).unwrap();
+            assert_eq!(full_hash_backfill_window_open(&now), open);
+
+            let next = next_full_hash_backfill_window(&now, true)
+                .unwrap()
+                .with_timezone(&zone);
+            if open {
+                assert_eq!(next, now);
+            } else {
+                assert_eq!(next.hour(), 0);
+                assert_eq!(
+                    next.date_naive(),
+                    now.date_naive() + chrono::Duration::days(i64::from(hour >= 6))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_hash_backfill_resumes_next_night_after_the_window_closes() {
+        let zone = FixedOffset::west_opt(6 * 60 * 60).unwrap();
+        let inside_window = zone.with_ymd_and_hms(2026, 9, 12, 2, 0, 0).unwrap();
+        assert_eq!(
+            next_full_hash_backfill_run(&inside_window)
+                .unwrap()
+                .with_timezone(&zone),
+            zone.with_ymd_and_hms(2026, 9, 12, 2, 30, 0).unwrap()
+        );
+
+        let final_run = zone.with_ymd_and_hms(2026, 9, 12, 5, 45, 0).unwrap();
+        assert_eq!(
+            next_full_hash_backfill_run(&final_run)
+                .unwrap()
+                .with_timezone(&zone),
+            zone.with_ymd_and_hms(2026, 9, 13, 0, 0, 0).unwrap()
+        );
+    }
 }
