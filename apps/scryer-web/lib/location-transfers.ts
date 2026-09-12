@@ -64,10 +64,16 @@ export type TransferView = {
   snapshot: TransferSnapshot | null;
 };
 
+/** `reread` also admits a snapshot at the retained revision. A caller that just
+ * resumed, retried, canceled or abandoned the operation asks for it until one
+ * snapshot lands: the row can change state without the live hub advancing its
+ * revision, and the snapshot retained from before the action is not newer
+ * than the answer to it. */
 export function acceptTransferSnapshot(
   current: TransferView,
   scope: TransferScope,
   incoming: TransferSnapshot,
+  reread = false,
 ): TransferView {
   if (
     current.scope.operationId !== scope.operationId ||
@@ -84,7 +90,9 @@ export function acceptTransferSnapshot(
     if (
       generation < 0n ||
       (generation === 0n &&
-        BigInt(incoming.revision) <= BigInt(previous.revision))
+        (reread
+          ? BigInt(incoming.revision) < BigInt(previous.revision)
+          : BigInt(incoming.revision) <= BigInt(previous.revision)))
     )
       return current;
   }
