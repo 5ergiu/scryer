@@ -534,12 +534,18 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
               size="sm"
               variant="primary"
               disabled={isDisabled}
+              aria-label={t(
+                job.key === "ARTWORK_ENCODING" ? "jobs.action.runArtworkNow" : "jobs.action.run",
+              )}
+              title={t(
+                job.key === "ARTWORK_ENCODING" ? "jobs.action.runArtworkNow" : "jobs.action.run",
+              )}
               onClick={(event) => {
                 event.stopPropagation();
                 onTriggerJob(job.key);
               }}
             >
-              {t(job.key === "ARTWORK_ENCODING" ? "jobs.action.runArtworkNow" : "jobs.action.run")}
+              {t("jobs.action.run")}
             </Button>
           ) : null}
         </TableCell>
