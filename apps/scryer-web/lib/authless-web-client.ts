@@ -6,6 +6,11 @@ type AuthlessProof = {
 };
 
 let cachedProof: AuthlessProof | null = null;
+// Every /authless-client response sets a fresh cookie, and the server only
+// accepts a proof that matches the cookie the browser holds. Concurrent
+// startup queries must share one fetch, or the cookie jar can keep one
+// response while the cache keeps the other and every request is rejected.
+let inFlightProof: Promise<string | null> | null = null;
 
 function authlessClientUrl() {
   return getRuntimeBackendUrl("/authless-client");
@@ -16,7 +21,15 @@ export async function getAuthlessWebClientProof(): Promise<string | null> {
   if (cachedProof && cachedProof.expiresAt - 15 > nowSeconds) {
     return cachedProof.proof;
   }
+  if (!inFlightProof) {
+    inFlightProof = fetchAuthlessWebClientProof().finally(() => {
+      inFlightProof = null;
+    });
+  }
+  return inFlightProof;
+}
 
+async function fetchAuthlessWebClientProof(): Promise<string | null> {
   try {
     const response = await fetch(authlessClientUrl(), {
       method: "GET",
