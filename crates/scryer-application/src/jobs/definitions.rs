@@ -501,8 +501,9 @@ impl JobKey {
             Self::SubtitleSearch => Some(120),
             Self::HealthChecks => Some(30),
             Self::DiscoverySync => Some(30 * 60),
-            // Boot is the busiest moment there is; the first sweep waits it out.
-            Self::FullHashBackfill => Some(15 * 60),
+            // Avoid competing with startup work: the first CPU-heavy hash sweep
+            // waits two hours, then resumes its normal thirty-minute cadence.
+            Self::FullHashBackfill => Some(2 * 60 * 60),
             _ => None,
         }
     }
@@ -928,6 +929,14 @@ mod tests {
 
         assert_eq!(definition.schedule.description, "Every 2 hours");
         assert_eq!(definition.schedule.initial_delay_seconds, None);
+    }
+
+    #[test]
+    fn full_hash_backfill_waits_two_hours_after_startup() {
+        let definition = JobDefinition::from_key(JobKey::FullHashBackfill, None);
+
+        assert_eq!(definition.schedule.interval_seconds, Some(30 * 60));
+        assert_eq!(definition.schedule.initial_delay_seconds, Some(2 * 60 * 60));
     }
 
     #[test]
