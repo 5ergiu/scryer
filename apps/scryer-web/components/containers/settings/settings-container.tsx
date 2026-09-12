@@ -751,8 +751,19 @@ export const SettingsContainer = memo(function SettingsContainer({
     subscribeToProviderCatalog,
   );
 
+  // The Indexers and Rules rails only become a side column at 2xl; below that
+  // they are a full-width strip, so the row has to stack or the strip takes
+  // the whole row and leaves the page content zero wide.
+  const showSectionSubnav =
+    settingsSection === "indexers" || (isRulesSection && rulesSections.length >= 2);
+
   return (
-    <div className="flex min-h-0 w-full flex-1 flex-col overflow-visible bg-transparent md:flex-row min-[981px]:overflow-hidden">
+    <div
+      className={cn(
+        "flex min-h-0 w-full flex-1 flex-col overflow-visible bg-transparent min-[981px]:overflow-hidden",
+        showSectionSubnav ? "2xl:flex-row" : "md:flex-row",
+      )}
+    >
       {showPrimarySettingsSubnav ? (
         <aside
           data-slot="settings-subnav-scroll"
