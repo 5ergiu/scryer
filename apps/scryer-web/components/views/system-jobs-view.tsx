@@ -500,7 +500,8 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
     rows.map(({ job, lastRun, status, isDisabled }) => (
       <TableRow
         key={job.key}
-        className="cursor-pointer border-[var(--scry-border3)] hover:bg-[var(--scry-hover)]"
+        data-ui="activity-row"
+        className="cursor-pointer border-[var(--scry-border3)]"
         onClick={() => onSelectJob(job.key)}
       >
         <TableCell className="min-w-0">
