@@ -536,6 +536,96 @@ async fn observation_stub_keeps_a_foreign_job_foreign_through_a_native_id_reuse(
     fixture.cleanup();
 }
 
+/// A foreign job imported in place settles in the tracker's write order: the
+/// canonical identity state first, then the submission projection. The
+/// projection write finds the binding already terminal — because of this very
+/// job, still in the client — and must land on it rather than retire it and
+/// split the job across two canonical downloads.
+#[tokio::test]
+async fn settling_a_foreign_job_keeps_its_identity_through_the_projection_write() {
+    let fixture = StaleBindingFixture::new("foreign_settle").await;
+    let submissions = fixture.submissions();
+    let registry = fixture.registry();
+    let locator = locator();
+
+    let scryer_application::ObservationResolution::Resolved {
+        download_id: foreign_download_id,
+        ..
+    } = registry
+        .resolve_observation(&scryer_application::ObservedClientJob {
+            locator: locator.clone(),
+            wire_token: None,
+            observed_name: Some("foreign torrent".to_string()),
+            observed_at: Utc::now(),
+        })
+        .await
+        .expect("foreign observation should resolve")
+    else {
+        panic!("foreign observation should produce a resolved identity");
+    };
+
+    submissions
+        .record_identity_tracked_state_for_download(
+            Some(&foreign_download_id),
+            &DownloadSubmissionIdentity {
+                download_id: Some(ITEM_ID.to_string()),
+            },
+            Some(&locator),
+            "imported",
+            None,
+            None,
+        )
+        .await
+        .expect("canonical terminal state should persist");
+    submissions
+        .update_tracked_state(&locator, "imported")
+        .await
+        .expect("the projection write should land on the settled job");
+
+    assert_eq!(
+        fixture.binding_rows().await,
+        vec![(foreign_download_id.to_string(), None)],
+        "the job keeps its one live binding"
+    );
+    let download_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM downloads")
+        .fetch_one(fixture.services.pool())
+        .await
+        .expect("download row count should load");
+    assert_eq!(download_rows, 1, "no second canonical download is minted");
+    assert_eq!(
+        fixture
+            .tracked_state_of(&foreign_download_id.to_string())
+            .await,
+        Some("imported".to_string())
+    );
+    assert_eq!(
+        registry
+            .load_download(&foreign_download_id)
+            .await
+            .expect("foreign parent should load")
+            .expect("foreign parent should exist")
+            .origin,
+        scryer_application::DownloadOrigin::ForeignObservation
+    );
+
+    // A job starting over under that native id is still a re-add.
+    submissions
+        .update_tracked_state(&locator, "downloading")
+        .await
+        .expect("the re-added job should claim a fresh identity");
+    assert_ne!(
+        registry
+            .find_active_binding_by_locator(&locator)
+            .await
+            .expect("active binding lookup should succeed")
+            .expect("the re-added job should own an active binding")
+            .download_id,
+        foreign_download_id
+    );
+
+    fixture.cleanup();
+}
+
 /// The stub writer is also what *records* terminal states, so a duplicate
 /// terminal write for a Scryer-owned job that is still in the client must keep
 /// the submission identity: minting a fresh one would detach the entry from
