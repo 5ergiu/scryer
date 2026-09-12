@@ -28,6 +28,10 @@ export function useLocationTransfer(
   const client = useClient();
   const generation = useRef(0);
   const retained = useRef<TransferView | null>(null);
+  // The `refresh` the retained snapshot was read under. A newer one means the
+  // caller acted on the operation since, so a terminal snapshot from before is
+  // no longer the answer: a retried or resumed operation runs again.
+  const retainedRefresh = useRef(refresh);
   const pendingQueries = useRef(new Set<string>());
   const [view, setView] = useState<TransferView | null>(null);
   const [connected, setConnected] = useState(false);
@@ -63,8 +67,11 @@ export function useLocationTransfer(
     setConnected(false);
     setError(null);
     if (!enabled || !visible) return;
+    let reread =
+      current.snapshot !== null && retainedRefresh.current !== refresh;
     if (
       current.snapshot &&
+      !reread &&
       isTerminalOperationState(current.snapshot.operation.state)
     )
       return;
@@ -89,10 +96,12 @@ export function useLocationTransfer(
         : { id: operationId, offset: page * 50 };
     const accept = (snapshot: TransferSnapshot | null | undefined) => {
       if (!active || !snapshot) return;
-      const next = acceptTransferSnapshot(current, scope, snapshot);
+      const next = acceptTransferSnapshot(current, scope, snapshot, reread);
       if (next === current) return;
+      reread = false;
       current = next;
       retained.current = next;
+      retainedRefresh.current = refresh;
       setView(next);
       setError(null);
       terminal = isTerminalOperationState(snapshot.operation.state);

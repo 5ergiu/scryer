@@ -64,6 +64,30 @@ test("late polling cannot replace subscription snapshots, including restart and 
   assert.equal(acceptTransferSnapshot(view, scope, snapshot(2, 1)), view);
 });
 
+test("a reread after acting on a failed operation takes the row's new state at the same revision", () => {
+  const failed = {
+    ...snapshot(3, 40),
+    operation: { id: "op", state: "FAILED" },
+  } as unknown as TransferSnapshot;
+  const queued = {
+    ...snapshot(3, 40),
+    operation: { id: "op", state: "QUEUED" },
+  } as unknown as TransferSnapshot;
+  const view: TransferView = { scope, snapshot: failed };
+  // Without the reread, the same revision is a duplicate and the panel keeps
+  // showing the failure the user just retried.
+  assert.equal(acceptTransferSnapshot(view, scope, queued), view);
+  assert.equal(
+    acceptTransferSnapshot(view, scope, queued, true).snapshot?.operation.state,
+    "QUEUED",
+  );
+  // A reread still refuses a late response from before the retained one.
+  assert.equal(
+    acceptTransferSnapshot(view, scope, { ...queued, revision: 39 }, true),
+    view,
+  );
+});
+
 test("file disclosures reject other titles and stale file pages through the shared version gate", () => {
   const fileScope = { ...scope, titleId: "title-a", page: 0 };
   let view: TransferView = { scope: fileScope, snapshot: null };
