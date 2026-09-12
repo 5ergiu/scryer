@@ -111,6 +111,11 @@ pub(super) enum BindingClaim {
     /// stub writer, or the tracker's observation stub row, which brings the
     /// id it pre-allocated for an unbound locator.
     Observation(Option<DownloadId>),
+    /// A terminal tracked state for a client job Scryer did not submit: the
+    /// outcome of the job the tracker is settling, recorded right after its
+    /// canonical state. It never marks a re-added job, so it never retires a
+    /// terminal binding.
+    ObservedOutcome,
 }
 
 impl BindingClaim {
@@ -118,11 +123,16 @@ impl BindingClaim {
         match self {
             Self::Submission(download_id) => Some(download_id),
             Self::Observation(download_id) => download_id,
+            Self::ObservedOutcome => None,
         }
     }
 
     fn claims_scryer_provenance(self) -> bool {
         matches!(self, Self::Submission(_))
+    }
+
+    fn may_retire_terminal_binding(self) -> bool {
+        !matches!(self, Self::ObservedOutcome)
     }
 }
 
@@ -130,9 +140,9 @@ impl BindingClaim {
 /// row to it. A [`BindingClaim::Submission`] adopts an existing locator binding
 /// and upgrades its parent to `scryer_submission`, or binds a new
 /// `scryer_submission` parent under its id. A [`BindingClaim::Observation`]
-/// adopts the binding without touching its origin, or binds a new
-/// `foreign_observation` parent: observing a client job must never turn a
-/// foreign download into a Scryer-owned one.
+/// or [`BindingClaim::ObservedOutcome`] adopts the binding without touching its
+/// origin, or binds a new `foreign_observation` parent: observing a client job
+/// must never turn a foreign download into a Scryer-owned one.
 ///
 /// Adoption covers the live job: dedup-by-hash clients hand back the same
 /// native job for a re-submitted release, and one active binding per locator is
@@ -142,8 +152,8 @@ impl BindingClaim {
 /// fresh grab a download id that already carries an import or failure history,
 /// so the whole grab reads as already finished. Such a binding is ended here
 /// and the claim proceeds as if the locator were unbound — for an accepted
-/// grab whatever the parent's origin, and for an observation only for foreign
-/// parents (see below).
+/// grab whatever the parent's origin, for an observation only for foreign
+/// parents (see below), and never for an observed outcome.
 ///
 /// The read-then-insert is not atomic under a datastore with concurrent
 /// writers: two claimants can both find the locator unbound (or both end the
@@ -164,7 +174,11 @@ pub(super) async fn claim_or_create_binding_download_id_tx(
         // download's history to inherit, and the binding row is that identity's
         // own (`download_id` is the bindings primary key).
         let reclaims_bound_identity = requested_download_id == Some(download_id);
+        // An observed outcome is the settling job's own terminal state, whose
+        // canonical state was written first: the binding reads terminal
+        // because of that very job, which is still in the client.
         let stale = !reclaims_bound_identity
+            && claim.may_retire_terminal_binding()
             && bound_download_is_terminal_tx(tx, &download_id).await?
             // For an observation the guard is for foreign re-adds only. A
             // Scryer-owned binding ends through the queue-delete /
@@ -1634,6 +1648,15 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
     ) -> AppResult<()> {
         let identity = identity.clone();
         let tracked_state = tracked_state.to_string();
+        // Only a job starting over (a non-terminal state) can be a re-add under
+        // a finished job's native id; a terminal state settles the tracked job.
+        let claim = if TrackedDownloadState::from_str_opt(&tracked_state)
+            .is_some_and(TrackedDownloadState::is_terminal)
+        {
+            BindingClaim::ObservedOutcome
+        } else {
+            BindingClaim::Observation(None)
+        };
         run_in_transaction_retrying_unique_violation(
             &self.datastore,
             "update_tracked_state",
@@ -1641,12 +1664,8 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let identity = identity.clone();
                 let tracked_state = tracked_state.clone();
                 Box::pin(async move {
-                    let canonical_download_id = claim_or_create_binding_download_id_tx(
-                        tx,
-                        &identity,
-                        BindingClaim::Observation(None),
-                    )
-                    .await?;
+                    let canonical_download_id =
+                        claim_or_create_binding_download_id_tx(tx, &identity, claim).await?;
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
                         "INSERT INTO download_submissions
