@@ -558,3 +558,143 @@ async fn changing_files_never_produce_a_completed_identity_proof() {
             .all(|row| !row.completed)
     );
 }
+
+/// A placement that loses its storage for the first `failures` attempts, the
+/// way a destination mount that went away answers, and then places normally.
+struct StorageOutage {
+    failures: std::sync::atomic::AtomicU32,
+    placement: RootMoveFileMover,
+}
+
+impl StorageOutage {
+    fn failing(failures: u32) -> Self {
+        Self {
+            failures: std::sync::atomic::AtomicU32::new(failures),
+            placement: RootMoveFileMover::without_permissions(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TitleFileMover for StorageOutage {
+    async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile> {
+        let failed = self
+            .failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if failed {
+            return Err(AppError::Repository(
+                "failed to create destination directory: Permission denied".into(),
+            ));
+        }
+        self.placement.move_file(request).await
+    }
+}
+
+async fn resolve_with(
+    resolver: &ConflictResolver,
+    mover: &dyn TitleFileMover,
+    title: &PlannedTitle,
+    index: usize,
+) -> AppResult<VerifiedFile> {
+    resolver
+        .resolve(
+            mover,
+            FileMoveRequest {
+                operation_id: "op",
+                title,
+                file: &title.files[index],
+                depth: VerificationDepth::Quick,
+                progress: &CopyProgress::none(),
+            },
+        )
+        .await
+}
+
+/// A movie with one subtitle, neither of which exists at the destination yet.
+fn media_with_subtitle(temp: &tempfile::TempDir) -> (ConflictResolver, PlannedTitle) {
+    let (_, resolver, mut title) = fixture(temp);
+    let source = temp.path().join("source");
+    let destination = temp.path().join("destination");
+    title.files[0].source_path = source.join("movie.mkv");
+    title.files[0].destination_path = destination.join("movie.mkv");
+    std::fs::write(&title.files[0].source_path, b"incoming").unwrap();
+    std::fs::write(source.join("movie.en.srt"), b"sidecar").unwrap();
+    title.files.push(PlannedFile {
+        media_file_id: None,
+        source_path: source.join("movie.en.srt"),
+        destination_path: destination.join("movie.en.srt"),
+        size_bytes: 7,
+        source_content: None,
+    });
+    (resolver, title)
+}
+
+/// FR-088: a media file that meets a storage outage is retried once the
+/// storage is back, so its failed attempt is not a verdict its companions may
+/// settle on. They wait for the attempt that places it and follow it there.
+#[tokio::test]
+async fn a_transient_media_failure_keeps_its_companions_waiting_for_the_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let (resolver, title) = media_with_subtitle(&temp);
+    let outage = StorageOutage::failing(1);
+
+    let error = resolve_with(&resolver, &outage, &title, 0)
+        .await
+        .expect_err("the first attempt meets the outage");
+    assert!(matches!(error, AppError::Repository(_)));
+
+    let companion = resolve_with(&resolver, &outage, &title, 1);
+    tokio::pin!(companion);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut companion)
+            .await
+            .is_err(),
+        "the subtitle must not settle while its media file is still being retried"
+    );
+
+    resolve_with(&resolver, &outage, &title, 0)
+        .await
+        .expect("the retry places the media file");
+    let subtitle = tokio::time::timeout(std::time::Duration::from_secs(5), companion)
+        .await
+        .expect("the placed media file releases its companion")
+        .expect("the companion follows the media file");
+    assert!(subtitle.destination_path.ends_with("movie.en.srt"));
+}
+
+/// The runner giving up on a media file is the verdict: a companion still
+/// waiting on it settles with the explanation instead of waiting forever,
+/// and its source stays where it was.
+#[tokio::test]
+async fn an_abandoned_media_file_releases_its_waiting_companions() {
+    let temp = tempfile::tempdir().unwrap();
+    let (resolver, title) = media_with_subtitle(&temp);
+    let outage = StorageOutage::failing(u32::MAX);
+
+    resolve_with(&resolver, &outage, &title, 0)
+        .await
+        .expect_err("the media file never places");
+    let companion = resolve_with(&resolver, &outage, &title, 1);
+    tokio::pin!(companion);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut companion)
+            .await
+            .is_err()
+    );
+
+    resolver.media_abandoned("op", &title, &title.files[0]);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), companion)
+        .await
+        .expect("abandoning the media file releases its companion")
+        .expect_err("a companion of a media file that never moved does not move");
+    assert!(
+        error.to_string().contains("could not be transferred"),
+        "got {error}"
+    );
+    assert!(title.files[1].source_path.exists());
+}

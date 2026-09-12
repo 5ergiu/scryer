@@ -72,7 +72,9 @@ impl FileResolution {
     }
 }
 
-use super::executor::{FileMoveRequest, TitleFileMover};
+use super::executor::{
+    FileMoveRequest, PlannedFile, PlannedTitle, TitleFileMover, move_error_is_transient,
+};
 use super::model::{
     AppliedVerificationDepth, FileVerificationOutcome, KnownSourceContent, VerificationDepth,
 };
@@ -88,6 +90,9 @@ use std::{
 /// The first resolver to reach a destination publishes where the media file
 /// landed; later companions of the same file wait on it.
 type MediaResultSender = tokio::sync::watch::Sender<Option<Result<PathBuf, String>>>;
+
+const MEDIA_NOT_TRANSFERRED: &str =
+    "The related media file could not be transferred. Its companion files were preserved.";
 
 pub struct ConflictResolver {
     pub store: Arc<dyn LocationOperationRepository>,
@@ -118,28 +123,57 @@ impl ConflictResolver {
         let result = self.resolve_file(mover, request).await;
         if request.file.media_file_id.is_some() {
             let destination = match &result {
-                Ok(file) if file.permits_source_removal() => Ok(file.destination_path.clone()),
-                _ => Err("The related media file could not be transferred. Its companion files were preserved.".into()),
+                Ok(file) if file.permits_source_removal() => {
+                    Some(Ok(file.destination_path.clone()))
+                }
+                // Not a verdict yet: the runner retries a transient failure, and
+                // waits out a storage outage before it does, so the companions
+                // keep waiting for the attempt that places the media file. The
+                // runner reports a file it gives up on through
+                // `media_abandoned`.
+                Err(error) if move_error_is_transient(error) => None,
+                Ok(file) if file.outcome == FileVerificationOutcome::Unavailable => None,
+                _ => Some(Err(MEDIA_NOT_TRANSFERRED.into())),
             };
-            self.media_result(request, &request.file.source_path)
+            if let Some(destination) = destination {
+                self.media_result(
+                    request.operation_id,
+                    &request.title.title_id,
+                    &request.file.source_path,
+                )
                 .send_replace(Some(destination));
+            }
         }
         result
     }
 
+    /// The runner gave up on `file` without placing it. When it is a media
+    /// file, the companions still waiting on it settle now instead of waiting
+    /// on an attempt that will never come.
+    pub fn media_abandoned(&self, operation_id: &str, title: &PlannedTitle, file: &PlannedFile) {
+        if file.media_file_id.is_none() {
+            return;
+        }
+        self.media_result(operation_id, &title.title_id, &file.source_path)
+            .send_if_modified(|value| {
+                if value.is_some() {
+                    return false;
+                }
+                *value = Some(Err(MEDIA_NOT_TRANSFERRED.into()));
+                true
+            });
+    }
+
     fn media_result(
         &self,
-        request: FileMoveRequest<'_>,
+        operation_id: &str,
+        title_id: &str,
         source: &Path,
     ) -> tokio::sync::watch::Sender<Option<Result<PathBuf, String>>> {
         self.media_results
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry((
-                request.operation_id.into(),
-                request.title.title_id.clone(),
-                source.to_path_buf(),
-            ))
+            .entry((operation_id.into(), title_id.into(), source.to_path_buf()))
             .or_insert_with(|| tokio::sync::watch::channel(None).0)
             .clone()
     }
@@ -176,7 +210,13 @@ impl ConflictResolver {
             {
                 stored_path_to_path_buf(&row.destination_path)
             } else {
-                let mut updates = self.media_result(request, &media.source_path).subscribe();
+                let mut updates = self
+                    .media_result(
+                        request.operation_id,
+                        &request.title.title_id,
+                        &media.source_path,
+                    )
+                    .subscribe();
                 loop {
                     if let Some(result) = updates.borrow_and_update().clone() {
                         break result.map_err(AppError::Validation)?;
