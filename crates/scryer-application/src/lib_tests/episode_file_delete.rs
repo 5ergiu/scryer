@@ -921,6 +921,7 @@ impl ScopedMaintenanceFixture {
             &rule.rule_set.id,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(count as i64),
+            Some((&rule.rule_set).into()),
         )
         .await
         .expect("arm");

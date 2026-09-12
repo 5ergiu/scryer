@@ -854,6 +854,11 @@ pub struct SetMaintenanceRuleArmingInput {
     /// The candidate count the operator saw and acknowledged; required for
     /// `DESTRUCTIVE` and must equal the rule's current non-terminal count.
     pub acknowledged_candidate_count: Option<i32>,
+    /// The reviewed matcher/action revision; required for `DESTRUCTIVE`.
+    pub acknowledged_revision_number: Option<i32>,
+    /// The reviewed library scope; required for `DESTRUCTIVE`. An empty list
+    /// explicitly acknowledges all libraries; omission is not confirmation.
+    pub acknowledged_library_ids: Option<Vec<ID>>,
 }
 
 /// Arms or disarms the instance-wide maintenance gates. An omitted field leaves

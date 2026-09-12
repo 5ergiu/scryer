@@ -100,6 +100,7 @@ async fn arm_and_evaluate_all(
             &rule_set_id,
             MaintenanceEffectArming::Reversible,
             None,
+            None,
         )
         .await
         .expect("arm sequence rule");
@@ -1351,6 +1352,8 @@ async fn high_risk_sequence_failures_trip_the_per_pass_breaker_before_a_fourth_d
             &rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(4),
+            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
+                .await,
         )
         .await
         .expect("destructively arm the four candidates");

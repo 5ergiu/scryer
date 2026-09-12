@@ -93,8 +93,17 @@ impl ClaimFixture {
     }
 
     async fn arm(&self, rule_set_id: &str, arming: MaintenanceEffectArming, ack: Option<i64>) {
+        let rule = self
+            .app
+            .services
+            .customization
+            .maintenance_rule_sets
+            .get_rule_set(rule_set_id)
+            .await
+            .unwrap()
+            .unwrap();
         self.app
-            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack)
+            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack, Some((&rule).into()))
             .await
             .expect("arm rule");
     }

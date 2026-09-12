@@ -286,6 +286,8 @@ async fn sequence_unmonitor_then_delete_files_removes_only_the_matched_title_fil
             &rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
+                .await,
         )
         .await
         .expect("arm destructive sequence");
@@ -390,6 +392,8 @@ async fn episode_sequence_unmonitor_then_delete_files_preserves_other_season_rec
             &rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
+                .await,
         )
         .await
         .expect("arm destructive episode sequence");
@@ -486,6 +490,7 @@ async fn a_fresh_re_monitor_cancels_the_sequence_delete_files_step_and_preserves
             &_rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.app, &_rule_set_id).await,
         )
         .await
         .expect("arm destructive sequence");
@@ -536,6 +541,8 @@ async fn storage_sequence_holds_its_journal_when_target_or_root_identity_changes
             &rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
+                .await,
         )
         .await
         .expect("arm destructive storage sequence");
@@ -697,6 +704,8 @@ async fn completed_storage_sequence_releases_its_exact_marker_after_root_filter_
             &rule_set_id,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
+                .await,
         )
         .await
         .expect("arm destructive storage sequence");

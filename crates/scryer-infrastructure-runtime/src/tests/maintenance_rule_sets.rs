@@ -35,6 +35,238 @@ async fn maintenance_rule_set_store(services: &SqliteServices) -> crate::Mainten
 }
 
 #[tokio::test]
+async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
+    use scryer_domain::{MaintenanceEffectArming, MaintenanceRuleArmingConfirmation};
+    let temp = tempfile::tempdir().unwrap();
+    let services =
+        SqliteServices::new(temp.path().join("arming.db").to_string_lossy().into_owned())
+            .await
+            .unwrap();
+    let store = maintenance_rule_set_store(&services).await;
+    let original = rule_set("reviewed", vec!["library-1".into()]);
+    store
+        .create_rule_set(&original, &revision("reviewed", 1))
+        .await
+        .unwrap();
+    let reviewed = MaintenanceRuleArmingConfirmation::from(&original);
+    assert!(
+        !store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                None,
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+
+    // The application may have validated the old snapshot before this edit.
+    // Hold the writer transaction across the arming attempt to exercise the
+    // serialization boundary, then commit the new scope without a revision bump.
+    let mut edit = services.pool().begin().await.unwrap();
+    sqlx::query("UPDATE maintenance_rule_sets SET effect_arming = 'none' WHERE id = 'reviewed'")
+        .execute(&mut *edit)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE maintenance_rule_set_libraries SET library_id = 'library-2' WHERE rule_set_id = 'reviewed'")
+        .execute(&mut *edit).await.unwrap();
+    let arming = store.update_rule_set_arming(
+        "reviewed",
+        MaintenanceEffectArming::Destructive,
+        Some(&reviewed),
+        Utc::now(),
+    );
+    tokio::pin!(arming);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut arming)
+            .await
+            .is_err()
+    );
+    edit.commit().await.unwrap();
+    assert!(
+        !arming.await.unwrap(),
+        "a stale acknowledgement must lose to the committed scope edit"
+    );
+    let current = store.get_rule_set("reviewed").await.unwrap().unwrap();
+    assert_eq!(current.effect_arming, MaintenanceEffectArming::None);
+    assert_eq!(current.library_ids, vec!["library-2"]);
+    let reviewed = MaintenanceRuleArmingConfirmation::from(&current);
+    assert!(
+        store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+
+    store
+        .add_revision(&revision("reviewed", 2), Utc::now())
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get_rule_set("reviewed")
+            .await
+            .unwrap()
+            .unwrap()
+            .effect_arming,
+        MaintenanceEffectArming::None
+    );
+    assert!(
+        store
+            .update_rule_set_arming("reviewed", MaintenanceEffectArming::None, None, Utc::now())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires SCRYER_TEST_POSTGRES_URL pointing to an isolated PostgreSQL fixture"]
+async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confirmation() {
+    use scryer_domain::{MaintenanceEffectArming, MaintenanceRuleArmingConfirmation};
+    let raw_url =
+        std::env::var("SCRYER_TEST_POSTGRES_URL").expect("isolated PostgreSQL fixture URL");
+    let admin = sqlx::PgPool::connect(&raw_url).await.unwrap();
+    let schema = format!("maintenance_arming_{}", Utc::now().timestamp_micros());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&raw_url).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let services = scryer_infrastructure_datastore::postgres::PostgresServices::new_with_mode(
+        url.as_str(),
+        scryer_infrastructure_datastore::MigrationMode::Apply,
+    )
+    .await
+    .unwrap();
+    seed_rule_libraries(&services.datastore()).await;
+    let store = crate::MaintenanceRuleSetStore::new(services.datastore());
+    let original = rule_set("reviewed", vec!["library-1".into()]);
+    store
+        .create_rule_set(&original, &revision("reviewed", 1))
+        .await
+        .unwrap();
+    let reviewed = MaintenanceRuleArmingConfirmation::from(&original);
+    assert!(
+        !store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                None,
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+
+    let mut edit = services.pool().begin().await.unwrap();
+    sqlx::query("UPDATE maintenance_rule_sets SET effect_arming = 'none' WHERE id = 'reviewed'")
+        .execute(&mut *edit)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE maintenance_rule_set_libraries SET library_id = 'library-2' WHERE rule_set_id = 'reviewed'")
+        .execute(&mut *edit).await.unwrap();
+    let arming = store.update_rule_set_arming(
+        "reviewed",
+        MaintenanceEffectArming::Destructive,
+        Some(&reviewed),
+        Utc::now(),
+    );
+    tokio::pin!(arming);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut arming)
+            .await
+            .is_err()
+    );
+    edit.commit().await.unwrap();
+    assert!(
+        !arming.await.unwrap(),
+        "the post-lock read must see the new PostgreSQL scope"
+    );
+    let current = store.get_rule_set("reviewed").await.unwrap().unwrap();
+    assert_eq!(current.effect_arming, MaintenanceEffectArming::None);
+    let reviewed = MaintenanceRuleArmingConfirmation::from(&current);
+    assert!(
+        store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+    store
+        .add_revision(&revision("reviewed", 2), Utc::now())
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .update_rule_set_arming(
+                "reviewed",
+                MaintenanceEffectArming::Destructive,
+                Some(&reviewed),
+                Utc::now()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .update_rule_set_arming("reviewed", MaintenanceEffectArming::None, None, Utc::now())
+            .await
+            .unwrap()
+    );
+    services.pool().close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test]
 async fn normalized_library_scopes_preserve_intent_and_enforce_integrity() {
     let (services, db) = temp_services("scryer_maintenance_scope_integrity").await;
     let store = maintenance_rule_set_store(&services).await;
@@ -115,6 +347,10 @@ async fn normalized_library_scopes_preserve_intent_and_enforce_integrity() {
         .update_rule_set_arming(
             "scoped",
             scryer_domain::MaintenanceEffectArming::Destructive,
+            Some(&scryer_domain::MaintenanceRuleArmingConfirmation {
+                revision_number: 1,
+                library_ids: expected.clone(),
+            }),
             Utc::now(),
         )
         .await
@@ -307,6 +543,10 @@ async fn adding_a_revision_repoints_the_rule_set_and_preserves_the_old_one() {
         .update_rule_set_arming(
             "rule-b",
             scryer_domain::MaintenanceEffectArming::Destructive,
+            Some(&scryer_domain::MaintenanceRuleArmingConfirmation {
+                revision_number: 1,
+                library_ids: vec![],
+            }),
             Utc::now(),
         )
         .await

@@ -728,16 +728,33 @@ test("every evaluation mode carries a label and an explanation", () => {
 });
 
 test("only a destructive arming carries an acknowledgement", () => {
-  assert.deepEqual(setMaintenanceRuleArmingInput("rule-1", "REVERSIBLE", 7), {
+  const reviewed = { currentRevisionNumber: 3, libraryIds: ["library-a"] };
+  assert.deepEqual(setMaintenanceRuleArmingInput("rule-1", "REVERSIBLE", 7, reviewed), {
     id: "rule-1",
     arming: "REVERSIBLE",
     acknowledgedCandidateCount: undefined,
+    acknowledgedRevisionNumber: undefined,
+    acknowledgedLibraryIds: undefined,
   });
-  assert.deepEqual(setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 7), {
+  const input = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 7, reviewed);
+  reviewed.libraryIds.push("library-b");
+  assert.deepEqual(input, {
     id: "rule-1",
     arming: "DESTRUCTIVE",
     acknowledgedCandidateCount: 7,
+    acknowledgedRevisionNumber: 3,
+    acknowledgedLibraryIds: ["library-a"],
   });
+});
+
+test("destructive arming distinguishes reviewed global scope from missing confirmation", () => {
+  const global = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 0, {
+    currentRevisionNumber: 1, libraryIds: [],
+  });
+  assert.deepEqual(global.acknowledgedLibraryIds, []);
+  const missing = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 0);
+  assert.equal(missing.acknowledgedLibraryIds, undefined);
+  assert.equal(missing.acknowledgedRevisionNumber, undefined);
 });
 
 test("the count-mismatch message shape the dialog re-asks against is pinned", () => {

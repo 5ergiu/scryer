@@ -342,6 +342,15 @@ impl MaintenanceRuleMutations {
                 input.id.as_ref(),
                 crate::mappers::maintenance_effect_arming_into_application(input.arming),
                 input.acknowledged_candidate_count.map(i64::from),
+                input
+                    .acknowledged_revision_number
+                    .zip(input.acknowledged_library_ids)
+                    .map(|(revision_number, library_ids)| {
+                        scryer_domain::MaintenanceRuleArmingConfirmation {
+                            revision_number: i64::from(revision_number),
+                            library_ids: library_ids.into_iter().map(|id| id.to_string()).collect(),
+                        }
+                    }),
             )
             .await
             .map_err(to_gql_error)?;

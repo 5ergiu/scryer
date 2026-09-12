@@ -6845,12 +6845,16 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
         updated_at: DateTime<Utc>,
     ) -> AppResult<()>;
 
+    /// Atomically checks the reviewed configuration and changes arming.
+    /// Destructive arming requires a confirmation. A stale or missing
+    /// confirmation returns false without changing the rule.
     async fn update_rule_set_arming(
         &self,
         id: &str,
         arming: scryer_domain::MaintenanceEffectArming,
+        confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
-    ) -> AppResult<()>;
+    ) -> AppResult<bool>;
 }
 
 /// Which candidates a read should return. Every field narrows; an empty

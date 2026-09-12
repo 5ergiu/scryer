@@ -1929,6 +1929,9 @@ async fn effect_arming_and_attempts_round_trip() {
         .update_rule_set_arming(
             "rule-a",
             scryer_domain::MaintenanceEffectArming::Destructive,
+            Some(&scryer_domain::MaintenanceRuleArmingConfirmation::from(
+                &rules.get_rule_set("rule-a").await.unwrap().unwrap(),
+            )),
             now,
         )
         .await

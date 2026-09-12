@@ -161,6 +161,7 @@ async fn an_ordered_sequence_is_saved_as_an_immutable_revision_and_disarms_on_ch
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
         None,
+        None,
     )
     .await
     .expect("arm the reversible sequence");

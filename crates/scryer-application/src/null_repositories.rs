@@ -1572,8 +1572,9 @@ impl MaintenanceRuleSetRepository for NullMaintenanceRuleSetRepository {
         &self,
         _id: &str,
         _arming: scryer_domain::MaintenanceEffectArming,
+        _confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         _updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<bool> {
         Err(AppError::Repository(
             "maintenance rule repository is not configured".to_string(),
         ))

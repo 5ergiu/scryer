@@ -887,6 +887,7 @@ export function SettingsMaintenanceRulesContainer({
             record.id,
             arming,
             acknowledgedCandidateCount,
+            record,
           ),
         })
         .toPromise();
@@ -992,6 +993,7 @@ export function SettingsMaintenanceRulesContainer({
     if (serverCount === null) {
       setPendingArming(null);
       setGlobalStatus(result.message);
+      await refreshRuleSets();
       return;
     }
     setPendingArming((prev) =>
@@ -1005,7 +1007,7 @@ export function SettingsMaintenanceRulesContainer({
           }
         : prev,
     );
-  }, [applyArming, pendingArming, setGlobalStatus, t]);
+  }, [applyArming, pendingArming, refreshRuleSets, setGlobalStatus, t]);
 
   // ── Run now ─────────────────────────────────────────────────────────
 

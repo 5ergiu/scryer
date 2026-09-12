@@ -24270,6 +24270,15 @@ input SetMaintenanceRuleArmingInput {
 	`DESTRUCTIVE` and must equal the rule's current non-terminal count.
 	"""
 	acknowledgedCandidateCount: Int
+	"""
+	The reviewed matcher/action revision; required for `DESTRUCTIVE`.
+	"""
+	acknowledgedRevisionNumber: Int
+	"""
+	The reviewed library scope; required for `DESTRUCTIVE`. An empty list
+	explicitly acknowledges all libraries; omission is not confirmation.
+	"""
+	acknowledgedLibraryIds: [ID!]
 }
 
 """

@@ -254,19 +254,25 @@ impl MaintenanceRuleSetRepository for InMemoryMaintenanceRuleRepo {
         &self,
         id: &str,
         arming: scryer_domain::MaintenanceEffectArming,
+        confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<bool> {
         let mut rule_sets = self.rule_sets.lock().await;
         let rule_set = rule_sets
             .iter_mut()
             .find(|rule_set| rule_set.id == id)
             .ok_or_else(|| AppError::NotFound(id.to_string()))?;
+        if arming == scryer_domain::MaintenanceEffectArming::Destructive
+            && !confirmation.is_some_and(|reviewed| reviewed.matches(rule_set))
+        {
+            return Ok(false);
+        }
         rule_set.effect_arming = arming;
         if arming == scryer_domain::MaintenanceEffectArming::Destructive {
             rule_set.destructive_rearm_required = false;
         }
         rule_set.updated_at = updated_at;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -405,6 +411,21 @@ async fn seed_media_file(media_files: &MockMediaFileRepo, title_id: &str, size_b
         })
         .await
         .expect("insert media file");
+}
+
+pub(super) async fn arming_confirmation(
+    app: &AppUseCase,
+    id: &str,
+) -> Option<scryer_domain::MaintenanceRuleArmingConfirmation> {
+    let rule = app
+        .services
+        .customization
+        .maintenance_rule_sets
+        .get_rule_set(id)
+        .await
+        .unwrap()
+        .unwrap();
+    Some((&rule).into())
 }
 
 // ── Authoring ───────────────────────────────────────────────────────────────
@@ -625,6 +646,7 @@ async fn changing_the_library_scope_disarms_the_rule() {
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
         None,
+        None,
     )
     .await
     .expect("arm the rule");
@@ -677,6 +699,7 @@ async fn renaming_or_reordering_the_same_scope_leaves_arming_alone() {
         &user,
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
+        None,
         None,
     )
     .await

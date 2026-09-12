@@ -877,6 +877,7 @@ export function setMaintenanceRuleArmingInput(
   id: string,
   arming: MaintenanceEffectArming,
   acknowledgedCandidateCount?: number,
+  reviewed?: Pick<MaintenanceRuleSetRecord, "currentRevisionNumber" | "libraryIds">,
 ) {
   return {
     id,
@@ -886,6 +887,10 @@ export function setMaintenanceRuleArmingInput(
     /// never showed anyone.
     acknowledgedCandidateCount:
       arming === "DESTRUCTIVE" ? acknowledgedCandidateCount : undefined,
+    acknowledgedRevisionNumber:
+      arming === "DESTRUCTIVE" ? reviewed?.currentRevisionNumber : undefined,
+    acknowledgedLibraryIds:
+      arming === "DESTRUCTIVE" ? reviewed?.libraryIds.slice() : undefined,
   };
 }
 

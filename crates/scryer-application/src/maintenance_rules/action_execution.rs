@@ -442,6 +442,7 @@ impl AppUseCase {
         rule_set_id: &str,
         arming: MaintenanceEffectArming,
         acknowledged_candidate_count: Option<i64>,
+        confirmation: Option<scryer_domain::MaintenanceRuleArmingConfirmation>,
     ) -> AppResult<MaintenanceRuleSetDetail> {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
@@ -454,6 +455,14 @@ impl AppUseCase {
         let detail = self.load_maintenance_rule_detail(rule_set).await?;
 
         if arming == MaintenanceEffectArming::Destructive {
+            if !confirmation
+                .as_ref()
+                .is_some_and(|reviewed| reviewed.matches(&detail.rule_set))
+            {
+                return Err(AppError::Validation(
+                    "the rule configuration must be reviewed again before arming deletion; reopen the confirmation".into(),
+                ));
+            }
             let high_risk = match &detail.action_definition {
                 MaintenanceActionDefinition::Legacy(spec) => {
                     descriptor_for(spec.kind).risk_class == MaintenanceRiskClass::High
@@ -481,14 +490,23 @@ impl AppUseCase {
         }
 
         let now = Utc::now();
-        self.services
+        let updated = self
+            .services
             .customization
             .maintenance_rule_sets
-            .update_rule_set_arming(&detail.rule_set.id, arming, now)
+            .update_rule_set_arming(&detail.rule_set.id, arming, confirmation.as_ref(), now)
             .await?;
+        if !updated {
+            return Err(AppError::Validation(
+                "the rule changed while confirming; review it again before arming deletion".into(),
+            ));
+        }
 
         let mut detail = detail;
         detail.rule_set.effect_arming = arming;
+        if arming == MaintenanceEffectArming::Destructive {
+            detail.rule_set.destructive_rearm_required = false;
+        }
         detail.rule_set.updated_at = now;
         Ok(detail)
     }

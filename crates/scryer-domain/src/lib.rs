@@ -4582,6 +4582,36 @@ pub struct MaintenanceRuleSet {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The rule configuration an operator reviewed before arming deletion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaintenanceRuleArmingConfirmation {
+    pub revision_number: i64,
+    pub library_ids: Vec<String>,
+}
+
+impl From<&MaintenanceRuleSet> for MaintenanceRuleArmingConfirmation {
+    fn from(rule: &MaintenanceRuleSet) -> Self {
+        Self {
+            revision_number: rule.current_revision_number,
+            library_ids: rule.library_ids.clone(),
+        }
+    }
+}
+
+impl MaintenanceRuleArmingConfirmation {
+    pub fn matches(&self, rule: &MaintenanceRuleSet) -> bool {
+        self.revision_number == rule.current_revision_number
+            && self
+                .library_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == rule
+                    .library_ids
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+    }
+}
+
 /// One immutable revision of a maintenance rule set's matcher and action
 /// (RFC 137 section 7.1).
 ///

@@ -178,8 +178,9 @@ impl ExecutionFixture {
     }
 
     async fn arm(&self, rule_set_id: &str, arming: MaintenanceEffectArming, ack: Option<i64>) {
+        let rule = self.rules.get_rule_set(rule_set_id).await.unwrap().unwrap();
         self.app
-            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack)
+            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack, Some((&rule).into()))
             .await
             .expect("arm rule");
     }
@@ -979,6 +980,7 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
             &unmonitor_rule,
             MaintenanceEffectArming::Destructive,
             Some(0),
+            super::maintenance_rules::arming_confirmation(&fixture.app, &unmonitor_rule).await,
         )
         .await
         .expect_err("destructive arming of a medium-risk action must be refused");
@@ -1014,6 +1016,7 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
             &delete_rule,
             MaintenanceEffectArming::Destructive,
             Some(1),
+            super::maintenance_rules::arming_confirmation(&fixture.app, &delete_rule).await,
         )
         .await
         .expect_err("a stale acknowledged count must be refused");
@@ -1031,6 +1034,7 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
             &delete_rule,
             MaintenanceEffectArming::Destructive,
             Some(2),
+            super::maintenance_rules::arming_confirmation(&fixture.app, &delete_rule).await,
         )
         .await
         .expect("correct acknowledgement arms");
@@ -1042,6 +1046,105 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
     // Disarming never needs an acknowledgement.
     fixture
         .arm(&delete_rule, MaintenanceEffectArming::None, None)
+        .await;
+}
+
+#[tokio::test]
+async fn destructive_arming_rejects_missing_or_stale_revision_even_with_the_same_count() {
+    let fixture = execution_app(None);
+    let rule_id = fixture.observed_rule(delete_draft()).await;
+    fixture.open_gates(true, true).await;
+    let reviewed = super::maintenance_rules::arming_confirmation(&fixture.app, &rule_id).await;
+    fixture
+        .app
+        .set_maintenance_rule_arming(
+            &fixture.user,
+            &rule_id,
+            MaintenanceEffectArming::Destructive,
+            Some(0),
+            None,
+        )
+        .await
+        .expect_err("legacy requests must not arm deletion without configuration confirmation");
+
+    let draft = delete_draft();
+    fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &rule_id,
+            MaintenanceMatcherDraft {
+                rego_source: ALWAYS_MATCHER.into(),
+                action_definition: draft.action_definition,
+                grace_days: 0,
+                storage_root_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .app
+        .set_maintenance_rule_arming(
+            &fixture.user,
+            &rule_id,
+            MaintenanceEffectArming::Destructive,
+            Some(0),
+            reviewed,
+        )
+        .await
+        .expect_err("the old dialog must not arm the replacement revision");
+    assert_eq!(fixture.handle().await.rules_eligible, 0);
+    assert!(fixture.evaluation.all_action_runs().await.is_empty());
+    fixture
+        .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(0))
+        .await;
+    // Disarming remains available without any confirmation, including to old clients.
+    fixture
+        .app
+        .set_maintenance_rule_arming(
+            &fixture.user,
+            &rule_id,
+            MaintenanceEffectArming::None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn destructive_arming_rejects_a_stale_scope_even_with_the_same_revision_and_count() {
+    let fixture = execution_app(None);
+    let rule_id = fixture.observed_rule(delete_draft()).await;
+    fixture.open_gates(true, true).await;
+    let reviewed = super::maintenance_rules::arming_confirmation(&fixture.app, &rule_id).await;
+    let rule = fixture.rules.get_rule_set(&rule_id).await.unwrap().unwrap();
+    fixture
+        .app
+        .update_maintenance_rule_metadata(
+            &fixture.user,
+            &rule_id,
+            rule.name,
+            rule.description,
+            vec!["library-a".into()],
+        )
+        .await
+        .unwrap();
+    fixture
+        .app
+        .set_maintenance_rule_arming(
+            &fixture.user,
+            &rule_id,
+            MaintenanceEffectArming::Destructive,
+            Some(0),
+            reviewed,
+        )
+        .await
+        .expect_err("same revision and count do not confirm a different library scope");
+    assert_eq!(fixture.handle().await.rules_eligible, 0);
+    assert!(fixture.evaluation.all_action_runs().await.is_empty());
+    fixture
+        .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(0))
         .await;
 }
 
@@ -1066,6 +1169,7 @@ async fn destructive_arming_requires_system_settings_authority() {
             &delete_rule,
             MaintenanceEffectArming::Reversible,
             None,
+            None,
         )
         .await
         .expect("reversible arming under catalog authority");
@@ -1078,6 +1182,7 @@ async fn destructive_arming_requires_system_settings_authority() {
             &delete_rule,
             MaintenanceEffectArming::Destructive,
             Some(0),
+            None,
         )
         .await
         .expect_err("destructive arming must demand system-settings authority");

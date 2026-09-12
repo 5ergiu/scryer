@@ -281,6 +281,7 @@ async fn arm_storage_title_deletion_with_matcher(
             &created.rule_set.id,
             MaintenanceEffectArming::Destructive,
             Some(active_candidates as i64),
+            Some((&created.rule_set).into()),
         )
         .await
         .expect("arm storage rule");

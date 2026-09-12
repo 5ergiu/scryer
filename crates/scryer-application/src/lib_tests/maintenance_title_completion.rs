@@ -246,6 +246,7 @@ async fn create_destructive_rule(
             &created.rule_set.id,
             MaintenanceEffectArming::Destructive,
             Some(candidates as i64),
+            Some((&created.rule_set).into()),
         )
         .await
         .expect("arm destructive rule");

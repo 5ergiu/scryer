@@ -264,8 +264,9 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
         &self,
         id: &str,
         arming: MaintenanceEffectArming,
+        confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<bool> {
         let clears_compatibility_rearm = arming == MaintenanceEffectArming::Destructive;
         let sql = if clears_compatibility_rearm {
             "UPDATE maintenance_rule_sets
@@ -282,11 +283,51 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
         }
         args.push(SqlArg::Timestamp(updated_at));
         args.push(SqlArg::Text(id.to_string()));
-        execute_write(
+        let id = id.to_string();
+        let confirmation = confirmation.cloned();
+        SqlRuntime::run_in_transaction(
             &self.datastore,
             "update_maintenance_rule_set_arming",
-            sql,
-            args,
+            move |tx| {
+                let id = id.clone();
+                let confirmation = confirmation.clone();
+                let args = args.clone();
+                Box::pin(async move {
+                    // Revision and scope writers lock this parent row before
+                    // changing scope rows. Take the same lock before reading:
+                    // a pre-lock snapshot can miss a concurrent scope change
+                    // under PostgreSQL READ COMMITTED. This also serializes
+                    // SQLite writers without engine-specific lock syntax.
+                    let locked = SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE maintenance_rule_sets SET id = id WHERE id = {}",
+                        &[SqlArg::Text(id.clone())],
+                    )
+                    .await?;
+                    if locked != 1 {
+                        return Ok(false);
+                    }
+                    if arming == MaintenanceEffectArming::Destructive {
+                        let rows = SqlRuntime::fetch_all(
+                            SqlExec::Tx(tx),
+                            &format!(
+                                "{RULE_SET_SELECT} WHERE id = {{}} ORDER BY scope.position ASC"
+                            ),
+                            &[SqlArg::Text(id)],
+                        )
+                        .await?;
+                        let rules = rows_to_rule_sets(&rows)?;
+                        if !rules.first().is_some_and(|rule| {
+                            confirmation
+                                .as_ref()
+                                .is_some_and(|reviewed| reviewed.matches(rule))
+                        }) {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(SqlRuntime::execute(SqlExec::Tx(tx), sql, &args).await? == 1)
+                })
+            },
         )
         .await
     }

@@ -1613,6 +1613,55 @@ async fn wait_for_candidate_state(ctx: &TestContext, rule_set_id: &str, state: &
 }
 
 #[tokio::test]
+async fn destructive_arming_requires_the_reviewed_revision_and_explicit_library_scope() {
+    let ctx = TestContext::new().await;
+    let detail = create_rule(&ctx, "Review deletion", MONITORED_MATCHER, delete_action()).await;
+    let id = detail["ruleSet"]["id"].as_str().unwrap();
+    for extra in [
+        json!({}),
+        json!({ "acknowledgedRevisionNumber": 1 }),
+        json!({ "acknowledgedRevisionNumber": 2, "acknowledgedLibraryIds": [] }),
+        json!({ "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": ["different-library"] }),
+    ] {
+        let mut input =
+            json!({ "id": id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 0 });
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = gql(&ctx, SET_ARMING_MUTATION, json!({ "input": input })).await;
+        assert!(
+            response["errors"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("reviewed again"),
+            "{response}"
+        );
+    }
+    let armed = gql(
+        &ctx,
+        SET_ARMING_MUTATION,
+        json!({ "input": {
+            "id": id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 0,
+            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [],
+        }}),
+    )
+    .await;
+    assert_no_errors(&armed);
+    let disarmed = gql(
+        &ctx,
+        SET_ARMING_MUTATION,
+        json!({ "input": { "id": id, "arming": "NONE" }}),
+    )
+    .await;
+    assert_no_errors(&disarmed);
+    assert_eq!(
+        disarmed["data"]["setMaintenanceRuleArming"]["effectArming"],
+        "NONE"
+    );
+}
+
+#[tokio::test]
 async fn the_full_destructive_journey_removes_a_matching_title() {
     let ctx = TestContext::new().await;
     seed_title(&ctx, "title-doomed", "Doomed Movie", true).await;
@@ -1631,7 +1680,8 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
     let mismatch = gql(
         &ctx,
         SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 7 } }),
+        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 7,
+            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
     )
     .await;
     let message = mismatch["errors"][0]["message"]
@@ -1645,7 +1695,8 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
     let armed = gql(
         &ctx,
         SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1 } }),
+        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1,
+            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
     )
     .await;
     assert_no_errors(&armed);
@@ -1740,7 +1791,8 @@ async fn a_subject_that_stopped_matching_is_canceled_at_execution_time() {
     let armed = gql(
         &ctx,
         SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1 } }),
+        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1,
+            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
     )
     .await;
     assert_no_errors(&armed);
