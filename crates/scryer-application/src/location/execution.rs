@@ -406,9 +406,10 @@ impl TitleFileMover for RootMoveFileMover {
         operation_id: &str,
         title: &PlannedTitle,
         file: &crate::location::executor::PlannedFile,
+        abandonment: crate::location::executor::FileAbandonment,
     ) {
         if let Some(resolver) = &self.resolver {
-            resolver.media_abandoned(operation_id, title, file);
+            resolver.media_abandoned(operation_id, title, file, abandonment);
         }
     }
 

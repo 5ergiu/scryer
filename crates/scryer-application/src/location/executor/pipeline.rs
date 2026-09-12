@@ -7,8 +7,9 @@ use std::sync::atomic::AtomicBool;
 /// What one file's transfer future hands back to the driver.
 enum PipelineFileOutcome {
     Verified(VerifiedFile),
-    /// The user canceled while the file waited for storage. Nothing moved, so
-    /// the file is neither done nor failed; the driver stops at the boundary.
+    /// The user canceled while the file, or the media file it follows, waited
+    /// for storage. Nothing moved, so the file is neither done nor failed; the
+    /// driver stops at the boundary.
     Canceled,
 }
 
@@ -339,16 +340,30 @@ impl LocationOperationRunner<'_> {
                                     Err(AppError::Repository("file transfer task panicked".into()))
                                 });
                                 // Every way out except a placed, proven copy is
-                                // this file given up on. Siblings waiting on it
+                                // this file abandoned. Siblings waiting on it
                                 // (a media file's companions) are told here, not
                                 // on the transient failures retried above, and
                                 // never left waiting on a file nothing retries.
-                                if !matches!(
-                                    &result,
+                                // A file handed back on a cancel releases them
+                                // as canceled too, not as failed.
+                                let abandonment = match &result {
                                     Ok(PipelineFileOutcome::Verified(verified))
-                                        if verified.permits_source_removal()
-                                ) {
-                                    self.mover.file_abandoned(&operation.id, title, file);
+                                        if verified.permits_source_removal() =>
+                                    {
+                                        None
+                                    }
+                                    Ok(PipelineFileOutcome::Canceled) => {
+                                        Some(FileAbandonment::Canceled)
+                                    }
+                                    _ => Some(FileAbandonment::GivenUp),
+                                };
+                                if let Some(abandonment) = abandonment {
+                                    self.mover.file_abandoned(
+                                        &operation.id,
+                                        title,
+                                        file,
+                                        abandonment,
+                                    );
                                 }
                                 signal.store(true, Ordering::Release);
                                 wake.notify_one();
@@ -689,6 +704,13 @@ impl LocationOperationRunner<'_> {
                     } else {
                         return Err(error);
                     }
+                }
+                // The mover released this file on a cancel: a companion whose
+                // media file was handed back while it waited for storage. It
+                // moved nothing either, so it is canceled, not failed.
+                Err(AppError::Canceled(_)) => {
+                    hub.file_released(&operation.id, &title.title_id, &file.stored_destination());
+                    return Ok(PipelineFileOutcome::Canceled);
                 }
                 result => return result.map(PipelineFileOutcome::Verified),
             }

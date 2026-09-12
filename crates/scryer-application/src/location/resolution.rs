@@ -73,7 +73,8 @@ impl FileResolution {
 }
 
 use super::executor::{
-    FileMoveRequest, PlannedFile, PlannedTitle, TitleFileMover, move_error_is_transient,
+    FileAbandonment, FileMoveRequest, PlannedFile, PlannedTitle, TitleFileMover,
+    move_error_is_transient,
 };
 use super::model::{
     AppliedVerificationDepth, FileVerificationOutcome, KnownSourceContent, VerificationDepth,
@@ -89,10 +90,31 @@ use std::{
 
 /// The first resolver to reach a destination publishes where the media file
 /// landed; later companions of the same file wait on it.
-type MediaResultSender = tokio::sync::watch::Sender<Option<Result<PathBuf, String>>>;
+type MediaResultSender = tokio::sync::watch::Sender<Option<Result<PathBuf, MediaUnplaced>>>;
 
-const MEDIA_NOT_TRANSFERRED: &str =
-    "The related media file could not be transferred. Its companion files were preserved.";
+/// Why a media file its companions were waiting on was never placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaUnplaced {
+    /// It failed, or the runner gave up on it: the companions fail with it.
+    NotTransferred,
+    /// The user canceled while it waited: the companions are canceled with it.
+    Canceled,
+}
+
+impl MediaUnplaced {
+    fn into_error(self) -> AppError {
+        match self {
+            Self::NotTransferred => AppError::Validation(
+                "The related media file could not be transferred. Its companion files were preserved."
+                    .into(),
+            ),
+            Self::Canceled => AppError::Canceled(
+                "The related media file's transfer was canceled. Its companion files were preserved."
+                    .into(),
+            ),
+        }
+    }
+}
 
 pub struct ConflictResolver {
     pub store: Arc<dyn LocationOperationRepository>,
@@ -133,7 +155,7 @@ impl ConflictResolver {
                 // `media_abandoned`.
                 Err(error) if move_error_is_transient(error) => None,
                 Ok(file) if file.outcome == FileVerificationOutcome::Unavailable => None,
-                _ => Some(Err(MEDIA_NOT_TRANSFERRED.into())),
+                _ => Some(Err(MediaUnplaced::NotTransferred)),
             };
             if let Some(destination) = destination {
                 self.media_result(
@@ -147,29 +169,35 @@ impl ConflictResolver {
         result
     }
 
-    /// The runner gave up on `file` without placing it. When it is a media
-    /// file, the companions still waiting on it settle now instead of waiting
-    /// on an attempt that will never come.
-    pub fn media_abandoned(&self, operation_id: &str, title: &PlannedTitle, file: &PlannedFile) {
+    /// The runner stopped trying to place `file`. When it is a media file, the
+    /// companions still waiting on it settle now instead of waiting on an
+    /// attempt that will never come: failed with it when it was given up on,
+    /// canceled with it when a cancel handed it back (FR-092).
+    pub fn media_abandoned(
+        &self,
+        operation_id: &str,
+        title: &PlannedTitle,
+        file: &PlannedFile,
+        abandonment: FileAbandonment,
+    ) {
         if file.media_file_id.is_none() {
             return;
         }
+        let unplaced = match abandonment {
+            FileAbandonment::GivenUp => MediaUnplaced::NotTransferred,
+            FileAbandonment::Canceled => MediaUnplaced::Canceled,
+        };
         self.media_result(operation_id, &title.title_id, &file.source_path)
             .send_if_modified(|value| {
                 if value.is_some() {
                     return false;
                 }
-                *value = Some(Err(MEDIA_NOT_TRANSFERRED.into()));
+                *value = Some(Err(unplaced));
                 true
             });
     }
 
-    fn media_result(
-        &self,
-        operation_id: &str,
-        title_id: &str,
-        source: &Path,
-    ) -> tokio::sync::watch::Sender<Option<Result<PathBuf, String>>> {
+    fn media_result(&self, operation_id: &str, title_id: &str, source: &Path) -> MediaResultSender {
         self.media_results
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -219,7 +247,7 @@ impl ConflictResolver {
                     .subscribe();
                 loop {
                     if let Some(result) = updates.borrow_and_update().clone() {
-                        break result.map_err(AppError::Validation)?;
+                        break result.map_err(MediaUnplaced::into_error)?;
                     }
                     updates.changed().await.map_err(|_| {
                         AppError::Validation(

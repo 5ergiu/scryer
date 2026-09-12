@@ -302,12 +302,33 @@ pub struct FileMoveRequest<'a> {
 pub trait TitleFileMover: Send + Sync {
     async fn move_file(&self, request: FileMoveRequest<'_>) -> AppResult<VerifiedFile>;
 
-    /// The runner stopped trying to place `file` without a verified copy: its
-    /// retries ran out, a cancel arrived while it waited for storage, or its
-    /// proof failed. A transient failure inside [`Self::move_file`] is not
-    /// this; the runner may still retry it, so only the runner can say when a
-    /// file is given up on.
-    fn file_abandoned(&self, _operation_id: &str, _title: &PlannedTitle, _file: &PlannedFile) {}
+    /// The runner stopped trying to place `file` without a verified copy, for
+    /// the reason `abandonment` names. A transient failure inside
+    /// [`Self::move_file`] is not this; the runner may still retry it, so only
+    /// the runner can say when a file is given up on.
+    ///
+    /// A mover that fails a dependent file because of this (a media file's
+    /// companions) reports a [`FileAbandonment::Canceled`] one as
+    /// [`AppError::Canceled`], which the runner reads as the cancel it is.
+    fn file_abandoned(
+        &self,
+        _operation_id: &str,
+        _title: &PlannedTitle,
+        _file: &PlannedFile,
+        _abandonment: FileAbandonment,
+    ) {
+    }
+}
+
+/// Why the runner stopped trying to place a file without a verified copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAbandonment {
+    /// Its retries ran out or its proof failed: the file could not be placed.
+    GivenUp,
+    /// The user canceled while it waited for storage. It was handed back
+    /// untouched, which is not a failure of the file or of anything waiting
+    /// on it (FR-092).
+    Canceled,
 }
 
 /// Whether a title may still be processed as planned.
@@ -3023,8 +3044,15 @@ mod tests {
             self.resolver.resolve(&self.placement, request).await
         }
 
-        fn file_abandoned(&self, operation_id: &str, title: &PlannedTitle, file: &PlannedFile) {
-            self.resolver.media_abandoned(operation_id, title, file);
+        fn file_abandoned(
+            &self,
+            operation_id: &str,
+            title: &PlannedTitle,
+            file: &PlannedFile,
+            abandonment: FileAbandonment,
+        ) {
+            self.resolver
+                .media_abandoned(operation_id, title, file, abandonment);
         }
     }
 
@@ -3122,6 +3150,88 @@ mod tests {
                 .checkpoint_states("first")
                 .contains(&TitleCheckpointState::Failed)
         );
+        assert!(temp.path().join("source/movie.en.srt").exists());
+        assert!(reconciler.cleaned.lock().unwrap().is_empty());
+    }
+
+    /// FR-092: a cancel that lands while a media file waits for storage is not
+    /// a failure of the companion waiting on it either. Nothing of the title
+    /// moved, so it is left unsettled on a Canceled operation exactly like a
+    /// lone waiting file, with no "could not be transferred" verdict recorded
+    /// against it.
+    #[tokio::test(start_paused = true)]
+    async fn pipeline_cancel_while_media_waits_for_storage_does_not_fail_its_companion() {
+        let temp = tempfile::tempdir().unwrap();
+        let (plan, mover) = movie_with_subtitle(&temp, |_| true, true);
+        let store = FakeStore::with_operation(operation());
+        store.seed_transfer_title(
+            "op-1",
+            crate::location::live::TransferTitle {
+                title_id: "first".into(),
+                name: "First".into(),
+                sequence: 0,
+                state: TitleCheckpointState::Pending,
+                files_total: 2,
+                files_done: 0,
+                bytes_total: 13,
+                copy_bytes: 0,
+                verification_bytes: 0,
+                current_file: None,
+                copying: 0,
+                verifying: 0,
+                detail: None,
+            },
+        );
+        let admission = ScriptedAdmission::new(&[]);
+        let reconciler = RecordingReconciler::default();
+        let hub = crate::location::live::TransferHub::default();
+        let runner = LocationOperationRunner::new(&store, &mover, &admission, &reconciler)
+            .with_transfers(&hub);
+        let cancel = async {
+            while !hub.has_storage_waiters("op-1") {
+                tokio::task::yield_now().await;
+            }
+            store.request_cancel("op-1");
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(runner.run("op-1", &plan), cancel)
+        })
+        .await
+        .expect("a cancel while the media file waits releases its companion promptly");
+        let result = result.unwrap();
+
+        assert_eq!(
+            result.state,
+            LocationOperationState::Canceled,
+            "{:?}",
+            result.detail
+        );
+        assert_eq!(result.reason_code, Some(LocationReasonCode::Canceled));
+        assert_eq!(result.counters.files_processed, 0);
+        let states = store.checkpoint_states("first");
+        assert!(
+            !states.contains(&TitleCheckpointState::Failed),
+            "a canceled wait must not settle the title Failed: {states:?} {:?}",
+            store
+                .checkpoint("op-1", "first")
+                .and_then(|checkpoint| checkpoint.detail)
+        );
+        let row = store.transfer_title_row("op-1", "first").unwrap();
+        assert_ne!(
+            row.state,
+            TitleCheckpointState::Failed,
+            "the title row must not read Failed on a Canceled operation: {:?}",
+            row.detail
+        );
+        assert!(
+            !row.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("could not be transferred")),
+            "a cancel is not a transfer failure: {:?}",
+            row.detail
+        );
+        assert!(!hub.has_storage_waiters("op-1"));
+        assert!(temp.path().join("source/movie.mkv").exists());
         assert!(temp.path().join("source/movie.en.srt").exists());
         assert!(reconciler.cleaned.lock().unwrap().is_empty());
     }
