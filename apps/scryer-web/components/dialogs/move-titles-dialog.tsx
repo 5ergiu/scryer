@@ -5,7 +5,6 @@ import {
   HardDrive,
   Loader2,
   Merge,
-  ShieldCheck,
   TriangleAlert,
   User,
   X,
@@ -576,7 +575,6 @@ export function MoveTitlesDialog({
       freeSpace.recycleOnOtherVolume)
       ? freeSpace
       : null;
-  const verification = preview?.verification ?? null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1095,28 +1093,6 @@ export function MoveTitlesDialog({
                     ) : null}
                   </div>
                 </div>
-              ) : null}
-
-              {verification ? (
-                <p
-                  id="move-titles-verification"
-                  className="flex items-start gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3 text-sm text-foreground"
-                >
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span>
-                    {verification.applies
-                      ? t(
-                          verification.depth === "FULL"
-                            ? "move.verificationStatementFull"
-                            : "move.verificationStatementQuick",
-                          {
-                            files: toCount(verification.files),
-                            bytes: formatByteCount(toCount(verification.bytes)),
-                          },
-                        )
-                      : t("move.verificationNotApplicable")}
-                  </span>
-                </p>
               ) : null}
 
               {preview.warnings.length > 0 ? (
