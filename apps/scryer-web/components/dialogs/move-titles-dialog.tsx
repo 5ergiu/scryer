@@ -172,6 +172,12 @@ export function MoveTitlesDialog({
   const [preview, setPreview] = React.useState<LocationOperationPreview | null>(
     null,
   );
+  // The title ids exactly as the preview in hand was requested. The planner
+  // keeps submission order, and the fingerprint covers its items in that order,
+  // so start has to resubmit this list rather than `preview.selection`, which
+  // the header sorts: a selection the user made in any other order would
+  // otherwise be refused as a stale plan on every attempt.
+  const previewedTitleIds = React.useRef<string[]>([]);
   const [previewLoading, setPreviewLoading] = React.useState(false);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
   const [typedConfirmation, setTypedConfirmation] = React.useState("");
@@ -281,12 +287,13 @@ export function MoveTitlesDialog({
     setPreviewLoading(true);
     setPreviewError(null);
     clearStartError();
+    const requestedTitleIds = selection;
     client
       .query(
         locationOperationPreviewQuery,
         {
           input: {
-            titleIds: selection,
+            titleIds: requestedTitleIds,
             destination: {
               libraryId: libraryId || null,
               rootId,
@@ -318,6 +325,7 @@ export function MoveTitlesDialog({
           setPreviewError(t("move.previewFailed"));
           return;
         }
+        previewedTitleIds.current = requestedTitleIds;
         setPreview(next);
         clearPlanChanged();
       })
@@ -436,7 +444,7 @@ export function MoveTitlesDialog({
       return;
     }
     await start({
-      titleIds: preview.selection,
+      titleIds: previewedTitleIds.current,
       destination: { libraryId: libraryId || null, rootId },
       // Read off the preview, not off the control: a confirmation states the
       // mode the plan in hand was built from, so a mode the user changed after
