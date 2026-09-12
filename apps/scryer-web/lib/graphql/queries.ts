@@ -4133,6 +4133,7 @@ export const pendingImportsQuery = `query PendingImports($facet: MediaFacetValue
       titleId
       titleName
       titleSlug
+      titleFolderPath
       displayName
       path
       folderPath

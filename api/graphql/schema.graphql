@@ -18607,6 +18607,10 @@ type PendingImportItemPayload {
 	"""
 	titleSlug: String
 	"""
+	Folder currently owned by the bound title, or null before resolution.
+	"""
+	titleFolderPath: String
+	"""
 	Display name derived from the unmatched item.
 	"""
 	displayName: String!

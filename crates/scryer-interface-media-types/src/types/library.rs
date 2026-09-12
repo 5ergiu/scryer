@@ -404,6 +404,8 @@ pub struct PendingImportItemPayload {
     pub title_name: Option<String>,
     /// Bound title slug, or null before resolution.
     pub title_slug: Option<String>,
+    /// Folder currently owned by the bound title, or null before resolution.
+    pub title_folder_path: Option<String>,
     /// Display name derived from the unmatched item.
     pub display_name: String,
     /// Full source path.

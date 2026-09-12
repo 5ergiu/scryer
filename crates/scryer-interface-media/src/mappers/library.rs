@@ -490,6 +490,7 @@ pub fn from_pending_import_item(
         title_id: item.title_id.map(Into::into),
         title_name: item.title_name,
         title_slug: item.title_slug,
+        title_folder_path: item.title_folder_path,
         display_name: item.display_name,
         path: item.path,
         folder_path: item.folder_path,

@@ -1569,7 +1569,7 @@ const en: LocaleDictionary = {
   "pendingImports.folderOwnershipChangedHelp":
     "This folder was given to another title, so this title no longer has one. Open the title and use Change folder to point it at the right folder, or use Ignore to hide this item.",
   "pendingImports.ownershipConflictHelp":
-    "This title's media lives in a different folder, and a title owns exactly one folder. Move this file into the title's folder (or delete this duplicate folder) and rescan; use Ignore to hide it. If this is a different film that only shares the name (a remake or the original), rescanning after the 0.18.13 update matches it on its own.",
+    "This title is assigned to {{folder}}. Move this folder's files there, or delete the duplicate folder, then rescan.",
   "pendingImports.bindEpisodes": "Bind Episodes",
   "pendingImports.bindPreviewLoadFailed": "Failed to load binding preview",
   "pendingImports.bindFailed": "Failed to bind pending import.",

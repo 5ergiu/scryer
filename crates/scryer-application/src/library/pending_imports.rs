@@ -84,6 +84,7 @@ fn pending_import_item_from_unmatched(item: LibraryScanUnmatchedItem) -> Pending
         title_id: item.title_id,
         title_name: None,
         title_slug: None,
+        title_folder_path: None,
         display_name: item.display_name,
         path: item.item_path,
         folder_path,
@@ -441,7 +442,10 @@ impl AppUseCase {
         let mut known_titles = HashMap::with_capacity(title_ids.len());
         for title_id in title_ids {
             if let Some(title) = self.services.catalog.titles.get_by_id(title_id).await? {
-                known_titles.insert(title_id.to_string(), (title.name, title.slug));
+                known_titles.insert(
+                    title_id.to_string(),
+                    (title.name, title.slug, title.folder_path),
+                );
             }
         }
 
@@ -455,9 +459,10 @@ impl AppUseCase {
                 continue;
             };
 
-            if let Some((title_name, title_slug)) = known_titles.get(title_id) {
+            if let Some((title_name, title_slug, title_folder_path)) = known_titles.get(title_id) {
                 item.title_name = Some(title_name.clone());
                 item.title_slug = title_slug.clone();
+                item.title_folder_path = title_folder_path.clone();
             }
         }
 

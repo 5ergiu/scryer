@@ -191,7 +191,9 @@ export const PendingImportCard = React.memo(function PendingImportCard({
           >
             {isFolderOwnershipChange
               ? t("pendingImports.folderOwnershipChangedHelp")
-              : t("pendingImports.ownershipConflictHelp")}
+              : t("pendingImports.ownershipConflictHelp", {
+                  folder: item.titleFolderPath,
+                })}
           </p>
         ) : null}
         {isActive && canSearchOrBind ? (

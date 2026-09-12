@@ -23,6 +23,7 @@ export type PendingImportItem = {
   titleId?: string | null;
   titleName?: string | null;
   titleSlug?: string | null;
+  titleFolderPath?: string | null;
   displayName: string;
   path: string;
   folderPath?: string | null;

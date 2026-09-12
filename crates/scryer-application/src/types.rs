@@ -1096,6 +1096,7 @@ pub struct PendingImportItem {
     pub title_id: Option<String>,
     pub title_name: Option<String>,
     pub title_slug: Option<String>,
+    pub title_folder_path: Option<String>,
     pub display_name: String,
     pub path: String,
     pub folder_path: Option<String>,
