@@ -1943,10 +1943,14 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: title.name }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, title.name) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, title.name);
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       }
     },
     [refreshTitleDetail, client, confirmReplaceConflict, title, t, setGlobalStatus],
@@ -1976,10 +1980,14 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: link.movie.title }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, link.movie.title) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, link.movie.title);
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       }
     },
     [refreshTitleDetail, client, confirmReplaceConflict, title, t, setGlobalStatus],
@@ -2051,7 +2059,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: title.name }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [

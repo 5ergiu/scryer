@@ -558,7 +558,7 @@ fn validate_nzb_xml(bytes: &[u8]) -> AppResult<()> {
     }
 
     if bytes.len() as u64 > MAX_NZB_BYTES {
-        return Err(AppError::Repository(format!(
+        return Err(AppError::Validation(format!(
             "nzb download payload exceeded {} bytes",
             MAX_NZB_BYTES
         )));
@@ -612,7 +612,8 @@ pub async fn stage_nzb_from_bytes(
         ));
     }
     if bytes.len() as u64 > MAX_NZB_BYTES {
-        return Err(AppError::Repository(format!(
+        // A property of the artifact, not a storage fault: reported, not masked.
+        return Err(AppError::Validation(format!(
             "resolved NZB download artifact exceeded {} bytes",
             MAX_NZB_BYTES
         )));
