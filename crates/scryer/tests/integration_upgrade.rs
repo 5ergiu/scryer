@@ -290,6 +290,25 @@ impl MediaFileRepository for FailingPathUpdateMediaFileRepo {
             .await
     }
 
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        self.inner
+            .refresh_media_file_source_signature(
+                file_id,
+                size_bytes,
+                source_signature_scheme,
+                source_signature_value,
+                invalidate_full_hashes,
+            )
+            .await
+    }
+
     async fn update_media_file_path(&self, file_id: &str, file_path: &str) -> AppResult<()> {
         if file_path == self.fail_path {
             return Err(AppError::Repository(format!(

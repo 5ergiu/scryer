@@ -1257,15 +1257,26 @@ impl AppUseCase {
             created_at: now,
         };
 
-        let decision = self
-            .maintenance_execution_safety_checks(
+        // Approval creates claims under the same title guard. Keep it from
+        // this final safety snapshot through the action's completion.
+        let title_guard = self
+            .runtime
+            .jobs
+            .interactive_operation_guards
+            .try_acquire(&format!("maintenance-title:{}", candidate.title_id))
+            .await;
+        let decision = if title_guard.is_some() {
+            self.maintenance_execution_safety_checks(
                 detail,
                 evaluator,
                 &candidate,
                 libraries,
                 tag_conflicts,
             )
-            .await;
+            .await
+        } else {
+            SafetyDecision::Hold(execution_reason::LOCATION_OPERATION_HOLD)
+        };
 
         // Idempotency protects mutations, not evidence: a hold re-checks every
         // pass and each refusal is its own appended row, so hold rows key on
@@ -1358,31 +1369,17 @@ impl AppUseCase {
                 }
             }
             SafetyDecision::Proceed(title, input) => {
-                let action_result = match self
-                    .runtime
-                    .jobs
-                    .interactive_operation_guards
-                    .try_acquire(&format!("maintenance-title:{}", candidate.title_id))
-                    .await
-                {
-                    Some(_title_guard) => {
-                        let mut context = MaintenanceExecutionContext {
-                            detail,
-                            candidate: &candidate,
-                            title: &title,
-                            input: &input,
-                            run: &mut run,
-                            evaluator,
-                            libraries,
-                            tag_conflicts,
-                        };
-                        self.execute_maintenance_action(kind, &mut context).await
-                    }
-                    None => Ok(ActionResult::Held {
-                        reason: execution_reason::LOCATION_OPERATION_HOLD,
-                        detail: serde_json::json!({"title_id": candidate.title_id}),
-                    }),
+                let mut context = MaintenanceExecutionContext {
+                    detail,
+                    candidate: &candidate,
+                    title: &title,
+                    input: &input,
+                    run: &mut run,
+                    evaluator,
+                    libraries,
+                    tag_conflicts,
                 };
+                let action_result = self.execute_maintenance_action(kind, &mut context).await;
                 match action_result {
                     Ok(ActionResult::Executed { detail: evidence }) => {
                         run.status = LifecycleActionRunStatus::Succeeded;

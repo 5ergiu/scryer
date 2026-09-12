@@ -342,6 +342,7 @@ impl DomainEventRepository for MockDomainEventRepo {
 
 #[derive(Default)]
 pub(super) struct MockMediaRequestRepo {
+    pub(super) titles: Option<Arc<MockTitleRepo>>,
     pub(super) fail_policy_tag_rewrites: AtomicBool,
     pub(super) requests: Arc<Mutex<Vec<MediaRequest>>>,
     pub(super) domain_events: Option<Arc<MockDomainEventRepo>>,
@@ -350,6 +351,7 @@ pub(super) struct MockMediaRequestRepo {
 impl MockMediaRequestRepo {
     pub(super) fn with_domain_events(domain_events: Arc<MockDomainEventRepo>) -> Self {
         Self {
+            titles: None,
             requests: Arc::new(Mutex::new(Vec::new())),
             domain_events: Some(domain_events),
             fail_policy_tag_rewrites: AtomicBool::new(false),
@@ -384,6 +386,38 @@ pub(super) async fn append_mock_media_request_event(
 
 #[async_trait]
 impl MediaRequestRepository for MockMediaRequestRepo {
+    async fn approve_with_title(
+        &self,
+        request: &MediaRequest,
+        title: Title,
+        options: TitleOptionsPatch,
+        resolution: MediaRequestResolution,
+        added_event: NewDomainEvent,
+    ) -> AppResult<(
+        CreateTitleOutcome,
+        MediaRequestResolutionResult,
+        Option<DomainEvent>,
+    )> {
+        let titles = self.titles.as_ref().expect("approval title store");
+        let created = titles
+            .create_or_get_existing_with_options_patch(title, options.clone())
+            .await?;
+        if let Some(selection) = options.monitor_selection {
+            titles
+                .replace_title_monitor_selection(&created.title.id, selection)
+                .await?;
+        }
+        let result = self
+            .resolve_pending_overlapping(request, resolution)
+            .await?;
+        let event = if created.reused_existing {
+            None
+        } else {
+            Some(append_mock_media_request_event(self.domain_events.as_ref(), added_event).await?)
+        };
+        Ok((created, result, event))
+    }
+
     async fn submit(
         &self,
         request: NewMediaRequest,

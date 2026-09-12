@@ -2116,6 +2116,25 @@ pub trait MediaRequestRepository: Send + Sync {
         title_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<String>>>;
 
+    /// Commit the title, monitoring selection, approval, claim and events as
+    /// one unit. The caller holds the mutation guard for title.id.
+    async fn approve_with_title(
+        &self,
+        _request: &MediaRequest,
+        _title: Title,
+        _options: TitleOptionsPatch,
+        _resolution: MediaRequestResolution,
+        _added_event: NewDomainEvent,
+    ) -> AppResult<(
+        CreateTitleOutcome,
+        MediaRequestResolutionResult,
+        Option<DomainEvent>,
+    )> {
+        Err(AppError::Repository(
+            "atomic request approval is unsupported".into(),
+        ))
+    }
+
     async fn count_quality_profile_references(
         &self,
         profile_id: &str,
@@ -6163,6 +6182,30 @@ pub trait MediaFileRepository: Send + Sync {
         source_signature_scheme: Option<String>,
         source_signature_value: Option<String>,
     ) -> AppResult<()>;
+
+    /// Refresh sampled evidence and invalidate stale full hashes atomically.
+    /// Stores without this capability must preserve the old evidence on error.
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        if invalidate_full_hashes {
+            return Err(AppError::Repository(
+                "atomic source signature refresh is unsupported".into(),
+            ));
+        }
+        self.update_media_file_source_signature(
+            file_id,
+            size_bytes,
+            source_signature_scheme,
+            source_signature_value,
+        )
+        .await
+    }
 
     /// One page of the full-hash backfill queue (FR-047), ordered by id so the
     /// cursor is a plain "everything after this id" and the ordering survives a

@@ -838,6 +838,24 @@ impl MediaFileRepository for MockMediaFileRepo {
         source_signature_scheme: Option<String>,
         source_signature_value: Option<String>,
     ) -> AppResult<()> {
+        self.refresh_media_file_source_signature(
+            file_id,
+            size_bytes,
+            source_signature_scheme,
+            source_signature_value,
+            false,
+        )
+        .await
+    }
+
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
         let mut list = self.store.lock().await;
         let entry = list
             .iter_mut()
@@ -846,6 +864,9 @@ impl MediaFileRepository for MockMediaFileRepo {
         entry.size_bytes = size_bytes;
         entry.source_signature_scheme = source_signature_scheme;
         entry.source_signature_value = source_signature_value;
+        if invalidate_full_hashes {
+            entry.content_hashes = None;
+        }
         Ok(())
     }
 

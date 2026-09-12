@@ -1462,6 +1462,94 @@ async fn requester_cannot_update_or_cancel_after_manager_resolution() {
 }
 
 #[tokio::test]
+async fn approval_waits_for_destructive_title_ownership() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    harness
+        .app
+        .submit_media_request(&harness.user, media_request_input(library_id, 9022))
+        .await
+        .unwrap();
+    let request_id = harness.media_requests.requests.lock().await[0].id.clone();
+    let first = harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &request_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut pending = harness.media_requests.requests.lock().await[0].clone();
+    pending.id = "pending-for-existing-title".into();
+    pending.status = scryer_domain::MediaRequestStatus::Pending;
+    pending.created_title_id = None;
+    let pending_id = pending.id.clone();
+    harness.media_requests.requests.lock().await.push(pending);
+    let guard = harness
+        .app
+        .runtime
+        .jobs
+        .interactive_operation_guards
+        .try_acquire(&format!("maintenance-title:{}", first.title_id))
+        .await
+        .unwrap();
+    let error = harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &pending_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("maintenance owns the title");
+    assert!(error.to_string().contains("title is being modified"));
+    assert_eq!(
+        harness
+            .media_requests
+            .get(&pending_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        scryer_domain::MediaRequestStatus::Pending
+    );
+    assert_eq!(harness.titles.store.lock().await.len(), 1);
+    drop(guard);
+    harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &pending_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .media_requests
+            .get(&pending_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        scryer_domain::MediaRequestStatus::Approved
+    );
+}
+
+#[tokio::test]
 async fn approve_media_request_creates_title_and_resolves_overlapping_pending_requests() {
     let harness = bootstrap_media_request_app();
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);

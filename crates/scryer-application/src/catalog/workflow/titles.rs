@@ -946,43 +946,7 @@ impl AppUseCase {
         self.finish_add_title_with_outcome(created).await
     }
 
-    pub(crate) async fn add_title_with_options_patch_outcome_after_library_authorization(
-        &self,
-        actor: &User,
-        request: NewTitle,
-        library_id: String,
-        options_patch: TitleOptionsPatch,
-    ) -> AppResult<AddTitleOutcome> {
-        let created = self
-            .create_title_without_hydration_with_options_patch_after_library_authorization(
-                actor,
-                request,
-                library_id,
-                options_patch,
-            )
-            .await?;
-        self.finish_add_title_with_outcome(created).await
-    }
-
-    pub(crate) async fn add_title_with_options_patch_outcome_after_library_authorization_profile_lock_held(
-        &self,
-        actor: &User,
-        request: NewTitle,
-        library_id: String,
-        options_patch: TitleOptionsPatch,
-    ) -> AppResult<AddTitleOutcome> {
-        let created = self
-            .create_title_without_hydration_with_options_patch_after_library_authorization_lock_held(
-                actor,
-                request,
-                library_id,
-                options_patch,
-            )
-            .await?;
-        self.finish_add_title_with_outcome(created).await
-    }
-
-    async fn finish_add_title_with_outcome(
+    pub(crate) async fn finish_add_title_with_outcome(
         &self,
         created: CreateTitleOutcome,
     ) -> AppResult<AddTitleOutcome> {

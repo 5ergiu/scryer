@@ -1,7 +1,9 @@
 pub mod snapshot;
 
 use super::*;
-use crate::domain_events::new_global_domain_event;
+use crate::domain_events::{
+    new_global_domain_event, new_title_domain_event, title_context_snapshot,
+};
 use crate::ports::MediaRequestResolution;
 use scryer_domain::{
     DomainEvent, DomainEventFilter, DomainEventPayload, DomainEventType, LibraryPermission,
@@ -14,6 +16,67 @@ use std::collections::BTreeSet;
 
 const TITLE_QUALITY_PROFILE_TAG_PREFIX: &str = "scryer:quality-profile:";
 const TITLE_MONITOR_TYPE_TAG_PREFIX: &str = "scryer:monitor-type:";
+
+impl AppUseCase {
+    async fn prepare_request_approval_title(
+        &self,
+        actor: &User,
+        request: NewTitle,
+        library_id: String,
+    ) -> AppResult<(Title, tokio::sync::OwnedMutexGuard<()>)> {
+        let mut title = self
+            .new_title_for_library(actor, request, library_id)
+            .await?;
+        let mut existing_id = None;
+        for id in &title.external_ids {
+            if let Some(existing) = self
+                .services
+                .catalog
+                .titles
+                .find_by_external_id_in_library_and_facet(
+                    &title.library_id,
+                    title.facet.clone(),
+                    &id.source,
+                    &id.value,
+                )
+                .await?
+            {
+                if existing_id.as_ref().is_some_and(|id| id != &existing.id) {
+                    return Err(AppError::Validation(
+                        "external ids map to multiple titles".into(),
+                    ));
+                }
+                existing_id = Some(existing.id);
+            }
+        }
+        if let Some(id) = &existing_id {
+            title.id = id.clone();
+        }
+        let guard = self
+            .runtime
+            .jobs
+            .interactive_operation_guards
+            .try_acquire(&format!("maintenance-title:{}", title.id))
+            .await
+            .ok_or_else(|| {
+                AppError::Validation("title is being modified; retry approval".into())
+            })?;
+        if existing_id.is_some()
+            && self
+                .services
+                .catalog
+                .titles
+                .get_by_id(&title.id)
+                .await?
+                .is_none()
+        {
+            return Err(AppError::Validation(
+                "title changed during approval; retry".into(),
+            ));
+        }
+        Ok((title, guard))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SubmitMediaRequestInput {
@@ -452,8 +515,8 @@ impl AppUseCase {
             approved_monitor_type.as_deref(),
             monitor_selection.or_else(|| request.requested_monitor_selection.clone()),
         )?;
-        let outcome = self
-            .add_title_with_options_patch_outcome_after_library_authorization_profile_lock_held(
+        let (title, _title_guard) = self
+            .prepare_request_approval_title(
                 actor,
                 media_request_to_new_title(
                     &request,
@@ -462,10 +525,6 @@ impl AppUseCase {
                     &approved_tags,
                 ),
                 request.library_id.clone(),
-                TitleOptionsPatch {
-                    monitor_selection: Some(approved_monitor_selection),
-                    ..TitleOptionsPatch::default()
-                },
             )
             .await?;
         let provenance = RequestDecisionProvenance {
@@ -476,24 +535,36 @@ impl AppUseCase {
         };
         let mut event_data = media_request_resolved_event_data(
             &request,
-            Some(outcome.title.id.clone()),
+            Some(title.id.clone()),
             Some(approved_quality_profile_id.clone()),
             Some(approved_quality_profile_name.clone()),
         );
         apply_decision_provenance(&mut event_data, &provenance, approved_lease_days);
         let resolved_event =
             new_global_domain_event(actor, DomainEventPayload::MediaRequestApproved(event_data));
-        let resolution = self
+        let added_event = new_title_domain_event(
+            actor,
+            &title,
+            DomainEventPayload::TitleAdded(scryer_domain::TitleAddedEventData {
+                title: title_context_snapshot(&title),
+            }),
+        );
+        let (created, resolution, added_event) = self
             .services
             .catalog
             .media_requests
-            .resolve_pending_overlapping(
+            .approve_with_title(
                 &request,
+                title.clone(),
+                TitleOptionsPatch {
+                    monitor_selection: Some(approved_monitor_selection),
+                    ..TitleOptionsPatch::default()
+                },
                 MediaRequestResolution {
                     status: MediaRequestStatus::Approved,
                     resolved_by_user_id: Some(actor.id.clone()),
                     resolved_at: chrono::Utc::now(),
-                    created_title_id: Some(outcome.title.id.clone()),
+                    created_title_id: Some(title.id.clone()),
                     approved_quality_profile_id: Some(approved_quality_profile_id),
                     approved_quality_profile_name: Some(approved_quality_profile_name),
                     approved_lease_days,
@@ -502,12 +573,17 @@ impl AppUseCase {
                     policy_tags: provenance.policy_tags.clone(),
                     event: resolved_event,
                 },
+                added_event,
             )
             .await?;
         drop(profile_reference_guard);
+        if let Some(event) = &added_event {
+            self.publish_stored_domain_event(event).await;
+        }
         if let Some(event) = &resolution.event {
             self.publish_stored_domain_event(event).await;
         }
+        let outcome = self.finish_add_title_with_outcome(created).await?;
         let title_id = outcome.title.id.clone();
         let claim_error = self
             .create_request_lifecycle_claims(actor, &request, &title_id, approved_lease_days)
@@ -761,8 +837,14 @@ impl AppUseCase {
         // The requester's own lease is what a policy approval grants: nobody
         // overrode it, so `approved` and `requested` are the same window.
         let approved_lease_days = request.requested_lease_days;
-        let outcome = self
-            .add_title_with_options_patch_outcome_after_library_authorization(
+        let profile_reference_guard = self
+            .runtime
+            .catalog
+            .quality_profile_reference_lock
+            .lock()
+            .await;
+        let (title, _title_guard) = self
+            .prepare_request_approval_title(
                 actor,
                 media_request_to_new_title(
                     &request,
@@ -771,32 +853,40 @@ impl AppUseCase {
                     &provenance.policy_tags,
                 ),
                 request.library_id.clone(),
-                TitleOptionsPatch {
-                    monitor_selection: Some(approved_monitor_selection),
-                    ..TitleOptionsPatch::default()
-                },
             )
             .await?;
         let mut event_data = media_request_resolved_event_data(
             &request,
-            Some(outcome.title.id.clone()),
+            Some(title.id.clone()),
             Some(approved_quality_profile_id.clone()),
             Some(approved_quality_profile_name.clone()),
         );
         apply_decision_provenance(&mut event_data, &provenance, approved_lease_days);
         let resolved_event =
             new_global_domain_event(actor, DomainEventPayload::MediaRequestApproved(event_data));
-        let resolution = self
+        let added_event = new_title_domain_event(
+            actor,
+            &title,
+            DomainEventPayload::TitleAdded(scryer_domain::TitleAddedEventData {
+                title: title_context_snapshot(&title),
+            }),
+        );
+        let (created, resolution, added_event) = self
             .services
             .catalog
             .media_requests
-            .resolve_pending_overlapping(
+            .approve_with_title(
                 &request,
+                title.clone(),
+                TitleOptionsPatch {
+                    monitor_selection: Some(approved_monitor_selection),
+                    ..TitleOptionsPatch::default()
+                },
                 MediaRequestResolution {
                     status: MediaRequestStatus::Approved,
                     resolved_by_user_id: Some(actor.id.clone()),
                     resolved_at: chrono::Utc::now(),
-                    created_title_id: Some(outcome.title.id.clone()),
+                    created_title_id: Some(title.id.clone()),
                     approved_quality_profile_id: Some(approved_quality_profile_id),
                     approved_quality_profile_name: Some(approved_quality_profile_name),
                     approved_lease_days,
@@ -805,8 +895,14 @@ impl AppUseCase {
                     policy_tags: provenance.policy_tags.clone(),
                     event: resolved_event,
                 },
+                added_event,
             )
             .await?;
+        drop(profile_reference_guard);
+        if let Some(event) = &added_event {
+            self.publish_stored_domain_event(event).await;
+        }
+        let outcome = self.finish_add_title_with_outcome(created).await?;
         if let Some(event) = &resolution.event {
             self.publish_stored_domain_event(event).await;
         }

@@ -1594,7 +1594,7 @@ async fn bootstrap_application(
         restore_restart_controller.application_upgrade_handle(),
     );
 
-    let upgrade_reconcile_exclusions = match app_use_case
+    let mut upgrade_reconcile_exclusions = match app_use_case
         .finalize_application_upgrade_journal_with_boot_time(application_upgrade_boot_time())
         .await
     {
@@ -1605,13 +1605,24 @@ async fn bootstrap_application(
         }
     };
 
-    // A persisted running job run whose worker died in a previous process is
-    // unfinishable; fail those rows before any poller can wait on them forever.
-    if let Err(e) = app_use_case
-        .reconcile_interrupted_job_runs(&upgrade_reconcile_exclusions)
-        .await
-    {
-        tracing::warn!(error = %e, "failed to reconcile interrupted job runs on startup");
+    // Durable maintenance search intents resume with their original job ids.
+    // Keep those reservations out of generic interrupted-job reconciliation.
+    match app_use_case.resume_interrupted_maintenance_searches().await {
+        Ok(recovered) => {
+            upgrade_reconcile_exclusions.extend(recovered);
+            // Other abandoned jobs cannot be resumed; close them before pollers start.
+            if let Err(e) = app_use_case
+                .reconcile_interrupted_job_runs(&upgrade_reconcile_exclusions)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to reconcile interrupted job runs on startup");
+            }
+        }
+        Err(error) => {
+            // Keep recovery evidence if its read failed. An optional recovery
+            // pass must not prevent the rest of the application from starting.
+            tracing::warn!(error = %error, "could not reserve maintenance searches; preserved interrupted jobs for the next restart");
+        }
     }
 
     if let Err(e) = app_use_case.reconcile_default_library_roots().await {

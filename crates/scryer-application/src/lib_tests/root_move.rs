@@ -983,6 +983,108 @@ async fn a_monitored_title_with_no_files_takes_the_catalog_only_fast_path() {
 /// shows up from the runner's point of view: a read fails and `run` returns
 /// without ever writing a terminal state.
 #[tokio::test]
+async fn unreadable_operation_mode_stops_before_filesystem_execution() {
+    let fixture = RootMoveFixture::new().await;
+    let title = fixture
+        .seed_title(
+            "Preserve",
+            2020,
+            &fixture.root_a_id,
+            &fixture.root_a(),
+            "Preserve (2020)",
+            &[("Preserve.mkv", 32)],
+        )
+        .await;
+    let preview = fixture.preview(&[&title.id]).await;
+    let operation = queued_operation(
+        "op-mode-read",
+        LocationOperationType::RootMove,
+        LocationExecutionMode::CatalogOnly,
+        VerificationDepth::Full,
+    );
+    fixture.operations.insert_operation(operation.clone());
+    fixture
+        .operations
+        .fail_next_operation_read
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let file = &preview.execution.titles[0].files[0];
+    let before = std::fs::read(file.source()).unwrap();
+    fixture
+        .app
+        .run_root_move(&operation.id, &preview.execution)
+        .await
+        .expect_err("mode read failed");
+    assert_eq!(std::fs::read(file.source()).unwrap(), before);
+    assert!(!file.destination().exists());
+}
+
+#[tokio::test]
+async fn multi_library_operation_requires_all_saved_source_permissions() {
+    let fixture = RootMoveFixture::new().await;
+    let title = fixture
+        .seed_title(
+            "Scoped",
+            2020,
+            &fixture.root_a_id,
+            &fixture.root_a(),
+            "Scoped (2020)",
+            &[("Scoped.mkv", 32)],
+        )
+        .await;
+    let mut plan = fixture.preview(&[&title.id]).await.execution;
+    let mut other = plan.titles[0].clone();
+    other.title_id = "other-title".into();
+    other.source_library_id = "other-source".into();
+    plan.titles.push(other);
+    let mut operation = queued_operation(
+        "op-permissions",
+        LocationOperationType::RootMove,
+        LocationExecutionMode::MoveWithScryer,
+        VerificationDepth::Full,
+    );
+    operation.source_library_id = None;
+    operation.destination_library_id = Some(fixture.library_id());
+    fixture
+        .operations
+        .create_location_operation(&operation, Some(&serde_json::to_string(&plan).unwrap()))
+        .await
+        .unwrap();
+    let mut actor = fixture.user.clone();
+    actor.authorization = scryer_domain::UserAuthorization {
+        loaded: true,
+        ..Default::default()
+    };
+    actor.authorization.libraries.insert(
+        fixture.library_id(),
+        scryer_domain::LibraryPermissionMask::MANAGE_TITLES,
+    );
+    assert!(
+        fixture
+            .app
+            .require_location_operation_permission(&actor, &operation)
+            .await
+            .is_err()
+    );
+    actor.authorization.libraries.insert(
+        "other-source".into(),
+        scryer_domain::LibraryPermissionMask::MANAGE_TITLES,
+    );
+    fixture
+        .app
+        .require_location_operation_permission(&actor, &operation)
+        .await
+        .unwrap();
+    operation.id = "missing-plan".into();
+    assert!(
+        fixture
+            .app
+            .require_location_operation_permission(&actor, &operation)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn an_interrupted_operation_resumes_from_its_persisted_plan_without_redoing_settled_titles() {
     let fixture = RootMoveFixture::new().await;
     let first = fixture

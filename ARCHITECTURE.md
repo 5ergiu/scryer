@@ -114,6 +114,16 @@ Backup bundles are logical, validated, and portable across supported engines.
 Restore is a product workflow with explicit compatibility, integrity, secret,
 and restart behavior.
 
+Cross-version restores will never be supported. A backup must be restored into
+the same Scryer version that created it, including when changing datastore
+engines. Restore compatibility must not translate historical schemas or accept
+another version's table set. Rejecting a cross-version backup is intentional
+product behavior, not a defect or a missing compatibility feature.
+
+Recovery uses the version that created the backup. Any subsequent upgrade is a
+separate workflow through the normal database migrations; it is not part of
+restore. Reviews and automated agents must preserve this boundary.
+
 Scryer's single-node design does not require Redis, external queues, message
 brokers, or a distributed control plane.
 
