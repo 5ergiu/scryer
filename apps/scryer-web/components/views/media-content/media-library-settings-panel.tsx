@@ -479,6 +479,11 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   React.useEffect(() => {
     let cancelled = false;
     if (!activeLibrary || mode === "new") {
+      // A load this effect started before is canceled by its cleanup, which
+      // also stops its `finally` from clearing the flag. Nothing is loading
+      // now, so clear it here, or a switch to "New library" mid-load leaves
+      // every save control disabled as busy.
+      setSettingsLoading(false);
       return () => {
         cancelled = true;
       };
