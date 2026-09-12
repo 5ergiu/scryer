@@ -40,6 +40,10 @@ import { formatAudioLanguageLabels } from "@/lib/constants/audio-languages";
 import { METADATA_LANGUAGES } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { selectorId } from "@/lib/utils/dom-ids";
+import {
+  resolveLibraryDiscardPrompt,
+  shouldBlockLibraryNavigation,
+} from "@/lib/utils/library-navigation-guard";
 import { DownloadClientRoutingPanel } from "@/components/views/media-content/download-client-routing-panel";
 import {
   LIBRARY_FOOTER_SLOT_ID,
@@ -294,6 +298,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   // only exist when the instance has opted in.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [mode, setMode] = React.useState<"existing" | "new">("existing");
+  // `saving` covers the container's mutation and refreshes only; this also
+  // covers the panel adopting the saved library afterwards.
+  const [saveInProgress, setSaveInProgress] = React.useState(false);
   const [deleteLibraryOpen, setDeleteLibraryOpen] = React.useState(false);
   const [pendingLibrarySelection, setPendingLibrarySelection] = React.useState<
     string | null
@@ -593,7 +600,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     );
   }, [activeLibrary?.id, invalidRootPathsByLibraryId, localPathStyle]);
   const hasInvalidRootFolderPaths = invalidRootFolderPaths.size > 0;
-  const actionBusy = loading || librariesLoading || rootValidationLibrariesLoading || saving;
+  const saveInFlight = saving || saveInProgress;
+  const actionBusy =
+    loading || librariesLoading || rootValidationLibrariesLoading || saveInFlight;
   const settingsBusy = actionBusy || settingsLoading;
   const showUnixPermissions = localPathStyle !== "windows";
   const effectiveDraftSetPermissionsLinux =
@@ -749,7 +758,10 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     draftName.trim() !== (activeLibrary?.name ?? "") ||
     !rootsEqual(draftRoots, savedRoots, localPathStyle) ||
     hasSettingsChanges;
-  const shouldBlockNavigation = hasDraftChanges && !saving;
+  const shouldBlockNavigation = shouldBlockLibraryNavigation({
+    hasDraftChanges,
+    saveInFlight,
+  });
   // A root change is planned against the *stored* configuration, so it is
   // offered only while the panel has nothing unsaved to contradict it.
   const canChangeRoot =
@@ -990,14 +1002,41 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     }
     const roots = normalizeRoots(draftRoots, localPathStyle);
     setDraftRoots(roots);
-    if (mode === "new") {
-      if (!canCreateLibrary) {
-        return null;
+    // The container releases `saving` before the panel has reloaded the saved
+    // settings or left "new" mode, and until then the draft still reads as
+    // unsaved. Count the save as in flight until the saved library is adopted,
+    // so a navigation in between is not blocked and Save stays disabled.
+    setSaveInProgress(true);
+    try {
+      if (mode === "new") {
+        if (!canCreateLibrary) {
+          return null;
+        }
+        const created = await onCreateLibrary({ name, roots, settings: settingsDraft });
+        if (created?.id) {
+          try {
+            const refreshedSettings = await loadLibrarySettings(created.id);
+            hydrateSavedSettings(refreshedSettings);
+            setSettingsError(null);
+          } catch (error) {
+            setSettingsError(
+              error instanceof Error ? error.message : t("settings.librarySettingsLoadFailed"),
+            );
+          }
+          setMode("existing");
+          setActiveLibraryId(created.id);
+        }
+        return created ?? null;
       }
-      const created = await onCreateLibrary({ name, roots, settings: settingsDraft });
-      if (created?.id) {
+      if (activeLibrary) {
+        const updatedLibrary =
+          (await onUpdateLibrary(activeLibrary.id, {
+            name,
+            roots,
+            settings: settingsDraft,
+          })) ?? activeLibrary;
         try {
-          const refreshedSettings = await loadLibrarySettings(created.id);
+          const refreshedSettings = await loadLibrarySettings(updatedLibrary.id);
           hydrateSavedSettings(refreshedSettings);
           setSettingsError(null);
         } catch (error) {
@@ -1005,30 +1044,12 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
             error instanceof Error ? error.message : t("settings.librarySettingsLoadFailed"),
           );
         }
-        setMode("existing");
-        setActiveLibraryId(created.id);
+        return updatedLibrary;
       }
-      return created ?? null;
+      return null;
+    } finally {
+      setSaveInProgress(false);
     }
-    if (activeLibrary) {
-      const updatedLibrary =
-        (await onUpdateLibrary(activeLibrary.id, {
-          name,
-          roots,
-          settings: settingsDraft,
-        })) ?? activeLibrary;
-      try {
-        const refreshedSettings = await loadLibrarySettings(updatedLibrary.id);
-        hydrateSavedSettings(refreshedSettings);
-        setSettingsError(null);
-      } catch (error) {
-        setSettingsError(
-          error instanceof Error ? error.message : t("settings.librarySettingsLoadFailed"),
-        );
-      }
-      return updatedLibrary;
-    }
-    return null;
   };
 
   const handleSaveAndScanLibrary = async () => {
@@ -1066,6 +1087,20 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       applyLibrarySelection(nextSelection);
     }
   }, [applyLibrarySelection, libraryNavigationBlocker, pendingLibrarySelection]);
+
+  const libraryDiscardPrompt = resolveLibraryDiscardPrompt({
+    hasDraftChanges,
+    blockerState: libraryNavigationBlocker.state,
+    pendingLibrarySelection,
+  });
+  // A navigation or library switch held while the draft was unsaved stays held
+  // after the draft becomes clean (a save landed in between). The user asked to
+  // move and nothing is left to discard, so finish the move.
+  React.useEffect(() => {
+    if (libraryDiscardPrompt === "settled") {
+      handleConfirmDiscardLibraryChanges();
+    }
+  }, [handleConfirmDiscardLibraryChanges, libraryDiscardPrompt]);
 
   const handleCancelDiscardLibraryChanges = React.useCallback(() => {
     if (libraryNavigationBlocker.state === "blocked") {
@@ -2137,10 +2172,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
         onCancel={() => setDeleteLibraryOpen(false)}
       />
       <ConfirmDialog
-        open={
-          libraryNavigationBlocker.state === "blocked" ||
-          pendingLibrarySelection !== null
-        }
+        open={libraryDiscardPrompt === "open"}
         title={t("settings.unsavedLibraryChangesTitle")}
         description={t("settings.unsavedLibraryChangesConfirm")}
         confirmLabel={t("label.discard")}
