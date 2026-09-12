@@ -1049,12 +1049,36 @@ mod tests {
         }
     }
 
+    /// Stands in for the outbound `t=caps` request: every call is one send.
+    #[derive(Default)]
+    struct RecordingCapsSnapshotRefresher {
+        requested_ids: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingCapsSnapshotRefresher {
+        fn requested_ids(&self) -> Vec<String> {
+            self.requested_ids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IndexerCapsSnapshotRefresher for RecordingCapsSnapshotRefresher {
+        async fn fetch_for_config(
+            &self,
+            config: &IndexerConfig,
+        ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
+            self.requested_ids.lock().unwrap().push(config.id.clone());
+            Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
+        }
+    }
+
     type RecordedIndexerErrors = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
     struct RecordingIndexerConfigRepo {
         created: Arc<Mutex<Vec<IndexerConfig>>>,
         cleared_ids: Arc<Mutex<Vec<String>>>,
         recorded_errors: RecordedIndexerErrors,
+        system_backoffs: Arc<Mutex<HashMap<String, crate::IndexerSystemBackoff>>>,
     }
 
     impl RecordingIndexerConfigRepo {
@@ -1063,6 +1087,7 @@ mod tests {
                 created: Arc::new(Mutex::new(Vec::new())),
                 cleared_ids: Arc::new(Mutex::new(Vec::new())),
                 recorded_errors: Arc::new(Mutex::new(Vec::new())),
+                system_backoffs: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -1160,6 +1185,12 @@ mod tests {
                 .await
                 .push((id.to_string(), message));
             Ok(())
+        }
+
+        async fn list_system_backoffs(
+            &self,
+        ) -> AppResult<HashMap<String, crate::IndexerSystemBackoff>> {
+            Ok(self.system_backoffs.lock().await.clone())
         }
     }
 
@@ -2495,6 +2526,132 @@ mod tests {
         assert_eq!(
             indexer_repo.cleared_ids().await,
             vec!["cfg-caps-error".to_string()]
+        );
+    }
+
+    /// The startup and daily caps pass is unattended traffic. A caps request is
+    /// a counted API hit, so an indexer that search dispatch is holding off —
+    /// a persisted system backoff (e.g. a Newznab quota wall) or a config-level
+    /// `disabled_until` — must not be sent one either. Restarting inside the
+    /// window must not buy a send; an expired window refreshes normally.
+    #[tokio::test]
+    async fn background_caps_refresh_sends_nothing_to_an_indexer_in_active_backoff() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let now = Utc::now();
+        let base = IndexerConfig {
+            id: String::new(),
+            name: String::new(),
+            provider_type: "newznab".into(),
+            base_url: String::new(),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: None,
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: Some(r#"{"known":"snapshot"}"#.into()),
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let indexer = |id: &str, disabled_until: Option<chrono::DateTime<Utc>>| IndexerConfig {
+            id: id.into(),
+            name: format!("Synthetic {id}"),
+            base_url: format!("https://{id}.example.test"),
+            disabled_until,
+            ..base.clone()
+        };
+        indexer_repo.created.lock().await.extend([
+            indexer("cfg-quota-backoff", None),
+            indexer("cfg-backoff-expired", None),
+            indexer(
+                "cfg-config-disabled",
+                Some(now + chrono::Duration::minutes(10)),
+            ),
+            indexer("cfg-healthy", None),
+        ]);
+        indexer_repo.system_backoffs.lock().await.extend([
+            (
+                "cfg-quota-backoff".to_string(),
+                crate::IndexerSystemBackoff {
+                    disabled_until: now + chrono::Duration::minutes(10),
+                    escalation_level: 2,
+                },
+            ),
+            (
+                "cfg-backoff-expired".to_string(),
+                crate::IndexerSystemBackoff {
+                    disabled_until: now - chrono::Duration::minutes(1),
+                    escalation_level: 1,
+                },
+            ),
+        ]);
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let indexer_client = Arc::new(RecordingIndexerClient::new(false));
+        let services = AppServices::builder(
+            Arc::new(NullTitleRepository),
+            Arc::new(NullShowRepository),
+            Arc::new(NullUserRepository),
+            indexer_repo.clone(),
+            indexer_client.clone(),
+            Arc::new(NullDownloadClient),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(NullReleaseAttemptRepository),
+            Arc::new(NullSettingsRepository),
+            Arc::new(NullQualityProfileRepository),
+            String::new(),
+        )
+        .with_indexer_caps_refresher(refresher.clone())
+        .build_partial_for_tests();
+        let app = AppUseCase::new(
+            services,
+            JwtAuthConfig {
+                issuer: "test".into(),
+                access_ttl_seconds: 3_600,
+                jwt_signing_salt: "test-salt".into(),
+            },
+            Arc::new(FacetRegistry::new()),
+        );
+
+        let (refreshed, failures) = app
+            .refresh_enabled_direct_nab_caps_snapshots(&User::new_admin("system-indexer-caps"))
+            .await
+            .expect("a caps pass that holds off backed-off indexers is not a failure");
+
+        assert_eq!(
+            refresher.requested_ids(),
+            vec!["cfg-backoff-expired".to_string(), "cfg-healthy".to_string()],
+            "only indexers outside an active backoff may be sent a caps request"
+        );
+        assert_eq!(refreshed, 2);
+        assert!(failures.is_empty());
+        // Holding off is not a caps failure: the known snapshot, health and
+        // learning of a held-off indexer stay exactly as they were. (The two
+        // refreshed indexers do prune learning, because their snapshot changed.)
+        assert!(indexer_repo.recorded_errors.lock().await.is_empty());
+        let pruned = indexer_client.pruned_indexers();
+        let stored = indexer_repo.created.lock().await;
+        for id in ["cfg-quota-backoff", "cfg-config-disabled"] {
+            assert!(!pruned.iter().any(|pruned_id| pruned_id == id));
+            let config = stored.iter().find(|config| config.id == id).unwrap();
+            assert_eq!(
+                config.caps_snapshot_json.as_deref(),
+                Some(r#"{"known":"snapshot"}"#)
+            );
+        }
+        assert_eq!(
+            indexer_repo.system_backoffs.lock().await["cfg-quota-backoff"].escalation_level,
+            2
         );
     }
 
