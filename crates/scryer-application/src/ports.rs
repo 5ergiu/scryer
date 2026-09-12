@@ -2142,7 +2142,8 @@ pub trait MediaRequestRepository: Send + Sync {
     async fn list(&self, query: MediaRequestQuery) -> AppResult<Vec<MediaRequest>>;
 
     /// How many requests `user_id` submitted, optionally narrowed to one status
-    /// and to requests created at or after `since`.
+    /// and to requests created at or after `since`. Edits exclude their own
+    /// request so a resubmission observes only prior requests.
     ///
     /// Counts submissions, not joins: the requester-history facts
     /// (`pending_request_count`, `approved_last_30d`, …) ask what this person
@@ -2152,6 +2153,7 @@ pub trait MediaRequestRepository: Send + Sync {
         user_id: &str,
         status: Option<scryer_domain::MediaRequestStatus>,
         since: Option<DateTime<Utc>>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<u64>;
 
     /// Every request ever made for this identity, any requester, any status,
@@ -2163,8 +2165,13 @@ pub trait MediaRequestRepository: Send + Sync {
     ) -> AppResult<Vec<MediaRequest>>;
 
     /// When `user_id` last submitted anything, for `days_since_last_request`.
+    /// Excludes the request currently being edited when its id is provided.
     /// `None` when they never have — a real answer, not an unknown.
-    async fn latest_request_at_for_user(&self, user_id: &str) -> AppResult<Option<DateTime<Utc>>>;
+    async fn latest_request_at_for_user(
+        &self,
+        user_id: &str,
+        excluding_request_id: Option<&str>,
+    ) -> AppResult<Option<DateTime<Utc>>>;
 
     /// Stamp the request-rule verdict onto a request row that is *not* being
     /// resolved (spec 0003 FR-016).

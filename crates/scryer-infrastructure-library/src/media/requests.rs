@@ -354,6 +354,7 @@ impl MediaRequestRepository for MediaRequestStore {
         user_id: &str,
         status: Option<MediaRequestStatus>,
         since: Option<chrono::DateTime<Utc>>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<u64> {
         let mut sql = String::from(
             "SELECT COUNT(*) AS request_count
@@ -361,6 +362,10 @@ impl MediaRequestRepository for MediaRequestStore {
               WHERE created_by_user_id = {}",
         );
         let mut args = vec![SqlArg::Text(user_id.to_string())];
+        if let Some(request_id) = excluding_request_id {
+            sql.push_str(" AND id <> {}");
+            args.push(SqlArg::Text(request_id.to_string()));
+        }
         if let Some(status) = status {
             sql.push_str(" AND status = {}");
             args.push(SqlArg::Text(status.as_str().to_string()));
@@ -408,17 +413,17 @@ impl MediaRequestRepository for MediaRequestStore {
     async fn latest_request_at_for_user(
         &self,
         user_id: &str,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-        let row = SqlRuntime::fetch_optional(
-            self.datastore.read_exec(),
-            "SELECT created_at
-               FROM media_requests
-              WHERE created_by_user_id = {}
-              ORDER BY created_at DESC, id DESC
-              LIMIT 1",
-            &[SqlArg::Text(user_id.to_string())],
-        )
-        .await?;
+        let mut sql =
+            String::from("SELECT created_at FROM media_requests WHERE created_by_user_id = {}");
+        let mut args = vec![SqlArg::Text(user_id.to_string())];
+        if let Some(request_id) = excluding_request_id {
+            sql.push_str(" AND id <> {}");
+            args.push(SqlArg::Text(request_id.to_string()));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT 1");
+        let row = SqlRuntime::fetch_optional(self.datastore.read_exec(), &sql, &args).await?;
         row.map(|row| row.timestamp("created_at")).transpose()
     }
 

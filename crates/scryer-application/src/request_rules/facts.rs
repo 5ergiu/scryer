@@ -533,12 +533,17 @@ impl AppUseCase {
         draft: &crate::request_rules::facts::RequestDraft,
         snapshot: MediaRequestMetadataSnapshot,
         evaluation_time: DateTime<Utc>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<RequestInputContext> {
         let requester = self.request_requester_doc(actor, &library.id).await?;
         let request = request_doc(draft);
         let quality = self.request_quality_context(draft).await;
-        let catalog = self.request_catalog_context(library, draft).await;
-        let history = self.request_history_context(actor, evaluation_time).await;
+        let catalog = self
+            .request_catalog_context(library, draft, excluding_request_id)
+            .await;
+        let history = self
+            .request_history_context(actor, evaluation_time, excluding_request_id)
+            .await;
         let library_title_count = self.request_library_title_count(&library.id).await;
 
         Ok(RequestInputContext {
@@ -665,6 +670,7 @@ impl AppUseCase {
         &self,
         library: &Library,
         draft: &crate::request_rules::facts::RequestDraft,
+        excluding_request_id: Option<&str>,
     ) -> RequestCatalogContext {
         let mut context = RequestCatalogContext {
             readable: true,
@@ -721,6 +727,10 @@ impl AppUseCase {
             .await
         {
             Ok(history) => {
+                let history = history
+                    .into_iter()
+                    .filter(|request| excluding_request_id != Some(request.id.as_str()))
+                    .collect::<Vec<_>>();
                 context.previous_request_count = history.len() as i64;
                 context.previously_denied = history
                     .iter()
@@ -745,6 +755,7 @@ impl AppUseCase {
         &self,
         actor: &User,
         evaluation_time: DateTime<Utc>,
+        excluding_request_id: Option<&str>,
     ) -> RequestRequesterHistoryContext {
         use scryer_domain::MediaRequestStatus;
 
@@ -758,13 +769,19 @@ impl AppUseCase {
         let counters = async {
             Ok::<_, crate::AppError>((
                 requests
-                    .count_for_requester(&actor.id, Some(MediaRequestStatus::Pending), None)
+                    .count_for_requester(
+                        &actor.id,
+                        Some(MediaRequestStatus::Pending),
+                        None,
+                        excluding_request_id,
+                    )
                     .await?,
                 requests
                     .count_for_requester(
                         &actor.id,
                         Some(MediaRequestStatus::Approved),
                         Some(thirty_days_ago),
+                        excluding_request_id,
                     )
                     .await?,
                 requests
@@ -772,12 +789,20 @@ impl AppUseCase {
                         &actor.id,
                         Some(MediaRequestStatus::Rejected),
                         Some(thirty_days_ago),
+                        excluding_request_id,
                     )
                     .await?,
                 requests
-                    .count_for_requester(&actor.id, Some(MediaRequestStatus::Approved), None)
+                    .count_for_requester(
+                        &actor.id,
+                        Some(MediaRequestStatus::Approved),
+                        None,
+                        excluding_request_id,
+                    )
                     .await?,
-                requests.latest_request_at_for_user(&actor.id).await?,
+                requests
+                    .latest_request_at_for_user(&actor.id, excluding_request_id)
+                    .await?,
             ))
         }
         .await;

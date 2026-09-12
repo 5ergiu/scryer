@@ -3269,6 +3269,7 @@ impl MediaRequestRepository for NullMediaRequestRepository {
         _user_id: &str,
         _status: Option<scryer_domain::MediaRequestStatus>,
         _since: Option<DateTime<Utc>>,
+        _excluding_request_id: Option<&str>,
     ) -> AppResult<u64> {
         Ok(0)
     }
@@ -3280,7 +3281,11 @@ impl MediaRequestRepository for NullMediaRequestRepository {
         Ok(Vec::new())
     }
 
-    async fn latest_request_at_for_user(&self, _user_id: &str) -> AppResult<Option<DateTime<Utc>>> {
+    async fn latest_request_at_for_user(
+        &self,
+        _user_id: &str,
+        _excluding_request_id: Option<&str>,
+    ) -> AppResult<Option<DateTime<Utc>>> {
         Ok(None)
     }
 

@@ -210,12 +210,15 @@ fn evict_stale_entries(
 /// subject. A query subject is the same subject when the kind, the text and the
 /// restricted indexer set all match.
 fn interactive_release_search_scope_key(request: &InteractiveReleaseSearchRequest) -> String {
+    let mut indexer_ids = request.indexer_ids.clone().unwrap_or_default();
+    indexer_ids.sort();
+    indexer_ids.dedup();
     match request.query.as_deref() {
         Some(query) => format!(
             "q|{}|{}|{}",
             request.kind.map_or("raw", InteractiveSearchKind::as_str),
             query.trim(),
-            request.indexer_ids.as_deref().unwrap_or_default().join(","),
+            indexer_ids.join(","),
         ),
         None => format!(
             "{}|{}|{}|{}",
@@ -415,11 +418,11 @@ impl AppUseCase {
             }
         }
 
-        // Config-visible eligibility only: enabled + interactive, minus any
-        // indexer the request did not name. A config cooldown lists the indexer
-        // as Skipped without dispatching; a routing-disabled indexer is omitted
-        // entirely. Backoff state stays with the search client (a backed-off
-        // indexer's restricted call just returns empty).
+        // Dispatch enabled interactive configs within the requested set.
+        // Explicitly selected disabled configs and config cooldowns remain
+        // visible as Skipped; routing-disabled indexers are omitted. Backoff
+        // state stays with the search client (a backed-off indexer's restricted
+        // call just returns empty).
         let wants_routing_base = matches!(subject, InteractiveReleaseSearchSubject::Query { .. });
         let now = self.runtime.environment.now();
         let mut indexer_views = Vec::new();
@@ -432,6 +435,23 @@ impl AppUseCase {
         let mut routing_base = HashMap::new();
         for config in configs {
             if !config.is_enabled {
+                if requested_indexers
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&config.id))
+                {
+                    indexer_views.push(InteractiveReleaseSearchIndexerView {
+                        priority: indexer_priority_by_name
+                            .get(config.name.as_str())
+                            .copied()
+                            .unwrap_or(0),
+                        indexer_id: config.id,
+                        name: config.name,
+                        status: InteractiveReleaseSearchIndexerStatus::Skipped,
+                        result_count: 0,
+                        elapsed_ms: None,
+                        failure_reason: Some("indexer is disabled".to_string()),
+                    });
+                }
                 continue;
             }
             let routing_entry = indexer_routing

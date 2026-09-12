@@ -300,28 +300,33 @@ async fn media_request_history_reads_answer_the_fact_builder() {
     // Counts are per submitter, and a status narrows them.
     assert_eq!(
         store
-            .count_for_requester("requester-1", None, None)
+            .count_for_requester("requester-1", None, None, None)
             .await
             .unwrap(),
         3
     );
     assert_eq!(
         store
-            .count_for_requester("requester-1", Some(MediaRequestStatus::Pending), None)
+            .count_for_requester("requester-1", Some(MediaRequestStatus::Pending), None, None)
             .await
             .unwrap(),
         2
     );
     assert_eq!(
         store
-            .count_for_requester("requester-1", Some(MediaRequestStatus::Rejected), None)
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Rejected),
+                None,
+                None
+            )
             .await
             .unwrap(),
         1
     );
     assert_eq!(
         store
-            .count_for_requester("requester-2", None, None)
+            .count_for_requester("requester-2", None, None, None)
             .await
             .unwrap(),
         1
@@ -331,7 +336,8 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .count_for_requester(
                 "requester-1",
                 None,
-                Some(Utc::now() + chrono::Duration::days(1))
+                Some(Utc::now() + chrono::Duration::days(1)),
+                None,
             )
             .await
             .unwrap(),
@@ -343,7 +349,8 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .count_for_requester(
                 "requester-1",
                 None,
-                Some(Utc::now() - chrono::Duration::days(1))
+                Some(Utc::now() - chrono::Duration::days(1)),
+                None,
             )
             .await
             .unwrap(),
@@ -377,17 +384,49 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .is_empty()
     );
 
+    assert_eq!(
+        store
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Pending),
+                None,
+                Some("request-2")
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Rejected),
+                None,
+                Some("request-1")
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        store
+            .latest_request_at_for_user("requester-2", Some("request-3"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     // Never having asked is a real answer, not an unknown.
     assert!(
         store
-            .latest_request_at_for_user("requester-1")
+            .latest_request_at_for_user("requester-1", None)
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         store
-            .latest_request_at_for_user("nobody")
+            .latest_request_at_for_user("nobody", None)
             .await
             .unwrap()
             .is_none()

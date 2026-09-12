@@ -243,6 +243,48 @@ async fn submission_rules_read_history_before_the_new_request_is_persisted() {
 }
 
 #[tokio::test]
+async fn resubmission_rules_exclude_the_edited_request_from_history() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let request_id = submit(&harness, &library_id, 9047, None).await;
+    let detail = create_rule(
+        &harness,
+        "First request on edit",
+        r#"package rules
+import rego.v1
+approve if {
+    input.facts.previous_request_count == 0
+    input.facts.pending_request_count == 0
+    not input.facts.days_since_last_request
+}
+"#,
+    )
+    .await;
+    arm(
+        &harness,
+        &detail.rule_set.id,
+        RequestRuleEvaluationMode::Enforce,
+    )
+    .await;
+    enable_gate(&harness).await;
+    let updated = harness
+        .app
+        .update_my_media_request(
+            &harness.user,
+            UpdateMediaRequestInput {
+                request_id,
+                requested_quality_profile_id: "1080p".into(),
+                requested_monitor_type: None,
+                requested_monitor_selection: None,
+                requested_lease_days: Some(Some(7)),
+            },
+        )
+        .await
+        .expect("edit pending request");
+    assert_eq!(updated.status, MediaRequestStatus::Approved);
+}
+
+#[tokio::test]
 async fn catalog_fact_collects_every_library_with_a_matching_title() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(

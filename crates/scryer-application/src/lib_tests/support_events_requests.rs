@@ -687,12 +687,14 @@ impl MediaRequestRepository for MockMediaRequestRepo {
         user_id: &str,
         status: Option<MediaRequestStatus>,
         since: Option<chrono::DateTime<Utc>>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<u64> {
         let requests = self.requests.lock().await;
         Ok(requests
             .iter()
             .filter(|request| {
                 request.created_by_user_id == user_id
+                    && excluding_request_id != Some(request.id.as_str())
                     && status.is_none_or(|status| request.status == status)
                     && since.is_none_or(|since| request.created_at >= since)
             })
@@ -721,11 +723,15 @@ impl MediaRequestRepository for MockMediaRequestRepo {
     async fn latest_request_at_for_user(
         &self,
         user_id: &str,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<Option<chrono::DateTime<Utc>>> {
         let requests = self.requests.lock().await;
         Ok(requests
             .iter()
-            .filter(|request| request.created_by_user_id == user_id)
+            .filter(|request| {
+                request.created_by_user_id == user_id
+                    && excluding_request_id != Some(request.id.as_str())
+            })
             .map(|request| request.created_at)
             .max())
     }
