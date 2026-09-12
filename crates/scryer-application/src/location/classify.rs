@@ -151,6 +151,12 @@ pub mod reason_codes {
     /// to attach those records to a guess (FR-066). The blocking records are
     /// named in the explanation.
     pub const MERGE_RECORDS_UNMAPPED: &str = "merge_records_unmapped";
+    /// Planning could not walk the title's source folder (vanished,
+    /// unreadable), so no work can be planned for it.
+    pub const SOURCE_FOLDER_UNREADABLE: &str = "source_folder_unreadable";
+    /// The destination root the title was classified onto has no configured
+    /// path, so no destination folder can be calculated.
+    pub const DESTINATION_ROOT_UNCONFIGURED: &str = "destination_root_unconfigured";
 }
 
 /// The destination a selection was previewed against.
@@ -527,6 +533,44 @@ impl SelectionClassification {
         self.titles.iter().find(|title| title.title_id == title_id)
     }
 
+    /// Move one title into needs-resolution after classification, when planning
+    /// finds what the classifier could not see (a source folder that cannot be
+    /// read, a destination root with no path).
+    ///
+    /// The title's class, reason, and the counts change together, so the
+    /// grouped lists the preview renders (and the deselect rows built from
+    /// them) always agree with the counts that stop the start (FR-015, FR-016).
+    /// A title already in a blocking class, or not in the selection, is left
+    /// alone.
+    pub fn downgrade_to_needs_resolution(
+        &mut self,
+        title_id: &str,
+        reason_code: &str,
+        reason: impl Into<String>,
+    ) {
+        let Some(title) = self
+            .titles
+            .iter_mut()
+            .find(|title| title.title_id == title_id)
+        else {
+            return;
+        };
+        if title.class.blocks_start() {
+            return;
+        }
+        match title.class {
+            TitleLocationClass::CrossLibraryTransfer => self.counts.cross_library_transfer -= 1,
+            TitleLocationClass::RootMove => self.counts.root_move -= 1,
+            TitleLocationClass::NoOp => self.counts.no_op -= 1,
+            TitleLocationClass::CatalogOnly => self.counts.catalog_only -= 1,
+            TitleLocationClass::Incompatible | TitleLocationClass::NeedsResolution => {}
+        }
+        self.counts.needs_resolution += 1;
+        title.class = TitleLocationClass::NeedsResolution;
+        title.reason_code = Some(reason_code.to_string());
+        title.reason = Some(reason.into());
+    }
+
     /// The plan-level FR-016 check the preview and confirm paths enforce: a bulk
     /// job must not start while an included title is unresolved or incompatible.
     pub fn blocks_start(&self) -> bool {
@@ -894,6 +938,88 @@ mod tests {
             assert_eq!(title.destination_root_id, "root-b");
             assert_eq!(title.destination_library_id, "lib-movies");
         }
+    }
+
+    /// FR-015/FR-016: a title planning downgrades after classification leaves
+    /// its old group and joins needs-resolution with the planner's reason, and
+    /// the counts move with it, so the grouped lists and the counts that block
+    /// the start never disagree. A title already blocking is not re-counted.
+    #[test]
+    fn downgrading_a_title_moves_it_between_groups_and_counts() {
+        let titles = vec![
+            movie_facts("unreadable", "root-a"),
+            movie_facts("fileless", "root-a").with_tracked_files(0),
+            movie_facts("readable", "root-a"),
+            movie_facts("busy", "root-a").with_active_work("an import is still running"),
+        ];
+        let library = movies_library(&["root-a", "root-b"]);
+        let mut result = classify_selection(
+            &titles,
+            &DestinationRequest::to_root("root-b"),
+            Some(&library),
+        );
+        assert_eq!(result.counts.root_move, 2);
+        assert_eq!(result.counts.catalog_only, 1);
+        assert_eq!(result.counts.needs_resolution, 1);
+
+        result.downgrade_to_needs_resolution(
+            "unreadable",
+            reason_codes::SOURCE_FOLDER_UNREADABLE,
+            "the source folder could not be read",
+        );
+        result.downgrade_to_needs_resolution(
+            "fileless",
+            reason_codes::DESTINATION_ROOT_UNCONFIGURED,
+            "destination root root-b has no configured path",
+        );
+        result.downgrade_to_needs_resolution(
+            "busy",
+            reason_codes::SOURCE_FOLDER_UNREADABLE,
+            "must not replace the active-work reason",
+        );
+        result.downgrade_to_needs_resolution(
+            "not-selected",
+            reason_codes::SOURCE_FOLDER_UNREADABLE,
+            "ignored",
+        );
+
+        assert_eq!(result.counts.root_move, 1);
+        assert_eq!(result.counts.catalog_only, 0);
+        assert_eq!(result.counts.needs_resolution, 3);
+        assert_eq!(result.counts.total(), titles.len() as i64);
+        assert_eq!(
+            result.title_ids_in(TitleLocationClass::RootMove),
+            vec!["readable".to_string()]
+        );
+        assert_eq!(
+            result.title_ids_in(TitleLocationClass::NeedsResolution),
+            vec![
+                "unreadable".to_string(),
+                "fileless".to_string(),
+                "busy".to_string()
+            ]
+        );
+        assert_eq!(
+            result.blocking_title_ids(),
+            result.title_ids_in(TitleLocationClass::NeedsResolution)
+        );
+        let unreadable = result.classification_of("unreadable").expect("present");
+        assert_eq!(
+            unreadable.reason_code.as_deref(),
+            Some(reason_codes::SOURCE_FOLDER_UNREADABLE)
+        );
+        assert_eq!(
+            unreadable.reason.as_deref(),
+            Some("the source folder could not be read")
+        );
+        assert_eq!(
+            result
+                .classification_of("busy")
+                .expect("present")
+                .reason_code
+                .as_deref(),
+            Some(reason_codes::ACTIVE_DOWNLOAD_OR_IMPORT)
+        );
     }
 
     /// FR-012 / US2.1: the preview states current → destination for every
