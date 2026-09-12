@@ -1837,6 +1837,7 @@ fn shared_plan_request(request: &RootScopePlanRequest) -> RootMovePlanRequest {
     RootMovePlanRequest {
         source_library_id: Some(request.library_id.clone()),
         destination_library_id: Some(request.library_id.clone()),
+        library_names: BTreeMap::new(),
         source_root_id: Some(request.root_id.clone()),
         destination_root_id: Some(request.destination_root_id().to_string()),
         selection: Vec::new(),

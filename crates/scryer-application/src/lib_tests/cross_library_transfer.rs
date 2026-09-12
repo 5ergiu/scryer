@@ -628,6 +628,16 @@ async fn a_transfer_without_a_destination_match_carries_the_title_into_the_desti
     );
     assert_eq!(classified[0].merge_target_title_id(), None);
     assert_eq!(classified[0].same_named_destination_title_id(), None);
+    let source_library_name = fixture
+        .app
+        .services
+        .catalog
+        .libraries
+        .get_by_id(&fixture.source_library_id)
+        .await
+        .expect("read the source library")
+        .expect("the source library exists")
+        .name;
     // FR-056, stated before confirmation: the library changes, and inherited
     // behaviour is replaced by the destination library's.
     let transfer_item = items_of(&preview, PlanItemKind::CatalogChange)
@@ -637,8 +647,20 @@ async fn a_transfer_without_a_destination_match_carries_the_title_into_the_desti
     assert_eq!(transfer_item.title_id.as_deref(), Some(title.id.as_str()));
     let detail = transfer_item.detail.clone().expect("transfer detail");
     assert!(
-        detail.contains(&fixture.destination_library_id),
+        detail.contains(&source_library_name),
+        "the detail names the source library: {detail}"
+    );
+    assert!(
+        detail.contains("Archive Movies"),
         "the detail names the destination library: {detail}"
+    );
+    assert!(
+        !detail.contains(&fixture.source_library_id),
+        "the detail hides the source id: {detail}"
+    );
+    assert!(
+        !detail.contains(&fixture.destination_library_id),
+        "the detail hides the destination id: {detail}"
     );
 
     let operation = fixture.start_and_settle(&[&title.id]).await;

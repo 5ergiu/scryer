@@ -544,6 +544,9 @@ impl RootMoveTitleDraft {
 pub struct RootMovePlanRequest {
     pub source_library_id: Option<String>,
     pub destination_library_id: Option<String>,
+    /// Display names for the libraries involved in the preview. IDs remain the
+    /// fallback when an older caller cannot provide a name.
+    pub library_names: BTreeMap<String, String>,
     pub source_root_id: Option<String>,
     pub destination_root_id: Option<String>,
     /// The user's selection, in the order it was submitted. Every id appears in
@@ -786,7 +789,7 @@ pub(super) fn plan_title(
             );
             // A fileless title still changes library, and the same-name warning
             // still applies to it (FR-055/FR-056).
-            items.extend(transfer_items(draft));
+            items.extend(transfer_items(draft, &request.library_names));
             let transfer_warnings = transfer_warnings(draft);
             warnings.extend(transfer_warnings.iter().cloned());
             let execution = RootMoveTitleExecution {
@@ -842,7 +845,7 @@ pub(super) fn plan_title(
     // line is mode-independent — a blocked title is blocked either way, and a
     // fileless title takes the FR-076 fast path either way.
     if request.mode == LocationExecutionMode::FilesAlreadyThere {
-        return plan_adopted_title(draft, sequence, items, warnings);
+        return plan_adopted_title(draft, &request.library_names, sequence, items, warnings);
     }
 
     let Some(destination_folder) = draft.destination_folder_path.clone() else {
@@ -862,7 +865,7 @@ pub(super) fn plan_title(
     // consequences the user cannot see on disk — destination-library defaults
     // replacing the source library's, the destination naming policy calculating
     // the folder — all follow from it.
-    items.extend(transfer_items(draft));
+    items.extend(transfer_items(draft, &request.library_names));
     warnings.extend(transfer_warnings(draft));
 
     // The folder itself: a move, and a rename when the naming policy calculated
@@ -1103,6 +1106,7 @@ pub(super) fn plan_title(
 ///   (FR-053, and see [`crate::location::adoption::AdoptionFileVerifier`]).
 fn plan_adopted_title(
     draft: &RootMoveTitleDraft,
+    library_names: &BTreeMap<String, String>,
     sequence: i64,
     mut items: Vec<PlanItem>,
     mut warnings: Vec<String>,
@@ -1140,7 +1144,7 @@ fn plan_adopted_title(
 
     // FR-056/FR-055 apply to an adoption that also changes library, exactly as
     // they do to a managed transfer: the ownership flip is the same flip.
-    items.extend(transfer_items(draft));
+    items.extend(transfer_items(draft, library_names));
     warnings.extend(transfer_warnings(draft));
 
     let source_folder_display = draft
@@ -1310,7 +1314,10 @@ fn plan_adopted_title(
 /// 2. **A same-named title may already be there.** FR-055 forbids merging on
 ///    title text, so the transfer proceeds — but silently landing a second
 ///    "The Gift" in one library is exactly the surprise C3 exists to prevent.
-fn transfer_items(draft: &RootMoveTitleDraft) -> Vec<PlanItem> {
+fn transfer_items(
+    draft: &RootMoveTitleDraft,
+    library_names: &BTreeMap<String, String>,
+) -> Vec<PlanItem> {
     if !draft.crosses_libraries() {
         return Vec::new();
     }
@@ -1329,6 +1336,14 @@ fn transfer_items(draft: &RootMoveTitleDraft) -> Vec<PlanItem> {
                 )),
         ]
     } else {
+        let source_library = library_names
+            .get(&draft.source_library_id)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&draft.source_library_id);
+        let destination_library = library_names
+            .get(&draft.destination_library_id)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&draft.destination_library_id);
         vec![
             PlanItem::new(PlanItemKind::CatalogChange)
                 .with_title(draft.title_id.clone())
@@ -1336,9 +1351,9 @@ fn transfer_items(draft: &RootMoveTitleDraft) -> Vec<PlanItem> {
                 .with_detail(format!(
                     "\"{}\" moves from library {} to library {}; its own settings, tags, monitoring, history, and requests travel with it, and anything it inherited from {} is replaced by the destination library's defaults",
                     draft.title_name,
-                    draft.source_library_id,
-                    draft.destination_library_id,
-                    draft.source_library_id
+                    source_library,
+                    destination_library,
+                    source_library
                 )),
         ]
     };
@@ -1798,6 +1813,7 @@ mod tests {
         RootMovePlanRequest {
             source_library_id: Some("lib-1".to_string()),
             destination_library_id: Some("lib-1".to_string()),
+            library_names: BTreeMap::from([("lib-1".to_string(), "Movies".to_string())]),
             source_root_id: None,
             destination_root_id: Some("root-b".to_string()),
             selection,
@@ -1809,6 +1825,29 @@ mod tests {
             case_rule: PathCaseRule::CaseSensitive,
             naming: CollisionNaming::from_source_library("Movies"),
         }
+    }
+
+    #[test]
+    fn transfer_preview_uses_library_names_instead_of_ids() {
+        let mut transfer = draft(TitleLocationClass::CrossLibraryTransfer);
+        transfer.destination_library_id = "lib-2".to_string();
+        let mut plan_request = request(vec![transfer]);
+        plan_request.destination_library_id = Some("lib-2".to_string());
+        plan_request.library_names = BTreeMap::from([
+            ("lib-1".to_string(), "Movies".to_string()),
+            ("lib-2".to_string(), "Anime".to_string()),
+        ]);
+
+        let planned = build_root_move_plan(&plan_request);
+        let detail = details_for(&planned, plan_reasons::LIBRARY_TRANSFER)
+            .into_iter()
+            .next()
+            .expect("library transfer detail");
+
+        assert!(detail.contains("Movies"));
+        assert!(detail.contains("Anime"));
+        assert!(!detail.contains("lib-1"));
+        assert!(!detail.contains("lib-2"));
     }
 
     /// US2.2: a stale folder name is repaired by the destination naming policy,

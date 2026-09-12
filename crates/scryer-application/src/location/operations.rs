@@ -2255,10 +2255,19 @@ impl AppUseCase {
                 _ => None,
             }
         };
+        let mut library_names = libraries
+            .iter()
+            .map(|(library_id, library)| (library_id.clone(), library.name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        library_names.insert(
+            destination_library.id.clone(),
+            destination_library.name.clone(),
+        );
 
         let planned = build_root_move_plan(&RootMovePlanRequest {
             source_library_id,
             destination_library_id: Some(destination_library.id.clone()),
+            library_names,
             source_root_id,
             destination_root_id: request.destination.root_id.clone(),
             selection,
