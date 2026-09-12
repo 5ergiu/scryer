@@ -686,7 +686,7 @@ function SeriesOverviewViewImpl({
           await onTitleChanged?.();
         })
         .catch((error: unknown) => {
-          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
         });
     },
     [
@@ -727,7 +727,7 @@ function SeriesOverviewViewImpl({
         setGlobalStatus(t("status.queuedLatest", { name: title.name }));
         await onTitleChanged?.();
       } catch (error: unknown) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [onTitleChanged, client, setGlobalStatus, t, title],
@@ -752,7 +752,7 @@ function SeriesOverviewViewImpl({
       dispatchEpisodePanel({ type: "SET_AUTO_SEARCH_LOADING", episodeId, loading: true });
       Promise.resolve(onAutoSearchEpisode(episode))
         .catch((error: unknown) => {
-          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
         })
         .finally(() => {
           dispatchEpisodePanel({ type: "SET_AUTO_SEARCH_LOADING", episodeId, loading: false });
@@ -878,7 +878,7 @@ function SeriesOverviewViewImpl({
           await onTitleChanged?.();
         })
         .catch((error: unknown) => {
-          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
         });
     },
     [
@@ -921,7 +921,7 @@ function SeriesOverviewViewImpl({
         setGlobalStatus(t("status.queueSuccess", { name: release.title }));
         await onTitleChanged?.();
       } catch (error: unknown) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [client, onTitleChanged, setGlobalStatus, t, title],
@@ -946,7 +946,7 @@ function SeriesOverviewViewImpl({
       }));
       Promise.resolve(onAutoSearchSeriesMovie(link))
         .catch((error: unknown) => {
-          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
         })
         .finally(() => {
           setAutoSearchSeriesMovieLoadingByLink((prev) => ({

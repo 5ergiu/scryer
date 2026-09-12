@@ -3660,10 +3660,14 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       try {
         await startAutomaticSearch(title.id);
       } catch (error) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, title.name) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, title.name);
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       }
     },
     [startAutomaticSearch, setGlobalStatus, t],
@@ -3747,6 +3751,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       } catch (error) {
         setGlobalStatus(
           userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
+          { level: "ERROR" },
         );
         throw error;
       }
@@ -3783,6 +3788,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       } catch (error) {
         setGlobalStatus(
           userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
+          { level: "ERROR" },
         );
         throw error;
       }

@@ -893,10 +893,7 @@ impl IndexerArtifactTransport {
                 response.status(),
                 reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
             ) {
-                return Err(AppError::DownloadSourceGone(format!(
-                    "The download artifact fetch returned HTTP {}.",
-                    response.status()
-                )));
+                return Err(artifact_source_gone(response.status()));
             }
             if !response.status().is_success() {
                 return Err(AppError::DownloadSubmitUnavailable(format!(
@@ -1048,10 +1045,7 @@ impl IndexerArtifactTransport {
                 response.status(),
                 reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
             ) {
-                return Err(AppError::DownloadSourceGone(format!(
-                    "The download artifact fetch returned HTTP {}.",
-                    response.status()
-                )));
+                return Err(artifact_source_gone(response.status()));
             }
             if !response.status().is_success() {
                 return Err(AppError::DownloadSubmitUnavailable(format!(
@@ -1119,6 +1113,17 @@ fn map_artifact_outbound_error(
             "Scryer could not fetch the download artifact from '{name}'."
         )),
     }
+}
+
+/// The indexer answered the artifact fetch with 404 or 410: the search result's
+/// download link is dead. Indexer grab links are commonly short-lived or
+/// single-use, so the operator's remedy is a fresh search, and the message says
+/// so rather than leaving a bare status code to interpret.
+fn artifact_source_gone(status: reqwest::StatusCode) -> AppError {
+    AppError::DownloadSourceGone(format!(
+        "The indexer no longer serves this download (HTTP {status}): the search result has \
+         expired, search again for a fresh link."
+    ))
 }
 
 fn artifact_fetch_cancelled() -> AppError {
@@ -1713,6 +1718,50 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "no_response");
         assert_eq!(recorded[0].1.load(Ordering::Relaxed), 1);
+    }
+
+    /// A dead grab link is the operator's to fix by searching again, so the
+    /// source-gone error says that rather than only quoting the status code.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dead_artifact_link_tells_the_operator_to_search_again() {
+        for status in [404u16, 410] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_string("This download URL has expired"),
+                )
+                .mount(&server)
+                .await;
+            let stats = Arc::new(CountingStats {
+                sent: AtomicU32::new(0),
+                gate: None,
+            });
+            let transport = transport(stats.clone());
+            let tally = IndexerRequestTally::new(
+                "id".into(),
+                "fixture".into(),
+                IndexerErrorOperation::IndexerAction,
+                stats,
+            );
+            let result = transport
+                .fetch_response_direct(
+                    "fixture",
+                    &server.uri(),
+                    Duration::from_secs(5),
+                    &PluginEgressPolicy::default(),
+                    None,
+                    None,
+                    tally,
+                    ArtifactEgress::Direct,
+                )
+                .await;
+            let Err(AppError::DownloadSourceGone(message)) = result else {
+                panic!("HTTP {status} must be a source-gone error");
+            };
+            assert!(message.contains(&format!("HTTP {status}")), "{message}");
+            assert!(message.contains("expired"), "{message}");
+            assert!(message.contains("search again"), "{message}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2416,7 +2465,10 @@ mod tests {
             };
             match status {
                 429 => assert!(matches!(error, AppError::TemporaryUnavailable { .. })),
-                404 | 410 => assert!(matches!(error, AppError::DownloadSourceGone(_))),
+                404 | 410 => assert!(
+                    matches!(&error, AppError::DownloadSourceGone(message) if message.contains("search again")),
+                    "{label}: {error:?}"
+                ),
                 _ if body.contains("501") => assert!(matches!(
                     error,
                     AppError::NewznabQuotaExceeded { code: 501, .. }

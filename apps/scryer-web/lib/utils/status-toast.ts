@@ -107,3 +107,17 @@ export function classifyStatusToastLevel(message: string): StatusToastKind | nul
 
   return null;
 }
+
+/**
+ * The level a status toasts at: the caller's explicit level when it gave one,
+ * otherwise whatever the wording classifies as. An empty status never toasts.
+ */
+export function resolveStatusToastLevel(
+  message: string,
+  options?: { level?: StatusToastKind },
+): StatusToastKind | null {
+  if (!message.trim()) {
+    return null;
+  }
+  return options?.level ?? classifyStatusToastLevel(message);
+}

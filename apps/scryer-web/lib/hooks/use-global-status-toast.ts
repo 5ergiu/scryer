@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import type { GlobalStatusOptions, SetGlobalStatus } from "@/lib/context/global-status-context";
 import { normalizeGraphQlErrorMessage } from "@/lib/graphql/error-message";
-import { classifyStatusToastLevel } from "@/lib/utils/status-toast";
+import { resolveStatusToastLevel } from "@/lib/utils/status-toast";
 
 type UseGlobalStatusToastOptions = {
   dedupeMs?: number;
@@ -27,7 +27,7 @@ export function useGlobalStatusToast(setGlobalStatus: SetGlobalStatus, {
       return;
     }
 
-    const toastLevel = classifyStatusToastLevel(rawStatus);
+    const toastLevel = resolveStatusToastLevel(rawStatus, options);
     if (!toastLevel) {
       return;
     }
