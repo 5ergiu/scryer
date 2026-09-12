@@ -357,6 +357,7 @@ pub(crate) fn evaluate_import_admission(
             crate::admission::AdmissionVerdict::Admit {
                 ranked_superseded,
                 previous_best_score,
+                ..
             } => (ranked_superseded, previous_best_score),
         };
 

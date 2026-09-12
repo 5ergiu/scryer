@@ -169,6 +169,7 @@ fn pack_replaces_singles_only_when_it_beats_all_of_them() {
         AdmissionVerdict::Admit {
             ranked_superseded,
             previous_best_score,
+            ..
         } => {
             assert_eq!(ranked_superseded, vec!["file-2", "file-1"], "best-first");
             assert_eq!(previous_best_score, 450);
@@ -559,10 +560,14 @@ fn a_pack_is_grabbed_when_any_member_would_improve() {
     )
     .per_member();
 
+    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 2_000), &auto(1));
     assert!(
-        evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 2_000), &auto(1))
-            .is_admitted(),
+        verdict.is_admitted(),
         "ep-02 is beatable, so the pack is worth fetching"
+    );
+    assert!(
+        !verdict.fills_missing_member(),
+        "every member is occupied, so this pack is an upgrade, not a fill"
     );
 }
 
@@ -595,8 +600,16 @@ fn a_pack_with_a_missing_member_is_always_worth_fetching() {
     )
     .per_member();
 
+    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 1), &auto(1));
+    assert!(verdict.is_admitted());
+    // The grab lane's churn guard reads this to tell a fill from an upgrade.
+    assert!(verdict.fills_missing_member());
+
+    // A single-file subject over the same span is never a fill.
+    let single_file = AdmissionSubject::new(episodes(&["ep-01"]), []);
     assert!(
-        evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 1), &auto(1)).is_admitted()
+        !evaluate_admission(&single_file, CandidateFacts::new(Some(0), 0, 1), &auto(1))
+            .fills_missing_member()
     );
 }
 

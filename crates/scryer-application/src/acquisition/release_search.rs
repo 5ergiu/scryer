@@ -1906,7 +1906,16 @@ pub(crate) fn evaluate_auto_candidate(
     // Churn guard: a freshly-imported scope is left alone briefly even when a
     // better release shows up. This gates *starting* work, so it is a grab-only
     // concern and deliberately absent from the shared verdict.
-    if let Some(incumbent) = context.admission.best_incumbent()
+    //
+    // It guards *replacement*, so it does not apply to a season pack admitted
+    // because monitored members are missing. Those members hold no file to
+    // protect, and the only incumbents the guard could compare against are the
+    // few members that did land — the pack would be refused as a weak
+    // "upgrade" of E01 while the rest of the season stays empty. Each member is
+    // still gated on its own at import, so a member held by a better file is
+    // not replaced by this exemption.
+    if !verdict.fills_missing_member()
+        && let Some(incumbent) = context.admission.best_incumbent()
         && crate::acquisition_policy::upgrade_cooldown_is_active(
             crate::acquisition_policy::CooldownCandidate {
                 tier_index: candidate_facts.tier_index,
@@ -5630,6 +5639,132 @@ mod tests {
         };
         assert_eq!(
             evaluate_auto_candidate(&candidate, &context),
+            ReleaseAutoDecisionCode::Eligible
+        );
+    }
+
+    /// The upgrade cooldown guards *replacement*. A season pack admitted because
+    /// monitored members are missing is a fill, so a recent search or import on
+    /// the anchor episode must not refuse it as a weak "upgrade" of the one
+    /// member that landed — that left a 52-episode season holding two files
+    /// with the only pack that could fill it rejected every RSS cycle. A pack
+    /// that is purely an upgrade of occupied members is still held off.
+    #[test]
+    fn the_upgrade_cooldown_holds_off_a_pack_upgrade_but_not_a_pack_filling_missing_members() {
+        let title = make_title();
+        let episode_ids = ["episode-1", "episode-2"];
+        let mut subject = episode_set_subject(&title, &episode_ids);
+        subject.submission_scope = SubmissionScope::Collection {
+            collection_id: "season-1".to_string(),
+        };
+
+        let profile = QualityProfile::default();
+        let thresholds = AcquisitionThresholds::default();
+        let now = Utc::now();
+        let recent_search = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let db_blocklist = crate::app_usecase_discovery::TitleReleaseBlocklistSignatures::default();
+        let no_minimum_seeders = HashMap::new();
+        let unmonitored = HashSet::new();
+
+        const PACK: &str = "Nightfall.S01.1080p.WEB-DL-FIXTUREGRP";
+        // Same tier as the incumbents, so only the score delta is in play.
+        let tier_index = crate::quality_profile::quality_tier_index(
+            &profile.criteria,
+            crate::parse_release_metadata(PACK).quality.as_deref(),
+        );
+        let incumbent_score = 900;
+        let pack_scoring = |score: i32| {
+            let mut candidate = make_candidate(PACK, None);
+            let mut decision = allowed_quality_decision(score);
+            decision.tier_index = tier_index;
+            candidate.quality_profile_decision = Some(decision);
+            candidate.coverage_scope = Some(SubmissionScope::EpisodeSet {
+                episode_ids: episode_ids.iter().map(|id| (*id).to_string()).collect(),
+            });
+            candidate
+        };
+        let member = |id: &str| {
+            (
+                crate::admission::Incumbent {
+                    tier_index,
+                    revision: 0,
+                    file_id: format!("file-{id}"),
+                    file_path: format!("/data/TV/Nightfall/{id}.mkv"),
+                    release_group: None,
+                    score: incumbent_score,
+                    covers: vec![id.to_string()],
+                    created_at: (now - chrono::Duration::hours(2)).to_rfc3339(),
+                },
+                true,
+            )
+        };
+        let pack_admission = |members: &[&str]| {
+            crate::admission::AdmissionSubject::new(
+                crate::admission::AdmissionScope::Episodes(
+                    episode_ids.iter().map(|id| (*id).to_string()).collect(),
+                ),
+                members.iter().map(|id| member(id)).collect::<Vec<_>>(),
+            )
+            .per_member()
+        };
+        let decide = |candidate: &IndexerSearchResult,
+                      admission: &crate::admission::AdmissionSubject,
+                      last_search_at: Option<&str>| {
+            let context = AutoCandidateEvaluationContext {
+                title: &title,
+                subject: &subject,
+                admission,
+                last_search_at,
+                profile: &profile,
+                thresholds: &thresholds,
+                incumbent_at_cutoff: false,
+                is_rss_lane: true,
+                user_invoked: false,
+                oldest_overlapping_pending_published_at: None,
+                now: &now,
+                dl_snapshot: None,
+                db_blocklist: &db_blocklist,
+                existing_files: &[],
+                delay_profiles: &[],
+                failed_routes: None,
+                minimum_seeders: &no_minimum_seeders,
+                unmonitored_episode_ids: &unmonitored,
+            };
+            evaluate_auto_candidate(candidate, &context)
+        };
+
+        // A true upgrade: every member is occupied, the pack clears the
+        // same-tier delta but not the forced bypass, and the scope was touched
+        // an hour ago. The cooldown holds it off…
+        let upgrade = pack_scoring(incumbent_score + thresholds.same_tier_min_delta);
+        assert!(
+            thresholds.same_tier_min_delta < thresholds.forced_upgrade_delta_bypass,
+            "the upgrade case needs a delta that admits but does not force past the cooldown"
+        );
+        let fully_occupied = pack_admission(&episode_ids);
+        assert_eq!(
+            decide(&upgrade, &fully_occupied, Some(&recent_search)),
+            ReleaseAutoDecisionCode::UpgradeRejected,
+            "a pack that only upgrades occupied members stays under the cooldown"
+        );
+        // …and it is the cooldown doing it, not admission.
+        assert_eq!(
+            decide(&upgrade, &fully_occupied, None),
+            ReleaseAutoDecisionCode::Eligible
+        );
+
+        // A fill: episode-2 has no file. The pack scores *below* the one member
+        // that landed — exactly the e2e season-pack shape — and must still be
+        // fetched inside the same cooldown window.
+        let weaker_fill = pack_scoring(incumbent_score - 91);
+        let one_member_missing = pack_admission(&["episode-1"]);
+        assert_eq!(
+            decide(&weaker_fill, &one_member_missing, Some(&recent_search)),
+            ReleaseAutoDecisionCode::Eligible,
+            "a pack filling a missing member is not an upgrade and is not cooldown-rejected"
+        );
+        assert_eq!(
+            decide(&upgrade, &one_member_missing, Some(&recent_search)),
             ReleaseAutoDecisionCode::Eligible
         );
     }
