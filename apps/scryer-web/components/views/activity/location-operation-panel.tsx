@@ -642,7 +642,7 @@ function TitleFiles({
             <TableBody>
               {files.map((file) => (
                 <React.Fragment key={file.destinationPath || file.sourcePath}>
-                  <TableRow>
+                  <TableRow data-ui="activity-row">
                     <TableCell>
                       <FilePath
                         path={file.destinationPath || file.sourcePath}
