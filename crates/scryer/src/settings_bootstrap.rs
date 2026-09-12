@@ -30,7 +30,7 @@ use scryer_application::{
     TITLE_METADATA_LANGUAGE_OVERRIDE_KEY, TITLE_REQUIRED_AUDIO_OVERRIDE_KEY,
     TLS_CERT_PATH_KEY as TLS_CERT_KEY, TLS_KEY_PATH_KEY as TLS_KEY_KEY,
     TOTP_REQUIRE_EMBY_LOGIN_KEY, TOTP_REQUIRE_JELLYFIN_LOGIN_KEY, USE_SEASON_FOLDERS_KEY,
-    builtin_4k_profile, builtin_1080p_profile, builtin_anime_profile,
+    VERIFICATION_DEPTH_KEY, builtin_4k_profile, builtin_1080p_profile, builtin_anime_profile,
     builtin_default_quality_profile,
 };
 pub(crate) use scryer_application::{
@@ -161,6 +161,18 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: RECYCLE_BIN_ENABLED_KEY,
             data_type: "boolean",
             default_value_json: "true",
+            is_sensitive: false,
+        },
+        // Import-copy verification depth (FR-042). Without a definition the
+        // Settings > General control cannot save at all. Seeded `full`, the
+        // default `resolve_verification_depth` already falls back to, so a
+        // fresh install reads exactly what an unseeded one did.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_MEDIA,
+            key_name: VERIFICATION_DEPTH_KEY,
+            data_type: "string",
+            default_value_json: "\"full\"",
             is_sensitive: false,
         },
         ServiceSettingSeed {
@@ -2311,6 +2323,61 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("startup migration state should persist: {error}"));
+        }
+    }
+
+    /// `updateVerificationSettings` writes `media.verification.depth` through the
+    /// settings store, which refuses a key with no definition. Without the seed
+    /// the import-copy verification control fails with "unknown setting key".
+    #[tokio::test]
+    async fn verification_depth_definition_is_seeded_and_accepts_writes() {
+        let seed = service_setting_seeds()
+            .iter()
+            .find(|seed| {
+                seed.scope == SETTINGS_SCOPE_MEDIA && seed.key_name == VERIFICATION_DEPTH_KEY
+            })
+            .expect("verification depth definition must be registered");
+        assert_eq!(seed.category, SETTINGS_CATEGORY_MEDIA);
+        assert_eq!(seed.data_type, "string");
+        assert_eq!(seed.default_value_json, "\"full\"");
+        assert!(!seed.is_sensitive);
+
+        let (_temp, store) = bootstrap_settings_store().await;
+        let initial = store
+            .get_setting_json(SETTINGS_SCOPE_MEDIA, VERIFICATION_DEPTH_KEY, None)
+            .await
+            .expect("read default")
+            .expect("verification depth default");
+        assert_eq!(
+            serde_json::from_str::<Value>(&initial).unwrap(),
+            json!("full")
+        );
+
+        for depth in ["quick", "full"] {
+            store
+                .upsert_setting_json(
+                    SETTINGS_SCOPE_MEDIA,
+                    VERIFICATION_DEPTH_KEY,
+                    None,
+                    json!(depth).to_string(),
+                    "typed_graphql",
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("verification depth should persist: {error}"));
+            // Startup reseeding must keep the operator's choice.
+            seed_service_setting_definitions(store.clone())
+                .await
+                .expect("reseed definitions");
+            let actual = store
+                .get_setting_json(SETTINGS_SCOPE_MEDIA, VERIFICATION_DEPTH_KEY, None)
+                .await
+                .expect("read depth")
+                .expect("saved depth");
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual).unwrap(),
+                json!(depth)
+            );
         }
     }
 
