@@ -55,6 +55,7 @@ pub fn from_delete_episode_files_preview(
             .map(|item| DeleteEpisodeFilePreviewResultPayload {
                 file_id: item.file_id.into(),
                 episode_id: item.episode_id.into(),
+                episode_ids: item.episode_ids.into_iter().map(Into::into).collect(),
                 preview: item.preview.map(from_delete_preview),
                 error: item.error,
             })

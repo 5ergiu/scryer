@@ -2916,9 +2916,14 @@ type DeleteEpisodeFilePreviewResultPayload {
 	"""
 	fileId: ID!
 	"""
-	Episode identity the media file is linked to.
+	First requested episode the media file is linked to.
 	"""
 	episodeId: ID!
+	"""
+	Every requested episode the media file is linked to. A multi-episode
+	file is deleted once but covers each of these episodes.
+	"""
+	episodeIds: [ID!]!
 	"""
 	Deletion preview for this file, or null when preview generation failed.
 	"""

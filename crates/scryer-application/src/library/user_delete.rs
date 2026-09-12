@@ -3,7 +3,7 @@ use crate::stored_paths::{path_to_stored_string, stored_path_to_path_buf};
 use scryer_domain::{
     MediaFacet, RootFolderEntry, Title, is_image_file, is_subtitle_file, is_video_file,
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -126,12 +126,16 @@ pub struct DeleteTitlesPreview {
     pub items: Vec<DeleteTitlePreviewResult>,
 }
 
-/// One media file targeted by a batch episode-file delete, with the episode it
-/// is linked to.
+/// One media file targeted by a batch episode-file delete, with the requested
+/// episodes it is linked to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeleteEpisodeFilePreviewResult {
     pub file_id: String,
+    /// The first entry of `episode_ids`, kept for existing single-episode callers.
     pub episode_id: String,
+    /// Every requested episode this file is linked to, sorted and distinct. A
+    /// multi-episode file (S01E04-E05) is deleted once but covers each of them.
+    pub episode_ids: Vec<String>,
     pub preview: Option<DeletePreview>,
     pub error: Option<String>,
 }
@@ -149,7 +153,8 @@ pub struct DeleteEpisodeFilesPreview {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EpisodeFileDeleteTarget {
     pub(crate) file_id: String,
-    pub(crate) episode_id: String,
+    /// Requested episodes linked to this file, sorted and distinct; never empty.
+    pub(crate) episode_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -478,12 +483,13 @@ impl AppUseCase {
             for target in chunk {
                 let app = self.clone();
                 let file_id = target.file_id.clone();
-                let episode_id = target.episode_id.clone();
+                let episode_ids = target.episode_ids.clone();
                 tasks.push(tokio::spawn(async move {
                     let result = app.build_media_file_delete_preview(&file_id).await;
                     DeleteEpisodeFilePreviewResult {
                         file_id,
-                        episode_id,
+                        episode_id: episode_ids[0].clone(),
+                        episode_ids,
                         preview: result.as_ref().ok().cloned(),
                         error: result.err().map(|error| error.to_string()),
                     }
@@ -510,7 +516,9 @@ impl AppUseCase {
     /// Resolve the media files of `title_id` that are linked to any of
     /// `episode_ids`, deduplicated by file id and ordered by file id so the
     /// aggregate fingerprint does not depend on the order episodes were
-    /// selected in. Files with no episode link are ignored.
+    /// selected in. Files with no episode link are ignored. The media-file
+    /// listing yields one row per episode link, so a multi-episode file keeps
+    /// every requested episode it covers rather than only its first row's.
     pub(crate) async fn resolve_episode_file_delete_targets(
         &self,
         actor: &User,
@@ -543,8 +551,7 @@ impl AppUseCase {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        let mut seen_file_ids = HashSet::new();
-        let mut targets = Vec::new();
+        let mut targets = BTreeMap::<String, BTreeSet<String>>::new();
         for media_file in self
             .services
             .library
@@ -558,16 +565,15 @@ impl AppUseCase {
             if !requested.contains(episode_id.as_str()) {
                 continue;
             }
-            if !seen_file_ids.insert(media_file.id.clone()) {
-                continue;
-            }
-            targets.push(EpisodeFileDeleteTarget {
-                file_id: media_file.id,
-                episode_id,
-            });
+            targets.entry(media_file.id).or_default().insert(episode_id);
         }
-        targets.sort_by(|left, right| left.file_id.cmp(&right.file_id));
-        Ok(targets)
+        Ok(targets
+            .into_iter()
+            .map(|(file_id, episode_ids)| EpisodeFileDeleteTarget {
+                file_id,
+                episode_ids: episode_ids.into_iter().collect(),
+            })
+            .collect())
     }
 
     /// Build the delete preview for one media file without re-checking
@@ -2087,6 +2093,7 @@ mod tests {
         DeleteEpisodeFilePreviewResult {
             file_id: file_id.to_string(),
             episode_id: episode_id.to_string(),
+            episode_ids: vec![episode_id.to_string()],
             preview: Some(DeletePreview {
                 fingerprint: fingerprint.to_string(),
                 total_file_count: media_count,

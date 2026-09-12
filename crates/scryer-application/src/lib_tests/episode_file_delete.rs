@@ -635,6 +635,68 @@ async fn delete_episode_files_unmonitors_deleted_episodes_and_their_drained_seas
     );
 }
 
+/// A multi-episode file (S01E01-E02) is listed once per episode link. It is
+/// deleted once, but the preview and the run must still cover both selected
+/// episodes, so both are unmonitored and their drained season follows.
+#[tokio::test]
+async fn delete_episode_files_covers_every_episode_of_a_shared_file() {
+    let setup = scoped_maintenance_fixture().await;
+    let f = &setup.fixture;
+    let season = &setup.seasons[1];
+    {
+        let mut store = f.media_files.store.lock().await;
+        let own_file = store[3].id.clone();
+        store.retain(|row| row.id != own_file);
+        let mut shared_link = store[2].clone();
+        shared_link.episode_id = Some(setup.episodes[3].id.clone());
+        store.push(shared_link);
+    }
+    let shared_file = f.media_files.store.lock().await[2].id.clone();
+    let mut episode_ids = vec![setup.episodes[3].id.clone(), setup.episodes[2].id.clone()];
+
+    let preview = f
+        .app
+        .preview_delete_episode_files(&f.admin, &f.title_id, &episode_ids)
+        .await
+        .expect("preview");
+    episode_ids.sort();
+    assert_eq!(preview.file_count, 1, "a shared file is deleted once");
+    assert_eq!(preview.items[0].file_id, shared_file);
+    assert_eq!(preview.items[0].episode_ids, episode_ids);
+    assert_eq!(preview.items[0].episode_id, episode_ids[0]);
+
+    let accepted = f
+        .app
+        .start_delete_episode_files_job(
+            &f.admin,
+            &f.title_id,
+            &episode_ids,
+            true,
+            Some(DeleteExecutionConfirmation {
+                preview_fingerprint: preview.preview.fingerprint.clone(),
+                typed_confirmation: None,
+            }),
+        )
+        .await
+        .expect("start episode file deletion job");
+    assert_eq!(accepted.accepted_file_ids, vec![shared_file]);
+    let run = f.wait_for_run(&accepted.job_run.id).await;
+    assert_eq!(run.status, JobRunStatus::Completed, "run: {run:?}");
+
+    for episode_id in &episode_ids {
+        assert!(
+            !episode_is_monitored(&f.app, episode_id).await,
+            "episode {episode_id} lost its shared file and should be unmonitored"
+        );
+    }
+    assert!(
+        !collection_is_monitored(&f.app, &season.id).await,
+        "a season drained through a shared file should be unmonitored"
+    );
+    let summary = f.run_summary(&run);
+    assert_eq!(summary_ids(&summary, "unmonitoredEpisodeIds"), episode_ids);
+}
+
 /// A season that still has an episode with a file stays monitored: only the
 /// episodes whose files actually went away are unmonitored.
 #[tokio::test]

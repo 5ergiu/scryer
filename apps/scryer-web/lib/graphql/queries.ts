@@ -1171,6 +1171,7 @@ export const deleteEpisodeFilesPreviewQuery = `query DeleteEpisodeFilesPreview($
     items {
       fileId
       episodeId
+      episodeIds
       error
     }
     fileCount
