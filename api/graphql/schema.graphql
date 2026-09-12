@@ -5597,13 +5597,13 @@ enum EmbyLocalSetupMethodValue {
 }
 
 """
-Count of files permanently purged from the recycle bin.
+Accepted background request to empty the selected recycle bins.
 """
 type EmptyRecycleBinPayload {
 	"""
-	Number of recycle-bin entries purged.
+	Background job whose result reports the number of entries purged.
 	"""
-	purgedCount: Int!
+	jobRun: JobRunPayload!
 }
 
 """
@@ -18008,7 +18008,7 @@ type MutationRoot {
 		input: DeleteRecycledItemsInput!
 	): DeleteRecycledItemsPayload!
 	"""
-	Empty recycle bins for the selected libraries. Returns the number of items purged.
+	Empty recycle bins for the selected libraries using a background job.
 	"""
 	emptyRecycleBin(
 		"""

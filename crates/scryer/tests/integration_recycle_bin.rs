@@ -376,14 +376,25 @@ async fn graphql_recycle_bin_settings_and_scoped_item_args_work() {
         &ctx,
         r#"mutation($libraryIds: [ID!]) {
             emptyRecycleBin(libraryIds: $libraryIds) {
-                purgedCount
+                jobRun { id jobKey status }
             }
         }"#,
         json!({ "libraryIds": null }),
     )
     .await;
     assert_no_errors(&body);
-    assert_eq!(body["data"]["emptyRecycleBin"]["purgedCount"], 0);
+    let run = &body["data"]["emptyRecycleBin"]["jobRun"];
+    assert_eq!(run["jobKey"], "RECYCLE_BIN_PURGE");
+    assert_eq!(run["status"], "RUNNING");
+    let admin = ctx.app.find_or_create_default_user().await.expect("admin");
+    let terminal = wait_for_terminal_job(
+        &ctx,
+        &admin,
+        JobKey::RecycleBinPurge,
+        run["id"].as_str().expect("accepted job id"),
+    )
+    .await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
 }
 
 #[tokio::test]
@@ -540,6 +551,82 @@ async fn empty_recycle_bin_only_purges_selected_authorized_libraries() {
         .expect("list remaining items");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].library_id, library_b.id);
+}
+
+#[tokio::test]
+async fn empty_recycle_bin_job_returns_before_purge_and_preserves_unselected_files() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root_a = tempfile::tempdir().expect("root a");
+    let root_b = tempfile::tempdir().expect("root b");
+    let library_a = seed_library(&ctx, "Async A", root_a.path()).await;
+    let library_b = seed_library(&ctx, "Async B", root_b.path()).await;
+    seed_title(&ctx, "async-a", &library_a).await;
+    seed_title(&ctx, "async-b", &library_b).await;
+    let entry_a = seed_recycled_file(root_a.path(), "async-a", "selected").await;
+    let entry_b = seed_recycled_file(root_b.path(), "async-b", "unselected").await;
+    let unrelated = root_a.path().join("keep.mkv");
+    std::fs::write(&unrelated, b"unrelated file").expect("unrelated fixture");
+    let malformed = root_a.path().join(".scryer-recycle").join("unrecognized");
+    std::fs::create_dir(&malformed).expect("unrecognized entry");
+    std::fs::write(malformed.join("keep.mkv"), b"unrecognized file").unwrap();
+    let manager = persisted_manage_titles_actor(
+        &ctx,
+        "async-manager",
+        &[library_a.id.clone(), library_b.id.clone()],
+    )
+    .await;
+
+    assert!(
+        ctx.app
+            .start_empty_recycle_bin_job(&no_permission_actor(), None)
+            .await
+            .is_err()
+    );
+    let accepted = ctx
+        .app
+        .start_empty_recycle_bin_job(&manager, Some(vec![library_a.id.clone()]))
+        .await
+        .expect("accept empty job");
+    assert_eq!(accepted.status, JobRunStatus::Running);
+    // This single-threaded runtime has not yielded to the spawned purge yet.
+    assert!(
+        root_a
+            .path()
+            .join(".scryer-recycle")
+            .join(&entry_a)
+            .exists()
+    );
+    let admin = ctx.app.find_or_create_default_user().await.expect("admin");
+    let terminal = wait_for_terminal_job(&ctx, &admin, JobKey::RecycleBinPurge, &accepted.id).await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
+    assert!(!root_a.path().join(".scryer-recycle").join(entry_a).exists());
+    assert!(root_b.path().join(".scryer-recycle").join(entry_b).exists());
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated file");
+    assert_eq!(
+        std::fs::read(malformed.join("keep.mkv")).unwrap(),
+        b"unrecognized file"
+    );
+    let summary: Value = serde_json::from_str(terminal.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["succeeded"], 1);
+    assert_eq!(summary["action"], "empty");
+
+    // Resolving an inaccessible selection to an empty set must not expand to all libraries.
+    let accepted = ctx
+        .app
+        .start_empty_recycle_bin_job(&manager, Some(vec!["unknown-library".into()]))
+        .await
+        .expect("accept empty scope");
+    let terminal = wait_for_terminal_job(&ctx, &admin, JobKey::RecycleBinPurge, &accepted.id).await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
+    assert_eq!(
+        ctx.app
+            .list_recycled_items(&manager, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -2145,7 +2145,21 @@ export const deleteRecycledItemsMutation = `mutation DeleteRecycledItems($input:
 
 export const emptyRecycleBinMutation = `mutation EmptyRecycleBin($libraryIds: [ID!]) {
   emptyRecycleBin(libraryIds: $libraryIds) {
-    purgedCount
+    jobRun {
+      id
+      jobKey
+      displayName
+      category
+      section
+      status
+      triggerSource
+      startedAt
+      completedAt
+      summaryJson
+      summaryText
+      errorText
+      progressJson
+    }
   }
 }`;
 

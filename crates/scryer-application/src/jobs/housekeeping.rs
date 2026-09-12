@@ -2056,6 +2056,68 @@ impl AppUseCase {
         Err(AppError::NotFound(format!("recycle entry {}", entry_id)))
     }
 
+    /// Accept a tracked background purge without scanning recycle directories in the request.
+    pub async fn start_empty_recycle_bin_job(
+        &self,
+        actor: &scryer_domain::User,
+        library_ids: Option<Vec<String>>,
+    ) -> AppResult<JobRun> {
+        self.require_recycle_bin_page_access(actor).await?;
+        // Resolve "all accessible" now so a later grant cannot expand this request.
+        let mut library_ids = self
+            .selected_recycle_library_ids(actor, library_ids)
+            .await?
+            .into_iter()
+            .collect::<Vec<_>>();
+        library_ids.sort();
+        let guard = self
+            .runtime
+            .jobs
+            .interactive_operation_guards
+            .try_acquire("recycle-bin-empty")
+            .await
+            .ok_or_else(|| {
+                AppError::Validation("emptying the recycle bin is already running".into())
+            })?;
+        let (run, job_run, actor_event) = self
+            .create_recycle_batch_job_run(
+                actor,
+                JobKey::RecycleBinPurge,
+                format!("recycle_bin_empty:{}", library_ids.join(",")),
+                &[],
+            )
+            .await?;
+        let app = self.clone();
+        let actor = actor.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            // An empty explicit scope must not become "all accessible" on revalidation.
+            let result = if library_ids.is_empty() {
+                Ok(0)
+            } else {
+                app.empty_recycle_bin(&actor, Some(library_ids)).await
+            };
+            let (total, succeeded, results) = match result {
+                Ok(count) => (count as usize, count as usize, Vec::new()),
+                Err(error) => (
+                    1,
+                    0,
+                    vec![serde_json::json!({
+                        "status": "failed",
+                        "error": error.to_string(),
+                    })],
+                ),
+            };
+            if let Err(error) = app
+                .finish_recycle_batch_job(run, actor_event, "empty", total, succeeded, results)
+                .await
+            {
+                warn!(error = %error, "failed to finish empty recycle bin job");
+            }
+        });
+        Ok(job_run)
+    }
+
     /// Empty all recycle bins across all media roots.
     pub async fn empty_recycle_bin(
         &self,
