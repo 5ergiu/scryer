@@ -2454,6 +2454,7 @@ async fn execute_manual_series_movie_import(
     completed: Option<&CompletedDownload>,
     release_evidence: &ReleaseEvidence,
     source: &Path,
+    content_qualified: Option<ContentQualifiedVideo>,
     mapping: &ManualImportFileMapping,
     series_movie_link_id: &str,
     full_folder_path: &Path,
@@ -2499,9 +2500,7 @@ async fn execute_manual_series_movie_import(
     let search_title = crate::acquisition_release_search::series_movie_search_title(title, &link);
     let parsed =
         build_augmented_movie_import_metadata_for_title(source, release_evidence, &search_title);
-    let ext = scryer_domain::canonical_video_extension(source)
-        .unwrap_or("mkv")
-        .to_string();
+    let ext = import_video_destination_extension(source, content_qualified).to_string();
     let linked_episode = resolve_series_movie_linked_episode(app, title, &link).await?;
     // The resolved episode, not `link.linked_episode_id`, is this import's episode
     // everywhere below, so a film the fallback identified is mapped and owned by
@@ -2887,6 +2886,12 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     continue;
                 }
             };
+        // Only a source this re-qualification content-probed as video carries
+        // that proof into the import checks and destination naming.
+        let content_qualified = qualified
+            .video_facts
+            .as_ref()
+            .map(ContentQualifiedVideo::from_video_facts);
         let source = qualified.canonical_path;
 
         let target = match manual_import_mapping_target(mapping, &title.facet) {
@@ -2962,7 +2967,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     release_evidence,
                     // Manual import never asks srrdb: an operator already told
                     // Scryer what this file is.
-                    std::slice::from_ref(&ImportVideoFile::physical(source.clone()).with_disc_selection(mapping.disc_selection.clone())),
+                    std::slice::from_ref(&ImportVideoFile::physical(source.clone()).with_disc_selection(mapping.disc_selection.clone()).with_content_qualified(content_qualified)),
                     Utc::now(),
                     // An operator picked this file. The same bypass the manual
                     // episode path passes: no automatic sample rail, and no
@@ -3006,6 +3011,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     completed,
                     release_evidence,
                     &source,
+                    content_qualified,
                     mapping,
                     series_movie_link_id,
                     &full_folder_path,
@@ -3108,6 +3114,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             &specials_folder_template,
             &full_folder_path,
             &source,
+            content_qualified,
             &parsed,
             &target_episodes,
             &target_episodes,
@@ -3716,6 +3723,15 @@ async fn execute_queued_manual_import_with_outcome_inner(
     // skipped mappings (movie samples/extras) were never expected to land.
     let expected_mapping_count = Some(results.iter().filter(|result| !result.skipped).count());
     let (status, error_code, error_message) = manual_import_terminal_status_and_error(&results);
+    if status == ImportStatus::Failed {
+        tracing::warn!(
+            import_id,
+            title_id,
+            error_code = error_code.map(ImportErrorCode::as_str),
+            error = error_message.as_deref(),
+            "manual import failed"
+        );
+    }
 
     if status == ImportStatus::Completed
         && let Err(error) = app

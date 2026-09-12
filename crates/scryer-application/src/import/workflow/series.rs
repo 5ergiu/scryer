@@ -1736,6 +1736,7 @@ async fn import_single_episode_file(
         specials_folder_template,
         title_folder_path,
         source_video,
+        None,
         &parsed,
         &target_episodes,
         &target_episodes,

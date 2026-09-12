@@ -71,6 +71,10 @@ pub struct ImportCheckContext<'a> {
     #[expect(dead_code)]
     pub parsed: &'a ParsedReleaseMetadata,
     pub existing_files: &'a [TitleMediaFile],
+    /// Set only when the manual import executor's own content probe qualified
+    /// the source as video, so it may lack a known video extension. Every
+    /// other check still runs.
+    pub content_qualified_video: bool,
 }
 
 const DISK_SPACE_RESERVE_BYTES: u64 = 500 * 1024 * 1024;
@@ -117,9 +121,10 @@ fn available_disk_space(path: &Path) -> std::io::Result<u64> {
 
 // ── Individual checks ────────────────────────────────────────────────────────
 
-/// Reject files with extensions outside the known video set.
+/// Reject files with extensions outside the known video set, unless the manual
+/// import executor content-qualified the source as video.
 pub fn check_valid_extension(ctx: &ImportCheckContext<'_>) -> ImportVerdict {
-    if scryer_domain::is_video_file(ctx.source_path) {
+    if ctx.content_qualified_video || scryer_domain::is_video_file(ctx.source_path) {
         ImportVerdict::Accept
     } else {
         let ext = ctx
@@ -303,6 +308,7 @@ mod tests {
             import_mode: scryer_domain::ImportMode::HardlinkOrCopy,
             parsed,
             existing_files,
+            content_qualified_video: false,
         }
     }
 
@@ -331,6 +337,33 @@ mod tests {
         let dst = PathBuf::from("/data/readme.txt");
         let ctx = dummy_ctx(&src, &dst, 100, &parsed, &[]);
         assert!(!check_valid_extension(&ctx).is_accept());
+    }
+
+    #[test]
+    fn valid_extension_accepts_extensionless_source_only_when_content_qualified() {
+        let parsed = parse_release_metadata("dXRUKoYEAJ58jradJdxMKKxgczVTvt");
+        let src = PathBuf::from("/tmp/dXRUKoYEAJ58jradJdxMKKxgczVTvt");
+        let dst = PathBuf::from("/data/Show/Season 01/Show - S01E01.mkv");
+        let mut ctx = dummy_ctx(&src, &dst, 32 * 1024 * 1024, &parsed, &[]);
+        assert_eq!(
+            run_import_checks(&ctx),
+            ImportVerdict::Reject {
+                reason: "unsupported extension: <none>".into(),
+                code: ImportCheckCode::InvalidExtension,
+            }
+        );
+
+        ctx.content_qualified_video = true;
+        assert!(check_valid_extension(&ctx).is_accept());
+        let sample_src = PathBuf::from("/tmp/sample/dXRUKoYEAJ58jradJdxMKKxgczVTvt");
+        ctx.source_path = &sample_src;
+        assert!(matches!(
+            run_import_checks(&ctx),
+            ImportVerdict::Reject {
+                code: ImportCheckCode::SampleDirectory,
+                ..
+            }
+        ));
     }
 
     #[test]

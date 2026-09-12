@@ -7210,6 +7210,215 @@ async fn manual_import_still_accepts_file_whose_name_matches_no_episode() {
     );
 }
 
+/// Sparse extensionless copy of a MediaInfo fixture, like an obfuscated
+/// download member, sized above the manual import content-probe floor.
+#[cfg(feature = "runtime-media-analysis")]
+fn write_extensionless_video(dir: &Path, fixture: &str) -> std::path::PathBuf {
+    let path = dir.join("dXRUKoYEAJ58jradJdxMKKxgczVTvt");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scryer-mediainfo/tests/media")
+            .join(fixture),
+        &path,
+    )
+    .expect("copy source video fixture");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open source video fixture")
+        .set_len(PACK_VIDEO_SIZE_BYTES)
+        .expect("size source video above the content-probe floor");
+    path
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+async fn assert_manual_import_lands_extensionless_episode(fixture: &str, extension: &str) {
+    // e2e manual-import-weaver: the selection preview content-probed an
+    // extensionless member as video and offered it, then execution failed it
+    // with "unsupported extension: <none>". The executor's own
+    // re-qualification must carry it through the import checks, and the
+    // destination takes the probed container's extension.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let source_file = write_extensionless_video(source_dir.path(), fixture);
+
+    let results = crate::import_workflow::execute_manual_import(
+        &app,
+        &user,
+        "manual-import-extensionless-episode",
+        &title.id,
+        None,
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: Some(episode.id.clone()),
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+    )
+    .await
+    .expect("execute manual import");
+
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].success, "{results:?}");
+    let dest_path = results[0].dest_path.as_deref().expect("dest path");
+    assert_eq!(
+        Path::new(dest_path)
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some(extension),
+        "{results:?}"
+    );
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(media_files.len(), 1, "{media_files:?}");
+    assert_eq!(
+        media_files[0].episode_id.as_deref(),
+        Some(episode.id.as_str())
+    );
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn manual_import_lands_content_qualified_extensionless_matroska_episode() {
+    assert_manual_import_lands_extensionless_episode("h264_aac.mkv", "mkv").await;
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn manual_import_names_content_qualified_extensionless_mp4_episode_by_container() {
+    assert_manual_import_lands_extensionless_episode("h264_aac.mp4", "mp4").await;
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn manual_import_lands_content_qualified_extensionless_movie() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            library_dir: _library_dir,
+            ..
+        },
+        _submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        facet: MediaFacet::Movie,
+        title_name: "Extensionless Movie".to_string(),
+        ..Default::default()
+    })
+    .await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let source_file = write_extensionless_video(source_dir.path(), "h264_aac.mkv");
+    let completed = completed_download_fixture_item(
+        "manual-extensionless-movie",
+        &title.id,
+        "Extensionless.Movie.2024.1080p.WEB-DL",
+        &source_dir.path().to_string_lossy(),
+    );
+    // The canonical movie import writes its status to the import record.
+    let import_id = app
+        .services
+        .workflow
+        .imports
+        .queue_import_request(
+            ClientJobLocator::for_import_artifact(
+                Some(&completed.client_id),
+                &completed.client_type,
+                &completed.download_client_item_id,
+            ),
+            ImportType::ManualImport.as_str().to_string(),
+            "{}".to_string(),
+        )
+        .await
+        .expect("queue manual import record");
+
+    let results = crate::import_workflow::execute_manual_import(
+        &app,
+        &user,
+        &import_id,
+        &title.id,
+        Some(&completed),
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: None,
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+    )
+    .await
+    .expect("execute manual movie import");
+
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].success, "{results:?}");
+    let dest_path = results[0].dest_path.as_deref().expect("dest path");
+    assert_eq!(
+        Path::new(dest_path)
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("mkv"),
+        "{results:?}"
+    );
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn automatic_import_still_ignores_an_extensionless_video() {
+    // Content qualification belongs to the manual executor alone: an automatic
+    // import keeps treating an extensionless file as no video at all.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        library_dir: _library_dir,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    write_extensionless_video(source_dir.path(), "h264_aac.mkv");
+    let completed = series_pack_completed_download(
+        "automatic-extensionless-episode",
+        &title.id,
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL",
+        source_dir.path(),
+    );
+
+    let result = crate::import::import::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("automatic import should run");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Skipped,
+        "{result:?}"
+    );
+    assert_eq!(
+        result.skip_reason,
+        Some(ImportSkipReason::NoVideoFiles),
+        "{result:?}"
+    );
+    assert!(
+        app.services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .expect("list media files")
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn manual_import_of_a_file_already_in_place_is_satisfied_not_failed() {
     // Prod 2026-08-18: an operator re-ran a manual import whose file an earlier

@@ -60,6 +60,8 @@ async fn execute_resolved_episode_import(
     specials_folder_template: &str,
     title_folder_path: &Path,
     source_video: &Path,
+    // Set only by the manual executor, for a source its own probe qualified.
+    content_qualified: Option<ContentQualifiedVideo>,
     parsed: &crate::ParsedReleaseMetadata,
     target_episodes: &[scryer_domain::Episode],
     coverage_episodes: &[scryer_domain::Episode],
@@ -124,9 +126,7 @@ async fn execute_resolved_episode_import(
             });
         }
 
-        let ext = scryer_domain::canonical_video_extension(source_video)
-            .unwrap_or("mkv")
-            .to_string();
+        let ext = import_video_destination_extension(source_video, content_qualified).to_string();
         let effective_quality_label = quality_override
             .as_deref()
             .and_then(|value| non_empty_string(Some(value.to_string())))
@@ -165,6 +165,7 @@ async fn execute_resolved_episode_import(
             source_size: source_size as u64,
             parsed: &effective_parsed,
             existing_files: &existing_files,
+            content_qualified_video: content_qualified.is_some(),
         };
         if let crate::import_checks::ImportVerdict::Reject { reason, code } =
             crate::import_checks::run_import_checks(&check_ctx)
@@ -283,9 +284,8 @@ async fn execute_resolved_episode_import(
             )
         }
     };
-    let precheck_ext = scryer_domain::canonical_video_extension(source_video)
-        .unwrap_or("mkv")
-        .to_string();
+    let precheck_ext =
+        import_video_destination_extension(source_video, content_qualified).to_string();
     let precheck_quality_label = quality_override
         .as_deref()
         .and_then(|value| non_empty_string(Some(value.to_string())))
@@ -323,6 +323,7 @@ async fn execute_resolved_episode_import(
         source_size: source_size as u64,
         parsed: &precheck_parsed,
         existing_files: &existing_files,
+        content_qualified_video: content_qualified.is_some(),
     };
     if let crate::import_checks::ImportVerdict::Reject { reason, code } =
         crate::import_checks::run_import_checks(&check_ctx)
