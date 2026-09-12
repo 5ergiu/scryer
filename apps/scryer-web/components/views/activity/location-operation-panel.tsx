@@ -766,10 +766,12 @@ function FileBytes({
       : 0;
   return (
     <div className="space-y-1 tabular-nums">
-      {showBytes && (
+      {showBytes ? (
         <span>
           {formatByteCount(done)} / {formatByteCount(total)}
         </span>
+      ) : (
+        <span aria-hidden="true" className="block h-6" />
       )}
       <Progress
         value={progress}
