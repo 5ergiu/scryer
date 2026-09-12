@@ -139,8 +139,13 @@ pub(crate) enum StandbyRecoveryOutcome {
     /// The saved release is already active in a download client.
     Active { scope: SubmissionScope },
     /// The download client could not be consulted; the list is left intact for
-    /// the next cycle.
-    Deferred { scope: Option<SubmissionScope> },
+    /// the next cycle. `refused` is set when a saved result was actually
+    /// submitted and refused — an acquisition job counts that as a failed
+    /// submission, exactly as it counts the same refusal on the search lane.
+    Deferred {
+        scope: Option<SubmissionScope>,
+        refused: Option<super::pending::RefusedSubmission>,
+    },
     /// A better saved result is still held by a delay profile. The promotion
     /// lane owns it, so this walk must not take a worse release.
     Parked { scope: Option<SubmissionScope> },
@@ -1727,6 +1732,7 @@ pub(crate) async fn try_saved_candidates(
                 .await;
             return StandbyRecoveryOutcome::Deferred {
                 scope: Some(standby_scope),
+                refused: None,
             };
         }
 
@@ -1800,7 +1806,10 @@ pub(crate) async fn try_saved_candidates(
 
                 return StandbyRecoveryOutcome::Recovered { scope };
             }
-            Ok(super::pending::PendingGrabOutcome::Deferred) => {
+            Ok(
+                outcome @ (super::pending::PendingGrabOutcome::Deferred
+                | super::pending::PendingGrabOutcome::SubmitRefused(_)),
+            ) => {
                 info!(
                     release = standby.release_title.as_str(),
                     "standby reacquisition: download client unavailable, keeping release pending"
@@ -1811,8 +1820,13 @@ pub(crate) async fn try_saved_candidates(
                     .pending_releases
                     .update_pending_release_status(&standby.id, PendingReleaseStatus::Standby, None)
                     .await;
+                let refused = match outcome {
+                    super::pending::PendingGrabOutcome::SubmitRefused(refused) => Some(refused),
+                    _ => None,
+                };
                 return StandbyRecoveryOutcome::Deferred {
                     scope: Some(standby_scope),
+                    refused,
                 };
             }
             Ok(super::pending::PendingGrabOutcome::Parked) => {

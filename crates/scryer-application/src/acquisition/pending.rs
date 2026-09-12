@@ -30,6 +30,22 @@ pub(crate) enum PendingGrabOutcome {
     SourceGone,
     Rejected,
     Deferred,
+    /// The submission was made and refused in a way that must not burn the
+    /// release — an unavailable client, an ambiguous submit, a title briefly
+    /// locked by a location operation. The release is kept exactly as for
+    /// `Deferred`; the refusal is reported separately because, unlike a
+    /// deferral that never reached a download client, it is a failed
+    /// submission that an acquisition job's accounting has to count.
+    SubmitRefused(RefusedSubmission),
+}
+
+/// A submission refused without burning its release, reduced to what failure
+/// accounting reads (the error itself is not `Clone`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefusedSubmission {
+    /// The refusal was a retryable download-submission failure: the download
+    /// client was unavailable, as a mapped client that is globally disabled is.
+    pub(crate) submit_unavailable: bool,
 }
 
 /// Which path is promoting a pending release.
@@ -436,7 +452,7 @@ impl AppUseCase {
                             .expire_pending_release(&pr.id, "pending_release_rejected")
                             .await;
                     }
-                    Ok(PendingGrabOutcome::Deferred) => {
+                    Ok(PendingGrabOutcome::Deferred | PendingGrabOutcome::SubmitRefused(_)) => {
                         info!(
                             release = pr.release_title.as_str(),
                             "pending release: download client unavailable, keeping release pending"
@@ -1580,7 +1596,9 @@ impl AppUseCase {
                 }
 
                 if defer {
-                    return Ok(PendingGrabOutcome::Deferred);
+                    return Ok(PendingGrabOutcome::SubmitRefused(RefusedSubmission {
+                        submit_unavailable: err.is_retryable_download_submit_failure(),
+                    }));
                 }
 
                 // A definitive submit failure burns the release for this title:
