@@ -11623,6 +11623,128 @@ async fn active_library_scans_and_subscription_use_runtime_tracker_state() {
     assert_eq!(initial.facet, session.facet);
 }
 
+#[tokio::test]
+async fn library_scan_subscription_includes_libraries_created_after_connecting() {
+    let (app, user) = bootstrap();
+    let tracker = &app.runtime.library.library_scan_tracker;
+    tracker
+        .start_session_with_id_for_library(
+            "initial-scan".into(),
+            MediaFacet::Anime,
+            Some(scryer_domain::default_library_id_for_facet(
+                &MediaFacet::Anime,
+            )),
+            LibraryScanMode::Full,
+        )
+        .await
+        .unwrap();
+    let mut receiver = app.subscribe_library_scan_progress(&user).await.unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.session_id, "initial-scan");
+
+    let mut library = app
+        .services
+        .catalog
+        .libraries
+        .default_for_facet(MediaFacet::Anime)
+        .await
+        .unwrap()
+        .unwrap();
+    library.id = "new-anime-library".into();
+    library.name = "Second anime library".into();
+    library.slug = "second-anime-library".into();
+    library.is_default = false;
+    app.services
+        .catalog
+        .libraries
+        .create(library.clone(), vec![])
+        .await
+        .unwrap();
+    tracker
+        .start_session_with_id_for_library(
+            "new-library-scan".into(),
+            MediaFacet::Anime,
+            Some(library.id.clone()),
+            LibraryScanMode::Full,
+        )
+        .await
+        .unwrap();
+    let progress = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.session_id, "new-library-scan");
+    assert_eq!(progress.library_id, Some(library.id));
+
+    tracker
+        .set_summary("new-library-scan", LibraryScanSummary::default())
+        .await;
+    tracker
+        .complete_if_finished("new-library-scan")
+        .await
+        .unwrap();
+    let completed = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let session = receiver.recv().await.unwrap();
+            if session.status.is_terminal() {
+                break session;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(completed.session_id, "new-library-scan");
+    assert_eq!(completed.status, LibraryScanStatus::Completed);
+}
+
+#[tokio::test]
+async fn library_scan_subscription_does_not_expose_unknown_libraries() {
+    let (app, user) = bootstrap();
+    let tracker = &app.runtime.library.library_scan_tracker;
+    tracker
+        .start_session_with_id_for_library(
+            "visible-initial".into(),
+            MediaFacet::Anime,
+            Some(scryer_domain::default_library_id_for_facet(
+                &MediaFacet::Anime,
+            )),
+            LibraryScanMode::Full,
+        )
+        .await
+        .unwrap();
+    let mut receiver = app.subscribe_library_scan_progress(&user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tracker
+        .start_session_with_id_for_library(
+            "invisible-scan".into(),
+            MediaFacet::Anime,
+            Some("unknown-library".into()),
+            LibraryScanMode::Full,
+        )
+        .await
+        .unwrap();
+    tracker.cancel_session("invisible-scan").await.unwrap();
+    tracker.cancel_session("visible-initial").await.unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.session_id, "visible-initial");
+    assert_eq!(received.status, LibraryScanStatus::Canceled);
+    assert!(
+        app.library_scan_session(&user, "invisible-scan")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 // ── decide_import: one gate, three dispositions (D17) ────────────────────────
 //
 // These drive the *real* completed-download path. Until the probe override

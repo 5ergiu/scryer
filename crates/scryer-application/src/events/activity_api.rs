@@ -1359,16 +1359,17 @@ impl AppUseCase {
         &self,
         actor: &User,
     ) -> AppResult<broadcast::Receiver<LibraryScanSession>> {
+        let (initial_sessions, mut receiver) = self
+            .runtime
+            .library
+            .library_scan_tracker
+            .subscribe_with_initial_snapshot()
+            .await;
         let visibility = load_library_scan_visibility(self, actor).await?;
         let (tx, rx) = broadcast::channel(128);
         let app = self.clone();
+        let actor = actor.clone();
         tokio::spawn(async move {
-            let (initial_sessions, mut receiver) = app
-                .runtime
-                .library
-                .library_scan_tracker
-                .subscribe_with_initial_snapshot()
-                .await;
             for session in initial_sessions {
                 if !library_scan_session_visible(&session, &visibility) {
                     continue;
@@ -1381,7 +1382,28 @@ impl AppUseCase {
             loop {
                 match receiver.recv().await {
                     Ok(session) => {
-                        if !library_scan_session_visible(&session, &visibility) {
+                        // Libraries can be created during this connection.
+                        // Recheck the affected facet rather than retaining the
+                        // subscription's original library allowlist indefinitely.
+                        let visible_ids = match app
+                            .authorized_library_ids(
+                                &actor,
+                                Some(session.facet.clone()),
+                                LibraryPermission::View,
+                            )
+                            .await
+                        {
+                            Ok(ids) => ids,
+                            Err(error) => {
+                                tracing::warn!(%error, "library scan visibility refresh failed");
+                                continue;
+                            }
+                        };
+                        if !session
+                            .library_id
+                            .as_ref()
+                            .map_or_else(|| !visible_ids.is_empty(), |id| visible_ids.contains(id))
+                        {
                             continue;
                         }
                         if tx.send(session).is_err() {

@@ -1,104 +1,76 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useClient } from "urql";
 
 import {
   activeLibraryScansQuery,
+  libraryScanSessionQuery,
   libraryScanStateSubscriptionQuery,
 } from "@/lib/graphql/queries";
 import { useDeferredWsSubscription } from "@/lib/hooks/use-deferred-ws-subscription";
-import type { Facet, LibraryScanProgress, LibraryScanStatus } from "@/lib/types";
+import type { Facet, LibraryScanProgress } from "@/lib/types";
 import { normalizeLibraryScanProgress } from "@/lib/utils/job-runs";
-import { findActiveLibraryScanSession } from "@/lib/utils/library-scan-sessions";
-
-function isTerminal(status: LibraryScanStatus): boolean {
-  return (
-    status === "COMPLETED" ||
-    status === "CANCELED" ||
-    status === "WARNING" ||
-    status === "FAILED"
-  );
-}
-
-function indexSessions(
-  sessions: LibraryScanProgress[],
-): Record<string, LibraryScanProgress> {
-  return sessions.reduce<Record<string, LibraryScanProgress>>((acc, session) => {
-    acc[session.sessionId] = session;
-    return acc;
-  }, {});
-}
-
-function scanSessionUpdatedAt(session: LibraryScanProgress): number {
-  return (
-    Date.parse(session.updatedAt ?? "") ||
-    Date.parse(session.startedAt ?? "") ||
-    0
-  );
-}
-
-function preferNewestScanSession(
-  current: LibraryScanProgress | undefined,
-  incoming: LibraryScanProgress,
-): LibraryScanProgress {
-  if (!current) {
-    return incoming;
-  }
-
-  return scanSessionUpdatedAt(incoming) >= scanSessionUpdatedAt(current)
-    ? incoming
-    : current;
-}
-
-function mergeSessionsByNewest(
-  current: Record<string, LibraryScanProgress>,
-  incoming: LibraryScanProgress[],
-): Record<string, LibraryScanProgress> {
-  const next = { ...current };
-  for (const session of incoming) {
-    next[session.sessionId] = preferNewestScanSession(
-      next[session.sessionId],
-      session,
-    );
-  }
-  return next;
-}
-
-function replaceActiveSessions(
-  current: Record<string, LibraryScanProgress>,
-  incoming: LibraryScanProgress[],
-): Record<string, LibraryScanProgress> {
-  const retainedTerminalSessions = Object.values(current).filter((session) =>
-    isTerminal(session.status),
-  );
-
-  return mergeSessionsByNewest(indexSessions(retainedTerminalSessions), incoming);
-}
+import {
+  findActiveLibraryScanSession,
+  isTerminalLibraryScanStatus,
+} from "@/lib/utils/library-scan-sessions";
+import { LibraryScanState } from "@/lib/utils/library-scan-state";
 
 export function useLibraryScanEventStream() {
   const client = useClient();
-  const [sessionsById, setSessionsById] = useState<
-    Record<string, LibraryScanProgress>
-  >({});
+  const [state] = useState(() => new LibraryScanState());
+  const sessionsById = useSyncExternalStore(
+    state.subscribe,
+    state.getSnapshot,
+    state.getSnapshot,
+  );
 
-  const refreshSessions = useCallback(async () => {
-    const { data, error } = await client
-      .query(activeLibraryScansQuery, {}, { requestPolicy: "network-only" })
-      .toPromise();
+  const refreshSessions = useCallback(
+    () =>
+      state.refresh(
+        async () => {
+          const { data, error } = await client
+            .query(
+              activeLibraryScansQuery,
+              {},
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
 
-    if (error) {
-      throw error;
-    }
+          if (error) {
+            throw error;
+          }
 
-    const rawSessions: unknown[] = Array.isArray(data?.activeLibraryScans)
-      ? data.activeLibraryScans
-      : [];
-    const sessions = rawSessions
-      .map(normalizeLibraryScanProgress)
-      .filter((session): session is LibraryScanProgress => session !== null);
+          const rawSessions: unknown[] = Array.isArray(data?.activeLibraryScans)
+            ? data.activeLibraryScans
+            : [];
+          const sessions = rawSessions
+            .map(normalizeLibraryScanProgress)
+            .filter(
+              (session): session is LibraryScanProgress => session !== null,
+            );
 
-    setSessionsById((current) => replaceActiveSessions(current, sessions));
-    return sessions;
-  }, [client]);
+          return sessions;
+        },
+        async (sessionId) => {
+          const { data, error } = await client
+            .query(
+              libraryScanSessionQuery,
+              { sessionId },
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
+          if (error) throw error;
+          return normalizeLibraryScanProgress(data?.libraryScanSession);
+        },
+      ),
+    [client, state],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -127,31 +99,26 @@ export function useLibraryScanEventStream() {
       variables: {},
     },
     onNext(result) {
-      const session = normalizeLibraryScanProgress(result.data?.libraryScanState);
+      const session = normalizeLibraryScanProgress(
+        result.data?.libraryScanState,
+      );
       if (!session) {
         return;
       }
 
-      setSessionsById((current) =>
-        mergeSessionsByNewest(current, [session]),
-      );
+      state.accept([session]);
     },
     onError(error) {
       console.error("[library-scan-events] subscription error:", error);
     },
   });
 
-  const dismissSession = useCallback((sessionId: string) => {
-    setSessionsById((current) => {
-      if (!(sessionId in current)) {
-        return current;
-      }
-
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-  }, []);
+  const dismissSession = useCallback(
+    (sessionId: string) => {
+      state.dismiss(sessionId);
+    },
+    [state],
+  );
 
   const sessions = useMemo(
     () =>
@@ -161,24 +128,20 @@ export function useLibraryScanEventStream() {
     [sessionsById],
   );
 
+  const hasActiveSessions = sessions.some(
+    (session) => !isTerminalLibraryScanStatus(session.status),
+  );
   useEffect(() => {
-    if (!sessions.some((session) => !isTerminal(session.status))) {
+    if (!hasActiveSessions) {
       return;
     }
-
-    const timer = window.setInterval(() => {
-      void refreshSessions().catch((error) => {
-        console.error(
-          "[library-scan-events] failed to reconcile active scan sessions:",
-          error,
-        );
-      });
-    }, 5_000);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [refreshSessions, sessions]);
+    return state.poll(refreshSessions, (error) => {
+      console.error(
+        "[library-scan-events] failed to reconcile active scan sessions:",
+        error,
+      );
+    });
+  }, [refreshSessions, hasActiveSessions, state]);
 
   const getActiveSession = useCallback(
     (facet: Facet, libraryId?: string | null) =>

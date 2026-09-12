@@ -2062,6 +2062,12 @@ ${LIBRARY_SCAN_PROGRESS_FIELDS}
   }
 }`;
 
+export const libraryScanSessionQuery = `query LibraryScanSession($sessionId: ID!) {
+  libraryScanSession(sessionId: $sessionId) {
+${LIBRARY_SCAN_PROGRESS_FIELDS}
+  }
+}`;
+
 export const jobsQuery = `query Jobs {
   jobs {
     key

@@ -20698,6 +20698,15 @@ type QueryRoot {
 	"""
 	activeLibraryScans: [LibraryScanProgressPayload!]!
 	"""
+	Recover an active or completed scan snapshot visible to the caller.
+	"""
+	libraryScanSession(
+		"""
+		ID of the active or completed library scan to recover.
+		"""
+		sessionId: ID!
+	): LibraryScanProgressPayload
+	"""
 	Poll deprecated external movie or series source warmup status for one session.
 	"""
 	externalImportArrSourceWarmupStatus(

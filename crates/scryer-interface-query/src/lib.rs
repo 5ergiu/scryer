@@ -2248,6 +2248,21 @@ impl ActivityQueries {
             .collect())
     }
 
+    /// Recover an active or completed scan snapshot visible to the caller.
+    async fn library_scan_session(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the active or completed library scan to recover.")] session_id: ID,
+    ) -> GqlResult<Option<LibraryScanProgressPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        Ok(app
+            .library_scan_session(&actor, session_id.as_str())
+            .await
+            .map_err(to_gql_error)?
+            .map(from_library_scan_session))
+    }
+
     /// Poll deprecated external movie or series source warmup status for one session.
     #[graphql(deprecation = "use externalImportWarmupStatus")]
     async fn external_import_arr_source_warmup_status(
