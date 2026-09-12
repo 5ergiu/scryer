@@ -5,7 +5,7 @@ mod application_upgrade_evidence;
 mod application_upgrade_helper;
 mod backup_routes;
 mod base_path;
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "e2e-harness"))]
 mod dev_api_keys;
 mod http_error;
 mod http_metrics;
@@ -1803,7 +1803,7 @@ async fn bootstrap_application(
             );
         }
     }
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(any(debug_assertions, test, feature = "e2e-harness"))]
     if let Err(error) = dev_api_keys::sync_from_env(&app_use_case).await {
         tracing::error!(error = %error, "failed to synchronize development API keys");
         std::process::exit(1);

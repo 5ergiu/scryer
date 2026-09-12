@@ -5,6 +5,9 @@ edition.workspace = true
 
 [features]
 default = []
+# Test-harness images only: sync SCRYER_DEV_API_KEYS in a binary built without
+# debug assertions. Never enable this for a shipped build.
+e2e-harness = []
 
 [dependencies]
 scryer-application = { path = "../scryer-application", features = ["runtime"] }

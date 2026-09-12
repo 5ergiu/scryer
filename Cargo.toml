@@ -104,12 +104,14 @@ debug = 0
 split-debuginfo = "off"
 incremental = false
 
+# Harness images: release semantics (panic = "abort", no debug assertions) with
+# a fast, incremental, debuginfo-free build.
 [profile.e2e]
 inherits = "release"
 opt-level = 1
 lto = false
 codegen-units = 256
-debug = 1
+debug = 0
 strip = false
 incremental = true
 
