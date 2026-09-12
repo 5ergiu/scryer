@@ -765,20 +765,18 @@ function FileBytes({
       ? Math.min(100, (done / total) * 100)
       : 0;
   return (
-    <div className="space-y-1 tabular-nums">
-      {showBytes ? (
-        <span>
-          {formatByteCount(done)} / {formatByteCount(total)}
-        </span>
-      ) : (
-        <span aria-hidden="true" className="block h-6" />
-      )}
+    <div className="flex items-center gap-2 tabular-nums">
       <Progress
         value={progress}
-        className="h-1.5"
+        className="h-1.5 min-w-0 flex-1"
         aria-label={label}
         aria-valuetext={`${progress.toFixed(1)}%`}
       />
+      {showBytes ? (
+        <span className="shrink-0 whitespace-nowrap text-right">
+          {formatByteCount(done)} / {formatByteCount(total)}
+        </span>
+      ) : null}
     </div>
   );
 }
