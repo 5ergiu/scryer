@@ -409,6 +409,90 @@ mod title_history_filter_tests {
         );
     }
 
+    /// FR-026: an unlinked grab has no catalog title behind it, so its domain
+    /// event carries a NULL `title_id`. The history page filter opened with an
+    /// unconditional `title_id IS NOT NULL`, which deleted those rows in SQL
+    /// before any projection ran - the unfiltered History page simply never
+    /// showed them. They belong on the unfiltered page, and only an actual
+    /// title filter may exclude them.
+    #[tokio::test]
+    async fn an_untitled_grab_is_on_the_unfiltered_history_page() {
+        let store = store().await;
+        let mut untitled = event_with_payload(
+            "event-untitled-grab",
+            DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
+                title: title_snapshot(),
+                source_title: Some("Example.2026.1080p.WEB-DL".to_string()),
+                source_hint: Some("https://indexer.example/api".to_string()),
+                source_provider: Some("Configured Indexer".to_string()),
+                download_id: Some("download-1".to_string()),
+                episode_ids: Vec::new(),
+            }),
+        );
+        untitled.title_id = None;
+        untitled.facet = None;
+        untitled.stream = DomainEventStream::Global;
+        store.append(untitled).await.expect("event should append");
+        store
+            .append(download_ignored_event())
+            .await
+            .expect("titled event should append");
+
+        let unfiltered = store
+            .list_title_history_page_events(None, None, None, 50, 0)
+            .await
+            .expect("unfiltered page should load");
+        assert_eq!(
+            unfiltered.len(),
+            2,
+            "both the titled and the untitled row are on the unfiltered page"
+        );
+        assert!(
+            unfiltered
+                .iter()
+                .any(|event| event.event_id == "event-untitled-grab"),
+            "the untitled grab is one of them"
+        );
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, None, None)
+                .await
+                .expect("unfiltered count should load"),
+            2
+        );
+
+        let grabs = store
+            .list_title_history_page_events(
+                Some(&[TitleHistoryEventType::Grabbed]),
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .expect("event-type filtered page should load");
+        assert_eq!(grabs.len(), 1, "and survives its own event-type filter");
+        assert_eq!(grabs[0].event_id, "event-untitled-grab");
+
+        let title_scoped = store
+            .list_title_history_page_events(None, Some(&["title-1".into()]), None, 50, 0)
+            .await
+            .expect("title-scoped page should load");
+        assert_eq!(
+            title_scoped.len(),
+            1,
+            "a title filter still excludes it: it has no catalog title to match"
+        );
+        assert_eq!(title_scoped[0].event_id, "event-1");
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, Some(&["title-1".into()]), None)
+                .await
+                .expect("title-scoped count should load"),
+            1
+        );
+    }
+
     /// `DownloadCompleted` has no stored domain-event equivalent, so its
     /// never-match clause is correct and must stay.
     #[tokio::test]
