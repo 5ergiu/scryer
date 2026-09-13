@@ -358,16 +358,63 @@ impl AppUseCase {
         &self,
         config: &IndexerConfig,
     ) -> AppResult<Option<String>> {
+        if self
+            .services
+            .integrations
+            .indexer_caps_refresher
+            .available()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        // Only a direct Newznab indexer has its caps fetched by Scryer itself;
+        // for every other kind the refresher sends nothing, so there is no
+        // request to route.
+        let proxy = if config.is_direct_nab() {
+            self.assigned_indexer_proxy(config).await?
+        } else {
+            None
+        };
         self.fetch_caps_snapshot_json_for_config_with_accounting(
             config,
+            proxy.as_ref(),
             crate::IndexerAccountingContext::for_config(config).as_ref(),
         )
         .await
     }
 
+    /// The proxy a stored indexer's own requests must travel through.
+    ///
+    /// Resolved the way the search client resolves it, so a caps fetch leaves
+    /// by the same route as the indexer's searches: an assignment that points at
+    /// a missing or disabled proxy is an error, never a reason to send the
+    /// request directly.
+    async fn assigned_indexer_proxy(
+        &self,
+        config: &IndexerConfig,
+    ) -> AppResult<Option<scryer_domain::ProxyConfig>> {
+        let Some(proxy_config_id) = config.proxy_config_id.as_deref() else {
+            return Ok(None);
+        };
+        let proxy = self
+            .services
+            .integrations
+            .proxy_configs
+            .get_by_id(proxy_config_id)
+            .await?
+            .ok_or_else(|| AppError::Validation("Proxy configuration was not found.".into()))?;
+        if !proxy.is_enabled {
+            return Err(AppError::Validation(
+                "Proxy is disabled for this indexer.".into(),
+            ));
+        }
+        Ok(Some(proxy))
+    }
+
     pub(crate) async fn fetch_caps_snapshot_json_for_config_with_accounting(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&scryer_domain::ProxyConfig>,
         accounting: Option<&crate::IndexerAccountingContext>,
     ) -> AppResult<Option<String>> {
         let Some(refresher) = self
@@ -378,7 +425,10 @@ impl AppUseCase {
         else {
             return Ok(None);
         };
-        let Some(snapshot) = refresher.fetch_for_config_with_accounting(config, accounting).await? else {
+        let Some(snapshot) = refresher
+            .fetch_for_config_with_accounting(config, proxy, accounting)
+            .await?
+        else {
             if config.is_direct_nab() {
                 return Err(AppError::Repository(
                     "caps refresh returned no Newznab caps snapshot".into(),
