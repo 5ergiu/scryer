@@ -16,7 +16,7 @@ use scryer_application::{
 };
 use scryer_domain::{
     IndexerCapsSearchNode, IndexerCapsSnapshot, IndexerCategoryDescriptor, IndexerCategoryModel,
-    IndexerCategoryValueKind, IndexerConfig,
+    IndexerCategoryValueKind, IndexerConfig, ProxyConfig,
 };
 use scryer_outbound_http::{
     DestinationKey, HostKey, OutboundHttpClient, OutboundHttpError, RateLimitRegistry,
@@ -238,6 +238,27 @@ fn merge_additional_params(extracted: Option<&str>, existing: Option<&str>) -> O
     any.then(|| serializer.finish())
 }
 
+/// The client a caps fetch for `config` is sent with.
+///
+/// `proxy` must be the indexer's own assignment: a caller that hands over a
+/// different proxy, or none for an indexer that has one, is refused rather than
+/// trusted, because the fallback would be a direct request from Scryer's own
+/// address to an indexer the operator put behind a proxy.
+fn caps_request_client(
+    config: &IndexerConfig,
+    proxy: Option<&ProxyConfig>,
+    direct: &reqwest::Client,
+) -> AppResult<reqwest::Client> {
+    if config.proxy_config_id.as_deref() != proxy.map(|proxy| proxy.id.as_str()) {
+        return Err(AppError::Validation(format!(
+            "caps refresh for indexer {} was not given its assigned proxy; refusing to send it directly",
+            config.name
+        )));
+    }
+    scryer_application::transport_proxy::indexer_host_request_client(proxy, || direct.clone())
+        .map_err(AppError::Repository)
+}
+
 fn is_direct_nab_control_query_key(key: &str) -> bool {
     matches!(
         key.trim().to_ascii_lowercase().as_str(),
@@ -313,9 +334,11 @@ impl IndexerCapsSnapshotRefresher for DirectNabCapsSnapshotRefresher {
     async fn fetch_for_config(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&ProxyConfig>,
     ) -> AppResult<Option<IndexerCapsSnapshot>> {
         self.fetch_for_config_with_accounting(
             config,
+            proxy,
             scryer_application::IndexerAccountingContext::for_config(config).as_ref(),
         )
         .await
@@ -324,6 +347,7 @@ impl IndexerCapsSnapshotRefresher for DirectNabCapsSnapshotRefresher {
     async fn fetch_for_config_with_accounting(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&ProxyConfig>,
         accounting: Option<&scryer_application::IndexerAccountingContext>,
     ) -> AppResult<Option<IndexerCapsSnapshot>> {
         if !config.is_direct_nab() {
@@ -331,6 +355,9 @@ impl IndexerCapsSnapshotRefresher for DirectNabCapsSnapshotRefresher {
         }
 
         let direct_config = DirectNabConfig::from_indexer_config(config)?;
+        // Settled before the scheduler is asked, so a caps fetch that cannot
+        // take the indexer's route neither sends nor spends an admission.
+        let request_client = caps_request_client(config, proxy, self.outbound_http.client())?;
         let (host_key, destination_key) = scheduler_keys_for_caps(&direct_config.base_url, config);
         let candidate_id = SchedulerCandidateId::new();
         let scheduler_decision = self
@@ -407,8 +434,7 @@ impl IndexerCapsSnapshotRefresher for DirectNabCapsSnapshotRefresher {
                 .with_backoff(Duration::from_secs(1), Duration::from_secs(15))
                 .with_destination_cooldown_key(destination_key.clone()),
                 || {
-                    self.outbound_http
-                        .client()
+                    request_client
                         .get(url.clone())
                         .header("Accept", "application/xml, text/xml, application/rss+xml")
                         .header("User-Agent", DIRECT_NAB_CAPS_USER_AGENT)
@@ -979,9 +1005,248 @@ mod tests {
 
         let refresher = DirectNabCapsSnapshotRefresher::new();
         let snapshot = refresher
-            .fetch_for_config(&config)
+            .fetch_for_config(&config, None)
             .await
             .expect("proxy configs should be ignored");
         assert!(snapshot.is_none());
+    }
+
+    const PROXIED_CAPS_XML: &str = r#"<caps><server title="Through The Proxy" /><searching><search available="yes" supportedParams="q" /></searching></caps>"#;
+
+    /// A direct Newznab indexer pointed at `origin`, assigned `proxy_config_id`.
+    fn direct_newznab_config(origin: &str, proxy_config_id: Option<&str>) -> IndexerConfig {
+        IndexerConfig {
+            id: "cfg-proxied-caps".to_string(),
+            name: "Proxied Newznab".to_string(),
+            provider_type: "newznab".to_string(),
+            base_url: origin.to_string(),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: proxy_config_id.map(str::to_string),
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: Some(
+                serde_json::json!({ "base_url": origin, "api_key": "test-key" }).to_string(),
+            ),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn proxy_config(
+        id: &str,
+        provider_type: scryer_domain::ProxyProviderType,
+        base_url: &str,
+    ) -> ProxyConfig {
+        let now = chrono::Utc::now();
+        ProxyConfig {
+            id: id.to_string(),
+            name: "House Proxy".to_string(),
+            provider_type,
+            protocol: None,
+            base_url: base_url.to_string(),
+            request_timeout_seconds: 5,
+            is_enabled: true,
+            username_encrypted: None,
+            password_encrypted: None,
+            remote_dns: false,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            created_at: now,
+            updated_at: now,
+            host_key_fingerprint: None,
+            host_key_pinned_at: None,
+            private_key_encrypted: None,
+            private_key_passphrase_encrypted: None,
+            peer_public_key: None,
+            preshared_key_encrypted: None,
+            tunnel_public_key: None,
+            tunnel_addresses: Vec::new(),
+            tunnel_dns_servers: Vec::new(),
+            tunnel_mtu: None,
+            tunnel_keepalive_seconds: None,
+        }
+    }
+
+    /// The indexer itself. Anything it receives arrived directly from Scryer,
+    /// which is exactly what a proxied indexer must never see.
+    async fn caps_origin() -> wiremock::MockServer {
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(PROXIED_CAPS_XML))
+            .mount(&origin)
+            .await;
+        origin
+    }
+
+    /// Minimal HTTP forward proxy: records each absolute-form request line and
+    /// answers with a caps document itself, without contacting the origin.
+    async fn spawn_recording_http_proxy() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy double should bind");
+        let address = listener.local_addr().expect("proxy double address");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorder = Arc::clone(&recorder);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 4096];
+                    let mut received = Vec::new();
+                    while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => received.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    if let Some(line) = String::from_utf8_lossy(&received).lines().next() {
+                        recorder.lock().unwrap().push(line.to_string());
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PROXIED_CAPS_XML}",
+                        PROXIED_CAPS_XML.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    /// The e2e proxy matrix caught Scryer's own address in a proxied indexer's
+    /// log: the caps request went straight out while the searches went through
+    /// the proxy. The caps request is indexer traffic like any other, so the
+    /// operator's proxy carries it.
+    #[tokio::test]
+    async fn caps_for_a_proxied_indexer_travel_through_its_transport_proxy() {
+        let origin = caps_origin().await;
+        let (proxy_url, proxy_requests) = spawn_recording_http_proxy().await;
+        let proxy = proxy_config(
+            "house-proxy",
+            scryer_domain::ProxyProviderType::Http,
+            &proxy_url,
+        );
+        let config = direct_newznab_config(&origin.uri(), Some("house-proxy"));
+
+        let snapshot = DirectNabCapsSnapshotRefresher::new()
+            .fetch_for_config(&config, Some(&proxy))
+            .await
+            .expect("the proxy answers the caps request")
+            .expect("a direct Newznab indexer yields a snapshot");
+
+        assert_eq!(snapshot.server_title.as_deref(), Some("Through The Proxy"));
+        let proxy_requests = proxy_requests.lock().unwrap().clone();
+        assert_eq!(proxy_requests.len(), 1, "{proxy_requests:?}");
+        assert!(
+            proxy_requests[0].starts_with(&format!("GET {}/api?t=caps", origin.uri())),
+            "the proxy must be asked for the indexer's caps: {proxy_requests:?}"
+        );
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the indexer must never be reached directly"
+        );
+    }
+
+    /// Fail closed: a proxy that cannot carry the request (disabled, or not
+    /// buildable into a client) fails the refresh. It never degrades into a
+    /// direct request.
+    #[tokio::test]
+    async fn caps_fail_closed_when_the_assigned_proxy_cannot_carry_them() {
+        let origin = caps_origin().await;
+        let config = direct_newznab_config(&origin.uri(), Some("house-proxy"));
+
+        let unbuildable = proxy_config(
+            "house-proxy",
+            scryer_domain::ProxyProviderType::Http,
+            "not a proxy url",
+        );
+        let mut disabled = proxy_config(
+            "house-proxy",
+            scryer_domain::ProxyProviderType::Socks5,
+            "socks5://127.0.0.1:1",
+        );
+        disabled.is_enabled = false;
+
+        for proxy in [unbuildable, disabled] {
+            let error = DirectNabCapsSnapshotRefresher::new()
+                .fetch_for_config(&config, Some(&proxy))
+                .await
+                .expect_err("a proxy that cannot carry caps must fail the refresh");
+            assert!(
+                error.to_string().contains("House Proxy"),
+                "the failure must name the proxy: {error}"
+            );
+        }
+        // The same holds when the caller hands over no proxy at all for an
+        // indexer that has one assigned, or a different proxy than assigned.
+        DirectNabCapsSnapshotRefresher::new()
+            .fetch_for_config(&config, None)
+            .await
+            .expect_err("an assigned proxy that was not resolved must not go direct");
+        let other = proxy_config(
+            "other-proxy",
+            scryer_domain::ProxyProviderType::Http,
+            "http://127.0.0.1:1",
+        );
+        DirectNabCapsSnapshotRefresher::new()
+            .fetch_for_config(&config, Some(&other))
+            .await
+            .expect_err("a proxy other than the assigned one must not be used");
+
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing may reach the indexer directly when its proxy is unusable"
+        );
+    }
+
+    /// A challenge solver is not a hop: the plugin hosts send an indexer's
+    /// requests directly and consult the solver only on a challenge page. The
+    /// caps request keeps that same behaviour.
+    #[tokio::test]
+    async fn caps_for_a_solver_assigned_indexer_stay_direct_like_its_searches() {
+        let origin = caps_origin().await;
+        let mut solver = proxy_config(
+            "solver",
+            scryer_domain::ProxyProviderType::Byparr,
+            "http://127.0.0.1:1",
+        );
+        solver.protocol = Some(scryer_domain::ChallengeSolverProtocol::RequestSolutionV1);
+        let config = direct_newznab_config(&origin.uri(), Some("solver"));
+
+        DirectNabCapsSnapshotRefresher::new()
+            .fetch_for_config(&config, Some(&solver))
+            .await
+            .expect("direct caps request")
+            .expect("snapshot");
+
+        assert_eq!(
+            origin.received_requests().await.unwrap_or_default().len(),
+            1
+        );
     }
 }

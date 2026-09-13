@@ -143,6 +143,41 @@ pub fn transport_proxied_reqwest_client_with_redirect_policy(
     .map_err(|error| transport_proxy_unreachable_message(config, &error))
 }
 
+/// The client for a request Scryer sends an indexer itself, outside any
+/// plugin: the connection preflight and the caps fetch.
+///
+/// `proxy` is the indexer's resolved assignment. The routing rule is the plugin
+/// hosts' rule, so these requests cannot leave by a different route than the
+/// indexer's searches do:
+///
+/// * no proxy, or a challenge solver: `direct()`. A solver is consulted only
+///   when a response turns out to be a challenge page; the plugin hosts send an
+///   indexer's requests directly first, and so do these.
+/// * every other kind: a client that egresses through the proxy, or an error.
+///   The filter is "not a solver" rather than "is a transport" for the same
+///   reason as in the plugin hosts: a kind that slipped past both would egress
+///   directly, which a configured proxy must never produce.
+///
+/// The proxied client follows no redirects, like the direct indexer client
+/// these requests otherwise use.
+pub fn indexer_host_request_client(
+    proxy: Option<&ProxyConfig>,
+    direct: impl FnOnce() -> reqwest::Client,
+) -> Result<reqwest::Client, String> {
+    let Some(proxy) = proxy.filter(|proxy| !proxy.is_challenge_solver()) else {
+        return Ok(direct());
+    };
+    if !proxy.is_enabled {
+        return Err(format!("Proxy {} is disabled.", proxy.name.trim()));
+    }
+    transport_proxied_reqwest_client_with_redirect_policy(
+        proxy,
+        "",
+        reqwest::redirect::Policy::none(),
+    )
+    .inspect_err(|message| record_transport_proxy_failure(proxy, message))
+}
+
 /// Blocking twin of [`transport_proxied_reqwest_client`], for the blocking
 /// plugin HTTP worker.
 pub fn blocking_transport_proxied_reqwest_client(

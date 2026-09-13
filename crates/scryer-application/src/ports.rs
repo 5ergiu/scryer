@@ -3759,19 +3759,30 @@ pub trait ProxyConfigRepository: Send + Sync {
     async fn clear_host_key(&self, id: &str) -> AppResult<()>;
 }
 
+/// Fetches an indexer's caps document with a request Scryer issues itself,
+/// outside any plugin.
+///
+/// `proxy` is the indexer's assigned proxy, already resolved by the caller
+/// (`None` only when the indexer has none). The request is subject to the same
+/// egress rule as the indexer's plugin traffic: every non-solver proxy carries
+/// it, and an implementation that cannot send it through that proxy must fail
+/// rather than send it directly. It is a required parameter, not a defaulted
+/// one, so no implementation can silently ignore it.
 #[async_trait]
 pub trait IndexerCapsSnapshotRefresher: Send + Sync {
     async fn fetch_for_config(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&scryer_domain::ProxyConfig>,
     ) -> AppResult<Option<IndexerCapsSnapshot>>;
 
     async fn fetch_for_config_with_accounting(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&scryer_domain::ProxyConfig>,
         _accounting: Option<&IndexerAccountingContext>,
     ) -> AppResult<Option<IndexerCapsSnapshot>> {
-        self.fetch_for_config(config).await
+        self.fetch_for_config(config, proxy).await
     }
 }
 

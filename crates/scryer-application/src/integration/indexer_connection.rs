@@ -190,6 +190,7 @@ impl AppUseCase {
 
         preflight_test_flight_url(
             &validated_base_url,
+            proxy_config.as_ref(),
             accounting.as_ref(),
             self.services.integrations.indexer_stats.clone(),
         )
@@ -256,7 +257,11 @@ impl AppUseCase {
             .available()
             .is_some();
         let caps_snapshot = self
-            .fetch_caps_snapshot_json_for_config_with_accounting(&temp_config, accounting.as_ref())
+            .fetch_caps_snapshot_json_for_config_with_accounting(
+                &temp_config,
+                proxy_config.as_ref(),
+                accounting.as_ref(),
+            )
             .await
             .map_err(map_indexer_connection_test_error)?;
         if caps_refresh_available && temp_config.is_direct_nab() && caps_snapshot.is_none() {
@@ -288,8 +293,11 @@ impl AppUseCase {
             Some(&normalized_config_json),
         )?;
         let validated_base_url = validate_test_flight_url(&base_url)?;
+        // The preview API takes no proxy identity, so this Prowlarr preview
+        // preflight has none to honor.
         preflight_test_flight_url(
             &validated_base_url,
+            None,
             None,
             self.services.integrations.indexer_stats.clone(),
         )
@@ -658,19 +666,27 @@ fn format_preflight_transport_error(url: &url::Url, origin: &str, error: &str) -
 #[cfg(not(test))]
 async fn preflight_test_flight_url(
     url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     accounting: Option<&crate::IndexerAccountingContext>,
     stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
-    observed_preflight_test_flight_url(url, accounting, stats).await
+    observed_preflight_test_flight_url(url, proxy, accounting, stats).await
 }
 
 async fn observed_preflight_test_flight_url(
     url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     accounting: Option<&crate::IndexerAccountingContext>,
     stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
     let origin = url.origin().ascii_serialization();
-    let client = scryer_outbound_http::indexer_reqwest_client();
+    // The preflight is the first request a save sends the indexer, so it goes
+    // through the indexer's proxy like every search does, or not at all.
+    let client = crate::transport_proxy::indexer_host_request_client(
+        proxy,
+        scryer_outbound_http::indexer_reqwest_client,
+    )
+    .map_err(AppError::Validation)?;
     let outbound_http = scryer_outbound_http::OutboundHttpClient::new(
         client,
         scryer_outbound_http::RateLimitRegistry::new(),
@@ -720,11 +736,27 @@ async fn observed_preflight_test_flight_url(
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The proxy id each unit-test preflight was handed, in call order. Unit
+    /// tests never send the preflight; they only prove which egress it was
+    /// given. `observed_preflight_test_flight_url` is tested for the send.
+    static PREFLIGHT_PROXY_IDS: std::cell::RefCell<Vec<Option<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_preflight_proxy_ids() -> Vec<Option<String>> {
+    PREFLIGHT_PROXY_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+#[cfg(test)]
 async fn preflight_test_flight_url(
     _url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     _accounting: Option<&crate::IndexerAccountingContext>,
     _stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
+    PREFLIGHT_PROXY_IDS.with(|ids| ids.borrow_mut().push(proxy.map(|proxy| proxy.id.clone())));
     Ok(())
 }
 
@@ -813,19 +845,166 @@ mod tests {
             indexer_id: "saved-preflight".into(),
             indexer_name: "Saved".into(),
         };
-        observed_preflight_test_flight_url(&url, Some(&accounting), stats.clone())
+        observed_preflight_test_flight_url(&url, None, Some(&accounting), stats.clone())
             .await
             .unwrap();
-        observed_preflight_test_flight_url(&url, None, stats.clone())
+        observed_preflight_test_flight_url(&url, None, None, stats.clone())
             .await
             .unwrap();
         stats.gate.close();
         assert!(
-            observed_preflight_test_flight_url(&url, Some(&accounting), stats.clone())
+            observed_preflight_test_flight_url(&url, None, Some(&accounting), stats.clone())
                 .await
                 .is_err()
         );
         assert_eq!(*stats.ids.lock().unwrap(), vec!["saved-preflight"]);
+    }
+
+    /// Minimal HTTP forward proxy: records each absolute-form request line and
+    /// answers it itself, without contacting the origin.
+    async fn spawn_recording_http_proxy() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy double should bind");
+        let address = listener.local_addr().expect("proxy double address");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorder = Arc::clone(&recorder);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 4096];
+                    let mut received = Vec::new();
+                    while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => received.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    if let Some(line) = String::from_utf8_lossy(&received).lines().next() {
+                        recorder.lock().unwrap().push(line.to_string());
+                    }
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    fn transport_proxy_config(id: &str, base_url: &str) -> scryer_domain::ProxyConfig {
+        scryer_domain::ProxyConfig {
+            id: id.to_string(),
+            name: "House Proxy".into(),
+            provider_type: scryer_domain::ProxyProviderType::Http,
+            protocol: None,
+            base_url: base_url.to_string(),
+            ..solver_proxy_config(id)
+        }
+    }
+
+    /// The e2e proxy matrix caught the save-time preflight `HEAD /` reaching a
+    /// proxied indexer straight from Scryer's own address. The preflight is
+    /// indexer traffic like the search that follows it, so the indexer's proxy
+    /// carries it.
+    #[tokio::test]
+    async fn preflight_for_a_proxied_indexer_travels_through_its_transport_proxy() {
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&origin)
+            .await;
+        let (proxy_url, proxy_requests) = spawn_recording_http_proxy().await;
+        let proxy = transport_proxy_config("house-proxy", &proxy_url);
+        let url = url::Url::parse(&format!("{}/api", origin.uri())).unwrap();
+
+        observed_preflight_test_flight_url(
+            &url,
+            Some(&proxy),
+            None,
+            Arc::new(crate::NullIndexerStatsTracker),
+        )
+        .await
+        .expect("the proxy answers the preflight");
+
+        let proxy_requests = proxy_requests.lock().unwrap().clone();
+        assert_eq!(
+            proxy_requests,
+            vec![format!("HEAD {}/ HTTP/1.1", origin.uri())],
+            "the proxy must carry the preflight"
+        );
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the indexer must never be reached directly"
+        );
+    }
+
+    /// Fail closed: when the assigned proxy cannot carry the preflight, the
+    /// preflight fails and names the proxy. It never falls back to a direct
+    /// request. A challenge solver is not a hop, so it keeps the direct
+    /// preflight exactly as the plugin hosts keep an indexer's first request
+    /// direct.
+    #[tokio::test]
+    async fn preflight_fails_closed_when_the_assigned_proxy_cannot_carry_it() {
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&origin)
+            .await;
+        let url = url::Url::parse(&origin.uri()).unwrap();
+
+        let unbuildable = transport_proxy_config("house-proxy", "not a proxy url");
+        let mut disabled = transport_proxy_config("house-proxy", "http://127.0.0.1:1");
+        disabled.is_enabled = false;
+        let mut unusable_tunnel = crate::tunnel_proxy::tests::tunnel_config();
+        unusable_tunnel.id = "preflight-unusable-tunnel".into();
+        unusable_tunnel.username_encrypted = None;
+
+        for proxy in [unbuildable, disabled, unusable_tunnel] {
+            let error = observed_preflight_test_flight_url(
+                &url,
+                Some(&proxy),
+                None,
+                Arc::new(crate::NullIndexerStatsTracker),
+            )
+            .await
+            .expect_err("an unusable proxy must fail the preflight");
+            assert!(
+                error.to_string().contains(proxy.name.trim()),
+                "the failure must name the proxy: {error}"
+            );
+        }
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing may reach the indexer directly when its proxy is unusable"
+        );
+
+        observed_preflight_test_flight_url(
+            &url,
+            Some(&solver_proxy_config("solver")),
+            None,
+            Arc::new(crate::NullIndexerStatsTracker),
+        )
+        .await
+        .expect("a solver-assigned preflight is direct");
+        assert_eq!(
+            origin.received_requests().await.unwrap_or_default().len(),
+            1
+        );
     }
     use crate::NullSettingsRepository;
     use crate::null_repositories::test_nulls::{
@@ -1006,6 +1185,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             Ok(None)
         }
@@ -1018,6 +1198,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
         }
@@ -1040,6 +1221,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
@@ -1053,11 +1235,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingCapsSnapshotRefresher {
         requested_ids: std::sync::Mutex<Vec<String>>,
+        requested_proxy_ids: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     impl RecordingCapsSnapshotRefresher {
         fn requested_ids(&self) -> Vec<String> {
             self.requested_ids.lock().unwrap().clone()
+        }
+
+        /// The proxy each send was handed, in call order.
+        fn requested_proxy_ids(&self) -> Vec<Option<String>> {
+            self.requested_proxy_ids.lock().unwrap().clone()
         }
     }
 
@@ -1066,8 +1254,13 @@ mod tests {
         async fn fetch_for_config(
             &self,
             config: &IndexerConfig,
+            proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             self.requested_ids.lock().unwrap().push(config.id.clone());
+            self.requested_proxy_ids
+                .lock()
+                .unwrap()
+                .push(proxy.map(|proxy| proxy.id.clone()));
             Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
         }
     }
@@ -1719,8 +1912,8 @@ mod tests {
         )
     }
 
-    /// A proxy repository holding exactly one enabled challenge solver.
-    struct SolverProxyRepository(scryer_domain::ProxyConfig);
+    /// A proxy repository holding exactly one proxy.
+    struct SingleProxyRepository(scryer_domain::ProxyConfig);
 
     fn solver_proxy_config(id: &str) -> scryer_domain::ProxyConfig {
         let now = Utc::now();
@@ -1755,7 +1948,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::ProxyConfigRepository for SolverProxyRepository {
+    impl crate::ProxyConfigRepository for SingleProxyRepository {
         async fn list(
             &self,
             _: Option<scryer_domain::ProxyProviderType>,
@@ -1909,7 +2102,7 @@ mod tests {
             Arc::new(RecordingIndexerConfigRepo::new()),
             Some(provider),
             Arc::new(NullSettingsRepository),
-            Arc::new(SolverProxyRepository(solver_proxy_config("solver"))),
+            Arc::new(SingleProxyRepository(solver_proxy_config("solver"))),
         );
         let input = NewIndexerConfig {
             name: "Prowlarr".into(),
@@ -2761,6 +2954,192 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.starts_with("caps refresh failed:"))
         );
+    }
+
+    fn proxied_newznab_app(
+        indexer_repo: Arc<RecordingIndexerConfigRepo>,
+        refresher: Arc<RecordingCapsSnapshotRefresher>,
+        proxy: scryer_domain::ProxyConfig,
+    ) -> AppUseCase {
+        let indexer_client = Arc::new(RecordingIndexerClient::new(false));
+        let plugin_provider = Arc::new(RecordingPluginProvider::new(
+            "newznab",
+            vec![
+                string_field(
+                    "base_url",
+                    "Base URL",
+                    Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+                ),
+                password_field("api_key", "API Key"),
+            ],
+            searchable_capabilities(),
+            indexer_client.clone(),
+        ));
+        let services = AppServices::builder(
+            Arc::new(NullTitleRepository),
+            Arc::new(NullShowRepository),
+            Arc::new(NullUserRepository),
+            indexer_repo,
+            indexer_client,
+            Arc::new(NullDownloadClient),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(NullReleaseAttemptRepository),
+            Arc::new(NullSettingsRepository),
+            Arc::new(NullQualityProfileRepository),
+            String::new(),
+        )
+        .with_proxy_config_store(Arc::new(SingleProxyRepository(proxy)))
+        .with_indexer_caps_refresher(refresher)
+        .with_plugin_provider(plugin_provider)
+        .build_partial_for_tests();
+        AppUseCase::new(
+            services,
+            JwtAuthConfig {
+                issuer: "test".into(),
+                access_ttl_seconds: 3_600,
+                jwt_signing_salt: "test-salt".into(),
+            },
+            Arc::new(FacetRegistry::new()),
+        )
+    }
+
+    /// The e2e proxy matrix saved a Newznab indexer behind an HTTP proxy and
+    /// found three requests in the indexer's log from Scryer's own address:
+    /// the save's preflight `HEAD /` and a `t=caps` from each of the save's
+    /// connection probe and caps refresh. Only the plugin search went through
+    /// the proxy. Every request Scryer issues to that indexer itself — on
+    /// create, on update, and in the unattended caps pass — must be handed the
+    /// indexer's proxy.
+    #[tokio::test]
+    async fn every_host_request_for_a_proxied_newznab_indexer_is_given_its_proxy() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let app = proxied_newznab_app(
+            indexer_repo.clone(),
+            refresher.clone(),
+            transport_proxy_config("house-proxy", "http://proxy.internal:3128"),
+        );
+        take_preflight_proxy_ids();
+
+        let created = app
+            .create_indexer_config(
+                &test_admin(),
+                NewIndexerConfig {
+                    name: "Proxied Newznab".into(),
+                    provider_type: "newznab".into(),
+                    rate_limit_seconds: None,
+                    rate_limit_burst: None,
+                    is_enabled: true,
+                    enable_interactive_search: true,
+                    enable_auto_search: true,
+                    proxy_config_id: Some("house-proxy".into()),
+                    download_client_id: None,
+                    config_json: Some(
+                        serde_json::json!({
+                            "base_url": "http://newznab.internal:8088",
+                            "api_key": "secret",
+                        })
+                        .to_string(),
+                    ),
+                },
+            )
+            .await
+            .expect("a proxied indexer saves");
+        assert_eq!(created.proxy_config_id.as_deref(), Some("house-proxy"));
+
+        let house_proxy = Some("house-proxy".to_string());
+        assert_eq!(
+            take_preflight_proxy_ids(),
+            vec![house_proxy.clone()],
+            "the save's preflight must be given the indexer's proxy"
+        );
+        assert_eq!(
+            refresher.requested_proxy_ids(),
+            vec![house_proxy.clone(), house_proxy.clone()],
+            "the probe's and the save's caps requests must be given the indexer's proxy"
+        );
+
+        app.update_indexer_config(
+            &test_admin(),
+            IndexerConfigUpdate {
+                id: created.id.clone(),
+                name: Some("Renamed Proxied Newznab".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rename saves");
+        app.refresh_enabled_direct_nab_caps_snapshots(&test_admin())
+            .await
+            .expect("unattended caps pass");
+
+        assert_eq!(
+            refresher.requested_proxy_ids(),
+            vec![house_proxy; 4],
+            "the update's and the unattended pass's caps requests must be given the indexer's proxy"
+        );
+    }
+
+    /// Fail closed: a direct Newznab indexer whose assigned proxy is disabled
+    /// or gone is not sent a caps request at all — not directly, not through
+    /// anything else — and the refresh is recorded as failed.
+    #[tokio::test]
+    async fn caps_pass_sends_nothing_for_an_indexer_whose_proxy_is_unusable() {
+        let now = Utc::now();
+        let indexer = |id: &str, proxy_config_id: &str| IndexerConfig {
+            id: id.into(),
+            name: format!("Synthetic {id}"),
+            provider_type: "newznab".into(),
+            base_url: format!("http://{id}.internal:8088"),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: Some(proxy_config_id.into()),
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        indexer_repo.created.lock().await.extend([
+            indexer("cfg-disabled-proxy", "house-proxy"),
+            indexer("cfg-missing-proxy", "deleted-proxy"),
+        ]);
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let mut disabled = transport_proxy_config("house-proxy", "http://proxy.internal:3128");
+        disabled.is_enabled = false;
+        let app = proxied_newznab_app(indexer_repo.clone(), refresher.clone(), disabled);
+
+        let (refreshed, failures) = app
+            .refresh_enabled_direct_nab_caps_snapshots(&test_admin())
+            .await
+            .expect("an unusable proxy is a per-indexer failure");
+
+        assert!(
+            refresher.requested_ids().is_empty(),
+            "no caps request may be sent for an indexer whose proxy is unusable"
+        );
+        assert_eq!(refreshed, 0);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        let errors = indexer_repo.recorded_errors.lock().await;
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|(_, message)| {
+            message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("caps refresh failed:"))
+        }));
     }
 
     #[tokio::test]
