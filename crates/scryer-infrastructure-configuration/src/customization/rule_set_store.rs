@@ -648,6 +648,7 @@ mod tests {
         include_str!("../../../scryer/src/db/migrations/0060_managed_rule_sets.sql"),
         include_str!("../../../scryer/src/db/migrations/0149_rule_set_managed_tag_filter.sql"),
         include_str!("../../../scryer/src/db/migrations/0225_tracked_rule_packs.sql"),
+        include_str!("../../../scryer/src/db/migrations/0239_rule_pack_customizable.sql"),
     ];
     const METADATA_MIGRATION: &str =
         include_str!("../../../scryer/src/db/migrations/0228_rule_set_evaluation_metadata.sql");
@@ -713,6 +714,7 @@ mod tests {
             name: "Fixture pack".to_string(),
             version: "1.0.0".to_string(),
             digest: "sha256:fixture".to_string(),
+            customizable: false,
             auto_update: true,
             revision,
             last_updated: Utc::now(),
