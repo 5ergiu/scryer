@@ -39,6 +39,44 @@ export function titleOverviewReactiveRefreshKinds(importKinds: ReadonlySet<strin
   ]);
 }
 
+/**
+ * Split the collections a refresh asks for into the ones to fetch now and the
+ * ones whose own load is still in flight. A collection loading right now cannot
+ * be fetched again - the second query would race the first - but its in-flight
+ * answer predates the event that asked for the refresh, so the request has to
+ * survive until that load resolves rather than being dropped.
+ */
+export function planCollectionEpisodeRefresh(
+  requestedCollectionIds: readonly string[],
+  inFlightCollectionIds: ReadonlySet<string>,
+): { refreshNow: string[]; deferred: string[] } {
+  const refreshNow: string[] = [];
+  const deferred: string[] = [];
+  for (const collectionId of requestedCollectionIds) {
+    if (inFlightCollectionIds.has(collectionId)) {
+      deferred.push(collectionId);
+    } else {
+      refreshNow.push(collectionId);
+    }
+  }
+  return { refreshNow, deferred };
+}
+
+/**
+ * Answer, as a load for `completedCollectionId` resolves, which deferred
+ * refreshes that release and what stays pending.
+ */
+export function drainDeferredCollectionEpisodeRefresh(
+  deferredCollectionIds: ReadonlySet<string>,
+  completedCollectionId: string,
+): { rerun: string[]; remaining: Set<string> } {
+  const remaining = new Set(deferredCollectionIds);
+  const rerun = remaining.delete(completedCollectionId)
+    ? [completedCollectionId]
+    : [];
+  return { rerun, remaining };
+}
+
 export function titleOverviewReactiveRefreshPlan(
   activityKind: string,
   importKinds: ReadonlySet<string>,

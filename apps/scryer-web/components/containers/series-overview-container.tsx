@@ -45,6 +45,10 @@ import {
   releaseQueueScopeInput,
 } from "@/lib/utils/release-queue-scope";
 import {
+  drainDeferredCollectionEpisodeRefresh,
+  planCollectionEpisodeRefresh,
+} from "@/lib/utils/title-overview-refresh-policy";
+import {
   episodeIdsForEpisodeRecord,
   mergeLoadedEpisodeDetailsForCollections,
   pruneEpisodeRecord,
@@ -448,6 +452,12 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     Record<string, boolean>
   >({});
   const collectionEpisodesLoadingRef = React.useRef<Set<string>>(new Set());
+  // Refresh requests that arrived while the collection's own load was in
+  // flight; released by releaseDeferredCollectionRefresh as each load resolves.
+  const deferredCollectionRefreshRef = React.useRef<Set<string>>(new Set());
+  const refreshLoadedCollectionEpisodesRef = React.useRef<
+    (collectionIds: readonly string[]) => void
+  >(() => {});
   const deepLinkResolveAttemptedRef = React.useRef<string | null>(null);
   const [qualityProfiles, setQualityProfiles] = React.useState<{ id: string; name: string }[]>([]);
   const [defaultRootFolder, setDefaultRootFolder] = React.useState(DEFAULT_SERIES_LIBRARY_PATH);
@@ -595,6 +605,20 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     [],
   );
 
+  const releaseDeferredCollectionRefresh = React.useCallback(
+    (collectionId: string) => {
+      const { rerun, remaining } = drainDeferredCollectionEpisodeRefresh(
+        deferredCollectionRefreshRef.current,
+        collectionId,
+      );
+      deferredCollectionRefreshRef.current = remaining;
+      if (rerun.length > 0) {
+        refreshLoadedCollectionEpisodesRef.current(rerun);
+      }
+    },
+    [],
+  );
+
   const loadCollectionEpisodes = React.useCallback(
     async (collectionId: string, options: { force?: boolean } = {}) => {
       if (!titleId) {
@@ -664,9 +688,10 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
           delete next[collectionId];
           return next;
         });
+        releaseDeferredCollectionRefresh(collectionId);
       }
     },
-    [client, setGlobalStatus, t, titleId],
+    [client, releaseDeferredCollectionRefresh, setGlobalStatus, t, titleId],
   );
 
   const refreshLoadedCollectionEpisodes = React.useCallback(
@@ -675,9 +700,17 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         return;
       }
 
-      const collectionIdsToRefresh = collectionIds.filter(
-        (collectionId) => !collectionEpisodesLoadingRef.current.has(collectionId),
-      );
+      const { refreshNow: collectionIdsToRefresh, deferred } =
+        planCollectionEpisodeRefresh(
+          collectionIds,
+          collectionEpisodesLoadingRef.current,
+        );
+      // The in-flight query was issued before the event that asked for this
+      // refresh, so its answer cannot carry the change. Hold the request until
+      // that load resolves instead of dropping it.
+      for (const collectionId of deferred) {
+        deferredCollectionRefreshRef.current.add(collectionId);
+      }
       if (collectionIdsToRefresh.length === 0) {
         return;
       }
@@ -769,10 +802,19 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
           }
           return changed ? next : current;
         });
+        for (const collectionId of collectionIdsToRefresh) {
+          releaseDeferredCollectionRefresh(collectionId);
+        }
       }
     },
-    [client, setGlobalStatus, t, titleId],
+    [client, releaseDeferredCollectionRefresh, setGlobalStatus, t, titleId],
   );
+
+  React.useEffect(() => {
+    refreshLoadedCollectionEpisodesRef.current = (collectionIds) => {
+      void refreshLoadedCollectionEpisodes(collectionIds);
+    };
+  }, [refreshLoadedCollectionEpisodes]);
 
   const applySidePanelOverviewSnapshot = React.useCallback(
     (
@@ -1314,6 +1356,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     setEpisodesByCollection({});
     setCollectionEpisodesLoading({});
     collectionEpisodesLoadingRef.current = new Set();
+    deferredCollectionRefreshRef.current = new Set();
     deepLinkResolveAttemptedRef.current = null;
     setMediaFilesByEpisode({});
     setMediaFilesBySeriesMovieLink({});
