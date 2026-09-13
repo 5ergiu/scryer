@@ -962,13 +962,6 @@ impl TitleReconciler for RootMoveReconciler<'_> {
                 continue;
             }
             if record.hashes.is_none() {
-                // Adoption verifies a destination placed by the user. Without
-                // full-hash proof, any remaining source still belongs to them.
-                if operation.operation_type
-                    == crate::location::model::LocationOperationType::Adoption
-                {
-                    continue;
-                }
                 let source = stored_path_to_path_buf(&file.source_path);
                 if source == file.destination() {
                     return Err(AppError::Validation(
@@ -1191,36 +1184,11 @@ pub(super) async fn remove_directory_if_empty(path: &Path) -> DirectoryPrune {
 pub struct RootMoveAdmission<'a> {
     plan: &'a RootMoveExecutionPlan,
     catalog: &'a dyn RootMoveCatalog,
-    presence: PlannedContentPresence,
-}
-
-/// Which side of a planned file has to be on disk for its title to be admitted.
-///
-/// A managed move needs its sources: they are what it is about to copy. An
-/// adoption needs its *destinations*, and must not fail on a missing source —
-/// FR-053 says in as many words that "a stale or unavailable source mount MUST
-/// NOT block adoption when the destination is provable from stored catalog
-/// information" (US3.3). Checking the source there would refuse exactly the
-/// case the story exists for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlannedContentPresence {
-    Source,
-    Destination,
 }
 
 impl<'a> RootMoveAdmission<'a> {
     pub fn new(plan: &'a RootMoveExecutionPlan, catalog: &'a dyn RootMoveCatalog) -> Self {
-        Self {
-            plan,
-            catalog,
-            presence: PlannedContentPresence::Source,
-        }
-    }
-
-    /// The FR-053 variant: prove the destination, tolerate a stale source.
-    pub fn adopting(mut self) -> Self {
-        self.presence = PlannedContentPresence::Destination;
-        self
+        Self { plan, catalog }
     }
 }
 
@@ -1347,22 +1315,13 @@ impl TitleAdmissionCheck for RootMoveAdmission<'_> {
                 debug_assert!(!PlanInputChange::VerifiedDestinationFile.is_stale());
                 continue;
             }
-            let (path, detail) = match self.presence {
-                PlannedContentPresence::Source => (
-                    stored_path_to_path_buf(&file.source_path),
-                    format!(
-                        "the source {} is gone and its destination was never verified",
-                        file.source_path
-                    ),
+            let (path, detail) = (
+                stored_path_to_path_buf(&file.source_path),
+                format!(
+                    "the source {} is gone and its destination was never verified",
+                    file.source_path
                 ),
-                PlannedContentPresence::Destination => (
-                    stored_path_to_path_buf(&file.destination_path),
-                    format!(
-                        "the content this adoption accounted for at {} is no longer there",
-                        file.destination_path
-                    ),
-                ),
-            };
+            );
             if tokio::fs::symlink_metadata(&path).await.is_err() {
                 return Ok(stale(PlanInputChange::UnprocessedSourceItem, detail));
             }

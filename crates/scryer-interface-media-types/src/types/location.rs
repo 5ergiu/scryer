@@ -116,8 +116,6 @@ pub enum LocationOperationTypeValue {
     RootConsolidation,
     /// Move titles into a different library, with or without a merge.
     CrossLibraryTransfer,
-    /// Adopt content the user already moved outside Scryer.
-    Adoption,
 }
 
 /// How the filesystem side of an operation is performed.
@@ -129,8 +127,6 @@ pub enum LocationOperationTypeValue {
 pub enum LocationExecutionModeValue {
     /// Scryer performs and verifies the filesystem operation.
     MoveWithScryer,
-    /// The user already moved the files; Scryer verifies and adopts them.
-    FilesAlreadyThere,
     /// The user moved the files themselves; Scryer trusts that move and
     /// updates the catalog mappings only.
     UserMovedFiles,
@@ -139,7 +135,7 @@ pub enum LocationExecutionModeValue {
 }
 
 /// The filesystem side a client may ask for when previewing or starting a
-/// location operation (FR-011, FR-050).
+/// location operation (FR-011).
 ///
 /// Deliberately narrower than the reported `LocationExecutionModeValue`:
 /// `CATALOG_ONLY` is derived by the server for a selection with no files on
@@ -150,9 +146,6 @@ pub enum LocationExecutionModeValue {
 pub enum LocationExecutionModeInput {
     /// Scryer performs and verifies the filesystem operation.
     MoveWithScryer,
-    /// The user already moved the files; Scryer accounts for them at the
-    /// destination and adopts them where they lie.
-    FilesAlreadyThere,
     /// The user moved the files themselves; Scryer trusts that move and
     /// updates the catalog mappings only.
     UserMovedFiles,

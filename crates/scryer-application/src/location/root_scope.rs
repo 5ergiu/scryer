@@ -935,10 +935,6 @@ pub mod refusal_codes {
         pub source_root_is_symlink: &'static str,
         /// The source root is not a directory Scryer can read right now.
         pub source_root_unavailable: &'static str,
-        /// The request named an execution mode neither branch offers: both are
-        /// managed moves, and "files are already there" adopts content the user
-        /// placed by hand, which is a different workflow (US3).
-        pub mode_not_supported: &'static str,
         /// What this branch is, for the refusals that have to name it.
         pub subject: &'static str,
         /// What the user does about a symlinked source root.
@@ -952,7 +948,6 @@ pub mod refusal_codes {
         paths_overlap: "root_change_paths_overlap",
         source_root_is_symlink: "root_change_source_root_is_symlink",
         source_root_unavailable: "root_change_source_root_unavailable",
-        mode_not_supported: "root_change_mode_not_supported",
         subject: "a root change",
         resolve_symlink_action: "changing the root",
         overlap_consequence: "a root change needs a destination outside the root it replaces",
@@ -963,7 +958,6 @@ pub mod refusal_codes {
         paths_overlap: "root_consolidation_paths_overlap",
         source_root_is_symlink: "root_consolidation_source_root_is_symlink",
         source_root_unavailable: "root_consolidation_source_root_unavailable",
-        mode_not_supported: "root_consolidation_mode_not_supported",
         subject: "a consolidation",
         resolve_symlink_action: "consolidating it",
         overlap_consequence: "consolidating one into the other would move content into itself",
@@ -1047,10 +1041,6 @@ pub struct RootScopePathFacts {
     pub source_root_is_symlink: bool,
     pub source_root_is_directory: bool,
     pub destination: DestinationPathState,
-    /// The execution mode the request named. Checked here rather than in the
-    /// interface so the refusal is application vocabulary the client can
-    /// translate, exactly as the plan items above do.
-    pub mode: LocationExecutionMode,
 }
 
 /// FR-020's admissibility rules, for either of its two branches.
@@ -1062,19 +1052,6 @@ pub struct RootScopePathFacts {
 /// between the two.
 pub fn check_root_scope_paths(facts: &RootScopePathFacts) -> Result<(), RootScopeRefusal> {
     let codes = facts.variant.vocabulary();
-
-    // Neither branch adopts. Without this the mode would pass straight into the
-    // plan header and label the operation `FILES_ALREADY_THERE` while the
-    // executor performed a managed move.
-    if facts.mode == LocationExecutionMode::FilesAlreadyThere {
-        return Err(RootScopeRefusal::new(
-            codes.mode_not_supported,
-            format!(
-                "{} moves the files itself; \"files are already there\" adopts content at a destination folder and is not offered here",
-                codes.subject
-            ),
-        ));
-    }
 
     // A fold's destination is named by id, so "is it this root?" is answerable
     // before anything is `stat`ed. "Is it a root at all?" is not asked here:
@@ -1808,9 +1785,8 @@ fn build_retirement_contract(
 /// An operation with nothing to move needs no move mode; FR-076 asks the UI to
 /// skip the chooser in exactly that case.
 ///
-/// A fold never consults the requested mode: **files are already there** was
-/// refused at admission ([`check_root_scope_paths`]), so the only mode a fold can be
-/// running in is **Move with Scryer**.
+/// A fold never consults the requested mode: it is always **Move with
+/// Scryer**.
 fn execution_mode_for(
     request: &RootScopePlanRequest,
     accounting: &TitleAccounting,
@@ -1828,10 +1804,8 @@ fn execution_mode_for(
 /// The shared per-title planner's request, filled with the facts a root-scoped
 /// operation has (D1).
 ///
-/// The mode is deliberately **not** the caller's: FR-020's "files are already
-/// there" applies to the root, not to a title, and the per-title planner reads
-/// `mode` only to decide whether to take US3's adoption path — which a
-/// root-scoped operation never does. The mode the *plan* carries is still
+/// The mode is deliberately **not** the caller's: the per-title planner is
+/// always run as a managed move here. The mode the *plan* carries is still
 /// [`execution_mode_for`]'s.
 fn shared_plan_request(request: &RootScopePlanRequest) -> RootMovePlanRequest {
     RootMovePlanRequest {
@@ -1854,8 +1828,7 @@ fn shared_plan_request(request: &RootScopePlanRequest) -> RootMovePlanRequest {
 /// One root-scoped title as the shared planner sees it (D1).
 ///
 /// A root-scope title *is* a root move: one library on both sides, so no facet
-/// conversion, no association facts, no adoption, and no library-transfer
-/// statement. The one thing the root-scope layer decides for itself is the
+/// conversion, no association facts, and no library-transfer statement. The one thing the root-scope layer decides for itself is the
 /// destination folder — re-anchored from the source root for a path change
 /// (FR-026), or the folder [`resolve_root_scope_folders`] settled on for a fold
 /// (FR-025, FR-063).
@@ -1885,7 +1858,6 @@ fn root_move_draft(
         facet_conversion: None,
         associations: TitleAssociationFacts::default(),
         merge_summary: draft.merge_summary.clone(),
-        adoption: None,
     }
 }
 
@@ -2920,7 +2892,6 @@ mod fold_tests {
             source_root_is_symlink: false,
             source_root_is_directory: true,
             destination: DestinationPathState::Directory { empty: false },
-            mode: LocationExecutionMode::MoveWithScryer,
         }
     }
 
@@ -2946,14 +2917,6 @@ mod fold_tests {
             check_root_scope_paths(&facts).expect_err("same root").code,
             refusal_codes::FOLD_SAME_ROOT
         );
-    }
-
-    #[test]
-    fn files_already_there_is_not_a_consolidation_mode() {
-        let mut facts = facts();
-        facts.mode = LocationExecutionMode::FilesAlreadyThere;
-        let refusal = check_root_scope_paths(&facts).expect_err("mode refused");
-        assert_eq!(refusal.code, refusal_codes::FOLD.mode_not_supported);
     }
 
     #[test]

@@ -399,8 +399,8 @@ impl TransferHub {
                 useful
             }
             ImportTransferPhase::Verifying => {
-                // Adoption and interrupted placement already have destination
-                // bytes. This instantaneous credit is excluded from throughput.
+                // Interrupted placement already has destination bytes. This
+                // instantaneous credit is excluded from throughput.
                 file.copied = size;
                 file.verified = bytes;
                 let useful = bytes.saturating_sub(file.verify_credit);

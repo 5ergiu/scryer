@@ -3402,11 +3402,12 @@ mod tests {
             }
         }
         for files in [0, 1] {
-            // Validated adoption retains its existing verification records;
-            // managed copies additionally need a durable identity resolution.
-            let mut adoption = operation();
-            adoption.mode = super::super::model::LocationExecutionMode::FilesAlreadyThere;
-            let store = FakeStore::with_operation(adoption);
+            // A mode that copies nothing retains its existing verification
+            // records; managed copies additionally need a durable identity
+            // resolution.
+            let mut repointed = operation();
+            repointed.mode = super::super::model::LocationExecutionMode::UserMovedFiles;
+            let store = FakeStore::with_operation(repointed);
             let plan = OperationWorkPlan::new(vec![
                 planned_title("first", 0, files),
                 planned_title("second", 1, files),

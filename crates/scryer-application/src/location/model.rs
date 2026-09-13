@@ -23,8 +23,6 @@ pub enum LocationOperationType {
     RootConsolidation,
     /// Move titles into a different library, with or without a merge (US6/US7).
     CrossLibraryTransfer,
-    /// Adopt content the user already moved outside Scryer (US3).
-    Adoption,
 }
 
 impl LocationOperationType {
@@ -35,7 +33,6 @@ impl LocationOperationType {
             Self::RootChange => "root_change",
             Self::RootConsolidation => "root_consolidation",
             Self::CrossLibraryTransfer => "cross_library_transfer",
-            Self::Adoption => "adoption",
         }
     }
 
@@ -48,7 +45,6 @@ impl LocationOperationType {
             "root_change" => Some(Self::RootChange),
             "root_consolidation" => Some(Self::RootConsolidation),
             "cross_library_transfer" => Some(Self::CrossLibraryTransfer),
-            "adoption" => Some(Self::Adoption),
             _ => None,
         }
     }
@@ -62,15 +58,13 @@ impl LocationOperationType {
 
 /// How the filesystem side of an operation is performed.
 ///
-/// Spec "Product Language": **Move with Scryer** vs **Files are already there**.
+/// Spec "Product Language": **Move with Scryer** vs the user's own move.
 /// Catalog-only reassignments (FR-076) never present a mode choice.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationExecutionMode {
     /// Scryer performs and verifies the filesystem operation.
     MoveWithScryer,
-    /// The user already moved the files; Scryer verifies and adopts them.
-    FilesAlreadyThere,
     /// Trust the user's external move and update catalog mappings only.
     UserMovedFiles,
     /// No filesystem work at all: fileless titles (FR-076) and folder-match
@@ -82,7 +76,6 @@ impl LocationExecutionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MoveWithScryer => "move_with_scryer",
-            Self::FilesAlreadyThere => "files_already_there",
             Self::UserMovedFiles => "user_moved_files",
             Self::CatalogOnly => "catalog_only",
         }
@@ -93,7 +86,6 @@ impl LocationExecutionMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "move_with_scryer" => Some(Self::MoveWithScryer),
-            "files_already_there" => Some(Self::FilesAlreadyThere),
             "user_moved_files" => Some(Self::UserMovedFiles),
             "catalog_only" => Some(Self::CatalogOnly),
             _ => None,
@@ -733,6 +725,5 @@ mod tests {
         assert!(!LocationOperationType::RootMove.requires_typed_confirmation());
         assert!(!LocationOperationType::FolderReassignment.requires_typed_confirmation());
         assert!(!LocationOperationType::CrossLibraryTransfer.requires_typed_confirmation());
-        assert!(!LocationOperationType::Adoption.requires_typed_confirmation());
     }
 }

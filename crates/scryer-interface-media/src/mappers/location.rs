@@ -207,31 +207,23 @@ fn from_verification_depth(value: VerificationDepth) -> VerificationDepthValue {
 /// is what decides where a title with no explicit root ends up.
 /// The execution mode a request asked for.
 ///
-/// Omitting the field is the managed move, so a client written before adoption
-/// existed keeps the behavior it already had. `CATALOG_ONLY` is not in the
-/// input enum at all: it is the server's own conclusion about a fileless
-/// selection (FR-076), never something a caller may claim.
+/// Omitting the field is the managed move, so a client that names no mode keeps
+/// the behavior it already had. `CATALOG_ONLY` is not in the input enum at all:
+/// it is the server's own conclusion about a fileless selection (FR-076), never
+/// something a caller may claim.
 pub fn location_execution_mode_into_application(
     input: Option<LocationExecutionModeInput>,
 ) -> LocationExecutionMode {
     match input {
         Some(LocationExecutionModeInput::UserMovedFiles) => LocationExecutionMode::UserMovedFiles,
-        Some(LocationExecutionModeInput::FilesAlreadyThere) => {
-            LocationExecutionMode::FilesAlreadyThere
-        }
         Some(LocationExecutionModeInput::MoveWithScryer) | None => {
             LocationExecutionMode::MoveWithScryer
         }
     }
 }
 
-// The root-scoped workflow once had a second mapper here that refused
-// `FILES_ALREADY_THERE` with an untranslatable interface sentence. The planner
-// now refuses it by name — `root_scope::refusal_codes::…mode_not_supported` —
-// so the request travels through the shared mapper above and the refusal is
-// application vocabulary the client can route and translate. `CATALOG_ONLY`
-// stays unrequestable everywhere: it is the server's own conclusion about a
-// root with no files on it (FR-076).
+// `CATALOG_ONLY` stays unrequestable everywhere: it is the server's own
+// conclusion about a root with no files on it (FR-076).
 
 /// FR-020's one destination, in the two forms a client may name it.
 ///

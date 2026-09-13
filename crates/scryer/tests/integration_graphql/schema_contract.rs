@@ -1096,12 +1096,8 @@ async fn graphql_introspection_location_mode_is_requestable_but_never_catalog_on
         .collect::<Vec<_>>();
     assert_eq!(
         requestable,
-        vec![
-            "MOVE_WITH_SCRYER",
-            "FILES_ALREADY_THERE",
-            "USER_MOVED_FILES"
-        ],
-        "only the three modes a caller may ask for: {body}"
+        vec!["MOVE_WITH_SCRYER", "USER_MOVED_FILES"],
+        "only the two modes a caller may ask for: {body}"
     );
 
     // The reported enum keeps the derived value the input enum refuses.
