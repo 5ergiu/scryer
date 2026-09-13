@@ -905,6 +905,172 @@ async fn an_unlinked_grab_records_an_orphan_scoped_submission_and_history() {
     );
 }
 
+/// The download-client router refuses an indexer URL it has to fetch itself,
+/// so an unlinked grab must resolve the indexer artifact first, exactly as
+/// the canonical submission path does, and hold the artifact lease until the
+/// client accepts.
+#[tokio::test]
+async fn an_unlinked_grab_resolves_the_indexer_artifact_before_client_routing() {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Lease {
+        active: Arc<AtomicBool>,
+        staged: crate::StagedNzbRef,
+    }
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.active.store(false, Ordering::SeqCst);
+        }
+    }
+    impl crate::IndexerArtifactLease for Lease {
+        fn staged_nzb(&self) -> &crate::StagedNzbRef {
+            &self.staged
+        }
+    }
+    struct Resolver {
+        active: Arc<AtomicBool>,
+        requests: Arc<StdMutex<Vec<crate::IndexerArtifactResolutionRequest>>>,
+    }
+    #[async_trait]
+    impl crate::IndexerArtifactResolver for Resolver {
+        async fn resolve_artifact(
+            &self,
+            request: &crate::IndexerArtifactResolutionRequest,
+        ) -> AppResult<crate::PreparedIndexerArtifact> {
+            self.requests
+                .lock()
+                .expect("resolver request log")
+                .push(request.clone());
+            self.active.store(true, Ordering::SeqCst);
+            Ok(crate::PreparedIndexerArtifact::StagedNzb(Box::new(Lease {
+                active: self.active.clone(),
+                staged: crate::StagedNzbRef {
+                    id: "unlinked-lease".into(),
+                    compressed_path: "fixture.nzb.gz".into(),
+                    raw_size_bytes: 10,
+                },
+            })))
+        }
+    }
+    /// What the download client saw at the moment it was handed the grab.
+    #[derive(Clone, Debug)]
+    struct Handed {
+        lease_active: bool,
+        staged_nzb_id: Option<String>,
+        source_hint: Option<String>,
+    }
+    struct Client {
+        inner: Arc<dyn DownloadClient>,
+        active: Arc<AtomicBool>,
+        handed: Arc<StdMutex<Vec<Handed>>>,
+    }
+    #[async_trait]
+    impl DownloadClient for Client {
+        async fn submit_download(
+            &self,
+            request: &DownloadClientAddRequest,
+        ) -> AppResult<DownloadGrabResult> {
+            self.handed.lock().expect("handed log").push(Handed {
+                lease_active: self.active.load(Ordering::SeqCst),
+                staged_nzb_id: request.staged_nzb.as_ref().map(|value| value.id.clone()),
+                source_hint: request.source_hint.clone(),
+            });
+            tokio::task::yield_now().await;
+            self.inner.submit_download(request).await
+        }
+    }
+
+    let indexer_client = ScriptedIndexerClient::default()
+        .with_releases(
+            "idx-a",
+            vec![nzb_release("Paperman.2012.1080p.WEB-DL", "g1")],
+        )
+        .await;
+    let (app, user) = bootstrap_search(
+        Arc::new(StoredSettingsRepo::default()),
+        indexer_client,
+        vec![synthetic_direct_nab_indexer_config("idx-a", "newznab")],
+    );
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let active = Arc::new(AtomicBool::new(false));
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let handed = Arc::new(StdMutex::new(Vec::new()));
+    let resolver: Arc<dyn crate::IndexerArtifactResolver> = Arc::new(Resolver {
+        active: active.clone(),
+        requests: requests.clone(),
+    });
+    let client = Arc::new(Client {
+        inner: app.services.integrations.download_client.clone(),
+        active: active.clone(),
+        handed: handed.clone(),
+    });
+    let app = app.with_test_overrides(|services| {
+        services
+            .with_download_submissions(submissions.clone())
+            .with_indexer_artifact_resolver(Some(resolver))
+            .with_download_client(client)
+    });
+    let download_client =
+        create_enabled_download_client_config(&app, &user, "Primary", "nzbget").await;
+
+    let start = app
+        .start_interactive_release_search(
+            &user,
+            query_request("paperman", InteractiveSearchKind::Movie),
+        )
+        .await
+        .expect("start");
+    let done = await_completion(&app, &user, &start.id).await;
+    let release = done.results.first().expect("one result").clone();
+    let download_url = release.download_url.clone().expect("release download url");
+
+    app.queue_unlinked_release(&user, &start.id, &download_url, &download_client.id)
+        .await
+        .expect("queue unlinked release");
+
+    let requests = requests.lock().expect("resolver request log").clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "an unlinked grab resolves its indexer artifact exactly once"
+    );
+    assert_eq!(requests[0].indexer_id.as_deref(), Some("idx-a"));
+    assert_eq!(requests[0].source_url, download_url);
+    assert_eq!(requests[0].source_kind, Some(DownloadSourceKind::NzbUrl));
+    assert_eq!(requests[0].title_id, None, "an unlinked grab has no title");
+    assert_eq!(
+        requests[0].search_facet,
+        Some(MediaFacet::Movie),
+        "the search kind stands in for the owner facet"
+    );
+
+    let handed = handed.lock().expect("handed log").clone();
+    assert_eq!(handed.len(), 1, "{handed:?}");
+    assert!(
+        handed[0].lease_active,
+        "artifact lease ended before submission"
+    );
+    assert_eq!(handed[0].staged_nzb_id.as_deref(), Some("unlinked-lease"));
+    assert!(
+        handed[0].source_hint.is_none(),
+        "download client must receive the artifact, not the indexer URL: {handed:?}"
+    );
+    assert!(
+        !active.load(Ordering::SeqCst),
+        "an accepted unlinked grab should release the artifact"
+    );
+
+    let rows = submissions.store.lock().await.clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].source_hint.as_deref(),
+        Some(download_url.as_str()),
+        "history keeps the release URL the operator grabbed"
+    );
+    assert_eq!(rows[0].source_kind, Some(DownloadSourceKind::NzbUrl));
+}
+
 #[tokio::test]
 async fn grab_indexer_name_prefers_the_configured_name_and_falls_back_to_the_source() {
     let (app, _user) = bootstrap_search(
