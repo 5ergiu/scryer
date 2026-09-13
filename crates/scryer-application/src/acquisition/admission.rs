@@ -361,11 +361,6 @@ pub(crate) enum AdmissionVerdict {
         /// the scope was unoccupied.
         ranked_superseded: Vec<String>,
         previous_best_score: i32,
-        /// A per-member (season pack) subject admitted this candidate because
-        /// at least one monitored member is held by nothing — the pack *fills*
-        /// the scope rather than only upgrading it. Always `false` for a
-        /// single-file subject.
-        fills_missing_member: bool,
     },
     Reject(AdmissionRejection),
 }
@@ -373,20 +368,6 @@ pub(crate) enum AdmissionVerdict {
 impl AdmissionVerdict {
     pub(crate) fn is_admitted(&self) -> bool {
         matches!(self, Self::Admit { .. })
-    }
-
-    /// Whether the admit arm is a fill of missing members rather than purely an
-    /// upgrade. The grab lane's churn guard reads this: a cooldown protects a
-    /// freshly-imported file from replacement, and a member with no file has
-    /// nothing to protect. `false` on a rejection.
-    pub(crate) fn fills_missing_member(&self) -> bool {
-        matches!(
-            self,
-            Self::Admit {
-                fills_missing_member: true,
-                ..
-            }
-        )
     }
 
     /// Incumbent file ids this candidate displaces, best-first. Empty on a
@@ -735,7 +716,6 @@ fn evaluate_any_member(
                 .map(|incumbent| incumbent.file_id.clone())
                 .collect(),
             previous_best_score: subject.best_score().unwrap_or(0),
-            fills_missing_member: false,
         };
     }
 
@@ -831,7 +811,6 @@ fn evaluate_any_member(
         return AdmissionVerdict::Admit {
             ranked_superseded: improvable,
             previous_best_score: subject.best_score().unwrap_or(0),
-            fills_missing_member: has_missing_member,
         };
     }
 
@@ -857,7 +836,6 @@ fn evaluate_any_member(
         return AdmissionVerdict::Admit {
             ranked_superseded: Vec::new(),
             previous_best_score: 0,
-            fills_missing_member: false,
         };
     };
 
@@ -1091,6 +1069,5 @@ pub(crate) fn evaluate_admission(
             .map(|incumbent| incumbent.file_id.clone())
             .collect(),
         previous_best_score: subject.best_score().unwrap_or(0),
-        fills_missing_member: false,
     }
 }

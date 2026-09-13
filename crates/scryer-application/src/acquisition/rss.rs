@@ -2225,7 +2225,6 @@ impl AppUseCase {
                 title,
                 subject: &subject,
                 admission: &admission,
-                last_search_at: wanted.last_search_at.as_deref(),
                 profile: &upgrade_context.profile,
                 thresholds: &upgrade_context.thresholds,
                 incumbent_at_cutoff: crate::acquisition_release_search::incumbent_at_cutoff(

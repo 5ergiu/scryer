@@ -565,10 +565,6 @@ fn a_pack_is_grabbed_when_any_member_would_improve() {
         verdict.is_admitted(),
         "ep-02 is beatable, so the pack is worth fetching"
     );
-    assert!(
-        !verdict.fills_missing_member(),
-        "every member is occupied, so this pack is an upgrade, not a fill"
-    );
 }
 
 /// …and refused when every member is already held by an equal or better file,
@@ -602,14 +598,12 @@ fn a_pack_with_a_missing_member_is_always_worth_fetching() {
 
     let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 1), &auto(1));
     assert!(verdict.is_admitted());
-    // The grab lane's churn guard reads this to tell a fill from an upgrade.
-    assert!(verdict.fills_missing_member());
 
-    // A single-file subject over the same span is never a fill.
+    // A single-file subject over the same span admits on its own terms.
     let single_file = AdmissionSubject::new(episodes(&["ep-01"]), []);
     assert!(
-        !evaluate_admission(&single_file, CandidateFacts::new(Some(0), 0, 1), &auto(1))
-            .fills_missing_member()
+        evaluate_admission(&single_file, CandidateFacts::new(Some(0), 0, 1), &auto(1))
+            .is_admitted()
     );
 }
 
