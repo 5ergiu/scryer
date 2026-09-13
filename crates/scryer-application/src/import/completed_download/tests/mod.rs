@@ -1390,11 +1390,11 @@ impl DomainEventRepository for TestDomainEventRepo {
                     |record| {
                         event_types.is_none_or(|values| values.contains(&record.event_type))
                             && title_ids.is_none_or(|values| {
-                        record
-                            .title_id
-                            .as_ref()
-                            .is_some_and(|title_id| values.contains(title_id))
-                    })
+                                record
+                                    .title_id
+                                    .as_ref()
+                                    .is_some_and(|title_id| values.contains(title_id))
+                            })
                             && download_id
                                 .is_none_or(|value| record.download_id.as_deref() == Some(value))
                     },

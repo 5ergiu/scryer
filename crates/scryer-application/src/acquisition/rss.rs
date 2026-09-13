@@ -3560,8 +3560,9 @@ mod tests {
                 language: "x-jat".into(),
             },
             scryer_domain::TaggedAlias {
-                name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
-                    .into(),
+                name:
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
                 language: "x-jat".into(),
             },
         ];

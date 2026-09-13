@@ -63,9 +63,7 @@ use crate::location::classify::{
     DestinationLibraryFacts, DestinationRequest, SelectionClassification, TitleClassificationFacts,
     TitleLocationClass, classify_selection, reason_codes,
 };
-use crate::location::collisions::{
-    CollisionNaming, ContentFacts, DestinationItem, PathCaseRule,
-};
+use crate::location::collisions::{CollisionNaming, ContentFacts, DestinationItem, PathCaseRule};
 use crate::location::execution::{
     ImportFilePermissionsApplier, MergedSourceRetirement, MergedSourceRetirer,
     RecycleBinSourceRecycler, RootMoveAdmission, RootMoveCatalog, RootMoveFileMover,
@@ -1779,10 +1777,7 @@ async fn unavailable_plan_root(
     let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for title in &plan.titles {
         for (label, root) in [
-            (
-                "the source root",
-                title.source_root_path.as_deref(),
-            ),
+            ("the source root", title.source_root_path.as_deref()),
             (
                 "the destination root",
                 title.destination_root_path.as_deref(),

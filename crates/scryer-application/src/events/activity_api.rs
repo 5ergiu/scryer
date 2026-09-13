@@ -319,17 +319,14 @@ fn title_history_record_matches(record: &TitleHistoryRecord, filter: &TitleHisto
         .event_types
         .as_ref()
         .is_none_or(|event_types| event_types.contains(&record.event_type))
-        && filter
-            .title_ids
-            .as_ref()
-            .is_none_or(|title_ids| {
-                // A record with no catalog title behind it (an unlinked grab)
-                // can never satisfy a title-scoped filter.
-                record
-                    .title_id
-                    .as_ref()
-                    .is_some_and(|title_id| title_ids.contains(title_id))
-            })
+        && filter.title_ids.as_ref().is_none_or(|title_ids| {
+            // A record with no catalog title behind it (an unlinked grab)
+            // can never satisfy a title-scoped filter.
+            record
+                .title_id
+                .as_ref()
+                .is_some_and(|title_id| title_ids.contains(title_id))
+        })
         && filter
             .download_id
             .as_ref()
