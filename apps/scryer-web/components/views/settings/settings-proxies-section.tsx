@@ -44,9 +44,9 @@ import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import {
+  OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY,
   PROXY_FAMILIES,
   PROXY_FAMILY_LABEL_KEYS,
-  PROXY_PROVIDER_TYPES_BY_FAMILY,
   WIREGUARD_KEEPALIVE_DEFAULT_SECONDS,
   WIREGUARD_MTU_DEFAULT,
   WIREGUARD_MTU_MAX,
@@ -446,7 +446,7 @@ export function SettingsProxiesSection({
                             <SelectLabel>
                               {t(PROXY_FAMILY_LABEL_KEYS[family])}
                             </SelectLabel>
-                            {PROXY_PROVIDER_TYPES_BY_FAMILY[family].map((providerType) => (
+                            {OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY[family].map((providerType) => (
                               <SelectItem key={providerType} value={providerType}>
                                 {formatProxyProvider(providerType)}
                               </SelectItem>

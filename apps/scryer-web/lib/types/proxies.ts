@@ -56,6 +56,37 @@ export const PROXY_PROVIDER_TYPES_BY_FAMILY: Record<
 };
 
 /**
+ * Providers the editor does not offer for a new proxy.
+ *
+ * SOCKS4 is withheld until the HTTP client's SOCKS4 connector is fixed:
+ * hyper-util 0.1.20 writes a second NUL after the empty user id, so a socks4a
+ * hop hands the proxy an empty destination name and a socks4 hop carries a
+ * stray leading byte into the proxied stream. The fix (hyperium/hyper-util#307)
+ * is not in a release yet. A SOCKS4 proxy saved before this still lists and
+ * opens, because a saved proxy's provider is not editable.
+ */
+const WITHHELD_PROXY_PROVIDER_TYPES: ReadonlySet<ProxyProviderTypeValue> =
+  new Set(["socks4"]);
+
+export function isProxyProviderOffered(
+  providerType: ProxyProviderTypeValue,
+): boolean {
+  return !WITHHELD_PROXY_PROVIDER_TYPES.has(providerType);
+}
+
+/** The editor's provider list for a new proxy, grouped by family. */
+export const OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY: Record<
+  ProxyFamily,
+  readonly ProxyProviderTypeValue[]
+> = {
+  solver: PROXY_PROVIDER_TYPES_BY_FAMILY.solver.filter(isProxyProviderOffered),
+  standard: PROXY_PROVIDER_TYPES_BY_FAMILY.standard.filter(
+    isProxyProviderOffered,
+  ),
+  tunnel: PROXY_PROVIDER_TYPES_BY_FAMILY.tunnel.filter(isProxyProviderOffered),
+};
+
+/**
  * Product and protocol names, so they stay identical in every locale. An
  * unknown value from a newer server is rendered verbatim rather than
  * mislabelled as something it is not.
