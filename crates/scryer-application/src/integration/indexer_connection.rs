@@ -1884,7 +1884,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(FacetRegistry::new()),
@@ -1923,7 +1922,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2633,7 +2631,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2721,7 +2718,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2828,7 +2824,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2939,7 +2934,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -3014,7 +3008,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),

@@ -1030,7 +1030,6 @@ impl TestContext {
             services,
             JwtAuthConfig {
                 issuer: "scryer-test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             facet_registry,

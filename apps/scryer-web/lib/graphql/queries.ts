@@ -2787,6 +2787,7 @@ export const securitySettingsQuery = `query SecuritySettings {
   securitySettings {
     formLoginEnabled
     passwordMinLength
+    sessionDurationDays
     skipLoginForLocalIps
     apiKeysRestrictToSystemSettingsUsers
     mfaRequireConfigStepUp

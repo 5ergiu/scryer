@@ -202,6 +202,9 @@ const ru: LocaleDictionary = {
     "settings.securityEnableFormLoginHelp":
         "Если параметр включён, Scryer требует аутентифицированный сеанс пользователя. Если параметр отключён, запросы выполняются от имени администратора по умолчанию.",
     "settings.securityPasswordMinLength": "Минимальная длина локального пароля",
+    "settings.securitySessionDuration": "Длительность сеанса (дни)",
+    "settings.securitySessionDurationHelp": "Применяется к новым входам всех пользователей этого экземпляра. Если включено сохранение входа, сеансы сохраняются после перезапуска браузера до истечения срока. Срок существующих сеансов не меняется.",
+    "settings.securitySessionDurationInvalid": "Длительность сеанса должна быть целым числом от 1 до 365 дней.",
     "settings.securityPasswordMinLengthHelp":
         "Применяется только к новым или изменённым паролям Scryer. Существующие более короткие пароли продолжат работать. Минимум: {{min}}.",
     "settings.securityPasswordMinLengthInvalid":

@@ -424,6 +424,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_SECURITY,
             scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::SESSION_DURATION_DAYS_KEY,
+            data_type: "integer",
+            default_value_json: "3",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_SECURITY,
+            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: PASSWORD_MIN_LENGTH_KEY,
             data_type: "integer",
             default_value_json: "8",

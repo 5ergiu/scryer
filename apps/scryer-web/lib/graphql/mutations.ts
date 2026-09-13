@@ -958,6 +958,7 @@ export const updateSecuritySettingsMutation = `mutation UpdateSecuritySettings($
   updateSecuritySettings(input: $input) {
     formLoginEnabled
     passwordMinLength
+    sessionDurationDays
     skipLoginForLocalIps
     apiKeysRestrictToSystemSettingsUsers
     mfaRequireConfigStepUp

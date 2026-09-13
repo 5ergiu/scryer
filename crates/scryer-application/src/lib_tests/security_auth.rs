@@ -1,5 +1,55 @@
 use super::*;
 
+#[tokio::test]
+async fn session_duration_controls_new_tokens_for_both_persistence_modes() {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let (app, admin) = bootstrap_with_settings_repo_and_profiles(
+        settings.clone(),
+        Arc::new(MockQualityProfileRepo),
+        Arc::new(MockIndexerClient),
+    );
+    let user = app
+        .create_user(
+            &admin,
+            "session-duration-user".into(),
+            "test-password-123".into(),
+            Default::default(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let claims = |token: &str| {
+        jsonwebtoken::dangerous::insecure_decode::<JwtClaims>(token)
+            .unwrap()
+            .claims
+    };
+    let original = app.issue_access_token(&user).await.unwrap();
+    let original_claims = claims(&original);
+    assert_eq!(original_claims.exp - original_claims.iat, 3 * 86_400);
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            settings::keys::SESSION_DURATION_DAYS_KEY,
+            "14",
+        )
+        .await;
+    for persistent in [false, true] {
+        let token = app
+            .issue_access_token_with_mfa_and_persistence(&user, None, None, persistent)
+            .await
+            .unwrap();
+        let decoded = claims(&token);
+        assert_eq!(decoded.exp - decoded.iat, 14 * 86_400);
+        assert_eq!(decoded.persist_session, persistent);
+        app.authenticate_token(&token).await.unwrap();
+    }
+    app.authenticate_token(&original)
+        .await
+        .expect("saved duration does not invalidate existing tokens");
+    assert_eq!(claims(&original).exp, original_claims.exp);
+    assert_eq!(app.mfa_enrollment_token_lifetime(), 10 * 60);
+}
+
 #[test]
 fn hash_and_validate_password_round_trip() {
     let (app, _user) = bootstrap();
@@ -120,6 +170,7 @@ async fn existing_short_password_remains_valid_after_minimum_is_raised() {
     app.update_security_settings(
         &admin,
         UpdateSecuritySettings {
+            session_duration_days: None,
             form_login_enabled: false,
             password_min_length: 12,
             skip_login_for_local_ips: false,
@@ -206,6 +257,7 @@ async fn emby_totp_requirement_round_trips_through_settings_values() {
     app.update_security_settings(
         &admin,
         UpdateSecuritySettings {
+            session_duration_days: None,
             form_login_enabled: false,
             password_min_length: 8,
             skip_login_for_local_ips: false,

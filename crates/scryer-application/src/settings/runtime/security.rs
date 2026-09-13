@@ -6,6 +6,7 @@ pub struct ServiceSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecuritySettings {
     pub form_login_enabled: bool,
+    pub session_duration_days: i32,
     pub password_min_length: i32,
     pub skip_login_for_local_ips: bool,
     pub api_keys_restrict_to_system_settings_users: bool,
@@ -17,6 +18,8 @@ pub struct SecuritySettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateSecuritySettings {
     pub form_login_enabled: bool,
+    /// Omission preserves the instance-wide session duration.
+    pub session_duration_days: Option<i32>,
     pub password_min_length: i32,
     pub skip_login_for_local_ips: bool,
     /// When absent, preserve the current value without writing this protected setting.
@@ -69,6 +72,7 @@ impl AppUseCase {
 
         Ok(SecuritySettings {
             form_login_enabled,
+            session_duration_days: self.session_duration_days().await?,
             password_min_length,
             skip_login_for_local_ips,
             api_keys_restrict_to_system_settings_users,
@@ -166,14 +170,19 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageUsers)
             .await?;
         if input.api_keys_restrict_to_system_settings_users.is_some() {
-            self.require_app_permission(
-                actor,
-                scryer_domain::AppPermission::ManageSystemSettings,
-            )
-            .await?;
+            self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+                .await?;
         }
 
         let current = self.load_security_settings().await?;
+        let session_duration_days = input
+            .session_duration_days
+            .unwrap_or(current.session_duration_days);
+        if !(1..=365).contains(&session_duration_days) {
+            return Err(AppError::Validation(
+                "session duration must be between 1 and 365 days".into(),
+            ));
+        }
         let api_keys_restrict_to_system_settings_users = input
             .api_keys_restrict_to_system_settings_users
             .unwrap_or(current.api_keys_restrict_to_system_settings_users);
@@ -241,6 +250,14 @@ impl AppUseCase {
             Some(actor.id.clone()),
         )
         .await?;
+        if input.session_duration_days.is_some() {
+            self.upsert_system_setting_json(
+                settings::keys::SESSION_DURATION_DAYS_KEY,
+                &session_duration_days,
+                Some(actor.id.clone()),
+            )
+            .await?;
+        }
         if let Some(value) = input.api_keys_restrict_to_system_settings_users {
             self.upsert_system_setting_json(
                 API_KEYS_RESTRICT_TO_SYSTEM_SETTINGS_USERS_KEY,
@@ -295,11 +312,15 @@ impl AppUseCase {
         if input.totp_require_emby_login.is_some() {
             saved_keys.push(TOTP_REQUIRE_EMBY_LOGIN_KEY.to_string());
         }
+        if input.session_duration_days.is_some() {
+            saved_keys.push(settings::keys::SESSION_DURATION_DAYS_KEY.to_string());
+        }
         self.emit_settings_saved(actor, "security_settings", None, saved_keys)
             .await;
 
         Ok(SecuritySettings {
             form_login_enabled: input.form_login_enabled,
+            session_duration_days,
             password_min_length: input.password_min_length,
             skip_login_for_local_ips: input.skip_login_for_local_ips,
             api_keys_restrict_to_system_settings_users,

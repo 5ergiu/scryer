@@ -19,6 +19,9 @@ const SECURITY_INSET_CLASS =
   "rounded-[12px] border border-[var(--scry-line2)] bg-[var(--scry-card2)]";
 
 type SettingsSecuritySectionProps = {
+  sessionDurationDraft: string;
+  onSessionDurationDraftChange: (value: string) => void;
+  onSessionDurationSubmit: (value: string) => Promise<void>;
   settings: SecuritySettings;
   loading: boolean;
   enableConfirmOpen: boolean;
@@ -28,6 +31,7 @@ type SettingsSecuritySectionProps = {
   newPasswordConfirm: string;
   setPasswordError: string | null;
   confirmBusy: boolean;
+  saveBusy: boolean;
   confirmPassword: string;
   confirmError: string | null;
   passwordMinLengthDraft: string;
@@ -56,6 +60,9 @@ type SettingsSecuritySectionProps = {
 };
 
 export function SettingsSecuritySection({
+  sessionDurationDraft,
+  onSessionDurationDraftChange,
+  onSessionDurationSubmit,
   settings,
   loading,
   enableConfirmOpen,
@@ -65,6 +72,7 @@ export function SettingsSecuritySection({
   newPasswordConfirm,
   setPasswordError,
   confirmBusy,
+  saveBusy,
   confirmPassword,
   confirmError,
   passwordMinLengthDraft,
@@ -92,7 +100,7 @@ export function SettingsSecuritySection({
   oauthApplicationsPanel,
 }: SettingsSecuritySectionProps) {
   const t = useTranslate();
-  const busy = loading || confirmBusy;
+  const busy = loading || confirmBusy || saveBusy;
   const confirmDisabled = confirmPassword.trim().length === 0;
   const setPasswordDisabled =
     newPassword.length === 0 || newPasswordConfirm.length === 0;
@@ -160,6 +168,35 @@ export function SettingsSecuritySection({
                   {t("settings.securityPasswordMinLengthHelp", {
                     min: minPasswordLength,
                   })}
+                </p>
+              </div>
+            </section>
+
+            <section className={`${SECURITY_INSET_CLASS} p-4`}>
+              <div className="max-w-sm space-y-1.5">
+                <Label htmlFor="security-session-duration-days">
+                  {t("settings.securitySessionDuration")}
+                </Label>
+                <Input
+                  id="security-session-duration-days"
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={365}
+                  step={1}
+                  value={sessionDurationDraft}
+                  disabled={busy}
+                  onChange={(event) => onSessionDurationDraftChange(event.target.value)}
+                  onBlur={(event) => void onSessionDurationSubmit(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void onSessionDurationSubmit(event.currentTarget.value);
+                    }
+                  }}
+                />
+                <p className="text-xs leading-relaxed text-[var(--scry-muted3)]">
+                  {t("settings.securitySessionDurationHelp")}
                 </p>
               </div>
             </section>

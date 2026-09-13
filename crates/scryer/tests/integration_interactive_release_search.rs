@@ -411,7 +411,6 @@ async fn setup_app_with_movie_routing(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".into(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".into(),
         },
         Arc::new(registry),

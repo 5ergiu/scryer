@@ -2605,7 +2605,6 @@ pub struct IndexerErrorPage {
 #[derive(Clone, Debug)]
 pub struct JwtAuthConfig {
     pub issuer: String,
-    pub access_ttl_seconds: usize,
     pub jwt_signing_salt: String,
 }
 

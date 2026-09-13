@@ -23921,6 +23921,10 @@ type SecuritySettingsPayload {
 	"""
 	formLoginEnabled: Boolean!
 	"""
+	Instance-wide lifetime of new sign-in sessions, in days.
+	"""
+	sessionDurationDays: Int!
+	"""
 	Minimum accepted password length.
 	"""
 	passwordMinLength: Int!
@@ -28377,6 +28381,10 @@ input UpdateRuleSetInput {
 Authentication and local-access security settings.
 """
 input UpdateSecuritySettingsInput {
+	"""
+	Session lifetime in days (1–365). Omission preserves the saved instance setting.
+	"""
+	sessionDurationDays: Int
 	"""
 	Whether form login is enabled.
 	"""

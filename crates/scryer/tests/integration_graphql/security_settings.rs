@@ -868,6 +868,100 @@ async fn graphql_security_settings_form_login_enable_revokes_authless_oauth_gran
 }
 
 #[tokio::test]
+async fn graphql_security_session_duration_round_trip_and_validation() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let admin = ctx.app.find_or_create_default_user().await.unwrap();
+    let original_token = ctx.app.issue_access_token(&admin).await.unwrap();
+    assert_eq!(ctx.app.token_lifetime().await.unwrap(), 3 * 86_400);
+    for (field, expected, valid) in [
+        ("sessionDurationDays: 14", 14, true),
+        ("", 14, true),
+        ("sessionDurationDays: 0", 14, false),
+        ("sessionDurationDays: 366", 14, false),
+        ("sessionDurationDays: 1", 1, true),
+        ("sessionDurationDays: 365", 365, true),
+    ] {
+        let mutation = format!(
+            r#"mutation {{ updateSecuritySettings(input: {{
+            formLoginEnabled: false passwordMinLength: 8 skipLoginForLocalIps: false
+            mfaRequireConfigStepUp: false mfaRequirePasswordLogin: false
+            mfaRequireJellyfinLogin: false {field}
+        }}) {{ sessionDurationDays }} }}"#
+        );
+        let result = schema_exec(&ctx, &mutation, Some(admin.clone())).await;
+        if valid {
+            assert_no_errors(&result);
+            assert_eq!(
+                result["data"]["updateSecuritySettings"]["sessionDurationDays"],
+                expected
+            );
+        } else {
+            assert!(
+                result["errors"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("session duration")
+            );
+        }
+        let saved = schema_exec(
+            &ctx,
+            "{ securitySettings { sessionDurationDays } }",
+            Some(admin.clone()),
+        )
+        .await;
+        assert_no_errors(&saved);
+        assert_eq!(
+            saved["data"]["securitySettings"]["sessionDurationDays"],
+            expected
+        );
+        for persistent in [false, true] {
+            let token = ctx
+                .app
+                .issue_access_token_with_mfa_and_persistence(&admin, None, None, persistent)
+                .await
+                .unwrap();
+            ctx.app
+                .authenticate_token(&token)
+                .await
+                .expect("new session is valid");
+        }
+        assert_eq!(ctx.app.token_lifetime().await.unwrap(), expected * 86_400);
+        ctx.app
+            .authenticate_token(&original_token)
+            .await
+            .expect("existing session remains valid");
+    }
+    let viewer = ctx
+        .app
+        .create_user(
+            &admin,
+            "session-viewer".into(),
+            "test-password-123".into(),
+            Default::default(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let denied = schema_exec(
+        &ctx,
+        r#"mutation { updateSecuritySettings(input: {
+        sessionDurationDays: 2 formLoginEnabled: false passwordMinLength: 8
+        skipLoginForLocalIps: false mfaRequireConfigStepUp: false
+        mfaRequirePasswordLogin: false mfaRequireJellyfinLogin: false
+    }) { sessionDurationDays } }"#,
+        Some(viewer),
+    )
+    .await;
+    assert!(
+        denied["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    );
+    assert_eq!(ctx.app.token_lifetime().await.unwrap(), 365 * 86_400);
+}
+
+#[tokio::test]
 async fn graphql_typed_security_settings_reject_short_password_minimum() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;

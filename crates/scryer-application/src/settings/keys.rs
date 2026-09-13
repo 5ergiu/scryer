@@ -87,6 +87,7 @@ pub const AUTO_BACKUP_POST_UPGRADE_PENDING_VERSION_KEY: &str =
     "backup.auto.post_upgrade_pending_version";
 pub const FORM_LOGIN_ENABLED_KEY: &str = "auth.form_login_enabled";
 pub const PASSWORD_MIN_LENGTH_KEY: &str = "auth.password_min_length";
+pub const SESSION_DURATION_DAYS_KEY: &str = "auth.session_duration_days";
 pub const PASSWORD_MIN_LENGTH_MIN: i64 = 8;
 pub const SKIP_LOGIN_FOR_LOCAL_IPS_KEY: &str = "auth.skip_login_for_local_ips";
 pub const MFA_REQUIRE_CONFIG_STEP_UP_KEY: &str = "auth.mfa.require_config_step_up";

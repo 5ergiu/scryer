@@ -1503,7 +1503,6 @@ fn bootstrap_plugins_inner(
         services,
         JwtAuthConfig {
             issuer: "test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1558,7 +1557,6 @@ fn bootstrap_plugins_with_subtitles(
         services.build_partial_for_tests(),
         JwtAuthConfig {
             issuer: "test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1640,7 +1638,6 @@ fn bootstrap_plugins_with_runtime_providers_and_archive(
         services.build_partial_for_tests(),
         JwtAuthConfig {
             issuer: "test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),

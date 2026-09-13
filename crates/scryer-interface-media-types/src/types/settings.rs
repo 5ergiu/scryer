@@ -167,6 +167,8 @@ pub struct BackupSettingsPayload {
 pub struct SecuritySettingsPayload {
     /// Whether form-based login is enabled by configuration.
     pub form_login_enabled: bool,
+    /// Instance-wide lifetime of new sign-in sessions, in days.
+    pub session_duration_days: i32,
     /// Minimum accepted password length.
     pub password_min_length: i32,
     /// Whether local IPs may skip login.
@@ -962,6 +964,8 @@ pub struct UpdateBackupSettingsInput {
 #[derive(InputObject, Clone)]
 /// Authentication and local-access security settings.
 pub struct UpdateSecuritySettingsInput {
+    /// Session lifetime in days (1–365). Omission preserves the saved instance setting.
+    pub session_duration_days: Option<i32>,
     /// Whether form login is enabled.
     pub form_login_enabled: bool,
     /// Minimum accepted password length.

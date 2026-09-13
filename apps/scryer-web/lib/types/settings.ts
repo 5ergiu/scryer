@@ -119,6 +119,7 @@ export type TrustedCertificateEntry = {
 };
 
 export type SecuritySettings = {
+  sessionDurationDays: number;
   formLoginEnabled: boolean;
   passwordMinLength: number;
   skipLoginForLocalIps: boolean;

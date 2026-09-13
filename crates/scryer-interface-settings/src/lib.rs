@@ -318,6 +318,7 @@ fn from_security_settings(
     SecuritySettingsPayload {
         form_login_enabled: settings.form_login_enabled,
         password_min_length: settings.password_min_length,
+        session_duration_days: settings.session_duration_days,
         skip_login_for_local_ips: settings.skip_login_for_local_ips,
         api_keys_restrict_to_system_settings_users: settings
             .api_keys_restrict_to_system_settings_users,
