@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use scryer_application::{AppError, AppResult};
 use scryer_plugin_sdk::{ArchivePluginProcessResponse, PluginDescriptor};
+use tracing::Instrument;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
@@ -233,8 +234,20 @@ pub(crate) async fn process_archive_component(
         plugin_version = invocation.plugin_version,
         operation = invocation.operation,
     );
-    let _enter = span.enter();
+    // The span instruments the future rather than an `enter()` guard held
+    // across the awaits below: a guard that straddles an await is left behind
+    // on whichever worker entered it once tokio moves the task, and that
+    // worker then panics on the next span it opens.
+    instrumented_archive_component(spec, request_json, invocation)
+        .instrument(span)
+        .await
+}
 
+async fn instrumented_archive_component(
+    spec: &PluginInstanceSpec,
+    request_json: &str,
+    invocation: ArchiveInvocation<'_>,
+) -> AppResult<ArchivePluginProcessResponse> {
     let started = Instant::now();
     let request_bytes = request_json.as_bytes().to_vec();
     let request_len = request_bytes.len();

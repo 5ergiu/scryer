@@ -38,8 +38,7 @@ use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use tracing::Instrument;
@@ -89,12 +88,6 @@ impl Drop for PinnedThread {
     }
 }
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 /// A future that is `Pending` exactly once, so a caller can choose which thread
 /// polls it the first time and which thread polls it the second.
 #[derive(Default)]
@@ -118,8 +111,7 @@ impl Future for YieldOnce {
 type BoxedUnitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn poll_once(future: &mut BoxedUnitFuture) -> Poll<()> {
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     future.as_mut().poll(&mut cx)
 }
 
@@ -212,9 +204,8 @@ fn a_span_guard_held_across_an_await_poisons_the_thread_that_entered_it() {
     );
 
     let guarded = open_a_span_after_a_thread_hop(guard_held_across_await);
-    let payload = guarded
-        .err()
-        .expect("holding the guard across the await must poison the entering thread");
+    let payload =
+        guarded.expect_err("holding the guard across the await must poison the entering thread");
     let message = panic_message(payload.as_ref());
     assert!(
         message.contains("tried to clone a span") && message.contains("already closed"),
