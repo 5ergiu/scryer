@@ -108,6 +108,23 @@ fn submission_matches_intent(
         && submission.scope == intent.scope
 }
 
+/// Whether an accepted grab that landed on a job the tracker only observed may
+/// take that job over.
+///
+/// A client that already holds the release reports the job it has instead of a
+/// new one, so the grab resolves to the job's foreign canonical identity, whose
+/// only submission row is the tracker's title-less observation stub. That stub
+/// belongs to no title, so it is not another title's grab: the grab claims it,
+/// and the store then records the job as a Scryer submission under the
+/// identity it already had.
+enum ObservationStubAdoption {
+    /// This call is the grab's own client mutation; claim the stub and freeze
+    /// the grab's seed goals on it.
+    ClaimForGrab(Option<crate::PersistedSeedGoals>),
+    /// Leave a stub owner rejected like any other title mismatch.
+    Refuse,
+}
+
 impl AppUseCase {
     async fn adopt_canonical_download(
         &self,
@@ -115,6 +132,7 @@ impl AppUseCase {
         request: &DownloadClientAddRequest,
         effective_download_id: scryer_domain::download_identity::DownloadId,
         adopted_grab: DownloadGrabResult,
+        stub_adoption: ObservationStubAdoption,
     ) -> AppResult<CanonicalDownloadSubmissionOutcome> {
         let title_id = request.title.id.as_str();
         let Some(existing) = self
@@ -128,7 +146,14 @@ impl AppUseCase {
                 "download client reused canonical identity {effective_download_id}, but its submission could not be loaded"
             )));
         };
-        if existing.title_id != title_id {
+        let claimed_stub_seed_goals = match stub_adoption {
+            ObservationStubAdoption::ClaimForGrab(seed_goals) if existing.is_observation_stub() => {
+                Some(seed_goals)
+            }
+            _ => None,
+        };
+        let claims_observation_stub = claimed_stub_seed_goals.is_some();
+        if !claims_observation_stub && existing.title_id != title_id {
             return Err(AppError::DownloadSubmitRejected(format!(
                 "download client reused canonical identity {effective_download_id} owned by title {}, not {title_id}",
                 existing.title_id
@@ -143,6 +168,7 @@ impl AppUseCase {
         {
             let submission =
                 submission_for_grab(intent, request, effective_download_id, &adopted_grab);
+            let seed_goals = claimed_stub_seed_goals.flatten();
             let disposition = match self
                 .services
                 .workflow
@@ -150,7 +176,7 @@ impl AppUseCase {
                 .record_submission_with_identity(
                     submission.clone(),
                     accepted_identity.clone(),
-                    None,
+                    seed_goals.clone(),
                 )
                 .await
             {
@@ -164,7 +190,7 @@ impl AppUseCase {
                             UncertainDownloadSubmissionClaim::accepted(
                                 submission,
                                 accepted_identity,
-                                None,
+                                seed_goals,
                             ),
                         );
                     return Err(AppError::DownloadSubmitAmbiguous(format!(
@@ -199,7 +225,9 @@ impl AppUseCase {
         Ok(CanonicalDownloadSubmissionOutcome::Accepted(
             CanonicalDownloadSubmission {
                 grab: adopted_grab,
-                newly_submitted: false,
+                // Claiming an observed job is this grab's submission, not a
+                // reuse of an earlier Scryer one.
+                newly_submitted: claims_observation_stub,
             },
         ))
     }
@@ -301,12 +329,16 @@ impl AppUseCase {
                                 download_id: Some(download_id),
                                 seed_goals: None,
                             };
+                            // The recovered claim is an earlier grab, possibly of
+                            // a different release than this intent, so the intent
+                            // cannot stand in for it on an observed job.
                             return self
                                 .adopt_canonical_download(
                                     &intent,
                                     &intent.request,
                                     download_id,
                                     adopted_grab,
+                                    ObservationStubAdoption::Refuse,
                                 )
                                 .await;
                         }
@@ -834,7 +866,13 @@ impl AppUseCase {
                 ..grab
             };
             let outcome = self
-                .adopt_canonical_download(&intent, &request, effective_download_id, adopted_grab)
+                .adopt_canonical_download(
+                    &intent,
+                    &request,
+                    effective_download_id,
+                    adopted_grab,
+                    ObservationStubAdoption::ClaimForGrab(seed_goals),
+                )
                 .await?;
             if let Some(adopted) = self
                 .services
