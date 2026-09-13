@@ -160,8 +160,8 @@ const nl: LocaleDictionary = {
   "dashboard.unmetered": "Onbeperkt",
   "dashboard.statusOk": "OK",
   "dashboard.statusError": "Fout",
-  "dashboard.rootCount": "{{count}} hoofdmappen",
-  "dashboard.rootCountOne": "1 hoofdmap",
+  "dashboard.rootCount": "{{count}} rootmappen",
+  "dashboard.rootCountOne": "1 rootmap",
   "dashboard.storageFree": "{{size}} vrij",
   "dashboard.storageUnavailable": "Gebruik niet beschikbaar",
   "dashboard.storageUsage": "{{used}}/{{total}} TB",
@@ -521,11 +521,11 @@ const nl: LocaleDictionary = {
   "settings.downloadClientRoutingSavedFor":
     'Downloadclient-routing opgeslagen voor "{{name}}".',
   "settings.delayProfiles": "Vertragingsprofielen",
-  "settings.acquisition": "Ververven",
-  "settings.acquisitionSaved": "Ververvingsinstellingen opgeslagen.",
-  "settings.acquisitionIntro": "RSS is het standaard ververvingspad: elk gewenst item wordt actief één keer per indexer doorzocht en daarna gevolgd via RSS. Actief navullen is getimed en eindig.",
-  "settings.acquisitionEnabled": "Automatisch ververven inschakelen",
-  "settings.acquisitionEnabledHelp": "Voert de ververvingslus op de achtergrond uit: convergentiezoekacties en RSS-matching.",
+  "settings.acquisition": "Ophalen",
+  "settings.acquisitionSaved": "Ophaalinstellingen opgeslagen.",
+  "settings.acquisitionIntro": "RSS is het standaard ophaalpad: elk gewenst item wordt actief één keer per indexer doorzocht en daarna gevolgd via RSS. Actief navullen is getimed en eindig.",
+  "settings.acquisitionEnabled": "Automatisch ophalen inschakelen",
+  "settings.acquisitionEnabledHelp": "Voert de ophaallus op de achtergrond uit: convergentiezoekacties en RSS-matching.",
   "settings.acquisitionThresholds": "Opwaarderingsdrempels",
   "settings.acquisitionUpgradeCooldownHours": "Afkoelperiode  voor opwaarderen (uren)",
   "settings.acquisitionUpgradeCooldownHoursHelp": "Minimale tijd tussen opwaarderen voor hetzelfde item.",
@@ -537,14 +537,14 @@ const nl: LocaleDictionary = {
   "settings.acquisitionForcedUpgradeDeltaBypassHelp": "Een scoreverbetering van deze omvang waardeert onmiddellijk op en omzeilt de afkoelperiode.",
   "settings.acquisitionConvergence": "Convergentie & timing",
   "settings.acquisitionPollIntervalSeconds": "Pollinterval (seconden)",
-  "settings.acquisitionPollIntervalSecondsHelp": "Hoe vaak de ververvingslus op de achtergrond wakker wordt.",
+  "settings.acquisitionPollIntervalSecondsHelp": "Hoe vaak de ophaallus op de achtergrond wakker wordt.",
   "settings.acquisitionMaxScopesPerCycle": "Max. items geëvalueerd per cyclus",
-  "settings.acquisitionMaxScopesPerCycleHelp": "Evaluatielimiet voor één ververvingscyclus. Indexer-rate limits — niet dit aantal — bepalen het werkelijke verzoektarief.",
-  "settings.acquisitionReconvergeDays": "Opnieuw ververven na (dagen)",
-  "settings.acquisitionReconvergeDaysHelp": "0 schakelt het uit (aanbevolen): ververvende items worden via RSS gevolgd. Schakel alleen in als noodmaatregel wanneer een feed onvolledig blijkt.",
+  "settings.acquisitionMaxScopesPerCycleHelp": "Evaluatielimiet voor één ophaalcyclus. Indexer-rate limits — niet dit aantal — bepalen het werkelijke verzoektarief.",
+  "settings.acquisitionReconvergeDays": "Opnieuw convergeren na (dagen)",
+  "settings.acquisitionReconvergeDaysHelp": "0 schakelt het uit (aanbevolen): geconvergeerde items worden via RSS gevolgd. Schakel alleen in als noodmaatregel wanneer een feed onvolledig blijkt.",
   "settings.delayProfileExisting": "Bestaande vertragingsprofielen",
   "settings.delayProfileNone":
-    "Geen vertragingsprofielen geconfigureerd. Releases worden onmiddellijk vervorven.",
+    "Geen vertragingsprofielen geconfigureerd. Releases worden onmiddellijk opgehaald.",
   "settings.delayProfileCreate": "Profiel aanmaken",
   "settings.delayProfileCreateNew": "Nieuw vertragingsprofiel aanmaken",
   "settings.delayProfileEdit": "Profiel bewerken",
@@ -558,10 +558,10 @@ const nl: LocaleDictionary = {
   "settings.delayProfileNameRequired": "Naam vertragingsprofiel is verplicht.",
   "settings.delayProfileUsenetDelay": "Usenet-vertraging (minuten)",
   "settings.delayProfileUsenetDelayHelp":
-    "Hoe lang usenet-releases worden vastgehouden voordat ze worden vervorven. 0 = onmiddellijk vervorven.",
+    "Hoe lang usenet-releases worden vastgehouden voordat ze worden opgehaald. 0 = onmiddellijk ophalen.",
   "settings.delayProfileTorrentDelay": "Torrent-vertraging (minuten)",
   "settings.delayProfileTorrentDelayHelp":
-    "Hoe lang torrent-releases worden vastgehouden voordat ze worden vervorven. 0 = onmiddellijk vervorven.",
+    "Hoe lang torrent-releases worden vastgehouden voordat ze worden opgehaald. 0 = onmiddellijk ophalen.",
   "settings.delayProfilePreferred": "Gewenst protocol",
   "settings.delayProfilePreferredHelp":
     "Scoregebaseerde bypass geldt alleen voor releases op het gewenste protocol.",
@@ -1119,7 +1119,7 @@ const nl: LocaleDictionary = {
   "pwa.offline": "Je bent offline. Sommige functies zijn misschien niet beschikbaar.",
   "pwa.installApp": "Scryer installeren",
   "pwa.iosInstallHint":
-    'Tap the share button and select "Add to Home Screen" to install.',
+    'Tik op de deelknop en kies "Zet op beginscherm" om te installeren.',
   "smgUpgrade.deprecatedTitle": "Scryer-update aanbevolen",
   "smgUpgrade.deprecatedBody":
     "Deze Scryer-versie nadert het einde van de ondersteuning. Werk binnenkort bij om Scryer te blijven gebruiken.",
@@ -1349,7 +1349,7 @@ const nl: LocaleDictionary = {
   "pendingImports.knownTitle": "Bekende titel:",
   "pendingImports.reason.title_already_owns_another_folder": "Titel heeft al een andere map",
   "pendingImports.ownershipConflictHelp":
-    "De media van deze titel staan in een andere map, en een titel heeft precies één map. Verplaats dit bestand naar de map van de titel (of verwijder deze dubbele map) en scan opnieuw; gebruik Negeren om het te verbergen. Als dit een andere film is die alleen de naam deelt (een remake of het origineel), matcht een rescan na update 0.18.13 het op zichzelf.",
+    "De media van deze titel staan in een andere map, en een titel heeft precies één map. Verplaats dit bestand naar de map van de titel (of verwijder deze dubbele map) en scan opnieuw; gebruik Negeren om het te verbergen. Als dit een andere film is die alleen de naam deelt (een remake of het origineel), matcht een rescan na update 0.18.13 het vanzelf.",
   "pendingImports.bindEpisodes": "Afleveringen koppelen",
   "pendingImports.bindPreviewLoadFailed": "Koppelingsvoorvertoning laden mislukt",
   "pendingImports.bindFailed": "Openstaande import koppelen mislukt.",
@@ -1450,7 +1450,7 @@ const nl: LocaleDictionary = {
     "Automatische import kon geen unieke seizoen- en afleveringskoppeling bepalen. Open Handmatige import en wijs het juiste seizoen en de juiste aflevering toe.",
   "queue.blockReasonFallbackReview":
     "Automatische import vereist operatorcontrole. Open Handmatige import en bevestig de bestandskoppeling om verder te gaan.",
-  "queue.seeding.stateSeeding": "Seeding",
+  "queue.seeding.stateSeeding": "Seeden",
   "queue.seeding.stateGoalMet": "Seeddoel bereikt",
   "queue.seeding.stateHeldPrivate": "Seeding · privé",
   "queue.seeding.stateNeverRemove": "Altijd seeden",
@@ -1694,7 +1694,7 @@ const nl: LocaleDictionary = {
   "settings.arrImportDiagnostics": "Vertaalnotities",
   "settings.arrImportApply": "Geïmporteerd concept gebruiken",
 
-  "settings.refTitle": "Input Context Reference",
+  "settings.refTitle": "Referentie voor de input-context",
   "settings.refSubtitle":
     "Klik om de volledige referentie uit te klappen voor alle velden die beschikbaar zijn voor je Rego-regels.",
   "settings.refIntro":
@@ -1759,7 +1759,7 @@ const nl: LocaleDictionary = {
   "settings.refReleaseEpisodeReleaseType":
     "Afleveringsverpakkingstype zoals single_episode, multi_episode, season_pack of unknown",
   "settings.refReleaseIsSeasonPack":
-    "True wanneer de release een volledig of gedeeltelijk season pack lijkt te bevatten",
+    "True wanneer de release een volledig of gedeeltelijk seizoenspakket lijkt te bevatten",
   "settings.refReleaseIsMultiEpisode":
     "True wanneer de release meerdere afleveringen lijkt te bevatten",
   "settings.refReleaseGroup": "Releasegroep of uploadernaam",
@@ -1999,7 +1999,7 @@ const nl: LocaleDictionary = {
   "settings.postProcessing": "Post-processing",
   "settings.pp.title": "Post-processing scripts",
   "settings.pp.description":
-    "Scripts draaien automatisch nadat media is geïmporteerd. Blocking scripts worden in prioriteitsvolgorde uitgevoerd. Fire-and-forget scripts draaien parallel zonder de importpipeline te vertragen.",
+    "Scripts draaien automatisch nadat media is geïmporteerd. Blokkerende scripts worden in prioriteitsvolgorde uitgevoerd. Achtergrondscripts draaien parallel zonder de importpipeline te vertragen.",
   "settings.pp.noScripts": "Geen post-processing scripts geconfigureerd.",
   "settings.pp.name": "Scriptnaam",
   "settings.pp.namePlaceholder": "bijv. Plex notificeren",
@@ -2072,7 +2072,7 @@ const nl: LocaleDictionary = {
   "settings.pluginCategoryIndexer": "Indexer",
   "settings.pluginCategoryUsenetIndexer": "Usenet Indexer",
   "settings.pluginCategoryTorrentIndexer": "Torrent Indexer",
-  "settings.pluginCategoryDownloadClient": "Download Client",
+  "settings.pluginCategoryDownloadClient": "Downloadclient",
   "settings.pluginCategoryArchiveExtractor": "Archiefextractie",
   "settings.pluginCategoryNotification": "Notificatie",
   "settings.pluginCategorySubtitleProvider": "Ondertitelprovider",
@@ -2097,7 +2097,7 @@ const nl: LocaleDictionary = {
   "settings.pluginBeta": "Beta",
   "settings.pluginDeprecated": "Verouderd",
   "settings.pluginSource": "Bron",
-  "settings.pluginDocs": "Docs",
+  "settings.pluginDocs": "Documentatie",
   "settings.pluginInstallManually": "Handmatig installeren",
   "settings.pluginManualUploadTitle": "Lokaal bestand uploaden",
   "settings.pluginManualUploadHelp":
@@ -2172,7 +2172,7 @@ const nl: LocaleDictionary = {
   "qualityProfile.allQualityTiersSelected": "Alle bekende kwaliteitslagen geselecteerd.",
   "qualityProfile.archivalQuality": "Archiefkwaliteit",
   "qualityProfile.archivalQualityInfo":
-    "Het kwaliteitsniveau om langdurig te bewaren. Scryer kan eerst een hogere kwaliteit downloaden als er nog geen archiefkwaliteit is, en die later vervangen wanneer de archiefkwaliteit release wordt gevonden.",
+    "Het kwaliteitsniveau om langdurig te bewaren. Scryer kan eerst een hogere kwaliteit downloaden als er nog geen archiefkwaliteit is, en die later vervangen wanneer de release in archiefkwaliteit wordt gevonden.",
   "qualityProfile.qualityTiers": "Kwaliteitslagen",
   "qualityProfile.allowHdr": "HDR",
   "qualityProfile.detectedHdrAllowed": "HDR toegestaan",
@@ -2194,9 +2194,9 @@ const nl: LocaleDictionary = {
   "qualityProfile.allowUpgrades": "Upgrades toegestaan",
   "qualityProfile.allowUpgradesInfo":
     "Sta toe dat beheerde kopieën later worden vervangen door een betere match, maar nooit boven de geselecteerde archiefkwaliteit.",
-  "qualityProfile.sourceAllowlist": "Sources",
-  "qualityProfile.videoCodecAllowlist": "Video Codecs",
-  "qualityProfile.audioCodecAllowlist": "Audio Codecs",
+  "qualityProfile.sourceAllowlist": "Bronnen",
+  "qualityProfile.videoCodecAllowlist": "Videocodecs",
+  "qualityProfile.audioCodecAllowlist": "Audiocodecs",
   "qualityProfile.sourceAllowlistInfo":
     "Sta alleen releases toe die overeenkomen met een van de geselecteerde source-waarden (bijvoorbeeld WEB-DL, HDTV).",
   "qualityProfile.sourceBlocklistDefault":
@@ -2220,10 +2220,10 @@ const nl: LocaleDictionary = {
   "qualityProfile.scoringPersona": "Scorepersona",
   "qualityProfile.scoringPersonaInfo":
     "Vooraf ingestelde scoringgewichten die verschillende releasekwaliteiten prioriteren. Balanced wordt aanbevolen voor de meeste gebruikers.",
-  "qualityProfile.personaBalanced": "Balanced",
+  "qualityProfile.personaBalanced": "Gebalanceerd",
   "qualityProfile.personaAudiophile": "Audiofiel",
-  "qualityProfile.personaEfficient": "Efficient",
-  "qualityProfile.personaCompatible": "Compatible",
+  "qualityProfile.personaEfficient": "Efficiënt",
+  "qualityProfile.personaCompatible": "Compatibel",
   "qualityProfile.scoringOverrides": "Score-overschrijvingen",
   "qualityProfile.scoringOverridesInfo":
     "Overschrijf specifiek scoringgedrag ongeacht de geselecteerde persona. Laat op 'Default' staan om de instelling van de persona te gebruiken.",
@@ -2273,7 +2273,7 @@ const nl: LocaleDictionary = {
   "episode.ova": "OVA",
   "episode.ona": "ONA",
   "episode.alternate": "Alternatief",
-  "seasonSection.seasonPackResults": "Season pack resultaten",
+  "seasonSection.seasonPackResults": "Seizoenspakket-resultaten",
   "seasonSection.noEpisodeRecords": "Geen afleveringsrecords voor dit seizoen.",
   "seriesOverview.selectColumn": "Selecteren",
   "seriesOverview.selectEpisodeForDelete": "{{name}} selecteren",
@@ -2428,7 +2428,7 @@ const nl: LocaleDictionary = {
   "status.languageChanged": "Taal van de interface ingesteld op {{language}}.",
 
   "status.editingIndexer": "Indexer {{name}} bewerken",
-  "status.editingDownloadClient": "Download client {{name}} bewerken",
+  "status.editingDownloadClient": "Downloadclient {{name}} bewerken",
   "status.editingSubtitleProvider": "Ondertitelprovider {{name}} bewerken",
   "status.deletingUser": "Gebruiker {{name}} verwijderen?",
   "status.userLoginEnabled": "Login ingeschakeld voor {{name}}.",
@@ -2715,7 +2715,7 @@ const nl: LocaleDictionary = {
   "wanted.noDecisions": "Nog geen releasebeslissingen vastgelegd.",
   "wanted.standby": "Reserve · {{count}}",
   "wanted.standbyTooltip": "{{count}} opgeslagen kandidaten worden geprobeerd als de huidige poging om te ophalen mislukt.",
-  "wanted.standbyScopeNote": "Telt rijen binnen dit bereik; season packs worden geteld op de ankeraflevering van het seizoen.",
+  "wanted.standbyScopeNote": "Telt rijen binnen dit bereik; seizoenspakketten worden geteld op de ankeraflevering van het seizoen.",
   "wanted.loadingStandby": "Opgeslagen kandidaten laden…",
   "wanted.standbyCandidates": "Standby-kandidaten · {{count}}",
   "wanted.standbyRank": "Rang {{rank}}",
@@ -2754,7 +2754,7 @@ const nl: LocaleDictionary = {
   "cutoff.colCurrentQuality": "Huidig",
   "cutoff.colTargetQuality": "Doel",
   "cutoff.noItems":
-    "Alle gevolgde films en afleveringen halen de cutoff van hun kwaliteitsprofiel.",
+    "Alle gemonitorde films en afleveringen halen de cutoff van hun kwaliteitsprofiel.",
   "cutoff.totalCount": "{{count}} items onder cutoff",
   "cutoff.filterFacet": "Type",
   "cutoff.allFacets": "Alle types",
@@ -2989,9 +2989,9 @@ const nl: LocaleDictionary = {
   "setup.importing": "Importeren…",
   "setup.summaryImportedClients": "Downloadclients geïmporteerd",
   "setup.summaryImportedIndexers": "Indexers geïmporteerd",
-  "setup.monitorWarmupTitle": "Import van gevolgde status voorbereiden",
+  "setup.monitorWarmupTitle": "Import van gemonitorde status voorbereiden",
   "setup.monitorWarmupDescription":
-    "Scryer haalt de gevolgde status op de achtergrond op zodat de laatste importstap sneller gaat.",
+    "Scryer haalt de gemonitorde status op de achtergrond op zodat de laatste importstap sneller gaat.",
   "setup.monitorWarmupQueued": "Wachten op voortgangsdetails…",
   "setup.monitorWarmupLoadingIndexers": "Indexers ontdekken",
   "setup.monitorWarmupLoadingMovies": "Films laden",
@@ -3004,7 +3004,7 @@ const nl: LocaleDictionary = {
   "setup.monitorWarmupCanceled":
     "Achtergrondvoorbereiding is geannuleerd. Scryer start het opnieuw als dat nodig is.",
   "setup.importFinalizeFailed":
-    "Scryer kon de gevolgde status voor deze import niet klaarzetten.",
+    "Scryer kon de gemonitorde status voor deze import niet klaarzetten.",
   "setup.apiKeyMasked":
     "Sonarr/Radarr verbergt deze API-sleutel. Voer ze handmatig in om door te gaan met importeren:",
 
@@ -3120,22 +3120,22 @@ const nl: LocaleDictionary = {
   "setup.summaryRootsMapped": "Bronroots gemapt",
   "setup.summaryRootsMappedDetail": "Doorgestuurd naar een Scryer-bibliotheek",
   "setup.summaryPathsRemapped": "Paden geremapt",
-  "setup.summaryPathsRemappedDetail": "Provenance behouden voor gevolgde status",
+  "setup.summaryPathsRemappedDetail": "Provenance behouden voor gemonitorde status",
   "setup.summaryClientsMerged": "Samengevoegd over instanties",
   "setup.summaryIndexersEnabled": "Ondersteund en ingeschakeld",
-  "setup.fetchingMonitoredStatus": "Gevolgde status ophalen…",
+  "setup.fetchingMonitoredStatus": "Gemonitorde status ophalen…",
   "setup.fetchingMonitoredStatusDetail":
-    "De gevolgde status van elke titel wordt op de achtergrond van je instanties opgehaald.",
-  "setup.monitoredStatusSynced": "Gevolgde status gesynchroniseerd",
+    "De gemonitorde status van elke titel wordt op de achtergrond van je instanties opgehaald.",
+  "setup.monitoredStatusSynced": "Gemonitorde status gesynchroniseerd",
   "setup.monitoredStatusSyncedDetail":
-    "De gevolgde status van elke titel is van je instanties opgehaald.",
+    "De gemonitorde status van elke titel is van je instanties opgehaald.",
   "setup.importGateHint":
-    "Import kan niet voltooien tot de synchronisatie van de gevolgde status klaar is.",
+    "Import kan niet voltooien tot de synchronisatie van de gemonitorde status klaar is.",
   "setup.importGateDoneHint": "Klaar — je kunt de import nu voltooien.",
   "setup.titlesFetched": "{{fetched}} / {{total}} titels",
-  "setup.importWarmupFailedTitle": "Synchronisatie van gevolgde status mislukt",
+  "setup.importWarmupFailedTitle": "Synchronisatie van gemonitorde status mislukt",
   "setup.importWarmupFailedDetail":
-    "Scryer kon de gevolgde status niet volledig ophalen van je instanties. Controleer de verbindingen en probeer het opnieuw.",
+    "Scryer kon de gemonitorde status niet volledig ophalen van je instanties. Controleer de verbindingen en probeer het opnieuw.",
   "setup.importWarmupRetrying": "Synchronisatie opnieuw starten…",
   "setup.importWarmupSessionExpiredTitle": "Importvoorbereiding verlopen",
   "setup.importWarmupSessionExpired":
