@@ -112,6 +112,7 @@ const SERIES_OVERVIEW_IMPORT_REFRESH_KINDS = new Set([
 
 export type TitleDetail = {
   id: string;
+  sizeBytes?: number | null;
   name: string;
   facet: string;
   libraryId: string;
@@ -175,6 +176,7 @@ export type TitleCollection = {
   label: string | null;
   orderedPath: string | null;
   narrativeOrder: string | null;
+  sizeBytes?: number | null;
   fileSizeBytes: number | null;
   firstEpisodeNumber: string | null;
   lastEpisodeNumber: string | null;
@@ -255,6 +257,7 @@ export type CollectionEpisode = {
   seasonNumber: string | null;
   episodeLabel: string | null;
   title: string | null;
+  sizeBytes?: number | null;
   overview?: string | null;
   airDate: string | null;
   durationSeconds: number | null;

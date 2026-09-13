@@ -437,6 +437,22 @@ impl WasmIndexerClient {
         action: &str,
         query: BTreeMap<String, String>,
     ) -> AppResult<Option<serde_json::Value>> {
+        self.indexer_action_with_operation(
+            action,
+            query,
+            IndexerErrorOperation::IndexerAction,
+            false,
+        )
+        .await
+    }
+
+    async fn indexer_action_with_operation(
+        &self,
+        action: &str,
+        query: BTreeMap<String, String>,
+        operation: IndexerErrorOperation,
+        unsupported_is_absent: bool,
+    ) -> AppResult<Option<serde_json::Value>> {
         let indexer = &self.component;
         // Capture state and request accounting are owned by the component
         // host, while actor serialization is owned by `invoke_component`. Hold
@@ -444,9 +460,9 @@ impl WasmIndexerClient {
         // caller cannot replace this operation's accounting/error capture
         // while it waits.
         let _operation_guard = indexer.invocation_lock.lock().await;
-        indexer.host.begin_indexer_error_capture(
-            self.indexer_error_capture(IndexerErrorOperation::IndexerAction),
-        );
+        indexer
+            .host
+            .begin_indexer_error_capture(self.indexer_error_capture(operation));
         let result = match self
             .invoke_component(
                 PluginIndexerCommand::Action(PluginActionRequest {
@@ -458,6 +474,14 @@ impl WasmIndexerClient {
             )
             .await
         {
+            // The connection probe is optional for installed components. An
+            // explicit `Unsupported` reply therefore selects the established
+            // generic-search fallback instead of failing the connection test.
+            Ok(PluginIndexerCommandResult::Action(PluginResult::Err(error)))
+                if unsupported_is_absent && error.code == PluginErrorCode::Unsupported =>
+            {
+                Ok(None)
+            }
             Ok(PluginIndexerCommandResult::Action(result)) => {
                 decode_command_result::<PluginActionResponse>(
                     result,
@@ -1515,6 +1539,45 @@ async fn forward_component_strategy_event(
 
 #[async_trait]
 impl IndexerClient for WasmIndexerClient {
+    async fn probe_connection(&self) -> AppResult<bool> {
+        if !self
+            .descriptor
+            .provider_type()
+            .eq_ignore_ascii_case("newznab")
+        {
+            return Ok(false);
+        }
+
+        let payload = self
+            .indexer_action_with_operation(
+                "newznabConnectionTest",
+                BTreeMap::new(),
+                IndexerErrorOperation::ConnectionTest,
+                true,
+            )
+            .await?;
+        let Some(payload) = payload else {
+            return Ok(false);
+        };
+        let Some(values) = payload.as_object() else {
+            return Err(AppError::Repository(
+                "indexer connection probe returned an invalid response".to_string(),
+            ));
+        };
+        if values.is_empty() {
+            return Ok(false);
+        }
+        if values.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+            && values.get("validated").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            return Ok(true);
+        }
+
+        Err(AppError::Repository(
+            "indexer connection probe returned an invalid response".to_string(),
+        ))
+    }
+
     fn search_plan_capability(&self) -> Option<IndexerSearchPlanCapability> {
         let component = &self.component;
         if component.runtime.contract_version() != ComponentContractVersion::V1_1 {

@@ -944,6 +944,32 @@ impl TitlePayload {
 
 #[ComplexObject]
 impl CollectionPayload {
+    /// Aggregated live media-file size for this collection.
+    async fn size_bytes(&self, ctx: &Context<'_>) -> GqlResult<Option<Long>> {
+        if let Some(loaders) = loaders_from_ctx(ctx) {
+            let summary = loaders
+                .collection_media_size_summary
+                .load_one((self.title_id.to_string(), self.id.to_string()))
+                .await?;
+            return Ok(summary.map(|summary| Long::from(summary.total_size_bytes)));
+        }
+        Box::pin(async move {
+            let app = app_from_ctx(ctx)?;
+            let actor = actor_from_ctx(ctx)?;
+            let title_id = self.title_id.to_string();
+            let collection_id = self.id.to_string();
+            let summaries = app
+                .list_collection_media_size_summaries(&actor, std::slice::from_ref(&title_id))
+                .await
+                .map_err(to_gql_error)?;
+            Ok(summaries
+                .into_iter()
+                .find(|summary| summary.collection_id == collection_id)
+                .map(|summary| Long::from(summary.total_size_bytes)))
+        })
+        .await
+    }
+
     /// Size in bytes of the media file associated with this collection, or null when unavailable.
     async fn file_size_bytes(&self, ctx: &Context<'_>) -> GqlResult<Option<Long>> {
         let Some(ordered_path) = self.ordered_path.clone() else {
@@ -1117,6 +1143,32 @@ impl CollectionPayload {
 
 #[ComplexObject]
 impl EpisodePayload {
+    /// Aggregated live media-file size for this episode.
+    async fn size_bytes(&self, ctx: &Context<'_>) -> GqlResult<Option<Long>> {
+        if let Some(loaders) = loaders_from_ctx(ctx) {
+            let summary = loaders
+                .episode_media_size_summary
+                .load_one((self.title_id.to_string(), self.id.to_string()))
+                .await?;
+            return Ok(summary.map(|summary| Long::from(summary.total_size_bytes)));
+        }
+        Box::pin(async move {
+            let app = app_from_ctx(ctx)?;
+            let actor = actor_from_ctx(ctx)?;
+            let title_id = self.title_id.to_string();
+            let episode_id = self.id.to_string();
+            let summaries = app
+                .list_episode_media_size_summaries(&actor, std::slice::from_ref(&title_id))
+                .await
+                .map_err(to_gql_error)?;
+            Ok(summaries
+                .into_iter()
+                .find(|summary| summary.episode_id == episode_id)
+                .map(|summary| Long::from(summary.total_size_bytes)))
+        })
+        .await
+    }
+
     /// Provider-native playback links for this episode, when an exact catalog mapping exists.
     async fn playback_links(
         &self,
