@@ -6921,6 +6921,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "wasmparser 0.254.0",
