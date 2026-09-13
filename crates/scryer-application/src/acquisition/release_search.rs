@@ -2992,6 +2992,78 @@ mod tests {
         }
     }
 
+    /// Search results named in romaji reach the same canonical relaxed matcher
+    /// the RSS path uses. An anime episode name carries no year and the
+    /// indexer asserts no id here, so only the romanization equivalence can
+    /// prove the identity.
+    #[test]
+    fn romanized_search_result_matches_the_tagged_romaji_alias() {
+        let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
+        title.facet = MediaFacet::Anime;
+        title.year = None;
+        title.imdb_id = None;
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+
+        let candidate = make_candidate(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            None,
+        );
+        let matched = candidate_title_match(&candidate, &evidence)
+            .expect("a romanized search result must match the romaji alias");
+        let proof = matched.evidence_match.expect("evidence match");
+        let spelling = proof.spelling.expect("spelling evidence");
+        assert_eq!(
+            spelling.key,
+            "hagane no renkinjutsushi saigo no gassho o utau toki no hikari to kage no uta"
+        );
+        assert_eq!(
+            spelling.locale,
+            Some(scryer_domain::title_spelling::JAPANESE_ROMANIZATION_TAG)
+        );
+        assert!(
+            !proof.requires_external_id,
+            "a romanization proves identity on its own"
+        );
+    }
+
+    /// A romanization equivalence must not rescue an identity that a second
+    /// library title answers to just as well.
+    #[test]
+    fn romanized_search_result_stays_unmatched_against_a_competing_identity() {
+        let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
+        title.facet = MediaFacet::Anime;
+        title.year = None;
+        title.imdb_id = None;
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let mut rival = title.clone();
+        rival.id = "rival".to_string();
+        rival.name = "Fullmetal Alchemist Final Chorus".to_string();
+        rival.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gasshoo o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let evidence = spelling_evidence(&title, &[title.clone(), rival]);
+
+        let candidate = make_candidate(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            None,
+        );
+        assert!(
+            candidate_title_match(&candidate, &evidence).is_none(),
+            "a romanization two library titles answer to names neither of them"
+        );
+    }
+
     #[test]
     fn multilingual_spelling_requires_corroboration_and_available_collision_index() {
         let title = spelling_title("Die zwei Päpste", "deu");

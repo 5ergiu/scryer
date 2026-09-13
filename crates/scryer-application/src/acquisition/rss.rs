@@ -3545,6 +3545,41 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "t1");
     }
 
+    /// A romanized release name spells the cour alias slightly differently
+    /// than the catalog does (`Gasshou wo` against `Gassho o`). The canonical
+    /// relaxed matcher knows those are the same romanization, so RSS must not
+    /// drop the release.
+    #[test]
+    fn match_romanized_release_to_a_tagged_romaji_alias() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        title.tagged_aliases = vec![
+            scryer_domain::TaggedAlias {
+                name: "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                language: "x-jat".into(),
+            },
+            scryer_domain::TaggedAlias {
+                name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                    .into(),
+                language: "x-jat".into(),
+            },
+        ];
+        let titles = vec![title];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a romanized cour alias spelling must still resolve to the title"
+        );
+    }
+
     #[test]
     fn match_no_match_returns_none() {
         let titles = vec![make_title("t1", "Neon Cipher", Some(2010))];

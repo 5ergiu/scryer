@@ -880,6 +880,36 @@ mod tests {
         assert_eq!(matched.id, titles[1].id);
     }
 
+    /// Import and manual-import candidacy both run through
+    /// `collect_name_matches`, which falls back to the same canonical relaxed
+    /// matcher acquisition uses. A downloaded file named in romaji must
+    /// resolve to the title whose romanized alias spells the name another way.
+    #[test]
+    fn resolves_a_romanized_file_name_to_the_tagged_romaji_alias() {
+        let mut title = test_title(
+            "Fullmetal Alchemist Brotherhood",
+            MediaFacet::Anime,
+            None,
+            &[],
+        );
+        title.metadata_language = Some("eng".into());
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let title_id = title.id.clone();
+        let matcher = MonitoredTitleMatcher::new(vec![title]);
+        let parsed = crate::parse_release_metadata(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+        );
+
+        let matched = matcher
+            .resolve_episode(&parsed, Some("anime"))
+            .expect("a romanized file name must resolve to the romaji alias");
+        assert_eq!(matched.title.id, title_id);
+    }
+
     #[test]
     fn strip_trailing_year_key_strips_only_plausible_year_suffixes() {
         assert_eq!(strip_trailing_year_key("tide chart 2023"), "tide chart");
