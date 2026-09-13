@@ -194,6 +194,71 @@ impl MediaRequestRepository for MediaRequestStore {
         Ok(Some(request))
     }
 
+    async fn approve_with_title(
+        &self,
+        request: &MediaRequest,
+        title: scryer_domain::Title,
+        options: scryer_application::TitleOptionsPatch,
+        resolution: MediaRequestResolution,
+        added_event: NewDomainEvent,
+    ) -> AppResult<(
+        scryer_application::CreateTitleOutcome,
+        MediaRequestResolutionResult,
+        Option<scryer_domain::DomainEvent>,
+    )> {
+        let request = request.clone();
+        SqlRuntime::run_in_transaction(&self.datastore, "approve_request_with_title", move |tx| {
+            let (request, title, options, resolution, added_event) = (
+                request.clone(),
+                title.clone(),
+                options.clone(),
+                resolution.clone(),
+                added_event.clone(),
+            );
+            Box::pin(async move {
+                let created =
+                    crate::media::titles::store::create_or_get_title_tx(tx, &title, &options)
+                        .await?;
+                // The application guards this identity. A concurrent creation
+                // with another id must retry under the correct title guard.
+                if created.title.id != title.id {
+                    return Err(AppError::Validation(
+                        "request title changed during approval; retry".into(),
+                    ));
+                }
+                let advanced = created
+                    .title
+                    .tags
+                    .iter()
+                    .any(|tag| tag == "scryer:monitor-type:advanced");
+                if !advanced || options.monitor_selection.is_some() {
+                    replace_monitor_selection_tx(
+                        tx,
+                        crate::media::monitor_selections::OWNER_KIND_TITLE,
+                        &title.id,
+                        if advanced {
+                            options.monitor_selection.as_ref().and_then(Option::as_ref)
+                        } else {
+                            None
+                        },
+                    )
+                    .await?;
+                }
+                let event = if created.reused_existing {
+                    None
+                } else {
+                    Some(append_domain_event_tx(tx, added_event).await?)
+                };
+                let result = resolve_pending_overlapping_tx(tx, &request, resolution).await?;
+                if result.updated == 0 {
+                    return Err(AppError::Validation("request is no longer pending".into()));
+                }
+                Ok((created, result, event))
+            })
+        })
+        .await
+    }
+
     async fn resolve_pending_overlapping(
         &self,
         request: &MediaRequest,
@@ -354,6 +419,7 @@ impl MediaRequestRepository for MediaRequestStore {
         user_id: &str,
         status: Option<MediaRequestStatus>,
         since: Option<chrono::DateTime<Utc>>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<u64> {
         let mut sql = String::from(
             "SELECT COUNT(*) AS request_count
@@ -361,6 +427,10 @@ impl MediaRequestRepository for MediaRequestStore {
               WHERE created_by_user_id = {}",
         );
         let mut args = vec![SqlArg::Text(user_id.to_string())];
+        if let Some(request_id) = excluding_request_id {
+            sql.push_str(" AND id <> {}");
+            args.push(SqlArg::Text(request_id.to_string()));
+        }
         if let Some(status) = status {
             sql.push_str(" AND status = {}");
             args.push(SqlArg::Text(status.as_str().to_string()));
@@ -408,17 +478,17 @@ impl MediaRequestRepository for MediaRequestStore {
     async fn latest_request_at_for_user(
         &self,
         user_id: &str,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-        let row = SqlRuntime::fetch_optional(
-            self.datastore.read_exec(),
-            "SELECT created_at
-               FROM media_requests
-              WHERE created_by_user_id = {}
-              ORDER BY created_at DESC, id DESC
-              LIMIT 1",
-            &[SqlArg::Text(user_id.to_string())],
-        )
-        .await?;
+        let mut sql =
+            String::from("SELECT created_at FROM media_requests WHERE created_by_user_id = {}");
+        let mut args = vec![SqlArg::Text(user_id.to_string())];
+        if let Some(request_id) = excluding_request_id {
+            sql.push_str(" AND id <> {}");
+            args.push(SqlArg::Text(request_id.to_string()));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT 1");
+        let row = SqlRuntime::fetch_optional(self.datastore.read_exec(), &sql, &args).await?;
         row.map(|row| row.timestamp("created_at")).transpose()
     }
 

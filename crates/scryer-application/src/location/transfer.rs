@@ -55,7 +55,11 @@ impl CopyCoordinator {
     }
 
     pub async fn acquire_destination(&self, path: &Path) -> OwnedSemaphorePermit {
-        self.acquire(&destination_volume_key(path), "copy").await
+        let path = path.to_path_buf();
+        let key = tokio::task::spawn_blocking(move || destination_volume_key(&path))
+            .await
+            .unwrap_or_else(|_| "unknown-volume".to_owned());
+        self.acquire(&key, "copy").await
     }
 }
 

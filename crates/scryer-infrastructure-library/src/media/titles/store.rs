@@ -1354,37 +1354,7 @@ impl TitleRepository for TitleStore {
             move |tx| {
                 let title = title.clone();
                 let options_patch = options_patch.clone();
-                Box::pin(async move {
-                    if let Some(mut existing) =
-                        find_existing_title_for_create_tx(tx, &title).await?
-                    {
-                        refuse_direct_root_write_for_reused_title_tx(
-                            tx,
-                            &existing,
-                            &options_patch,
-                            &title.root_folder_id,
-                        )
-                        .await?;
-                        apply_reused_title_options_patch(
-                            &mut existing,
-                            &options_patch,
-                            &title.root_folder_id,
-                        );
-                        persist_title_tx(tx, &existing, HydrationStateWrite::Preserve).await?;
-                        let title = load_title_tx_or_not_found(tx, &existing.id, true).await?;
-                        return Ok(CreateTitleOutcome {
-                            title,
-                            reused_existing: true,
-                        });
-                    }
-
-                    create_title_tx(tx, &title).await?;
-                    let title = load_title_tx_or_not_found(tx, &title.id, true).await?;
-                    Ok(CreateTitleOutcome {
-                        title,
-                        reused_existing: false,
-                    })
-                })
+                Box::pin(async move { create_or_get_title_tx(tx, &title, &options_patch).await })
             },
         )
         .await;
@@ -4015,6 +3985,33 @@ async fn find_existing_title_for_create_tx(
     }
 
     Ok(None)
+}
+
+pub(crate) async fn create_or_get_title_tx(
+    tx: &mut SqlTx<'_>,
+    title: &Title,
+    options_patch: &TitleOptionsPatch,
+) -> AppResult<CreateTitleOutcome> {
+    if let Some(mut existing) = find_existing_title_for_create_tx(tx, title).await? {
+        refuse_direct_root_write_for_reused_title_tx(
+            tx,
+            &existing,
+            options_patch,
+            &title.root_folder_id,
+        )
+        .await?;
+        apply_reused_title_options_patch(&mut existing, options_patch, &title.root_folder_id);
+        persist_title_tx(tx, &existing, HydrationStateWrite::Preserve).await?;
+        return Ok(CreateTitleOutcome {
+            title: load_title_tx_or_not_found(tx, &existing.id, true).await?,
+            reused_existing: true,
+        });
+    }
+    create_title_tx(tx, title).await?;
+    Ok(CreateTitleOutcome {
+        title: load_title_tx_or_not_found(tx, &title.id, true).await?,
+        reused_existing: false,
+    })
 }
 
 async fn create_title_tx(tx: &mut SqlTx<'_>, title: &Title) -> AppResult<()> {

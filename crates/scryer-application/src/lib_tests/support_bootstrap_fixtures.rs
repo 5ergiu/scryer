@@ -309,9 +309,10 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     let indexer_client = Arc::new(MockIndexerClient);
     let libraries = Arc::new(MockLibraryRepo::default());
     let domain_events = Arc::new(MockDomainEventRepo::default());
-    let media_requests = Arc::new(MockMediaRequestRepo::with_domain_events(
-        domain_events.clone(),
-    ));
+    let media_requests = Arc::new(MockMediaRequestRepo {
+        titles: Some(titles.clone()),
+        ..MockMediaRequestRepo::with_domain_events(domain_events.clone())
+    });
     let request_rules = Arc::new(InMemoryRequestRuleRepo::default());
     let request_rule_decisions = Arc::new(InMemoryRequestRuleDecisionRepo::default());
     let lifecycle_claims = Arc::new(InMemoryLifecycleClaimRepo::with_media_requests(

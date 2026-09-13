@@ -1306,14 +1306,38 @@ impl MediaFileRepository for MediaFileStore {
         source_signature_scheme: Option<String>,
         source_signature_value: Option<String>,
     ) -> AppResult<()> {
+        self.refresh_media_file_source_signature(
+            file_id,
+            size_bytes,
+            source_signature_scheme,
+            source_signature_value,
+            false,
+        )
+        .await
+    }
+
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        let invalidation = if invalidate_full_hashes {
+            ", full_blake3 = NULL, move_crc = NULL, move_crc_algorithm = NULL, hash_computed_at = NULL"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "UPDATE media_files SET size_bytes = {{}},
+                source_signature_scheme = {{}}, source_signature_value = {{}}{invalidation}
+             WHERE id = {{}}"
+        );
         execute_write(
             &self.datastore,
             "update_media_file_source_signature",
-            "UPDATE media_files SET
-                size_bytes = {},
-                source_signature_scheme = {},
-                source_signature_value = {}
-             WHERE id = {}",
+            &sql,
             vec![
                 SqlArg::I64(size_bytes),
                 SqlArg::OptText(source_signature_scheme),
@@ -2998,6 +3022,96 @@ mod tests {
 
     /// FR-047 / FR-046 round trip: the queue predicate, the write, and the
     /// invalidation, over the real SQL rather than a double.
+    #[tokio::test]
+    async fn source_signature_refresh_and_hash_invalidation_are_atomic() {
+        use scryer_application::location::model::PersistedContentHashes;
+        let temp = tempfile::tempdir().unwrap();
+        let services = SqliteServices::new(temp.path().join("atomic.db").to_string_lossy())
+            .await
+            .unwrap();
+        let titles = title_store(&services);
+        let files = media_file_store(&services);
+        let title = make_test_series_title("atomic-hash");
+        titles.create(title.clone()).await.unwrap();
+        let id = files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id,
+                file_path: "/synthetic/atomic.mkv".into(),
+                size_bytes: 4,
+                role: MediaFileRole::Primary,
+                source_signature_scheme: Some("sample".into()),
+                source_signature_value: Some("old".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let hashes = PersistedContentHashes {
+            full_blake3: "ab".repeat(32),
+            move_crc: None,
+            crc_algorithm: None,
+            hash_computed_at: Some(Utc::now()),
+        };
+        files
+            .update_media_file_content_hashes(&id, &hashes)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_signature BEFORE UPDATE OF source_signature_value ON media_files
+            BEGIN SELECT RAISE(ABORT, 'injected signature failure'); END",
+        )
+        .execute(services.pool())
+        .await
+        .unwrap();
+        assert!(
+            files
+                .refresh_media_file_source_signature(
+                    &id,
+                    5,
+                    Some("sample".into()),
+                    Some("new".into()),
+                    true
+                )
+                .await
+                .is_err()
+        );
+        let prior = files.get_media_file_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(prior.source_signature_value.as_deref(), Some("old"));
+        assert_eq!(prior.size_bytes, 4);
+        assert_eq!(prior.content_hashes, Some(hashes.clone()));
+        sqlx::query("DROP TRIGGER fail_signature")
+            .execute(services.pool())
+            .await
+            .unwrap();
+        files
+            .refresh_media_file_source_signature(
+                &id,
+                5,
+                Some("sample".into()),
+                Some("new".into()),
+                true,
+            )
+            .await
+            .unwrap();
+        let current = files.get_media_file_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(current.source_signature_value.as_deref(), Some("new"));
+        assert_eq!(current.size_bytes, 5);
+        assert!(current.content_hashes.is_none());
+        assert!(
+            !files
+                .update_media_file_content_hashes_if_unchanged(&prior, &hashes)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            files
+                .list_media_files_missing_full_hash(None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn full_hash_columns_round_trip_and_drive_the_backfill_queue() {
         use scryer_application::location::model::{MoveCrcAlgorithm, PersistedContentHashes};

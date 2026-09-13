@@ -1309,6 +1309,7 @@ impl AppUseCase {
                 serde_json::json!({
                     "schema_version": 1,
                     "maintenance_action_request": {
+                        "automatic": request.automatic,
                         "wanted_kind": request.wanted_kind.as_str(),
                         "facet": request.facet.map(|facet| facet.as_str()),
                         "library_ids": request.library_ids,
@@ -1376,6 +1377,192 @@ impl AppUseCase {
             .await;
         });
         Ok(receipt)
+    }
+
+    /// Reserve and resume durable maintenance searches before startup marks
+    /// other abandoned jobs failed. Reuse their receipt and job identities.
+    pub async fn resume_interrupted_maintenance_searches(&self) -> AppResult<Vec<String>> {
+        let runs = self.services.events.job_runs.list_active_job_runs().await?;
+        let mut reserved = Vec::new();
+        {
+            let mut tokens = self
+                .runtime
+                .acquisition
+                .acquisition_search_cancellation_tokens
+                .lock()
+                .await;
+            for run in runs {
+                if run.job_key == JobKey::AcquisitionSearch
+                    && run
+                        .operation_type
+                        .starts_with("maintenance_acquisition_search:")
+                    && !run.status.is_terminal()
+                    && !tokens.contains_key(&run.id)
+                {
+                    let cancellation = tokio_util::sync::CancellationToken::new();
+                    tokens.insert(run.id.clone(), cancellation.clone());
+                    reserved.push((run, cancellation));
+                }
+            }
+        }
+        let ids = reserved.iter().map(|(run, _)| run.id.clone()).collect();
+        if reserved.is_empty() {
+            return Ok(ids);
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            // One worker at a time, sharing admission with live searches.
+            for (mut run, cancellation) in reserved {
+                let guard = app
+                    .runtime
+                    .jobs
+                    .acquisition_search_lock
+                    .clone()
+                    .lock_owned()
+                    .await;
+                let prepared = async {
+                    let persisted = app
+                        .services
+                        .events
+                        .job_runs
+                        .get_job_run(&run.id)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("recovery search job".into()))?;
+                    if persisted.status.is_terminal() {
+                        return Ok(None);
+                    }
+                    #[derive(serde::Deserialize)]
+                    struct SavedRequest {
+                        #[serde(default)]
+                        automatic: bool,
+                        wanted_kind: String,
+                        facet: Option<String>,
+                        library_ids: Vec<String>,
+                        title_id: Option<String>,
+                        season_number: Option<i32>,
+                        wanted_item_id: Option<String>,
+                    }
+                    let summary: serde_json::Value =
+                        serde_json::from_str(persisted.summary_json.as_deref().unwrap_or(""))
+                            .map_err(|e| {
+                                AppError::Repository(format!("invalid saved search: {e}"))
+                            })?;
+                    if summary["schema_version"].as_u64() != Some(1) {
+                        return Err(AppError::Validation(
+                            "unsupported saved search version".into(),
+                        ));
+                    }
+                    let saved: SavedRequest =
+                        serde_json::from_value(summary["maintenance_action_request"].clone())
+                            .map_err(|e| {
+                                AppError::Repository(format!("invalid saved search request: {e}"))
+                            })?;
+                    let request = AcquisitionSearchRequest {
+                        automatic: saved.automatic,
+                        wanted_kind: WantedKind::parse(&saved.wanted_kind).ok_or_else(|| {
+                            AppError::Validation("invalid saved wanted kind".into())
+                        })?,
+                        facet: saved
+                            .facet
+                            .map(|facet| {
+                                MediaFacet::parse(&facet).ok_or_else(|| {
+                                    AppError::Validation("invalid saved search facet".into())
+                                })
+                            })
+                            .transpose()?,
+                        library_ids: saved.library_ids,
+                        title_id: saved.title_id,
+                        season_number: saved.season_number,
+                        wanted_item_id: saved.wanted_item_id,
+                    };
+                    let actor_id = persisted.actor_user_id.as_deref().ok_or_else(|| {
+                        AppError::Validation("search actor is unavailable".into())
+                    })?;
+                    let actor = app
+                        .services
+                        .identity
+                        .users
+                        .get_by_id(actor_id)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::Validation("search actor no longer exists".into())
+                        })?;
+                    if !actor.login_status().is_enabled() {
+                        return Err(AppError::Unauthorized("search actor is disabled".into()));
+                    }
+                    app.authorize_acquisition_search(&actor, &request).await?;
+                    let scopes = app
+                        .resolve_acquisition_search_scopes(&actor, &request)
+                        .await?;
+                    let plan = app.acquisition_search_plan(&request, scopes).await?;
+                    Ok::<_, AppError>(Some((persisted, actor, plan)))
+                }
+                .await;
+                match prepared {
+                    Ok(Some((persisted, actor, plan))) => {
+                        app.runtime
+                            .jobs
+                            .job_run_tracker
+                            .upsert_active_run(JobRun::from_record(&persisted, None))
+                            .await;
+                        if cancellation.is_cancelled() {
+                            app.finish_acquisition_search_job(
+                                persisted,
+                                DomainEventActor::from(&actor),
+                                0,
+                                0,
+                                0,
+                                0,
+                                false,
+                                true,
+                            )
+                            .await;
+                            continue;
+                        }
+                        app.run_acquisition_search_job(
+                            persisted,
+                            actor.clone(),
+                            DomainEventActor::from(&actor),
+                            plan,
+                            cancellation,
+                            guard,
+                        )
+                        .await;
+                    }
+                    Ok(None) => {
+                        app.runtime
+                            .acquisition
+                            .acquisition_search_cancellation_tokens
+                            .lock()
+                            .await
+                            .remove(&run.id);
+                    }
+                    Err(error) => {
+                        run.status = JobRunStatus::Failed;
+                        run.completed_at = Some(chrono::Utc::now());
+                        run.updated_at = chrono::Utc::now();
+                        run.error_text = Some(format!("Automatic search recovery failed: {error}"));
+                        if let Err(write_error) =
+                            app.services.events.job_runs.update_job_run(&run).await
+                        {
+                            tracing::warn!(job_id = %run.id, error = %write_error, "could not persist search recovery failure");
+                        }
+                        app.runtime
+                            .jobs
+                            .job_run_tracker
+                            .upsert_active_run(JobRun::from_record(&run, None))
+                            .await;
+                        app.runtime
+                            .acquisition
+                            .acquisition_search_cancellation_tokens
+                            .lock()
+                            .await
+                            .remove(&run.id);
+                    }
+                }
+            }
+        });
+        Ok(ids)
     }
 
     /// Which of the two shapes an acquisition-search request runs as.

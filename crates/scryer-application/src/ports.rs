@@ -2116,6 +2116,25 @@ pub trait MediaRequestRepository: Send + Sync {
         title_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<String>>>;
 
+    /// Commit the title, monitoring selection, approval, claim and events as
+    /// one unit. The caller holds the mutation guard for title.id.
+    async fn approve_with_title(
+        &self,
+        _request: &MediaRequest,
+        _title: Title,
+        _options: TitleOptionsPatch,
+        _resolution: MediaRequestResolution,
+        _added_event: NewDomainEvent,
+    ) -> AppResult<(
+        CreateTitleOutcome,
+        MediaRequestResolutionResult,
+        Option<DomainEvent>,
+    )> {
+        Err(AppError::Repository(
+            "atomic request approval is unsupported".into(),
+        ))
+    }
+
     async fn count_quality_profile_references(
         &self,
         profile_id: &str,
@@ -2142,7 +2161,8 @@ pub trait MediaRequestRepository: Send + Sync {
     async fn list(&self, query: MediaRequestQuery) -> AppResult<Vec<MediaRequest>>;
 
     /// How many requests `user_id` submitted, optionally narrowed to one status
-    /// and to requests created at or after `since`.
+    /// and to requests created at or after `since`. Edits exclude their own
+    /// request so a resubmission observes only prior requests.
     ///
     /// Counts submissions, not joins: the requester-history facts
     /// (`pending_request_count`, `approved_last_30d`, …) ask what this person
@@ -2152,6 +2172,7 @@ pub trait MediaRequestRepository: Send + Sync {
         user_id: &str,
         status: Option<scryer_domain::MediaRequestStatus>,
         since: Option<DateTime<Utc>>,
+        excluding_request_id: Option<&str>,
     ) -> AppResult<u64>;
 
     /// Every request ever made for this identity, any requester, any status,
@@ -2163,8 +2184,13 @@ pub trait MediaRequestRepository: Send + Sync {
     ) -> AppResult<Vec<MediaRequest>>;
 
     /// When `user_id` last submitted anything, for `days_since_last_request`.
+    /// Excludes the request currently being edited when its id is provided.
     /// `None` when they never have — a real answer, not an unknown.
-    async fn latest_request_at_for_user(&self, user_id: &str) -> AppResult<Option<DateTime<Utc>>>;
+    async fn latest_request_at_for_user(
+        &self,
+        user_id: &str,
+        excluding_request_id: Option<&str>,
+    ) -> AppResult<Option<DateTime<Utc>>>;
 
     /// Stamp the request-rule verdict onto a request row that is *not* being
     /// resolved (spec 0003 FR-016).
@@ -6156,6 +6182,30 @@ pub trait MediaFileRepository: Send + Sync {
         source_signature_scheme: Option<String>,
         source_signature_value: Option<String>,
     ) -> AppResult<()>;
+
+    /// Refresh sampled evidence and invalidate stale full hashes atomically.
+    /// Stores without this capability must preserve the old evidence on error.
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        if invalidate_full_hashes {
+            return Err(AppError::Repository(
+                "atomic source signature refresh is unsupported".into(),
+            ));
+        }
+        self.update_media_file_source_signature(
+            file_id,
+            size_bytes,
+            source_signature_scheme,
+            source_signature_value,
+        )
+        .await
+    }
 
     /// One page of the full-hash backfill queue (FR-047), ordered by id so the
     /// cursor is a plain "everything after this id" and the ordering survives a

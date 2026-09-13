@@ -315,6 +315,88 @@ async fn requested_indexer_ids_restrict_a_query_subject_fan_out() {
 }
 
 #[tokio::test]
+async fn explicitly_requested_disabled_indexer_is_reported_without_dispatch() {
+    let client = ScriptedIndexerClient::default();
+    let mut disabled = synthetic_direct_nab_indexer_config("idx-disabled", "newznab");
+    disabled.is_enabled = false;
+    let (app, user) = bootstrap_search(
+        Arc::new(StoredSettingsRepo::default()),
+        client.clone(),
+        vec![disabled],
+    );
+    let job = app
+        .start_interactive_release_search(
+            &user,
+            InteractiveReleaseSearchRequest {
+                indexer_ids: Some(vec!["idx-disabled".into()]),
+                ..query_request("q", InteractiveSearchKind::Raw)
+            },
+        )
+        .await
+        .expect("start explicit search");
+    let done = await_completion(&app, &user, &job.id).await;
+    let view = indexer_view(&done, "idx-disabled");
+    assert_eq!(view.status, InteractiveReleaseSearchIndexerStatus::Skipped);
+    assert_eq!(view.failure_reason.as_deref(), Some("indexer is disabled"));
+    assert!(client.calls().await.is_empty());
+
+    let job = app
+        .start_interactive_release_search(&user, query_request("all", InteractiveSearchKind::Raw))
+        .await
+        .expect("start unrestricted search");
+    assert!(
+        await_completion(&app, &user, &job.id)
+            .await
+            .indexers
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn equivalent_indexer_sets_replace_the_running_query_search() {
+    let client = ScriptedIndexerClient::default();
+    let (app, user) = bootstrap_search(
+        Arc::new(StoredSettingsRepo::default()),
+        client.clone(),
+        vec![
+            synthetic_direct_nab_indexer_config("idx-a", "newznab"),
+            synthetic_direct_nab_indexer_config("idx-b", "newznab"),
+        ],
+    );
+    // Keep the first job running until its equivalent replacement is registered.
+    let releases = client.releases.lock().await;
+    let first = app
+        .start_interactive_release_search(
+            &user,
+            InteractiveReleaseSearchRequest {
+                indexer_ids: Some(vec!["idx-a".into(), "idx-b".into()]),
+                ..query_request("q", InteractiveSearchKind::Raw)
+            },
+        )
+        .await
+        .expect("start first search");
+    let second = app
+        .start_interactive_release_search(
+            &user,
+            InteractiveReleaseSearchRequest {
+                indexer_ids: Some(vec!["idx-b".into(), "idx-a".into(), "idx-b".into()]),
+                ..query_request("q", InteractiveSearchKind::Raw)
+            },
+        )
+        .await
+        .expect("start replacement");
+    let first = app
+        .interactive_release_search(&user, &first.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.state, InteractiveReleaseSearchState::Cancelled);
+    drop(releases);
+    let second = await_completion(&app, &user, &second.id).await;
+    assert_eq!(second.indexers.len(), 2);
+}
+
+#[tokio::test]
 async fn requested_indexer_ids_restrict_a_title_subject_fan_out() {
     let client = ScriptedIndexerClient::default()
         .with_releases(

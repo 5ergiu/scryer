@@ -10,6 +10,105 @@ use scryer_application::{MediaRequestRepository, MediaRequestResolution};
 use scryer_domain::MediaRequestStatus;
 
 #[tokio::test]
+async fn approval_rolls_back_title_events_and_claims_together() {
+    let (services, _db) = temp_services("atomic_request_approval").await;
+    seed_library(&services, "library-1").await;
+    seed_user(&services, "requester-1").await;
+    let store = request_store(&services);
+    let request = store
+        .submit(
+            new_request("atomic-request", "library-1", "requester-1"),
+            &user("requester-1"),
+            request_event("atomic-request"),
+        )
+        .await
+        .unwrap()
+        .request;
+    let mut title = make_test_title("atomic-title", None);
+    title.library_id = "library-1".into();
+    let resolution = MediaRequestResolution {
+        status: MediaRequestStatus::Approved,
+        resolved_by_user_id: Some("requester-1".into()),
+        resolved_at: Utc::now(),
+        created_title_id: Some(title.id.clone()),
+        approved_quality_profile_id: None,
+        approved_quality_profile_name: None,
+        approved_lease_days: Some(14),
+        decision_id: None,
+        decided_by_rule_set_ids: vec![],
+        policy_tags: vec![],
+        event: request_event("atomic-approved"),
+    };
+    let added = request_event("atomic-added");
+    sqlx::query(
+        "CREATE TRIGGER fail_claim BEFORE INSERT ON lifecycle_claims
+        BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END",
+    )
+    .execute(services.pool())
+    .await
+    .unwrap();
+    assert!(
+        store
+            .approve_with_title(
+                &request,
+                title.clone(),
+                Default::default(),
+                resolution.clone(),
+                added.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        title_store(&services)
+            .get_by_id(&title.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.get(&request.id).await.unwrap().unwrap().status,
+        MediaRequestStatus::Pending
+    );
+    let events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM domain_events WHERE event_id IN (?, ?)")
+            .bind(&added.event_id)
+            .bind(&resolution.event.event_id)
+            .fetch_one(services.pool())
+            .await
+            .unwrap();
+    assert_eq!(events, 0);
+    sqlx::query("DROP TRIGGER fail_claim")
+        .execute(services.pool())
+        .await
+        .unwrap();
+    let (created, result, added) = store
+        .approve_with_title(
+            &request,
+            title.clone(),
+            Default::default(),
+            resolution,
+            added,
+        )
+        .await
+        .unwrap();
+    assert!(!created.reused_existing);
+    assert_eq!(result.updated, 1);
+    assert!(added.is_some());
+    assert_eq!(
+        store.get(&request.id).await.unwrap().unwrap().status,
+        MediaRequestStatus::Approved
+    );
+    let claims: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM lifecycle_claims WHERE title_id = ?")
+            .bind(&title.id)
+            .fetch_one(services.pool())
+            .await
+            .unwrap();
+    assert_eq!(claims, 1);
+}
+
+#[tokio::test]
 async fn media_request_policy_columns_round_trip() {
     let (services, db) = temp_services("scryer_media_request_policy").await;
     seed_library(&services, "library-1").await;
@@ -300,28 +399,33 @@ async fn media_request_history_reads_answer_the_fact_builder() {
     // Counts are per submitter, and a status narrows them.
     assert_eq!(
         store
-            .count_for_requester("requester-1", None, None)
+            .count_for_requester("requester-1", None, None, None)
             .await
             .unwrap(),
         3
     );
     assert_eq!(
         store
-            .count_for_requester("requester-1", Some(MediaRequestStatus::Pending), None)
+            .count_for_requester("requester-1", Some(MediaRequestStatus::Pending), None, None)
             .await
             .unwrap(),
         2
     );
     assert_eq!(
         store
-            .count_for_requester("requester-1", Some(MediaRequestStatus::Rejected), None)
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Rejected),
+                None,
+                None
+            )
             .await
             .unwrap(),
         1
     );
     assert_eq!(
         store
-            .count_for_requester("requester-2", None, None)
+            .count_for_requester("requester-2", None, None, None)
             .await
             .unwrap(),
         1
@@ -331,7 +435,8 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .count_for_requester(
                 "requester-1",
                 None,
-                Some(Utc::now() + chrono::Duration::days(1))
+                Some(Utc::now() + chrono::Duration::days(1)),
+                None,
             )
             .await
             .unwrap(),
@@ -343,7 +448,8 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .count_for_requester(
                 "requester-1",
                 None,
-                Some(Utc::now() - chrono::Duration::days(1))
+                Some(Utc::now() - chrono::Duration::days(1)),
+                None,
             )
             .await
             .unwrap(),
@@ -377,17 +483,49 @@ async fn media_request_history_reads_answer_the_fact_builder() {
             .is_empty()
     );
 
+    assert_eq!(
+        store
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Pending),
+                None,
+                Some("request-2")
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .count_for_requester(
+                "requester-1",
+                Some(MediaRequestStatus::Rejected),
+                None,
+                Some("request-1")
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        store
+            .latest_request_at_for_user("requester-2", Some("request-3"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     // Never having asked is a real answer, not an unknown.
     assert!(
         store
-            .latest_request_at_for_user("requester-1")
+            .latest_request_at_for_user("requester-1", None)
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         store
-            .latest_request_at_for_user("nobody")
+            .latest_request_at_for_user("nobody", None)
             .await
             .unwrap()
             .is_none()

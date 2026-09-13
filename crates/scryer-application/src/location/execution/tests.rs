@@ -582,6 +582,74 @@ async fn an_identical_source_is_dropped_outright_once_the_transfer_proves_it() {
 /// files are still the files that were compared. Whichever side changes (or
 /// disappears) after the proof, the catalog is left alone and the source stays.
 #[tokio::test]
+async fn copied_source_cleanup_revalidates_both_copies_after_interruption() {
+    for changed in ["none", "source", "destination", "missing_destination"] {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = single_title_plan(
+            &temp.path().join("a"),
+            &temp.path().join("b"),
+            "movie.mkv",
+            5,
+        );
+        let file = &plan.titles[0].files[0];
+        write_file(&file.source(), b"first");
+        write_file(&file.destination(), b"first");
+        let unrelated = temp.path().join("unrelated.mkv");
+        write_file(&unrelated, b"keep");
+        let hashes = crate::location::verify::hash_existing_file(&file.source())
+            .await
+            .unwrap();
+        let operation = queued_operation(
+            "op-1",
+            LocationOperationType::RootMove,
+            LocationExecutionMode::MoveWithScryer,
+            VerificationDepth::Full,
+        );
+        let store = InMemoryLocationOperationStore::new();
+        store.insert_operation(operation.clone());
+        store
+            .record_location_file_verification(&crate::location::model::FileVerificationRecord {
+                operation_id: operation.id.clone(),
+                title_id: "title-1".into(),
+                media_file_id: Some("mf-1".into()),
+                source_path: file.source_path.clone(),
+                destination_path: file.destination_path.clone(),
+                hashes: Some(hashes),
+                depth: crate::location::model::AppliedVerificationDepth::exact(
+                    VerificationDepth::Full,
+                ),
+                outcome: crate::location::model::FileVerificationOutcome::Verified,
+                detail: None,
+                verified_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        match changed {
+            "source" => write_file(&file.source(), b"other"),
+            "destination" => write_file(&file.destination(), b"other"),
+            "missing_destination" => std::fs::remove_file(file.destination()).unwrap(),
+            _ => {}
+        }
+        let catalog = FakeCatalog::with_title("title-1", placement_for(&plan));
+        let recycler = RecordingRecycler::default();
+        let reconciler = RootMoveReconciler::new(&plan, &catalog, &store, &recycler);
+        let result = reconciler
+            .clean_up_title(&operation, &plan.titles[0].to_planned_title())
+            .await;
+        if changed == "none" {
+            result.unwrap();
+            assert!(!file.source().exists());
+            assert_eq!(std::fs::read(file.destination()).unwrap(), b"first");
+        } else {
+            result.expect_err("changed copies must preserve the source");
+            assert!(file.source().exists());
+            assert!(recycler.recycled().is_empty());
+        }
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
+    }
+}
+
+#[tokio::test]
 async fn changed_identical_copies_keep_the_source_and_catalog_intact() {
     for changed_copy in ["source", "destination", "missing"] {
         let temp = tempfile::tempdir().unwrap();

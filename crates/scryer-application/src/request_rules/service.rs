@@ -440,7 +440,14 @@ impl AppUseCase {
         let evaluated_at = Utc::now();
         let metadata_partial = snapshot.partial;
         let context = self
-            .assemble_request_input_context(&requester, &library, &draft, snapshot, evaluated_at)
+            .assemble_request_input_context(
+                &requester,
+                &library,
+                &draft,
+                snapshot,
+                evaluated_at,
+                None,
+            )
             .await?;
         let input = build_request_input(context);
         let input_json = serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string());

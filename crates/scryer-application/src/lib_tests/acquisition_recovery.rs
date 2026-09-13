@@ -12573,6 +12573,159 @@ async fn await_acquisition_search_job(
     panic!("the acquisition search job never reached a terminal state");
 }
 
+#[tokio::test]
+async fn accepted_maintenance_searches_recover_once_with_original_job_ids() {
+    let harness = bootstrap_media_request_app();
+    harness.users.create(harness.manager.clone()).await.unwrap();
+    let jobs = Arc::new(RecordingJobRunRepo::default());
+    let app = harness.app.with_test_overrides({
+        let jobs = jobs.clone();
+        move |services| services.with_job_runs(jobs)
+    });
+    let now = Utc::now();
+    for (id, summary) in [
+        (
+            "recover-valid",
+            serde_json::json!({"schema_version": 1, "maintenance_action_request": {
+                "wanted_kind": "missing", "facet": null, "library_ids": [],
+                "title_id": null, "season_number": null, "wanted_item_id": null
+            }})
+            .to_string(),
+        ),
+        ("recover-invalid", "{}".into()),
+    ] {
+        jobs.seed(JobRunRecord {
+            id: id.into(),
+            job_key: JobKey::AcquisitionSearch,
+            operation_type: "maintenance_acquisition_search:missing:0".into(),
+            status: JobRunStatus::Running,
+            trigger_source: JobTriggerSource::SystemInternal,
+            actor_user_id: Some(harness.manager.id.clone()),
+            progress_json: None,
+            summary_json: Some(summary),
+            summary_text: None,
+            error_text: None,
+            started_at: now,
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+    }
+    let admission = app
+        .runtime
+        .jobs
+        .acquisition_search_lock
+        .clone()
+        .lock_owned()
+        .await;
+    let reserved = app.resume_interrupted_maintenance_searches().await.unwrap();
+    assert_eq!(reserved.len(), 2);
+    assert!(
+        app.resume_interrupted_maintenance_searches()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    app.reconcile_interrupted_job_runs(&reserved).await.unwrap();
+    drop(admission);
+    let valid = await_acquisition_search_job(&app, &harness.manager, "recover-valid").await;
+    assert_eq!(valid.state, "completed");
+    let invalid = await_acquisition_search_job(&app, &harness.manager, "recover-invalid").await;
+    assert_eq!(invalid.state, "failed");
+    assert_eq!(
+        jobs.list_job_runs(Some(JobKey::AcquisitionSearch), 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        app.resume_interrupted_maintenance_searches()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn recovered_maintenance_search_does_not_resubmit_pending_downloads() {
+    let (app, title, _, downloads) = seed_recent_failed_season_pack_fixture_with_indexer(Arc::new(
+        TrackingIndexerClient::default()
+            .with_season_pack_titles([
+                "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-FIRST".to_string()
+            ])
+            .stamping_indexer_ids(),
+    ))
+    .await;
+    let jobs = Arc::new(RecordingJobRunRepo::default());
+    let app = app.with_test_overrides(|services| services.with_job_runs(jobs.clone()));
+    attach_default_library_to_scope_states(&app, MediaFacet::Anime).await;
+    let actor = test_admin_user();
+    app.services
+        .identity
+        .users
+        .create(actor.clone())
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let run = JobRunRecord {
+        id: "recover-pending-download".into(),
+        job_key: JobKey::AcquisitionSearch,
+        operation_type: "maintenance_acquisition_search:missing:2".into(),
+        status: JobRunStatus::Running,
+        trigger_source: JobTriggerSource::SystemInternal,
+        actor_user_id: Some(actor.id.clone()),
+        progress_json: None,
+        summary_json: Some(
+            serde_json::json!({
+                "schema_version": 1,
+                "maintenance_action_request": {
+                    "automatic": true, "wanted_kind": "missing", "facet": "anime",
+                    "library_ids": [title.library_id], "title_id": title.id,
+                    "season_number": null, "wanted_item_id": null
+                }
+            })
+            .to_string(),
+        ),
+        summary_text: None,
+        error_text: None,
+        started_at: now,
+        completed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    jobs.seed(run.clone()).await;
+    assert_eq!(
+        app.resume_interrupted_maintenance_searches().await.unwrap(),
+        vec![run.id.clone()]
+    );
+    let first = await_acquisition_search_job(&app, &actor, &run.id).await;
+    assert_eq!(first.state, "completed");
+    let submitted = downloads.submitted_release_titles.lock().await.clone();
+    assert!(
+        !submitted.is_empty(),
+        "the recovery must perform real acquisition work"
+    );
+
+    // Model a restart after durable submission but before the job's terminal write.
+    jobs.update_job_run(&run).await.unwrap();
+    assert_eq!(
+        app.resume_interrupted_maintenance_searches().await.unwrap(),
+        vec![run.id.clone()]
+    );
+    let second = await_acquisition_search_job(&app, &actor, &run.id).await;
+    assert_eq!(second.state, "completed");
+    assert_eq!(*downloads.submitted_release_titles.lock().await, submitted);
+    assert_eq!(
+        jobs.list_job_runs(Some(JobKey::AcquisitionSearch), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// A job whose every submission is refused must fail, not complete with nothing
 /// grabbed.
 ///

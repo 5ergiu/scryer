@@ -282,6 +282,57 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
 }
 
 #[tokio::test]
+async fn destructive_execution_reads_claims_under_the_approval_guard() {
+    let fixture = claims_app();
+    let rule_id = fixture
+        .rule(
+            draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
+            MaintenanceEvaluationMode::Observe,
+        )
+        .await;
+    fixture.open_gates(true, true).await;
+    let title = seed_title(&fixture.app, &fixture.user, "Guarded lease").await;
+    fixture.evaluate().await;
+    fixture
+        .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(1))
+        .await;
+    fixture
+        .claims
+        .seed(lease(
+            "guarded-claim",
+            &title.id,
+            LifecycleClaimState::Active,
+        ))
+        .await;
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *fixture.claims.read_guard_probe.lock().await = Some((
+        fixture
+            .app
+            .runtime
+            .jobs
+            .interactive_operation_guards
+            .clone(),
+        title.id.clone(),
+        observed.clone(),
+    ));
+    let report = fixture.handle().await;
+    assert_eq!(report.held, 1);
+    assert_eq!(report.executed, 0);
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .get_by_id(&title.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn an_active_lease_holds_a_destructive_action() {
     assert_destructive_hold(
         LifecycleClaimState::Active,

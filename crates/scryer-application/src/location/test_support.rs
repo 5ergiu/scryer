@@ -51,6 +51,7 @@ pub(crate) struct InMemoryLocationOperationStore {
     state: Mutex<State>,
     pub(crate) operation_read_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(crate) active_reads: std::sync::atomic::AtomicUsize,
+    pub(crate) fail_next_operation_read: std::sync::atomic::AtomicBool,
 }
 
 impl InMemoryLocationOperationStore {
@@ -207,6 +208,14 @@ impl LocationOperationRepository for InMemoryLocationOperationStore {
         &self,
         operation_id: &str,
     ) -> AppResult<Option<LocationOperation>> {
+        if self
+            .fail_next_operation_read
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::AppError::Repository(
+                "injected operation read failure".into(),
+            ));
+        }
         if let Some(hook) = self.operation_read_hook.lock().expect("lock").as_ref() {
             hook();
         }

@@ -454,7 +454,7 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
-    async fn new_title_for_library(
+    pub(crate) async fn new_title_for_library(
         &self,
         actor: &User,
         request: NewTitle,

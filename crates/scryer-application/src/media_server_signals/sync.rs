@@ -117,8 +117,7 @@ impl AppUseCase {
             .integrations
             .media_server_signals
             .signal_sync_states()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|state| (state.connection_id.clone(), state))
             .collect::<HashMap<_, _>>();

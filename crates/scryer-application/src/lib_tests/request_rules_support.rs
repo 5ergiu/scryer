@@ -243,6 +243,13 @@ impl crate::ports::RequestRuleDecisionRepository for InMemoryRequestRuleDecision
 
 #[derive(Default)]
 pub(super) struct InMemoryLifecycleClaimRepo {
+    pub(super) read_guard_probe: Mutex<
+        Option<(
+            crate::services::InteractiveOperationGuardTable,
+            String,
+            Arc<AtomicBool>,
+        )>,
+    >,
     claims: Mutex<Vec<LifecycleClaim>>,
     /// Resolves `producer_ref` to the user who submitted that request, standing
     /// in for the SQL store's join to `media_requests`.
@@ -262,6 +269,7 @@ impl InMemoryLifecycleClaimRepo {
             claims: Mutex::new(Vec::new()),
             media_requests: Some(media_requests),
             unreadable: AtomicBool::new(false),
+            read_guard_probe: Mutex::new(None),
         }
     }
 
@@ -351,6 +359,15 @@ impl crate::ports::LifecycleClaimRepository for InMemoryLifecycleClaimRepo {
         title_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<LifecycleClaim>>> {
         self.fail_if_armed()?;
+        if let Some((guards, title_id, observed)) = self.read_guard_probe.lock().await.clone()
+            && title_ids.contains(&title_id)
+            && guards
+                .try_acquire(&format!("maintenance-title:{title_id}"))
+                .await
+                .is_none()
+        {
+            observed.store(true, Ordering::SeqCst);
+        }
         let wanted: HashSet<&String> = title_ids.iter().collect();
         let mut by_title: HashMap<String, Vec<LifecycleClaim>> = HashMap::new();
         let mut claims: Vec<LifecycleClaim> = self

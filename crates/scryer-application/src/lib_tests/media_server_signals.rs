@@ -446,6 +446,7 @@ impl MediaServerSignalSource for StubSignalSource {
 /// sync bug cannot hide behind a permissive double.
 #[derive(Default)]
 pub(super) struct InMemorySignalRepo {
+    fail_state_reads: std::sync::atomic::AtomicBool,
     rows: Mutex<Vec<UserMediaSignal>>,
     states: Mutex<Vec<MediaServerSignalSyncState>>,
     generations: Mutex<HashMap<(String, String), i64>>,
@@ -560,6 +561,12 @@ impl MediaServerSignalRepository for InMemorySignalRepo {
     }
 
     async fn signal_sync_states(&self) -> AppResult<Vec<MediaServerSignalSyncState>> {
+        if self
+            .fail_state_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository("sync state read failed".into()));
+        }
         Ok(self.states.lock().await.clone())
     }
 
@@ -731,6 +738,36 @@ async fn an_unmapped_observation_is_retained_with_no_subject() {
             crate::maintenance_rules::facts::unknown_reason::SIGNAL_SYNC_INCOMPLETE
         )
     ));
+}
+
+#[tokio::test]
+async fn unreadable_prior_sync_state_preserves_the_last_success() {
+    let fixture = sync_app(
+        vec![jellyfin_connection(true)],
+        vec![verified_account()],
+        StubSignalSource::default(),
+    );
+    fixture
+        .app
+        .run_media_server_signal_sync_job()
+        .await
+        .unwrap();
+    let before = fixture.signals.state_for(CONNECTION_ID).await.unwrap();
+    assert!(before.last_success_at.is_some());
+    fixture
+        .signals
+        .fail_state_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        fixture
+            .app
+            .run_media_server_signal_sync_job()
+            .await
+            .is_err()
+    );
+    let after = fixture.signals.state_for(CONNECTION_ID).await.unwrap();
+    assert_eq!(after.last_success_at, before.last_success_at);
+    assert_eq!(after.last_started_at, before.last_started_at);
 }
 
 #[tokio::test]

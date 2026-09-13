@@ -1183,17 +1183,17 @@ impl AppUseCase {
             )
             .await?;
         self.settle_stranded_location_operations().await;
-        let row = self.location_operation(operation_id).await.ok().flatten();
-        let job_run_id = row
-            .as_ref()
-            .and_then(|operation| operation.job_run_id.clone());
+        let row = self
+            .location_operation(operation_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("location operation {operation_id} not found"))
+            })?;
+        let job_run_id = row.job_run_id.clone();
         // The mode is what decides whether this run copies bytes or proves the
         // ones already there (FR-050). It is read off the persisted row rather
         // than re-derived, so a resumed adoption is still an adoption.
-        let mode = row
-            .as_ref()
-            .map(|operation| operation.mode)
-            .unwrap_or(LocationExecutionMode::MoveWithScryer);
+        let mode = row.mode;
 
         let outcome = self
             .execute_root_move(operation_id, plan, mode, job_run_id.as_deref())
@@ -1693,14 +1693,41 @@ impl AppUseCase {
         actor: &User,
         operation: &LocationOperation,
     ) -> AppResult<()> {
-        for library_id in [
-            operation.source_library_id.as_deref(),
-            operation.destination_library_id.as_deref(),
+        let mut library_ids = [
+            operation.source_library_id.clone(),
+            operation.destination_library_id.clone(),
         ]
         .into_iter()
         .flatten()
-        {
-            self.require_library_permission(actor, library_id, LibraryPermission::ManageTitles)
+        .collect::<std::collections::BTreeSet<_>>();
+        if operation.source_library_id.is_none() {
+            let plan_json = self
+                .services
+                .library
+                .location_operations
+                .get_location_operation_plan_json(&operation.id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Validation(
+                        "location operation source libraries are unavailable".into(),
+                    )
+                })?;
+            let plan: RootMoveExecutionPlan =
+                serde_json::from_str(&plan_json).map_err(|error| {
+                    AppError::Repository(format!("cannot read location operation scope: {error}"))
+                })?;
+            if plan.titles.is_empty() {
+                return Err(AppError::Validation(
+                    "location operation source libraries are unavailable".into(),
+                ));
+            }
+            for title in plan.titles {
+                library_ids.insert(title.source_library_id);
+                library_ids.insert(title.destination_library_id);
+            }
+        }
+        for library_id in library_ids {
+            self.require_library_permission(actor, &library_id, LibraryPermission::ManageTitles)
                 .await?;
         }
         Ok(())

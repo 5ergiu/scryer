@@ -1010,6 +1010,37 @@ impl TitleReconciler for RootMoveReconciler<'_> {
                 continue;
             }
             let source = stored_path_to_path_buf(&file.source_path);
+            // A durable copy receipt describes the bytes copied, not whatever
+            // occupies the source name after an interruption. Recheck both
+            // copies and their versions before handing this path to disposal.
+            match tokio::fs::symlink_metadata(&source).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(AppError::Repository(error.to_string())),
+                Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                    return Err(AppError::Validation(
+                        "Source changed before cleanup; preserved it.".into(),
+                    ));
+                }
+                Ok(_) => {}
+            }
+            let source_version = super::resolution::file_version(&source).await?;
+            let destination = file.destination();
+            let destination_version = super::resolution::file_version(&destination).await?;
+            let source_hashes = super::verify::hash_existing_file(&source).await?;
+            let destination_proof = super::verify::VerifiedCopier::default()
+                .verify(&source, &destination, &source_hashes, record.depth.applied)
+                .await?;
+            if record.source_path != file.source_path
+                || record.hashes.as_ref() != Some(&source_hashes)
+                || !destination_proof.outcome.permits_source_removal()
+                || destination_proof.depth.applied != record.depth.applied
+                || super::resolution::file_version(&source).await? != source_version
+                || super::resolution::file_version(&destination).await? != destination_version
+            {
+                return Err(AppError::Validation(
+                    "Source or destination changed before cleanup; preserved the source.".into(),
+                ));
+            }
             let disposal = self
                 .recycler
                 .recycle_source(

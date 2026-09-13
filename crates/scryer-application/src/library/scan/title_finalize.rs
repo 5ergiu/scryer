@@ -48,47 +48,20 @@ async fn persist_or_reuse_scanned_media_file(
     if let Some(existing) = existing {
         let mut db_elapsed = Duration::default();
 
-        // FR-046: a changed quick proof throws away the persisted full hashes
-        // before anything else, so a crash between here and the signature
-        // refresh leaves the file queued for backfill rather than carrying a
-        // hash of content it no longer holds. The scan itself never computes a
-        // full hash; it only ever clears one.
-        if existing.should_invalidate_full_hashes {
-            let db_started = Instant::now();
-            let invalidated = app
-                .services
-                .library
-                .media_files
-                .clear_media_file_content_hashes(existing.file_id)
-                .await;
-            db_elapsed = db_elapsed.saturating_add(db_started.elapsed());
-            match invalidated {
-                Ok(true) => tracing::info!(
-                    title_id = %title.id,
-                    file_id = %existing.file_id,
-                    "sampled content proof changed; cleared persisted full hashes and re-queued the file for backfill"
-                ),
-                Ok(false) => {}
-                Err(error) => warn!(
-                    error = %error,
-                    title_id = %title.id,
-                    file_id = %existing.file_id,
-                    "failed to invalidate persisted full hashes after a changed content proof"
-                ),
-            }
-        }
-
-        if existing.should_refresh_source_signature {
+        // FR-046: the new sampled proof and stale full-hash invalidation form
+        // one write. Failure must not make the old full hash appear current.
+        if existing.should_refresh_source_signature || existing.should_invalidate_full_hashes {
             let db_started = Instant::now();
             let update_result = app
                 .services
                 .library
                 .media_files
-                .update_media_file_source_signature(
+                .refresh_media_file_source_signature(
                     existing.file_id,
                     snapshot.size_bytes,
                     source_signature_scheme.clone(),
                     source_signature_value.clone(),
+                    existing.should_invalidate_full_hashes,
                 )
                 .await;
             db_elapsed = db_elapsed.saturating_add(db_started.elapsed());
@@ -99,6 +72,8 @@ async fn persist_or_reuse_scanned_media_file(
                     file_id = %existing.file_id,
                     "{update_error_message}"
                 );
+                summary.skipped += 1;
+                return None;
             }
         }
 

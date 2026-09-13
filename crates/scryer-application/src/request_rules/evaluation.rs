@@ -279,6 +279,10 @@ impl AppUseCase {
                 draft,
                 snapshot.clone(),
                 evaluation_time,
+                match &purpose {
+                    RequestEvaluationPurpose::Resubmit { request_id } => Some(request_id.as_str()),
+                    _ => None,
+                },
             )
             .await
         {
