@@ -1418,6 +1418,27 @@ fn rate_limit_signal_from_error(error: &AppError) -> Option<RateLimitSignal> {
     })
 }
 
+/// The delay the upstream named for one failed strategy.
+///
+/// A rate-limit signal carries it for transport-recorded and text-derived
+/// limits. A component plugin's typed deferral carries it on the error itself:
+/// the adapter decodes `Deferred { retry_after_seconds }` — which is how the
+/// Newznab plugin reports an HTTP 429 and its `Retry-After` — into a plain
+/// `TemporaryUnavailable`. That is deliberately no rate-limit signal, so the
+/// failure still reaches the operational backoff, and this delay is what keeps
+/// that backoff from ending before the provider said to come back.
+fn strategy_retry_after(
+    error: &AppError,
+    rate_limit_signal: Option<&RateLimitSignal>,
+) -> Option<std::time::Duration> {
+    rate_limit_signal
+        .and_then(|signal| signal.retry_after)
+        .or(match error {
+            AppError::TemporaryUnavailable { retry_after, .. } => *retry_after,
+            _ => None,
+        })
+}
+
 fn indexer_rss_feedback_summary(
     lease: &SchedulerLease,
     response: &IndexerSearchResponse,
@@ -2116,11 +2137,18 @@ impl IndexerBackoffTracker {
         }
 
         let period_index = state.escalation_level.min(BACKOFF_PERIODS_SECS.len() - 1);
-        let backoff_secs = retry_after
-            .map(|duration| duration.as_secs())
-            .unwrap_or(BACKOFF_PERIODS_SECS[period_index]);
-        let backoff_secs = backoff_secs.min(i64::MAX as u64) as i64;
-        let until = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+        let ladder = std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]);
+        // `Retry-After` is a floor: the provider's delay can lengthen the step
+        // this failure lands on, never shorten it below the ladder.
+        let backoff = retry_after.map_or(ladder, |retry_after| retry_after.max(ladder));
+        let now = chrono::Utc::now();
+        let until = chrono::Duration::from_std(backoff)
+            .ok()
+            .and_then(|backoff| now.checked_add_signed(backoff))
+            // A delay no timestamp can hold is not one to honor literally.
+            .unwrap_or_else(|| {
+                now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono")
+            });
 
         state.escalation_level = (state.escalation_level + 1).min(BACKOFF_PERIODS_SECS.len());
         state.disabled_until = Some(until);
@@ -3074,9 +3102,9 @@ impl MultiIndexerSearchClient {
                             .as_ref()
                             .err()
                             .and_then(rate_limit_signal_from_error);
-                        let retry_after = rate_limit_signal
-                            .as_ref()
-                            .and_then(|signal| signal.retry_after);
+                        let retry_after = response.as_ref().err().and_then(|error| {
+                            strategy_retry_after(error, rate_limit_signal.as_ref())
+                        });
                         let rate_limited = rate_limit_signal.is_some();
                         let page_reservation = if response
                             .as_ref()
@@ -3319,9 +3347,9 @@ impl MultiIndexerSearchClient {
                             .as_ref()
                             .err()
                             .and_then(rate_limit_signal_from_error);
-                        let retry_after = rate_limit_signal
-                            .as_ref()
-                            .and_then(|signal| signal.retry_after);
+                        let retry_after = response.as_ref().err().and_then(|error| {
+                            strategy_retry_after(error, rate_limit_signal.as_ref())
+                        });
                         let page_reservation = if response
                             .as_ref()
                             .is_ok_and(|response| !response.results.is_empty())
@@ -8072,10 +8100,16 @@ mod tests {
     }
 
     async fn protocol_plan_outcomes(mode: PlanFailureMode) -> Vec<StrategyExecutionOutcome> {
+        plan_strategy_outcomes(Arc::new(ProtocolPlanIndexerClient { mode })).await
+    }
+
+    async fn plan_strategy_outcomes(
+        client: Arc<dyn IndexerClient>,
+    ) -> Vec<StrategyExecutionOutcome> {
         let (page_tx, _page_rx) = tokio::sync::mpsc::channel(4);
         let mut outcomes = MultiIndexerSearchClient::execute_plan_strategy_tier(
             StrategyTierContext {
-                client: Arc::new(ProtocolPlanIndexerClient { mode }),
+                client,
                 search_limit: Arc::new(Semaphore::new(1)),
                 rate_limiter: IndexerRateLimiter::new(),
                 indexer_id: "indexer-1".into(),
@@ -11245,6 +11279,221 @@ mod tests {
             backoff_state(&client, "idx-1").await.is_none(),
             "a 429 expires on the indexer's own schedule, so it must keep staying out of \
              operational backoff rather than disabling the indexer over a transient limit"
+        );
+    }
+
+    /// What the component adapter hands the search client for a plugin's
+    /// `Deferred { reason: RateLimited, retry_after_seconds }`: the Newznab
+    /// plugin's answer to an HTTP 429 that carries `Retry-After`.
+    fn deferred_rate_limit_error(retry_after: std::time::Duration) -> AppError {
+        AppError::temporary_unavailable(
+            format!(
+                "Newznab upstream rate limit reached; indexer search deferred: RateLimited; \
+                 retry after {}s",
+                retry_after.as_secs()
+            ),
+            Some(retry_after),
+        )
+    }
+
+    async fn assert_backoff_waits_out(
+        client: &MultiIndexerSearchClient,
+        before: chrono::DateTime<chrono::Utc>,
+        retry_after: std::time::Duration,
+    ) {
+        let backoff = backoff_state(client, "idx-1")
+            .await
+            .expect("a deferred search must still back the indexer off");
+        let disabled_until = backoff
+            .disabled_until
+            .expect("the backoff must name when the indexer returns");
+        assert!(
+            disabled_until
+                >= before
+                    + chrono::Duration::from_std(retry_after).expect("retry-after fits chrono"),
+            "the provider asked for {}s, but the indexer returns at {disabled_until} \
+             (search started {before})",
+            retry_after.as_secs()
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_sync_backoff_waits_out_a_deferred_retry_after() {
+        // Longer than the ladder's first five-minute step, so the ladder alone
+        // cannot satisfy it.
+        let retry_after = std::time::Duration::from_secs(360);
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (client, calls) =
+            scripted_search_client(caps, move |_| Err(deferred_rate_limit_error(retry_after)));
+
+        let before = chrono::Utc::now();
+        let _ = client
+            .search(
+                String::new(),
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Some(vec!["2000".into()]),
+                None,
+                SearchMode::Auto,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .await;
+
+        assert!(
+            !calls.lock().expect("call log mutex").is_empty(),
+            "the RSS sweep must reach the provider"
+        );
+        assert_backoff_waits_out(&client, before, retry_after).await;
+    }
+
+    #[tokio::test]
+    async fn automatic_search_backoff_waits_out_a_deferred_retry_after() {
+        let retry_after = std::time::Duration::from_secs(360);
+        let (client, calls) = scripted_search_client(movie_caps(), move |_| {
+            Err(deferred_rate_limit_error(retry_after))
+        });
+
+        let before = chrono::Utc::now();
+        let _ = client
+            .search(
+                "Paperman".into(),
+                HashMap::from([("imdb_id".to_string(), "tt2388725".to_string())]),
+                Some("movie".into()),
+                Some("movie".into()),
+                None,
+                None,
+                None,
+                SearchMode::Auto,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .await;
+
+        assert!(
+            !calls.lock().expect("call log mutex").is_empty(),
+            "the automatic search must reach the provider"
+        );
+        assert_backoff_waits_out(&client, before, retry_after).await;
+    }
+
+    /// A strategy-plan client that defers every strategy the way the adapter
+    /// decodes a rate-limited plugin deferral.
+    struct DeferredPlanIndexerClient {
+        retry_after: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl IndexerClient for DeferredPlanIndexerClient {
+        fn search_plan_capability(&self) -> Option<IndexerSearchPlanCapability> {
+            Some(IndexerSearchPlanCapability {
+                version: 1,
+                max_parallel_strategies: 4,
+            })
+        }
+
+        async fn search_plan(
+            &self,
+            request: IndexerSearchPlanRequest,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _cancel_token: CancellationToken,
+            event_sink: IndexerSearchStrategyEventSink,
+        ) -> AppResult<IndexerSearchPlanSummary> {
+            let mut emitted_strategy_ids = Vec::new();
+            for strategy in &request.strategies {
+                event_sink
+                    .send(IndexerSearchStrategyEvent {
+                        strategy_id: strategy.strategy_id.clone(),
+                        response: Err(deferred_rate_limit_error(self.retry_after)),
+                    })
+                    .await
+                    .expect("plan event receiver should remain open");
+                emitted_strategy_ids.push(strategy.strategy_id.clone());
+            }
+            Ok(IndexerSearchPlanSummary {
+                plan_id: request.plan_id,
+                emitted_strategy_ids,
+            })
+        }
+
+        async fn search(
+            &self,
+            _query: String,
+            _ids: HashMap<String, String>,
+            _category: Option<String>,
+            _facet: Option<String>,
+            _id_search_facet: Option<String>,
+            _newznab_categories: Option<Vec<String>>,
+            _indexer_routing: Option<IndexerRoutingPlan>,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _season: Option<u32>,
+            _episode: Option<u32>,
+            _absolute_episode: Option<u32>,
+            _year: Option<i32>,
+            _tagged_aliases: Vec<scryer_domain::TaggedAlias>,
+            _learning_context: Option<IndexerSearchLearningContext>,
+            _cancel_token: CancellationToken,
+        ) -> AppResult<IndexerSearchResponse> {
+            Err(AppError::Repository("unary search was not expected".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_strategy_outcomes_keep_a_deferred_retry_after() {
+        let retry_after = std::time::Duration::from_secs(360);
+        let outcomes =
+            plan_strategy_outcomes(Arc::new(DeferredPlanIndexerClient { retry_after })).await;
+
+        assert_eq!(outcomes.len(), 2);
+        for outcome in &outcomes {
+            assert!(outcome.response.is_err(), "{outcome:?}");
+            assert_eq!(
+                outcome.retry_after,
+                Some(retry_after),
+                "the plan path must carry the provider's delay to the backoff: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn record_failure_retry_after_never_undercuts_the_ladder() {
+        let tracker = IndexerBackoffTracker::new();
+        let before = chrono::Utc::now();
+        let backoff = tracker
+            .record_failure(
+                "idx-1",
+                "Indexer 1",
+                Some(std::time::Duration::from_secs(30)),
+            )
+            .await;
+
+        assert_eq!(backoff.escalation_level, 1);
+        assert!(
+            backoff.disabled_until >= before + chrono::Duration::minutes(5),
+            "Retry-After is a floor on the operational backoff; a short one must not let a \
+             failing indexer be re-asked sooner than the ladder's current step"
+        );
+
+        let unrepresentable = tracker
+            .record_failure(
+                "idx-2",
+                "Indexer 2",
+                Some(std::time::Duration::from_secs(u64::MAX)),
+            )
+            .await;
+        assert!(
+            unrepresentable.disabled_until >= before + chrono::Duration::minutes(5),
+            "a provider delay no timestamp can hold must still leave the ladder's backoff \
+             instead of panicking"
         );
     }
 

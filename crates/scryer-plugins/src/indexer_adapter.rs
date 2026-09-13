@@ -1893,6 +1893,40 @@ mod tests {
         );
     }
 
+    /// The search client sizes the indexer's operational backoff from this
+    /// error's own delay, so the plugin's `Retry-After` must survive the
+    /// component boundary on it.
+    #[test]
+    fn deferred_rate_limit_keeps_the_plugin_retry_after_on_the_error() {
+        let error = decode_search_result(
+            PluginResult::Err(PluginError {
+                code: PluginErrorCode::RateLimited,
+                public_message: "Newznab upstream rate limit reached".to_string(),
+                debug_message: Some("HTTP 429 after 1 attempt(s) and 0s total wait".to_string()),
+                retry_after_seconds: Some(360),
+                details: Some(PluginErrorDetails::IndexerSearch(
+                    IndexerSearchPluginError::Deferred {
+                        reason: PluginIncompleteReason::RateLimited,
+                        retry_after_seconds: Some(360),
+                    },
+                )),
+            }),
+            true,
+            "indexer search",
+        )
+        .err()
+        .expect("a deferred search is a failed strategy");
+
+        match error {
+            AppError::TemporaryUnavailable { retry_after, .. } => assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs(360)),
+                "the provider's Retry-After was lost at the component boundary"
+            ),
+            other => panic!("unexpected deferred-search error: {other:?}"),
+        }
+    }
+
     #[test]
     fn component_api_key_rejection_is_actionable_without_exposing_debug_detail() {
         let error = decode_search_result(
