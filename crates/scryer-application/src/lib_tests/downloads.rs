@@ -13,6 +13,7 @@ struct RecordingDownloadRegistry {
     terminal: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
     reconcile_candidates: Arc<Mutex<Vec<DownloadClientBindingRecord>>>,
     failing_bindings: Arc<Mutex<HashSet<ClientJobLocator>>>,
+    failing_ends: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
     strict_conflicts: bool,
 }
 
@@ -242,6 +243,11 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         &self,
         id: &scryer_domain::download_identity::DownloadId,
     ) -> AppResult<()> {
+        if self.failing_ends.lock().await.contains(id) {
+            return Err(AppError::Repository(
+                "injected binding end failure".to_string(),
+            ));
+        }
         self.ended.lock().await.insert(*id);
         Ok(())
     }
@@ -655,6 +661,94 @@ async fn authoritative_absence_fails_and_ends_an_incomplete_binding_before_reobs
         panic!("re-observation should resolve to a fresh identity");
     };
     assert_ne!(reobserved_download_id, first_download_id);
+}
+
+#[tokio::test]
+async fn authoritative_absence_retires_cached_terminal_job_once() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (base_app, _) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let source = ClientJobLocator::new(Some("deleted-client"), "sabnzbd", "jd_orphan");
+    registry.bind(source.clone(), download_id).await;
+    download_client
+        .set_snapshot_authoritative_client_ids(["deleted-client".to_string()])
+        .await;
+    let mut item = queue_history_fixture_item("jd_orphan", DownloadQueueState::Downloading, 1);
+    item.client_id = "deleted-client".to_string();
+    item.client_type = "sabnzbd".to_string();
+    item.download_id = Some(download_id.to_wire());
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    tracker.track(&app, item).await;
+    let id = tracker
+        .cached_id_for_source_identity_for_download(Some(&download_id), &source)
+        .expect("job should be cached");
+    tracker.find_mut(&id).expect("cached job").state = TrackedDownloadState::Failed;
+
+    let mut unavailable_app = app.clone();
+    unavailable_app
+        .services
+        .integrations
+        .download_client_configs = Arc::new(MockDownloadClientConfigRepo {
+        fail_list: true,
+        ..Default::default()
+    });
+    crate::app_usecase_integration::reconcile_authoritatively_absent_source(
+        &unavailable_app,
+        &mut tracker,
+        &source,
+    )
+    .await;
+    assert!(
+        tracker.find(&id).is_some(),
+        "configuration failure must retain tracking for retry"
+    );
+    assert!(
+        registry.ended.lock().await.is_empty(),
+        "configuration failure must not end the binding"
+    );
+
+    registry.failing_ends.lock().await.insert(download_id);
+    crate::app_usecase_integration::reconcile_authoritatively_absent_source(
+        &app,
+        &mut tracker,
+        &source,
+    )
+    .await;
+    assert!(
+        tracker.find(&id).is_some(),
+        "failed durable end must retain tracking for retry"
+    );
+    assert!(registry.ended.lock().await.is_empty());
+    registry.failing_ends.lock().await.clear();
+
+    for _ in 0..3 {
+        crate::app_usecase_integration::reconcile_authoritatively_absent_source(
+            &app,
+            &mut tracker,
+            &source,
+        )
+        .await;
+        assert!(
+            tracker.get_all().is_empty(),
+            "no terminal job may be persisted again"
+        );
+        assert!(
+            registry
+                .find_active_binding_by_locator(&source)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(registry.rows.lock().await.len(), 1);
+        assert_eq!(registry.ended.lock().await.len(), 1);
+    }
 }
 
 /// A process restart has no in-memory tracker entry, but an authoritative

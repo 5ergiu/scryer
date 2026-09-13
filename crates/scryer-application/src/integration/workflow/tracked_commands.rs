@@ -1496,6 +1496,21 @@ pub(crate) async fn reconcile_authoritatively_absent_source(
         AuthoritativelyAbsentDownloadDisposition::Terminal => {}
     }
 
+    // Resolve this before ending the binding so a failed read leaves the
+    // binding available for retry. Configured clients retain their existing
+    // terminal cleanup path; deleted clients cannot perform client cleanup.
+    let configs = match app.services.integrations.download_client_configs.list(None).await {
+        Ok(configs) => configs,
+        Err(error) => {
+            tracing::warn!(error = %error, download_id = %binding.download_id,
+                "preserving unavailable download binding until client configuration can be read");
+            return;
+        }
+    };
+    let client_deleted = source_identity.client_id.as_ref().is_some_and(|client_id| {
+        !configs.iter().any(|config| &config.id == client_id)
+    });
+
     if let Err(error) = app
         .services
         .workflow
@@ -1511,6 +1526,20 @@ pub(crate) async fn reconcile_authoritatively_absent_source(
             item_id = %source_identity.item_id,
             "failed to end binding for unavailable download"
         );
+        return;
+    }
+
+    if !client_deleted {
+        return;
+    }
+
+    // A cached terminal job can persist its outcome again on the next tick.
+    // Once its binding is ended, that locator-only write would adopt a new
+    // download. Retire only this canonical job after the durable end succeeds.
+    if let Some(id) = tracker
+        .cached_id_for_source_identity_for_download(Some(&binding.download_id), source_identity)
+    {
+        tracker.stop_tracking(&id);
     }
 }
 
