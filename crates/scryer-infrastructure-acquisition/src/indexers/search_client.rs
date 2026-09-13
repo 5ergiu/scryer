@@ -2136,21 +2136,27 @@ impl IndexerBackoffTracker {
             };
         }
 
-        let period_index = state.escalation_level.min(BACKOFF_PERIODS_SECS.len() - 1);
+        let max_period_index = BACKOFF_PERIODS_SECS.len() - 1;
+        let mut period_index = state.escalation_level.min(max_period_index);
+        // Sonarr's rule (`ProviderStatusServiceBase.RecordFailure`): `Retry-After`
+        // never becomes the backoff itself. It escalates the ladder until a step
+        // covers the provider's delay — capped at the top step — and that step is
+        // the backoff. Quantizing keeps every backoff on the ladder an operator can
+        // reason about, and no delay, however long or unrepresentable, is honored
+        // literally. The level it climbs to is kept, so the next failure starts
+        // from there instead of sliding back down.
+        if let Some(retry_after) = retry_after {
+            while period_index < max_period_index
+                && std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]) < retry_after
+            {
+                period_index += 1;
+            }
+        }
         let ladder = std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]);
-        // `Retry-After` is a floor: the provider's delay can lengthen the step
-        // this failure lands on, never shorten it below the ladder.
-        let backoff = retry_after.map_or(ladder, |retry_after| retry_after.max(ladder));
         let now = chrono::Utc::now();
-        let until = chrono::Duration::from_std(backoff)
-            .ok()
-            .and_then(|backoff| now.checked_add_signed(backoff))
-            // A delay no timestamp can hold is not one to honor literally.
-            .unwrap_or_else(|| {
-                now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono")
-            });
+        let until = now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono");
 
-        state.escalation_level = (state.escalation_level + 1).min(BACKOFF_PERIODS_SECS.len());
+        state.escalation_level = (period_index + 1).min(BACKOFF_PERIODS_SECS.len());
         state.disabled_until = Some(until);
         set_indexer_backoff_gauges(&state.indexer_name, Some(until), state.escalation_level);
 
@@ -11468,6 +11474,7 @@ mod tests {
     async fn record_failure_retry_after_never_undercuts_the_ladder() {
         let tracker = IndexerBackoffTracker::new();
         let before = chrono::Utc::now();
+        let after_call = |backoff: &IndexerSystemBackoff| backoff.disabled_until - before;
         let backoff = tracker
             .record_failure(
                 "idx-1",
@@ -11478,9 +11485,10 @@ mod tests {
 
         assert_eq!(backoff.escalation_level, 1);
         assert!(
-            backoff.disabled_until >= before + chrono::Duration::minutes(5),
-            "Retry-After is a floor on the operational backoff; a short one must not let a \
-             failing indexer be re-asked sooner than the ladder's current step"
+            after_call(&backoff) >= chrono::Duration::minutes(5)
+                && after_call(&backoff) < chrono::Duration::minutes(6),
+            "a Retry-After the current ladder step already covers must leave that step \
+             alone, not shorten it: {backoff:?}"
         );
 
         let unrepresentable = tracker
@@ -11490,10 +11498,44 @@ mod tests {
                 Some(std::time::Duration::from_secs(u64::MAX)),
             )
             .await;
+        assert_eq!(
+            unrepresentable.escalation_level,
+            BACKOFF_PERIODS_SECS.len(),
+            "a delay beyond every ladder step must pin the top level"
+        );
         assert!(
-            unrepresentable.disabled_until >= before + chrono::Duration::minutes(5),
-            "a provider delay no timestamp can hold must still leave the ladder's backoff \
-             instead of panicking"
+            after_call(&unrepresentable) >= chrono::Duration::minutes(60)
+                && after_call(&unrepresentable) < chrono::Duration::minutes(61),
+            "a provider delay no timestamp can hold must land on the ladder's top step \
+             instead of panicking or being honored literally: {unrepresentable:?}"
+        );
+    }
+
+    /// Sonarr quantizes: a `Retry-After` is not the backoff, it escalates the
+    /// ladder until a step covers it, and that step is the backoff
+    /// (`ProviderStatusServiceBase.RecordFailure`). A 360 s delay therefore
+    /// costs the 600 s step, not 360 s, and the level it climbed to is kept.
+    #[tokio::test]
+    async fn record_failure_rounds_retry_after_up_to_the_next_ladder_step() {
+        let tracker = IndexerBackoffTracker::new();
+        let before = chrono::Utc::now();
+        let backoff = tracker
+            .record_failure(
+                "idx-1",
+                "Indexer 1",
+                Some(std::time::Duration::from_secs(360)),
+            )
+            .await;
+        let elapsed = backoff.disabled_until - before;
+
+        assert!(
+            elapsed >= chrono::Duration::minutes(10) && elapsed < chrono::Duration::minutes(11),
+            "360 s must round up to the 10-minute ladder step, never be honored \
+             literally: {backoff:?}"
+        );
+        assert_eq!(
+            backoff.escalation_level, 2,
+            "the level the ladder climbed to is kept, so the next failure starts there"
         );
     }
 
@@ -11578,7 +11620,9 @@ mod tests {
             .await;
         let after = chrono::Utc::now();
 
-        assert_eq!(backoff.escalation_level, 1);
+        // 900 s is itself a ladder step (the 15-minute one), so the ladder
+        // escalates to exactly it and the backoff is exactly that step.
+        assert_eq!(backoff.escalation_level, 3);
         assert!(backoff.disabled_until >= before + chrono::Duration::seconds(900));
         assert!(backoff.disabled_until <= after + chrono::Duration::seconds(901));
     }
