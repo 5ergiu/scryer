@@ -831,12 +831,21 @@ mod tests {
         use crate::location::test_support::{InMemoryLocationOperationStore, queued_operation};
         let (mut app, user) = crate::lib_tests::bootstrap();
         let store = Arc::new(InMemoryLocationOperationStore::new());
-        store.insert_operation(queued_operation(
+        let mut operation = queued_operation(
             "op",
             LocationOperationType::RootMove,
             LocationExecutionMode::MoveWithScryer,
             VerificationDepth::Full,
+        );
+        // A snapshot read is authorized against every library the operation
+        // touches, and an operation that names no source library has its scope
+        // read from its persisted plan instead. This fixture has neither, which
+        // no real root move does, so the read was refused before it could prove
+        // anything about churn. Name the library rather than weaken the claim.
+        operation.source_library_id = Some(scryer_domain::default_library_id_for_facet(
+            &scryer_domain::MediaFacet::Movie,
         ));
+        store.insert_operation(operation);
         app.services.library.location_operations = store.clone();
         app.initialize_transfer_generation().await.unwrap();
         let hub = app.runtime.library.location_runners.transfers.clone();
