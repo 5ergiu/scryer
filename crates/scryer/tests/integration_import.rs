@@ -1270,7 +1270,9 @@ async fn import_movie_second_attempt_is_deduped() {
     let user = ctx.app.find_or_create_default_user().await.unwrap();
 
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    copy_fixture(source_dir.path(), "h264_aac.mkv", "Movie.2024.1080p.mkv");
+    // The one-second 128x72 fixture makes no HD claim: this test exercises
+    // import idempotency, not rejection of implausibly small 1080p payloads.
+    copy_fixture(source_dir.path(), "h264_aac.mkv", "Movie.2024.mkv");
 
     let dest_root = tempfile::tempdir().expect("dest tempdir");
     let title = add_movie_title(
@@ -1292,7 +1294,7 @@ async fn import_movie_second_attempt_is_deduped() {
     let first = import_completed_download(&app, &user, &completed)
         .await
         .expect("first import");
-    assert_eq!(first.decision, ImportDecision::Imported);
+    assert_eq!(first.decision, ImportDecision::Imported, "{first:?}");
 
     // Second import — same download_client_item_id → AlreadyImported.
     let second = import_completed_download(&app, &user, &completed)

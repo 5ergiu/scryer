@@ -1798,16 +1798,11 @@ async fn a_multi_episode_files_landed_bar_matches_the_gates_incumbent_bar() {
     );
 }
 
-/// **F-3b-2 / D18.** A queued release is scored with the size it announced, so
-/// the pseudo-incumbent and the candidate beside it are measured on the same
-/// terms.
-///
-/// Scoring the in-flight release with no size left it without a size term while
-/// the candidate had one: a candidate identical to the queued release but
-/// announced in a larger band beat it by the band weight and was grabbed as a
-/// duplicate.
+/// **F-3b-2 / D18.** Announced size reaches queued-release eligibility and search
+/// fit, but adds no numeric points. A different size alone cannot justify a
+/// duplicate download over the in-flight pseudo-incumbent.
 #[tokio::test]
-async fn a_queued_releases_announced_size_is_part_of_its_score() {
+async fn a_queued_releases_announced_size_affects_fit_without_creating_score_upgrades() {
     let (app, user) = bootstrap();
     app.swap_user_rules_engine(
         AppUseCase::build_user_rules_engine(
@@ -1822,6 +1817,7 @@ async fn a_queued_releases_announced_size_is_part_of_its_score() {
             NewTitle {
                 name: "Sized Queue".into(),
                 facet: MediaFacet::Movie,
+                runtime_minutes: Some(120),
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
@@ -1837,7 +1833,7 @@ async fn a_queued_releases_announced_size_is_part_of_its_score() {
         .resolve_canonical_scoring_context(&title, &profile)
         .await;
     let release = "Sized.Queue.2024.1080p.WEB-DL.H.264-GRP";
-    let score_at = |size: Option<i64>| {
+    let facts_at = |size: Option<i64>| {
         crate::quality::canonical_context::score_parked_release_title(
             &title,
             release,
@@ -1846,21 +1842,19 @@ async fn a_queued_releases_announced_size_is_part_of_its_score() {
             &[],
             &context,
         )
-        .score
     };
 
-    let size_less = score_at(None);
-    let plausible = score_at(Some(7_000_000_000));
-    let tiny = score_at(Some(200 * 1024 * 1024));
-    assert_ne!(
-        plausible, size_less,
-        "the announced size has to reach the score, or a queued release is \
-         compared on different terms than the candidate beside it"
-    );
+    let size_less = facts_at(None);
+    let plausible = facts_at(Some(7_000_000_000));
+    let tiny = facts_at(Some(200 * 1024 * 1024));
+    assert!(size_less.allowed && plausible.allowed && tiny.allowed);
+    assert_eq!(plausible.score, size_less.score);
+    assert_eq!(plausible.score, tiny.score);
+    assert_eq!(size_less.size_fit_penalty, 0);
+    assert_eq!(plausible.size_fit_penalty, 0);
     assert!(
-        plausible > tiny,
-        "a plausibly sized queued release must out-score a tiny one \
-         ({plausible} vs {tiny})"
+        tiny.size_fit_penalty > plausible.size_fit_penalty,
+        "announced size must still reach search fit without changing the upgrade score"
     );
 
     // …and the parity that matters at the gate: the *same release* announced a

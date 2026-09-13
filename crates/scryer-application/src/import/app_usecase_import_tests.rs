@@ -1262,7 +1262,7 @@ fn rescore_from_mediainfo_updates_quality_when_parsed_quality_is_missing() {
 }
 
 #[tokio::test]
-async fn post_download_score_uses_rescored_quality_and_records_negative_audit() {
+async fn post_download_score_uses_rescored_quality_and_records_downgrade_audit() {
     let app = build_manual_import_cleanup_app(
         Vec::new(),
         Arc::new(ManualImportCleanupDownloadClient::default()),
@@ -1297,28 +1297,47 @@ async fn post_download_score_uses_rescored_quality_and_records_negative_audit() 
         audio_language_warning: None,
     };
 
-    let result = {
+    let (result, announced_score) = {
         let context = app
             .resolve_canonical_scoring_context(&title, &profile)
             .await;
-        crate::post_download_gate::compute_post_download_acquisition_decision(
+        let size_basis = crate::quality_profile::CoverageSizeBasis::single(title.runtime_minutes);
+        let announced_score = crate::canonical_scoring::score_release(
+            &crate::canonical_scoring::ReleaseEvidence::announced(
+                parsed.clone(),
+                Some(5 * 1024 * 1024),
+            ),
+            &context.view(size_basis, false),
+        )
+        .total;
+        let result = crate::post_download_gate::compute_post_download_acquisition_decision(
             &context,
             &title,
             &parsed,
             &acceptance,
-            crate::quality_profile::CoverageSizeBasis::single(title.runtime_minutes),
+            size_basis,
             5 * 1024 * 1024,
             &[],
             false,
-        )
+        );
+        (result, announced_score)
     };
 
     assert_eq!(result.parsed.quality.as_deref(), Some("720p"));
-    assert!(result.score < 0);
+    assert_eq!(result.tier_index, Some(1));
+    assert_eq!(
+        announced_score - result.score,
+        100,
+        "the analyzed 720p file must lose the announced 1080p resolution bonus"
+    );
     // The resolution the file actually has contradicts the one it advertised.
     // The score reflects the truth; the verdict names the disagreement.
     assert!(
-        !result.truth_verdict.is_consistent(),
+        matches!(
+            &result.truth_verdict,
+            crate::canonical_scoring::TruthVerdict::Contradicted { codes }
+                if codes.iter().any(|code| code == "quality_contradicted:1080P->720P")
+        ),
         "a 720p file sold as 1080p must be recorded as contradicted, got {:?}",
         result.truth_verdict
     );
@@ -1330,6 +1349,27 @@ async fn post_download_score_uses_rescored_quality_and_records_negative_audit() 
         serde_json::Value::String("post_download_acquisition_score".to_string())
     );
     assert_eq!(scoring_log["preference_score"], result.score);
+    let entries = scoring_log["scoring_log"].as_array().unwrap();
+    assert!(!entries.iter().any(|entry| {
+        entry["code"]
+            .as_str()
+            .is_some_and(|code| code.starts_with("quality_resolution_"))
+    }));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["code"] == "size_tiny_for_quality")
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| {
+                entry["code"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("size_"))
+            })
+            .all(|entry| entry["delta"] == 0)
+    );
     assert!(
         scoring_log["rescore_changes"]
             .as_array()
