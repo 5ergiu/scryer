@@ -435,6 +435,9 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // (discoverySyncStatus, libraryScanSession, mediaServerConnection,
     // outboundRateLimitSnapshot, upstreamSchedulerSnapshot), 1 dead mutation
     // (queueReplacementRelease), and the 5 exclusive snapshot payload OBJECT types.
+    // Two of those have since been reinstated with real consumers, and the
+    // counts below carry the reinstatement rather than the trim:
+    // queueReplacementRelease (mutation) and libraryScanSession (query).
     // 0.17.0 API surface trim (field wave): removed dead output fields inside
     // consumed types plus 4 never-selected OBJECT types (DiscoverySyncRunPayload and the
     // ExternalImportLibrarySetting{Application,Evidence,Value}Payload trio); the trio's
@@ -697,8 +700,15 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // title's exception. Failed-move recovery adds
     // `locationOperationRetrySelection`, the prefilled Plan again selection.
     // Query 164->169.
+    // Reinstate `libraryScanSession`, the by-id scan snapshot read: query
+    // 169->170. The 0.17.0 root wave trimmed it as *dead*, not as a duplicate,
+    // and it now has a consumer again - the web client resolves a session that
+    // dropped out of `activeLibraryScans` by id, to learn whether it completed
+    // or merely went invisible. Nothing else answers that: `activeLibraryScans`
+    // takes no argument and lists only live sessions, and `libraryScanState` is
+    // a push stream. Same shape as the `queueReplacementRelease` reinstatement.
     assert_eq!(
-        query_field_count, 169,
+        query_field_count, 170,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -836,10 +846,14 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // OBJECT 451->458, public types 836->843. Reason codes and the third
     // requestable mode are additive fields and enum values on types that
     // already existed, so INPUT_OBJECT and ENUM counts are unchanged.
-    assert_eq!(public_types.len(), 843);
+    // Unified automatic-search semantics add the one-variant
+    // `AcquisitionSearchIntentValue` enum, which names why a search was
+    // started: ENUM 152->153, public types 843->844. Nothing else in the
+    // schema moved with it - it is an additive enum on existing types.
+    assert_eq!(public_types.len(), 844);
     assert_eq!(kind_count("OBJECT"), 458);
     assert_eq!(kind_count("INPUT_OBJECT"), 221);
-    assert_eq!(kind_count("ENUM"), 152);
+    assert_eq!(kind_count("ENUM"), 153);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
@@ -1031,7 +1045,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // 0.17.0 API surface trim (root wave): dead root fields and their
     // exclusive snapshot payload types are gone.
     assert!(!query_field_names.contains(&"discoverySyncStatus"));
-    assert!(!query_field_names.contains(&"libraryScanSession"));
+    // ...except `libraryScanSession`, which the trim removed as unconsumed and
+    // which is consumed again: it is the by-id fallback the scan toast uses
+    // when a session leaves `activeLibraryScans`.
+    assert!(query_field_names.contains(&"libraryScanSession"));
     assert!(!query_field_names.contains(&"mediaServerConnection"));
     assert!(!query_field_names.contains(&"outboundRateLimitSnapshot"));
     assert!(!query_field_names.contains(&"upstreamSchedulerSnapshot"));
@@ -1676,7 +1693,8 @@ async fn graphql_introspection_query_root_uses_semantic_search_and_browse_fields
     assert!(names.contains(&"titleHistory"));
     assert!(!names.contains(&"titleEvents"));
     assert!(!names.contains(&"episodeHistory"));
-    assert!(!names.contains(&"libraryScanSession"));
+    // Reinstated: the by-id scan snapshot read the scan toast falls back to.
+    assert!(names.contains(&"libraryScanSession"));
     assert!(!names.contains(&"domainEvents"));
     assert!(names.contains(&"downloadHistory"));
 }
@@ -2252,7 +2270,17 @@ async fn graphql_introspection_recycle_bin_uses_id_and_payload_results() {
             }
           }
           emptyPayload: __type(name: "EmptyRecycleBinPayload") {
-            fields { name }
+            fields {
+              name
+              type {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
           }
         }
         "#,
@@ -2392,13 +2420,25 @@ async fn graphql_introspection_recycle_bin_uses_id_and_payload_results() {
         .expect("delete payload id field should exist");
     assert_eq!(delete_id["type"]["ofType"]["name"], "ID");
 
-    let empty_payload_names: Vec<&str> = body["data"]["emptyPayload"]["fields"]
+    // Emptying a bin is a tracked background job now, exactly like the batch
+    // restore and batch delete above: the mutation hands back the job run to
+    // follow rather than a `purgedCount` it would have to block to know. The
+    // payload is the job handle and nothing else, so callers cannot read a
+    // count that is only true at submit time.
+    let empty_payload_fields = body["data"]["emptyPayload"]["fields"]
         .as_array()
-        .expect("EmptyRecycleBinPayload should expose fields")
+        .expect("EmptyRecycleBinPayload should expose fields");
+    let empty_payload_names: Vec<&str> = empty_payload_fields
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect();
-    assert_eq!(empty_payload_names, vec!["purgedCount"]);
+    assert_eq!(empty_payload_names, vec!["jobRun"]);
+    let empty_job_run = empty_payload_fields
+        .iter()
+        .find(|field| field["name"] == "jobRun")
+        .expect("empty payload job run should exist");
+    assert_eq!(empty_job_run["type"]["kind"], "NON_NULL");
+    assert_eq!(empty_job_run["type"]["ofType"]["name"], "JobRunPayload");
 }
 
 #[tokio::test]
