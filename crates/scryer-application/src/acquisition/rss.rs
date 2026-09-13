@@ -9,7 +9,7 @@ use crate::acquisition_release_search::{
     annotate_auto_decision, candidate_presents_identity_disambiguator, canonical_title_evidence,
     context_free_identity_anchor_keys, evaluate_auto_candidate, external_id_agreement,
     parsed_release_matches_title_evidence, serialize_decision_explanation,
-    series_movie_search_title,
+    series_movie_search_title, title_with_bridge_cour_titles,
 };
 use crate::acquisition_search_queries::{
     imdb_id_from_title, tmdb_id_from_external_ids, tvdb_id_from_external_ids,
@@ -411,47 +411,6 @@ impl std::ops::Deref for TitleContextBank {
     }
 }
 
-/// Present a title's anime numbering bridge cour names as tagged aliases.
-///
-/// A cour's own name is a name the title answers to, but the catalog keeps it
-/// only inside the numbering bridge, and the bridge is not consulted until
-/// long after title matching has already decided a release belongs to nobody.
-/// Folding the cour names into the aliases is what puts them into
-/// `CanonicalTitleEvidence` — lookup keys and spelling identity alike — so
-/// every matcher downstream sees them. Names the catalog already carries are
-/// left alone, and a title with no bridge is returned untouched.
-pub(crate) fn title_with_bridge_cour_titles(
-    title: &Title,
-    bridge: Option<&scryer_domain::AnimeNumberingBridge>,
-) -> Title {
-    let Some(bridge) = bridge.filter(|bridge| !bridge.is_empty()) else {
-        return title.clone();
-    };
-    let mut seen = std::iter::once(title.name.as_str())
-        .chain(title.aliases.iter().map(String::as_str))
-        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
-        .map(crate::title_matching::canonical_lookup_key)
-        .collect::<HashSet<_>>();
-    let mut bridged = title.clone();
-    for name in bridge.seasons.iter().flat_map(|season| &season.titles) {
-        let key = crate::title_matching::canonical_lookup_key(name);
-        if key.is_empty() || !seen.insert(key) {
-            continue;
-        }
-        // Bridge cour names are the upstream anime dataset's, so a Latin one is
-        // a romanization; tagging it as such is what lets the relaxed matcher
-        // treat `Gassho o` and `Gasshou wo` as one spelling.
-        let language = match scryer_domain::title_spelling::title_script(name) {
-            scryer_domain::title_spelling::TitleScript::Latin => "x-jat",
-            _ => "ja",
-        };
-        bridged.tagged_aliases.push(scryer_domain::TaggedAlias {
-            name: name.clone(),
-            language: language.to_string(),
-        });
-    }
-    bridged
-}
 
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
     let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));

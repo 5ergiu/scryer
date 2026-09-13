@@ -99,8 +99,31 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
+        // An imported file is named by the same release groups the indexers
+        // carry, so it can arrive under an anime cour's own name. That name
+        // lives only in the numbering bridge, so it has to be folded in before
+        // the matcher indexes the title, or the file belongs to nobody.
+        let mut bridged_titles = Vec::with_capacity(titles.len());
+        for title in &titles {
+            let bridge = if title.facet == scryer_domain::MediaFacet::Anime {
+                self.services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                None
+            };
+            bridged_titles.push(
+                crate::acquisition_release_search::title_with_bridge_cour_titles(
+                    title,
+                    bridge.as_ref(),
+                ),
+            );
+        }
         let matcher = Arc::new(crate::import_title_resolution::MonitoredTitleMatcher::new(
-            titles,
+            bridged_titles,
         ));
 
         let mut state = self.runtime.catalog.monitored_title_matcher.write().await;

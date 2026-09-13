@@ -5674,3 +5674,91 @@ async fn queue_existing_title_download_treats_legacy_failover_text_as_definitive
     )
     .await;
 }
+
+/// The acquisition walk asks the same question RSS does: does this release
+/// name the title? A cour's own name lives only in the anime numbering
+/// bridge, so a romanized cour-numbered release proved nothing against the
+/// walk's subject evidence and every result was discarded in silence.
+#[tokio::test]
+async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
+    let (app, user) = bootstrap();
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Fullmetal Alchemist Brotherhood".into(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create anime title");
+
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        generated_on: "2026-01-01".into(),
+        corroborating_order: None,
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 4,
+            titles: vec![
+                "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                    .into(),
+            ],
+            absolute_start: Some(37),
+            ..Default::default()
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store the anime numbering bridge");
+
+    let now = Utc::now().to_rfc3339();
+    let wanted = AcquisitionScopeState {
+        id: Id::new().0,
+        title_id: title.id.clone(),
+        title_name: Some(title.name.clone()),
+        title_slug: title.slug.clone(),
+        title_facet: Some("anime".to_string()),
+        library_id: Some(title.library_id.clone()),
+        library_name: None,
+        library_slug: None,
+        episode_id: None,
+        collection_id: None,
+        series_movie_link_id: None,
+        season_number: Some("1".to_string()),
+        episode_number: Some("59".to_string()),
+        media_type: "episode".to_string(),
+        last_search_at: None,
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    let search_title = app
+        .release_search_title_for_wanted_item(&title, &wanted, None)
+        .await;
+    let subject = app
+        .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
+        .await;
+
+    let release = "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb";
+    let parsed = crate::release_parser::parse_release_metadata_for_target(
+        release,
+        &subject.title_evidence.parse_context,
+    );
+
+    assert!(
+        crate::acquisition_release_search::parsed_release_matches_title_evidence(
+            &parsed,
+            &subject.title_evidence
+        ),
+        "the walk must recognise a release named after a bridge cour"
+    );
+}
