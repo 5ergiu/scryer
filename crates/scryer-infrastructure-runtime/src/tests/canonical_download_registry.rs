@@ -293,6 +293,127 @@ async fn accepted_grab_reports_foreign_adoption_without_mutating_the_foreign_job
 }
 
 #[tokio::test]
+async fn grab_claiming_an_observation_stub_makes_the_foreign_job_a_scryer_submission() {
+    let db = std::env::temp_dir().join(format!(
+        "scryer_grab_claims_observation_stub_{}.db",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let services = SqliteServices::new(db.to_string_lossy())
+        .await
+        .expect("database should migrate through the canonical binding schema");
+    sqlx::query(
+        "INSERT INTO download_clients (
+            id, name, client_type, config_json, created_at, updated_at
+         ) VALUES ('client-one', 'Primary qBittorrent', 'qbittorrent', '{}', ?1, ?1)",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("configured client should insert");
+
+    let submissions = DownloadSubmissionStore::new(services.datastore());
+    let registry = DownloadRegistryStore::new(services.datastore());
+    let locator = ClientJobLocator::new(Some("client-one"), "qbittorrent", "observed-hash");
+
+    // The tracker's title-less stub for a job the client held before Scryer
+    // grabbed it.
+    let mut stub = submission("observed-hash", "");
+    stub.scope = SubmissionScope::Orphan;
+    stub.facet = String::new();
+    assert!(stub.is_observation_stub());
+    let foreign_download_id = stub.download_id;
+    submissions
+        .record_submission(stub)
+        .await
+        .expect("observation stub should persist");
+    assert_eq!(
+        registry
+            .load_download(&foreign_download_id)
+            .await
+            .expect("observed parent should load")
+            .expect("observed parent should exist")
+            .origin,
+        scryer_application::DownloadOrigin::ForeignObservation
+    );
+
+    // The grab first reports the job's existing identity...
+    let mut grabbed = submission("observed-hash", "title-one");
+    grabbed.source_title = Some("Observed.Release.S01E01.1080p".to_string());
+    grabbed.request_signature = Some("signature-one".to_string());
+    let identity = DownloadSubmissionIdentity {
+        download_id: Some("observed-hash".to_string()),
+    };
+    assert_eq!(
+        submissions
+            .record_submission_with_identity(grabbed.clone(), identity.clone(), Some(seed_goals()),)
+            .await
+            .expect("accepted grab should report the observed canonical id"),
+        scryer_application::CanonicalDownloadIdentityDisposition::AdoptedExisting {
+            download_id: foreign_download_id,
+        }
+    );
+
+    // ...and claiming the stub records the grab under that identity.
+    grabbed.download_id = foreign_download_id;
+    assert_eq!(
+        submissions
+            .record_submission_with_identity(grabbed, identity, Some(seed_goals()))
+            .await
+            .expect("claiming the stub should persist the grab"),
+        scryer_application::CanonicalDownloadIdentityDisposition::Requested
+    );
+
+    let stored = submissions
+        .find_by_client_item_id(&locator)
+        .await
+        .expect("submission lookup should succeed")
+        .expect("the claimed submission should exist");
+    assert_eq!(stored.download_id, foreign_download_id);
+    assert_eq!(stored.title_id, "title-one");
+    assert_eq!(
+        stored.source_title.as_deref(),
+        Some("Observed.Release.S01E01.1080p")
+    );
+    assert!(!stored.is_observation_stub());
+    assert_eq!(
+        registry
+            .load_download(&foreign_download_id)
+            .await
+            .expect("claimed parent should load")
+            .expect("claimed parent should exist")
+            .origin,
+        scryer_application::DownloadOrigin::ScryerSubmission
+    );
+    assert!(
+        submissions
+            .get_seed_goals_for_download(Some(&foreign_download_id), &locator)
+            .await
+            .expect("seed-goal lookup should succeed")
+            .is_some()
+    );
+    let binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM download_client_bindings
+          WHERE client_config_id = 'client-one'
+            AND native_item_id = 'observed-hash'",
+    )
+    .fetch_one(services.pool())
+    .await
+    .expect("binding count should load");
+    assert_eq!(binding_count, 1);
+    let submission_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM download_submissions
+          WHERE download_client_item_id = 'observed-hash'",
+    )
+    .fetch_one(services.pool())
+    .await
+    .expect("submission count should load");
+    assert_eq!(submission_count, 1);
+
+    drop(services);
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
 async fn ambiguous_submissions_attach_only_when_the_observation_is_unambiguous() {
     let db = std::env::temp_dir().join(format!(
         "scryer_ambiguous_download_observation_{}.db",

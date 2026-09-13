@@ -1724,6 +1724,94 @@ async fn queue_existing_title_download_adopts_same_title_client_identity() {
 }
 
 #[tokio::test]
+async fn queue_existing_title_download_adopts_a_foreign_observation_stub_identity() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Observed First".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    // The client already holds the job Scryer is about to grab, and the tracker
+    // has persisted its title-less observation stub under the job's foreign
+    // canonical identity.
+    let foreign_download_id = scryer_domain::download_identity::DownloadId::new();
+    let job_id = format!("job-for-{}", title.id);
+    let stub = DownloadSubmission {
+        download_id: foreign_download_id,
+        title_id: String::new(),
+        facet: String::new(),
+        download_client_id: Some("primary".to_string()),
+        download_client_type: "nzbget".to_string(),
+        download_client_item_id: job_id.clone(),
+        source_hint: None,
+        source_provider_id: None,
+        source_provider_name: None,
+        source_kind: None,
+        source_title: None,
+        info_hash: None,
+        release_size_bytes: None,
+        request_signature: None,
+        purpose: crate::DownloadSubmissionPurpose::Standard,
+        scope: SubmissionScope::Orphan,
+    };
+    assert!(stub.is_observation_stub());
+    download_submissions
+        .record_submission(stub)
+        .await
+        .expect("record the tracker's observation stub");
+
+    let outcome = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/observed.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Observed.First.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a grab of a job Scryer only observed adopts that job's identity");
+    let QueueDownloadOutcome::Queued(queued) = outcome else {
+        panic!("the adopted grab should be returned as queued");
+    };
+
+    // Scryer's grab is what now owns the job, so it is not a reuse of an
+    // earlier Scryer submission.
+    assert!(!queued.reused_existing);
+    assert_eq!(queued.job_id, job_id);
+    let submissions = download_submissions.store.lock().await;
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].download_id, foreign_download_id);
+    assert_eq!(submissions[0].title_id, title.id);
+    assert_eq!(
+        submissions[0].source_title.as_deref(),
+        Some("Observed.First.2026.1080p.WEB-DL")
+    );
+    assert!(submissions[0].request_signature.is_some());
+    assert!(!submissions[0].is_observation_stub());
+    drop(submissions);
+    assert_eq!(download_client.submitted_download_ids.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn queue_existing_title_download_rejects_cross_title_client_identity() {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
