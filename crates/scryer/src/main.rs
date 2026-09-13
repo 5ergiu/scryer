@@ -2758,14 +2758,6 @@ fn resolve_auth_mode_from_env() -> Result<AuthModeConfig, String> {
     )
 }
 
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
 fn parse_optional_setting_string(value_json: &str) -> Option<String> {
     serde_json::from_str::<Option<String>>(value_json)
         .ok()
