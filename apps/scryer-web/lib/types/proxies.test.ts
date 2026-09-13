@@ -13,6 +13,7 @@ import ru from "../i18n/locales/ru.ts";
 import zh_CN from "../i18n/locales/zh_CN.ts";
 import type { LocaleDictionary } from "../i18n/types.ts";
 import {
+  OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY,
   PROXY_DEFAULT_BASE_URLS,
   PROXY_FAMILIES,
   PROXY_FAMILY_LABEL_KEYS,
@@ -177,6 +178,25 @@ test("every provider belongs to exactly one family", () => {
   // A provider from a newer server still has no family rather than a wrong one.
   assert.equal(proxyProviderFamily("hypothetical"), null);
   assert.equal(isProxyProviderType("hypothetical"), false);
+});
+
+test("the new-proxy picker withholds SOCKS4 and offers every other provider", () => {
+  // hyper-util 0.1.20's SOCKS4 connector puts a stray NUL on the wire, so a
+  // new SOCKS4 proxy cannot carry traffic until that fix ships.
+  assert.deepEqual(OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY.standard, [
+    "http",
+    "socks5",
+  ]);
+  const offered = PROXY_FAMILIES.flatMap(
+    (family) => OFFERED_PROXY_PROVIDER_TYPES_BY_FAMILY[family],
+  );
+  assert.deepEqual(
+    [...offered].sort(),
+    PROXY_PROVIDER_TYPES.filter((providerType) => providerType !== "socks4").sort(),
+  );
+  // A saved SOCKS4 proxy still has a family and a label to render with.
+  assert.equal(proxyProviderFamily("socks4"), "standard");
+  assert.equal(formatProxyProvider("socks4"), "SOCKS4");
 });
 
 test("provider labels are product names, and unknown values render verbatim", () => {
