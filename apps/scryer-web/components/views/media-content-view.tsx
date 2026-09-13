@@ -3276,6 +3276,7 @@ export function MediaContentView({
 
       const target = event.target;
       if (
+        selectedTitleListDrawerModeActive &&
         target instanceof Node &&
         selectedTitleListDrawerRef.current?.contains(target)
       ) {
@@ -3300,6 +3301,7 @@ export function MediaContentView({
   }, [
     handleSelectedOverviewBackToList,
     selectedTitleLayoutActive,
+    selectedTitleListDrawerModeActive,
     seriesSidePanelTitleId,
   ]);
 

@@ -1234,7 +1234,22 @@ function pendingPhaseBadge(status: PendingReleaseStatus, t: Translate) {
 function PendingReleasesCard({ state }: { state: PendingViewState }) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
-  const isMobile = useIsMobile(1280);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [useCards, setUseCards] = useState(true);
+  useEffect(() => {
+    const element = contentRef.current;
+    if (!element) return;
+    // Fixed columns need 1176px; leave room for the release title and padding.
+    const updateLayout = () => setUseCards(element.clientWidth < 1536);
+    updateLayout();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateLayout);
+      return () => window.removeEventListener("resize", updateLayout);
+    }
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const {
     items,
@@ -1279,7 +1294,8 @@ function PendingReleasesCard({ state }: { state: PendingViewState }) {
   return (
     <Card className="overflow-hidden rounded-none border-0 bg-transparent shadow-none">
       <CardContent className="p-4 sm:p-5">
-        {isMobile ? (
+        <div ref={contentRef}>
+        {useCards ? (
           items.length === 0 && !loading ? (
             <p className="text-center text-[var(--scry-muted3)]">{t("pending.noItems")}</p>
           ) : (
@@ -1533,6 +1549,7 @@ function PendingReleasesCard({ state }: { state: PendingViewState }) {
             {t("wanted.refreshing")}
           </p>
         ) : null}
+        </div>
       </CardContent>
     </Card>
   );

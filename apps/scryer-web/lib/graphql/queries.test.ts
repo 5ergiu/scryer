@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Kind, parse } from "graphql";
 
 import {
   buildTitlesQuery,
@@ -286,7 +287,17 @@ test("series side panel overview scopes hydration to season aggregates", () => {
   assert.equal(seriesSidePanelOverviewQuery.includes("titleHistory("), false);
   assert.equal(seriesSidePanelOverviewQuery.includes("titleAcquisitionDiagnostics"), false);
   assert.equal(seriesSidePanelOverviewQuery.includes("overview"), true);
-  assert.equal(seriesSidePanelOverviewQuery.includes("sizeBytes"), true);
+  const operation = parse(seriesSidePanelOverviewQuery).definitions.find(
+    (definition) => definition.kind === Kind.OPERATION_DEFINITION,
+  );
+  assert.ok(operation);
+  const title = operation.selectionSet.selections.find(
+    (selection) => selection.kind === Kind.FIELD && selection.name.value === "title",
+  );
+  assert.ok(title?.kind === Kind.FIELD);
+  assert.ok(title.selectionSet?.selections.some(
+    (selection) => selection.kind === Kind.FIELD && selection.name.value === "sizeBytes",
+  ), "the series title itself must request its aggregate size");
   assert.equal(seriesSidePanelOverviewQuery.includes("qualityLabel"), false);
 });
 

@@ -529,7 +529,6 @@ const DOWNLOAD_QUEUE_ITEM_FIELDS = `
 
 const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     id
-    sizeBytes
     name
     facet
     libraryId
@@ -600,6 +599,7 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
 
 const SERIES_SIDE_PANEL_TITLE_FIELDS = `
     id
+    sizeBytes
     name
     facet
     libraryId

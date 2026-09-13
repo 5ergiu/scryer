@@ -564,14 +564,19 @@ impl MediaFileRepository for MediaFileStore {
                                ELSE 0
                            END AS size_bytes
                       FROM collections c
-                      JOIN episodes e
-                        ON e.collection_id = c.id
-                       AND e.title_id = c.title_id
-                      JOIN file_episode_map fem
-                        ON fem.episode_id = e.id
                       JOIN media_files mf
-                        ON mf.id = fem.file_id
-                       AND mf.title_id = c.title_id
+                        ON mf.title_id = c.title_id
+                       AND (
+                            mf.file_path = c.ordered_path
+                            OR EXISTS (
+                                SELECT 1
+                                  FROM episodes e
+                                  JOIN file_episode_map fem ON fem.episode_id = e.id
+                                 WHERE e.collection_id = c.id
+                                   AND e.title_id = c.title_id
+                                   AND fem.file_id = mf.id
+                            )
+                       )
                      WHERE c.title_id IN ({placeholders})
                        AND {}
                ) matched
@@ -3577,6 +3582,37 @@ mod tests {
         assert_eq!(collection_progress[0].total_episodes, 2);
         assert_eq!(collection_progress[0].monitored_episodes, 2);
         assert_eq!(collection_progress[0].owned_episodes, 1);
+
+        let direct_collection = Collection {
+            id: "collection-direct-file".to_string(),
+            collection_index: "2".to_string(),
+            ordered_path: Some("/library/Show/Season 01/Show - S01E01.mkv".to_string()),
+            ..collection.clone()
+        };
+        ShowRepository::create_collection(&shows, direct_collection.clone())
+            .await
+            .expect("direct collection should insert");
+        // The same physical file can cover multiple episodes, but counts once
+        // in the season total and is also visible through a direct association.
+        media_files
+            .link_file_to_episode(&live_file_id, &episode_two.id)
+            .await
+            .expect("multi-episode file should link");
+        let summaries = media_files
+            .list_collection_media_size_summaries(std::slice::from_ref(&title.id))
+            .await
+            .expect("direct and episode totals should succeed");
+        assert_eq!(summaries.len(), 2);
+        for id in [&collection.id, &direct_collection.id] {
+            assert_eq!(
+                summaries
+                    .iter()
+                    .find(|summary| &summary.collection_id == id)
+                    .expect("collection should have a size")
+                    .total_size_bytes,
+                1_000,
+            );
+        }
 
         let _ = std::fs::remove_file(db);
     }
