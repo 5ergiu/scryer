@@ -1701,8 +1701,50 @@ fn preferred_anime_alias_query(
         .map(|(name, _, _, _)| name.clone())
 }
 
+/// Whether an anime text query ends in a bare absolute episode number, the
+/// `Title 059` form the query builder puts ahead of the official coordinates.
+/// A four-digit number in the usual release-year range reads as a title year,
+/// not a numbering, so it stays a plain title query.
+fn query_ends_with_absolute_number(query: &str) -> bool {
+    let mut tokens = query.split_whitespace().rev();
+    let Some(last) = tokens.next() else {
+        return false;
+    };
+    if tokens.next().is_none() {
+        return false;
+    }
+    if !(2..=4).contains(&last.len()) || !last.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(number) = last.parse::<u32>() else {
+        return false;
+    };
+    !(last.len() == 4 && (1900..=2099).contains(&number))
+}
+
 fn is_freetext_strategy_label(label: &str) -> bool {
-    matches!(label, "freetext" | "freetext_alias")
+    matches!(
+        label,
+        "freetext" | "freetext_alias" | ANIME_ABSOLUTE_TEXT_LABEL | ANIME_COUR_TEXT_LABEL
+    )
+}
+
+/// An anime text query that asks for the episode by an absolute or
+/// cour-relative number rather than by its official coordinates.
+const ANIME_ABSOLUTE_TEXT_LABEL: &str = "freetext_anime_abs";
+/// An anime text query that asks for the episode under the community cour's
+/// own season and episode numbering.
+const ANIME_COUR_TEXT_LABEL: &str = "freetext_anime_cour";
+
+/// The numbering form a text strategy asks under. Automatic search keeps one
+/// strategy per form so the community and absolute query forms survive the
+/// tier split next to the plain one.
+fn auto_text_numbering_form(label: &str) -> &'static str {
+    match label {
+        ANIME_ABSOLUTE_TEXT_LABEL => ANIME_ABSOLUTE_TEXT_LABEL,
+        ANIME_COUR_TEXT_LABEL => ANIME_COUR_TEXT_LABEL,
+        _ => "",
+    }
 }
 
 fn is_title_query_strategy_label(label: &str) -> bool {
@@ -1714,7 +1756,11 @@ fn learning_strategy_key(label: &str) -> Option<&'static str> {
         "ids_abs" => Some("v2:ids_abs"),
         "ids_sxex" => Some("v2:ids_sxex"),
         "ids" => Some("v2:ids"),
-        "freetext" | "freetext_alias" | "fallback" => Some("v2:freetext"),
+        "freetext"
+        | "freetext_alias"
+        | ANIME_ABSOLUTE_TEXT_LABEL
+        | ANIME_COUR_TEXT_LABEL
+        | "fallback" => Some("v2:freetext"),
         _ => None,
     }
 }
@@ -1832,7 +1878,7 @@ fn split_strategy_tiers(
     strategies: Vec<SearchStrategy>,
 ) -> (Vec<SearchStrategy>, Vec<SearchStrategy>) {
     if mode == SearchMode::Auto {
-        return split_auto_strategy_tiers(strategies);
+        return split_auto_strategy_tiers(facet, strategies);
     }
 
     if !should_defer_freetext_to_fallback(facet, &strategies) {
@@ -1860,11 +1906,18 @@ fn split_strategy_tiers(
 }
 
 fn split_auto_strategy_tiers(
+    facet: &str,
     strategies: Vec<SearchStrategy>,
 ) -> (Vec<SearchStrategy>, Vec<SearchStrategy>) {
     if strategies.len() <= 1 {
         return (strategies, Vec::new());
     }
+
+    // One anime episode is posted under several numberings, and each numbering
+    // is a different question to the indexer. Keeping a single text strategy
+    // there would throw away the community and absolute query forms, so
+    // automatic anime search keeps the best strategy of every numbering form.
+    let keep_every_numbering_form = facet == "anime";
 
     let mut primary_candidates = Vec::new();
     let mut fallback_candidates = Vec::new();
@@ -1877,23 +1930,53 @@ fn split_auto_strategy_tiers(
         }
     }
 
+    let take_text = |candidates: &mut Vec<SearchStrategy>| -> Vec<SearchStrategy> {
+        if keep_every_numbering_form {
+            take_best_auto_strategy_per_numbering_form(candidates)
+        } else {
+            take_best_auto_strategy(candidates).into_iter().collect()
+        }
+    };
+
     if primary_candidates.is_empty() {
-        return (
-            take_best_auto_strategy(&mut fallback_candidates)
-                .into_iter()
-                .collect(),
-            Vec::new(),
-        );
+        return (take_text(&mut fallback_candidates), Vec::new());
     }
 
     let primary = take_best_auto_strategy(&mut primary_candidates)
         .into_iter()
         .collect();
-    let fallback = take_best_auto_strategy(&mut fallback_candidates)
-        .into_iter()
-        .collect();
+    let fallback = take_text(&mut fallback_candidates);
 
     (primary, fallback)
+}
+
+/// The best strategy of each distinct numbering form, ordered by rank so the
+/// plain title query still leads.
+fn take_best_auto_strategy_per_numbering_form(
+    strategies: &mut Vec<SearchStrategy>,
+) -> Vec<SearchStrategy> {
+    let mut forms: Vec<&'static str> = Vec::new();
+    for strategy in strategies.iter() {
+        let form = auto_text_numbering_form(&strategy.label);
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
+    }
+
+    let mut kept: Vec<SearchStrategy> = forms
+        .into_iter()
+        .filter_map(|form| {
+            let index = strategies
+                .iter()
+                .enumerate()
+                .filter(|(_, strategy)| auto_text_numbering_form(&strategy.label) == form)
+                .min_by_key(|(_, strategy)| auto_strategy_rank(strategy))
+                .map(|(index, _)| index)?;
+            Some(strategies.remove(index))
+        })
+        .collect();
+    kept.sort_by_key(auto_strategy_rank);
+    kept
 }
 
 fn take_best_auto_strategy(strategies: &mut Vec<SearchStrategy>) -> Option<SearchStrategy> {
@@ -1914,8 +1997,10 @@ fn auto_strategy_rank(strategy: &SearchStrategy) -> (u8, u8) {
         "freetext" => (1, 0),
         "freetext_alias" => (1, 1),
         "fallback" => (1, 2),
+        ANIME_ABSOLUTE_TEXT_LABEL => (1, 3),
+        ANIME_COUR_TEXT_LABEL => (1, 4),
         _ if !strategy.ids.is_empty() => (0, 4),
-        _ => (1, 3),
+        _ => (1, 5),
     }
 }
 
@@ -2136,21 +2221,27 @@ impl IndexerBackoffTracker {
             };
         }
 
-        let period_index = state.escalation_level.min(BACKOFF_PERIODS_SECS.len() - 1);
+        let max_period_index = BACKOFF_PERIODS_SECS.len() - 1;
+        let mut period_index = state.escalation_level.min(max_period_index);
+        // Sonarr's rule (`ProviderStatusServiceBase.RecordFailure`): `Retry-After`
+        // never becomes the backoff itself. It escalates the ladder until a step
+        // covers the provider's delay — capped at the top step — and that step is
+        // the backoff. Quantizing keeps every backoff on the ladder an operator can
+        // reason about, and no delay, however long or unrepresentable, is honored
+        // literally. The level it climbs to is kept, so the next failure starts
+        // from there instead of sliding back down.
+        if let Some(retry_after) = retry_after {
+            while period_index < max_period_index
+                && std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]) < retry_after
+            {
+                period_index += 1;
+            }
+        }
         let ladder = std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]);
-        // `Retry-After` is a floor: the provider's delay can lengthen the step
-        // this failure lands on, never shorten it below the ladder.
-        let backoff = retry_after.map_or(ladder, |retry_after| retry_after.max(ladder));
         let now = chrono::Utc::now();
-        let until = chrono::Duration::from_std(backoff)
-            .ok()
-            .and_then(|backoff| now.checked_add_signed(backoff))
-            // A delay no timestamp can hold is not one to honor literally.
-            .unwrap_or_else(|| {
-                now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono")
-            });
+        let until = now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono");
 
-        state.escalation_level = (state.escalation_level + 1).min(BACKOFF_PERIODS_SECS.len());
+        state.escalation_level = (period_index + 1).min(BACKOFF_PERIODS_SECS.len());
         state.disabled_until = Some(until);
         set_indexer_backoff_gauges(&state.indexer_name, Some(until), state.escalation_level);
 
@@ -5904,15 +5995,27 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
                 && !number.is_empty()
                 && number.bytes().all(|byte| byte.is_ascii_digit())
         });
+    let community_coordinates = terminal_coordinates
+        .filter(|_| matches!(query_facet, "series" | "anime"))
+        .filter(|(query_season, query_episode, _)| {
+            (*query_season, *query_episode) != (season, episode)
+        });
+    // Anime numbering forms all ask for the same episode under a different
+    // numbering. Labelling them apart is what keeps automatic search from
+    // collapsing them into one text query. Bounded to anime on purpose.
+    let anime_numbering_label = if query_facet != "anime" || is_alias_query {
+        None
+    } else if dashed_anime_episode || query_ends_with_absolute_number(query) {
+        Some(ANIME_ABSOLUTE_TEXT_LABEL)
+    } else if community_coordinates.is_some() {
+        Some(ANIME_COUR_TEXT_LABEL)
+    } else {
+        None
+    };
     let (season, episode, absolute_episode) = if dashed_anime_episode {
         (None, None, None)
     } else {
-        terminal_coordinates
-            .filter(|_| matches!(query_facet, "series" | "anime"))
-            .filter(|(query_season, query_episode, _)| {
-                (*query_season, *query_episode) != (season, episode)
-            })
-            .unwrap_or((season, episode, absolute_episode))
+        community_coordinates.unwrap_or((season, episode, absolute_episode))
     };
     let text_season = text_strategy_season(caps, text_dispatch_mode, season);
     let text_episode = text_strategy_episode(caps, text_dispatch_mode, episode);
@@ -5931,7 +6034,7 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
             label: if is_alias_query {
                 "freetext_alias".into()
             } else {
-                "freetext".into()
+                anime_numbering_label.unwrap_or("freetext").into()
             },
         });
     }
@@ -11468,6 +11571,7 @@ mod tests {
     async fn record_failure_retry_after_never_undercuts_the_ladder() {
         let tracker = IndexerBackoffTracker::new();
         let before = chrono::Utc::now();
+        let after_call = |backoff: &IndexerSystemBackoff| backoff.disabled_until - before;
         let backoff = tracker
             .record_failure(
                 "idx-1",
@@ -11478,9 +11582,10 @@ mod tests {
 
         assert_eq!(backoff.escalation_level, 1);
         assert!(
-            backoff.disabled_until >= before + chrono::Duration::minutes(5),
-            "Retry-After is a floor on the operational backoff; a short one must not let a \
-             failing indexer be re-asked sooner than the ladder's current step"
+            after_call(&backoff) >= chrono::Duration::minutes(5)
+                && after_call(&backoff) < chrono::Duration::minutes(6),
+            "a Retry-After the current ladder step already covers must leave that step \
+             alone, not shorten it: {backoff:?}"
         );
 
         let unrepresentable = tracker
@@ -11490,10 +11595,44 @@ mod tests {
                 Some(std::time::Duration::from_secs(u64::MAX)),
             )
             .await;
+        assert_eq!(
+            unrepresentable.escalation_level,
+            BACKOFF_PERIODS_SECS.len(),
+            "a delay beyond every ladder step must pin the top level"
+        );
         assert!(
-            unrepresentable.disabled_until >= before + chrono::Duration::minutes(5),
-            "a provider delay no timestamp can hold must still leave the ladder's backoff \
-             instead of panicking"
+            after_call(&unrepresentable) >= chrono::Duration::minutes(60)
+                && after_call(&unrepresentable) < chrono::Duration::minutes(61),
+            "a provider delay no timestamp can hold must land on the ladder's top step \
+             instead of panicking or being honored literally: {unrepresentable:?}"
+        );
+    }
+
+    /// Sonarr quantizes: a `Retry-After` is not the backoff, it escalates the
+    /// ladder until a step covers it, and that step is the backoff
+    /// (`ProviderStatusServiceBase.RecordFailure`). A 360 s delay therefore
+    /// costs the 600 s step, not 360 s, and the level it climbed to is kept.
+    #[tokio::test]
+    async fn record_failure_rounds_retry_after_up_to_the_next_ladder_step() {
+        let tracker = IndexerBackoffTracker::new();
+        let before = chrono::Utc::now();
+        let backoff = tracker
+            .record_failure(
+                "idx-1",
+                "Indexer 1",
+                Some(std::time::Duration::from_secs(360)),
+            )
+            .await;
+        let elapsed = backoff.disabled_until - before;
+
+        assert!(
+            elapsed >= chrono::Duration::minutes(10) && elapsed < chrono::Duration::minutes(11),
+            "360 s must round up to the 10-minute ladder step, never be honored \
+             literally: {backoff:?}"
+        );
+        assert_eq!(
+            backoff.escalation_level, 2,
+            "the level the ladder climbed to is kept, so the next failure starts there"
         );
     }
 
@@ -11578,7 +11717,9 @@ mod tests {
             .await;
         let after = chrono::Utc::now();
 
-        assert_eq!(backoff.escalation_level, 1);
+        // 900 s is itself a ladder step (the 15-minute one), so the ladder
+        // escalates to exactly it and the backoff is exactly that step.
+        assert_eq!(backoff.escalation_level, 3);
         assert!(backoff.disabled_until >= before + chrono::Duration::seconds(900));
         assert!(backoff.disabled_until <= after + chrono::Duration::seconds(901));
     }
@@ -12755,6 +12896,160 @@ mod tests {
         assert_eq!(primary[0].label, "ids_abs");
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].label, "freetext");
+    }
+
+    #[test]
+    fn auto_strategy_tier_keeps_anime_numbering_text_strategies() {
+        let (primary, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "anime",
+            vec![
+                strategy_with_label("ids_abs"),
+                strategy_with_label("freetext"),
+                strategy_with_label("freetext_anime_cour"),
+                strategy_with_label("freetext_anime_abs"),
+            ],
+        );
+
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].label, "ids_abs");
+
+        let mut fallback_labels = fallback
+            .iter()
+            .map(|strategy| strategy.label.as_str())
+            .collect::<Vec<_>>();
+        fallback_labels.sort_unstable();
+        assert_eq!(
+            fallback_labels,
+            vec!["freetext", "freetext_anime_abs", "freetext_anime_cour"]
+        );
+    }
+
+    #[test]
+    fn auto_strategy_tier_keeps_one_text_strategy_per_numbering_form() {
+        let (primary, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "anime",
+            vec![
+                strategy_with_label("freetext"),
+                strategy_with_label("freetext_alias"),
+                strategy_with_label("freetext_anime_abs"),
+                strategy_with_label("freetext_anime_abs"),
+            ],
+        );
+
+        let mut labels = primary
+            .iter()
+            .chain(fallback.iter())
+            .map(|strategy| strategy.label.as_str())
+            .collect::<Vec<_>>();
+        labels.sort_unstable();
+        assert_eq!(labels, vec!["freetext", "freetext_anime_abs"]);
+    }
+
+    #[test]
+    fn series_auto_strategy_tier_still_keeps_one_text_strategy() {
+        let (primary, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "series",
+            vec![
+                strategy_with_label("ids"),
+                strategy_with_label("freetext"),
+                strategy_with_label("freetext_alias"),
+            ],
+        );
+
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].label, "ids");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].label, "freetext");
+    }
+
+    #[test]
+    fn anime_numbering_query_forms_get_their_own_strategy_labels() {
+        let caps = IndexerProviderCapabilities {
+            supported_ids: HashMap::from([("anime".into(), vec!["anidb_id".into()])]),
+            season_param: Some("s".into()),
+            episode_param: Some("ep".into()),
+            query_param: Some("q".into()),
+            search_inputs: vec![
+                IndexerSearchInputCapability::TitleQuery,
+                IndexerSearchInputCapability::Season,
+                IndexerSearchInputCapability::Episode,
+                IndexerSearchInputCapability::AbsoluteEpisode,
+            ],
+            ..Default::default()
+        };
+        let ids = HashMap::from([("anidb_id".to_string(), "18886".to_string())]);
+
+        for (query, expected_label) in [
+            ("Lantern Verge S01E59", "freetext"),
+            ("Lantern Verge", "freetext"),
+            ("Lantern Verge 1984", "freetext"),
+            ("Lantern Verge 059", "freetext_anime_abs"),
+            ("Lantern Verge - 59", "freetext_anime_abs"),
+            ("Glass Meridian - 11", "freetext_anime_abs"),
+            ("Lantern Verge S04E11", "freetext_anime_cour"),
+        ] {
+            let strategies = build_strategies(&StrategyParams {
+                query,
+                query_facet: "anime",
+                id_facet: "anime",
+                ids: &ids,
+                season: Some(1),
+                episode: Some(59),
+                absolute_episode: Some(59),
+                caps: &caps,
+                id_dispatch_mode: IdDispatchMode::Aggregate,
+                text_dispatch_mode: TextDispatchMode::FacetScoped,
+                is_alias_query: false,
+                facet_omitted: false,
+            });
+            let text = strategies
+                .iter()
+                .find(|strategy| strategy.label.starts_with("freetext"))
+                .expect("a text strategy");
+            assert_eq!(text.label, expected_label, "query {query}");
+        }
+    }
+
+    #[test]
+    fn series_numbering_query_forms_keep_the_plain_freetext_label() {
+        let caps = IndexerProviderCapabilities {
+            supported_ids: HashMap::from([("series".into(), vec!["tvdb_id".into()])]),
+            season_param: Some("s".into()),
+            episode_param: Some("ep".into()),
+            query_param: Some("q".into()),
+            search_inputs: vec![
+                IndexerSearchInputCapability::TitleQuery,
+                IndexerSearchInputCapability::Season,
+                IndexerSearchInputCapability::Episode,
+            ],
+            ..Default::default()
+        };
+        let ids = HashMap::from([("tvdb_id".to_string(), "18886".to_string())]);
+
+        for query in ["Lantern Verge - 59", "Lantern Verge 059"] {
+            let strategies = build_strategies(&StrategyParams {
+                query,
+                query_facet: "series",
+                id_facet: "series",
+                ids: &ids,
+                season: Some(1),
+                episode: Some(59),
+                absolute_episode: None,
+                caps: &caps,
+                id_dispatch_mode: IdDispatchMode::Aggregate,
+                text_dispatch_mode: TextDispatchMode::FacetScoped,
+                is_alias_query: false,
+                facet_omitted: false,
+            });
+            let text = strategies
+                .iter()
+                .find(|strategy| strategy.label.starts_with("freetext"))
+                .expect("a text strategy");
+            assert_eq!(text.label, "freetext", "query {query}");
+        }
     }
 
     #[test]

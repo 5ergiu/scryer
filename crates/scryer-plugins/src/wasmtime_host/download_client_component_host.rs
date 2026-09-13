@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use scryer_application::{AppError, AppResult};
 use scryer_plugin_sdk::PluginDescriptor;
 use scryer_plugin_sdk::command::{PluginCommandRequest, PluginCommandResponse};
+use tracing::Instrument;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -281,8 +282,20 @@ pub(crate) async fn process_download_client_component(
         plugin_version = invocation.plugin_version,
         operation = invocation.operation,
     );
-    let _enter = span.enter();
+    // The span instruments the future rather than an `enter()` guard held
+    // across the awaits below: a guard that straddles an await is left behind
+    // on whichever worker entered it once tokio moves the task, and that
+    // worker then panics on the next span it opens.
+    instrumented_download_client_component(spec, request, invocation)
+        .instrument(span)
+        .await
+}
 
+async fn instrumented_download_client_component(
+    spec: &PluginInstanceSpec,
+    request: &PluginCommandRequest,
+    invocation: DownloadClientComponentInvocation<'_>,
+) -> AppResult<PluginCommandResponse> {
     let started = Instant::now();
     let request_bytes = serde_json::to_vec(request).map_err(|error| {
         AppError::Repository(format!(

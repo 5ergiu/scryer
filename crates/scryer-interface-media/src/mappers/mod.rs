@@ -162,7 +162,7 @@ mod tests {
     fn title_history_record_fixture() -> TitleHistoryRecord {
         TitleHistoryRecord {
             id: "history-1".to_string(),
-            title_id: "title-1".to_string(),
+            title_id: Some("title-1".to_string()),
             title_name: Some("Example".to_string()),
             poster_url: None,
             library_id: None,

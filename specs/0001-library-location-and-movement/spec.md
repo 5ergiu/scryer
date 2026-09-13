@@ -4,7 +4,9 @@
 **Created**: 2026-08-30
 **Status**: Implemented (2026-09-01) — all nine user stories built on
 `feature/library-location-movement`. US3 (adoption), US4 (change root) and US5
-(consolidate root) landed `cf9f92bcd`..`b51f30973`; the relocation-prototype
+(consolidate root) landed `cf9f92bcd`..`b51f30973`; **US3 was retired on
+2026-09-13**, before 0.20.0 shipped, for Sonarr parity (`USER_MOVED_FILES` is
+the re-point path); the relocation-prototype
 gate on US4 dissolved and the phase was built fresh against this spec. Final
 acceptance (tasks.md T096) and the operator-run e2e gate (T095) are still
 pending; known deltas are recorded in
@@ -141,7 +143,13 @@ repair, and Activity reporting.
    verified at the configured verification depth before the source copy is recycled
    or removed, and the applied depth is recorded per file.
 
-### User Story 3 — Adopt files the user already moved (Priority: P2)
+### User Story 3 — Adopt files the user already moved (Priority: P2) — RETIRED 2026-09-13
+
+**Retired 2026-09-13**, before 0.20.0 shipped: `FILES_ALREADY_THERE` was dropped
+for Sonarr parity. A user who moved files themselves takes `USER_MOVED_FILES`,
+which re-points the catalog and copies nothing; Scryer no longer accounts for
+what is at the destination. The story is kept for history. FR-050, FR-051 and
+FR-052 are retired with it; FR-053 is retained (see below).
 
 A user moved a title (or a whole root) with Finder/rsync/another host, then tells
 Scryer **Files are already there**. Scryer scans the destination, accounts for every
@@ -356,8 +364,9 @@ convergence, throttling, and skip rules.
   source the transfer proved byte-identical to the destination's copy: it is
   dropped outright, bin or no bin (FR-073, C4).
 - Crash mid-copy → partial destination state is expected and resumable; not stale.
-- Stale source mount during adoption → proceed when the destination is provable from
-  stored catalog data; otherwise a clear unresolved state (US3.3).
+- ~~Stale source mount during adoption → proceed when the destination is provable
+  from stored catalog data; otherwise a clear unresolved state (US3.3).~~
+  *(RETIRED 2026-09-13 with the FILES_ALREADY_THERE mode.)*
 - Series with series-movie-linked titles moves libraries → linked titles follow
   FR-060–FR-062; no silent orphaning.
 - Renamed canonical sidecar (`movie.nfo`, `tvshow.nfo`) → preserved incoming
@@ -499,20 +508,26 @@ convergence, throttling, and skip rules.
   resumable, skipping unavailable mounts and files owned by an active location
   operation, and skipping files that already have a current full hash.
 
-### External adoption — "Files are already there" (US3)
+### External adoption — "Files are already there" (US3) — RETIRED 2026-09-13
 
-- **FR-050**: Adoption MUST NOT simply replace stored path prefixes. It scans the
+The `FILES_ALREADY_THERE` execution mode was dropped for Sonarr parity:
+`USER_MOVED_FILES` is the re-point path, and Sonarr has no adoption-accounting
+equivalent. FR-050, FR-051 and FR-052 are retired with the mode; FR-053 is
+retained because its verification and source-cleanup rules bind every mode, and
+only its adoption-specific clause is retired.
+
+- **FR-050** *(RETIRED 2026-09-13 — FILES_ALREADY_THERE dropped for Sonarr parity; USER_MOVED_FILES is the re-point path)*: Adoption MUST NOT simply replace stored path prefixes. It scans the
   destination and matches tracked media using stored identity information, size,
   media characteristics, and stored content signatures (sampled proof always; full
   BLAKE3 where already persisted).
-- **FR-051**: Adoption MUST present accounted-for, missing, additional, and ambiguous
+- **FR-051** *(RETIRED 2026-09-13 — FILES_ALREADY_THERE dropped for Sonarr parity; USER_MOVED_FILES is the re-point path)*: Adoption MUST present accounted-for, missing, additional, and ambiguous
   files, and apply the same title/folder/library/merge preview as a managed move.
-- **FR-052**: Confirmation MUST be blocked while required tracked media is missing or
+- **FR-052** *(RETIRED 2026-09-13 — FILES_ALREADY_THERE dropped for Sonarr parity; USER_MOVED_FILES is the re-point path)*: Confirmation MUST be blocked while required tracked media is missing or
   ambiguous. Insufficient proof produces a clear unresolved state, never a guess.
-- **FR-053**: Catalog ownership updates only after verification. Source cleanup is
+- **FR-053** *(RETAINED; its third sentence retired 2026-09-13 with the mode)*: Catalog ownership updates only after verification. Source cleanup is
   left to the user unless Scryer can prove a redundant source copy is safe to
-  recycle. A stale or unavailable source mount MUST NOT block adoption when the
-  destination is provable from stored catalog information.
+  recycle. ~~A stale or unavailable source mount MUST NOT block adoption when the
+  destination is provable from stored catalog information.~~
 
 ### Cross-library transfer (US6)
 
@@ -778,7 +793,8 @@ convergence, throttling, and skip rules.
   (`root_consolidation_mode_not_supported`). A root change refuses it too —
   its destination must be empty or absent, so files can never already be
   there. Adoption of externally-moved content remains the title-scoped US3
-  workflow.
+  workflow. **Superseded 2026-09-13**: US3 and the `FILES_ALREADY_THERE` mode
+  were retired, so the question no longer has two modes to choose between.
 
 ### Session 2026-08-30 (operator decisions)
 

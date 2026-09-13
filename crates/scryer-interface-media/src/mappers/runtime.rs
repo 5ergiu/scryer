@@ -563,7 +563,7 @@ pub fn from_title_history_record(
 ) -> scryer_application::AppResult<TitleHistoryEventPayload> {
     Ok(TitleHistoryEventPayload {
         id: record.id.into(),
-        title_id: record.title_id.into(),
+        title_id: record.title_id.map(Into::into),
         title_name: record.title_name,
         poster_url: record.poster_url,
         library_id: record.library_id.map(Into::into),

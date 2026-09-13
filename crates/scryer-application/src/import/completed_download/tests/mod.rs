@@ -1352,6 +1352,7 @@ impl DomainEventRepository for TestDomainEventRepo {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        _include_titleless: bool,
         download_id: Option<&str>,
     ) -> AppResult<i64> {
         let events = self.events.lock().await;
@@ -1361,7 +1362,12 @@ impl DomainEventRepository for TestDomainEventRepo {
             .filter_map(crate::event_views::title_history_record_from_domain_event)
             .filter(|record| {
                 event_types.is_none_or(|values| values.contains(&record.event_type))
-                    && title_ids.is_none_or(|values| values.contains(&record.title_id))
+                    && title_ids.is_none_or(|values| {
+                        record
+                            .title_id
+                            .as_ref()
+                            .is_some_and(|title_id| values.contains(title_id))
+                    })
                     && download_id.is_none_or(|value| record.download_id.as_deref() == Some(value))
             })
             .count() as i64)
@@ -1371,6 +1377,7 @@ impl DomainEventRepository for TestDomainEventRepo {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        _include_titleless: bool,
         download_id: Option<&str>,
         limit: usize,
         offset: usize,
@@ -1384,7 +1391,12 @@ impl DomainEventRepository for TestDomainEventRepo {
                 crate::event_views::title_history_record_from_domain_event(event).is_some_and(
                     |record| {
                         event_types.is_none_or(|values| values.contains(&record.event_type))
-                            && title_ids.is_none_or(|values| values.contains(&record.title_id))
+                            && title_ids.is_none_or(|values| {
+                                record
+                                    .title_id
+                                    .as_ref()
+                                    .is_some_and(|title_id| values.contains(title_id))
+                            })
                             && download_id
                                 .is_none_or(|value| record.download_id.as_deref() == Some(value))
                     },

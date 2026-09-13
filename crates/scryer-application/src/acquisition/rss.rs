@@ -9,7 +9,7 @@ use crate::acquisition_release_search::{
     annotate_auto_decision, candidate_presents_identity_disambiguator, canonical_title_evidence,
     context_free_identity_anchor_keys, evaluate_auto_candidate, external_id_agreement,
     parsed_release_matches_title_evidence, serialize_decision_explanation,
-    series_movie_search_title,
+    series_movie_search_title, title_with_bridge_cour_titles,
 };
 use crate::acquisition_search_queries::{
     imdb_id_from_title, tmdb_id_from_external_ids, tvdb_id_from_external_ids,
@@ -411,6 +411,7 @@ impl std::ops::Deref for TitleContextBank {
     }
 }
 
+
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
     let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
     let mut candidates = titles
@@ -765,7 +766,25 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
-        let title_context_bank = build_title_context_bank(&titles);
+        // A feed item named after an anime cour carries a name the catalog
+        // keeps only in the numbering bridge, so the bank is built over titles
+        // whose bridge names have been folded in. `titles` itself stays as the
+        // catalog gave it: routing and scoping below are about the title rows.
+        let mut bridged_titles = Vec::with_capacity(titles.len());
+        for title in &titles {
+            let bridge = if title.monitored && title.facet == MediaFacet::Anime {
+                self.services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                None
+            };
+            bridged_titles.push(title_with_bridge_cour_titles(title, bridge.as_ref()));
+        }
+        let title_context_bank = build_title_context_bank(&bridged_titles);
 
         if title_context_bank.is_empty() {
             debug!("RSS sync: no monitored titles, skipping");
@@ -2225,7 +2244,6 @@ impl AppUseCase {
                 title,
                 subject: &subject,
                 admission: &admission,
-                last_search_at: wanted.last_search_at.as_deref(),
                 profile: &upgrade_context.profile,
                 thresholds: &upgrade_context.thresholds,
                 incumbent_at_cutoff: crate::acquisition_release_search::incumbent_at_cutoff(
@@ -3544,6 +3562,101 @@ mod tests {
         // Should match via the reverse year-addition path
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
+    }
+
+    /// A romanized release name spells the cour alias slightly differently
+    /// than the catalog does (`Gasshou wo` against `Gassho o`). The canonical
+    /// relaxed matcher knows those are the same romanization, so RSS must not
+    /// drop the release.
+    #[test]
+    fn match_romanized_release_to_a_tagged_romaji_alias() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        title.tagged_aliases = vec![
+            scryer_domain::TaggedAlias {
+                name: "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                language: "x-jat".into(),
+            },
+            scryer_domain::TaggedAlias {
+                name:
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
+                language: "x-jat".into(),
+            },
+        ];
+        let titles = vec![title];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a romanized cour alias spelling must still resolve to the title"
+        );
+    }
+
+    /// The catalog's aliases carry the series name; a cour's own name lives
+    /// only in the anime numbering bridge. A release named after the cour has
+    /// to reach title matching with that name in evidence, or it is dropped
+    /// before numbering is ever consulted.
+    #[test]
+    fn match_romanized_release_to_a_bridge_cour_title() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        let bridge = scryer_domain::AnimeNumberingBridge {
+            generated_on: "2026-01-01".into(),
+            corroborating_order: None,
+            seasons: vec![scryer_domain::AnimeCommunitySeason {
+                index: 4,
+                titles: vec![
+                    "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
+                ],
+                ..Default::default()
+            }],
+        };
+        let titles = vec![title_with_bridge_cour_titles(&title, Some(&bridge))];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a bridge cour name must be title-matching evidence for its title"
+        );
+    }
+
+    /// The bridge is the only source allowed to add these names: a title with
+    /// no bridge keeps exactly the aliases the catalog gave it, and a release
+    /// named after a cour it does not carry still matches nothing.
+    #[test]
+    fn a_title_without_a_bridge_keeps_its_own_aliases_only() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        let bridged = title_with_bridge_cour_titles(&title, None);
+        assert_eq!(bridged.aliases, title.aliases);
+        assert_eq!(bridged.tagged_aliases, title.tagged_aliases);
+
+        let bank = build_title_context_bank(&[bridged]);
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+        assert!(
+            result.is_none(),
+            "without a bridge there is no cour name to match on"
+        );
     }
 
     #[test]

@@ -1297,45 +1297,58 @@ impl AppUseCase {
         let grab_indexer = self
             .grab_indexer_name(result.indexer_id.as_deref(), Some(result.source.as_str()))
             .await;
-        let grab_result = self
-            .services
-            .integrations
-            .download_client
-            .submit_download(&DownloadClientAddRequest {
-                title: stand_in_title.clone(),
-                search_facet: None,
-                purpose: DownloadSubmissionPurpose::OperatorQueued,
-                download_id: Some(download_id),
-                source_hint: Some(source_hint.clone()),
-                staged_nzb: None,
-                resolved_download_artifact: None,
-                source_kind: Some(source_kind),
-                source_title: Some(result.title.clone()),
-                source_password: result.password_hint.clone(),
-                // Left to the router's grab-time choke point: the routing entry
-                // for the pinned client decides the category, and "no entry"
-                // means the download client's own default (D16).
-                category: None,
-                queue_priority: None,
-                download_directory: None,
-                release_title: None,
-                indexer_name: Some(result.source.clone()),
-                indexer_id: result.indexer_id.clone(),
-                info_hash_hint: info_hash_hint.clone(),
-                seed_goal_ratio: None,
-                seed_goal_seconds: None,
-                // No title means no quality profile to read tracker-minimum
-                // honouring off, so the release's own minimums are not clamped
-                // in — the same position the manual queue path takes.
-                tracker_min_seed_ratio: None,
-                tracker_min_seed_time_minutes: None,
-                season_pack_seed_ratio: None,
-                season_pack_seed_time_minutes: None,
-                is_recent: None,
-                season_pack: None,
-                pinned_download_client_id: Some(client.id.clone()),
-            })
-            .await;
+        let mut request = DownloadClientAddRequest {
+            title: stand_in_title.clone(),
+            search_facet: None,
+            purpose: DownloadSubmissionPurpose::OperatorQueued,
+            download_id: Some(download_id),
+            source_hint: Some(source_hint.clone()),
+            staged_nzb: None,
+            resolved_download_artifact: None,
+            source_kind: Some(source_kind),
+            source_title: Some(result.title.clone()),
+            source_password: result.password_hint.clone(),
+            // Left to the router's grab-time choke point: the routing entry
+            // for the pinned client decides the category, and "no entry"
+            // means the download client's own default (D16).
+            category: None,
+            queue_priority: None,
+            download_directory: None,
+            release_title: None,
+            indexer_name: Some(result.source.clone()),
+            indexer_id: result.indexer_id.clone(),
+            info_hash_hint: info_hash_hint.clone(),
+            seed_goal_ratio: None,
+            seed_goal_seconds: None,
+            // No title means no quality profile to read tracker-minimum
+            // honouring off, so the release's own minimums are not clamped
+            // in — the same position the manual queue path takes.
+            tracker_min_seed_ratio: None,
+            tracker_min_seed_time_minutes: None,
+            season_pack_seed_ratio: None,
+            season_pack_seed_time_minutes: None,
+            is_recent: None,
+            season_pack: None,
+            pinned_download_client_id: Some(client.id.clone()),
+        };
+        // The router refuses an indexer URL it would have to fetch itself, so
+        // resolve the artifact here as the canonical path does. The lease
+        // keeps the staged file alive until the client has accepted; the
+        // request loses the URL, but history below keeps `source_hint`.
+        let (grab_result, _prepared_artifact) = match self
+            .prepare_indexer_artifact_for_submission(&mut request, None)
+            .await
+        {
+            Ok(prepared) => (
+                self.services
+                    .integrations
+                    .download_client
+                    .submit_download(&request)
+                    .await,
+                prepared,
+            ),
+            Err(error) => (Err(error), None),
+        };
         // This is the one grab that does not pass through
         // `submit_canonical_download`, so it reports its own outcome; the
         // indexer's grab is counted the moment the client accepts, like every

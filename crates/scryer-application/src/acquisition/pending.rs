@@ -1282,21 +1282,6 @@ impl AppUseCase {
         {
             return Ok(PendingGrabOutcome::Rejected);
         }
-        if let Some(incumbent) = admission.best_incumbent()
-            && crate::acquisition_policy::upgrade_cooldown_is_active(
-                crate::acquisition_policy::CooldownCandidate {
-                    tier_index: candidate_facts.tier_index,
-                    score: candidate_score,
-                },
-                incumbent,
-                wanted.last_search_at.as_deref(),
-                now,
-                &upgrade_context.thresholds,
-            )
-        {
-            return Ok(PendingGrabOutcome::Rejected);
-        }
-
         let source_hint = pr.release_url.clone();
         let source_kind = pr
             .source_kind

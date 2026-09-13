@@ -5,8 +5,8 @@ use super::{bounded_levenshtein_distance, canonical_lookup_key};
 use scryer_domain::{
     Title,
     title_spelling::{
-        SpellingEquivalence, TitleScript, compare_title_spelling, title_script, title_spelling_key,
-        title_spelling_profiles,
+        JAPANESE_ROMANIZATION_TAG, SpellingEquivalence, TitleScript, compare_title_spelling,
+        japanese_romanization_key, title_script, title_spelling_key, title_spelling_profiles,
     },
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -116,6 +116,10 @@ type TrigramIndex = HashMap<([char; 3], usize), Vec<(usize, usize)>>;
 struct SpellingBucket {
     names: Vec<IndexedName>,
     exact: HashMap<String, Vec<usize>>,
+    /// Romanization variance is not a bounded edit distance, so the trigram
+    /// filter below can miss it. Keying the folded form keeps both discovery
+    /// and the collision check exhaustive for romanized names.
+    romanized: HashMap<String, Vec<usize>>,
     locales: HashMap<&'static str, HashMap<Vec<u8>, Vec<usize>>>,
     by_length: BTreeMap<usize, Vec<usize>>,
     grams: TrigramIndex,
@@ -139,6 +143,11 @@ impl SpellingBucket {
             .or_default()
             .push(index);
         self.by_length.entry(length).or_default().push(index);
+        if let Some(key) =
+            japanese_romanization_key(&entry.name.text, entry.name.language.as_deref())
+        {
+            self.romanized.entry(key).or_default().push(index);
+        }
         for profile in title_spelling_profiles(&entry.name.text, entry.name.language.as_deref()) {
             if let Some(key) = title_spelling_key(&entry.name.text, profile) {
                 self.locales
@@ -170,6 +179,14 @@ impl SpellingBucket {
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
+        // Only Japanese-romanized catalog names are keyed here, so folding the
+        // observed spelling can only reach names the catalog itself marked as
+        // romanizations.
+        if let Some(key) = japanese_romanization_key(observed, Some("ja"))
+            && let Some(indexes) = self.romanized.get(&key)
+        {
+            possible.extend(indexes);
+        }
         for (&profile, keys) in &self.locales {
             if let Some(key) = title_spelling_key(observed, profile)
                 && let Some(indexes) = keys.get(&key)
@@ -393,11 +410,21 @@ pub(crate) fn find_spelling_match(
             let Some((distance, locale)) = spelling_distance(observed, name, None) else {
                 continue;
             };
-            let exact = observed == &name.text;
-            if !exact {
+            let literally_exact = observed == &name.text;
+            // A romanization is a transliteration convention, not a spelling a
+            // release group can get wrong: the catalog carries the romanized
+            // alias precisely so a release named in romaji is recognizable,
+            // and an anime episode name carries neither a year nor, usually,
+            // an indexer id to corroborate one. Every other locale equivalence
+            // keeps its corroboration requirement. A romanization still has to
+            // be the only library identity that spelling can name, which the
+            // competitor check below proves.
+            let romanization = distance == 0 && locale == Some(JAPANESE_ROMANIZATION_TAG);
+            let exact = literally_exact || romanization;
+            if !literally_exact {
                 let native_typo = distance > 0 && title_script(observed) == TitleScript::Cjk;
                 let year_matches = (year.is_some() && year == name.year) || episode_year_matches;
-                if ids != Some(true) && (native_typo || !year_matches) {
+                if ids != Some(true) && !romanization && (native_typo || !year_matches) {
                     tracing::debug!(
                         title_id = identity.id,
                         observed,

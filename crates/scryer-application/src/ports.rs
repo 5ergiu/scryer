@@ -3637,16 +3637,24 @@ pub trait DomainEventRepository: Send + Sync {
     }
     async fn append_many(&self, events: Vec<NewDomainEvent>) -> AppResult<Vec<DomainEvent>>;
     async fn list(&self, filter: &DomainEventFilter) -> AppResult<Vec<DomainEvent>>;
+    /// `title_ids` scopes the page to those catalog titles. `include_titleless`
+    /// additionally admits rows that have no catalog title at all - an unlinked
+    /// grab (FR-026) is recorded against the release and the indexer, so it can
+    /// never be named by a title id, and a page scoped only by the caller's
+    /// library authorization would otherwise drop it. It is ignored when
+    /// `title_ids` is `None`, where nothing is excluded anyway.
     async fn count_title_history_page_events(
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
     ) -> AppResult<i64>;
     async fn list_title_history_page_events(
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
         limit: usize,
         offset: usize,

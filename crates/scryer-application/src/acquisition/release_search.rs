@@ -165,7 +165,6 @@ pub(crate) struct ResolvedReleaseSearchSubject {
     pub(crate) numbering_context: crate::IndexerSearchNumberingContext,
     pub(crate) absolute_episode: Option<u32>,
     pub(crate) subject_kind: ReleaseSearchSubjectKind,
-    pub(crate) last_search_at: Option<String>,
     pub(crate) submission_scope: SubmissionScope,
 }
 
@@ -340,7 +339,6 @@ pub(crate) struct AutoCandidateEvaluationContext<'a> {
     /// Replaces a ledger score that could be null, stale, or the grab-time score
     /// of a release that never landed.
     pub(crate) admission: &'a crate::admission::AdmissionSubject,
-    pub(crate) last_search_at: Option<&'a str>,
     pub(crate) profile: &'a QualityProfile,
     pub(crate) thresholds: &'a AcquisitionThresholds,
     /// The scope's best incumbent has reached the profile's cutoff — the
@@ -404,6 +402,48 @@ pub(crate) fn canonical_title_lookup_keys(title: &Title) -> Vec<String> {
     }
 
     keys
+}
+
+/// Present a title's anime numbering bridge cour names as tagged aliases.
+///
+/// A cour's own name is a name the title answers to, but the catalog keeps it
+/// only inside the numbering bridge, and the bridge is not consulted until
+/// long after title matching has already decided a release belongs to nobody.
+/// Folding the cour names into the aliases is what puts them into
+/// `CanonicalTitleEvidence` — lookup keys and spelling identity alike — so
+/// every matcher downstream sees them. Names the catalog already carries are
+/// left alone, and a title with no bridge is returned untouched.
+pub(crate) fn title_with_bridge_cour_titles(
+    title: &Title,
+    bridge: Option<&scryer_domain::AnimeNumberingBridge>,
+) -> Title {
+    let Some(bridge) = bridge.filter(|bridge| !bridge.is_empty()) else {
+        return title.clone();
+    };
+    let mut seen = std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+        .map(crate::title_matching::canonical_lookup_key)
+        .collect::<HashSet<_>>();
+    let mut bridged = title.clone();
+    for name in bridge.seasons.iter().flat_map(|season| &season.titles) {
+        let key = crate::title_matching::canonical_lookup_key(name);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        // Bridge cour names are the upstream anime dataset's, so a Latin one is
+        // a romanization; tagging it as such is what lets the relaxed matcher
+        // treat `Gassho o` and `Gasshou wo` as one spelling.
+        let language = match scryer_domain::title_spelling::title_script(name) {
+            scryer_domain::title_spelling::TitleScript::Latin => "x-jat",
+            _ => "ja",
+        };
+        bridged.tagged_aliases.push(scryer_domain::TaggedAlias {
+            name: name.clone(),
+            language: language.to_string(),
+        });
+    }
+    bridged
 }
 
 pub(crate) fn canonical_title_evidence(title: &Title) -> CanonicalTitleEvidence {
@@ -1903,33 +1943,6 @@ pub(crate) fn evaluate_auto_candidate(
         };
     }
 
-    // Churn guard: a freshly-imported scope is left alone briefly even when a
-    // better release shows up. This gates *starting* work, so it is a grab-only
-    // concern and deliberately absent from the shared verdict.
-    //
-    // It guards *replacement*, so it does not apply to a season pack admitted
-    // because monitored members are missing. Those members hold no file to
-    // protect, and the only incumbents the guard could compare against are the
-    // few members that did land — the pack would be refused as a weak
-    // "upgrade" of E01 while the rest of the season stays empty. Each member is
-    // still gated on its own at import, so a member held by a better file is
-    // not replaced by this exemption.
-    if !verdict.fills_missing_member()
-        && let Some(incumbent) = context.admission.best_incumbent()
-        && crate::acquisition_policy::upgrade_cooldown_is_active(
-            crate::acquisition_policy::CooldownCandidate {
-                tier_index: candidate_facts.tier_index,
-                score: candidate_score,
-            },
-            incumbent,
-            context.last_search_at,
-            context.now,
-            context.thresholds,
-        )
-    {
-        return ReleaseAutoDecisionCode::UpgradeRejected;
-    }
-
     // After admission on purpose: a same-tier higher-revision candidate now
     // admits above, so this rule runs on exactly the population Sonarr's
     // `RepackSpecification` checks — the repacks that would otherwise be fetched.
@@ -2342,7 +2355,6 @@ impl AppUseCase {
             title,
             subject,
             admission: &admission,
-            last_search_at: subject.last_search_at.as_deref(),
             profile: &upgrade_context.profile,
             thresholds: &upgrade_context.thresholds,
             incumbent_at_cutoff: incumbent_at_cutoff(
@@ -2447,15 +2459,6 @@ impl AppUseCase {
             ));
         }
 
-        let wanted = self
-            .services
-            .workflow
-            .acquisition_scope_states
-            .get_acquisition_scope_state_for_title(&title.id, None)
-            .await
-            .ok()
-            .flatten();
-
         Ok(ResolvedReleaseSearchSubject {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
@@ -2478,7 +2481,6 @@ impl AppUseCase {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Title,
-            last_search_at: wanted.as_ref().and_then(|item| item.last_search_at.clone()),
             submission_scope: SubmissionScope::Title,
         })
     }
@@ -2541,18 +2543,6 @@ impl AppUseCase {
             .find_episode_by_title_and_numbers(&title.id, &season_digits, &episode_digits)
             .await?;
 
-        let wanted = self
-            .services
-            .workflow
-            .acquisition_scope_states
-            .get_acquisition_scope_state_for_title(
-                &title.id,
-                episode_record.as_ref().map(|episode| episode.id.as_str()),
-            )
-            .await
-            .ok()
-            .flatten();
-
         let imdb_id = imdb_id_from_title(title);
         let tvdb_id = tvdb_id_from_external_ids(&title.external_ids)
             .as_deref()
@@ -2580,6 +2570,7 @@ impl AppUseCase {
             episode_num
         )];
         queries.push(format!("{} S{:0>2}", title.name.trim(), season_num));
+        let mut anime_numbering_bridge = None;
         if title.facet == MediaFacet::Anime {
             if let Some(absolute) = absolute_episode {
                 queries.insert(0, format!("{} {:0>3}", title.name.trim(), absolute));
@@ -2593,7 +2584,7 @@ impl AppUseCase {
             // the season and episode numbers the groups actually post under,
             // and the results it does return are whatever the bare title
             // matched.
-            let anime_numbering_bridge = self
+            anime_numbering_bridge = self
                 .services
                 .catalog
                 .shows
@@ -2617,11 +2608,18 @@ impl AppUseCase {
         let mut seen = HashSet::new();
         queries.retain(|query| !query.trim().is_empty() && seen.insert(query.to_ascii_lowercase()));
 
+        // The same cour names the queries are built from are names the results
+        // come back under, so the evidence has to carry them too.
+        let evidence_title = title_with_bridge_cour_titles(title, anime_numbering_bridge.as_ref());
+
         Ok(ResolvedReleaseSearchSubject {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
-            title_evidence: canonical_title_evidence_for_episode(title, episode_record.as_ref())
-                .with_ambiguity(self.title_identity_ambiguity(title).await),
+            title_evidence: canonical_title_evidence_for_episode(
+                &evidence_title,
+                episode_record.as_ref(),
+            )
+            .with_ambiguity(self.title_identity_ambiguity(title).await),
             queries,
             imdb_id,
             tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
@@ -2643,7 +2641,6 @@ impl AppUseCase {
             numbering_context,
             absolute_episode,
             subject_kind: ReleaseSearchSubjectKind::Episode,
-            last_search_at: wanted.as_ref().and_then(|item| item.last_search_at.clone()),
             submission_scope: episode_record
                 .as_ref()
                 .map(|episode| SubmissionScope::Episode {
@@ -2711,7 +2708,6 @@ impl AppUseCase {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Season,
-            last_search_at: item.last_search_at.clone(),
             submission_scope: collection_download_submission_scope_for_wanted_item(item, episode),
         })
     }
@@ -2727,20 +2723,6 @@ impl AppUseCase {
                 "series movie search subject has no searchable title".into(),
             ));
         }
-
-        let wanted = self
-            .services
-            .workflow
-            .acquisition_scope_states
-            .list_acquisition_scope_states(AcquisitionScopeStatesQuery {
-                media_types: vec!["series_movie".into()],
-                title_id: Some(title.id.clone()),
-                limit: 500,
-                ..AcquisitionScopeStatesQuery::default()
-            })
-            .await?
-            .into_iter()
-            .find(|item| item.series_movie_link_id.as_deref() == Some(link.id.as_str()));
 
         let imdb_id = search_title
             .imdb_id
@@ -2787,7 +2769,6 @@ impl AppUseCase {
                 numbering_context: crate::IndexerSearchNumberingContext::default(),
                 absolute_episode: None,
                 subject_kind: ReleaseSearchSubjectKind::Title,
-                last_search_at: wanted.as_ref().and_then(|item| item.last_search_at.clone()),
                 submission_scope: SubmissionScope::SeriesMovie {
                     series_movie_link_id: link.id.clone(),
                 },
@@ -2830,11 +2811,16 @@ impl AppUseCase {
         let absolute_episode = episode
             .and_then(|episode| episode.absolute_number.as_deref())
             .and_then(|value| value.parse::<u32>().ok());
+        // Release groups name a posting after the cour, and the cour's name is
+        // in the bridge rather than the catalog's aliases. The evidence has to
+        // carry it or the walk proves nothing against its own results.
+        let evidence_title =
+            title_with_bridge_cour_titles(search_title, anime_numbering_bridge.as_ref());
 
         ResolvedReleaseSearchSubject {
             title_id: owner_title.id.clone(),
             title_tags: owner_title.tags.clone(),
-            title_evidence: canonical_title_evidence_for_episode(search_title, episode)
+            title_evidence: canonical_title_evidence_for_episode(&evidence_title, episode)
                 .with_ambiguity(self.title_identity_ambiguity(search_title).await),
             queries: query_result.queries,
             imdb_id: query_result.imdb_id,
@@ -2863,7 +2849,6 @@ impl AppUseCase {
                 "episode" => ReleaseSearchSubjectKind::Episode,
                 _ => ReleaseSearchSubjectKind::Title,
             },
-            last_search_at: item.last_search_at.clone(),
             submission_scope: direct_download_submission_scope_for_wanted_item(item, episode),
         }
     }
@@ -3060,6 +3045,78 @@ mod tests {
             );
             assert!(match_parsed_release_to_title_evidence(&parsed, &evidence).is_some());
         }
+    }
+
+    /// Search results named in romaji reach the same canonical relaxed matcher
+    /// the RSS path uses. An anime episode name carries no year and the
+    /// indexer asserts no id here, so only the romanization equivalence can
+    /// prove the identity.
+    #[test]
+    fn romanized_search_result_matches_the_tagged_romaji_alias() {
+        let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
+        title.facet = MediaFacet::Anime;
+        title.year = None;
+        title.imdb_id = None;
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+
+        let candidate = make_candidate(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            None,
+        );
+        let matched = candidate_title_match(&candidate, &evidence)
+            .expect("a romanized search result must match the romaji alias");
+        let proof = matched.evidence_match.expect("evidence match");
+        let spelling = proof.spelling.expect("spelling evidence");
+        assert_eq!(
+            spelling.key,
+            "hagane no renkinjutsushi saigo no gassho o utau toki no hikari to kage no uta"
+        );
+        assert_eq!(
+            spelling.locale,
+            Some(scryer_domain::title_spelling::JAPANESE_ROMANIZATION_TAG)
+        );
+        assert!(
+            !proof.requires_external_id,
+            "a romanization proves identity on its own"
+        );
+    }
+
+    /// A romanization equivalence must not rescue an identity that a second
+    /// library title answers to just as well.
+    #[test]
+    fn romanized_search_result_stays_unmatched_against_a_competing_identity() {
+        let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
+        title.facet = MediaFacet::Anime;
+        title.year = None;
+        title.imdb_id = None;
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let mut rival = title.clone();
+        rival.id = "rival".to_string();
+        rival.name = "Fullmetal Alchemist Final Chorus".to_string();
+        rival.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gasshoo o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let evidence = spelling_evidence(&title, &[title.clone(), rival]);
+
+        let candidate = make_candidate(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            None,
+        );
+        assert!(
+            candidate_title_match(&candidate, &evidence).is_none(),
+            "a romanization two library titles answer to names neither of them"
+        );
     }
 
     #[test]
@@ -3469,7 +3526,6 @@ mod tests {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Title,
-            last_search_at: None,
             submission_scope: SubmissionScope::EpisodeSet {
                 episode_ids: episode_ids.iter().map(|id| (*id).to_string()).collect(),
             },
@@ -3635,7 +3691,6 @@ mod tests {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Title,
-            last_search_at: None,
             submission_scope: SubmissionScope::Title,
         };
         let profile = QualityProfile::default();
@@ -3647,7 +3702,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -3714,7 +3768,6 @@ mod tests {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Title,
-            last_search_at: None,
             submission_scope: SubmissionScope::Title,
         };
         let profile = QualityProfile::default();
@@ -3728,7 +3781,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -3811,7 +3863,6 @@ mod tests {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Episode,
-            last_search_at: None,
             submission_scope: SubmissionScope::Title,
         }
     }
@@ -3887,7 +3938,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -3927,7 +3977,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -4133,7 +4182,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -4344,7 +4392,6 @@ mod tests {
             title,
             subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -4703,7 +4750,6 @@ mod tests {
             title: &live_action,
             subject: &subject,
             admission: &empty_admission(),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -5099,7 +5145,6 @@ mod tests {
             numbering_context: crate::IndexerSearchNumberingContext::default(),
             absolute_episode: None,
             subject_kind: ReleaseSearchSubjectKind::Title,
-            last_search_at: None,
             submission_scope: SubmissionScope::Title,
         };
         let profile = QualityProfile::default();
@@ -5113,7 +5158,6 @@ mod tests {
             // The premise is "something is already there", which is now a fact
             // about the library rather than a number on the ledger row.
             admission: &admission_holding(1_200),
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -5192,7 +5236,6 @@ mod tests {
                 numbering_context: crate::IndexerSearchNumberingContext::default(),
                 absolute_episode: None,
                 subject_kind: ReleaseSearchSubjectKind::Title,
-                last_search_at: None,
                 submission_scope: SubmissionScope::Title,
             }
         }
@@ -5266,7 +5309,6 @@ mod tests {
                     title: &title,
                     subject: &subject,
                     admission,
-                    last_search_at: None,
                     profile: &profile,
                     thresholds: &thresholds,
                     incumbent_at_cutoff: incumbent_at_cutoff(true, admission, Some(500)),
@@ -5550,7 +5592,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &admission,
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -5622,7 +5663,6 @@ mod tests {
             title: &title,
             subject: &subject,
             admission: &admission,
-            last_search_at: None,
             profile: &profile,
             thresholds: &thresholds,
             incumbent_at_cutoff: false,
@@ -5644,14 +5684,13 @@ mod tests {
         );
     }
 
-    /// The upgrade cooldown guards *replacement*. A season pack admitted because
-    /// monitored members are missing is a fill, so a recent search or import on
-    /// the anchor episode must not refuse it as a weak "upgrade" of the one
-    /// member that landed — that left a 52-episode season holding two files
-    /// with the only pack that could fill it rejected every RSS cycle. A pack
-    /// that is purely an upgrade of occupied members is still held off.
+    /// There is no recency cooldown on a grab: Sonarr has none, and Scryer's
+    /// was the only thing that could refuse an admitted release for no reason
+    /// other than *when* the scope was last touched. A pack that upgrades
+    /// occupied members and a pack that fills a missing one are both grabbed,
+    /// however recently the anchor episode was searched or imported.
     #[test]
-    fn the_upgrade_cooldown_holds_off_a_pack_upgrade_but_not_a_pack_filling_missing_members() {
+    fn a_recently_searched_scope_no_longer_holds_off_an_admitted_pack() {
         let title = make_title();
         let episode_ids = ["episode-1", "episode-2"];
         let mut subject = episode_set_subject(&title, &episode_ids);
@@ -5662,7 +5701,6 @@ mod tests {
         let profile = QualityProfile::default();
         let thresholds = AcquisitionThresholds::default();
         let now = Utc::now();
-        let recent_search = (now - chrono::Duration::hours(1)).to_rfc3339();
         let db_blocklist = crate::app_usecase_discovery::TitleReleaseBlocklistSignatures::default();
         let no_minimum_seeders = HashMap::new();
         let unmonitored = HashSet::new();
@@ -5709,13 +5747,11 @@ mod tests {
             .per_member()
         };
         let decide = |candidate: &IndexerSearchResult,
-                      admission: &crate::admission::AdmissionSubject,
-                      last_search_at: Option<&str>| {
+                      admission: &crate::admission::AdmissionSubject| {
             let context = AutoCandidateEvaluationContext {
                 title: &title,
                 subject: &subject,
                 admission,
-                last_search_at,
                 profile: &profile,
                 thresholds: &thresholds,
                 incumbent_at_cutoff: false,
@@ -5734,38 +5770,33 @@ mod tests {
             evaluate_auto_candidate(candidate, &context)
         };
 
-        // A true upgrade: every member is occupied, the pack clears the
-        // same-tier delta but not the forced bypass, and the scope was touched
-        // an hour ago. The cooldown holds it off…
+        // A true upgrade: every member is occupied and the pack clears the
+        // same-tier delta but not the old forced bypass — the exact shape the
+        // cooldown used to refuse, on a scope whose members landed an hour ago.
         let upgrade = pack_scoring(incumbent_score + thresholds.same_tier_min_delta);
         assert!(
             thresholds.same_tier_min_delta < thresholds.forced_upgrade_delta_bypass,
-            "the upgrade case needs a delta that admits but does not force past the cooldown"
+            "the upgrade case needs a delta that admits but would not have forced past \
+             the old cooldown"
         );
         let fully_occupied = pack_admission(&episode_ids);
         assert_eq!(
-            decide(&upgrade, &fully_occupied, Some(&recent_search)),
-            ReleaseAutoDecisionCode::UpgradeRejected,
-            "a pack that only upgrades occupied members stays under the cooldown"
-        );
-        // …and it is the cooldown doing it, not admission.
-        assert_eq!(
-            decide(&upgrade, &fully_occupied, None),
-            ReleaseAutoDecisionCode::Eligible
+            decide(&upgrade, &fully_occupied),
+            ReleaseAutoDecisionCode::Eligible,
+            "an admitted upgrade is grabbed however recently the scope was filled"
         );
 
         // A fill: episode-2 has no file. The pack scores *below* the one member
-        // that landed — exactly the e2e season-pack shape — and must still be
-        // fetched inside the same cooldown window.
+        // that landed — exactly the e2e season-pack shape — and is fetched.
         let weaker_fill = pack_scoring(incumbent_score - 91);
         let one_member_missing = pack_admission(&["episode-1"]);
         assert_eq!(
-            decide(&weaker_fill, &one_member_missing, Some(&recent_search)),
+            decide(&weaker_fill, &one_member_missing),
             ReleaseAutoDecisionCode::Eligible,
-            "a pack filling a missing member is not an upgrade and is not cooldown-rejected"
+            "a pack filling a missing member is grabbed"
         );
         assert_eq!(
-            decide(&upgrade, &one_member_missing, Some(&recent_search)),
+            decide(&upgrade, &one_member_missing),
             ReleaseAutoDecisionCode::Eligible
         );
     }

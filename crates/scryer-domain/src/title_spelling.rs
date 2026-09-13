@@ -198,12 +198,129 @@ pub fn compare_title_spelling(
             return Some(SpellingEquivalence::Locale(tag));
         }
     }
+    if let Some(right_key) = japanese_romanization_key(right, language)
+        && romanized_japanese_spelling(left) == right_key
+    {
+        return Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG));
+    }
     Some(SpellingEquivalence::Different)
+}
+
+/// The comparison-only romanization key of a Japanese-romanized name, or
+/// `None` when the language tag does not mark the name as one. Indexes that
+/// need to find every spelling of a name must key on this as well as on the
+/// literal and collation keys: romanization variance is not a bounded edit
+/// distance, so a Levenshtein-shaped candidate filter can miss it.
+pub fn japanese_romanization_key(value: &str, language: Option<&str>) -> Option<String> {
+    (title_script(value) == TitleScript::Latin && is_japanese_romanization(language))
+        .then(|| romanized_japanese_spelling(value))
+}
+
+/// The locale reported for two spellings that agree only once romanization
+/// variance is folded away.
+pub const JAPANESE_ROMANIZATION_TAG: &str = "ja-latn";
+
+/// Whether a catalog language tag marks a Latin-script name as a romanization
+/// of a Japanese one. Catalogs write these as `ja`, `jpn`, `ja-Latn`, or the
+/// AniDB/TVDB transliteration tag `x-jat`.
+fn is_japanese_romanization(language: Option<&str>) -> bool {
+    let language = language
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let root = language.split('-').next().unwrap_or("");
+    matches!(root, "ja" | "jpn") || language.starts_with("x-jat")
+}
+
+/// Fold the romanization variance a catalog and a release group can each pick
+/// for one Japanese name: long vowels written with a macron, doubled, or bare
+/// (`Gasshō` / `Gasshou` / `Gassho`), the `wo`/`o` particle, and `m` before a
+/// labial (`Shimbun` / `Shinbun`).
+///
+/// This is a comparison-only reduction. It is applied to both sides of one
+/// comparison and only to Japanese-romanized names, so it can equate two
+/// spellings of the same name and nothing else; the caller still has to prove
+/// no other library identity answers to that spelling.
+fn romanized_japanese_spelling(value: &str) -> String {
+    let words = value
+        .split_whitespace()
+        .map(|word| if word == "wo" { "o" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let characters = words.chars().collect::<Vec<_>>();
+    let mut folded = String::with_capacity(words.len());
+    let mut index = 0;
+    while index < characters.len() {
+        let character = match characters[index] {
+            'ā' => 'a',
+            'ī' => 'i',
+            'ū' => 'u',
+            'ē' => 'e',
+            'ō' => 'o',
+            other => other,
+        };
+        match (character, characters.get(index + 1).copied()) {
+            ('o', Some('u' | 'o')) => {
+                folded.push('o');
+                index += 2;
+                continue;
+            }
+            ('u', Some('u')) => {
+                folded.push('u');
+                index += 2;
+                continue;
+            }
+            ('m', Some('b' | 'p')) => {
+                folded.push('n');
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+        folded.push(character);
+        index += 1;
+    }
+    folded
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn japanese_romanization_variance_is_one_spelling() {
+        for (left, right) in [
+            (
+                "hagane no renkinjutsushi saigo no gasshou wo utau toki no hikari to kage no uta",
+                "hagane no renkinjutsushi saigo no gassho o utau toki no hikari to kage no uta",
+            ),
+            ("yuusha no shimbun", "yusha no shinbun"),
+            ("toukyou monogatari", "tōkyō monogatari"),
+        ] {
+            for language in ["x-jat", "ja", "jpn", "ja-Latn"] {
+                assert_eq!(
+                    compare_title_spelling(left, right, Some(language)),
+                    Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG)),
+                    "{language}: {left} / {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn romanization_folding_stays_off_other_languages_and_other_names() {
+        // Folding is scoped to Japanese-romanized names.
+        assert_eq!(
+            compare_title_spelling("yuusha no shimbun", "yusha no shinbun", Some("eng")),
+            Some(SpellingEquivalence::Different)
+        );
+        // And it never equates two different names.
+        assert_eq!(
+            compare_title_spelling("hikari no uta", "kage no uta", Some("x-jat")),
+            Some(SpellingEquivalence::Different)
+        );
+    }
 
     #[test]
     fn multilingual_equivalents_and_distinctions() {

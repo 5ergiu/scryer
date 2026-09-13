@@ -319,10 +319,14 @@ fn title_history_record_matches(record: &TitleHistoryRecord, filter: &TitleHisto
         .event_types
         .as_ref()
         .is_none_or(|event_types| event_types.contains(&record.event_type))
-        && filter
-            .title_ids
-            .as_ref()
-            .is_none_or(|title_ids| title_ids.contains(&record.title_id))
+        && filter.title_ids.as_ref().is_none_or(|title_ids| {
+            // A record with no catalog title behind it (an unlinked grab)
+            // can never satisfy a title-scoped filter.
+            record
+                .title_id
+                .as_ref()
+                .is_some_and(|title_id| title_ids.contains(title_id))
+        })
         && filter
             .download_id
             .as_ref()
@@ -333,9 +337,17 @@ fn title_history_record_matches(record: &TitleHistoryRecord, filter: &TitleHisto
             .is_none_or(|expected| record.episode_id.as_deref() == Some(expected.as_str()))
 }
 
+/// `include_titleless` says whether records with no catalog title behind them
+/// belong on this page. An unlinked grab (FR-026) is recorded against the
+/// release and the indexer and has no title and no library, so it can only ever
+/// be admitted explicitly: `list_title_history` sets this when the caller is
+/// allowed to see title-less history and has not scoped the page to titles of
+/// their own choosing. It is never set for a user-chosen title or title search,
+/// where a record with no title genuinely does not match.
 async fn project_title_history_page(
     app: &AppUseCase,
     filter: &TitleHistoryFilter,
+    include_titleless: bool,
 ) -> AppResult<TitleHistoryPage> {
     // Title and episode history are projected exclusively from durable domain events.
     // The legacy `title_history` table is deprecated compatibility state and must not
@@ -370,6 +382,12 @@ async fn project_title_history_page(
         });
     }
 
+    // Only an authorization-derived scope may be widened. If the user picked
+    // titles or typed a title search, a record with no catalog title is not a
+    // match and must stay out.
+    let include_titleless =
+        include_titleless && filter.title_ids.is_none() && filter.title_search.is_none();
+
     let include_request_history =
         should_include_request_history(filter, effective_title_ids.as_deref());
 
@@ -382,6 +400,7 @@ async fn project_title_history_page(
             .count_title_history_page_events(
                 filter.event_types.as_deref(),
                 effective_title_ids.as_deref(),
+                include_titleless,
                 filter.download_id.as_deref(),
             )
             .await?;
@@ -399,6 +418,7 @@ async fn project_title_history_page(
             .list_title_history_page_events(
                 filter.event_types.as_deref(),
                 effective_title_ids.as_deref(),
+                include_titleless,
                 filter.download_id.as_deref(),
                 limit,
                 filter.offset,
@@ -469,7 +489,19 @@ async fn project_title_history_page(
                 };
 
             for record in event_records {
-                if !matched_title_ids.is_empty() && !matched_title_ids.contains(&record.title_id) {
+                // A title-scoped page is about those titles; a record with no
+                // catalog title behind it belongs to none of them - unless the
+                // scope came from the caller's library authorization rather
+                // than titles they chose, in which case an unlinked grab
+                // (FR-026) is admitted on its own terms, exactly as the grouped
+                // page query above admits it.
+                if !matched_title_ids.is_empty()
+                    && !record
+                        .title_id
+                        .as_ref()
+                        .is_some_and(|title_id| matched_title_ids.contains(title_id))
+                    && !(include_titleless && record.title_id.is_none())
+                {
                     continue;
                 }
                 if !title_history_record_matches(&record, filter) {
@@ -529,7 +561,7 @@ fn media_request_title_history_records(
         .filter(|title| media_request_external_ids_overlap(&title.external_ids, &data.external_ids))
         .map(|title| TitleHistoryRecord {
             id: format!("{}:{}", event.event_id, title.id),
-            title_id: title.id.clone(),
+            title_id: Some(title.id.clone()),
             title_name: Some(title.name.clone()),
             poster_url: title.poster_url.clone(),
             library_id: Some(title.library_id.clone()),
@@ -663,7 +695,8 @@ async fn hydrate_title_history_record_contexts(
                 || record.library_id.is_none()
                 || record.poster_url.is_none()
         })
-        .map(|record| record.title_id.clone())
+        // A record with no catalog title has nothing to hydrate from.
+        .filter_map(|record| record.title_id.clone())
         .collect::<HashSet<_>>();
 
     for title_id in missing_title_ids {
@@ -673,7 +706,7 @@ async fn hydrate_title_history_record_contexts(
 
         for record in records
             .iter_mut()
-            .filter(|record| record.title_id == title_id)
+            .filter(|record| record.title_id.as_deref() == Some(title_id.as_str()))
         {
             if record.title_name.is_none() {
                 record.title_name = Some(title.name.clone());
@@ -1501,7 +1534,19 @@ impl AppUseCase {
             }
             None => library_ids,
         });
-        project_title_history_page(self, &scoped_filter).await
+        // The library scope above is authorization, not a filter the user
+        // chose: with "All Libraries" selected the page still arrives here as
+        // an explicit list of every library the actor can view. An unlinked
+        // grab has no title and therefore no library, so it can never be named
+        // by that list and has to be admitted separately. Gate it on the same
+        // permission `event_allowed` uses for title-less events, which is also
+        // the permission required to make an unlinked grab in the first place
+        // (`interactive_release_search` requires ManageSystemSettings), so only
+        // an actor who could have performed the grab can see it.
+        let include_titleless = self
+            .has_app_permission(actor, AppPermission::ManageSystemSettings)
+            .await?;
+        project_title_history_page(self, &scoped_filter, include_titleless).await
     }
 
     /// Count dashboard activity events over a trailing window and the window
@@ -1578,6 +1623,9 @@ impl AppUseCase {
                 limit,
                 offset,
             },
+            // A single title's own history page: a record with no catalog title
+            // behind it is not part of it.
+            false,
         )
         .await
     }

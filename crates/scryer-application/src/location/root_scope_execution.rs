@@ -776,7 +776,6 @@ impl AppUseCase {
             source_root_is_symlink,
             source_root_is_directory,
             destination,
-            mode: call.mode,
         })
     }
 
@@ -1386,6 +1385,5 @@ pub(super) fn resumes_through_root_move_runner(operation_type: LocationOperation
             | LocationOperationType::RootChange
             | LocationOperationType::RootConsolidation
             | LocationOperationType::CrossLibraryTransfer
-            | LocationOperationType::Adoption
     )
 }

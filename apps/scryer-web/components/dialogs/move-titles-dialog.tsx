@@ -42,8 +42,6 @@ import {
   useLocationOperationStart,
 } from "@/components/dialogs/location-operation-start";
 import {
-  adoptionAccounting,
-  adoptionBlockedReasonKey,
   ambiguousCandidates,
   blockingTitleRows,
   classBlocksStart,
@@ -77,8 +75,6 @@ import {
   toCount,
   transferStatement,
   typedConfirmationSatisfied,
-  type AdoptionAccountingSummary,
-  type AdoptionFileLine,
   type ClassifiedTitlePlacement,
   type LocationClassifiedTitle,
   type LocationOperationPreview,
@@ -357,9 +353,8 @@ export function MoveTitlesDialog({
     () => populatedClassificationGroups(preview?.classification),
     [preview],
   );
-  // Both ways a title can stop the plan: the classification refusing it, and an
-  // adoption refusing its files while the title itself still classifies as a
-  // plain root move (FR-052, FR-086).
+  // The titles the classification refuses, which the user must deselect before
+  // the plan can start (FR-086).
   const blocked = React.useMemo(() => blockingTitleRows(preview), [preview]);
   const planKindCounts = React.useMemo(
     () => orderedPlanKindCounts(preview?.counts),
@@ -375,10 +370,6 @@ export function MoveTitlesDialog({
     () => mergePreviewsBySourceTitle(preview),
     [preview],
   );
-  // FR-051's accounting, read back out of the plan items the adoption planner
-  // already emitted. Null for every plan that is not an adoption.
-  const adoption = React.useMemo(() => adoptionAccounting(preview), [preview]);
-
   // FR-012's "current library/root/folder" rides on the classification payload
   // itself, so a no-op or catalog-only title states its placement too. These
   // plan-item folders are the fallback for the moving titles, whose calculated
@@ -832,12 +823,6 @@ export function MoveTitlesDialog({
             }}>{t("move.changeDestination")}</Button>
           </div>
 
-          {/* FR-051: adoption states what it found before it states what it
-              would do, so a refusal is legible without opening the plan. */}
-          {adoption ? (
-            <AdoptionAccountingPanel accounting={adoption} t={t} />
-          ) : null}
-
           {preview && !offersModeSelection(preview) ? (
             <p
               id="move-titles-catalog-only"
@@ -926,11 +911,7 @@ export function MoveTitlesDialog({
                     {t("move.blockedHelp")}
                   </p>
                   <ul className="space-y-1">
-                    {blocked.map((row) => {
-                      const adoptionReasonKey = adoptionBlockedReasonKey(
-                        row.adoptionReasonCode,
-                      );
-                      return (
+                    {blocked.map((row) => (
                         <li
                           key={row.titleId}
                           className="space-y-1 text-sm text-[var(--scry-danger-text)]"
@@ -952,17 +933,6 @@ export function MoveTitlesDialog({
                               {t("move.deselect")}
                             </Button>
                           </span>
-                          {/* FR-052's refusal names its files in the accounting
-                              panel; here it names the title the user is being
-                              told to deselect. */}
-                          {adoptionReasonKey ? (
-                            <span
-                              id={`move-titles-adoption-blocked-${row.titleId}`}
-                              className="block text-xs"
-                            >
-                              {t(adoptionReasonKey)}
-                            </span>
-                          ) : null}
                           {row.entry ? (
                             <BlockedIdentityDetail
                               entry={row.entry}
@@ -971,8 +941,7 @@ export function MoveTitlesDialog({
                             />
                           ) : null}
                         </li>
-                      );
-                    })}
+                    ))}
                   </ul>
                 </div>
               ) : null}
@@ -1616,180 +1585,3 @@ function BlockedIdentityDetail({
   );
 }
 
-/**
- * FR-051's accounting for an adoption: how much of the selection was found at
- * the destination, what is still unaccounted for, and what is there that no
- * tracked file claims.
- *
- * The four counts are the summary; the unresolved files are listed by name
- * underneath, because FR-052's refusal is only actionable if the user can see
- * which files it is about. The FR-053 line about source cleanup is stated
- * before confirmation rather than after it.
- */
-function AdoptionAccountingPanel({
-  accounting,
-  t,
-}: {
-  accounting: AdoptionAccountingSummary;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  const unresolvedCount =
-    accounting.missing.length +
-    accounting.ambiguous.length +
-    accounting.unreadable.length;
-  return (
-    <div
-      id="move-titles-adoption"
-      className={cn(
-        "space-y-3 rounded-lg border px-3 py-3",
-        accounting.blocks
-          ? "border-[var(--scry-danger-border)] bg-[var(--scry-danger-bg)]"
-          : "border-border bg-muted/20",
-      )}
-    >
-      <p className="text-sm font-medium text-foreground">
-        {t("move.adoptionHeading")}
-      </p>
-
-      {/* FR-051's four-way accounting, stating only the ways that hold files. */}
-      <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-        {accounting.accountedForFiles > 0 ? (
-          <div id="move-titles-adoption-accounted">
-            <dt className="text-xs text-muted-foreground">
-              {t("move.adoptionAccountedFor")}
-            </dt>
-            <dd className="text-foreground">
-              {accounting.accountedForFiles}
-              {accounting.accountedForBytes > 0 ? (
-                <span className="ml-1 text-xs text-muted-foreground">
-                  {formatByteCount(accounting.accountedForBytes)}
-                </span>
-              ) : null}
-            </dd>
-          </div>
-        ) : null}
-        {accounting.missing.length > 0 ? (
-          <div id="move-titles-adoption-missing">
-            <dt className="text-xs text-muted-foreground">
-              {t("move.adoptionMissing")}
-            </dt>
-            <dd className="text-[var(--scry-danger-text)]">
-              {accounting.missing.length}
-            </dd>
-          </div>
-        ) : null}
-        {accounting.ambiguous.length > 0 ? (
-          <div id="move-titles-adoption-ambiguous">
-            <dt className="text-xs text-muted-foreground">
-              {t("move.adoptionAmbiguous")}
-            </dt>
-            <dd className="text-[var(--scry-danger-text)]">
-              {accounting.ambiguous.length}
-            </dd>
-          </div>
-        ) : null}
-        {accounting.additionalFiles > 0 ? (
-          <div id="move-titles-adoption-additional">
-            <dt className="text-xs text-muted-foreground">
-              {t("move.adoptionAdditional")}
-            </dt>
-            <dd className="text-foreground">
-              {accounting.additionalFiles}
-              {accounting.additionalBytes > 0 ? (
-                <span className="ml-1 text-xs text-muted-foreground">
-                  {formatByteCount(accounting.additionalBytes)}
-                </span>
-              ) : null}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
-
-      {accounting.blocks ? (
-        <div
-          id="move-titles-adoption-unresolved"
-          className="space-y-2 text-sm text-[var(--scry-danger-text)]"
-        >
-          <p className="flex items-start gap-2">
-            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              {t("move.adoptionBlocked", { count: unresolvedCount })}
-            </span>
-          </p>
-          <AdoptionFileList
-            id="move-titles-adoption-missing-files"
-            heading={t("move.adoptionMissingHeading")}
-            lines={accounting.missing}
-          />
-          <AdoptionFileList
-            id="move-titles-adoption-ambiguous-files"
-            heading={t("move.adoptionAmbiguousHeading")}
-            lines={accounting.ambiguous}
-          />
-          <AdoptionFileList
-            id="move-titles-adoption-unreadable-files"
-            heading={t("move.adoptionUnreadableHeading")}
-            lines={accounting.unreadable}
-          />
-          {accounting.listingComplete ? null : (
-            <p id="move-titles-adoption-sampled" className="text-xs">
-              {t("move.adoptionSampled")}
-            </p>
-          )}
-        </div>
-      ) : null}
-
-      {accounting.additional.length > 0 ? (
-        <AdoptionFileList
-          id="move-titles-adoption-additional-files"
-          heading={t("move.adoptionAdditionalHeading")}
-          lines={accounting.additional}
-          tone="muted"
-        />
-      ) : null}
-
-      {accounting.sourceCleanupNotice ? (
-        <p
-          id="move-titles-adoption-source-cleanup"
-          className="text-xs text-muted-foreground"
-        >
-          {t("move.adoptionSourceCleanup")}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-/** One named group of adoption file lines: path first, then what was concluded. */
-function AdoptionFileList({
-  id,
-  heading,
-  lines,
-  tone = "danger",
-}: {
-  id: string;
-  heading: string;
-  lines: AdoptionFileLine[];
-  tone?: "danger" | "muted";
-}) {
-  if (lines.length === 0) {
-    return null;
-  }
-  return (
-    <div id={id} className={tone === "muted" ? "text-muted-foreground" : undefined}>
-      <p className="text-xs font-medium">{heading}</p>
-      <ul className="ml-4 list-disc space-y-0.5 text-xs">
-        {lines.map((line, index) => (
-          <li key={`${line.sourcePath ?? line.destinationPath ?? "line"}-${index}`}>
-            <span className="font-[var(--font-code)] break-all">
-              {line.sourcePath ?? line.destinationPath ?? ""}
-            </span>
-            {line.detail ? (
-              <span className="block opacity-80">{line.detail}</span>
-            ) : null}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}

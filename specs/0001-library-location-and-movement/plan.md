@@ -116,7 +116,7 @@ crates/scryer-infrastructure-datastore/src/migrations/
 crates/scryer-application/src/
     location/                                        # NEW subsystem
         model.rs / preview.rs / classify.rs / executor.rs / verify.rs
-        collisions.rs / merge.rs / adoption.rs / ownership_guard.rs
+        collisions.rs / merge.rs / ownership_guard.rs
     library/relocation.rs                            # absorbed prototype (US4 phase)
     jobs/                                            # FullHashBackfill registration
     settings/runtime/                                # verification-depth preference

@@ -2430,6 +2430,7 @@ impl DomainEventRepository for NullDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
     ) -> AppResult<i64> {
         Ok(0)
@@ -2449,6 +2450,7 @@ impl DomainEventRepository for NullDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
         _: usize,
         _: usize,

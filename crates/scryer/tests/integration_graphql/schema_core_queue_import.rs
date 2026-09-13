@@ -827,7 +827,6 @@ async fn graphql_introspection_exposes_typed_timestamps_as_datetime() {
         ("postProcessingScriptRun", "id"),
         ("postProcessingScriptRun", "scriptId"),
         ("titleHistoryEvent", "id"),
-        ("titleHistoryEvent", "titleId"),
         ("restoreInspect", "uploadId"),
         // 0.17.0: QueueDownloadScopePayload became a union; the scope ids are
         // non-null fields on the member payloads now.
@@ -849,6 +848,10 @@ async fn graphql_introspection_exposes_typed_timestamps_as_datetime() {
         ("domainEventEnvelope", "titleId"),
         ("libraryScanProgress", "libraryId"),
         ("postProcessingScriptRun", "titleId"),
+        // FR-026: an unlinked grab is recorded as history against the release
+        // and the indexer, with no catalog title behind it, so a history event
+        // legitimately has no `titleId`.
+        ("titleHistoryEvent", "titleId"),
         ("titleHistoryEvent", "episodeId"),
         ("titleHistoryEvent", "collectionId"),
         ("titleHistoryEvent", "actorUserId"),

@@ -93,6 +93,13 @@ function historyTypeLabel(event: TitleHistoryEvent, t: ReturnType<typeof useTran
   return event.eventType === "file_upgraded" ? t("history.upgrade") : t("history.initial");
 }
 
+// What the title column shows. An unlinked grab has no catalog title, so its
+// name comes from the release the grab submitted under; falling back to the
+// title id would print an empty string for it.
+function historyEventTitleLabel(event: TitleHistoryEvent): string {
+  return event.titleName ?? event.titleId ?? "";
+}
+
 function titleHistoryHref(event: TitleHistoryEvent): string | null {
   const viewByFacet: Record<string, ViewId> = {
     MOVIE: "movies",
@@ -101,11 +108,12 @@ function titleHistoryHref(event: TitleHistoryEvent): string | null {
   };
   const view = viewByFacet[event.facet?.trim().toUpperCase() ?? ""];
   // An unlinked grab (spec 0002, D8) records a facet but no title: nothing to link to.
-  if (!view || !event.titleId.trim()) {
+  const titleId = event.titleId?.trim() ?? "";
+  if (!view || !titleId) {
     return null;
   }
 
-  return `${buildOverviewDetailPath(view, null, null)}?id=${encodeURIComponent(event.titleId)}`;
+  return `${buildOverviewDetailPath(view, null, null)}?id=${encodeURIComponent(titleId)}`;
 }
 
 function historyEpisodeHref(event: TitleHistoryEvent, episodeId: string): string | null {
@@ -160,10 +168,10 @@ function calendarEpisodeForHistoryEvent(
   const libraryName = event.sourceSystem ?? event.clientName ?? null;
   return {
     id: event.id,
-    titleId: event.titleId,
+    titleId: event.titleId ?? "",
     libraryId: libraryName ?? "Scryer",
     libraryName,
-    titleName: event.titleName ?? event.titleId,
+    titleName: historyEventTitleLabel(event),
     titleFacet: details.facet?.toLowerCase() ?? "series",
     seasonNumber: null,
     episodeNumber: null,
@@ -313,7 +321,7 @@ function HistoryEpisodes({
   );
   const variables = React.useMemo(
     () => ({
-      titleId: event.titleId,
+      titleId: event.titleId ?? "",
       ...Object.fromEntries(
         episodeIds.map((episodeId, index) => [`episode${index}`, episodeId]),
       ),
@@ -527,9 +535,9 @@ export function HistoryEventTable({
                       <HistoryTitleHoverLink
                         event={event}
                         label={
-                          titleNameMap?.[event.titleId] ??
-                          event.titleName ??
-                          event.titleId
+                          (event.titleId
+                            ? titleNameMap?.[event.titleId]
+                            : undefined) ?? historyEventTitleLabel(event)
                         }
                         href={titleHref}
                         className={

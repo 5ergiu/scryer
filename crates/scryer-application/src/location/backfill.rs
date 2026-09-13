@@ -76,10 +76,13 @@ pub(crate) fn next_full_hash_backfill_window<T: TimeZone>(
     }
 
     let zone = now.timezone();
-    let mut date = now.date_naive();
-    if now.hour() >= FULL_HASH_BACKFILL_WINDOW_END_HOUR {
-        date = date.succ_opt()?;
-    }
+    // Past the early return, tonight's window is never the answer: either it is
+    // already closed, or the caller asked for the window *after* this one. Both
+    // mean the next local midnight. Starting the scan on today's date instead
+    // let a call made inside the window return `now + 1 minute` — at 05:45 the
+    // next run landed at 05:46, so the tail of the window degenerated into a
+    // per-minute sweep rather than the 30-minute cadence the job schedules.
+    let mut date = now.date_naive().succ_opt()?;
     for _ in 0..3 {
         // If midnight is skipped locally, use the first valid minute in the window.
         for minute in 0..FULL_HASH_BACKFILL_WINDOW_END_HOUR * 60 {

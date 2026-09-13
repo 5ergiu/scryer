@@ -47,3 +47,6 @@ wat = "1"
 # travelled through a tunnel rather than merely failing to go direct.
 scryer-tunnel = { workspace = true, features = ["test-support"] }
 wiremock = { workspace = true }
+# The span-guard regression test drives a real `Registry`, so the close/clone
+# bookkeeping under test is the subscriber the server itself installs.
+tracing-subscriber = { workspace = true }

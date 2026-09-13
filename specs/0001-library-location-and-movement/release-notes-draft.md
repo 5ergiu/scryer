@@ -10,7 +10,8 @@
 
   Written 2026-09-01 against `feature/library-location-movement`; updated the
   same day at `b51f30973`, when US3 (adoption), US4 (change root), and US5
-  (consolidate root) landed. It now describes the whole of spec 0001.
+  (consolidate root) landed. It now describes the whole of spec 0001, minus US3,
+  which was retired on 2026-09-13 before 0.20.0 shipped.
 -->
 
 ## Highlights
@@ -77,25 +78,16 @@ gradually fills in full-file hashes for content that was already in your library
   destination changes between preview and confirm, the confirmation is refused
   and you are asked to review a fresh plan.
 
-### Tell Scryer the files are already there
+### Tell Scryer you moved the files yourself
 
-- **The move workflow's "Files are already there" mode is live.** If you already
-  moved a title's files yourself — Finder, rsync, a download client writing
-  straight to the destination — pick the same destination in the move dialog
-  and choose this mode. Scryer proves the files instead of copying them: a file
-  with a stored full hash is read back completely and re-verified; otherwise
-  its size and head-and-tail content are checked against what the catalog
-  knows, and the result records which proof applied.
-- **Nothing is adopted on faith.** Every tracked file must be accounted for at
-  the destination. A title with tracked media that cannot be matched is named
-  and blocked, and the preview lets you drop it from the selection rather than
-  guessing. Disagreeing content excludes a match; mere absence of a hash does
-  not.
-- A source that has since vanished — an unplugged drive, an already-deleted
-  folder — does not fail the preview or block the adoption of titles whose
-  files are present at the destination.
-- Leftover source files are yours: Scryer only recycles a source copy it has
-  **proven** redundant by full hash, and otherwise leaves the source alone.
+- **"I moved them myself" re-points the catalog.** If you already moved a
+  title's files — Finder, rsync, a download client writing straight to the
+  destination — pick the same destination in the move dialog and choose this
+  method. Scryer updates the catalog mappings and copies nothing. This matches
+  Sonarr, which has no second flavour of this.
+- An adoption mode that accounted for every tracked file at the destination was
+  built during 0.20.0 and **retired before release** (2026-09-13). It never had
+  a browser entry point, and "I moved them myself" is the one re-point path.
 
 ### Change a root's path, moving everything on it
 

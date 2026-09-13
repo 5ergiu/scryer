@@ -22,6 +22,12 @@ use crate::queries::sql_runtime::{
 use crate::storage::sql::json::{canonical_json_text, json_text_or};
 
 const RECYCLE_BIN_PATH_SEGMENT: &str = "/.scryer-recycle/";
+/// Same-path upgrades stage the verified replacement beside the final file
+/// under this prefix (`import::upgrade::sibling_guard_path`) and only rename it
+/// onto the final path once the old file is safely aside. The staged row exists
+/// in `media_files` for the whole copy, so every live query has to treat it the
+/// same way it treats a recycled file: not part of the library yet.
+const STAGED_UPGRADE_REPLACEMENT_PATH_SEGMENT: &str = "/.scryer-upgrade-replacement-";
 
 #[derive(Clone)]
 pub struct MediaFileStore {
@@ -2007,10 +2013,14 @@ fn placeholders(count: usize) -> String {
 
 fn live_media_file_predicate(dialect: SqlDialect, alias: &str) -> String {
     match dialect {
-        SqlDialect::Sqlite => format!("instr({alias}.file_path, '{RECYCLE_BIN_PATH_SEGMENT}') = 0"),
-        SqlDialect::Postgres => {
-            format!("POSITION('{RECYCLE_BIN_PATH_SEGMENT}' IN {alias}.file_path) = 0")
-        }
+        SqlDialect::Sqlite => format!(
+            "(instr({alias}.file_path, '{RECYCLE_BIN_PATH_SEGMENT}') = 0
+              AND instr({alias}.file_path, '{STAGED_UPGRADE_REPLACEMENT_PATH_SEGMENT}') = 0)"
+        ),
+        SqlDialect::Postgres => format!(
+            "(POSITION('{RECYCLE_BIN_PATH_SEGMENT}' IN {alias}.file_path) = 0
+              AND POSITION('{STAGED_UPGRADE_REPLACEMENT_PATH_SEGMENT}' IN {alias}.file_path) = 0)"
+        ),
     }
 }
 
@@ -3613,6 +3623,164 @@ mod tests {
                 1_000,
             );
         }
+
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// An in-flight same-path upgrade stages the replacement beside the final
+    /// file under a `.scryer-upgrade-replacement-<uuid>-` name and inserts a
+    /// media-file row at that staged path *before* the rename and the DB swap
+    /// land. Until the swap commits, the staged file is not part of the
+    /// library: the episode must still resolve to the old file, and the
+    /// staged dotfile path must never surface on a live title/episode query.
+    ///
+    /// Regression: gate 7 `sqlite-upgrade` read the title state inside that
+    /// window and saw two media files for S01E01 — the old one plus the
+    /// staged `.scryer-upgrade-replacement-…` row carrying the new
+    /// acquisition score — and reported the dotfile as the imported path.
+    #[tokio::test]
+    async fn staged_upgrade_replacements_are_excluded_from_live_title_queries() {
+        let db = std::env::temp_dir().join(format!(
+            "scryer_media_file_staged_upgrade_{}.db",
+            chrono::Utc::now().timestamp_micros()
+        ));
+        let services = SqliteServices::new(db.to_string_lossy())
+            .await
+            .expect("db should initialize");
+        let titles = title_store(&services);
+        let shows = show_store(&services);
+        let media_files = media_file_store(&services);
+
+        let title = make_test_series_title("title-staged-upgrade");
+        titles
+            .create(title.clone())
+            .await
+            .expect("title should insert");
+
+        let collection = Collection {
+            id: "collection-staged-upgrade".to_string(),
+            title_id: title.id.clone(),
+            collection_type: CollectionType::Season,
+            collection_index: "1".to_string(),
+            label: Some("Season 1".to_string()),
+            ordered_path: None,
+            narrative_order: None,
+            first_episode_number: Some("1".to_string()),
+            last_episode_number: Some("1".to_string()),
+            monitored: true,
+            created_at: Utc::now(),
+        };
+        ShowRepository::create_collection(&shows, collection.clone())
+            .await
+            .expect("collection should insert");
+
+        let episode = Episode {
+            id: "episode-staged-upgrade-1".to_string(),
+            title_id: title.id.clone(),
+            collection_id: Some(collection.id.clone()),
+            episode_type: scryer_domain::EpisodeType::Standard,
+            episode_number: Some("1".to_string()),
+            season_number: Some("1".to_string()),
+            episode_label: Some("S01E01".to_string()),
+            title: Some("Episode 1".to_string()),
+            air_date: Some("2026-04-01".to_string()),
+            duration_seconds: None,
+            has_multi_audio: false,
+            has_subtitle: false,
+            is_filler: false,
+            is_recap: false,
+            absolute_number: None,
+            overview: None,
+            tvdb_id: None,
+            image_url: None,
+            monitored: true,
+            created_at: Utc::now(),
+        };
+        ShowRepository::create_episode(&shows, episode.clone())
+            .await
+            .expect("episode should insert");
+
+        let old_file_path = "/data/series/Bluey (2018)/Season 1/Bluey (2018) - S01E01 - 720p.mkv";
+        let old_file_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: old_file_path.to_string(),
+                size_bytes: 1_000,
+                ..Default::default()
+            })
+            .await
+            .expect("old media file should insert");
+        media_files
+            .link_file_to_episode(&old_file_id, &episode.id)
+            .await
+            .expect("old file should link");
+        media_files
+            .set_media_file_roles_for_episode(&title.id, &episode.id, &old_file_id, &[])
+            .await
+            .expect("old file should be primary for the episode");
+
+        let staged_replacement_path = "/data/series/Bluey (2018)/Season 1/.scryer-upgrade-replacement-bc2daab6-e1ef-42c3-a36f-0c6a125c22b7-Bluey (2018) - S01E01 - 720p.mkv";
+        let staged_file_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: staged_replacement_path.to_string(),
+                size_bytes: 77_514_091,
+                ..Default::default()
+            })
+            .await
+            .expect("staged replacement should insert");
+        media_files
+            .link_file_to_episode(&staged_file_id, &episode.id)
+            .await
+            .expect("staged replacement should link");
+
+        let title_files = media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .expect("list media files should succeed");
+        assert_eq!(
+            title_files
+                .iter()
+                .map(|file| file.file_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![old_file_path],
+            "an in-flight staged upgrade replacement must not surface as a live title media file"
+        );
+
+        let scoped = media_files
+            .list_live_media_files_for_episode_ids(
+                &title.id,
+                std::slice::from_ref(&episode.id.clone()),
+            )
+            .await
+            .expect("scoped media files should succeed");
+        assert_eq!(
+            scoped
+                .iter()
+                .map(|file| file.media_file.file_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![old_file_path],
+            "an in-flight staged upgrade replacement must not surface on the episode"
+        );
+
+        // Once the swap commits the replacement row carries the final path and
+        // becomes the single live file for the episode.
+        media_files
+            .replace_media_file_for_upgrade(&old_file_id, &staged_file_id, old_file_path)
+            .await
+            .expect("upgrade swap should succeed");
+        let swapped = media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .expect("list media files should succeed after the swap");
+        assert_eq!(
+            swapped
+                .iter()
+                .map(|file| (file.id.as_str(), file.file_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(staged_file_id.as_str(), old_file_path)],
+            "after the swap the replacement is the only live file, at the final path"
+        );
 
         let _ = std::fs::remove_file(db);
     }
