@@ -612,6 +612,7 @@ impl DomainEventRepository for TestDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
     ) -> AppResult<i64> {
         Ok(0)
@@ -631,6 +632,7 @@ impl DomainEventRepository for TestDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
         _: usize,
         _: usize,

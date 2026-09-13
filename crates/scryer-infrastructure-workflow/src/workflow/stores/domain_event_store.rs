@@ -62,10 +62,16 @@ impl DomainEventRepository for DomainEventStore {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
     ) -> AppResult<i64> {
-        let (where_sql, args) =
-            build_title_history_filter_sql(&self.datastore, event_types, title_ids, download_id);
+        let (where_sql, args) = build_title_history_filter_sql(
+            &self.datastore,
+            event_types,
+            title_ids,
+            include_titleless,
+            download_id,
+        );
         let row = SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
             &format!("SELECT COUNT(*) AS count FROM domain_events{where_sql}"),
@@ -80,13 +86,19 @@ impl DomainEventRepository for DomainEventStore {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
         limit: usize,
         offset: usize,
     ) -> AppResult<Vec<DomainEvent>> {
         let page_size = if limit == 0 { 50 } else { limit.min(500) };
-        let (where_sql, mut args) =
-            build_title_history_filter_sql(&self.datastore, event_types, title_ids, download_id);
+        let (where_sql, mut args) = build_title_history_filter_sql(
+            &self.datastore,
+            event_types,
+            title_ids,
+            include_titleless,
+            download_id,
+        );
         args.push(SqlArg::I64(page_size as i64));
         args.push(SqlArg::I64(offset as i64));
         fetch_domain_events(
@@ -345,20 +357,20 @@ mod title_history_filter_tests {
         );
         for filter in [None, Some(&[TitleHistoryEventType::TitleMoved][..])] {
             let page = store
-                .list_title_history_page_events(filter, Some(&["title-1".into()]), None, 50, 0)
+                .list_title_history_page_events(filter, Some(&["title-1".into()]), false, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(page, vec![first.clone()]);
             assert_eq!(
                 store
-                    .count_title_history_page_events(filter, None, None)
+                    .count_title_history_page_events(filter, None, false, None)
                     .await
                     .unwrap(),
                 1
             );
             assert!(
                 store
-                    .list_title_history_page_events(filter, None, None, 50, 1)
+                    .list_title_history_page_events(filter, None, false, None, 50, 1)
                     .await
                     .unwrap()
                     .is_empty()
@@ -378,7 +390,7 @@ mod title_history_filter_tests {
             .expect("event should append");
 
         let unfiltered = store
-            .list_title_history_page_events(None, None, None, 50, 0)
+            .list_title_history_page_events(None, None, false, None, 50, 0)
             .await
             .expect("unfiltered page should load");
         assert_eq!(unfiltered.len(), 1, "the row is on the unfiltered page");
@@ -387,6 +399,7 @@ mod title_history_filter_tests {
             .list_title_history_page_events(
                 Some(&[TitleHistoryEventType::DownloadIgnored]),
                 None,
+                false,
                 None,
                 50,
                 0,
@@ -401,6 +414,7 @@ mod title_history_filter_tests {
                 .count_title_history_page_events(
                     Some(&[TitleHistoryEventType::DownloadIgnored]),
                     None,
+                    false,
                     None
                 )
                 .await
@@ -439,7 +453,7 @@ mod title_history_filter_tests {
             .expect("titled event should append");
 
         let unfiltered = store
-            .list_title_history_page_events(None, None, None, 50, 0)
+            .list_title_history_page_events(None, None, false, None, 50, 0)
             .await
             .expect("unfiltered page should load");
         assert_eq!(
@@ -455,7 +469,7 @@ mod title_history_filter_tests {
         );
         assert_eq!(
             store
-                .count_title_history_page_events(None, None, None)
+                .count_title_history_page_events(None, None, false, None)
                 .await
                 .expect("unfiltered count should load"),
             2
@@ -465,6 +479,7 @@ mod title_history_filter_tests {
             .list_title_history_page_events(
                 Some(&[TitleHistoryEventType::Grabbed]),
                 None,
+                false,
                 None,
                 50,
                 0,
@@ -475,7 +490,7 @@ mod title_history_filter_tests {
         assert_eq!(grabs[0].event_id, "event-untitled-grab");
 
         let title_scoped = store
-            .list_title_history_page_events(None, Some(&["title-1".into()]), None, 50, 0)
+            .list_title_history_page_events(None, Some(&["title-1".into()]), false, None, 50, 0)
             .await
             .expect("title-scoped page should load");
         assert_eq!(
@@ -486,10 +501,26 @@ mod title_history_filter_tests {
         assert_eq!(title_scoped[0].event_id, "event-1");
         assert_eq!(
             store
-                .count_title_history_page_events(None, Some(&["title-1".into()]), None)
+                .count_title_history_page_events(None, Some(&["title-1".into()]), false, None)
                 .await
                 .expect("title-scoped count should load"),
             1
+        );
+
+        // The same scope, widened: this is what /activity/history sends, where
+        // the title list is the caller's library authorization rather than a
+        // title the user chose, so the untitled grab comes back alongside.
+        let authorization_scoped = store
+            .list_title_history_page_events(None, Some(&["title-1".into()]), true, None, 50, 0)
+            .await
+            .expect("authorization-scoped page should load");
+        assert_eq!(authorization_scoped.len(), 2, "{authorization_scoped:?}");
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, Some(&["title-1".into()]), true, None)
+                .await
+                .expect("authorization-scoped count should load"),
+            2
         );
     }
 
@@ -507,6 +538,7 @@ mod title_history_filter_tests {
             .list_title_history_page_events(
                 Some(&[TitleHistoryEventType::DownloadCompleted]),
                 None,
+                false,
                 None,
                 50,
                 0,
