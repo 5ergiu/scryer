@@ -60,13 +60,20 @@ fn from_metadata_search_item(
         .smg_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| item.tvdb_id.to_string());
-    let poster_url = app.media_image_url(
-        item.poster_url.as_deref(),
-        Some("metadata_search"),
-        Some(&owner_id),
-        ImageProxyKind::Poster,
-        "w250",
-    );
+    let poster_url = item
+        .poster_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .and_then(|url| {
+            app.media_image_url(
+                Some(url),
+                Some("metadata_search"),
+                Some(&owner_id),
+                ImageProxyKind::Poster,
+                "w250",
+            )
+        });
     MetadataSearchItemPayload {
         tvdb_id: item.tvdb_id,
         smg_id: item.smg_id,

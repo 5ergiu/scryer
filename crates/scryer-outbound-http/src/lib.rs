@@ -1871,8 +1871,11 @@ pub fn transport_proxy_egress_url(base_url: &str, remote_dns: bool) -> String {
         return base_url.to_string();
     }
     for (local, remote) in [("socks5://", "socks5h://"), ("socks4://", "socks4a://")] {
-        if let Some(rest) = base_url.strip_prefix(local) {
-            return format!("{remote}{rest}");
+        if base_url
+            .get(..local.len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(local))
+        {
+            return format!("{remote}{}", &base_url[local.len()..]);
         }
     }
     base_url.to_string()
@@ -2951,6 +2954,20 @@ mod tests {
             transport_proxy_egress_url("  https://gateway:3128  ", false),
             "https://gateway:3128"
         );
+    }
+
+    #[test]
+    fn transport_proxy_egress_url_preserves_endpoint_spelling_with_mixed_case_schemes() {
+        for (input, expected) in [
+            ("SOCKS5://GateWay:1080", "socks5h://GateWay:1080"),
+            ("SoCkS4://GateWay:1080", "socks4a://GateWay:1080"),
+            ("SOCKS5H://GateWay:1080", "SOCKS5H://GateWay:1080"),
+            ("HTTPS://GateWay:3128", "HTTPS://GateWay:3128"),
+            ("☃://gateway", "☃://gateway"),
+        ] {
+            assert_eq!(transport_proxy_egress_url(input, true), expected);
+            assert_eq!(transport_proxy_egress_url(input, false), input);
+        }
     }
 
     #[test]

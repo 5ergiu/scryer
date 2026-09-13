@@ -4200,7 +4200,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         retry_after,
                         ..
                     } => {
-                        info!(
+                        debug!(
                             indexer = config.name.as_str(),
                             scheduler_reason = ?reason,
                             retry_after_secs = retry_after.map(|delay| delay.as_secs()),

@@ -27,6 +27,9 @@ use crate::{AppResult, AppUseCase};
 /// claims are read oldest-first, so the backlog drains in the order it formed.
 pub const LIFECYCLE_CLAIM_DORMANT_SWEEP_LIMIT: usize = 500;
 
+/// Maximum orphan claims released per pass; subsequent passes drain the backlog.
+pub const LIFECYCLE_CLAIM_ORPHAN_SWEEP_LIMIT: usize = 500;
+
 /// Reason recorded on claims released because their title was deleted.
 pub const CLAIM_RELEASE_TITLE_DELETED: &str = "title_deleted";
 
@@ -123,6 +126,16 @@ impl AppUseCase {
     /// facts go unknown on their own, which holds any rule that reads one).
     pub(crate) async fn reconcile_lifecycle_claims(&self, now: DateTime<Utc>) -> (u64, u64) {
         let claims = &self.services.catalog.lifecycle_claims;
+        if let Err(error) = claims
+            .release_orphaned(
+                LIFECYCLE_CLAIM_ORPHAN_SWEEP_LIMIT,
+                CLAIM_RELEASE_TITLE_DELETED,
+                now,
+            )
+            .await
+        {
+            warn!(error = %error, "could not release orphaned lifecycle claims; the next maintenance pass will retry");
+        }
         let expired = match claims.expire_due(now).await {
             Ok(expired) => expired,
             Err(error) => {
@@ -173,7 +186,7 @@ impl AppUseCase {
     }
 
     /// Release every live claim on a deleted title. Best effort: the title row
-    /// is already gone, and a claim left behind holds nothing.
+    /// is already gone; the maintenance sweep retries any claims left behind.
     pub(crate) async fn release_lifecycle_claims_for_deleted_title(&self, title_id: &str) {
         match self
             .services

@@ -2605,7 +2605,6 @@ pub struct IndexerErrorPage {
 #[derive(Clone, Debug)]
 pub struct JwtAuthConfig {
     pub issuer: String,
-    pub access_ttl_seconds: usize,
     pub jwt_signing_salt: String,
 }
 
@@ -3172,6 +3171,20 @@ pub struct PrimaryCollectionSummary {
 #[derive(Clone, Debug)]
 pub struct TitleMediaSizeSummary {
     pub title_id: String,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CollectionMediaSizeSummary {
+    pub title_id: String,
+    pub collection_id: String,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct EpisodeMediaSizeSummary {
+    pub title_id: String,
+    pub episode_id: String,
     pub total_size_bytes: i64,
 }
 

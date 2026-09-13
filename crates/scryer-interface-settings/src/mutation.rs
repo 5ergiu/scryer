@@ -165,6 +165,7 @@ fn from_security_settings(
     SecuritySettingsPayload {
         form_login_enabled: settings.form_login_enabled,
         password_min_length: settings.password_min_length,
+        session_duration_days: settings.session_duration_days,
         skip_login_for_local_ips: settings.skip_login_for_local_ips,
         api_keys_restrict_to_system_settings_users: settings
             .api_keys_restrict_to_system_settings_users,
@@ -492,7 +493,7 @@ async fn login_payload_from_user(
         + chrono::Duration::seconds(if password_change_required {
             app.mfa_enrollment_token_lifetime()
         } else {
-            app.token_lifetime()
+            app.token_lifetime().await.map_err(to_gql_error)?
         });
     Ok(LoginPayload {
         token,
@@ -1113,6 +1114,7 @@ impl SettingsMutations {
                 AppUpdateSecuritySettings {
                     form_login_enabled: input.form_login_enabled,
                     password_min_length: input.password_min_length,
+                    session_duration_days: input.session_duration_days,
                     skip_login_for_local_ips: input.skip_login_for_local_ips,
                     api_keys_restrict_to_system_settings_users: input
                         .api_keys_restrict_to_system_settings_users,

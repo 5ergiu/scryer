@@ -22,7 +22,8 @@ use std::time::Duration;
 
 use async_graphql::dataloader::{DataLoader, Loader};
 use scryer_application::{
-    AcquisitionScopeState, AppUseCase, CollectionEpisodeProgressSummary, EpisodeMediaAvailability,
+    AcquisitionScopeState, AppUseCase, CollectionEpisodeProgressSummary,
+    CollectionMediaSizeSummary, EpisodeMediaAvailability, EpisodeMediaSizeSummary,
     PrimaryCollectionSummary, TitleEpisodeProgressSummary, TitleMediaFile, TitleMediaSizeSummary,
     TitleMovieMediaSummary, TitleQualitySummary, TitleRatingSummary,
 };
@@ -265,6 +266,44 @@ loader!(
 );
 
 loader!(
+    CollectionMediaSizeSummaryLoader,
+    (String, String),
+    CollectionMediaSizeSummary,
+    |ctx, keys| {
+        let title_ids = dedup_first(keys);
+        let summaries = ctx
+            .app
+            .list_collection_media_size_summaries(&ctx.actor, &title_ids)
+            .await
+            .map_err(to_gql_error)?;
+        let mut summaries = by_id(summaries, |summary| {
+            (summary.title_id.clone(), summary.collection_id.clone())
+        });
+        summaries.retain(|key, _| keys.contains(key));
+        Ok(summaries)
+    }
+);
+
+loader!(
+    EpisodeMediaSizeSummaryLoader,
+    (String, String),
+    EpisodeMediaSizeSummary,
+    |ctx, keys| {
+        let title_ids = dedup_first(keys);
+        let summaries = ctx
+            .app
+            .list_episode_media_size_summaries(&ctx.actor, &title_ids)
+            .await
+            .map_err(to_gql_error)?;
+        let mut summaries = by_id(summaries, |summary| {
+            (summary.title_id.clone(), summary.episode_id.clone())
+        });
+        summaries.retain(|key, _| keys.contains(key));
+        Ok(summaries)
+    }
+);
+
+loader!(
     QualitySummaryLoader,
     String,
     TitleQualitySummary,
@@ -494,6 +533,8 @@ pub struct RequestLoaders {
     pub global_metadata_language: DataLoader<GlobalMetadataLanguageLoader>,
     pub primary_collection_summary: DataLoader<PrimaryCollectionSummaryLoader>,
     pub media_size_summary: DataLoader<MediaSizeSummaryLoader>,
+    pub collection_media_size_summary: DataLoader<CollectionMediaSizeSummaryLoader>,
+    pub episode_media_size_summary: DataLoader<EpisodeMediaSizeSummaryLoader>,
     pub quality_summary: DataLoader<QualitySummaryLoader>,
     pub effective_quality_summary: DataLoader<EffectiveQualitySummaryLoader>,
     pub episode_progress_summary: DataLoader<EpisodeProgressSummaryLoader>,
@@ -533,6 +574,8 @@ impl RequestLoaders {
             global_metadata_language: dl!(GlobalMetadataLanguageLoader),
             primary_collection_summary: dl!(PrimaryCollectionSummaryLoader),
             media_size_summary: dl!(MediaSizeSummaryLoader),
+            collection_media_size_summary: dl!(CollectionMediaSizeSummaryLoader),
+            episode_media_size_summary: dl!(EpisodeMediaSizeSummaryLoader),
             quality_summary: dl!(QualitySummaryLoader),
             effective_quality_summary: dl!(EffectiveQualitySummaryLoader),
             episode_progress_summary: dl!(EpisodeProgressSummaryLoader),

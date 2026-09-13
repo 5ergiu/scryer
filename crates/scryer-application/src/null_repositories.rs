@@ -3477,6 +3477,14 @@ impl crate::ports::LifecycleClaimRepository for NullLifecycleClaimRepository {
     async fn expire_due(&self, _now: DateTime<Utc>) -> AppResult<u64> {
         Ok(0)
     }
+    async fn release_orphaned(
+        &self,
+        _limit: usize,
+        _reason: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<u64> {
+        Ok(0)
+    }
     async fn release_for_producer_ref(
         &self,
         _producer: scryer_domain::LifecycleClaimProducer,

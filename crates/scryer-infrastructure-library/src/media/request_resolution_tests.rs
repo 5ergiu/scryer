@@ -288,3 +288,105 @@ async fn lifecycle_claim_extensions_never_shorten_and_survive_activation() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn orphan_claim_reconciliation_is_bounded_retryable_and_preserves_existing_titles() {
+    let store = test_store().await;
+    let request = seed_resolution_requests(&store).await;
+    store
+        .resolve_pending_overlapping(&request, approval(&request))
+        .await
+        .unwrap();
+    let claims = crate::media::lifecycle_claims::LifecycleClaimStore::new(store.datastore.clone());
+    let originals = claims.list_for_title("approved-title").await.unwrap();
+    let now = Utc::now();
+    for (id, state) in [
+        ("orphan-active", scryer_domain::LifecycleClaimState::Active),
+        (
+            "orphan-dormant",
+            scryer_domain::LifecycleClaimState::Dormant,
+        ),
+        (
+            "orphan-expired",
+            scryer_domain::LifecycleClaimState::Expired,
+        ),
+        (
+            "orphan-released",
+            scryer_domain::LifecycleClaimState::Released,
+        ),
+        (
+            "orphan-converted",
+            scryer_domain::LifecycleClaimState::Converted,
+        ),
+    ] {
+        let mut orphan = originals[0].clone();
+        orphan.id = id.into();
+        orphan.title_id = "missing-title".into();
+        orphan.producer_ref = None;
+        orphan.state = state;
+        claims.create(&orphan).await.unwrap();
+    }
+    let before = claims.list_for_title("missing-title").await.unwrap();
+    assert_eq!(
+        claims
+            .release_orphaned(0, "title_deleted", now)
+            .await
+            .unwrap(),
+        0
+    );
+    SqlRuntime::execute_write(&store.datastore, "fail_orphan_release",
+        "CREATE TRIGGER fail_orphan_release BEFORE UPDATE ON lifecycle_claims WHEN NEW.id = 'orphan-dormant' BEGIN SELECT RAISE(ABORT, 'synthetic release failure'); END", vec![]).await.unwrap();
+    assert!(
+        claims
+            .release_orphaned(500, "title_deleted", now)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        claims.list_for_title("missing-title").await.unwrap(),
+        before
+    );
+    SqlRuntime::execute_write(
+        &store.datastore,
+        "restore_orphan_release",
+        "DROP TRIGGER fail_orphan_release",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        claims
+            .release_orphaned(1, "title_deleted", now)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        claims
+            .release_orphaned(500, "title_deleted", now)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        claims
+            .release_orphaned(500, "title_deleted", now)
+            .await
+            .unwrap(),
+        0
+    );
+    for original in before {
+        let current = claims.get(&original.id).await.unwrap().unwrap();
+        if original.is_live() {
+            assert_eq!(current.state, scryer_domain::LifecycleClaimState::Released);
+            assert_eq!(current.released_reason.as_deref(), Some("title_deleted"));
+            assert_eq!(current.updated_at, now);
+        } else {
+            assert_eq!(current, original);
+        }
+    }
+    assert_eq!(
+        claims.list_for_title("approved-title").await.unwrap(),
+        originals
+    );
+}

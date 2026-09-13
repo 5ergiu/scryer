@@ -1413,6 +1413,15 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
             SettingDefinitionSeed {
                 category: "security".into(),
                 scope: "system".into(),
+                key_name: "auth.session_duration_days".into(),
+                data_type: "integer".into(),
+                default_value_json: "3".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "security".into(),
+                scope: "system".into(),
                 key_name: "auth.skip_login_for_local_ips".into(),
                 data_type: "boolean".into(),
                 default_value_json: "false".into(),

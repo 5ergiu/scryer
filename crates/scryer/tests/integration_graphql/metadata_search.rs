@@ -38,12 +38,59 @@ async fn graphql_search_metadata_movie_accepts_year_hint() {
     assert_eq!(results[0]["smgId"], 202);
     assert_eq!(results[0]["tmdbId"], 2020);
     assert_eq!(results[0]["primarySource"], "tmdb");
+    let poster_url = results[0]["posterUrl"]
+        .as_str()
+        .expect("metadata search should proxy present poster artwork");
+    assert!(poster_url.starts_with("/images/media/"));
+    assert!(poster_url.ends_with("/w250"));
     assert_eq!(
         results[0]["externalIds"],
         json!([
             { "source": "smg", "value": "202" },
             { "source": "tmdb", "value": "2020" },
         ])
+    );
+}
+
+#[tokio::test]
+async fn graphql_search_metadata_omits_proxy_for_missing_poster() {
+    let ctx = TestContext::new().await;
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(&load_fixture("smg/search_titles_tmdb_primary.json"))
+            .expect("metadata search fixture should be valid JSON");
+    fixture["data"]["searchTitles"]["results"][0]["poster_url"] =
+        serde_json::Value::String(String::new());
+    let fixture =
+        serde_json::to_string(&fixture).expect("metadata search fixture should serialize");
+    Mock::given(method("GET"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
+        .mount(&ctx.smg_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
+        .mount(&ctx.smg_server)
+        .await;
+
+    let body = gql(
+        &ctx,
+        r#"query($query: String!, $type: MediaFacetValue!) {
+            searchMetadata(query: $query, type: $type) { posterUrl }
+        }"#,
+        json!({ "query": "TMDB Primary", "type": "MOVIE" }),
+    )
+    .await;
+    assert_no_errors(&body);
+    assert!(body["data"]["searchMetadata"][0]["posterUrl"].is_null());
+
+    let source_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM image_proxy_sources")
+        .fetch_one(ctx.db.pool())
+        .await
+        .expect("metadata search should inspect registered image sources");
+    assert_eq!(
+        source_count, 0,
+        "missing artwork must not register a proxy source"
     );
 }
 

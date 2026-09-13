@@ -235,6 +235,9 @@ const en: LocaleDictionary = {
   "settings.securityEnableFormLoginHelp":
     "When enabled, Scryer requires an authenticated user session. When disabled, requests resolve as the default admin user.",
   "settings.securityPasswordMinLength": "Minimum local password length",
+  "settings.securitySessionDuration": "Session duration (days)",
+  "settings.securitySessionDurationHelp": "Applies to new sign-ins for everyone on this instance. With Keep me signed in enabled, sessions survive browser restarts until they expire. Existing sessions keep their original expiry.",
+  "settings.securitySessionDurationInvalid": "Session duration must be a whole number from 1 to 365 days.",
   "settings.securityPasswordMinLengthHelp":
     "Applies to new or changed Scryer passwords only. Existing shorter passwords keep working. Minimum: {{min}}.",
   "settings.securityPasswordMinLengthInvalid":

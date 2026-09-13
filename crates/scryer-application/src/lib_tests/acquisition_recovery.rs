@@ -9676,7 +9676,6 @@ async fn bootstrap_rss_with_media_files_and_profiles(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),

@@ -24,6 +24,7 @@ const DEFAULT_ADMIN_PASSWORD_FORM_LOGIN_ERROR =
   "change the default admin password before enabling form login";
 
 const DEFAULT_SECURITY_SETTINGS: SecuritySettings = {
+  sessionDurationDays: 3,
   formLoginEnabled: false,
   passwordMinLength: MIN_PASSWORD_LENGTH,
   skipLoginForLocalIps: false,
@@ -80,6 +81,10 @@ export function SettingsSecurityContainer() {
     String(DEFAULT_SECURITY_SETTINGS.passwordMinLength),
   );
   const settingsRef = React.useRef(settings);
+  const [sessionDurationDraft, setSessionDurationDraft] = React.useState(
+    String(DEFAULT_SECURITY_SETTINGS.sessionDurationDays),
+  );
+  const [sessionSaveQueue] = React.useState(() => new LatestWinsSaveQueue<string>());
   const passwordMinLengthSaveQueueRef = React.useRef<LatestWinsSaveQueue<string> | null>(null);
   if (passwordMinLengthSaveQueueRef.current == null) {
     passwordMinLengthSaveQueueRef.current = new LatestWinsSaveQueue<string>();
@@ -97,6 +102,9 @@ export function SettingsSecurityContainer() {
   React.useEffect(() => {
     setPasswordMinLengthDraft(String(settings.passwordMinLength));
   }, [settings.passwordMinLength]);
+  React.useEffect(() => {
+    setSessionDurationDraft(String(settings.sessionDurationDays));
+  }, [settings.sessionDurationDays]);
 
   const draftPasswordMinLength = React.useMemo(
     () => parsePasswordMinLengthDraft(passwordMinLengthDraft),
@@ -153,12 +161,14 @@ export function SettingsSecurityContainer() {
     mfaRequireJellyfinLogin: boolean,
     mfaRequireEmbyLogin: boolean = settingsRef.current.mfaRequireEmbyLogin,
     apiKeysRestrictToSystemSettingsUsers?: boolean,
+    sessionDurationDays?: number,
   ) => {
     const { data, error } = await client
       .mutation(updateSecuritySettingsMutation, {
         input: {
           formLoginEnabled,
           passwordMinLength,
+          ...(sessionDurationDays === undefined ? {} : { sessionDurationDays }),
           skipLoginForLocalIps,
           mfaRequireConfigStepUp,
           mfaRequirePasswordLogin,
@@ -774,9 +784,44 @@ export function SettingsSecurityContainer() {
     [submitPasswordMinLength],
   );
 
+  const handleSessionDurationSubmit = React.useCallback(async (draft: string) => {
+    if (loading || confirmBusy) return;
+    await sessionSaveQueue.enqueue(draft, async (value) => {
+      const days = Number(value);
+      if (!/^\d+$/.test(value.trim()) || !Number.isInteger(days) || days < 1 || days > 365) {
+        setSessionDurationDraft(String(settingsRef.current.sessionDurationDays));
+        toast.error(t("settings.securitySessionDurationInvalid"));
+        return;
+      }
+      if (days === settingsRef.current.sessionDurationDays) return;
+      await submitPasswordMinLength(false);
+      const current = settingsRef.current;
+      setSaveBusy(true);
+      try {
+        const next = await applySecuritySettings(
+          current.formLoginEnabled, current.passwordMinLength, current.skipLoginForLocalIps,
+          current.mfaRequireConfigStepUp, current.mfaRequirePasswordLogin,
+          current.mfaRequireJellyfinLogin, current.mfaRequireEmbyLogin, undefined, days,
+        );
+        settingsRef.current = next;
+        setSettings(next);
+        setSessionDurationDraft(String(next.sessionDurationDays));
+        toast.success(t("settings.securityPreferenceSaved"));
+      } catch (error) {
+        setSessionDurationDraft(String(settingsRef.current.sessionDurationDays));
+        toast.error(errorMessage(error, t("settings.securitySaveFailed")));
+      } finally {
+        setSaveBusy(false);
+      }
+    });
+  }, [applySecuritySettings, confirmBusy, loading, sessionSaveQueue, submitPasswordMinLength, t]);
+
   return (
     <SettingsSecuritySection
       settings={settings}
+      sessionDurationDraft={sessionDurationDraft}
+      onSessionDurationDraftChange={setSessionDurationDraft}
+      onSessionDurationSubmit={handleSessionDurationSubmit}
       loading={loading}
       enableConfirmOpen={enableConfirmOpen}
       disableConfirmOpen={disableConfirmOpen}
@@ -785,6 +830,7 @@ export function SettingsSecurityContainer() {
       newPasswordConfirm={newPasswordConfirm}
       setPasswordError={setPasswordError}
       confirmBusy={confirmBusy}
+      saveBusy={saveBusy}
       confirmPassword={confirmPassword}
       confirmError={confirmError}
       passwordMinLengthDraft={passwordMinLengthDraft}

@@ -54,6 +54,7 @@ import {
   episodeSortValue,
   isSpecialsCollection,
   formatDate,
+  formatFileSize,
 } from "./helpers";
 import { OverviewControlPanel } from "../overview-control-panel";
 import { OverviewBackLink } from "../overview-back-link";
@@ -1078,6 +1079,11 @@ function SeriesOverviewViewImpl({
                   <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                     <Clapperboard className="h-3.5 w-3.5" />
                     {title.network}
+                  </span>
+                ) : null}
+                {typeof title.sizeBytes === "number" && title.sizeBytes >= 0 ? (
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {formatFileSize(title.sizeBytes)}
                   </span>
                 ) : null}
               </div>

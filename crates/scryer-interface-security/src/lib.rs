@@ -120,7 +120,7 @@ async fn login_payload_from_user(
         + chrono::Duration::seconds(if password_change_required {
             app.mfa_enrollment_token_lifetime()
         } else {
-            app.token_lifetime()
+            app.token_lifetime().await.map_err(to_gql_error)?
         });
     Ok(LoginPayload {
         token,

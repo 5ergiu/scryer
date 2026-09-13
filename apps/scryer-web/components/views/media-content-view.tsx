@@ -3259,6 +3259,52 @@ export function MediaContentView({
     void refreshTitles(titleFilterInputValue);
   }, [onCloseOverview, refreshTitles, titleFilterInputValue]);
 
+  React.useEffect(() => {
+    if (!selectedTitleLayoutActive || seriesSidePanelTitleId === null) {
+      return;
+    }
+
+    const handleSelectedOverviewEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== "Escape" ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.repeat
+      ) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        selectedTitleListDrawerModeActive &&
+        target instanceof Node &&
+        selectedTitleListDrawerRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      // A dialog owns Escape even when its implementation does not prevent
+      // the event. Radix menus/selects live outside the panel in a popper.
+      if (
+        document.querySelector('[role="dialog"][aria-modal="true"]') ||
+        document.querySelector("[data-radix-popper-content-wrapper]")
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      handleSelectedOverviewBackToList();
+    };
+
+    window.addEventListener("keydown", handleSelectedOverviewEscape);
+    return () => window.removeEventListener("keydown", handleSelectedOverviewEscape);
+  }, [
+    handleSelectedOverviewBackToList,
+    selectedTitleLayoutActive,
+    selectedTitleListDrawerModeActive,
+    seriesSidePanelTitleId,
+  ]);
+
   const handleLibraryScan = React.useCallback(
     (libraryId?: string) => {
       void scanLibrary(libraryId);

@@ -734,7 +734,6 @@ async fn run_application() {
         let _ = std::fs::create_dir_all(parent);
     }
     let jwt_issuer = std::env::var("SCRYER_JWT_ISSUER").unwrap_or_else(|_| "scryer".to_string());
-    let jwt_access_ttl_seconds = parse_env_u64("SCRYER_JWT_ACCESS_TTL_SECONDS", 86_400);
     let bind = std::env::var("SCRYER_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let development_mode = resolve_development_mode_from_env().unwrap_or_else(|error| {
         eprintln!("invalid {DEVELOPMENT_MODE_ENV}: {error}");
@@ -809,7 +808,6 @@ async fn run_application() {
                     migration_mode,
                     finalized_pending_restore,
                     jwt_issuer,
-                    jwt_access_ttl_seconds,
                     bootstrap_bind,
                     bootstrap_development_mode,
                     cors,
@@ -941,7 +939,6 @@ async fn bootstrap_application(
     _migration_mode: MigrationMode,
     finalized_pending_restore: bool,
     jwt_issuer: String,
-    jwt_access_ttl_seconds: u64,
     bind: String,
     development_mode: bool,
     cors: CorsConfig,
@@ -1462,7 +1459,6 @@ async fn bootstrap_application(
         services,
         scryer_application::JwtAuthConfig {
             issuer: jwt_issuer,
-            access_ttl_seconds: jwt_access_ttl_seconds as usize,
             jwt_signing_salt,
         },
         facet_registry,
@@ -2760,14 +2756,6 @@ fn resolve_auth_mode_from_env() -> Result<AuthModeConfig, String> {
         normalize_env_option(RECOVERY_ADMIN_PASSWORD_ENV).as_deref(),
         normalize_env_option(ALLOW_UNAUTHENTICATED_PUBLIC_ACCESS_ENV).as_deref(),
     )
-}
-
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
 }
 
 fn parse_optional_setting_string(value_json: &str) -> Option<String> {

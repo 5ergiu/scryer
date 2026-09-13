@@ -531,6 +531,7 @@ async fn form_login_prevents_disabling_last_usable_full_admin() {
     app.update_security_settings(
         &actor,
         UpdateSecuritySettings {
+            session_duration_days: None,
             form_login_enabled: true,
             password_min_length: 8,
             skip_login_for_local_ips: false,
@@ -558,6 +559,7 @@ async fn form_login_prevents_disabling_last_usable_full_admin() {
 async fn form_login_transition_requires_usable_admin_and_repairs_default_identity() {
     let (app, actor) = bootstrap();
     let settings = |form_login_enabled| UpdateSecuritySettings {
+        session_duration_days: None,
         form_login_enabled,
         password_min_length: 8,
         skip_login_for_local_ips: false,
@@ -678,6 +680,7 @@ async fn update_security_settings_preserves_api_key_policy_when_omitted() {
     app.update_security_settings(
         &admin,
         UpdateSecuritySettings {
+            session_duration_days: None,
             form_login_enabled: false,
             password_min_length: 8,
             skip_login_for_local_ips: false,
@@ -710,6 +713,7 @@ async fn update_security_settings_preserves_api_key_policy_when_omitted() {
         .update_security_settings(
             &users_manager,
             UpdateSecuritySettings {
+                session_duration_days: None,
                 form_login_enabled: false,
                 password_min_length: 8,
                 skip_login_for_local_ips: false,

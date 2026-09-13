@@ -552,6 +552,12 @@ impl AppUseCase {
                 "at least one title field must be provided".into(),
             ));
         }
+        // Match registry writers' lock order: registry, then title ownership.
+        let _registry_guard = if tags.is_some() {
+            Some(TITLE_TAG_REGISTRY_MUTATION.lock().await)
+        } else {
+            None
+        };
         let title = self
             .services
             .catalog

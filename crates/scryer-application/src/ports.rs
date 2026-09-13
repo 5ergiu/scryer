@@ -9,8 +9,9 @@ use crate::location::model::{
 };
 use crate::location::ownership_guard::{OwnedEntity, OwnershipConflict};
 use crate::types::{
-    ApiKeyRecord, EpisodeMediaAvailability, IndexerSearchPlanCapability, IndexerSearchPlanRequest,
-    IndexerSearchPlanSummary, IndexerSearchStrategyEventSink, LoginVerificationChallengeRecord,
+    ApiKeyRecord, CollectionMediaSizeSummary, EpisodeMediaAvailability, EpisodeMediaSizeSummary,
+    IndexerSearchPlanCapability, IndexerSearchPlanRequest, IndexerSearchPlanSummary,
+    IndexerSearchStrategyEventSink, LoginVerificationChallengeRecord,
     OAuthClientRegistrationRecord, PendingReleaseObservation, PendingReleaseRole,
     TitleCatalogFilterCounts,
 };
@@ -6079,6 +6080,20 @@ pub trait MediaFileRepository: Send + Sync {
         title_ids: &[String],
     ) -> AppResult<Vec<TitleMediaSizeSummary>>;
 
+    async fn list_collection_media_size_summaries(
+        &self,
+        _title_ids: &[String],
+    ) -> AppResult<Vec<CollectionMediaSizeSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_episode_media_size_summaries(
+        &self,
+        _title_ids: &[String],
+    ) -> AppResult<Vec<EpisodeMediaSizeSummary>> {
+        Ok(Vec::new())
+    }
+
     /// Total byte size of the live media file(s) backing a collection, matched by
     /// the collection's `ordered_path` against `media_files.file_path`. `None`
     /// when nothing is indexed at that path (mirrors the previous filesystem
@@ -7575,6 +7590,15 @@ pub trait LifecycleClaimRepository: Send + Sync {
     /// Returns how many moved.
     async fn expire_due(&self, now: DateTime<Utc>) -> AppResult<u64>;
 
+    /// Release at most `limit` live claims whose titles no longer exist.
+    /// Title absence and the transition must be checked in the same write.
+    async fn release_orphaned(
+        &self,
+        limit: usize,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<u64>;
+
     /// Release every live claim produced by one request. Returns how many moved.
     async fn release_for_producer_ref(
         &self,
@@ -7750,6 +7774,13 @@ pub struct AnimeSearchNumberingContext {
 
 #[async_trait]
 pub trait IndexerClient: Send + Sync {
+    /// Run a provider-specific connection probe when the component implements
+    /// one. `false` retains the generic search probe for older components and
+    /// provider kinds that do not need a specialized request shape.
+    async fn probe_connection(&self) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn finalize_search_session(
         &self,
         _search_session_id: &str,

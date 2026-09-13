@@ -1,6 +1,93 @@
 use super::*;
 
 #[tokio::test]
+async fn whole_bag_and_creation_tags_serialize_with_registry_rename() {
+    for creating in [false, true] {
+        let harness = bootstrap_media_request_app();
+        let app = &harness.app;
+        let user = &harness.manager;
+        let title = create_tagged_movie(app, user, "Existing title").await;
+        let definition = app
+            .create_title_tag_definition(user, "old label", None)
+            .await
+            .unwrap();
+        let blocked_titles = harness.titles.store.lock().await;
+        let write = async {
+            if creating {
+                app.add_title(
+                    user,
+                    NewTitle {
+                        name: "New tagged title".into(),
+                        facet: MediaFacet::Movie,
+                        monitored: true,
+                        tags: vec!["old label".into()],
+                        ..Default::default()
+                    },
+                )
+                .await
+            } else {
+                app.update_title_metadata(
+                    user,
+                    &title.id,
+                    None,
+                    None,
+                    Some(vec!["old label".into()]),
+                )
+                .await
+            }
+        };
+        tokio::pin!(write);
+        assert!(futures_util::poll!(&mut write).is_pending());
+        let rename =
+            app.update_title_tag_definition(user, &definition.id, Some("new label".into()), None);
+        tokio::pin!(rename);
+        assert!(futures_util::poll!(&mut rename).is_pending());
+        assert_eq!(
+            harness.titles.title_tag_definitions.lock().await[0].label,
+            "old label"
+        );
+        drop(blocked_titles);
+        let (written, renamed) = tokio::join!(write, rename);
+        let written = written.unwrap();
+        renamed.unwrap();
+        assert_eq!(stored_title_tags(app, &written.id).await, vec!["new label"]);
+    }
+}
+
+#[tokio::test]
+async fn tag_assignment_serializes_validation_and_persistence_with_rename() {
+    let harness = bootstrap_media_request_app();
+    let app = &harness.app;
+    let user = &harness.manager;
+    let title = create_tagged_movie(app, user, "Registry race").await;
+    let definition = app
+        .create_title_tag_definition(user, "old label", None)
+        .await
+        .unwrap();
+    let title_ids = [title.id.clone()];
+    let labels = ["old label".to_string()];
+    // The mock's registry read snapshots definitions before consulting titles.
+    // Pause there so the patch has read the old definition but has not written.
+    let blocked_titles = harness.titles.store.lock().await;
+    let patch = app.update_title_tags(user, &title_ids, &labels, &[]);
+    tokio::pin!(patch);
+    assert!(futures_util::poll!(&mut patch).is_pending());
+    let rename =
+        app.update_title_tag_definition(user, &definition.id, Some("new label".into()), None);
+    tokio::pin!(rename);
+    assert!(futures_util::poll!(&mut rename).is_pending());
+    assert_eq!(
+        harness.titles.title_tag_definitions.lock().await[0].label,
+        "old label"
+    );
+    drop(blocked_titles);
+    let (patched, renamed) = tokio::join!(patch, rename);
+    patched.unwrap();
+    renamed.unwrap();
+    assert_eq!(stored_title_tags(app, &title.id).await, vec!["new label"]);
+}
+
+#[tokio::test]
 async fn bulk_title_tag_ceiling_preflight_leaves_every_title_unchanged() {
     let (app, user) = bootstrap();
     let first = create_tagged_movie(&app, &user, "First").await;

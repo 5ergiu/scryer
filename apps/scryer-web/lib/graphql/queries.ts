@@ -333,6 +333,7 @@ const SERIES_SIDE_PANEL_EPISODE_ROW_FIELDS = `
       seasonNumber
       episodeLabel
       title
+      sizeBytes
       airDate
       durationSeconds
       isFiller
@@ -362,6 +363,7 @@ const SERIES_SIDE_PANEL_COLLECTION_FIELDS = `
       label
       orderedPath
       narrativeOrder
+      sizeBytes
       fileSizeBytes
       firstEpisodeNumber
       lastEpisodeNumber
@@ -597,6 +599,7 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
 
 const SERIES_SIDE_PANEL_TITLE_FIELDS = `
     id
+    sizeBytes
     name
     facet
     libraryId
@@ -2784,6 +2787,7 @@ export const securitySettingsQuery = `query SecuritySettings {
   securitySettings {
     formLoginEnabled
     passwordMinLength
+    sessionDurationDays
     skipLoginForLocalIps
     apiKeysRestrictToSystemSettingsUsers
     mfaRequireConfigStepUp

@@ -257,7 +257,6 @@ fn bootstrap_with_services(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -381,7 +380,6 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
             services,
             JwtAuthConfig {
                 issuer: "scryer-test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(registry),
@@ -563,7 +561,6 @@ pub(super) fn bootstrap_with_metadata_gateway_settings_and_titles(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -710,7 +707,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_queue_commands(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -770,7 +766,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_tracked_handle(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -830,7 +825,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_indexer(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -918,7 +912,6 @@ pub(super) fn bootstrap_with_search_settings_indexer_configs_and_management(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -988,7 +981,6 @@ pub(super) fn bootstrap_with_settings_repo_and_profiles_and_libraries(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1070,7 +1062,6 @@ pub(super) fn bootstrap_with_cutoff_projection_state(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1123,7 +1114,6 @@ pub(super) fn bootstrap_with_delete_queue(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1246,7 +1236,6 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1348,7 +1337,6 @@ pub(super) fn bootstrap_with_library_delete_repositories(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1426,7 +1414,6 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),

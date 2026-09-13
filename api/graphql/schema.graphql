@@ -1729,6 +1729,10 @@ type CollectionPayload {
 	"""
 	createdAt: DateTime!
 	"""
+	Aggregated live media-file size for this collection.
+	"""
+	sizeBytes: Long
+	"""
 	Size in bytes of the media file associated with this collection, or null when unavailable.
 	"""
 	fileSizeBytes: Long
@@ -5735,6 +5739,10 @@ type EpisodePayload {
 	Time when the episode record was created, in UTC.
 	"""
 	createdAt: DateTime!
+	"""
+	Aggregated live media-file size for this episode.
+	"""
+	sizeBytes: Long
 	"""
 	Provider-native playback links for this episode, when an exact catalog mapping exists.
 	"""
@@ -23898,6 +23906,10 @@ type SecuritySettingsPayload {
 	"""
 	formLoginEnabled: Boolean!
 	"""
+	Instance-wide lifetime of new sign-in sessions, in days.
+	"""
+	sessionDurationDays: Int!
+	"""
 	Minimum accepted password length.
 	"""
 	passwordMinLength: Int!
@@ -28356,6 +28368,10 @@ input UpdateRuleSetInput {
 Authentication and local-access security settings.
 """
 input UpdateSecuritySettingsInput {
+	"""
+	Session lifetime in days (1–365). Omission preserves the saved instance setting.
+	"""
+	sessionDurationDays: Int
 	"""
 	Whether form login is enabled.
 	"""
