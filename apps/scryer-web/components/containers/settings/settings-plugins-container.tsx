@@ -805,7 +805,6 @@ export function SettingsPluginsContainer() {
         autoUpdateSaving={autoUpdateSaving}
         onAutoUpdateEnabledChange={updateAutoUpdateEnabled}
         remoteActionsBlocked={{
-          refresh: blockedRemoteActions.has("catalog_refresh"),
           install: blockedRemoteActions.has("install"),
           installManual: blockedRemoteActions.has("install_manual"),
           upgrade: blockedRemoteActions.has("upgrade"),

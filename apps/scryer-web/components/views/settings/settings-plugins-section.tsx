@@ -117,7 +117,6 @@ type SettingsPluginsSectionProps = {
   autoUpdateLoading: boolean;
   autoUpdateSaving: boolean;
   remoteActionsBlocked: {
-    refresh: boolean;
     install: boolean;
     installManual: boolean;
     upgrade: boolean;
@@ -751,7 +750,7 @@ export function SettingsPluginsSection({
         variant="outline"
         size="sm"
         className="h-9"
-        disabled={refreshing || remoteActionsBlocked.refresh}
+        disabled={refreshing}
         onClick={onRefreshRegistry}
       >
         <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />

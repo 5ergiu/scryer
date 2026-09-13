@@ -4674,6 +4674,42 @@ fn a_restored_plugin_whose_version_moved_is_reported_once() {
 }
 
 #[tokio::test]
+async fn plugin_catalog_status_allows_retry_after_a_legacy_refresh_failure() {
+    let h = bootstrap_plugins(Some(MockPluginProvider::new()));
+    let cached_payload = serde_json::json!({
+        "githubAvailable": false,
+        "blockedActions": ["catalog_refresh", "install", "upgrade"],
+        "message": "cached outage",
+        "lastError": "invalid plugin catalog",
+    });
+    h.plugin_repo
+        .upsert_plugin_catalog_status(&scryer_domain::PluginCatalogStatusRecord {
+            status_key: CATALOG_STATUS_KEY.to_string(),
+            status_json: cached_payload.to_string(),
+            checked_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let status = h.app.plugin_catalog_status(&config_admin()).await.unwrap();
+
+    assert_eq!(status.refresh_state, "degraded");
+    assert_eq!(status.blocked_actions, vec!["install", "upgrade"]);
+    assert_eq!(status.last_error.as_deref(), Some("invalid plugin catalog"));
+    let stored = h
+        .plugin_repo
+        .get_plugin_catalog_status(CATALOG_STATUS_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored.status_json).unwrap(),
+        cached_payload,
+        "reading status must not require rewriting legacy state"
+    );
+}
+
+#[tokio::test]
 async fn plugin_catalog_status_returns_cached_status_without_rewriting_it() {
     let h = bootstrap_plugins(Some(MockPluginProvider::new()));
     let checked_at = Utc::now() - chrono::Duration::minutes(10);
