@@ -435,6 +435,9 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // (discoverySyncStatus, libraryScanSession, mediaServerConnection,
     // outboundRateLimitSnapshot, upstreamSchedulerSnapshot), 1 dead mutation
     // (queueReplacementRelease), and the 5 exclusive snapshot payload OBJECT types.
+    // Two of those have since been reinstated with real consumers, and the
+    // counts below carry the reinstatement rather than the trim:
+    // queueReplacementRelease (mutation) and libraryScanSession (query).
     // 0.17.0 API surface trim (field wave): removed dead output fields inside
     // consumed types plus 4 never-selected OBJECT types (DiscoverySyncRunPayload and the
     // ExternalImportLibrarySetting{Application,Evidence,Value}Payload trio); the trio's
@@ -697,8 +700,15 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // title's exception. Failed-move recovery adds
     // `locationOperationRetrySelection`, the prefilled Plan again selection.
     // Query 164->169.
+    // Reinstate `libraryScanSession`, the by-id scan snapshot read: query
+    // 169->170. The 0.17.0 root wave trimmed it as *dead*, not as a duplicate,
+    // and it now has a consumer again - the web client resolves a session that
+    // dropped out of `activeLibraryScans` by id, to learn whether it completed
+    // or merely went invisible. Nothing else answers that: `activeLibraryScans`
+    // takes no argument and lists only live sessions, and `libraryScanState` is
+    // a push stream. Same shape as the `queueReplacementRelease` reinstatement.
     assert_eq!(
-        query_field_count, 169,
+        query_field_count, 170,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -1031,7 +1041,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // 0.17.0 API surface trim (root wave): dead root fields and their
     // exclusive snapshot payload types are gone.
     assert!(!query_field_names.contains(&"discoverySyncStatus"));
-    assert!(!query_field_names.contains(&"libraryScanSession"));
+    // ...except `libraryScanSession`, which the trim removed as unconsumed and
+    // which is consumed again: it is the by-id fallback the scan toast uses
+    // when a session leaves `activeLibraryScans`.
+    assert!(query_field_names.contains(&"libraryScanSession"));
     assert!(!query_field_names.contains(&"mediaServerConnection"));
     assert!(!query_field_names.contains(&"outboundRateLimitSnapshot"));
     assert!(!query_field_names.contains(&"upstreamSchedulerSnapshot"));
@@ -1676,7 +1689,8 @@ async fn graphql_introspection_query_root_uses_semantic_search_and_browse_fields
     assert!(names.contains(&"titleHistory"));
     assert!(!names.contains(&"titleEvents"));
     assert!(!names.contains(&"episodeHistory"));
-    assert!(!names.contains(&"libraryScanSession"));
+    // Reinstated: the by-id scan snapshot read the scan toast falls back to.
+    assert!(names.contains(&"libraryScanSession"));
     assert!(!names.contains(&"domainEvents"));
     assert!(names.contains(&"downloadHistory"));
 }
