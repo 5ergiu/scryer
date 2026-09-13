@@ -3,11 +3,6 @@ import test from "node:test";
 
 import type { Translate } from "@/components/root/types";
 import {
-  ADOPTION_REASON_CODES,
-  adoptionAccounting,
-  adoptionBlockedReasonKey,
-  adoptionBlockedTitles,
-  adoptionBlocks,
   ambiguousCandidates,
   assetLineTextKey,
   assetLines,
@@ -82,9 +77,6 @@ import {
   type LocationOperation,
   type LocationOperationCounters,
   type LocationOperationPreview,
-  type LocationPlanCounts,
-  type LocationPlanItem,
-  type LocationPlanSection,
   type LocationSelectionClassification,
   type LocationOperationAssetListing,
   type LocationTitleAssets,
@@ -373,15 +365,15 @@ test("a fileless plan never offers a move mode (FR-076)", () => {
 test("only the two requestable modes are offered; catalog-only is derived", () => {
   assert.deepEqual(
     [...REQUESTABLE_MOVE_MODES],
-    ["MOVE_WITH_SCRYER", "FILES_ALREADY_THERE"],
+    ["MOVE_WITH_SCRYER", "USER_MOVED_FILES"],
   );
 });
 
 test("the confirmed mode is read off the previewed plan, never off the control", () => {
   assert.equal(startModeInput(preview()), "MOVE_WITH_SCRYER");
   assert.equal(
-    startModeInput(preview({ mode: "FILES_ALREADY_THERE" })),
-    "FILES_ALREADY_THERE",
+    startModeInput(preview({ mode: "USER_MOVED_FILES" })),
+    "USER_MOVED_FILES",
   );
   // A plan the server collapsed to catalog-only confirms as the managed move
   // it degrades into: CATALOG_ONLY is not a mode a client may ask for.
@@ -389,322 +381,7 @@ test("the confirmed mode is read off the previewed plan, never off the control",
   assert.equal(startModeInput(null), "MOVE_WITH_SCRYER");
 });
 
-function adoptionItem(
-  overrides: Partial<LocationPlanItem> = {},
-): LocationPlanItem {
-  return {
-    kind: "BLOCKED",
-    titleId: "a",
-    mediaFileId: null,
-    sourcePath: null,
-    destinationPath: null,
-    sizeBytes: 0,
-    sameVolume: null,
-    reasonCode: null,
-    detail: null,
-    ...overrides,
-  };
-}
-
-function adoptionPreview(
-  sections: LocationPlanSection[],
-  byKind: LocationPlanCounts["byKind"],
-): LocationOperationPreview {
-  return preview({
-    mode: "FILES_ALREADY_THERE",
-    operationType: "ADOPTION",
-    sections,
-    counts: {
-      itemsTotal: 0,
-      titlesTotal: 1,
-      filesTotal: 0,
-      bytesTotal: 0,
-      byKind,
-    },
-  });
-}
-
-test("a managed-move preview has no adoption accounting to state", () => {
-  assert.equal(adoptionAccounting(preview()), null);
-  assert.equal(adoptionAccounting(preview({ mode: "CATALOG_ONLY" })), null);
-  assert.equal(adoptionAccounting(null), null);
-  assert.equal(adoptionBlocks(null), false);
-});
-
-test("a clean adoption counts what it found and states the FR-053 cleanup rule", () => {
-  const accounting = adoptionAccounting(
-    adoptionPreview(
-      [
-        {
-          kind: "MOVE",
-          itemsTotal: 2,
-          bytesTotal: 400,
-          complete: true,
-          items: [
-            adoptionItem({
-              kind: "MOVE",
-              sourcePath: "/old/A/one.mkv",
-              destinationPath: "/new/A/one.mkv",
-              sizeBytes: 200,
-              reasonCode: ADOPTION_REASON_CODES.adopted,
-            }),
-            adoptionItem({
-              kind: "MOVE",
-              sourcePath: "/old/A/two.mkv",
-              destinationPath: "/new/A/two.mkv",
-              sizeBytes: 200,
-              reasonCode: ADOPTION_REASON_CODES.adopted,
-            }),
-          ],
-        },
-        {
-          kind: "UNMANAGED_CONTENT",
-          itemsTotal: 1,
-          bytesTotal: 30,
-          complete: true,
-          items: [
-            adoptionItem({
-              kind: "UNMANAGED_CONTENT",
-              destinationPath: "/new/A/extra.nfo",
-              sizeBytes: 30,
-              reasonCode: ADOPTION_REASON_CODES.additional,
-            }),
-          ],
-        },
-        {
-          kind: "WARNING",
-          itemsTotal: 1,
-          bytesTotal: 0,
-          complete: true,
-          items: [
-            adoptionItem({
-              kind: "WARNING",
-              reasonCode: ADOPTION_REASON_CODES.redundantSource,
-              detail: "adoption does not delete anything at the old location",
-            }),
-          ],
-        },
-      ],
-      [
-        { kind: "MOVE", count: 2 },
-        { kind: "UNMANAGED_CONTENT", count: 1 },
-      ],
-    ),
-  );
-  assert.ok(accounting);
-  assert.equal(accounting.accountedForFiles, 2);
-  assert.equal(accounting.accountedForBytes, 400);
-  assert.equal(accounting.additionalFiles, 1);
-  assert.equal(accounting.additionalBytes, 30);
-  assert.equal(accounting.additional.length, 1);
-  assert.deepEqual(accounting.missing, []);
-  assert.deepEqual(accounting.ambiguous, []);
-  // FR-051: an additional file is surfaced and never blocks.
-  assert.equal(accounting.blocks, false);
-  assert.equal(adoptionBlocks(accounting), false);
-  assert.equal(
-    accounting.sourceCleanupNotice,
-    "adoption does not delete anything at the old location",
-  );
-});
-
-test("unaccounted media names its files and refuses the confirmation (FR-052)", () => {
-  const accounting = adoptionAccounting(
-    adoptionPreview(
-      [
-        {
-          kind: "BLOCKED",
-          itemsTotal: 3,
-          bytesTotal: 0,
-          complete: true,
-          items: [
-            adoptionItem({
-              sourcePath: "/old/A/one.mkv",
-              destinationPath: "/new/A",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-              detail: "nothing at the destination matches this file",
-            }),
-            adoptionItem({
-              sourcePath: "/old/A/two.mkv",
-              destinationPath: "/new/A",
-              reasonCode: ADOPTION_REASON_CODES.ambiguous,
-              detail: "two destination files are equally plausible",
-            }),
-            // The title-level rollup carries no source path; counting it would
-            // invent a file the user cannot go and look at.
-            adoptionItem({
-              reasonCode: ADOPTION_REASON_CODES.missing,
-              detail: "1 tracked file is missing and 1 is ambiguous",
-            }),
-          ],
-        },
-      ],
-      [{ kind: "BLOCKED", count: 3 }],
-    ),
-  );
-  assert.ok(accounting);
-  assert.equal(accounting.missing.length, 1);
-  assert.equal(accounting.missing[0]?.sourcePath, "/old/A/one.mkv");
-  assert.equal(accounting.ambiguous.length, 1);
-  assert.equal(accounting.ambiguous[0]?.sourcePath, "/old/A/two.mkv");
-  assert.equal(accounting.blocks, true);
-  assert.equal(adoptionBlocks(accounting), true);
-  assert.equal(accounting.listingComplete, true);
-});
-
-test("an unreadable destination blocks, and a sampled block list says so", () => {
-  const accounting = adoptionAccounting(
-    adoptionPreview(
-      [
-        {
-          kind: "BLOCKED",
-          itemsTotal: 40,
-          bytesTotal: 0,
-          complete: false,
-          items: [
-            adoptionItem({
-              destinationPath: "/new/A",
-              reasonCode: ADOPTION_REASON_CODES.unreadable,
-              detail: "/new/A could not be scanned",
-            }),
-          ],
-        },
-      ],
-      [{ kind: "BLOCKED", count: 40 }],
-    ),
-  );
-  assert.ok(accounting);
-  assert.equal(accounting.unreadable.length, 1);
-  assert.equal(accounting.blocks, true);
-  assert.equal(accounting.listingComplete, false);
-});
-
-test("an adoption refusal names the titles its copy tells the user to deselect", () => {
-  // FR-052's refusal rides on BLOCKED plan items; the titles themselves stay
-  // classified ROOT_MOVE, so the plan is the only place the deselect list can
-  // learn which titles "resolve them or deselect the title" is about.
-  const blocked = adoptionBlockedTitles(
-    adoptionPreview(
-      [
-        {
-          kind: "BLOCKED",
-          itemsTotal: 5,
-          bytesTotal: 0,
-          complete: true,
-          items: [
-            adoptionItem({
-              titleId: "a",
-              sourcePath: "/old/A/one.mkv",
-              destinationPath: "/new/A",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-            }),
-            adoptionItem({
-              titleId: "a",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-              detail: "1 tracked file is missing",
-            }),
-            adoptionItem({
-              titleId: "b",
-              sourcePath: "/old/B/one.mkv",
-              destinationPath: "/new/B",
-              reasonCode: ADOPTION_REASON_CODES.ambiguous,
-            }),
-            // The rollup always reads "missing", even for a title whose only
-            // problem is ambiguity — it must never become the stated reason.
-            adoptionItem({
-              titleId: "b",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-              detail: "1 tracked file is ambiguous",
-            }),
-            adoptionItem({
-              titleId: "c",
-              destinationPath: "/new/C",
-              reasonCode: ADOPTION_REASON_CODES.unreadable,
-            }),
-          ],
-        },
-        {
-          // Surfaced, never refused: an additional file is not a blocked title.
-          kind: "UNMANAGED_CONTENT",
-          itemsTotal: 1,
-          bytesTotal: 10,
-          complete: true,
-          items: [
-            adoptionItem({
-              kind: "UNMANAGED_CONTENT",
-              titleId: "d",
-              destinationPath: "/new/D/extra.nfo",
-              reasonCode: ADOPTION_REASON_CODES.additional,
-            }),
-          ],
-        },
-      ],
-      [{ kind: "BLOCKED", count: 5 }],
-    ),
-  );
-  assert.deepEqual(
-    blocked.map((entry) => entry.titleId),
-    ["a", "b", "c"],
-  );
-  assert.deepEqual(blocked[0].reasonCodes, [ADOPTION_REASON_CODES.missing]);
-  assert.equal(blocked[1].primaryReasonCode, ADOPTION_REASON_CODES.ambiguous);
-  assert.equal(blocked[2].primaryReasonCode, ADOPTION_REASON_CODES.unreadable);
-});
-
-test("a rollup-only refusal still offers a deselect, with no reason invented", () => {
-  // A sampled BLOCKED section can drop every per-file item and keep the
-  // title-level rollup, which names no file and always reads "missing".
-  const blocked = adoptionBlockedTitles(
-    adoptionPreview(
-      [
-        {
-          kind: "BLOCKED",
-          itemsTotal: 40,
-          bytesTotal: 0,
-          complete: false,
-          items: [
-            adoptionItem({
-              titleId: "a",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-              detail: "20 tracked files are missing and 19 are ambiguous",
-            }),
-          ],
-        },
-      ],
-      [{ kind: "BLOCKED", count: 40 }],
-    ),
-  );
-  assert.deepEqual(
-    blocked.map((entry) => entry.titleId),
-    ["a"],
-  );
-  assert.deepEqual(blocked[0].reasonCodes, []);
-  assert.equal(blocked[0].primaryReasonCode, null);
-  assert.equal(adoptionBlockedReasonKey(null), null);
-});
-
-test("only an adoption preview has adoption-blocked titles", () => {
-  assert.deepEqual(adoptionBlockedTitles(preview()), []);
-  assert.deepEqual(adoptionBlockedTitles(preview({ mode: "CATALOG_ONLY" })), []);
-  assert.deepEqual(adoptionBlockedTitles(null), []);
-});
-
-test("each adoption refusal reason has its own translation key", () => {
-  assert.equal(
-    adoptionBlockedReasonKey(ADOPTION_REASON_CODES.missing),
-    "move.adoptionBlockedReason.adoption_media_missing",
-  );
-  assert.equal(
-    adoptionBlockedReasonKey(ADOPTION_REASON_CODES.ambiguous),
-    "move.adoptionBlockedReason.adoption_media_ambiguous",
-  );
-  assert.equal(
-    adoptionBlockedReasonKey(ADOPTION_REASON_CODES.unreadable),
-    "move.adoptionBlockedReason.adoption_destination_unreadable",
-  );
-});
-
-test("a title blocked both ways gets one deselect row, not two", () => {
+test("the deselect list carries one row per blocked title, with its prose", () => {
   const needsResolution: LocationClassifiedTitle = {
     titleId: "a",
     class: "NEEDS_RESOLUTION",
@@ -718,89 +395,22 @@ test("a title blocked both ways gets one deselect row, not two", () => {
   };
   const rows = blockingTitleRows(
     preview({
-      mode: "FILES_ALREADY_THERE",
-      operationType: "ADOPTION",
       selection: ["a", "b"],
       blocksStart: true,
       classification: classification(
         [{ class: "NEEDS_RESOLUTION", titles: [needsResolution] }],
         true,
       ),
-      sections: [
-        {
-          kind: "BLOCKED",
-          itemsTotal: 2,
-          bytesTotal: 0,
-          complete: true,
-          items: [
-            adoptionItem({
-              titleId: "a",
-              sourcePath: "/old/A/one.mkv",
-              reasonCode: ADOPTION_REASON_CODES.missing,
-            }),
-            adoptionItem({
-              titleId: "b",
-              sourcePath: "/old/B/one.mkv",
-              reasonCode: ADOPTION_REASON_CODES.ambiguous,
-            }),
-          ],
-        },
-      ],
     }),
   );
-  // One row per title id: the classification-blocked one keeps its classified
-  // entry and its prose, and carries the adoption reason too.
   assert.deepEqual(
     rows.map((row) => row.titleId),
-    ["a", "b"],
+    ["a"],
   );
   assert.equal(rows[0].entry, needsResolution);
   assert.equal(rows[0].reason, "An import is running for this title.");
-  assert.equal(rows[0].adoptionReasonCode, ADOPTION_REASON_CODES.missing);
-  // The adoption-only row has no classified entry to detail, so the dialog
-  // renders the reason and nothing that assumes a classification block.
-  assert.equal(rows[1].entry, null);
-  assert.equal(rows[1].reason, null);
-  assert.equal(rows[1].adoptionReasonCode, ADOPTION_REASON_CODES.ambiguous);
-});
-
-test("deselecting the last adoption-refused title yields a confirmable preview", () => {
-  const refused = adoptionPreview(
-    [
-      {
-        kind: "BLOCKED",
-        itemsTotal: 1,
-        bytesTotal: 0,
-        complete: true,
-        items: [
-          adoptionItem({
-            titleId: "b",
-            sourcePath: "/old/B/one.mkv",
-            reasonCode: ADOPTION_REASON_CODES.missing,
-          }),
-        ],
-      },
-    ],
-    [{ kind: "BLOCKED", count: 1 }],
-  );
-  refused.selection = ["a", "b"];
-  // The backend blocks a plan carrying any BLOCKED item, so the confirm is
-  // disabled and the only affordance is the deselect these rows now render.
-  refused.blocksStart = true;
-  assert.equal(previewCanStart(refused), false);
-  assert.deepEqual(
-    blockingTitleRows(refused).map((row) => row.titleId),
-    ["b"],
-  );
-
-  // Deselecting it re-previews the remaining selection; that plan carries no
-  // blocked item, so it has no deselect rows left and is confirmable.
-  const remaining = remainingSelection(refused.selection, new Set(["b"]));
-  assert.deepEqual(remaining, ["a"]);
-  const rePreviewed = adoptionPreview([], [{ kind: "MOVE", count: 3 }]);
-  rePreviewed.selection = remaining;
-  assert.deepEqual(blockingTitleRows(rePreviewed), []);
-  assert.equal(previewCanStart(rePreviewed), true);
+  assert.deepEqual(blockingTitleRows(preview()), []);
+  assert.deepEqual(blockingTitleRows(null), []);
 });
 
 test("plan-kind counts render in order and drop kinds the plan never produced", () => {

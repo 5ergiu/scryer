@@ -30,7 +30,7 @@ use crate::location::preview::{
     LOCATION_TYPED_CONFIRMATION_PHRASE, PlanConfirmationRequest, PlanItemKind,
 };
 use crate::location::root_scope::retirement_blockers;
-use crate::location::root_scope::{PlannedRootScope, plan_reasons, refusal_codes};
+use crate::location::root_scope::{PlannedRootScope, plan_reasons};
 use crate::location::root_scope_execution::{
     RootScopeCall, RootScopeCallDestination, StartRootScopeRequest,
 };
@@ -1383,32 +1383,6 @@ async fn a_destination_root_that_is_not_configured_here_is_not_found() {
     assert!(
         matches!(&error, AppError::NotFound(message)
             if message.contains("not-a-root-of-this-library")),
-        "got {error:?}"
-    );
-}
-
-/// US5's execution modes: **files are already there** is US3's adoption of a
-/// destination folder, not a way to fold two configured roots together.
-#[tokio::test]
-async fn files_already_there_is_refused_as_a_consolidation_mode() {
-    let fixture = ConsolidationFixture::new(false).await;
-    let error = fixture
-        .app
-        .preview_root_scope(
-            &fixture.user,
-            &RootScopeCall {
-                mode: LocationExecutionMode::FilesAlreadyThere,
-                ..fixture.request()
-            },
-        )
-        .await
-        .expect_err("adoption is not a consolidation mode");
-    assert!(
-        matches!(
-            &error,
-            AppError::LocationRootRefused { code, .. }
-                if *code == refusal_codes::FOLD.mode_not_supported
-        ),
         "got {error:?}"
     );
 }

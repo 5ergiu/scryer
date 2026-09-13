@@ -15,8 +15,8 @@
 //! - the verification-depth statement (FR-042/043),
 //! - the typed-confirmation hook for root-wide operations (FR-029/082).
 //!
-//! The per-workflow planners (root move, root change, consolidation, transfer,
-//! adoption) build [`PlanItem`]s and hand them to [`LocationPlanBuilder`]; they
+//! The per-workflow planners (root move, root change, consolidation, transfer)
+//! build [`PlanItem`]s and hand them to [`LocationPlanBuilder`]; they
 //! never invent their own fingerprint or confirmation rules.
 
 use std::collections::BTreeMap;

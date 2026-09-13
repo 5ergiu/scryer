@@ -9702,7 +9702,7 @@ input LocationDestinationInput {
 
 """
 The filesystem side a client may ask for when previewing or starting a
-location operation (FR-011, FR-050).
+location operation (FR-011).
 
 Deliberately narrower than the reported `LocationExecutionModeValue`:
 `CATALOG_ONLY` is derived by the server for a selection with no files on
@@ -9714,11 +9714,6 @@ enum LocationExecutionModeInput {
 	Scryer performs and verifies the filesystem operation.
 	"""
 	MOVE_WITH_SCRYER
-	"""
-	The user already moved the files; Scryer accounts for them at the
-	destination and adopts them where they lie.
-	"""
-	FILES_ALREADY_THERE
 	"""
 	The user moved the files themselves; Scryer trusts that move and
 	updates the catalog mappings only.
@@ -9734,10 +9729,6 @@ enum LocationExecutionModeValue {
 	Scryer performs and verifies the filesystem operation.
 	"""
 	MOVE_WITH_SCRYER
-	"""
-	The user already moved the files; Scryer verifies and adopts them.
-	"""
-	FILES_ALREADY_THERE
 	"""
 	The user moved the files themselves; Scryer trusts that move and
 	updates the catalog mappings only.
@@ -10566,10 +10557,6 @@ enum LocationOperationTypeValue {
 	Move titles into a different library, with or without a merge.
 	"""
 	CROSS_LIBRARY_TRANSFER
-	"""
-	Adopt content the user already moved outside Scryer.
-	"""
-	ADOPTION
 }
 
 """
@@ -17046,10 +17033,8 @@ type MutationRoot {
 	blocked or unresolved titles, is refused instead of started.
 	
 	The mode is confirmed the same way everything else is: it rebuilds the
-	plan, so confirming `FILES_ALREADY_THERE` against a managed-move
+	plan, so confirming `USER_MOVED_FILES` against a managed-move
 	fingerprint fails the comparison rather than running the other workflow.
-	An adoption whose destination is missing or ambiguous media is refused
-	here, because its rebuilt plan is blocked (FR-052).
 	
 	A root change (US4) and a root consolidation (US5) confirm through the
 	same mutation, the same `rootScope` target, and the same
@@ -20432,9 +20417,9 @@ type QueryRoot {
 	different fingerprint and voids the confirmation.
 	
 	The mode picks which preview runs: the managed move plans the copy, and
-	`FILES_ALREADY_THERE` instead accounts for what is already at the
-	destination (FR-050 to FR-053). The reported mode can still come back as
-	`CATALOG_ONLY` when the selection has no files on disk (FR-076).
+	`USER_MOVED_FILES` re-points the catalog at a move the user already made
+	themselves. The reported mode can still come back as `CATALOG_ONLY` when
+	the selection has no files on disk (FR-076).
 	"""
 	locationOperationPreview(
 		"""

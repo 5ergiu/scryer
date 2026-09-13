@@ -83,10 +83,8 @@ impl LocationMutations {
     /// blocked or unresolved titles, is refused instead of started.
     ///
     /// The mode is confirmed the same way everything else is: it rebuilds the
-    /// plan, so confirming `FILES_ALREADY_THERE` against a managed-move
+    /// plan, so confirming `USER_MOVED_FILES` against a managed-move
     /// fingerprint fails the comparison rather than running the other workflow.
-    /// An adoption whose destination is missing or ambiguous media is refused
-    /// here, because its rebuilt plan is blocked (FR-052).
     ///
     /// A root change (US4) and a root consolidation (US5) confirm through the
     /// same mutation, the same `rootScope` target, and the same
@@ -121,9 +119,6 @@ impl LocationMutations {
                 match mode {
                     LocationExecutionMode::UserMovedFiles => {
                         app.start_manual_move(&actor, request).await
-                    }
-                    LocationExecutionMode::FilesAlreadyThere => {
-                        app.start_adoption(&actor, request).await
                     }
                     _ => app.start_root_move(&actor, request).await,
                 }

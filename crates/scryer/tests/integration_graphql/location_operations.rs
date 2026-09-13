@@ -1521,224 +1521,66 @@ fn items_with_reason<'a>(preview: &'a Value, kind: &str, reason_code: &str) -> V
         .collect()
 }
 
-/// The whole of US3.1 through the request path: a folder the user moved with
-/// Finder is accounted for, previewed like a managed move, and started as an
-/// adoption rather than as a copy.
+/// The retired **Files are already there** mode is gone from the API boundary.
 ///
-/// The same selection previewed without the mode is still the managed move, so
-/// this also pins the routing: the mode picks the workflow, and omitting it
-/// leaves a client that predates adoption exactly where it was.
+/// `USER_MOVED_FILES` is the re-point path, so a client naming the retired mode
+/// is refused where every other unknown enum value is: at the parser, before a
+/// plan is built. The introspected enums say the same thing, which is what a
+/// client reads to know the mode is not on offer.
 #[tokio::test]
-async fn graphql_adoption_accounts_for_a_folder_the_user_moved_by_hand() {
-    let ctx = TestContext::new().await;
-    let first_root = tempfile::tempdir().expect("first root tempdir");
-    let second_root = tempfile::tempdir().expect("second root tempdir");
-    let (source_root_id, destination_root_id) =
-        configure_two_movie_roots(&ctx, first_root.path(), second_root.path()).await;
-
-    let folder = make_folder(first_root.path(), "Adopted Movie (2024)");
-    let title = movable_title(&ctx, "Adopted Movie", &folder, "Adopted.2024.mkv").await;
-
-    // Omitting the mode is still the managed move it always was, so a client
-    // written before adoption existed asks for exactly what it used to.
-    let managed = gql(
-        &ctx,
-        PREVIEW_QUERY,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id }
-        }}),
-    )
-    .await;
-    assert_no_errors(&managed);
-    assert_eq!(
-        managed["data"]["locationOperationPreview"]["operationType"],
-        "ROOT_MOVE"
-    );
-    assert_eq!(
-        managed["data"]["locationOperationPreview"]["mode"],
-        "MOVE_WITH_SCRYER"
-    );
-
-    // The user's own `mv`: the content is at the destination root and the
-    // catalog still points at the source root it left.
-    let moved_folder = second_root.path().join("Adopted Movie (2024)");
-    std::fs::rename(&folder, &moved_folder).expect("move the folder outside Scryer");
-
-    let body = gql(
-        &ctx,
-        PREVIEW_QUERY,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id },
-            "mode": "FILES_ALREADY_THERE"
-        }}),
-    )
-    .await;
-    assert_no_errors(&body);
-    let preview = &body["data"]["locationOperationPreview"];
-    assert_eq!(preview["operationType"], "ADOPTION");
-    assert_eq!(preview["mode"], "FILES_ALREADY_THERE");
-    assert_eq!(
-        preview["blocksStart"], false,
-        "every tracked file is at the destination: {preview}"
-    );
-
-    // FR-050/FR-051: the file is accounted for where it lies, as a plan item
-    // the shared preview vocabulary already carries.
-    let adopted = items_with_reason(preview, "MOVE", "adopted_at_destination");
-    assert_eq!(adopted.len(), 1, "{preview}");
-    assert_eq!(
-        adopted[0]["destinationPath"],
-        moved_folder
-            .join("Adopted.2024.mkv")
-            .to_string_lossy()
-            .as_ref()
-    );
-
-    // FR-053 is stated before the confirmation, not after it.
-    let cleanup = items_with_reason(preview, "WARNING", "adoption_redundant_source");
-    assert_eq!(cleanup.len(), 1, "{preview}");
-
-    let fingerprint = preview["planFingerprint"]
-        .as_str()
-        .expect("preview fingerprint")
-        .to_string();
-
-    let started = gql(
-        &ctx,
-        START_MUTATION,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id },
-            "mode": "FILES_ALREADY_THERE",
-            "planFingerprint": fingerprint
-        }}),
-    )
-    .await;
-    assert_no_errors(&started);
-    let operation = &started["data"]["startLocationOperation"]["operation"];
-    assert_eq!(operation["operationType"], "ADOPTION");
-    assert_eq!(operation["mode"], "FILES_ALREADY_THERE");
-    assert_eq!(operation["planFingerprint"], fingerprint);
-    assert_eq!(operation["counters"]["filesTotal"], 1);
-
-    let operation_id = operation["id"].as_str().expect("operation id").to_string();
-    let read_back = gql(&ctx, OPERATION_QUERY, json!({ "id": operation_id })).await;
-    assert_no_errors(&read_back);
-    assert_eq!(
-        read_back["data"]["locationOperation"]["mode"],
-        "FILES_ALREADY_THERE"
-    );
-    assert_eq!(
-        read_back["data"]["locationOperation"]["sourceRootId"],
-        source_root_id
-    );
-}
-
-/// US3.2 / FR-052: a tracked file that is not at the destination is named, and
-/// the confirmation is refused rather than guessed at. The same selection is a
-/// perfectly ordinary managed move, so the refusal belongs to the mode.
-#[tokio::test]
-async fn graphql_adoption_refuses_to_confirm_while_tracked_media_is_unaccounted_for() {
+async fn graphql_refuses_the_retired_files_already_there_mode() {
     let ctx = TestContext::new().await;
     let first_root = tempfile::tempdir().expect("first root tempdir");
     let second_root = tempfile::tempdir().expect("second root tempdir");
     let (_source_root_id, destination_root_id) =
         configure_two_movie_roots(&ctx, first_root.path(), second_root.path()).await;
 
-    let folder = make_folder(first_root.path(), "Half Moved (2024)");
-    let title = movable_title(&ctx, "Half Moved", &folder, "Half.Moved.2024.mkv").await;
+    let folder = make_folder(first_root.path(), "Retired Mode (2024)");
+    let title = movable_title(&ctx, "Retired Mode", &folder, "Retired.2024.mkv").await;
 
-    // The user made the destination folder but never copied the file into it.
-    make_folder(second_root.path(), "Half Moved (2024)");
+    for document in [PREVIEW_QUERY, START_MUTATION] {
+        let body = gql(
+            &ctx,
+            document,
+            json!({ "input": {
+                "titleIds": [title.id],
+                "destination": { "rootId": destination_root_id },
+                "mode": "FILES_ALREADY_THERE",
+                "planFingerprint": "whatever"
+            }}),
+        )
+        .await;
+        assert!(
+            body["errors"].is_array(),
+            "the retired mode is not a value the schema carries: {body}"
+        );
+    }
 
-    let body = gql(
-        &ctx,
-        PREVIEW_QUERY,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id },
-            "mode": "FILES_ALREADY_THERE"
-        }}),
-    )
-    .await;
-    assert_no_errors(&body);
-    let preview = &body["data"]["locationOperationPreview"];
-    assert_eq!(preview["operationType"], "ADOPTION");
-    assert_eq!(preview["blocksStart"], true, "{preview}");
-
-    // The refusal names the file: FR-052's "clear unresolved state" is only
-    // clear if the user can see which file it is about.
-    let missing = items_with_reason(preview, "BLOCKED", "adoption_media_missing");
-    assert!(
-        missing.iter().any(|item| item["sourcePath"]
-            == folder
-                .join("Half.Moved.2024.mkv")
-                .to_string_lossy()
-                .as_ref()),
-        "the blocked items name the tracked file: {preview}"
-    );
-    // Nothing is adopted while anything is unaccounted for.
-    assert!(items_with_reason(preview, "MOVE", "adopted_at_destination").is_empty());
-
-    let fingerprint = preview["planFingerprint"]
-        .as_str()
-        .expect("preview fingerprint")
-        .to_string();
-    let refused = gql(
-        &ctx,
-        START_MUTATION,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id },
-            "mode": "FILES_ALREADY_THERE",
-            "planFingerprint": fingerprint
-        }}),
-    )
-    .await;
-    assert!(
-        refused["errors"].is_array(),
-        "a blocked adoption is refused, not started: {refused}"
-    );
-}
-
-/// FR-051: a destination file nothing tracks is surfaced and left alone. It is
-/// information, never a reason to refuse.
-#[tokio::test]
-async fn graphql_adoption_surfaces_additional_destination_files_without_blocking() {
-    let ctx = TestContext::new().await;
-    let first_root = tempfile::tempdir().expect("first root tempdir");
-    let second_root = tempfile::tempdir().expect("second root tempdir");
-    let (_source_root_id, destination_root_id) =
-        configure_two_movie_roots(&ctx, first_root.path(), second_root.path()).await;
-
-    let folder = make_folder(first_root.path(), "Extra Files (2024)");
-    let title = movable_title(&ctx, "Extra Files", &folder, "Extra.2024.mkv").await;
-    let moved_folder = second_root.path().join("Extra Files (2024)");
-    std::fs::rename(&folder, &moved_folder).expect("move the folder outside Scryer");
-    // Something the user keeps beside the media and Scryer never tracked.
-    std::fs::write(moved_folder.join("notes.txt"), b"mine").expect("write an untracked file");
-
-    let body = gql(
-        &ctx,
-        PREVIEW_QUERY,
-        json!({ "input": {
-            "titleIds": [title.id],
-            "destination": { "rootId": destination_root_id },
-            "mode": "FILES_ALREADY_THERE"
-        }}),
-    )
-    .await;
-    assert_no_errors(&body);
-    let preview = &body["data"]["locationOperationPreview"];
-    assert_eq!(preview["blocksStart"], false, "{preview}");
-    let additional = items_with_reason(preview, "UNMANAGED_CONTENT", "adoption_additional_file");
-    assert_eq!(additional.len(), 1, "{preview}");
-    assert_eq!(
-        additional[0]["destinationPath"],
-        moved_folder.join("notes.txt").to_string_lossy().as_ref()
-    );
+    for (type_name, expected) in [
+        (
+            "LocationExecutionModeInput",
+            vec!["MOVE_WITH_SCRYER", "USER_MOVED_FILES"],
+        ),
+        (
+            "LocationExecutionModeValue",
+            vec!["MOVE_WITH_SCRYER", "USER_MOVED_FILES", "CATALOG_ONLY"],
+        ),
+    ] {
+        let body = gql(
+            &ctx,
+            r#"query ModeEnum($name: String!) { __type(name: $name) { enumValues { name } } }"#,
+            json!({ "name": type_name }),
+        )
+        .await;
+        assert_no_errors(&body);
+        let values: Vec<&str> = body["data"]["__type"]["enumValues"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{type_name} enum values: {body}"))
+            .iter()
+            .map(|value| value["name"].as_str().expect("enum value name"))
+            .collect();
+        assert_eq!(values, expected, "{type_name}: {body}");
+    }
 }
 
 // ── US4 and US5: the two root-scoped workflows ───────────────────────────────
@@ -2309,70 +2151,6 @@ async fn graphql_a_root_consolidation_preview_carries_the_seven_groups_and_the_d
         moving.id != colliding.id,
         "the two source titles are distinct rows: {started}"
     );
-}
-
-/// CHK003, for both of FR-020's destinations: **Change root** is a managed move
-/// either way. "Files are already there" adopts content at a destination folder
-/// (US3) and has no meaning for a whole root, so the *planner* refuses it by
-/// name — the client gets a routable code it can translate rather than an
-/// interface sentence it cannot.
-///
-/// The confirmation is guarded the same way, so a client cannot preview one
-/// workflow and start the other.
-#[tokio::test]
-async fn graphql_a_root_scoped_preview_refuses_the_files_already_there_mode() {
-    let ctx = TestContext::new().await;
-    let source_root = tempfile::tempdir().expect("source root tempdir");
-    let destination_root = tempfile::tempdir().expect("destination root tempdir");
-    let unconfigured = tempfile::tempdir().expect("unconfigured destination tempdir");
-    let (source_root_id, destination_root_id) =
-        configure_two_movie_roots(&ctx, source_root.path(), destination_root.path()).await;
-    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
-    let new_disk = unconfigured
-        .path()
-        .join("new-disk")
-        .to_string_lossy()
-        .to_string();
-
-    // The one target the preview and the confirmation both carry, per branch.
-    for (target, expected) in [
-        (
-            json!({
-                "libraryId": library_id,
-                "rootId": source_root_id,
-                "destinationPath": new_disk,
-            }),
-            "root_change_mode_not_supported",
-        ),
-        (
-            json!({
-                "libraryId": library_id,
-                "rootId": source_root_id,
-                "destinationRootId": destination_root_id,
-            }),
-            "root_consolidation_mode_not_supported",
-        ),
-    ] {
-        let mut input = target.clone();
-        input["mode"] = json!("FILES_ALREADY_THERE");
-        let body = gql(&ctx, ROOT_SCOPE_PREVIEW_QUERY, json!({ "input": input })).await;
-        assert!(body["errors"].is_array(), "{body}");
-        assert_eq!(refusal_code(&body), Some(expected), "{body}");
-
-        let refused = gql(
-            &ctx,
-            START_MUTATION,
-            json!({ "input": {
-                "rootScope": target,
-                "mode": "FILES_ALREADY_THERE",
-                "planFingerprint": "whatever",
-                "typedConfirmation": "MOVE",
-            }}),
-        )
-        .await;
-        assert!(refused["errors"].is_array(), "{refused}");
-        assert_eq!(refusal_code(&refused), Some(expected), "{refused}");
-    }
 }
 
 /// The start mutation carries two destination forms and exactly one of them

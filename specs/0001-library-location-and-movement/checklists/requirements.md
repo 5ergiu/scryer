@@ -54,7 +54,7 @@ spec-quality instrument.
 |---|---|---|
 | US1 folder-match correction | shipped | `d044283f8`, `d67be5e3f`, `098788cf8` |
 | US2 root move (same library) | shipped | `6b6e22b45`, `5243362a1`, `082783251`, `c42fcea57` |
-| US3 adoption ("Files are already there") | shipped *(addendum)* | `cf9f92bcd` (matcher/verifier/executor branch), `18ec0b542` (web mode + accounting), `f5dc6a71b`, `09bb114c9` |
+| US3 adoption ("Files are already there") | **retired 2026-09-13** *(shipped then removed pre-release)* | built: `cf9f92bcd`, `18ec0b542`, `f5dc6a71b`, `09bb114c9`; removed for Sonarr parity before 0.20.0 |
 | US4 change root | shipped *(addendum)* | `17cd37374` (planner), `627b93377` (executor, epilogue seam, traveling bin), `b51f30973` (GraphQL + web) |
 | US5 consolidate root | shipped *(addendum)* | `85fe8bbb1` (planner + executor, real merge handoff), `b51f30973` (GraphQL + web) |
 | US6 cross-library transfer | shipped | `8d0b7020b`, `7ff14ca81`, `1c1a05cd9` |
@@ -91,6 +91,10 @@ media-server refresh, PostgreSQL migration run pending, resume attribution
 - [ ] CHK003 — Are both execution modes (Move with Scryer / Files are already
       there) specified for every workflow that moves content? [Completeness,
       US2–US6]
+      - **Moot since 2026-09-13**: `FILES_ALREADY_THERE` was dropped, so the
+        only modes left are the managed move and `USER_MOVED_FILES`, and no
+        workflow offers a choice between the retired pair. The original note
+        follows.
       - **Gap (spec).** US2 (spec.md:108), US3 (spec.md:137–141) and US4
         (spec.md:164–166, "choosing managed move or external adoption") state
         their modes. **US5 consolidation never does**: neither the story
@@ -316,7 +320,7 @@ media-server refresh, PostgreSQL migration run pending, resume attribution
         permanent deletion"; edge case spec.md:342–343; SC-003 (spec.md:680–682)
         makes it a success criterion. `[commit]` `f5a3fc7db`.
 
-- [x] CHK028 — Stale/unavailable source mount during adoption: proceed and
+- [x] CHK028 *(MOOT 2026-09-13 — adoption retired with FILES_ALREADY_THERE)* — Stale/unavailable source mount during adoption: proceed and
       unresolved paths both specified? [Edge cases, FR-053, US3]
       - **Pass (spec).** `[spec]` FR-053 (spec.md:494–497) and US3 scenario 3
         (spec.md:155–157) specify the proceed path; US3 scenario 2

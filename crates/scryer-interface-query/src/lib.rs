@@ -1626,9 +1626,9 @@ impl CatalogQueries {
     /// different fingerprint and voids the confirmation.
     ///
     /// The mode picks which preview runs: the managed move plans the copy, and
-    /// `FILES_ALREADY_THERE` instead accounts for what is already at the
-    /// destination (FR-050 to FR-053). The reported mode can still come back as
-    /// `CATALOG_ONLY` when the selection has no files on disk (FR-076).
+    /// `USER_MOVED_FILES` re-points the catalog at a move the user already made
+    /// themselves. The reported mode can still come back as `CATALOG_ONLY` when
+    /// the selection has no files on disk (FR-076).
     async fn location_operation_preview(
         &self,
         ctx: &Context<'_>,
@@ -1651,9 +1651,6 @@ impl CatalogQueries {
         let preview = match mode {
             scryer_application::location::model::LocationExecutionMode::UserMovedFiles => {
                 app.preview_manual_move(&actor, request).await
-            }
-            scryer_application::location::model::LocationExecutionMode::FilesAlreadyThere => {
-                app.preview_adoption(&actor, request).await
             }
             _ => app.preview_root_move(&actor, request).await,
         }
