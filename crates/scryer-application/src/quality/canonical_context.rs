@@ -127,6 +127,8 @@ pub(crate) struct ParkedReleaseFacts {
     pub score: i32,
     pub tier_index: Option<usize>,
     pub revision: i32,
+    /// Search-only size preference, rederived alongside the numeric score.
+    pub size_fit_penalty: i32,
     /// Whether the *current* profile still allows it. A profile edit while a
     /// release waited can veto it (D20).
     pub allowed: bool,
@@ -186,6 +188,7 @@ pub(crate) fn score_parked_release_title(
         score: scored.total,
         tier_index,
         revision: scored.revision,
+        size_fit_penalty: scored.announced_decision.size_fit_penalty,
         allowed: scored.announced_decision.allowed,
         block_codes: scored.announced_decision.block_codes.clone(),
     }

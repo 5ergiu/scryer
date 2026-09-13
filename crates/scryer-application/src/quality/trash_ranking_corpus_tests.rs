@@ -820,7 +820,12 @@ fn any_vetoed_release_ranks_below_every_allowed_one() {
                 veto_is_load_bearing = true;
             }
             assert!(
-                blocked.preference_score < ok.preference_score,
+                (!ok.allowed, ok.tier_index, -ok.preference_score)
+                    < (
+                        !blocked.allowed,
+                        blocked.tier_index,
+                        -blocked.preference_score
+                    ),
                 "vetoed `{raw}` ({}) must rank below allowed `{other}` ({})\n  vetoed: {:?}",
                 blocked.preference_score,
                 ok.preference_score,

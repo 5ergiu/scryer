@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 pub(crate) const BUILTIN_TRASH_PACK_ID: &str = "trash-guides-scoring-pack";
 const BUILTIN_TRASH_SHA256: &str =
-    "1fecd3fce839b290dc3fad3f85c459774ce737eafadb411e115632ea6552c034";
+    "b2e923658339bd599f7f7c0cd4af6cab9729239ab2cf51bdc1076e17fe7221e9";
 
 #[derive(Deserialize)]
 struct BuiltinPackManifest {
@@ -69,6 +69,45 @@ pub(crate) fn default_template_ids(pack: &VerifiedRulePack) -> Vec<String> {
         .filter(|template| template.default_enabled)
         .map(|template| template.id.clone())
         .collect()
+}
+
+/// A narrow correction for existing installations, independent of pack updates.
+/// Match both tracked membership and the original source, preserving settings,
+/// copies and customizations. The historical source is an immutable matcher.
+pub(super) fn size_ranking_updates(
+    pack: &VerifiedRulePack,
+    installation: &scryer_domain::RulePackInstallation,
+    rules: &[scryer_domain::RuleSet],
+) -> Vec<scryer_domain::RuleSet> {
+    let Some(member) = installation
+        .members
+        .iter()
+        .find(|member| member.template_id == "trash-guides-size" && !member.removed)
+    else {
+        return Vec::new();
+    };
+    let Some(rule) = rules.iter().find(|rule| rule.id == member.rule_set_id) else {
+        return Vec::new();
+    };
+    let original = scryer_rules::rewrite_package_declaration(
+        include_str!("legacy_size_scoring.rego"),
+        &rule.id,
+    );
+    if rule.rego_source != original {
+        return Vec::new();
+    }
+    let Some(template) = pack
+        .templates
+        .iter()
+        .find(|template| template.id == member.template_id)
+    else {
+        return Vec::new();
+    };
+    let mut updated = rule.clone();
+    updated.rego_source =
+        scryer_rules::rewrite_package_declaration(&template.rego_source, &rule.id);
+    updated.updated_at = chrono::Utc::now();
+    vec![updated]
 }
 
 /// Fresh-install baseline policies materialized from the bundled manifest.
@@ -160,6 +199,53 @@ mod tests {
     #[test]
     fn bundled_baseline_engine_builds() {
         let _ = baseline_engine();
+    }
+
+    #[test]
+    fn size_policy_correction_preserves_settings_and_custom_rules() {
+        let pack = verified_pack().unwrap();
+        let mut original = baseline_rule_sets()
+            .into_iter()
+            .find(|r| r.id == "trash_guides_size")
+            .unwrap();
+        original.rego_source = scryer_rules::rewrite_package_declaration(
+            include_str!("legacy_size_scoring.rego"),
+            &original.id,
+        );
+        original.enabled = false;
+        original.priority = 37;
+        original.applied_facets = vec![MediaFacet::Series];
+        let mut installation = scryer_domain::RulePackInstallation {
+            pack_id: BUILTIN_TRASH_PACK_ID.into(),
+            name: pack.registry.name.clone(),
+            version: pack.registry.version.clone(),
+            digest: pack.registry.digest.clone(),
+            customizable: true,
+            auto_update: false,
+            revision: 1,
+            last_updated: Utc::now(),
+            last_error: None,
+            members: vec![scryer_domain::RulePackMember {
+                template_id: "trash-guides-size".into(),
+                rule_set_id: original.id.clone(),
+                removed: false,
+            }],
+        };
+        let changes = size_ranking_updates(&pack, &installation, &[original.clone()]);
+        assert_eq!(changes.len(), 1);
+        let changed = &changes[0];
+        assert!(!changed.enabled);
+        assert_eq!(changed.priority, 37);
+        assert_eq!(changed.applied_facets, original.applied_facets);
+        assert_eq!(changed.created_at, original.created_at);
+        assert_ne!(changed.rego_source, original.rego_source);
+        assert!(size_ranking_updates(&pack, &installation, &changes).is_empty());
+
+        let mut custom = original.clone();
+        custom.rego_source.push_str("\n# Local customization\n");
+        assert!(size_ranking_updates(&pack, &installation, &[custom]).is_empty());
+        installation.members[0].removed = true;
+        assert!(size_ranking_updates(&pack, &installation, &[original]).is_empty());
     }
 
     #[cfg(feature = "runtime-plugin-trust")]

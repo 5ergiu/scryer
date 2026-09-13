@@ -733,7 +733,7 @@ function TitleContextReleaseSearchPanel({
     InteractiveSearchIndexerProgress[] | null
   >(null);
   const [sortKey, setSortKey] =
-    React.useState<ReleaseSearchSortKey>("score");
+    React.useState<ReleaseSearchSortKey>("recommended");
   const [sortDirection, setSortDirection] =
     React.useState<ReleaseSearchSortDirection>("desc");
   const searchPresentation = React.useMemo(
@@ -929,6 +929,14 @@ function TitleContextReleaseSearchPanel({
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           {results && results.length > 1 ? (
             <>
+              <Button
+                type="button"
+                size="sm"
+                variant={sortKey === "recommended" ? "secondary" : "outline"}
+                onClick={() => toggleSort("recommended")}
+              >
+                {t("nzb.recommended")}
+              </Button>
               <Button
                 type="button"
                 size="sm"

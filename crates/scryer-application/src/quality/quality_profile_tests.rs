@@ -247,14 +247,10 @@ fn parse_profile_invalid_json() {
 
 // ── score_with_pack: quality tier scoring ────────────────────────
 
-/// Tier membership is a gate, not a score.
-///
-/// A listed quality contributes no points at all: ordering by tier happens
-/// before any score is consulted, in the admission gate and in search ranking.
-/// It used to add 3200/900/300 by position, which let a size penalty or a
-/// custom-format bonus argue across a whole resolution step.
+/// The old position-based tier points stay retired. Resolution now contributes
+/// a bounded bonus above the profile floor, while tier order precedes score.
 #[test]
-fn a_listed_quality_scores_no_tier_points() {
+fn a_listed_quality_does_not_restore_legacy_position_based_points() {
     let profile = QualityProfile::parse(
         r#"{"id":"t","name":"T","criteria":{"quality_tiers":["2160P","1080P"],"allow_upgrades":true}}"#,
     ).unwrap();
@@ -887,7 +883,8 @@ fn size_scoring_anime_expects_smaller() {
     score_size_with_pack(&mut d_movie, &release, Some(size_1gb), None, None, &w);
 
     // 1GB for anime 1080p is near expected; for a movie it is much too small.
-    assert!(d_anime.release_score > d_movie.release_score);
+    assert_eq!(d_anime.release_score, d_movie.release_score);
+    assert_ne!(d_anime.scoring_log[0].code, d_movie.scoring_log[0].code);
 }
 
 #[test]
@@ -912,7 +909,8 @@ fn size_scoring_scales_with_runtime() {
     score_size_with_pack(&mut d_long, &release, Some(size_12gb), None, Some(180), &w);
 
     // The long movie should score higher because 12 GB is more "expected" for 3 hours
-    assert!(d_long.release_score > d_standard.release_score);
+    assert_eq!(d_long.release_score, d_standard.release_score);
+    assert!(d_long.size_fit_penalty < d_standard.size_fit_penalty);
 }
 
 #[test]
@@ -1051,16 +1049,10 @@ fn size_delta(release: &str, category: Option<&str>, runtime: i32, size_gib: f64
     (entry.code.clone(), entry.delta)
 }
 
-/// **The D3 property.** A landed file is routinely a few percent smaller than
-/// the size the NZB advertised (par2 and RAR overhead are counted in the
-/// announcement but not in the video file). Under the old step function that
-/// drift could cross a bucket boundary and move the score by a whole bucket
-/// weight — up to 700 points on the Balanced curve, against a +200 grab
-/// threshold — so a release admitted at grab was refused at import as a
-/// downgrade. The term is now continuous, so the same drift moves the number by
-/// tens of points.
+/// Normal archive overhead may change a size classification, but never the
+/// intrinsic score or the incumbent upgrade bar.
 #[test]
-fn realistic_landed_drift_moves_the_size_term_only_slightly() {
+fn realistic_landed_drift_never_changes_intrinsic_points() {
     // A deterministic sweep rather than a random draw: a property test that
     // fails one run in fifty is worse than no test.
     let factors = [0.88_f64, 0.90, 0.93, 0.95, 0.97, 0.99, 1.0];
@@ -1082,7 +1074,7 @@ fn realistic_landed_drift_moves_the_size_term_only_slightly() {
             let moved = (landed_delta - announced_delta).abs();
             worst = worst.max(moved);
             assert!(
-                moved <= 125,
+                moved == 0,
                 "`{release}` at ×{factor} moved the size term by {moved} \
                  ({announced_code} {announced_delta} → {landed_code} {landed_delta})"
             );
@@ -1093,21 +1085,12 @@ fn realistic_landed_drift_moves_the_size_term_only_slightly() {
             );
         }
     }
-    assert!(worst > 0, "the corpus must actually exercise the curve");
+    assert_eq!(worst, 0, "size drift must never change intrinsic points");
 }
 
-/// The same drift, swept across the **whole** curve rather than the bands a
-/// healthy release occupies.
-///
-/// The bound here is 300 rather than 100, and that is a property of the Balanced
-/// weight table, not of the interpolation: `size_small` is −700 where
-/// `size_slightly_small` is 0, and one bucket is only 1.35× wide, so the gentlest
-/// curve that still honours both weights moves ~300 points across a 12 % drift
-/// there. It was 700 before, discontinuously, which is the regression this pins.
-/// Closing the remaining gap means re-baselining those weights, which is a
-/// separate product decision.
+/// Sweep the full size range: even an outlier has no numeric size contribution.
 #[test]
-fn no_drift_anywhere_on_the_curve_cliffs_the_way_a_bucket_step_did() {
+fn no_size_anywhere_on_the_curve_changes_intrinsic_points() {
     let release = "Boundary.2024.1080p.WEB-DL.H.264-GRP";
     let mut bands_seen = std::collections::HashSet::new();
     let mut worst = 0;
@@ -1123,7 +1106,7 @@ fn no_drift_anywhere_on_the_curve_cliffs_the_way_a_bucket_step_did() {
         let moved = (landed_delta - announced_delta).abs();
         worst = worst.max(moved);
         assert!(
-            moved <= 300,
+            moved == 0,
             "a 12% drift at {gib:.2} GiB moved the size term by {moved} \
              ({announced_code} {announced_delta} → {landed_code} {landed_delta})"
         );
@@ -1139,17 +1122,13 @@ fn no_drift_anywhere_on_the_curve_cliffs_the_way_a_bucket_step_did() {
         bands_seen.len() >= 7,
         "the sweep must cross most of the curve to be worth anything: {bands_seen:?}"
     );
-    assert!(worst > 0);
+    assert_eq!(worst, 0, "even outlier sizes contribute no points");
 }
 
-/// **D21, as it now reads.** A release far below anything its quality and
-/// runtime could produce is *penalised*, not refused.
-///
-/// The veto is gone. Its false positives were not fakes but honest aggregates
-/// whose indexer reported one member's size, and the profile's minimum score
-/// still refuses a genuinely tiny release on the numbers.
+/// A small movie above the conservative lower bound remains eligible. Its
+/// classification is explanatory and cannot depress the intrinsic score.
 #[test]
-fn size_implausibly_small_penalises_a_release_a_tenth_of_its_size() {
+fn a_small_but_not_extreme_movie_remains_eligible_without_size_points() {
     // 1080p WEB-DL, 120 min → expected ≈ 7.5 GiB. 400 MiB is ~5% of that.
     let release = parse_release_metadata("Portmere.2024.1080p.WEB-DL.H.264-GRP");
     let weights = balanced_scoring_config();
@@ -1170,7 +1149,7 @@ fn size_implausibly_small_penalises_a_release_a_tenth_of_its_size() {
         decision.block_codes
     );
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
-    assert_eq!(decision.scoring_log[0].delta, -800);
+    assert_eq!(decision.scoring_log[0].delta, 0);
     assert!(
         !decision
             .scoring_log
@@ -1181,12 +1160,9 @@ fn size_implausibly_small_penalises_a_release_a_tenth_of_its_size() {
     );
 }
 
-/// **BL2.** The honest number is always in the log.
-///
-/// `total` retains every numeric contribution. A mandatory rejection cannot
-/// replace a size penalty and accidentally improve the incumbent's score.
+/// Size explanations must not contribute to the intrinsic score.
 #[test]
-fn a_tiny_release_carries_the_size_penalty_it_earned() {
+fn a_small_release_carries_no_size_points() {
     let release = parse_release_metadata("Portmere.2024.1080p.WEB-DL.H.264-GRP");
     let weights = balanced_scoring_config();
 
@@ -1207,7 +1183,7 @@ fn a_tiny_release_carries_the_size_penalty_it_earned() {
         .map(|entry| entry.delta)
         .sum();
     assert_eq!(
-        non_block, -800,
+        non_block, 0,
         "the band must be in the log: {:?}",
         decision.scoring_log
     );
@@ -1279,37 +1255,32 @@ fn an_ordinary_episode_at_sonarrs_minimum_bitrate_is_not_vetoed() {
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
 }
 
-/// …and below the calibrated anchor it is the full tiny penalty, still not a
-/// block.
+/// Known runtime and codec permit exclusion below the conservative lower bound.
 #[test]
-fn an_episode_far_under_the_calibrated_floor_is_penalised_at_full_strength() {
+fn an_episode_far_under_the_calibrated_floor_is_excluded() {
     let release = parse_release_metadata("Portmere.S01E04.1080p.WEB-DL.H.264-GRP");
     let weights = balanced_scoring_config();
 
-    // 45 minutes at ~1.5 MB/min.
+    // 45 minutes at ~0.89 MB/min (0.119 Mbps), below the conservative floor.
     let mut decision = QualityProfileDecision::new();
     score_size_with_pack(
         &mut decision,
         &release,
-        Some(67_500_000),
+        Some(40_000_000),
         Some("series"),
         Some(45),
         &weights,
     );
 
-    assert!(decision.allowed, "{:?}", decision.block_codes);
+    assert!(!decision.allowed, "{:?}", decision.block_codes);
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
-    assert_eq!(decision.scoring_log[0].delta, -800);
+    assert_eq!(decision.scoring_log[0].delta, 0);
 }
 
-/// A special used to be the one shape exempt from the minimum-size veto
-/// (Sonarr's `AcceptableSizeSpecification.cs:29-33`), because a seven-minute S00
-/// short has no recorded runtime and reads as a fraction of the series average.
-/// With no veto left there is nothing to exempt it from: a special takes exactly
-/// the penalty an ordinary episode of the same size takes, and the exemption
-/// helper is gone with the veto.
+/// Specials often inherit a series runtime that overstates a short episode.
+/// Preserve the special instead of rejecting it on that uncertain assumption.
 #[test]
-fn a_special_takes_the_same_size_penalty_as_any_other_episode() {
+fn a_special_is_exempt_from_the_lower_size_guard() {
     let weights = balanced_scoring_config();
     let special = parse_release_metadata("Portmere.S00E03.1080p.WEB-DL.H.264-GRP");
     assert_eq!(
@@ -1329,7 +1300,7 @@ fn a_special_takes_the_same_size_penalty_as_any_other_episode() {
 
     assert!(decision.allowed, "{:?}", decision.block_codes);
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
-    assert_eq!(decision.scoring_log[0].delta, -800);
+    assert_eq!(decision.scoring_log[0].delta, 0);
 
     // The same bytes under an ordinary episode number score identically: the
     // size term no longer asks what kind of episode this is.
@@ -1343,21 +1314,17 @@ fn a_special_takes_the_same_size_penalty_as_any_other_episode() {
         Some(45),
         &weights,
     );
-    assert!(ordinary_decision.allowed);
+    assert!(!ordinary_decision.allowed);
     assert_eq!(
         ordinary_decision.preference_score,
         decision.preference_score
     );
 }
 
-/// The size curve says nothing about files the import pipeline's sample filter
-/// owns.
-///
-/// A `.strm` stream pointer holds a URL, not media, and its byte count says
-/// nothing about the release. Refusing it here would make stream-pointer imports
-/// fail on the length of their own filename.
+/// A tiny media listing is excluded. Stream-pointer byte counts are withheld
+/// separately by canonical scoring because they describe a URL, not media.
 #[test]
-fn a_file_too_small_to_be_media_at_all_is_penalised_but_not_vetoed() {
+fn a_tiny_listing_is_excluded_when_runtime_and_codec_are_known() {
     let release = parse_release_metadata("Portmere.2024.1080p.WEB-DL.H.264-GRP");
     let weights = balanced_scoring_config();
 
@@ -1372,15 +1339,15 @@ fn a_file_too_small_to_be_media_at_all_is_penalised_but_not_vetoed() {
             &weights,
         );
         assert!(
-            decision.allowed,
-            "{size_bytes} bytes was vetoed: {:?}",
+            !decision.allowed,
+            "{size_bytes} bytes was not vetoed: {:?}",
             decision.block_codes
         );
         assert_eq!(
             decision.scoring_log[0].code, "size_tiny_for_quality",
             "{size_bytes} bytes should still take the full tiny penalty"
         );
-        assert_eq!(decision.scoring_log[0].delta, -800);
+        assert_eq!(decision.scoring_log[0].delta, 0);
     }
 }
 
@@ -1514,11 +1481,10 @@ fn a_single_episode_is_never_reinterpreted_as_a_member() {
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
 }
 
-/// When neither reading is plausible the release is simply small, and it takes
-/// the penalty in full. 300 MiB is a twentieth of one episode, never mind
-/// twelve.
+/// An uncertain pack size is a ranking concern, not an intrinsic penalty.
+/// Without a trustworthy payload interpretation, do not apply the lower veto.
 #[test]
-fn a_genuinely_tiny_pack_keeps_the_full_tiny_penalty() {
+fn an_ambiguous_tiny_pack_does_not_affect_intrinsic_score() {
     let weights = balanced_scoring_config();
     let decision = score_pack_size(
         "Quiet.Meridian.S01.1080p.WEB-DL.H.264-GroupTag",
@@ -1530,7 +1496,7 @@ fn a_genuinely_tiny_pack_keeps_the_full_tiny_penalty() {
     assert!(decision.allowed, "{:?}", decision.block_codes);
     assert_eq!(decision.scoring_log.len(), 1, "{:?}", decision.scoring_log);
     assert_eq!(decision.scoring_log[0].code, "size_tiny_for_quality");
-    assert_eq!(decision.scoring_log[0].delta, -800);
+    assert_eq!(decision.scoring_log[0].delta, 0);
 }
 
 /// The member reading uses the **codec-adjusted** thresholds, the same ones the
@@ -1577,9 +1543,7 @@ fn the_member_reading_respects_codec_adjusted_thresholds() {
     assert_eq!(h265.scoring_log[0].code, "size_tiny_for_quality");
 }
 
-/// The reinterpretation spares a penalty; it never grants a bonus. A pack whose
-/// member reading lands in the expected band would earn `size_expected` if the
-/// size were not in doubt — capped to zero because it is.
+/// Neither measured nor inferred pack sizes can earn intrinsic points.
 #[test]
 fn an_inferred_member_size_can_never_earn_a_bonus() {
     let weights = balanced_scoring_config();
@@ -1591,8 +1555,8 @@ fn an_inferred_member_size_can_never_earn_a_bonus() {
             &weights
         )
         .preference_score
-            > 0,
-        "fixture precondition: the expected band pays"
+            == 0,
+        "the expected band contributes no intrinsic points"
     );
 
     let inferred = score_pack_size(
@@ -1610,7 +1574,7 @@ fn an_inferred_member_size_can_never_earn_a_bonus() {
 
     assert_eq!(inferred.preference_score, 0);
     assert!(
-        unambiguous.preference_score > inferred.preference_score,
+        unambiguous.preference_score == inferred.preference_score,
         "an inferred size outscored a measured one: {} vs {}",
         inferred.preference_score,
         unambiguous.preference_score
@@ -1625,7 +1589,7 @@ fn the_upper_veto_still_blocks_an_impossible_pack() {
     let weights = balanced_scoring_config();
     let decision = score_pack_size(
         "Quiet.Meridian.S01.1080p.WEB-DL.H.264-GroupTag",
-        gib(600.0),
+        gib(6000.0),
         season_basis(12),
         &weights,
     );
@@ -1651,7 +1615,14 @@ fn size_implausible_blocks_wildly_oversized() {
     let size_300gb = 300 * 1024 * 1024 * 1024_i64;
 
     let mut d = QualityProfileDecision::new();
-    score_size_with_pack(&mut d, &release, Some(size_300gb), Some("anime"), None, &w);
+    score_size_with_pack(
+        &mut d,
+        &release,
+        Some(size_300gb),
+        Some("anime"),
+        Some(24),
+        &w,
+    );
     assert!(!d.allowed);
     assert!(
         d.block_codes
@@ -1660,7 +1631,7 @@ fn size_implausible_blocks_wildly_oversized() {
 }
 
 #[test]
-fn size_excessive_penalizes_oversized_anime() {
+fn size_excessive_is_explanatory_for_oversized_anime() {
     // 3 GB for a 720p anime Blu-ray episode is far outside the anime envelope.
     // (720p anime baseline = 0.6 GiB × 1.35 BLURAY = 0.81 GiB; 3/0.81 = 3.7 → excessive)
     let release = parse_release_metadata("Anime.2024.720p.BluRay.H.265");
@@ -1673,12 +1644,12 @@ fn size_excessive_penalizes_oversized_anime() {
     assert!(
         d.scoring_log
             .iter()
-            .any(|e| e.code == "size_excessive_for_quality" && e.delta == -1200)
+            .any(|e| e.code == "size_excessive_for_quality" && e.delta == 0)
     );
 }
 
 #[test]
-fn large_balanced_anime_remux_gets_size_penalty_with_explicit_remux_preference() {
+fn large_balanced_anime_remux_keeps_remux_preference_without_size_points() {
     let profile = QualityProfile::parse(
         r#"{"id":"anime","name":"Anime","criteria":{"quality_tiers":["1080P","720P"],"prefer_remux":true,"allow_unknown_quality":true,"allow_upgrades":true}}"#,
     ).unwrap();
@@ -1704,7 +1675,7 @@ fn large_balanced_anime_remux_gets_size_penalty_with_explicit_remux_preference()
     assert!(
         d.scoring_log
             .iter()
-            .any(|e| e.code == "size_excessive_for_quality" && e.delta == -1200)
+            .any(|e| e.code == "size_excessive_for_quality" && e.delta == 0)
     );
 }
 

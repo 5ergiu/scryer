@@ -475,9 +475,14 @@ fn score_single_release_with_rules(
         .analyzed
         .as_ref()
         .is_some_and(|facts| facts.analysis.details.disc.is_some());
+    // A stream pointer's bytes describe a URL, never the media it references.
+    let is_stream_pointer = evidence
+        .analyzed
+        .as_ref()
+        .is_some_and(|facts| facts.analysis.container_format.as_deref() == Some("strm"));
     let announced_decision = run_term_pipeline(
         &evidence.parsed,
-        evidence.announced_size_bytes,
+        evidence.announced_size_bytes.filter(|_| !is_stream_pointer),
         None,
         ctx,
         rules,
@@ -502,7 +507,7 @@ fn score_single_release_with_rules(
             .0;
             let analyzed_pass = run_term_pipeline(
                 &analyzed_parsed,
-                (!is_disc).then_some(analyzed.actual_size_bytes),
+                (!is_disc && !is_stream_pointer).then_some(analyzed.actual_size_bytes),
                 analyzed.rule_file_doc.clone(),
                 ctx,
                 rules,
@@ -515,6 +520,7 @@ fn score_single_release_with_rules(
                 &analyzed_pass,
             );
             if matches!(classified.1, TruthVerdict::Consistent)
+                && !is_stream_pointer
                 && !ctx.size_basis.covers_multiple_members()
                 && size_claim_mismatch(evidence.announced_size_bytes, analyzed.actual_size_bytes)
             {
@@ -525,11 +531,9 @@ fn score_single_release_with_rules(
             analyzed_quality = analyzed_parsed.quality.clone();
 
             // A quality change is a contradiction on its own, whatever the
-            // scores did. Since the tier stopped contributing points, a file
-            // that is 720p where the release said 1080p moves the score by
-            // nothing at all — the disagreement is only visible by comparing the
-            // qualities directly. Admission still refuses it on tier; this is
-            // what lets the *reason* be reported rather than inferred.
+            // scores did. A modest resolution-score change can be cancelled by
+            // other contributions, so compare qualities directly. Admission
+            // still refuses the downgrade on tier; this preserves its reason.
             let announced_quality = normalize_quality_tier(evidence.parsed.quality.as_deref());
             let landed_quality = normalize_quality_tier(analyzed_quality.as_deref());
             if announced_quality != landed_quality {
@@ -778,7 +782,7 @@ const POLICY_ONLY_BLOCK_CODES: &[&str] = &["upgrade_blocked_by_profile"];
 /// | code | assertable | why |
 /// |---|---|---|
 /// | `quality_*` | always | the resolution is the one claim every release name makes, and it is the claim the grab decision was taken on. A file whose measured height lands outside the profile's tiers is not what was fetched. |
-/// | `size_implausible_for_quality` | always | both passes score the *same* bytes, so this can only be introduced when the landed quality moved — which is the quality claim again, seen through the size band. It is the only size veto left: implausible *smallness* is a penalty on the curve, never a block, so it cannot reach here at all. |
+/// | `size_implausib*` | always | a newly introduced upper or lower size veto means the measured payload no longer satisfies the release's claimed quality within the conservative runtime-aware bounds. Ordinary size classifications contribute no points and cannot reach this path. |
 /// | `video_codec_*` | iff the parse carried a codec | `H.265` in the name against an H.264 stream is a lie; a codec-silent name is not a claim. |
 /// | `audio_codec_*` | iff the parse carried an audio codec | same rule. Note the gate only fires at all when `normalized_audio_codecs` is non-empty, which for a silent name means the probe populated it. |
 /// | `hdr_not_allowed`, `dolby_vision_*` | never | derived from `video_hdr_format`; a profile that forbids them has refused this file, so import burns this release and convergence tries the next candidate. |

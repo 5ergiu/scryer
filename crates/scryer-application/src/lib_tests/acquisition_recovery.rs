@@ -3503,6 +3503,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
                             block_codes: Vec::new(),
                             preference_score: 100,
                             tier_index: Some(0),
+                            size_fit_penalty: 0,
                         },
                     ),
                     extra: Default::default(),
@@ -6938,6 +6939,88 @@ async fn scheduled_rss_fetches_before_deciding_due_pending_releases() {
             .await
             .iter()
             .any(|submission| submission.source_title.as_deref() == Some(rss_title))
+    );
+}
+
+#[tokio::test]
+async fn expired_pending_releases_break_equal_scores_by_size_fit_before_id() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking(
+        download_client,
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases.clone(),
+        wanted_items.clone(),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Delayed Size", 2024).await;
+    let title = app
+        .services
+        .catalog
+        .titles
+        .update_title_hydrated_metadata(
+            &title.id,
+            TitleMetadataUpdate {
+                year: title.year,
+                content_status: title.content_status.clone(),
+                runtime_minutes: Some(60),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set known movie runtime");
+    let mut outlier = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Delayed.Size.2024.1080p.NF.WEB-DL.DDP5.1.x264-NTb",
+        PendingReleaseStatus::Waiting,
+    );
+    outlier.id = "a-size-outlier".into();
+    outlier.release_size_bytes = Some(12 * 1_073_741_824);
+    let mut plausible = outlier.clone();
+    plausible.id = "b-plausible-size".into();
+    plausible.release_size_bytes = Some(3_435_973_837);
+    plausible.release_url = Some("https://example.invalid/plausible.nzb".into());
+    plausible.release_guid = Some("plausible-size-guid".into());
+    plausible.release_identity = "plausible-size-guid".into();
+
+    let profile = app.resolve_quality_profile_for_title(&title).await.unwrap();
+    let context = app
+        .resolve_canonical_scoring_context(&title, &profile)
+        .await;
+    let facts = |release: &PendingRelease| {
+        crate::quality::canonical_context::score_parked_release_title(
+            &title,
+            &release.release_title,
+            release.release_size_bytes,
+            &[],
+            &[],
+            &context,
+        )
+    };
+    let outlier_facts = facts(&outlier);
+    let plausible_facts = facts(&plausible);
+    assert!(outlier_facts.allowed && plausible_facts.allowed);
+    assert_eq!(outlier_facts.score, plausible_facts.score);
+    assert!(outlier_facts.size_fit_penalty > plausible_facts.size_fit_penalty);
+    for release in [&outlier, &plausible] {
+        pending_releases
+            .insert_pending_release(release)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(app.process_expired_pending_releases().await.unwrap(), 1);
+    assert_eq!(
+        pending_releases
+            .get_pending_release(&plausible.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        PendingReleaseStatus::Grabbed,
+        "size fit must win even when the outlier sorts first by ID"
     );
 }
 
@@ -10508,6 +10591,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                                 block_codes: Vec::new(),
                                 preference_score: 100,
                                 tier_index: Some(0),
+                                size_fit_penalty: 0,
                             },
                         ),
                         extra: Default::default(),

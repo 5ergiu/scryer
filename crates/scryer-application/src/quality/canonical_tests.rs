@@ -207,6 +207,8 @@ fn announced(size_gib: f64) -> ReleaseEvidence {
 
 fn analysis_reporting(codec: Option<&str>) -> MediaFileAnalysis {
     let mut analysis = build_stream_pointer_media_file_analysis();
+    // These fixtures represent measured media; pointer behavior has its own test.
+    analysis.container_format = Some("matroska".into());
     if let Some(codec) = codec {
         analysis.video_codec = VideoCodec::parse(codec);
     }
@@ -500,7 +502,10 @@ fn large_analyzed_swing_is_contradicted_and_clamped() {
         "expected Contradicted, got {:?}",
         scored.truth_verdict
     );
-    assert_eq!(scored.truth_variance, -TRUTH_VARIANCE_BOUND);
+    assert_eq!(
+        scored.truth_variance, 0,
+        "size is not an intrinsic score term"
+    );
     assert!(
         !scored.truth_verdict.codes().is_empty(),
         "a contradiction should name the terms that moved"
@@ -891,9 +896,9 @@ fn one_episode_scores_the_same_at_grab_at_import_and_as_a_bar() {
         ),
     )
     .release_score;
-    assert_ne!(
+    assert_eq!(
         grab_score, title_basis,
-        "fixture precondition: the episode runtime must actually move the score"
+        "runtime changes size fit, never intrinsic score"
     );
 }
 
@@ -1016,7 +1021,10 @@ fn a_pack_listed_at_one_members_size_scores_the_same_everywhere() {
             .any(|entry| entry.code == "size_tiny_for_quality"),
         "fixture precondition: the member reading must be doing the work"
     );
-    assert!(grab.release_score > total_only.release_score);
+    assert_eq!(grab.release_score, total_only.release_score);
+    assert!(
+        grab.announced_decision.size_fit_penalty < total_only.announced_decision.size_fit_penalty
+    );
 }
 
 // ── I2 / I4: grab and import agree ──────────────────────────────────────────
@@ -1610,6 +1618,7 @@ fn recoverable_scores_never_override_profile_requirements() {
     let profile = movie_profile();
     let mut context = ctx(&profile, &[]);
     context.rules = Some(&engine);
+    context.size_basis = CoverageSizeBasis::single(Some(120));
     let oversized = score_release(&announced(10_000.0), &context);
     assert!(oversized.total > 10_000_000);
     assert!(!oversized.announced_decision.allowed);
@@ -2023,7 +2032,7 @@ fn a_landed_aggregate_does_not_keep_a_member_sized_announcement() {
             .any(|entry| entry.code == SIZE_PACK_MEMBER_BASIS_CODE),
         "fixture precondition: the announcement must look member-sized"
     );
-    assert!(landed_score.total > member_score.total);
+    assert_eq!(landed_score.total, member_score.total);
 }
 
 #[test]
@@ -2077,9 +2086,9 @@ fn inside_the_overhead_band_the_size_term_matches_the_grab() {
         &context,
     )
     .release_score;
-    assert_ne!(
+    assert_eq!(
         grab, landed_basis,
-        "fixture precondition: a 20% shortfall must actually move the size term"
+        "a size shortfall must not change intrinsic points"
     );
 }
 
@@ -2134,8 +2143,30 @@ fn a_row_that_remembers_its_announced_size_reproduces_the_import_score() {
     // Load-bearing: a row that forgot its announcement drifts to the landed size.
     row.announced_size_bytes = None;
     let landed_only = score_media_file(&row, &context);
-    assert_ne!(
+    assert_eq!(
         landed_only.total, at_import.total,
-        "fixture precondition: a 10 % shortfall must move the size term"
+        "size overhead must not change intrinsic points"
+    );
+}
+
+#[test]
+fn a_stream_pointer_is_not_rejected_for_the_size_of_its_url() {
+    let profile = movie_profile();
+    let tags = Vec::new();
+    let mut context = ctx(&profile, &tags);
+    context.size_basis = CoverageSizeBasis::single(Some(90));
+    let mut facts = analyzed(0.0, None);
+    facts.analysis.container_format = Some("strm".into());
+    facts.actual_size_bytes = 96;
+    let evidence = announced(96.0 / GIB as f64).with_analysis(facts);
+    let score = score_release(&evidence, &context);
+    assert!(score.announced_decision.allowed);
+    assert_eq!(score.truth_verdict, TruthVerdict::Consistent);
+    assert!(
+        !score
+            .announced_decision
+            .scoring_log
+            .iter()
+            .any(|e| e.code.starts_with("size_"))
     );
 }

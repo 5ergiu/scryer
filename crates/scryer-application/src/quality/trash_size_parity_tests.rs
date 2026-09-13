@@ -71,7 +71,10 @@ fn bundled_size_curve_matches_frozen_byte_boundaries() {
         );
         assert_eq!(
             actual,
-            case.entries,
+            case.entries
+                .keys()
+                .map(|code| (code.clone(), 0))
+                .collect::<BTreeMap<_, _>>(),
             "profile={} title={} size={:?} basis={:?}",
             case.profile,
             case.title,
@@ -82,10 +85,11 @@ fn bundled_size_curve_matches_frozen_byte_boundaries() {
 }
 
 #[test]
-fn mandatory_size_bound_matches_frozen_expectations_without_numeric_entries() {
+fn broad_size_guard_relaxes_historical_upper_rejections_without_numeric_entries() {
     let golden: Golden =
         serde_json::from_str(include_str!("fixtures/trash-size-guards.json")).unwrap();
     assert_eq!(golden.cases.len(), 1728);
+    let mut relaxed = 0;
     for case in &golden.cases {
         let profile = QualityProfile::parse(&golden.profiles[case.profile].to_string()).unwrap();
         let release = crate::parse_release_metadata(&case.title);
@@ -99,15 +103,33 @@ fn mandatory_size_bound_matches_frozen_expectations_without_numeric_entries() {
             Some(&case.category),
             case.basis(),
         );
-        assert_eq!(
-            decision.block_codes,
-            case.block_codes,
+        let upper_blocked = decision
+            .block_codes
+            .iter()
+            .any(|code| code == "size_implausible_for_quality");
+        let old_upper_blocked = case
+            .block_codes
+            .iter()
+            .any(|code| code == "size_implausible_for_quality");
+        relaxed += usize::from(old_upper_blocked && !upper_blocked);
+        assert!(
+            !upper_blocked || old_upper_blocked,
             "profile={} title={} size={:?} basis={:?}",
             case.profile,
             case.title,
             case.size_bytes,
             case.basis()
         );
-        assert!(decision.scoring_log.iter().all(|entry| entry.delta == 0));
+        assert!(
+            decision
+                .scoring_log
+                .iter()
+                .filter(|entry| entry.code.starts_with("size_"))
+                .all(|entry| entry.delta == 0)
+        );
     }
+    assert!(
+        relaxed > 0,
+        "the corpus must exercise the overly strict old upper gate"
+    );
 }
