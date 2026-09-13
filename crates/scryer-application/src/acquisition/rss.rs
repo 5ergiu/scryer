@@ -411,6 +411,48 @@ impl std::ops::Deref for TitleContextBank {
     }
 }
 
+/// Present a title's anime numbering bridge cour names as tagged aliases.
+///
+/// A cour's own name is a name the title answers to, but the catalog keeps it
+/// only inside the numbering bridge, and the bridge is not consulted until
+/// long after title matching has already decided a release belongs to nobody.
+/// Folding the cour names into the aliases is what puts them into
+/// `CanonicalTitleEvidence` — lookup keys and spelling identity alike — so
+/// every matcher downstream sees them. Names the catalog already carries are
+/// left alone, and a title with no bridge is returned untouched.
+pub(crate) fn title_with_bridge_cour_titles(
+    title: &Title,
+    bridge: Option<&scryer_domain::AnimeNumberingBridge>,
+) -> Title {
+    let Some(bridge) = bridge.filter(|bridge| !bridge.is_empty()) else {
+        return title.clone();
+    };
+    let mut seen = std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+        .map(crate::title_matching::canonical_lookup_key)
+        .collect::<HashSet<_>>();
+    let mut bridged = title.clone();
+    for name in bridge.seasons.iter().flat_map(|season| &season.titles) {
+        let key = crate::title_matching::canonical_lookup_key(name);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        // Bridge cour names are the upstream anime dataset's, so a Latin one is
+        // a romanization; tagging it as such is what lets the relaxed matcher
+        // treat `Gassho o` and `Gasshou wo` as one spelling.
+        let language = match scryer_domain::title_spelling::title_script(name) {
+            scryer_domain::title_spelling::TitleScript::Latin => "x-jat",
+            _ => "ja",
+        };
+        bridged.tagged_aliases.push(scryer_domain::TaggedAlias {
+            name: name.clone(),
+            language: language.to_string(),
+        });
+    }
+    bridged
+}
+
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
     let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
     let mut candidates = titles
@@ -765,7 +807,25 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
-        let title_context_bank = build_title_context_bank(&titles);
+        // A feed item named after an anime cour carries a name the catalog
+        // keeps only in the numbering bridge, so the bank is built over titles
+        // whose bridge names have been folded in. `titles` itself stays as the
+        // catalog gave it: routing and scoping below are about the title rows.
+        let mut bridged_titles = Vec::with_capacity(titles.len());
+        for title in &titles {
+            let bridge = if title.monitored && title.facet == MediaFacet::Anime {
+                self.services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                None
+            };
+            bridged_titles.push(title_with_bridge_cour_titles(title, bridge.as_ref()));
+        }
+        let title_context_bank = build_title_context_bank(&bridged_titles);
 
         if title_context_bank.is_empty() {
             debug!("RSS sync: no monitored titles, skipping");
@@ -3577,6 +3637,65 @@ mod tests {
             result.map(|info| info.title_id.as_str()),
             Some("t1"),
             "a romanized cour alias spelling must still resolve to the title"
+        );
+    }
+
+    /// The catalog's aliases carry the series name; a cour's own name lives
+    /// only in the anime numbering bridge. A release named after the cour has
+    /// to reach title matching with that name in evidence, or it is dropped
+    /// before numbering is ever consulted.
+    #[test]
+    fn match_romanized_release_to_a_bridge_cour_title() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        let bridge = scryer_domain::AnimeNumberingBridge {
+            generated_on: "2026-01-01".into(),
+            corroborating_order: None,
+            seasons: vec![scryer_domain::AnimeCommunitySeason {
+                index: 4,
+                titles: vec![
+                    "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
+                ],
+                ..Default::default()
+            }],
+        };
+        let titles = vec![title_with_bridge_cour_titles(&title, Some(&bridge))];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a bridge cour name must be title-matching evidence for its title"
+        );
+    }
+
+    /// The bridge is the only source allowed to add these names: a title with
+    /// no bridge keeps exactly the aliases the catalog gave it, and a release
+    /// named after a cour it does not carry still matches nothing.
+    #[test]
+    fn a_title_without_a_bridge_keeps_its_own_aliases_only() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        let bridged = title_with_bridge_cour_titles(&title, None);
+        assert_eq!(bridged.aliases, title.aliases);
+        assert_eq!(bridged.tagged_aliases, title.tagged_aliases);
+
+        let bank = build_title_context_bank(&[bridged]);
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+        assert!(
+            result.is_none(),
+            "without a bridge there is no cour name to match on"
         );
     }
 
