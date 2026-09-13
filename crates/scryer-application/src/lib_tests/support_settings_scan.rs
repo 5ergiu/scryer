@@ -933,11 +933,17 @@ impl crate::SeedingProfileRepository for MockSeedingProfileRepo {
 #[derive(Default)]
 pub(super) struct MockDownloadClientConfigRepo {
     pub(super) store: Arc<Mutex<Vec<DownloadClientConfig>>>,
+    pub(super) fail_list: bool,
 }
 
 #[async_trait]
 impl DownloadClientConfigRepository for MockDownloadClientConfigRepo {
     async fn list(&self, client_type: Option<String>) -> AppResult<Vec<DownloadClientConfig>> {
+        if self.fail_list {
+            return Err(AppError::Repository(
+                "injected config list failure".to_string(),
+            ));
+        }
         let entries = self.store.lock().await;
         Ok(entries
             .iter()
