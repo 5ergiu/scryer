@@ -630,6 +630,7 @@ fn scored_search_result(
         },
         preference_score,
         tier_index,
+        size_fit_penalty: 0,
     });
     result
 }

@@ -63,6 +63,7 @@ fn trash_pack_matches_native_numeric_golden() {
         block_codes: vec![],
         preference_score: 0,
         tier_index: None,
+        size_fit_penalty: 0,
     };
     let mut mismatches = 0;
     let mut samples = Vec::new();

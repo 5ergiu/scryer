@@ -3513,6 +3513,7 @@ mod tests {
             block_codes: Vec::new(),
             preference_score: score,
             tier_index: None,
+            size_fit_penalty: 0,
         }
     }
 

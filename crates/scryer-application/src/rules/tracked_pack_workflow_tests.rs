@@ -561,6 +561,85 @@ async fn builtin_trash_bootstrap_preserves_user_choices_and_rebuilds_after_resta
 }
 
 #[tokio::test]
+async fn builtin_size_correction_is_atomic_and_idempotent_on_restart() {
+    let (app, repo) = build_test_app_with_rule_repo(vec![], vec![]);
+    app.bootstrap_builtin_trash_rule_pack().await.unwrap();
+    let installed = repo.list_rule_pack_installations().await.unwrap().remove(0);
+    let member = installed
+        .members
+        .iter()
+        .find(|m| m.template_id == "trash-guides-size")
+        .unwrap();
+    let mut old = repo
+        .get_rule_set(&member.rule_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    old.rego_source = scryer_rules::rewrite_package_declaration(
+        include_str!("legacy_size_scoring.rego"),
+        &old.id,
+    );
+    old.enabled = false;
+    old.priority = 37;
+    repo.update_rule_set(&old).await.unwrap();
+
+    let engine_before = app
+        .services
+        .customization
+        .user_rules
+        .read()
+        .unwrap()
+        .rule_identity();
+    repo.fail_pack_apply
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(app.bootstrap_builtin_trash_rule_pack().await.is_err());
+    assert_eq!(
+        repo.get_rule_set(&old.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .rego_source,
+        old.rego_source
+    );
+    assert_eq!(
+        app.services
+            .customization
+            .user_rules
+            .read()
+            .unwrap()
+            .rule_identity(),
+        engine_before
+    );
+    assert_eq!(
+        repo.list_rule_pack_installations()
+            .await
+            .unwrap()
+            .remove(0)
+            .revision,
+        installed.revision
+    );
+    repo.fail_pack_apply
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    app.bootstrap_builtin_trash_rule_pack().await.unwrap();
+    let updated = repo.get_rule_set(&old.id).await.unwrap().unwrap();
+    assert_ne!(updated.rego_source, old.rego_source);
+    assert!(!updated.enabled);
+    assert_eq!(updated.priority, 37);
+    let next = repo.list_rule_pack_installations().await.unwrap().remove(0);
+    assert_eq!(next.revision, installed.revision + 1);
+    app.bootstrap_builtin_trash_rule_pack().await.unwrap();
+    assert_eq!(
+        repo.list_rule_pack_installations()
+            .await
+            .unwrap()
+            .remove(0)
+            .revision,
+        next.revision
+    );
+}
+
+#[tokio::test]
 async fn builtin_trash_migration_disables_retired_sources_and_requires_repair_to_enable() {
     let mut affected = legacy_managed_rule("retired_custom", "unused", "Keep my rule", "");
     affected.is_managed = false;

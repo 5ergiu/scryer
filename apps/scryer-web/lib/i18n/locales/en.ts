@@ -1599,6 +1599,7 @@ const en: LocaleDictionary = {
   "nzb.showScoringLog": "Show scoring log",
   "nzb.hideScoringLog": "Hide scoring log",
   "nzb.score": "Score",
+  "nzb.recommended": "Recommended",
   "nzb.size": "Size",
   "nzb.scoringLog": "Scoring log",
   "nzb.total": "Total",

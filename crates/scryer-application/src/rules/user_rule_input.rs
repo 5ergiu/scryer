@@ -389,6 +389,7 @@ mod tests {
             block_codes: vec![],
             preference_score: 1200,
             tier_index: Some(0),
+            size_fit_penalty: 0,
         }
     }
 

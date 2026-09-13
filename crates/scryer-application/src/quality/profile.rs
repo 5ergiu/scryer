@@ -223,11 +223,13 @@ pub struct QualityProfileDecision {
     /// better, `None` when the profile does not list it.
     ///
     /// Carried on the decision so that **every** place results are ordered can
-    /// compare tier before score without re-resolving the profile. The tier
-    /// stopped contributing points when it became a comparison step, so a
-    /// comparator that only sees `preference_score` will happily list a 720p
-    /// release above a 2160p one (D11).
+    /// compare tier before score without re-resolving the profile. The bounded
+    /// resolution bonus also makes quality visible in the score, but cannot
+    /// guarantee fallback ordering against arbitrary custom-rule contributions.
     pub tier_index: Option<usize>,
+    /// Codec/source/runtime-aware size distance used only to break search ties.
+    /// Zero means plausible or unknown; this never contributes to the score.
+    pub size_fit_penalty: i32,
 }
 
 impl QualityProfileDecision {
@@ -239,6 +241,7 @@ impl QualityProfileDecision {
             block_codes: Vec::new(),
             preference_score: 0,
             tier_index: None,
+            size_fit_penalty: 0,
         }
     }
 
@@ -852,6 +855,33 @@ pub fn evaluate_profile_requirements(
     let mut decision = QualityProfileDecision::new();
     let criteria = &profile.criteria;
     decision.tier_index = quality_tier_index(criteria, release.quality.as_deref());
+    // The lowest admitted resolution is the fallback floor. Each standard
+    // resolution step above it earns 100 points, including skipped tiers. Profile
+    // ordering remains authoritative even against arbitrary custom scores.
+    if let Some(quality) = normalize_quality_tier(release.quality.as_deref())
+        && decision.tier_index.is_some()
+        && let Some(resolution) = resolution_lines(Some(&quality))
+    {
+        let floor = criteria
+            .quality_tiers
+            .iter()
+            .filter_map(|tier| normalize_quality_tier(Some(tier)))
+            .filter_map(|tier| resolution_lines(Some(&tier)))
+            .min()
+            .unwrap_or(resolution);
+        let bonus = [480, 576, 720, 1080, 2160, 4320]
+            .into_iter()
+            .filter(|step| *step > floor && *step <= resolution)
+            .count() as i32
+            * 100;
+        if bonus > 0 {
+            decision.log_with_source(
+                &format!("quality_resolution_{}", quality.to_ascii_lowercase()),
+                bonus,
+                ScoringSource::Builtin,
+            );
+        }
+    }
     if !criteria.allow_upgrades && has_existing_file {
         decision.reject_requirement("upgrade_blocked_by_profile");
     }
@@ -946,7 +976,19 @@ pub fn apply_min_score_gate(profile: &QualityProfile, decision: &mut QualityProf
         .scoring_log
         .retain(|entry| entry.kind != ScoringEntryKind::FinalScoreRejection);
     decision.refresh();
-    if decision.release_score <= scryer_rules::BLOCK_SCORE_THRESHOLD {
+    // Resolution explains quality preference; it cannot recover a blocked
+    // group/language policy just by adding more pixels to the announcement.
+    let policy_score = sum_score_deltas(
+        decision
+            .scoring_log
+            .iter()
+            .filter(|entry| {
+                !(entry.source == ScoringSource::Builtin
+                    && entry.code.starts_with("quality_resolution_"))
+            })
+            .map(|entry| entry.delta),
+    );
+    if policy_score <= scryer_rules::BLOCK_SCORE_THRESHOLD {
         decision.reject(
             "score_at_or_below_block_threshold",
             ScoringEntryKind::FinalScoreRejection,
@@ -1029,18 +1071,19 @@ fn expected_bitrate_mbps(
     }
 }
 
-/// Codec efficiency relative to mixed-codec baseline.  A known H.265 release
-/// should be smaller than average; a known H.264 release slightly larger.
-///
-/// Values match the canonical codec strings emitted by `parse_release_metadata`
-/// (`"H.264"`, `"H.265"`, `"AV1"`, `"VP9"`).
+/// Approximate codec efficiency for size preference, not a bitstream limit.
+/// Retain the calibrated modern-codec ratios; legacy codecs need more room,
+/// while VVC uses the AV1 estimate rather than an unearned tighter expectation.
 fn codec_efficiency_factor(codec: Option<&VideoCodec>) -> f64 {
     match codec {
-        Some(VideoCodec::Av1) => 0.50,
+        Some(VideoCodec::Av1 | VideoCodec::Vvc) => 0.50,
         Some(VideoCodec::H265) => 0.75,
         Some(VideoCodec::Vp9) => 0.75,
         Some(VideoCodec::H264) => 1.10,
-        _ => 1.0,
+        Some(VideoCodec::Vc1) => 1.30,
+        Some(VideoCodec::Mpeg2) => 1.80,
+        Some(VideoCodec::Mpeg4 | VideoCodec::Xvid | VideoCodec::Divx) => 1.50,
+        None => 1.0,
     }
 }
 
@@ -1160,8 +1203,7 @@ impl CoverageSizeBasis {
 #[cfg(test)]
 pub const SIZE_PACK_MEMBER_BASIS_CODE: &str = "size_pack_member_basis";
 
-/// Preserve the mandatory upper size bound independently of customizable scores.
-/// This emits only a zero-point requirement failure; the pack owns the size curve.
+/// Size is an eligibility check and a search tie-breaker, never intrinsic points.
 pub(crate) fn apply_size_requirement(
     decision: &mut QualityProfileDecision,
     profile: &QualityProfile,
@@ -1171,11 +1213,12 @@ pub(crate) fn apply_size_requirement(
     size_basis: CoverageSizeBasis,
 ) {
     let Some(bytes) = size_bytes.filter(|bytes| *bytes > 0) else {
+        decision.size_fit_penalty = 0;
         return;
     };
     let category = normalize_media_size_category(category_hint);
     let balanced = profile.criteria.scoring_persona == ScoringPersona::Balanced;
-    // These are the release's admission limits, not persona score weights.
+    // These are typical sizes for preference, never evidence of implausibility.
     let bitrate = expected_bitrate_mbps(
         normalize_quality_tier(release.quality.as_deref()).as_deref(),
         category,
@@ -1200,19 +1243,135 @@ pub(crate) fn apply_size_requirement(
         .unwrap_or_else(|| default_runtime_minutes(category));
     let expected_gib =
         (bitrate * codec_factor * source_factor * (runtime * 60.0) / 8.0 / 1024.0).max(0.5);
-    let upper_ratio = if category == MediaSizeCategory::Anime {
-        6.0
+    let total_ratio = bytes as f64 / (1024.0 * 1024.0 * 1024.0) / expected_gib;
+    let member_runtime = size_basis
+        .member_runtime_minutes
+        .filter(|minutes| *minutes > 0);
+    let member_expected_gib = (bitrate
+        * codec_factor
+        * source_factor
+        * (f64::from(member_runtime.unwrap_or(runtime as i32)) * 60.0)
+        / 8.0
+        / 1024.0)
+        .max(0.5);
+    let member_ratio = bytes as f64 / (1024.0 * 1024.0 * 1024.0) / member_expected_gib;
+    // An indexer may report a member's size for a whole pack. Preserve that
+    // interpretation before either applying a lower bound or ranking size fit.
+    let member_basis = size_basis.covers_multiple_members()
+        && total_ratio
+            < if category == MediaSizeCategory::Anime {
+                0.3
+            } else {
+                0.35
+            }
+        && member_runtime.is_some()
+        && member_ratio
+            >= if category == MediaSizeCategory::Anime {
+                0.5
+            } else {
+                0.55
+            }
+        && member_ratio
+            < (if category == MediaSizeCategory::Anime {
+                2.1
+            } else {
+                2.4
+            }) * if release.video_codec == Some(VideoCodec::Av1) {
+                1.5
+            } else {
+                1.0
+            };
+    let ratio = if member_basis {
+        member_ratio
     } else {
-        8.0
-    } * if release.video_codec == Some(VideoCodec::Av1) {
-        1.5
-    } else {
-        1.0
+        total_ratio
     };
-    // The member-size reinterpretation only applies below the lower bands and
-    // therefore cannot change this upper-bound verdict.
-    if bytes as f64 / (1024.0 * 1024.0 * 1024.0) / expected_gib >= upper_ratio {
+
+    apply_implausible_size_limits(decision, release, bytes, size_basis);
+
+    let known_runtime = size_basis
+        .total_runtime_minutes
+        .is_some_and(|minutes| minutes > 0);
+
+    // Preserve persona intent without rewarding one narrow sweet spot. Ordinary
+    // variance ties; outside it, logarithmic distance treats equivalent codec
+    // compression ratios equally. Unknown runtime supplies no ranking evidence.
+    let compact = profile
+        .criteria
+        .scoring_overrides
+        .prefer_compact_encodes
+        .unwrap_or(profile.criteria.scoring_persona == ScoringPersona::Efficient);
+    let (low, high): (f64, f64) = if compact {
+        (0.5, 1.2)
+    } else if matches!(
+        profile.criteria.scoring_persona,
+        ScoringPersona::Audiophile | ScoringPersona::Compatible
+    ) {
+        (0.85, 3.2)
+    } else {
+        (0.65, 1.8)
+    };
+    let distance = if ratio < low {
+        (low / ratio).ln()
+    } else if ratio > high {
+        (ratio / high).ln()
+    } else {
+        0.0
+    };
+    decision.size_fit_penalty = if known_runtime && !member_basis {
+        (distance * 100.0).round() as i32
+    } else {
+        0
+    };
+}
+
+/// Deliberately broad delivery-media bounds, independent of typical size and
+/// persona. Codec efficiency is an average, not a maximum encoded bitrate:
+/// an AV1 file may retain lossless/multiple audio tracks or target transparency.
+fn apply_implausible_size_limits(
+    decision: &mut QualityProfileDecision,
+    release: &ParsedReleaseMetadata,
+    bytes: i64,
+    basis: CoverageSizeBasis,
+) {
+    let Some(runtime) = basis.total_runtime_minutes.filter(|minutes| *minutes > 0) else {
+        return;
+    };
+    if release.video_codec.is_none() || release.is_bd_disk {
+        return;
+    }
+    let (lower_h264_mbps, upper_mbps) =
+        match normalize_quality_tier(release.quality.as_deref()).as_deref() {
+            Some("480P") => (0.04, 40.0),
+            Some("576P") => (0.05, 40.0),
+            Some("720P") => (0.10, 100.0),
+            Some("1080P") => (0.20, 200.0),
+            Some("2160P") => (0.25, 600.0),
+            Some("4320P") => (0.35, 1800.0),
+            _ => return,
+        };
+    let actual_mbps = bytes as f64 * 8.0 / 1_000_000.0 / (f64::from(runtime) * 60.0);
+    // Includes ample headroom for audio, grain, high frame rates, remuxes and
+    // container/archive overhead. Never make an efficient codec's ceiling lower.
+    let upper_mbps = upper_mbps * if release.is_remux { 1.5 } else { 1.0 };
+    if actual_mbps > upper_mbps {
         decision.reject_requirement("size_implausible_for_quality");
+    }
+    // Only codecs with a calibrated efficiency estimate can support a lower
+    // bound. VVC and legacy codecs remain eligible on uncertain small sizes.
+    let lower_factor = match release.video_codec {
+        Some(VideoCodec::H264) => 1.0,
+        Some(VideoCodec::H265 | VideoCodec::Vp9) => 0.75 / 1.1,
+        Some(VideoCodec::Av1) => 0.5 / 1.1,
+        _ => return,
+    };
+    let special = release
+        .episode
+        .as_ref()
+        .is_some_and(|episode| episode.season == Some(0));
+    if actual_mbps < lower_h264_mbps * lower_factor && !basis.covers_multiple_members() && !special
+    {
+        decision.reject_requirement("size_implausibly_small_for_quality");
     }
 }
 
@@ -1724,7 +1883,10 @@ mod tests {
             &w,
         );
 
-        assert!(large.preference_score > small.preference_score);
+        assert_eq!(large.preference_score, small.preference_score);
+        // Unknown runtime is neutral for ranking, while classification remains
+        // available as an explanation using the category's fallback runtime.
+        assert_eq!(large.size_fit_penalty, small.size_fit_penalty);
     }
 
     #[test]
@@ -1880,7 +2042,8 @@ mod tests {
 
         assert!(short.allowed);
         assert!(long.allowed);
-        assert!(long.preference_score > short.preference_score);
+        assert_eq!(long.preference_score, short.preference_score);
+        assert!(long.size_fit_penalty < short.size_fit_penalty);
     }
 
     #[test]
@@ -1943,7 +2106,9 @@ mod tests {
             Some("size_excessive_for_quality")
         );
 
-        let still_implausible = decision_for_size(6 * 1024 * 1024 * 1024);
+        // A large transparent encode or lossless-audio mux is still plausible.
+        assert!(decision_for_size(6 * 1024 * 1024 * 1024).allowed);
+        let still_implausible = decision_for_size(100 * 1024 * 1024 * 1024);
         assert!(!still_implausible.allowed);
         assert_eq!(
             still_implausible
@@ -2078,3 +2243,11 @@ fn resolve_archival_quality(
 #[cfg(test)]
 #[path = "quality_profile_tests.rs"]
 mod quality_profile_tests;
+
+#[cfg(test)]
+#[path = "size_ranking_tests.rs"]
+mod size_ranking_tests;
+
+#[cfg(test)]
+#[path = "bitrate_sanity_tests.rs"]
+mod bitrate_sanity_tests;

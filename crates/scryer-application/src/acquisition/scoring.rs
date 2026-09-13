@@ -74,6 +74,8 @@ pub(crate) struct RankHead {
     pub negated_revision: i32,
     /// The canonical score, negated so that higher wins.
     pub negated_score: i32,
+    /// Size fit breaks otherwise equal release preferences; it is not a score.
+    pub size_fit_penalty: i32,
 }
 
 impl RankHead {
@@ -95,15 +97,17 @@ impl RankHead {
             negated_revision: parsed.map_or(0, |parsed| revision_rank(parsed).saturating_neg()),
             negated_score: decision
                 .map_or(0, |decision| decision.preference_score.saturating_neg()),
+            size_fit_penalty: decision.map_or(0, |decision| decision.size_fit_penalty),
         }
     }
 
-    fn key(&self) -> (bool, usize, i32, i32) {
+    fn key(&self) -> (bool, usize, i32, i32, i32) {
         (
             self.blocked,
             self.tier_index,
             self.negated_revision,
             self.negated_score,
+            self.size_fit_penalty,
         )
     }
 
@@ -147,16 +151,13 @@ pub(crate) struct SearchRank {
     /// Usenet age in whole hours. Fresher releases sort first; non-Usenet
     /// releases tie because swarm is their protocol-specific listing signal.
     pub usenet_age_hours: i64,
-    /// Size, negated so the larger release wins when every stronger signal ties.
-    pub negated_size_bytes: i64,
 }
 
 type SearchRankKey = (
-    (bool, usize, i32, i32),
+    (bool, usize, i32, i32, i32),
     bool,
     usize,
     u32,
-    i64,
     i64,
     i64,
     i64,
@@ -172,7 +173,6 @@ impl SearchRank {
             self.indexer_priority,
             self.negated_seeders,
             self.usenet_age_hours,
-            self.negated_size_bytes,
         )
     }
 }
@@ -231,7 +231,6 @@ mod tests {
             indexer_priority: 0,
             negated_seeders: 0,
             usenet_age_hours: 0,
-            negated_size_bytes: 0,
         }
     }
 
@@ -304,24 +303,51 @@ mod tests {
 
         let fresher = SearchRank {
             usenet_age_hours: 1,
-            negated_size_bytes: -1,
             ..rank()
         };
         let larger = SearchRank {
             usenet_age_hours: 2,
-            negated_size_bytes: -1_000,
             ..rank()
         };
         assert!(fresher.key() < larger.key());
 
-        let larger = SearchRank {
-            negated_size_bytes: -1_000,
-            ..rank()
+        let plausible = rank();
+        let mut outlier = rank();
+        outlier.head.size_fit_penalty = 100;
+        assert!(plausible.key() < outlier.key());
+        outlier.head.negated_score = -1;
+        assert!(
+            outlier.key() < plausible.key(),
+            "size cannot outweigh score"
+        );
+    }
+
+    #[test]
+    fn a_lower_quality_is_a_fallback_even_with_a_much_higher_score() {
+        let low = RankHead {
+            tier_index: 1,
+            negated_score: -2000,
+            ..Default::default()
         };
-        let smaller = SearchRank {
-            negated_size_bytes: -1,
-            ..rank()
+        let high = RankHead {
+            tier_index: 0,
+            negated_score: -400,
+            size_fit_penalty: 200,
+            ..Default::default()
         };
-        assert!(larger.key() < smaller.key());
+        assert!(high.key() < low.key());
+        let excluded = RankHead {
+            blocked: true,
+            ..high.clone()
+        };
+        assert!(
+            low.key() < excluded.key(),
+            "fallback wins if the higher quality is excluded"
+        );
+        let proper = RankHead {
+            negated_revision: -1,
+            ..high.clone()
+        };
+        assert!(proper.key() < high.key());
     }
 }

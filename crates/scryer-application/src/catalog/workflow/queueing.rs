@@ -1257,6 +1257,7 @@ mod auto_eligibility_reason_tests {
                 block_codes: block_codes.iter().map(|code| code.to_string()).collect(),
                 preference_score: 0,
                 tier_index: None,
+                size_fit_penalty: 0,
             }),
             extra: Default::default(),
             response_attributes: Default::default(),

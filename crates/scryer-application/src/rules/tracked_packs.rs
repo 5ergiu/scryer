@@ -23,8 +23,8 @@ pub struct TrackedRulePackPreview {
 
 impl AppUseCase {
     /// Atomically installs the bundled pack and retires saved rules that still
-    /// depend on the removed release input. Existing installations are left to
-    /// their explicit tracked-pack update flow.
+    /// depend on the removed release input. Applies the exact shipped size-policy
+    /// correction; other existing rules retain their explicit pack update flow.
     pub async fn bootstrap_builtin_trash_rule_pack(&self) -> AppResult<()> {
         let pack = super::builtin_trash::verified_pack()?;
         let _mutation = self.services.customization.rule_mutation_lock.lock().await;
@@ -41,7 +41,14 @@ impl AppUseCase {
             .list_rule_sets()
             .await?;
         if let Some(mut installation) = existing_installation {
-            let retired = retired_rules(&existing)?;
+            let mut retired = retired_rules(&existing)?;
+            // Correct only the exact shipped size policy. A copied or edited
+            // rule remains operator-authored policy, including its size scores.
+            retired.extend(super::builtin_trash::size_ranking_updates(
+                &pack,
+                &installation,
+                &existing,
+            ));
             if retired.is_empty() {
                 let engine = self.prospective_engine(&[], &[]).await?;
                 self.swap_user_rules_engine(engine);
@@ -52,7 +59,7 @@ impl AppUseCase {
             installation.last_updated = Utc::now();
             let engine = self.prospective_engine(&retired, &[]).await?;
             let actor = User::system_execution_actor();
-            let history = history_for(&retired, "retired_input_disabled", &actor.id);
+            let history = history_for(&retired, "builtin_policy_updated", &actor.id);
             if !self
                 .services
                 .customization

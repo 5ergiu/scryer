@@ -177,8 +177,8 @@ impl AppUseCase {
     /// now rather than remembered from when they were parked (BL3).
     ///
     /// The key is `RankHead`'s: refused releases last, then tier, then revision,
-    /// then score — the same order `evaluate_admission` compares in, so the
-    /// release this picks is the one the gate would prefer. A scope whose title
+    /// then score, with size fit breaking otherwise equal search preferences.
+    /// The admission ladder remains unchanged. A scope whose title
     /// or profile cannot be resolved keeps the stored order: an unorderable
     /// group is still worth trying, and the gate refuses whatever it should.
     async fn order_expired_releases_by_rank(
@@ -221,7 +221,7 @@ impl AppUseCase {
             .await
             .unwrap_or_default();
 
-        let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32)> =
+        let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32, i32)> =
             std::collections::HashMap::with_capacity(releases.len());
         for release in releases.iter() {
             let facts = crate::quality::canonical_context::score_parked_release_title(
@@ -239,6 +239,7 @@ impl AppUseCase {
                     crate::admission::tier_sort_key(facts.tier_index),
                     facts.revision.saturating_neg(),
                     facts.score.saturating_neg(),
+                    facts.size_fit_penalty,
                 ),
             );
         }
@@ -416,7 +417,7 @@ impl AppUseCase {
             // 400 and marked the 2160p `Superseded` without ever scoring it.
             //
             // Ordered by the search rank's own key, which is the same ladder
-            // admission compares on: allowed, tier, revision, score.
+            // admission compares on, then size fit breaks equal preferences.
             self.order_expired_releases_by_rank(&wanted, &mut releases)
                 .await;
 

@@ -1189,6 +1189,7 @@ impl AppUseCase {
                         negated_revision: -(i32::from(scored_release_metadata.is_proper_upload)
                             + i32::from(scored_release_metadata.is_repack)),
                         negated_score: decision.preference_score.saturating_neg(),
+                        size_fit_penalty: decision.size_fit_penalty,
                     },
                     non_preferred_protocol: !source_kind_matches_preference(
                         &result,
@@ -1220,7 +1221,6 @@ impl AppUseCase {
                     } else {
                         0
                     },
-                    negated_size_bytes: result.size_bytes.unwrap_or_default().saturating_neg(),
                 },
             );
 
