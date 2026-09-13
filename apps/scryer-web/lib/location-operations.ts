@@ -18,13 +18,11 @@ export type LocationOperationType =
   | "ROOT_MOVE"
   | "ROOT_CHANGE"
   | "ROOT_CONSOLIDATION"
-  | "CROSS_LIBRARY_TRANSFER"
-  | "ADOPTION";
+  | "CROSS_LIBRARY_TRANSFER";
 
 /** How the filesystem side of an operation is performed. */
 export type LocationExecutionMode =
   | "MOVE_WITH_SCRYER"
-  | "FILES_ALREADY_THERE"
   | "USER_MOVED_FILES"
   | "CATALOG_ONLY";
 
@@ -1074,10 +1072,10 @@ export function offersModeSelection(
  */
 export const REQUESTABLE_MOVE_MODES = [
   "MOVE_WITH_SCRYER",
-  "FILES_ALREADY_THERE",
+  "USER_MOVED_FILES",
 ] as const;
 
-export type RequestableMoveMode = (typeof REQUESTABLE_MOVE_MODES)[number] | "USER_MOVED_FILES";
+export type RequestableMoveMode = (typeof REQUESTABLE_MOVE_MODES)[number];
 
 /**
  * The mode to confirm a previewed plan under.
@@ -1091,272 +1089,7 @@ export function startModeInput(
   preview: LocationOperationPreview | null | undefined,
 ): RequestableMoveMode {
   if (preview?.mode === "USER_MOVED_FILES") return "USER_MOVED_FILES";
-  return preview?.mode === "FILES_ALREADY_THERE"
-    ? "FILES_ALREADY_THERE"
-    : "MOVE_WITH_SCRYER";
-}
-
-/** Reason codes the adoption planner stamps on its plan items (FR-050 to FR-053). */
-export const ADOPTION_REASON_CODES = {
-  adopted: "adopted_at_destination",
-  missing: "adoption_media_missing",
-  ambiguous: "adoption_media_ambiguous",
-  additional: "adoption_additional_file",
-  unreadable: "adoption_destination_unreadable",
-  redundantSource: "adoption_redundant_source",
-} as const;
-
-/** One file line the adoption accounting states, as the plan item carries it. */
-export type AdoptionFileLine = {
-  titleId: string | null;
-  /** Path the catalog holds, for a tracked file; null for a destination file. */
-  sourcePath: string | null;
-  /** Where the file is (or was looked for) at the destination. */
-  destinationPath: string | null;
-  sizeBytes: number;
-  detail: string | null;
-};
-
-/**
- * FR-051's four-way accounting, read back out of the plan the preview already
- * carries.
- *
- * The counts come from the plan's complete per-kind totals; the lines come from
- * the sections, which the server may sample. `listingComplete` says which of the
- * two the reader is looking at, so a truncated list is never mistaken for the
- * whole refusal.
- */
-export type AdoptionAccountingSummary = {
-  /** Tracked files found at the destination and adopted where they lie. */
-  accountedForFiles: number;
-  accountedForBytes: number;
-  /** Destination files no tracked media claims; surfaced, never touched. */
-  additionalFiles: number;
-  additionalBytes: number;
-  additional: AdoptionFileLine[];
-  /** Tracked files with no match at the destination (FR-052). */
-  missing: AdoptionFileLine[];
-  /** Tracked files whose match could not be narrowed to one file (FR-052). */
-  ambiguous: AdoptionFileLine[];
-  /** Destination folders that could not be scanned at all. */
-  unreadable: AdoptionFileLine[];
-  /** Whether every unaccounted file is listed above, or only a sample of them. */
-  listingComplete: boolean;
-  /** The FR-053 statement about what adoption does and does not delete. */
-  sourceCleanupNotice: string | null;
-  /** Whether the accounting refuses the confirmation (FR-052). */
-  blocks: boolean;
-};
-
-function adoptionFileLine(item: LocationPlanItem): AdoptionFileLine {
-  return {
-    titleId: item.titleId,
-    sourcePath: item.sourcePath,
-    destinationPath: item.destinationPath,
-    sizeBytes: toCount(item.sizeBytes),
-    detail: item.detail,
-  };
-}
-
-function planKindTotal(
-  preview: LocationOperationPreview,
-  kind: LocationPlanItemKind,
-): number {
-  const entry = (preview.counts?.byKind ?? []).find(
-    (count) => count.kind === kind,
-  );
-  return entry ? toCount(entry.count) : 0;
-}
-
-/**
- * The adoption accounting for a preview, or null when this preview is not an
- * adoption.
- *
- * Every unaccounted file gets its own plan item plus one title-level rollup
- * carrying no source path. The rollup would double-count a file line and read
- * as a phantom row, so only the per-file items (the ones naming a tracked
- * file) become lines here.
- */
-export function adoptionAccounting(
-  preview: LocationOperationPreview | null | undefined,
-): AdoptionAccountingSummary | null {
-  if (!preview || preview.mode !== "FILES_ALREADY_THERE") {
-    return null;
-  }
-  const missing: AdoptionFileLine[] = [];
-  const ambiguous: AdoptionFileLine[] = [];
-  const unreadable: AdoptionFileLine[] = [];
-  const additional: AdoptionFileLine[] = [];
-  let sourceCleanupNotice: string | null = null;
-  let listingComplete = true;
-
-  const sections = preview.sections ?? [];
-  for (const section of sections) {
-    if (section.kind === "BLOCKED" && !section.complete) {
-      listingComplete = false;
-    }
-    for (const item of section.items) {
-      switch (item.reasonCode) {
-        case ADOPTION_REASON_CODES.missing:
-          if (item.sourcePath) {
-            missing.push(adoptionFileLine(item));
-          }
-          break;
-        case ADOPTION_REASON_CODES.ambiguous:
-          if (item.sourcePath) {
-            ambiguous.push(adoptionFileLine(item));
-          }
-          break;
-        case ADOPTION_REASON_CODES.unreadable:
-          unreadable.push(adoptionFileLine(item));
-          break;
-        case ADOPTION_REASON_CODES.additional:
-          additional.push(adoptionFileLine(item));
-          break;
-        case ADOPTION_REASON_CODES.redundantSource:
-          sourceCleanupNotice = sourceCleanupNotice ?? item.detail;
-          break;
-        default:
-          break;
-      }
-    }
-  }
-
-  const additionalSection = sections.find(
-    (section) => section.kind === "UNMANAGED_CONTENT",
-  );
-  const adoptedSection = sections.find((section) => section.kind === "MOVE");
-
-  return {
-    accountedForFiles: planKindTotal(preview, "MOVE"),
-    accountedForBytes: toCount(adoptedSection?.bytesTotal ?? 0),
-    additionalFiles: planKindTotal(preview, "UNMANAGED_CONTENT"),
-    additionalBytes: toCount(additionalSection?.bytesTotal ?? 0),
-    additional,
-    missing,
-    ambiguous,
-    unreadable,
-    listingComplete,
-    sourceCleanupNotice,
-    blocks:
-      missing.length > 0 || ambiguous.length > 0 || unreadable.length > 0,
-  };
-}
-
-/**
- * Whether an adoption preview has anything unresolved to state. A clean
- * adoption still renders its accounting; this is what turns the panel from a
- * summary into a refusal.
- */
-export function adoptionBlocks(
-  accounting: AdoptionAccountingSummary | null | undefined,
-): boolean {
-  return accounting?.blocks === true;
-}
-
-/**
- * The reason codes an adoption refusal stamps on its `Blocked` plan items
- * (FR-052). The other two adoption codes are surfaced and never refused, so
- * they are not among them.
- */
-export type AdoptionBlockingReasonCode =
-  | typeof ADOPTION_REASON_CODES.missing
-  | typeof ADOPTION_REASON_CODES.ambiguous
-  | typeof ADOPTION_REASON_CODES.unreadable;
-
-/**
- * Severity order for a title carrying more than one refusal: a folder that
- * could not be read at all comes before a file that was looked for and not
- * found, which comes before one that matched too many candidates.
- */
-const ADOPTION_BLOCKING_REASON_ORDER: AdoptionBlockingReasonCode[] = [
-  ADOPTION_REASON_CODES.unreadable,
-  ADOPTION_REASON_CODES.missing,
-  ADOPTION_REASON_CODES.ambiguous,
-];
-
-function adoptionBlockingReasonCode(
-  item: LocationPlanItem,
-): AdoptionBlockingReasonCode | null {
-  const code = item.reasonCode;
-  if (
-    code &&
-    (ADOPTION_BLOCKING_REASON_ORDER as readonly string[]).includes(code)
-  ) {
-    return code as AdoptionBlockingReasonCode;
-  }
-  return null;
-}
-
-/** One title an adoption refusal stops, as the plan items name it (FR-052). */
-export type AdoptionBlockedTitle = {
-  titleId: string;
-  /** Every refusal reason stamped on this title, in severity order. */
-  reasonCodes: AdoptionBlockingReasonCode[];
-  /**
-   * The reason the row leads with, or null when only the title-level rollup
-   * named this title. That rollup always reads "missing" — even for a title
-   * whose only problem is ambiguity — so it marks the title as refused without
-   * ever being read as a reason.
-   */
-  primaryReasonCode: AdoptionBlockingReasonCode | null;
-};
-
-/**
- * Every title an adoption refusal blocks, in payload order.
- *
- * The refusal rides on `BLOCKED` plan items and not on the classification — the
- * title itself still classifies as a plain root move — so the plan is the only
- * place the deselect affordance can learn which titles FR-052's "resolve them
- * or deselect the title" is actually about.
- */
-export function adoptionBlockedTitles(
-  preview: LocationOperationPreview | null | undefined,
-): AdoptionBlockedTitle[] {
-  if (!preview || preview.mode !== "FILES_ALREADY_THERE") {
-    return [];
-  }
-  const reasonsByTitle = new Map<string, Set<AdoptionBlockingReasonCode>>();
-  const order: string[] = [];
-  for (const section of preview.sections ?? []) {
-    for (const item of section.items) {
-      const code = adoptionBlockingReasonCode(item);
-      if (!code || !item.titleId) {
-        continue;
-      }
-      let reasons = reasonsByTitle.get(item.titleId);
-      if (!reasons) {
-        reasons = new Set<AdoptionBlockingReasonCode>();
-        reasonsByTitle.set(item.titleId, reasons);
-        order.push(item.titleId);
-      }
-      // The same rule the accounting reads by: a per-file refusal names the
-      // file it is about, and the title-level rollup carries no source path.
-      // Only the former says which reason applies. An unreadable destination
-      // has no tracked file to name and is always its own reason.
-      if (code === ADOPTION_REASON_CODES.unreadable || item.sourcePath) {
-        reasons.add(code);
-      }
-    }
-  }
-  return order.map((titleId) => {
-    const reasons = reasonsByTitle.get(titleId);
-    const reasonCodes = ADOPTION_BLOCKING_REASON_ORDER.filter(
-      (code) => reasons?.has(code) === true,
-    );
-    return {
-      titleId,
-      reasonCodes,
-      primaryReasonCode: reasonCodes[0] ?? null,
-    };
-  });
-}
-
-/** Translation key for one adoption refusal reason, when there is one to state. */
-export function adoptionBlockedReasonKey(
-  code: AdoptionBlockingReasonCode | null | undefined,
-): string | null {
-  return code ? `move.adoptionBlockedReason.${code}` : null;
+  return "MOVE_WITH_SCRYER";
 }
 
 /**
@@ -1369,17 +1102,11 @@ export type BlockingTitleRow = {
   entry: LocationClassifiedTitle | null;
   /** The classification's own prose, when it carried any. */
   reason: string | null;
-  /** The adoption refusal's reason, when an adoption is what blocks it. */
-  adoptionReasonCode: AdoptionBlockingReasonCode | null;
 };
 
 /**
- * Every title the user must deselect to proceed: the classification-blocked
- * ones first, in render order, then the adoption-refused ones in payload order.
- *
- * A title blocked both ways — an adoption whose title also needs resolution —
- * gets one row carrying both reasons, so the deselect control is never rendered
- * twice for the same id (FR-016, FR-052, FR-086).
+ * Every title the user must deselect to proceed, in render order, and never
+ * twice for the same id (FR-016, FR-086).
  */
 export function blockingTitleRows(
   preview: LocationOperationPreview | null | undefined,
@@ -1394,24 +1121,8 @@ export function blockingTitleRows(
       titleId: entry.titleId,
       entry,
       reason: entry.reason,
-      adoptionReasonCode: null,
     };
     byTitle.set(entry.titleId, row);
-    rows.push(row);
-  }
-  for (const blocked of adoptionBlockedTitles(preview)) {
-    const existing = byTitle.get(blocked.titleId);
-    if (existing) {
-      existing.adoptionReasonCode = blocked.primaryReasonCode;
-      continue;
-    }
-    const row: BlockingTitleRow = {
-      titleId: blocked.titleId,
-      entry: null,
-      reason: null,
-      adoptionReasonCode: blocked.primaryReasonCode,
-    };
-    byTitle.set(blocked.titleId, row);
     rows.push(row);
   }
   return rows;
