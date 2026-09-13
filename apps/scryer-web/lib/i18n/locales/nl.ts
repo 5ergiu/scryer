@@ -145,7 +145,7 @@ const nl: LocaleDictionary = {
   "dashboard.emptyQueue": "Er wordt niets gedownload.",
   "dashboard.columnIndexer": "Indexer",
   "dashboard.columnSearch": "Zoeken",
-  "dashboard.columnGrab": "Grab",
+  "dashboard.columnGrab": "Ophalen",
   "dashboard.columnFail": "Mislukt",
   "dashboard.columnQuota": "Quota",
   "dashboard.columnStatus": "Status",
@@ -465,7 +465,7 @@ const nl: LocaleDictionary = {
   "jobs.recentRuns": "Recente runs",
   "jobs.loadingRecentRuns": "Recente runs laden…",
   "jobs.noRunsYet": "Nog geen runs geregistreerd.",
-  "jobs.healthCheckIssues": "Problemen met gezondheidscontrole",
+  "jobs.healthCheckIssues": "Problemen met controle",
   "jobs.nextRunPrefix": "Volgende run: {{value}}",
   "jobs.startedAt": "Gestart {{value}}",
   "jobs.completedAt": "Voltooid {{value}}",
@@ -511,8 +511,8 @@ const nl: LocaleDictionary = {
   "settings.qualityProfileOverrideLabel": "{{category}}-kwaliteitsoverride",
   "settings.qualityProfileOverridesLabel": "Kwaliteitsprofiel-overrides per categorie",
   "settings.qualityProfileOverrideHelp":
-    "Gebruik overnemen om terug te vallen op de globale standaard voor deze inhoudscategorie.",
-  "settings.qualityProfileInheritLabel": "Overnemen van globaal",
+    "Gebruik overerven om terug te vallen op de globale standaard voor deze inhoudscategorie.",
+  "settings.qualityProfileInheritLabel": "Overerven van globaal",
   "settings.qualityProfileCatalogInvalid":
     "Kwaliteitsprofielcatalogus is geen geldige JSON.",
   "settings.qualityProfileUnknown": 'Onbekend kwaliteitsprofiel-id "{{id}}".',
@@ -521,35 +521,35 @@ const nl: LocaleDictionary = {
   "settings.downloadClientRoutingSavedFor":
     'Downloadclient-routing opgeslagen voor "{{name}}".',
   "settings.delayProfiles": "Vertragingsprofielen",
-  "settings.acquisition": "Acquisitie",
-  "settings.acquisitionSaved": "Acquisitie-instellingen opgeslagen.",
-  "settings.acquisitionIntro": "RSS is het standaard acquisitiepad: elk gewenst item wordt actief één keer per indexer doorzocht en daarna gevolgd via RSS. Actieve backfill is getimed en eindig.",
-  "settings.acquisitionEnabled": "Automatische acquisitie inschakelen",
-  "settings.acquisitionEnabledHelp": "Voert de acquisitielus op de achtergrond uit: convergentiezoekacties en RSS-matching.",
-  "settings.acquisitionThresholds": "Upgrade-drempels",
-  "settings.acquisitionUpgradeCooldownHours": "Upgrade-afkoelperiode (uren)",
-  "settings.acquisitionUpgradeCooldownHoursHelp": "Minimale tijd tussen upgrade-grabs voor hetzelfde item.",
-  "settings.acquisitionSameTierMinDelta": "Minimale scoredelta binnen tier",
-  "settings.acquisitionSameTierMinDeltaHelp": "Een release in dezelfde kwaliteitstier moet de score van het huidige bestand met minstens dit bedrag overtreffen.",
-  "settings.acquisitionCrossTierMinDelta": "Minimale scoredelta tussen tiers",
-  "settings.acquisitionCrossTierMinDeltaHelp": "Een release in een hogere kwaliteitstier moet de score van het huidige bestand met minstens dit bedrag overtreffen.",
-  "settings.acquisitionForcedUpgradeDeltaBypass": "Delta-bypass bij geforceerde upgrade",
-  "settings.acquisitionForcedUpgradeDeltaBypassHelp": "Een scoreverbetering van deze omvang upgrade onmiddellijk en omzeilt de afkoelperiode.",
+  "settings.acquisition": "Ververven",
+  "settings.acquisitionSaved": "Ververvingsinstellingen opgeslagen.",
+  "settings.acquisitionIntro": "RSS is het standaard ververvingspad: elk gewenst item wordt actief één keer per indexer doorzocht en daarna gevolgd via RSS. Actief navullen is getimed en eindig.",
+  "settings.acquisitionEnabled": "Automatisch ververven inschakelen",
+  "settings.acquisitionEnabledHelp": "Voert de ververvingslus op de achtergrond uit: convergentiezoekacties en RSS-matching.",
+  "settings.acquisitionThresholds": "Opwaarderingsdrempels",
+  "settings.acquisitionUpgradeCooldownHours": "Afkoelperiode  voor opwaarderen (uren)",
+  "settings.acquisitionUpgradeCooldownHoursHelp": "Minimale tijd tussen opwaarderen voor hetzelfde item.",
+  "settings.acquisitionSameTierMinDelta": "Minimale scoreverschil binnen niveau",
+  "settings.acquisitionSameTierMinDeltaHelp": "Een release in dezelfde kwaliteitsniveaumoet de score van het huidige bestand met minstens deze waarde overtreffen.",
+  "settings.acquisitionCrossTierMinDelta": "Minimale scoreverschil tussen niveaus",
+  "settings.acquisitionCrossTierMinDeltaHelp": "Een release in een hogere kwaliteitsniveau moet de score van het huidige bestand met minstens deze waarde overtreffen.",
+  "settings.acquisitionForcedUpgradeDeltaBypass": "Verschil bij geforceerd opwaarderen",
+  "settings.acquisitionForcedUpgradeDeltaBypassHelp": "Een scoreverbetering van deze omvang waardeert onmiddellijk op en omzeilt de afkoelperiode.",
   "settings.acquisitionConvergence": "Convergentie & timing",
   "settings.acquisitionPollIntervalSeconds": "Pollinterval (seconden)",
-  "settings.acquisitionPollIntervalSecondsHelp": "Hoe vaak de acquisitielus op de achtergrond wakker wordt.",
+  "settings.acquisitionPollIntervalSecondsHelp": "Hoe vaak de ververvingslus op de achtergrond wakker wordt.",
   "settings.acquisitionMaxScopesPerCycle": "Max. items geëvalueerd per cyclus",
-  "settings.acquisitionMaxScopesPerCycleHelp": "Evaluatielimiet voor één backfillcyclus. Indexer-rate limits — niet dit aantal — bepalen het werkelijke verzoektarief.",
-  "settings.acquisitionReconvergeDays": "Opnieuw convergeren na (dagen)",
-  "settings.acquisitionReconvergeDaysHelp": "0 schakelt het uit (aanbevolen): geconvergeerde items worden via RSS gevolgd. Schakel alleen in als noodmaatregel wanneer een feed onvolledig blijkt.",
+  "settings.acquisitionMaxScopesPerCycleHelp": "Evaluatielimiet voor één ververvingscyclus. Indexer-rate limits — niet dit aantal — bepalen het werkelijke verzoektarief.",
+  "settings.acquisitionReconvergeDays": "Opnieuw ververven na (dagen)",
+  "settings.acquisitionReconvergeDaysHelp": "0 schakelt het uit (aanbevolen): ververvende items worden via RSS gevolgd. Schakel alleen in als noodmaatregel wanneer een feed onvolledig blijkt.",
   "settings.delayProfileExisting": "Bestaande vertragingsprofielen",
   "settings.delayProfileNone":
-    "Geen vertragingsprofielen geconfigureerd. Releases worden onmiddellijk gegrabbed.",
+    "Geen vertragingsprofielen geconfigureerd. Releases worden onmiddellijk vervorven.",
   "settings.delayProfileCreate": "Profiel aanmaken",
   "settings.delayProfileCreateNew": "Nieuw vertragingsprofiel aanmaken",
   "settings.delayProfileEdit": "Profiel bewerken",
   "settings.delayProfileConfirmDiscardTitle":
-    "Huidige vertragingsprofielbewerkingen negeren?",
+    "Huidige vertragingsprofielbewerkingen verwerpen?",
   "settings.delayProfileConfirmDiscardDescription":
     "Je huidige vertragingsprofielbewerkingen gaan verloren.",
   "settings.delayProfileDeleteConfirm": "Dit vertragingsprofiel verwijderen?",
@@ -558,10 +558,10 @@ const nl: LocaleDictionary = {
   "settings.delayProfileNameRequired": "Naam vertragingsprofiel is verplicht.",
   "settings.delayProfileUsenetDelay": "Usenet-vertraging (minuten)",
   "settings.delayProfileUsenetDelayHelp":
-    "Hoe lang usenet-releases worden vastgehouden voordat ze worden gegrabbed. 0 = onmiddellijk grabben.",
+    "Hoe lang usenet-releases worden vastgehouden voordat ze worden vervorven. 0 = onmiddellijk vervorven.",
   "settings.delayProfileTorrentDelay": "Torrent-vertraging (minuten)",
   "settings.delayProfileTorrentDelayHelp":
-    "Hoe lang torrent-releases worden vastgehouden voordat ze worden gegrabbed. 0 = onmiddellijk grabben.",
+    "Hoe lang torrent-releases worden vastgehouden voordat ze worden vervorven. 0 = onmiddellijk vervorven.",
   "settings.delayProfilePreferred": "Gewenst protocol",
   "settings.delayProfilePreferredHelp":
     "Scoregebaseerde bypass geldt alleen voor releases op het gewenste protocol.",
@@ -574,17 +574,17 @@ const nl: LocaleDictionary = {
   "settings.delayProfileProtocolMode.onlyTorrent": "Alleen Torrent",
   "settings.delayProfileMinAge": "Minimale leeftijd (minuten)",
   "settings.delayProfileMinAgeHelp":
-    "Alleen Usenet. Harde grens — releases jonger dan dit worden vastgehouden ongeacht de score. Voorkomt grabben van onvolledige NZB's. 0 = uitgeschakeld.",
+    "Alleen Usenet. Harde grens — releases jonger dan dit worden vastgehouden ongeacht de score. Voorkomt ophalen van onvolledige NZB's. 0 = uitgeschakeld.",
   "settings.delayProfileBypassLabel": "Bypass-scoredrempel",
   "settings.delayProfileBypassPlaceholder": "Laat leeg om nooit te bypassen",
   "settings.delayProfileBypassHelp":
-    "Als een release op het gewenste protocol deze drempel scoort of overschrijdt, grab deze onmiddellijk ongeacht de vertraging.",
+    "Als een release op het gewenste protocol deze drempel scoort of overschrijdt, haal deze onmiddellijk op ongeacht de vertraging.",
   "settings.delayProfileBypassHighestQualityLabel": "Vertraging bypassen voor hoogste kwaliteit",
   "settings.delayProfileBypassHighestQualityHelp":
-    "Grab de hoogstkwalitatieve geschikte release onmiddellijk wanneer deze op het gewenste protocol staat.",
+    "Haal de hoogstkwalitatieve geschikte release onmiddellijk op wanneer deze op het gewenste protocol staat.",
   "settings.delayProfileFacetsLabel": "Geldt voor",
   "settings.delayProfileFacetsHelp":
-    "Welke inhoudstypen dit profiel geldt. Laat alles uitgevinkt voor alle typen.",
+    "Voor welke inhoudstypen dit profiel geldt. Laat alles uitgevinkt voor alle typen.",
   "settings.delayProfileAllFacets": "Alles",
   "settings.delayProfileTagsLabel": "Tags",
   "settings.delayProfileTagsPlaceholder":
@@ -600,12 +600,12 @@ const nl: LocaleDictionary = {
   "settings.seedingProfiles": "Seedingprofielen",
   "settings.seedingProfileExisting": "Bestaande seedingprofielen",
   "settings.seedingProfileNone":
-    "Geen seedingprofielen geconfigureerd. Torrents worden gegrabbed zonder Scryer-seeddoelen en volgen de eigen limieten van je downloadclient.",
+    "Geen seedingprofielen geconfigureerd. Torrents worden opgehaald zonder Scryer-seeddoelen en volgen de eigen limieten van je downloadclient.",
   "settings.seedingProfileCreate": "Profiel aanmaken",
   "settings.seedingProfileCreateNew": "Nieuw seedingprofiel aanmaken",
   "settings.seedingProfileEdit": "Profiel bewerken",
   "settings.seedingProfileConfirmDiscardTitle":
-    "Huidige seedingprofielbewerkingen negeren?",
+    "Huidige seedingprofielbewerkingen verwerpen?",
   "settings.seedingProfileConfirmDiscardDescription":
     "Je huidige seedingprofielbewerkingen gaan verloren.",
   "settings.seedingProfileDeleteConfirm": "Dit seedingprofiel verwijderen?",
@@ -614,16 +614,16 @@ const nl: LocaleDictionary = {
   "settings.seedingProfileGoalPlaceholder": "Laat leeg om de eigen limiet van de client te gebruiken",
   "settings.seedingProfileRatioLabel": "Ratio",
   "settings.seedingProfileRatioHelp":
-    "Stop met seeden zodra deze share-ratio is bereikt. Leeg geeft de limiet van de downloadclient door.",
-  "settings.seedingProfileSeedTimeFormatHint": "Duur zoals 90m, 36h, 1d 12h of 2w. Een gewoon getal is minuten.",
+    "Stop met seeden zodra deze deelratio is bereikt. Leeg geeft de limiet van de downloadclient door.",
+  "settings.seedingProfileSeedTimeFormatHint": "Duur zoals 90m, 36h, 1d, 12h of 2w. Een gewoon getal is minuten.",
   "settings.seedingProfileSeedTimeLabel": "Seedtijd",
   "settings.seedingProfileMinimumSeedersLabel": "Minimale seeders",
   "settings.seedingProfileMinimumSeedersHelp":
-    "Releases van een indexer die dit profiel gebruikt, hebben minstens dit aantal seeders nodig om gegrabbed te worden. Laat leeg voor de systeemstandaard; voer 0 in om de controle uit te schakelen.",
+    "Releases van een indexer die dit profiel gebruikt, hebben minstens dit aantal seeders nodig om opgehaald te worden. Laat leeg voor de systeemstandaard; voer 0 in om de controle uit te schakelen.",
   "settings.seedingProfileMinimumSeedersUnknownHelp":
     "Indexers die geen seedertelling rapporteren, zijn altijd geschikt.",
   "settings.seedingProfileMinimumSeedersRoutingHelp":
-    "Een profiel dat alleen via een downloadclient-routingentry is toegewezen, past zijn minimum niet toe: de controle draait voordat een client wordt gekozen, dus kijkt naar het indexerprofiel, dan een profiel geïmporteerd van Prowlarr, dan het standaardprofiel.",
+    "Een profiel dat alleen via een routeringsregel van de downloadclient is toegewezen, past zijn minimum niet toe: de controle draait voordat een client wordt gekozen, dus kijkt naar het indexerprofiel, dan een profiel geïmporteerd van Prowlarr, dan het standaardprofiel.",
   "settings.seedingProfileMinimumSeedersInheritHelp":
     "Een leeg veld neemt de instelling Standaard minimum seeders over, niet een waarde geïmporteerd van Prowlarr — dit profiel toewijzen aan een Prowlarr-beheerde indexer vervangt dat geïmporteerde minimum.",
   "settings.seedingProfileMinimumSeedersPlaceholder":
@@ -673,12 +673,12 @@ const nl: LocaleDictionary = {
   "settings.seedingProfileGoalMetKeep": "Blijven seeden",
   "settings.seedingProfileNeverRemoveLabel": "Nooit verwijderen",
   "settings.seedingProfileNeverRemoveHelp":
-    "Blokkeert alle automatische verwijdering voor torrents gegrabbed onder dit profiel, ook na bereikt doel. Je moet ze zelf verwijderen.",
+    "Blokkeert de automatische verwijdering voor torrents opgehaald onder dit profiel, ook nadat het doel bereikt doel is. Je moet ze zelf verwijderen.",
   "settings.seedingProfileNeverRemoveBadge": "Nooit verwijderd",
   "settings.seedingProfileDefaultTitle": "Standaard seedingprofiel",
   "settings.seedingProfileDefaultLabel": "Geldt wanneer niets specifieker matcht",
   "settings.seedingProfileDefaultHelp":
-    "Gebruikt voor torrent-grabs wanneer noch de indexer noch de downloadclient-routingentry een profiel noemt.",
+    "Gebruikt voor het ophalen van torrent wanneer noch de indexer noch de routeringsregel van de downloadclient een profiel noemt.",
   "settings.seedingProfileDefaultNone": "Geen standaard — gebruik de eigen limieten van de client",
   "settings.seedingProfileDefaultBadge": "Standaard",
   "settings.seedingProfileMissing": 'Ontbrekend profiel "{{id}}"',
@@ -694,14 +694,14 @@ const nl: LocaleDictionary = {
     "Beheerd door Prowlarr · minimum 1 seeder",
   "settings.seedingProfileProwlarrManagedMinimumOff":
     "Beheerd door Prowlarr · seedercontrole uit",
-  "settings.seedingProfileInherit": "Standaard overnemen",
+  "settings.seedingProfileInherit": "Standaard overerven",
   "settings.seedingProfileInheritProwlarrMinimum":
-    "Standaard overnemen · Prowlarr-minimum {{count}} seeders",
+    "Standaard overerven · Prowlarr-minimum {{count}} seeders",
   "settings.seedingProfileInheritProwlarrMinimumOne":
-    "Standaard overnemen · Prowlarr-minimum 1 seeder",
+    "Standaard overerven · Prowlarr-minimum 1 seeder",
   "settings.seedingProfileInheritProwlarrMinimumOff":
-    "Standaard overnemen · Prowlarr-seedercontrole uit",
-  "settings.seedingProfileRoutingInherit": "Globale standaard overnemen",
+    "Standaard overerven · Prowlarr-seedercontrole uit",
+  "settings.seedingProfileRoutingInherit": "Globale standaard overerven",
   "settings.seedingProfileColumn": "Seedingprofiel",
   "settings.seedingProfileIndexerLabel": "Seedingprofiel voor {{name}}",
   "settings.seedingProfileRoutingLabel": "Seedingprofiel voor {{name}}",
@@ -745,16 +745,16 @@ const nl: LocaleDictionary = {
   "settings.downloadClientCreateNew": "Downloadclient verbinden",
   "settings.downloadClientUpdate": "Downloadclient bijwerken",
   "settings.downloadClientConfirmDiscardTitle":
-    "Huidige downloadclientbewerkingen negeren?",
+    "Huidige aanpassingen aan de downloadclient verwerpen?",
   "settings.downloadClientConfirmDiscardDescription":
-    "Je huidige downloadclientbewerkingen gaan verloren.",
+    "Je huidige aanpassingen aan de downloadclient gaan verloren.",
   "settings.downloadClientUseSsl": "SSL gebruiken",
   "settings.downloadClientUrlBase": "URL-basis",
   "settings.downloadClientUrlPreview": "Berekende basis-URL",
   "settings.downloadClientCategory": "Categorie",
   "settings.downloadClientRecentPriority": "Prioriteit recente wachtrij",
   "settings.downloadClientOlderPriority": "Prioriteit oudere wachtrij",
-  "settings.downloadClientPriorityForce": "Force",
+  "settings.downloadClientPriorityForce": "Geforceerd",
   "settings.downloadClientPriorityVeryHigh": "Zeer hoog",
   "settings.downloadClientPriorityHigh": "Hoog",
   "settings.downloadClientPriorityNormal": "Normaal",
@@ -766,41 +766,41 @@ const nl: LocaleDictionary = {
   "settings.downloadClientUseSslInfo":
     "Gebruik SSL/TLS bij verbinden met deze downloadclient.",
   "settings.downloadClientEnabledInfo":
-    "Wanneer uitgeschakeld, wordt deze client overgeslagen tijdens downloadrouting.",
+    "Wanneer uitgeschakeld, wordt deze client overgeslagen tijdens routering van de download.",
   "settings.downloadClientEnabledLabel": "Downloadclient inschakelen",
   "settings.downloadClientFilesystemPathMapping":
-    "Bestandssysteempadmapping (Geavanceerd)",
+    "Koppeling van bestandssysteempaden (Geavanceerd)",
   "settings.downloadClientFilesystemPathMappingHelp":
-    "Remote padmappings zijn zelden nodig. Gebruik ze alleen wanneer Scryer en deze downloadclient dezelfde downloadmap op verschillende bestandssysteempaden zien.",
-  "settings.downloadClientRemotePathMappings": "Remote padmappings",
+    "Externe koppeling van mappen is zelden nodig. Gebruik dit alleen wanneer Scryer en deze downloadclient dezelfde downloadmap op verschillende bestandssysteempaden zien.",
+  "settings.downloadClientRemotePathMappings": "Externe koppeling van mappen",
   "settings.downloadClientRemotePathMappingsHelp":
-    "Elke regel wordt opgeslagen als REMOTE => LOCAL.",
-  "settings.downloadClientRemotePathMappingsRemoteLabel": "Remote pad",
+    "Elke regel wordt opgeslagen als EXTERN => LOKAAL.",
+  "settings.downloadClientRemotePathMappingsRemoteLabel": "Externe pad",
   "settings.downloadClientRemotePathMappingsRemoteHelp":
     "Pad gerapporteerd door de downloadclient.",
   "settings.downloadClientRemotePathMappingsLocalLabel": "Lokaal pad",
   "settings.downloadClientRemotePathMappingsLocalHelp":
     "Pad dat Scryer op deze machine moet gebruiken.",
-  "settings.downloadClientRemotePathMappingsAdd": "Mapping toevoegen",
+  "settings.downloadClientRemotePathMappingsAdd": "Koppeling toevoegen",
   "settings.downloadClientRemotePathMappingsEmptyState":
-    "Nog geen padmappings geconfigureerd. Voeg er een toe alleen als Scryer het pad van de downloadclient niet kan lezen.",
+    "Nog geen koppelingen geconfigureerd. Voeg er een toe alleen als Scryer het pad van de downloadclient niet kan lezen.",
   "settings.downloadClientRemotePathMappingsExampleLabel": "Voorbeeld",
   "settings.downloadClientRemotePathMappingsRemoteRequired":
-    "Remote pad is verplicht wanneer een mappingrij aanwezig is.",
+    "Extern pad is verplicht wanneer een koppeling aanwezig is.",
   "settings.downloadClientRemotePathMappingsLocalRequired":
-    "Lokaal pad is verplicht wanneer een mappingrij aanwezig is.",
+    "Lokaal pad is verplicht wanneer een koppeling aanwezig is.",
   "settings.downloadClientRemotePathMappingsLocalAbsolute":
     "Lokaal pad moet een absoluut pad zijn.",
   "settings.downloadClientRemotePathMappingsRemoteDuplicate":
-    "Remote pad dupliceert een andere mapping in deze client.",
+    "Extern pad dupliceert een andere koppeling in deze client.",
   "settings.downloadClientSabnzbdAuthHelp":
     "SABnzbd ondersteunt een API-sleutel of gebruikersnaam/wachtwoord. Voor Decypharr is dit doorgaans host :8282, URL-basis /sabnzbd, gebruikersnaam = je Arr-URL, wachtwoord = je Arr-token.",
   "settings.downloadClientSabnzbdNzbdavHelp":
-    "Voor NzbDav wijs je SAB-compatibele voltooide downloads naar het gemounte completed-symlinks-pad, zorg dat Scryer die mount lokaal kan lezen en voeg remote padmappings toe als NzbDav een ander zichtbaar pad rapporteert.",
+    "Voor NzbDav wijs je SAB-compatibele voltooide downloads naar het aangekoppelde completed-symlinks-pad, zorg dat Scryer dit aankoppelpunt lokaal kan lezen en voeg externe koppelingen toe als NzbDav een ander zichtbaar pad rapporteert.",
   "settings.downloadClientQbittorrentDecypharrHelp":
     "Voor Decypharr-ondersteunde qBittorrent gebruik je je Arr-URL als gebruikersnaam en je Arr-token als wachtwoord. Stel de overeenkomstige Arr-naam, zoals radarr of sonarr, in bij Downloadclient-routing voor die facet.",
   "settings.downloadClientDecypharrFilesystemHelp":
-    "Import van voltooide downloads werkt alleen vanaf paden die Scryer lokaal kan lezen. Voor Decypharr en NzbDav importeert Scryer vanuit de voltooide symlinkmap gerapporteerd door de client, dus mount dat pad in Scryer en voeg remote padmappings toe wanneer de gerapporteerde paden verschillen.",
+    "Import van voltooide downloads werkt alleen vanaf paden die Scryer lokaal kan lezen. Voor Decypharr en NzbDav importeert Scryer vanuit de voltooide symlinkmap gerapporteerd door de client, dus koppel dit pad aan Scryer en voeg externe koppelingen toe wanneer de gerapporteerde paden verschillen.",
   "settings.downloadClientNamePlaceholder": "Mijn downloadclient",
   "settings.downloadClientHostPlaceholder": "download.example.com",
   "settings.downloadClientUrlBasePlaceholder": "bijv. api",
@@ -844,27 +844,27 @@ const nl: LocaleDictionary = {
   "settings.downloadClientBaseUrlRequired":
     "Een geldige host en poort zijn verplicht.",
   "settings.folderTemplateLabel": "Maptemplate",
-  "settings.folderTemplatePlaceholder": "Placeholder",
+  "settings.folderTemplatePlaceholder": "Voorbeeld",
   "settings.folderTemplateRequired": "Maptemplate is verplicht.",
-  "settings.seasonFolderTemplateLabel": "Seizoensmaptemplate",
-  "settings.seasonFolderTemplatePlaceholder": "Season {season}",
-  "settings.seasonFolderTemplateRequired": "Seizoensmaptemplate is verplicht.",
-  "settings.specialsFolderTemplateLabel": "Specials-maptemplate",
+  "settings.seasonFolderTemplateLabel": "Maptemplate voor seizoenen",
+  "settings.seasonFolderTemplatePlaceholder": "Seizoen {season}",
+  "settings.seasonFolderTemplateRequired": "Maptemplate voor seizoenen is verplicht.",
+  "settings.specialsFolderTemplateLabel": "Maptemplate voor specials",
   "settings.specialsFolderTemplatePlaceholder": "Specials",
-  "settings.specialsFolderTemplateRequired": "Specials-maptemplate is verplicht.",
+  "settings.specialsFolderTemplateRequired": "Maptemplate voor specials is verplicht.",
   "settings.seasonFolderTemplateMustContainSeason":
-    "Seizoensmaptemplate moet {season} bevatten.",
+    "Maptemplate voor seizoenen moet {season} bevatten.",
   "settings.seasonFolderValidationUnknownToken":
-    "Seizoensmaptemplates ondersteunen {season}, title, year en externe ID-tokens. Ongeldig token: {{token}}",
+    "Seizoensmaptemplates ondersteunen {season}, titel, jaar en externe ID-tokens. Ongeldig token: {{token}}",
   "settings.folderRenameSectionTitle": "Map hernoemen",
   "settings.folderValidationUnknownToken":
     "Maptemplates ondersteunen {title}, {year} en externe ID-tokens. Ongeldig token: {{token}}",
   "settings.folderValidationEmpty": "Maptemplate mag niet leeg zijn",
   "settings.folderValidationIllegalCharacter":
-    "Maptemplate bevat een ongeldig bestandssysteemteken: {{character}}",
-  "settings.renameTemplateLabel": "Hernoemtemplate",
-  "settings.renameTemplatePlaceholder": "Placeholder",
-  "settings.renameTemplateRequired": "Hernoemtemplate is verplicht.",
+    "Maptemplate bevat een ongeldig teken: {{character}}",
+  "settings.renameTemplateLabel": "Template voor hernoemen",
+  "settings.renameTemplatePlaceholder": "Voorbeeld",
+  "settings.renameTemplateRequired": "Template voor hernoemen is verplicht.",
   "settings.renameCollisionPolicyLabel": "Conflictbeleid",
   "settings.renameCollisionPolicySkip": "Overslaan",
   "settings.renameCollisionPolicyError": "Fout",
@@ -921,7 +921,7 @@ const nl: LocaleDictionary = {
   "settings.renameValidationUnmatchedClose": "Niet-gekoppelde sluitingsaccolade '}'",
   "settings.renameValidationUnknownToken": "Onbekend token: {{token}}",
   "settings.renameValidationInvalidPadding":
-    "Numerieke padding moet een ASCII-geheel getal tussen 0 en 240 zijn: {{padding}}",
+    "Voorloopnullen moeten een ASCII-geheel getal tussen 0 en 240 zijn: {{padding}}",
   "settings.renameValidationInvalidFilter": "Ongeldig tokenfilter: {{filter}}",
   "settings.renameValidationEmpty": "Hernoemsjabloon mag niet leeg zijn",
   "settings.renameValidationInvalidOptionalGroup": "Ongeldige optionele groep",
@@ -1108,7 +1108,7 @@ const nl: LocaleDictionary = {
 
   "toast.catalogAdded": "Toegevoegd aan catalogus",
   "toast.catalogAddedAutoSearch": "Automatisch zoeken in wachtrij gezet.",
-  "toast.releaseGrabbed": "Release opgepakt",
+  "toast.releaseGrabbed": "Release opgehaald",
   "toast.titleImported": "Titel geïmporteerd",
   "toast.viewInCatalog": "Bekijken in catalogus",
 
@@ -1130,7 +1130,7 @@ const nl: LocaleDictionary = {
   "smgUpgrade.deadline": "Einde ondersteuning: {{date}}",
   "smgUpdate.title": "Scryer-update beschikbaar",
   "smgUpdate.body": "Je draait {{current}}. Nieuwste is {{latest}}.",
-  "smgUpdate.releaseNotes": "Release notes",
+  "smgUpdate.releaseNotes": "Uitgaveopmerkingen",
 
   "title.addAndQueue": "Titel toevoegen en in wachtrij zetten",
   "title.addToCatalog": "Toevoegen aan catalogus",
@@ -1480,9 +1480,9 @@ const nl: LocaleDictionary = {
   "queue.markFailedSearchAgain": "Als mislukt markeren en opnieuw zoeken",
   "queue.markFailedOnly": "Alleen als mislukt markeren",
   "queue.markFailedSearchSuccess":
-    "Download als mislukt gemarkeerd; heracquisitie wordt uitgevoerd.",
+    "Download als mislukt gemarkeerd; wordt opnieuw opgehaald.",
   "queue.markFailedOnlySuccess":
-    "Download als mislukt gemarkeerd zonder heracquisitie.",
+    "Download als mislukt gemarkeerd zonder opnieuw op te halen.",
   "queue.markFailedFailed": "Download als mislukt markeren mislukt.",
   "queue.bulkIgnoreSuccess": "{{count}} downloads genegeerd.",
   "queue.bulkIgnorePartial": "{{count}} downloads genegeerd; {{failed}} mislukt.",
@@ -1603,7 +1603,7 @@ const nl: LocaleDictionary = {
   "settings.indexerDownloadClientNotApplicable": "Niet van toepassing",
   "settings.indexerDownloadClientDisabled": "Uitgeschakeld",
   "settings.indexerDownloadClientDisabledWarning":
-    "{{name}} is uitgeschakeld. Grabs mislukken tot het is ingeschakeld.",
+    "{{name}} is uitgeschakeld. Ophalen zal mislukken totdat het is ingeschakeld.",
   "settings.indexerDownloadClientChooseAutomatic": "Automatisch kiezen",
   "settings.indexerDownloadClientInvalidOption": "Ongeldig: {{name}}",
   "settings.indexerDownloadClientInvalidMissing":
@@ -2186,7 +2186,7 @@ const nl: LocaleDictionary = {
     "Sta Dolby Vision releases toe. Sommige schermen kunnen Dolby Vision content niet correct weergeven, dus dit is niet voor iedereen gewenst.",
   "qualityProfile.preferRemux": "Remux voorkeur",
   "qualityProfile.preferRemuxInfo":
-    "Remux zijn kopieën van fysieke media in volledige kwaliteit. Dit is vooral nuttig met de Audiophile persona.",
+    "Remux zijn kopieën van fysieke media in volledige kwaliteit. Dit is vooral nuttig met de Audiofiel persona.",
   "qualityProfile.allowBdDisk": "BD disk",
   "qualityProfile.allowBdDiskInfo":
     "Sta BD/Disc image releases toe (ISO/Blu-ray disk-stijl releases) om het profiel te passeren.",
@@ -2221,7 +2221,7 @@ const nl: LocaleDictionary = {
   "qualityProfile.scoringPersonaInfo":
     "Vooraf ingestelde scoringgewichten die verschillende releasekwaliteiten prioriteren. Balanced wordt aanbevolen voor de meeste gebruikers.",
   "qualityProfile.personaBalanced": "Balanced",
-  "qualityProfile.personaAudiophile": "Audiophile",
+  "qualityProfile.personaAudiophile": "Audiofiel",
   "qualityProfile.personaEfficient": "Efficient",
   "qualityProfile.personaCompatible": "Compatible",
   "qualityProfile.scoringOverrides": "Score-overschrijvingen",
@@ -2244,11 +2244,11 @@ const nl: LocaleDictionary = {
     "Blokkeer releases die AI-upscaled zijn. Deze releases hebben vaak artefacten en zijn niet de echte native resolutie.",
   "qualityProfile.cutoffTier": "Grenskwaliteit",
   "qualityProfile.cutoffTierInfo":
-    "Stop met upgraden zodra deze kwaliteitslaag (of beter) is gegrabbed. Voorkomt onnodige herdownloads.",
+    "Stop met upgraden zodra deze kwaliteitslaag (of beter) is opgehaald. Voorkomt onnodige herdownloads.",
   "qualityProfile.cutoffNone": "Geen cutoff",
-  "qualityProfile.minScoreToGrab": "Minimale score om te grabben",
+  "qualityProfile.minScoreToGrab": "Minimale score om te ophalen",
   "qualityProfile.minScoreToGrabInfo":
-    "Grab alleen releases die op of boven deze drempel scoren. Laat leeg voor geen minimum.",
+    "Ophalen alleen releases die op of boven deze drempel scoren. Laat leeg voor geen minimum.",
   "qualityProfile.minScorePlaceholder": "Geen minimum",
   "qualityProfile.confirmDeleteTitle": "Kwaliteitsprofiel verwijderen",
   "qualityProfile.confirmDeleteDescription":
@@ -2322,7 +2322,7 @@ const nl: LocaleDictionary = {
   "subtitle.onDisk": "Op schijf",
   "subtitle.releaseInfo": "Release",
   "subtitle.provider": "Provider",
-  "subtitle.flags": "Flags",
+  "subtitle.flags": "Vlaggen",
   "subtitle.synced": "Gesynchroniseerd",
 
   "settings.fillerPolicyLabel": "Filler-afleveringsbeleid",
@@ -2364,7 +2364,7 @@ const nl: LocaleDictionary = {
   "settings.identityStorageTitle": "Identiteit & opslag",
   "settings.mediaProfilesTitle": "Mediaprofielen",
   "settings.mediaProfilesHelp":
-    "Laat op Inherit catalog default staan om de catalogus te volgen, of overschrijf per bibliotheek. De opgeloste waarde wordt onder elk control getoond.",
+    "Laat op Catalogusstandaard overnemen staan om de catalogus te volgen, of overschrijf per bibliotheek. De opgeloste waarde wordt onder elk control getoond.",
   "settings.importBehaviorTitle": "Importgedrag",
   "settings.libraryUnsavedChanges": "Niet-opgeslagen wijzigingen",
   "settings.nfoWriteOnImportLabel": "NFO schrijven bij import",
@@ -2425,7 +2425,7 @@ const nl: LocaleDictionary = {
   "status.bulkRenameForbidden":
     "Je hebt geen permissie om titels te hernoemen in elke geselecteerde bibliotheek.",
   "status.titleMatchUpdated": "Match bijgewerkt voor {{name}}.",
-  "status.languageChanged": "Interfacetaal ingesteld op {{language}}.",
+  "status.languageChanged": "Taal van de interface ingesteld op {{language}}.",
 
   "status.editingIndexer": "Indexer {{name}} bewerken",
   "status.editingDownloadClient": "Download client {{name}} bewerken",
@@ -2454,14 +2454,14 @@ const nl: LocaleDictionary = {
   "status.titleMonitoringDisabled": "Titelmonitoring uitgeschakeld.",
   "status.indexerDeleted": "Indexer {{name}} verwijderd.",
   "status.testingIndexerConnection": "Verbinding testen…",
-  "status.indexerConnectionTestPassed": "Indexer-verbindingstest geslaagd.",
-  "status.indexerConnectionTestFailed": "Indexer-verbindingstest mislukt.",
+  "status.indexerConnectionTestPassed": "Verbindingstest voor indexer geslaagd.",
+  "status.indexerConnectionTestFailed": "Verbindingstest voor indexer mislukt.",
   "status.testingSubtitleProviderConnection":
-    "Ondertitelprovider-verbinding testen…",
+    "Verbinding met ondertitelprovider testen…",
   "status.subtitleProviderConnectionTestPassed":
-    "Ondertitelprovider-verbindingstest geslaagd.",
+    "Verbindingstest voor ondertitelprovider geslaagd.",
   "status.subtitleProviderConnectionTestFailed":
-    "Ondertitelprovider-verbindingstest mislukt.",
+    "Verbindingstest voor ondertitelprovider mislukt.",
   "status.ruleCreated": "Regel opgeslagen.",
   "status.ruleUpdated": "Regel bijgewerkt.",
   "status.ruleDeleted": "Regel {{name}} verwijderd.",
@@ -2474,19 +2474,19 @@ const nl: LocaleDictionary = {
   "status.plexServersDiscovered": "Plex-servers geladen.",
   "status.editingMediaServer": "Mediaserver {{name}} bewerken",
   "status.deletingMediaServer": "Mediaserver {{name}} verwijderen?",
-  "status.testingMediaServerConnection": "{{server}}-verbinding testen…",
+  "status.testingMediaServerConnection": "Verbinding met mediaserver {{server}} testen…",
   "status.mediaServerConnectionTestPassed":
-    "{{server}}-verbindingstest geslaagd.",
+    "Verbindingstest voor mediaserver {{server}} geslaagd.",
   "status.mediaServerConnectionTestFailed":
-    "{{server}}-verbindingstest mislukt.",
-  "status.downloadClientCreated": "Download client opgeslagen.",
-  "status.downloadClientUpdated": "Download client bijgewerkt.",
+    "Verbindingstest voor mediaserver {{server}} mislukt.",
+  "status.downloadClientCreated": "Downloadclient opgeslagen.",
+  "status.downloadClientUpdated": "Downloadclient bijgewerkt.",
   "status.downloadClientDeletedWithMappings":
-    "Download client {{name}} verwijderd. {{count}} indexer(s) teruggezet naar Automatic.",
+    "Downloadclient {{name}} verwijderd. {{count}} indexer(s) teruggezet naar Automatic.",
   "status.indexerDownloadClientMappingSaving":
-    "Download client routing opslaan…",
+    "Downloadclient-routering opslaan…",
   "status.indexerDownloadClientMappingSaved":
-    "Download client routing opgeslagen voor {{name}}.",
+    "Downloadclient-routering opgeslagen voor {{name}}.",
   "status.testingDownloadClient": "{{client}}-verbinding testen…",
   "status.downloadClientConnectionTestPassed":
     "{{client}}-verbindingstest geslaagd.",
@@ -2518,18 +2518,18 @@ const nl: LocaleDictionary = {
   "profile.highlightColorSaved": "Accentkleur bijgewerkt.",
   "profile.highlightColorSaveFailed": "Kon accentkleur niet bijwerken.",
   "color.indigo": "Indigo",
-  "color.violet": "Violet",
-  "color.sky": "Sky",
-  "color.teal": "Teal",
-  "color.emerald": "Emerald",
-  "color.green": "Green",
+  "color.violet": "Paars",
+  "color.sky": "Hemelsblauw",
+  "color.teal": "Turkoois",
+  "color.emerald": "Smaragdgroen",
+  "color.green": "Groen",
   "color.amber": "Amber",
-  "color.cyan": "Cyan",
-  "color.rose": "Rose",
-  "color.red": "Red",
+  "color.cyan": "Cyaan",
+  "color.rose": "Roze",
+  "color.red": "Rood",
   "color.fuchsia": "Fuchsia",
   "color.magenta": "Magenta",
-  "color.crab": "Crab",
+  "color.crab": "Krab",
   "profile.changePassword": "Wachtwoord wijzigen",
   "profile.currentPassword": "Huidig wachtwoord",
   "profile.newPassword": "Nieuw wachtwoord",
@@ -2679,8 +2679,8 @@ const nl: LocaleDictionary = {
   "wanted.convergence.queuedHot": "In wachtrij · recent",
   "wanted.convergence.queuedCold": "In wachtrij · long tail",
   "wanted.searchJobStarted": "Zoekactie gestart.",
-  "wanted.searchJobComplete": "Zoekactie voltooid: {{processed}} doorzocht, {{grabbed}} gegrabbed, {{failed}} mislukt.",
-  "wanted.searchJobCancelled": "Zoekactie geannuleerd na {{processed}} item(s); {{grabbed}} gegrabbed.",
+  "wanted.searchJobComplete": "Zoekactie voltooid: {{processed}} doorzocht, {{grabbed}} opgehaald, {{failed}} mislukt.",
+  "wanted.searchJobCancelled": "Zoekactie geannuleerd na {{processed}} item(s); {{grabbed}} opgehaald.",
   "wanted.colPhase": "Fase",
   "wanted.colLatestDecision": "Laatste beslissing",
   "wanted.colScore": "Score",
@@ -2689,7 +2689,7 @@ const nl: LocaleDictionary = {
   "wanted.resume": "Hervatten",
   "wanted.actionRecoverMismatch": "Mismatch herstellen",
   "wanted.status.wanted": "Gezocht",
-  "wanted.status.grabbed": "Gegrabbed",
+  "wanted.status.grabbed": "Opgehaald",
   "wanted.status.completed": "Voltooid",
   "wanted.status.paused": "Gepauzeerd",
   "wanted.type.movie": "Film",
@@ -2714,7 +2714,7 @@ const nl: LocaleDictionary = {
   "wanted.loadingDecisions": "Releasebeslissingen laden…",
   "wanted.noDecisions": "Nog geen releasebeslissingen vastgelegd.",
   "wanted.standby": "Reserve · {{count}}",
-  "wanted.standbyTooltip": "{{count}} opgeslagen kandidaten worden geprobeerd als de huidige grab mislukt.",
+  "wanted.standbyTooltip": "{{count}} opgeslagen kandidaten worden geprobeerd als de huidige poging om te ophalen mislukt.",
   "wanted.standbyScopeNote": "Telt rijen binnen dit bereik; season packs worden geteld op de ankeraflevering van het seizoen.",
   "wanted.loadingStandby": "Opgeslagen kandidaten laden…",
   "wanted.standbyCandidates": "Standby-kandidaten · {{count}}",
@@ -2797,7 +2797,7 @@ const nl: LocaleDictionary = {
     "Geen meldingsplugins geïnstalleerd. Installeer eerst een meldingsplugin via de pagina Plugins.",
   "settings.notificationJellyfinSubscriptionHint":
     "Import voltooid is de gebruikelijke Jellyfin-scantrigger na import. Alleen Jellyfin-gebeurtenissen die de bibliotheek kunnen verversen zijn hier beschikbaar.",
-  "settings.notificationEvent.grab": "Release gegrabbed",
+  "settings.notificationEvent.grab": "Release opgehaald",
   "settings.notificationEvent.download": "Download mislukt",
   "settings.notificationEvent.upgrade": "Upgrade geïmporteerd",
   "settings.notificationEvent.importComplete": "Import voltooid",
@@ -2851,10 +2851,10 @@ const nl: LocaleDictionary = {
   "pending.role.fallback": "Reserve",
   "pending.status.needsReview": "Beoordeling nodig",
   "pending.phase.needsReview": "Beoordeling",
-  "pending.forceGrab": "Nu grabben",
+  "pending.forceGrab": "Nu ophalen",
   "pending.dismiss": "Negeren",
-  "pending.grabbed": "Release gegrabbed.",
-  "pending.grabRejected": "Grab afgewezen — de release is geblokkeerd of niet beschikbaar.",
+  "pending.grabbed": "Release opgehaald.",
+  "pending.grabRejected": "Ophalen afgewezen — de release is geblokkeerd of niet beschikbaar.",
   "pending.dismissed": "Release genegeerd.",
 
 
@@ -2881,25 +2881,25 @@ const nl: LocaleDictionary = {
   "setup.restoreTitle": "Herstellen vanuit een backupbundle",
   "setup.restoreDescription":
     "Upload een Scryer-backupbundle, bekijk het manifest en herstel het in deze nieuwe instantie.",
-  "setup.restoreSelectBundle": "Backupbundle",
-  "setup.restoreDropTargetTitle": "Sleep een backupbundle hierheen",
+  "setup.restoreSelectBundle": "Backupbundel",
+  "setup.restoreDropTargetTitle": "Sleep een backupbundel hierheen",
   "setup.restoreDropTargetDescription":
     "Kies een backupbestand op je apparaat of sleep het hierheen om te inspecteren voordat je herstelt.",
-  "setup.restoreDropTargetSelected": "Bundle geselecteerd en klaar om te inspecteren.",
+  "setup.restoreDropTargetSelected": "Bundel geselecteerd en klaar om te inspecteren.",
   "setup.restoreDropTargetEncryptedSelected":
-    "Versleutelde bundle geselecteerd. Voer het wachtwoord in dat je bij het maken van de backup hebt gebruikt om door te gaan.",
+    "Versleutelde bundel geselecteerd. Voer het wachtwoord in dat je bij het maken van de backup hebt gebruikt om door te gaan.",
   "setup.restoreDropTargetFormats": "Ondersteunde formaten: .tar.zst en .enc",
   "setup.restoreSelectFile": "Bestand selecteren",
   "setup.restoreClearFile": "Selectie wissen",
   "setup.restorePasswordHelp":
     "Voer het wachtwoord in dat je hebt gebruikt toen deze versleutelde backup werd gemaakt.",
-  "setup.restoreNoFile": "Kies een backupbundle om door te gaan.",
+  "setup.restoreNoFile": "Kies een backupbundel om door te gaan.",
   "setup.restorePasswordRequired":
-    "Voer het bundlewachtwoord in voordat je doorgaat.",
-  "setup.restoreInspect": "Bundle inspecteren",
+    "Voer het bundelwachtwoord in voordat je doorgaat.",
+  "setup.restoreInspect": "Bundel inspecteren",
   "setup.restoreApply": "Nu herstellen",
-  "setup.restoreChooseAnother": "Andere bundle kiezen",
-  "setup.restoreSummaryTitle": "Bundle-inhoud",
+  "setup.restoreChooseAnother": "Andere bundel kiezen",
+  "setup.restoreSummaryTitle": "Bundel-inhoud",
   "setup.restoreConfirmDescription":
     "Dit vervangt de nieuwe setupdatabase, schrijft herstelde instantiesecrets en start Scryer opnieuw in de herstelde instantie.",
   "setup.restoreCreatedAt": "Gemaakt",
@@ -3071,21 +3071,21 @@ const nl: LocaleDictionary = {
   "setup.moveToUnassigned": "Verplaatsen naar niet-toegewezen",
   "setup.noPathSet": "(geen pad ingesteld)",
   // Remap dialog
-  "setup.remapTitle": "Pad remappen",
+  "setup.remapTitle": "Pad opnieuw koppelen",
   "setup.remapExplain":
     "Scryer behoudt het pad dat {{instance}} rapporteert als provenance, zodat de gevolgde status correct opnieuw kan worden toegepast. Als die bestanden op een ander pad op de Scryer-host staan, stel dat hieronder in.",
   "setup.remapAsReported": "Zo gerapporteerd door bron",
   "setup.remapScryerHostPath": "Pad op Scryer-host",
-  "setup.remapResetToSource": "Terugzetten naar bron",
-  "setup.remapSave": "Remap opslaan",
+  "setup.remapResetToSource": "Opnieuw koppelen aan bron",
+  "setup.remapSave": "Nieuwe koppeling opslaan",
   "setup.mappedPathValidationChecking":
-    "Controleren of Scryer elk gemapt bronpad kan bereiken…",
+    "Controleren of Scryer elk toegewezen bronpad kan bereiken…",
   "setup.invalidMappedPathTitle":
     "Scryer kan dit gemapte bronpad niet bereiken",
   "setup.invalidMappedPathsTitle":
-    "Scryer kan {{count}} gemapte bronpaden niet bereiken",
+    "Scryer kan {{count}} toegewezen bronpaden niet bereiken",
   "setup.invalidMappedPathsHelp":
-    "Deze roots zijn toegewezen, maar hun paden zijn niet zichtbaar voor Scryer. Remap elk pad naar de equivalente map op de Scryer-host voordat je doorgaat.",
+    "Deze roots zijn toegewezen, maar hun paden zijn niet zichtbaar voor Scryer. Koppel elk pad opnieuw aan de equivalente map op de Scryer-host voordat je doorgaat.",
   "setup.remapInvalidRootAria": "{{name}} remappen van {{path}}",
   // Quality & persona
   "setup.library": "Bibliotheek",
@@ -3095,7 +3095,7 @@ const nl: LocaleDictionary = {
     "Map minstens één bronroot naar een bibliotheek om de kwaliteit in te stellen.",
   "setup.persona.balanced.name": "Gebalanceerd",
   "setup.persona.balanced.desc": "Degelijke kwaliteit met een redelijke grootte",
-  "setup.persona.audiophile.name": "Audiophile",
+  "setup.persona.audiophile.name": "Audiofiel",
   "setup.persona.audiophile.desc": "Maximale getrouwheid, grotere bestanden",
   "setup.persona.efficient.name": "Efficiënt",
   "setup.persona.efficient.desc": "Kleinere encodes, schijfruimte besparen",
@@ -3147,20 +3147,20 @@ const nl: LocaleDictionary = {
   "settings.runSetupWizard": "Setupwizard starten",
 
   "history.title": "Geschiedenis",
-  "history.empty": "Geen geschiedenisgebeurtenissen",
+  "history.empty": "De geschiedenis is leeg.",
   "history.loadError": "Geschiedenis kon niet worden geladen.",
   "history.retry": "Opnieuw proberen",
   "history.event": "Gebeurtenis",
   "history.initial": "Initieel",
   "history.upgrade": "Upgrade",
-  "history.prospectiveEpisodes": "Prospectieve afleveringen",
+  "history.prospectiveEpisodes": "Toekomstige afleveringen",
   "history.titleColumn": "Titel",
   "history.sourceTitle": "Brontitel",
   "history.quality": "Kwaliteit",
   "history.date": "Datum",
   "history.actor": "Gebruiker",
   "history.allEvents": "Alle gebeurtenissen",
-  "history.grabbed": "Gegrabbed",
+  "history.grabbed": "Opgehaald",
   "history.downloadFailed": "Download mislukt",
   "history.blocklisted": "Op blocklist",
   "history.scanned": "Gescand",
@@ -3168,8 +3168,8 @@ const nl: LocaleDictionary = {
   "history.importFailed": "Import mislukt",
   "history.importSkipped": "Import overgeslagen",
   "history.downloadCompleted": "Gedownload",
-  "history.fileUpgraded": "Geüpgraded",
-  "history.fileRecycled": "Gerecycled",
+  "history.fileUpgraded": "Bijgewerkt",
+  "history.fileRecycled": "Naar de prullenbak",
   "history.fileDeleted": "Verwijderd",
   "history.fileRenamed": "Hernoemd",
   "history.rematched": "Opnieuw gematcht",
@@ -3221,7 +3221,7 @@ const nl: LocaleDictionary = {
   "indexerErrors.body": "Responsebody",
   "indexerErrors.formatted": "Opgemaakt",
   "indexerErrors.raw": "Ruw",
-  "indexerErrors.redacted": "[geredigeerd vóór opslag]",
+  "indexerErrors.redacted": "[bijgewerkt vóór opslag]",
   "indexerErrors.base64Value": "Base64",
   "indexerErrors.previewTruncated":
     "Voorbeeld beperkt tot de eerste 1 MiB van {{size}}. Download de volledige body om alle vastgelegde bytes te inspecteren.",
@@ -3423,7 +3423,7 @@ const nl: LocaleDictionary = {
   "appUpgrade.operatorGuidance": "Door operator beheerde upgrade",
   "appUpgrade.guidance.winget": "Voer dit commando uit in een terminal met verhoogde rechten.",
   "appUpgrade.guidance.wingetCommand": "winget upgrade ScryerMedia.Scryer",
-  "appUpgrade.guidance.docker": "Pull de nieuwe image en maak de container opnieuw aan met je deploymentconfiguratie.",
+  "appUpgrade.guidance.docker": "Haal de nieuwe image op en maak de container opnieuw aan met je configuratie.",
   "appUpgrade.guidance.homebrew": "Voer dit commando uit in een terminal.",
   "appUpgrade.guidance.homebrewCommand": "brew upgrade scryer",
   "appUpgrade.guidance.disabled": "In-app upgrades zijn uitgeschakeld via een omgevingsinstelling.",
@@ -3434,7 +3434,7 @@ const nl: LocaleDictionary = {
   "appUpgrade.installationKind.docker": "Docker",
   "appUpgrade.installationKind.homebrew": "Homebrew",
   "appUpgrade.installationKind.winget": "winget",
-  "appUpgrade.installationKind.windowsSupervised": "Windows beheerd",
+  "appUpgrade.installationKind.windowsSupervised": "Windows-beheerd",
   "appUpgrade.installationKind.disabled": "Uitgeschakeld",
   "appUpgrade.installationKind.unsupported": "Niet ondersteund",
   "appUpgrade.success": "Geüpgraded naar {{version}}",
