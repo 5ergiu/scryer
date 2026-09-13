@@ -160,9 +160,7 @@ async fn graphql_title_history_page_lists_an_untitled_grab() {
     let untitled = items
         .iter()
         .find(|item| item["sourceTitle"] == "Unlinked.Release.2026.1080p.WEB-DL")
-        .unwrap_or_else(|| {
-            panic!("the unlinked grab must be on the history page; got {items:#?}")
-        });
+        .unwrap_or_else(|| panic!("the unlinked grab must be on the history page; got {items:#?}"));
     assert!(
         untitled["titleId"].is_null(),
         "it has no catalog title behind it: {untitled:#?}"
