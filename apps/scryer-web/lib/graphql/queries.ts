@@ -333,6 +333,7 @@ const SERIES_SIDE_PANEL_EPISODE_ROW_FIELDS = `
       seasonNumber
       episodeLabel
       title
+      sizeBytes
       airDate
       durationSeconds
       isFiller
@@ -362,6 +363,7 @@ const SERIES_SIDE_PANEL_COLLECTION_FIELDS = `
       label
       orderedPath
       narrativeOrder
+      sizeBytes
       fileSizeBytes
       firstEpisodeNumber
       lastEpisodeNumber
@@ -527,6 +529,7 @@ const DOWNLOAD_QUEUE_ITEM_FIELDS = `
 
 const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     id
+    sizeBytes
     name
     facet
     libraryId

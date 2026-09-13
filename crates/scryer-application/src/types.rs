@@ -3175,6 +3175,20 @@ pub struct TitleMediaSizeSummary {
     pub total_size_bytes: i64,
 }
 
+#[derive(Clone, Debug)]
+pub struct CollectionMediaSizeSummary {
+    pub title_id: String,
+    pub collection_id: String,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct EpisodeMediaSizeSummary {
+    pub title_id: String,
+    pub episode_id: String,
+    pub total_size_bytes: i64,
+}
+
 /// Aggregated current quality tier per title, based on the lowest-quality live
 /// media file linked to the title.
 #[derive(Clone, Debug)]

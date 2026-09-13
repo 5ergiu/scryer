@@ -1234,7 +1234,7 @@ function pendingPhaseBadge(status: PendingReleaseStatus, t: Translate) {
 function PendingReleasesCard({ state }: { state: PendingViewState }) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
-  const isMobile = useIsMobile();
+  const isMobile = useIsMobile(1280);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const {
     items,

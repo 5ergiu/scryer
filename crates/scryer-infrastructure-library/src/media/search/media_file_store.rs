@@ -2,12 +2,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use scryer_application::{
     AppError, AppResult, ClaimedMediaFile, CollectionEpisodeProgressSummary,
-    CutoffUnmetQualitySummary, EpisodeMediaAvailability, EpisodeMediaAvailabilityState,
-    EpisodeScopedMediaFile, InsertMediaFileInput, MediaFileAnalysis, MediaFileAssociations,
-    MediaFileCatalogDisposition, MediaFileHashCandidate, MediaFileRepository,
-    MissingEpisodeCandidate, MissingScopeCandidates, MissingSeriesMovieLinkCandidate,
-    MissingTitleCandidate, TitleEpisodeProgressSummary, TitleMediaFile, TitleMediaSizeSummary,
-    TitleMovieMediaSummary, TitleQualitySummary, derive_primary_quality_label,
+    CollectionMediaSizeSummary, CutoffUnmetQualitySummary, EpisodeMediaAvailability,
+    EpisodeMediaAvailabilityState, EpisodeMediaSizeSummary, EpisodeScopedMediaFile,
+    InsertMediaFileInput, MediaFileAnalysis, MediaFileAssociations, MediaFileCatalogDisposition,
+    MediaFileHashCandidate, MediaFileRepository, MissingEpisodeCandidate, MissingScopeCandidates,
+    MissingSeriesMovieLinkCandidate, MissingTitleCandidate, TitleEpisodeProgressSummary,
+    TitleMediaFile, TitleMediaSizeSummary, TitleMovieMediaSummary, TitleQualitySummary,
+    derive_primary_quality_label,
 };
 use scryer_domain::Id;
 use serde::de::DeserializeOwned;
@@ -533,6 +534,115 @@ impl MediaFileRepository for MediaFileStore {
             .map(|row| {
                 Ok(TitleMediaSizeSummary {
                     title_id: row.text("title_id")?,
+                    total_size_bytes: row.i64("total_size_bytes")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_collection_media_size_summaries(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<CollectionMediaSizeSummary>> {
+        if title_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let dialect = dialect_for_datastore(&self.datastore);
+        let placeholders = placeholders(title_ids.len());
+        let total_size_expression = total_size_bytes_sum_expression(dialect, "matched.size_bytes");
+        let sql = format!(
+            "SELECT matched.title_id,
+                    matched.collection_id,
+                    {total_size_expression} AS total_size_bytes
+               FROM (
+                    SELECT DISTINCT c.title_id,
+                           c.id AS collection_id,
+                           mf.id AS media_file_id,
+                           CASE
+                               WHEN mf.size_bytes > 0 THEN mf.size_bytes
+                               ELSE 0
+                           END AS size_bytes
+                      FROM collections c
+                      JOIN episodes e
+                        ON e.collection_id = c.id
+                       AND e.title_id = c.title_id
+                      JOIN file_episode_map fem
+                        ON fem.episode_id = e.id
+                      JOIN media_files mf
+                        ON mf.id = fem.file_id
+                       AND mf.title_id = c.title_id
+                     WHERE c.title_id IN ({placeholders})
+                       AND {}
+               ) matched
+              GROUP BY matched.title_id, matched.collection_id",
+            live_media_file_predicate(dialect, "mf")
+        );
+        let args = title_ids
+            .iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
+        SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(CollectionMediaSizeSummary {
+                    title_id: row.text("title_id")?,
+                    collection_id: row.text("collection_id")?,
+                    total_size_bytes: row.i64("total_size_bytes")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_episode_media_size_summaries(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<EpisodeMediaSizeSummary>> {
+        if title_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let dialect = dialect_for_datastore(&self.datastore);
+        let placeholders = placeholders(title_ids.len());
+        let total_size_expression = total_size_bytes_sum_expression(dialect, "matched.size_bytes");
+        let sql = format!(
+            "SELECT matched.title_id,
+                    matched.episode_id,
+                    {total_size_expression} AS total_size_bytes
+               FROM (
+                    SELECT DISTINCT e.title_id,
+                           e.id AS episode_id,
+                           mf.id AS media_file_id,
+                           CASE
+                               WHEN mf.size_bytes > 0 THEN mf.size_bytes
+                               ELSE 0
+                           END AS size_bytes
+                      FROM episodes e
+                      JOIN file_episode_map fem
+                        ON fem.episode_id = e.id
+                      JOIN media_files mf
+                        ON mf.id = fem.file_id
+                       AND mf.title_id = e.title_id
+                     WHERE e.title_id IN ({placeholders})
+                       AND {}
+               ) matched
+              GROUP BY matched.title_id, matched.episode_id",
+            live_media_file_predicate(dialect, "mf")
+        );
+        let args = title_ids
+            .iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
+        SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(EpisodeMediaSizeSummary {
+                    title_id: row.text("title_id")?,
+                    episode_id: row.text("episode_id")?,
                     total_size_bytes: row.i64("total_size_bytes")?,
                 })
             })
@@ -3431,6 +3541,22 @@ mod tests {
         assert_eq!(size_summaries.len(), 1);
         assert_eq!(size_summaries[0].title_id, title.id);
         assert_eq!(size_summaries[0].total_size_bytes, 1_000);
+
+        let collection_size_summaries = media_files
+            .list_collection_media_size_summaries(std::slice::from_ref(&title.id))
+            .await
+            .expect("collection size summaries should succeed");
+        assert_eq!(collection_size_summaries.len(), 1);
+        assert_eq!(collection_size_summaries[0].collection_id, collection.id);
+        assert_eq!(collection_size_summaries[0].total_size_bytes, 1_000);
+
+        let episode_size_summaries = media_files
+            .list_episode_media_size_summaries(std::slice::from_ref(&title.id))
+            .await
+            .expect("episode size summaries should succeed");
+        assert_eq!(episode_size_summaries.len(), 1);
+        assert_eq!(episode_size_summaries[0].episode_id, episode_one.id);
+        assert_eq!(episode_size_summaries[0].total_size_bytes, 1_000);
 
         let episode_progress = media_files
             .list_title_episode_progress_summaries(std::slice::from_ref(&title.id))

@@ -224,31 +224,38 @@ impl AppUseCase {
                     "no indexer provider available for provider type '{provider_type}'"
                 ))
             })?;
-        let capabilities = provider.capabilities_for_provider(provider_type);
-        let (query, ids, facet) = build_connection_test_search_request(&capabilities);
-
-        // Perform a real search request to validate the full pipeline.
-        client
-            .search(
-                query,
-                ids,
-                None,
-                facet,
-                None,
-                None,
-                None,
-                SearchMode::Interactive,
-                IndexerErrorOperation::ConnectionTest,
-                None,
-                None,
-                None,
-                None, // a connection probe has no subject, so no year
-                vec![],
-                None,
-                tokio_util::sync::CancellationToken::new(),
-            )
+        if !client
+            .probe_connection()
             .await
-            .map_err(map_indexer_connection_test_error)?;
+            .map_err(map_indexer_connection_test_error)?
+        {
+            let capabilities = provider.capabilities_for_provider(provider_type);
+            let (query, ids, facet) = build_connection_test_search_request(&capabilities);
+
+            // Older components and providers without a dedicated probe retain
+            // the established minimal-search validation path.
+            client
+                .search(
+                    query,
+                    ids,
+                    None,
+                    facet,
+                    None,
+                    None,
+                    None,
+                    SearchMode::Interactive,
+                    IndexerErrorOperation::ConnectionTest,
+                    None,
+                    None,
+                    None,
+                    None, // a connection probe has no subject, so no year
+                    vec![],
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .map_err(map_indexer_connection_test_error)?;
+        }
 
         let caps_refresh_available = self
             .services
@@ -1055,6 +1062,7 @@ mod tests {
         calls: Arc<std::sync::Mutex<Vec<RecordedSearchCall>>>,
         pruned_indexers: Arc<std::sync::Mutex<Vec<String>>>,
         search_error: Option<String>,
+        probe_result: bool,
     }
 
     impl RecordingIndexerClient {
@@ -1068,7 +1076,13 @@ mod tests {
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
                 pruned_indexers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 search_error,
+                probe_result: false,
             }
+        }
+
+        fn with_connection_probe(mut self) -> Self {
+            self.probe_result = true;
+            self
         }
 
         fn pruned_indexers(&self) -> Vec<String> {
@@ -1078,6 +1092,10 @@ mod tests {
 
     #[async_trait]
     impl IndexerClient for RecordingIndexerClient {
+        async fn probe_connection(&self) -> AppResult<bool> {
+            Ok(self.probe_result)
+        }
+
         async fn search(
             &self,
             query: String,
@@ -3595,6 +3613,38 @@ mod tests {
         assert_eq!(calls[0].query, "scryer connection test");
         assert!(calls[0].ids.is_empty());
         assert_eq!(calls[0].facet, None);
+    }
+
+    #[tokio::test]
+    async fn test_indexer_connection_skips_generic_search_after_provider_probe() {
+        let client = Arc::new(RecordingIndexerClient::new(false).with_connection_probe());
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "newznab",
+            vec![string_field(
+                "base_url",
+                "Base URL",
+                Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+            )],
+            searchable_capabilities(),
+            client.clone(),
+        ));
+        let app = test_app(
+            Arc::new(RecordingIndexerConfigRepo::new()),
+            Some(provider),
+            Arc::new(NullSettingsRepository),
+        );
+
+        app.test_indexer_connection(
+            &test_admin(),
+            "newznab",
+            Some(r#"{"base_url":"https://api.nzbgeek.info/"}"#),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(client.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

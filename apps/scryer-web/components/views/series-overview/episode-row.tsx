@@ -43,6 +43,7 @@ import type { ExternalSubtitleRecord } from "@/lib/types/subtitles";
 import type { DownloadQueueItem } from "@/lib/types/download-queue";
 import {
   formatDate,
+  formatFileSize,
   formatRuntimeFromSeconds,
 } from "./helpers";
 import { EpisodePanelContent } from "./episode-panel-content";
@@ -218,6 +219,13 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   const episodeRuntime = React.useMemo(
     () => formatRuntimeFromSeconds(episode.durationSeconds),
     [episode.durationSeconds],
+  );
+  const episodeSizeLabel = React.useMemo(
+    () =>
+      typeof episode.sizeBytes === "number" && episode.sizeBytes >= 0
+        ? formatFileSize(episode.sizeBytes)
+        : null,
+    [episode.sizeBytes],
   );
 
   const openPanelTab = React.useCallback(
@@ -403,6 +411,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                   {episodeRuntime}
                 </span>
               ) : null}
+              {episodeSizeLabel ? <span>{episodeSizeLabel}</span> : null}
             </div>
             <div className="mt-3 flex flex-col gap-2">
               {onAutoSearchEpisode ? (
@@ -517,6 +526,11 @@ export const EpisodeRow = React.memo(function EpisodeRow({
             <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
               <Clock3 className="h-3 w-3" />
               {episodeRuntime}
+            </span>
+          ) : null}
+          {episodeSizeLabel ? (
+            <span className="ml-2 text-[10px] tabular-nums text-muted-foreground">
+              {episodeSizeLabel}
             </span>
           ) : null}
         </TableCell>

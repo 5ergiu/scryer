@@ -286,7 +286,7 @@ test("series side panel overview scopes hydration to season aggregates", () => {
   assert.equal(seriesSidePanelOverviewQuery.includes("titleHistory("), false);
   assert.equal(seriesSidePanelOverviewQuery.includes("titleAcquisitionDiagnostics"), false);
   assert.equal(seriesSidePanelOverviewQuery.includes("overview"), true);
-  assert.equal(seriesSidePanelOverviewQuery.includes("sizeBytes"), false);
+  assert.equal(seriesSidePanelOverviewQuery.includes("sizeBytes"), true);
   assert.equal(seriesSidePanelOverviewQuery.includes("qualityLabel"), false);
 });
 
@@ -300,7 +300,7 @@ test("series collection episodes query uses compact rows for one season", () => 
   assert.equal(seriesCollectionEpisodesQuery.includes("overview"), false);
   assert.equal(seriesCollectionEpisodesQuery.includes("imageUrl"), false);
   assert.equal(seriesCollectionEpisodesQuery.includes("mediaFiles {"), false);
-  assert.equal(seriesCollectionEpisodesQuery.includes("sizeBytes"), false);
+  assert.equal(seriesCollectionEpisodesQuery.includes("sizeBytes"), true);
 });
 
 test("episode collection ref query resolves deep links without row payloads", () => {

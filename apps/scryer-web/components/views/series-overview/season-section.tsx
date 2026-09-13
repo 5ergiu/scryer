@@ -301,7 +301,6 @@ function SeasonSectionImpl({
   }, [collection.firstEpisodeNumber, collection.lastEpisodeNumber, t]);
 
   const collectionMetrics = React.useMemo(() => {
-    const uniqueFiles = new Map<string, EpisodeMediaFile>();
     const aggregateTotalEpisodes =
       typeof collection.episodesTotal === "number" && collection.episodesTotal >= 0
         ? collection.episodesTotal
@@ -334,27 +333,12 @@ function SeasonSectionImpl({
       if (episodeFiles.length > 0) {
         ownedEpisodes += 1;
       }
-
-      for (const file of episodeFiles) {
-        if (!uniqueFiles.has(file.id)) {
-          uniqueFiles.set(file.id, file);
-        }
-      }
-    }
-
-    let matchedSizeBytes = 0;
-    for (const file of uniqueFiles.values()) {
-      const sizeBytes = file.sizeBytes;
-      if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
-        matchedSizeBytes += sizeBytes;
-      }
     }
 
     return {
       totalEpisodes: aggregateTotalEpisodes ?? totalEpisodes,
       monitoredEpisodes: aggregateMonitoredEpisodes ?? monitoredEpisodes,
       ownedEpisodes: aggregateOwnedEpisodes ?? ownedEpisodes,
-      matchedSizeBytes,
     };
   }, [
     collection.episodesMonitored,
@@ -381,13 +365,12 @@ function SeasonSectionImpl({
   );
 
   const collectionSizeLabel = React.useMemo(() => {
-    const derivedSizeBytes = collectionMetrics?.matchedSizeBytes ?? 0;
-    if (derivedSizeBytes > 0) {
-      return formatFileSize(derivedSizeBytes);
+    if (typeof collection.sizeBytes === "number" && collection.sizeBytes >= 0) {
+      return formatFileSize(collection.sizeBytes);
     }
 
     return null;
-  }, [collectionMetrics]);
+  }, [collection.sizeBytes]);
 
   const isSpecials = isSpecialsCollection(collection);
   const showCollectionHeader = true;
@@ -481,7 +464,7 @@ function SeasonSectionImpl({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {!isSpecials && collectionSizeLabel ? (
+            {collectionSizeLabel ? (
               <span className="text-xs tabular-nums text-muted-foreground">
                 {collectionSizeLabel}
               </span>

@@ -126,6 +126,9 @@ const FALLBACK_PROVIDER_OPTIONS = [
   { value: "newznab", label: "Newznab Indexer" },
 ];
 
+const INDEXER_NARROW_CELL_CLASS =
+  "max-[1279px]:flex max-[1279px]:items-start max-[1279px]:justify-between max-[1279px]:gap-4 max-[1279px]:border-b max-[1279px]:border-border/60 max-[1279px]:px-3 max-[1279px]:py-2 max-[1279px]:text-right max-[1279px]:before:shrink-0 max-[1279px]:before:text-left max-[1279px]:before:text-xs max-[1279px]:before:font-medium max-[1279px]:before:text-muted-foreground max-[1279px]:before:content-[attr(data-label)]";
+
 function selectedIndexerPresetName(
   fields: ConfigFieldDef[],
   key: string,
@@ -1009,7 +1012,7 @@ export function SettingsIndexersSection({
             overflow="clip"
             layout="fixed"
             density="dense"
-            className="[&_td]:px-2 [&_th]:px-2"
+            className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
           >
             <colgroup>
               <col className="w-[13%]" />
@@ -1063,9 +1066,15 @@ export function SettingsIndexersSection({
                   data-ui="settings-table-row"
                   key={indexer.id}
                   id={selectorId("settings-indexer-row", indexer.name)}
-                  className={indexer.isManaged ? "bg-muted/25" : undefined}
+                  className={cn(
+                    indexer.isManaged && "bg-muted/25",
+                    "max-[1279px]:mb-3 max-[1279px]:block max-[1279px]:overflow-hidden max-[1279px]:rounded-lg max-[1279px]:border max-[1279px]:border-border",
+                  )}
                 >
-                  <TableCell>
+                  <TableCell
+                    data-label={t("label.name")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     <div className="space-y-1">
                       <div className="font-medium">{indexer.name}</div>
                       {indexer.isManaged ? (
@@ -1089,12 +1098,18 @@ export function SettingsIndexersSection({
                       ) : null}
                     </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell
+                    data-label={t("settings.indexerProvider")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     <IndexerProviderTypeCell
                       providerType={indexer.providerType}
                     />
                   </TableCell>
-                  <TableCell>
+                  <TableCell
+                    data-label={t("settings.proxyAssignment")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     {assignedProxy ? (
                       <span
                         className={cn(
@@ -1115,7 +1130,10 @@ export function SettingsIndexersSection({
                       </span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell
+                    data-label={t("settings.indexerDownloadClient")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     <IndexerDownloadClientCell
                       indexer={indexer}
                       resource={indexerDownloadClientMappingCatalogResource}
@@ -1127,7 +1145,10 @@ export function SettingsIndexersSection({
                       }
                     />
                   </TableCell>
-                  <TableCell>
+                  <TableCell
+                    data-label={t("settings.seedingProfileColumn")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     <IndexerSeedingProfileCell
                       indexer={indexer}
                       catalog={indexerDownloadClientMappingCatalogResource.catalog}
@@ -1139,13 +1160,19 @@ export function SettingsIndexersSection({
                       }
                     />
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell
+                    data-label={t("label.enabled")}
+                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
+                  >
                     <RenderBooleanIcon
                       value={indexer.isEnabled}
                       label={`${t("label.enabled")}: ${indexer.name}`}
                     />
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell
+                    data-label={t("settings.indexerInteractiveSearch")}
+                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
+                  >
                     {indexer.supportsManagedChildrenSync ? (
                       <span
                         className="text-muted-foreground"
@@ -1160,7 +1187,10 @@ export function SettingsIndexersSection({
                       />
                     )}
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell
+                    data-label={t("settings.indexerAutoSearch")}
+                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
+                  >
                     {indexer.supportsManagedChildrenSync ? (
                       <span
                         className="text-muted-foreground"
@@ -1175,7 +1205,10 @@ export function SettingsIndexersSection({
                       />
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell
+                    data-label={t("settings.indexerStatus")}
+                    className={INDEXER_NARROW_CELL_CLASS}
+                  >
                     <IndexerStatusCell
                       indexer={indexer}
                       onOpenErrorHistory={() => setErrorHistoryIndexer({
@@ -1184,7 +1217,10 @@ export function SettingsIndexersSection({
                       })}
                     />
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell
+                    data-label={t("label.actions")}
+                    className={cn("text-right", INDEXER_NARROW_CELL_CLASS)}
+                  >
                     <div className="flex flex-wrap justify-end gap-2">
                       <IndexerActionButton
                         id={selectorId("settings-indexer-error-history", indexer.name)}

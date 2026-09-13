@@ -847,6 +847,44 @@ impl AppUseCase {
             .await
     }
 
+    pub async fn list_collection_media_size_summaries(
+        &self,
+        actor: &User,
+        title_ids: &[String],
+    ) -> AppResult<Vec<crate::types::CollectionMediaSizeSummary>> {
+        let title_ids = self
+            .filter_title_ids_for_permission(
+                actor,
+                title_ids,
+                scryer_domain::LibraryPermission::View,
+            )
+            .await?;
+        self.services
+            .library
+            .media_files
+            .list_collection_media_size_summaries(&title_ids)
+            .await
+    }
+
+    pub async fn list_episode_media_size_summaries(
+        &self,
+        actor: &User,
+        title_ids: &[String],
+    ) -> AppResult<Vec<crate::types::EpisodeMediaSizeSummary>> {
+        let title_ids = self
+            .filter_title_ids_for_permission(
+                actor,
+                title_ids,
+                scryer_domain::LibraryPermission::View,
+            )
+            .await?;
+        self.services
+            .library
+            .media_files
+            .list_episode_media_size_summaries(&title_ids)
+            .await
+    }
+
     /// Byte size of the media file backing a single collection, keyed by the
     /// collection's `ordered_path`. Returns `None` when the actor cannot `View`
     /// the title or when nothing is indexed at that path.
