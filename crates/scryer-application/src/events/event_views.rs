@@ -421,7 +421,13 @@ fn serialize_title_history_data(payload: &DomainEventPayload) -> Option<String> 
 pub(crate) fn title_history_record_from_domain_event(
     event: &DomainEvent,
 ) -> Option<TitleHistoryRecord> {
-    let title_id = event.title_id.clone()?;
+    // Not a filter. An event without a `title_id` is not a malformed event —
+    // it is an event with no catalog title behind it, and FR-026 says such a
+    // grab is still "recorded as history against the release and indexer".
+    // Dropping it here is what kept unlinked grabs out of History entirely.
+    // Whether an event belongs in history is decided by its payload below; the
+    // `_ => return None` arm there is the real gate.
+    let title_id = event.title_id.clone();
 
     let (
         title_name,
@@ -1563,6 +1569,44 @@ mod tests {
         assert_eq!(history.source_hint.as_deref(), Some("Configured Indexer"));
         let data_json = history.data_json.expect("history event data");
         assert!(data_json.contains("indexer.example"));
+    }
+
+    #[test]
+    fn unlinked_release_grab_is_recorded_against_the_release_and_indexer() {
+        // FR-026: an unlinked grab has no catalog title behind it, and it is
+        // still "recorded as history against the release and indexer". The grab
+        // is appended as a global domain event, so `title_id` is absent; the
+        // stand-in snapshot carries the release name and the indexer.
+        let mut event = event(
+            1,
+            Utc::now(),
+            DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
+                title: title_snapshot("Example.2026.1080p.WEB-DL", MediaFacet::Movie),
+                source_title: Some("Example.2026.1080p.WEB-DL".to_string()),
+                source_hint: Some("https://indexer.example/api?t=get&id=release-1".to_string()),
+                source_provider: Some("Configured Indexer".to_string()),
+                download_id: Some("download-1".to_string()),
+                episode_ids: Vec::new(),
+            }),
+        );
+        event.title_id = None;
+        event.facet = None;
+        event.stream = DomainEventStream::Global;
+
+        let history = title_history_record_from_domain_event(&event)
+            .expect("an unlinked grab should still project to a history record");
+        assert_eq!(history.title_id, None);
+        assert_eq!(history.event_type, TitleHistoryEventType::Grabbed);
+        assert_eq!(
+            history.title_name.as_deref(),
+            Some("Example.2026.1080p.WEB-DL")
+        );
+        assert_eq!(
+            history.source_title.as_deref(),
+            Some("Example.2026.1080p.WEB-DL")
+        );
+        assert_eq!(history.source_hint.as_deref(), Some("Configured Indexer"));
+        assert_eq!(history.download_id.as_deref(), Some("download-1"));
     }
 
     #[test]

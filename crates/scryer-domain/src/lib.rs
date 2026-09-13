@@ -3050,7 +3050,11 @@ impl HistoryEventType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TitleHistoryRecord {
     pub id: String,
-    pub title_id: String,
+    /// Catalog title the event belongs to. `None` for an event that has no
+    /// catalog title behind it at all — an unlinked grab (FR-026) is recorded
+    /// against the release and the indexer, not against a title.
+    #[serde(default)]
+    pub title_id: Option<String>,
     #[serde(default)]
     pub title_name: Option<String>,
     /// Poster of the title, resolved during projection hydration like

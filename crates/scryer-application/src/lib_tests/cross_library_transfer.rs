@@ -1065,7 +1065,7 @@ async fn a_unique_identity_match_merges_into_the_destination_title() {
         .unwrap();
     assert_eq!(history.total_count, 1);
     let entry = &history.records[0];
-    assert_eq!(entry.title_id, destination.id);
+    assert_eq!(entry.title_id.as_deref(), Some(destination.id.as_str()));
     assert_eq!(entry.source_path, title.folder_path);
     assert_eq!(entry.dest_path, survivor.folder_path);
     let data: serde_json::Value = serde_json::from_str(entry.data_json.as_ref().unwrap()).unwrap();

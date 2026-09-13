@@ -25805,9 +25805,11 @@ type TitleHistoryEventPayload {
 	"""
 	id: ID!
 	"""
-	Title ID associated with the event.
+	Title ID associated with the event, or null when the event has no
+	catalog title behind it: an unlinked grab is recorded against the
+	release and the indexer, with no catalog title behind it (FR-026).
 	"""
-	titleId: ID!
+	titleId: ID
 	"""
 	Title name, or null when no name was available.
 	"""
