@@ -2252,7 +2252,17 @@ async fn graphql_introspection_recycle_bin_uses_id_and_payload_results() {
             }
           }
           emptyPayload: __type(name: "EmptyRecycleBinPayload") {
-            fields { name }
+            fields {
+              name
+              type {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
           }
         }
         "#,
@@ -2392,13 +2402,25 @@ async fn graphql_introspection_recycle_bin_uses_id_and_payload_results() {
         .expect("delete payload id field should exist");
     assert_eq!(delete_id["type"]["ofType"]["name"], "ID");
 
-    let empty_payload_names: Vec<&str> = body["data"]["emptyPayload"]["fields"]
+    // Emptying a bin is a tracked background job now, exactly like the batch
+    // restore and batch delete above: the mutation hands back the job run to
+    // follow rather than a `purgedCount` it would have to block to know. The
+    // payload is the job handle and nothing else, so callers cannot read a
+    // count that is only true at submit time.
+    let empty_payload_fields = body["data"]["emptyPayload"]["fields"]
         .as_array()
-        .expect("EmptyRecycleBinPayload should expose fields")
+        .expect("EmptyRecycleBinPayload should expose fields");
+    let empty_payload_names: Vec<&str> = empty_payload_fields
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect();
-    assert_eq!(empty_payload_names, vec!["purgedCount"]);
+    assert_eq!(empty_payload_names, vec!["jobRun"]);
+    let empty_job_run = empty_payload_fields
+        .iter()
+        .find(|field| field["name"] == "jobRun")
+        .expect("empty payload job run should exist");
+    assert_eq!(empty_job_run["type"]["kind"], "NON_NULL");
+    assert_eq!(empty_job_run["type"]["ofType"]["name"], "JobRunPayload");
 }
 
 #[tokio::test]
