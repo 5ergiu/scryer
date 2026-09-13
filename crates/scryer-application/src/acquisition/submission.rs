@@ -650,75 +650,9 @@ impl AppUseCase {
         };
         // Keep the staged file active through submission and every client
         // failover; the request contains only a reference to the lease.
-        let mut _prepared_artifact = None;
-        if request.resolved_download_artifact.is_none()
-            && request.staged_nzb.is_none()
-            && request
-                .source_hint
-                .as_deref()
-                .is_some_and(|source| !source.trim().is_empty())
-            && let Some(resolver) = self
-                .services
-                .integrations
-                .indexer_artifact_resolver
-                .as_ref()
-        {
-            let source_url = request.source_hint.clone().expect("checked above");
-            let artifact = resolver
-                .resolve_artifact(&IndexerArtifactResolutionRequest {
-                    indexer_id: request.indexer_id.clone(),
-                    source_url,
-                    source_kind: request.source_kind,
-                    info_hash_hint: request.info_hash_hint.clone(),
-                    title_id: Some(title_id.clone()),
-                    search_facet: request
-                        .search_facet
-                        .clone()
-                        .or_else(|| Some(request.title.facet.clone())),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                })
-                .await?;
-            match &artifact {
-                PreparedIndexerArtifact::StagedNzb(staged_nzb) => {
-                    request.source_kind = Some(DownloadSourceKind::NzbFile);
-                    request.source_hint = None;
-                    request.staged_nzb = Some(staged_nzb.staged_nzb().clone());
-                }
-                PreparedIndexerArtifact::Resolved(artifact) => {
-                    match &artifact {
-                        ResolvedDownloadArtifact::Nzb { bytes, .. } => {
-                            let head_len = bytes.len().min(NZB_HEAD_PROBE_BYTES);
-                            enforce_nzb_category_gate(
-                                &bytes[..head_len],
-                                request
-                                    .search_facet
-                                    .as_ref()
-                                    .unwrap_or(&request.title.facet),
-                            )?;
-                            request.source_kind = Some(DownloadSourceKind::NzbFile);
-                            request.source_hint = None;
-                        }
-                        ResolvedDownloadArtifact::Magnet {
-                            uri,
-                            info_hash_hint,
-                        } => {
-                            request.source_kind = Some(DownloadSourceKind::MagnetUri);
-                            request.source_hint = Some(uri.clone());
-                            request.info_hash_hint =
-                                info_hash_hint.clone().or(request.info_hash_hint.clone());
-                        }
-                        ResolvedDownloadArtifact::TorrentFile { info_hash_hint, .. } => {
-                            request.source_kind = Some(DownloadSourceKind::TorrentFile);
-                            request.source_hint = None;
-                            request.info_hash_hint =
-                                info_hash_hint.clone().or(request.info_hash_hint.clone());
-                        }
-                    }
-                    request.resolved_download_artifact = Some(artifact.clone());
-                }
-            }
-            _prepared_artifact = Some(artifact);
-        }
+        let _prepared_artifact = self
+            .prepare_indexer_artifact_for_submission(&mut request, Some(title_id.clone()))
+            .await?;
         let grab = match self
             .services
             .integrations
@@ -902,6 +836,94 @@ impl AppUseCase {
                 newly_submitted: true,
             },
         ))
+    }
+
+    /// Resolve an indexer-hosted source into the artifact the download-client
+    /// router requires; the router no longer fetches indexer URLs itself.
+    ///
+    /// Rewrites `request` to carry the staged NZB or resolved artifact in
+    /// place of the indexer URL, and applies the NZB category gate to buffered
+    /// NZB bytes. The returned lease owns the staged file: the caller must hold
+    /// it until the download client has accepted the request, across every
+    /// client failover. A request that already carries an artifact, has no
+    /// source, or runs without a resolver is left untouched.
+    pub(crate) async fn prepare_indexer_artifact_for_submission(
+        &self,
+        request: &mut DownloadClientAddRequest,
+        title_id: Option<String>,
+    ) -> AppResult<Option<PreparedIndexerArtifact>> {
+        if request.resolved_download_artifact.is_some()
+            || request.staged_nzb.is_some()
+            || !request
+                .source_hint
+                .as_deref()
+                .is_some_and(|source| !source.trim().is_empty())
+        {
+            return Ok(None);
+        }
+        let Some(resolver) = self
+            .services
+            .integrations
+            .indexer_artifact_resolver
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        let source_url = request.source_hint.clone().expect("checked above");
+        let artifact = resolver
+            .resolve_artifact(&IndexerArtifactResolutionRequest {
+                indexer_id: request.indexer_id.clone(),
+                source_url,
+                source_kind: request.source_kind,
+                info_hash_hint: request.info_hash_hint.clone(),
+                title_id,
+                search_facet: request
+                    .search_facet
+                    .clone()
+                    .or_else(|| Some(request.title.facet.clone())),
+                cancellation: tokio_util::sync::CancellationToken::new(),
+            })
+            .await?;
+        match &artifact {
+            PreparedIndexerArtifact::StagedNzb(staged_nzb) => {
+                request.source_kind = Some(DownloadSourceKind::NzbFile);
+                request.source_hint = None;
+                request.staged_nzb = Some(staged_nzb.staged_nzb().clone());
+            }
+            PreparedIndexerArtifact::Resolved(artifact) => {
+                match &artifact {
+                    ResolvedDownloadArtifact::Nzb { bytes, .. } => {
+                        let head_len = bytes.len().min(NZB_HEAD_PROBE_BYTES);
+                        enforce_nzb_category_gate(
+                            &bytes[..head_len],
+                            request
+                                .search_facet
+                                .as_ref()
+                                .unwrap_or(&request.title.facet),
+                        )?;
+                        request.source_kind = Some(DownloadSourceKind::NzbFile);
+                        request.source_hint = None;
+                    }
+                    ResolvedDownloadArtifact::Magnet {
+                        uri,
+                        info_hash_hint,
+                    } => {
+                        request.source_kind = Some(DownloadSourceKind::MagnetUri);
+                        request.source_hint = Some(uri.clone());
+                        request.info_hash_hint =
+                            info_hash_hint.clone().or(request.info_hash_hint.clone());
+                    }
+                    ResolvedDownloadArtifact::TorrentFile { info_hash_hint, .. } => {
+                        request.source_kind = Some(DownloadSourceKind::TorrentFile);
+                        request.source_hint = None;
+                        request.info_hash_hint =
+                            info_hash_hint.clone().or(request.info_hash_hint.clone());
+                    }
+                }
+                request.resolved_download_artifact = Some(artifact.clone());
+            }
+        }
+        Ok(Some(artifact))
     }
 }
 
