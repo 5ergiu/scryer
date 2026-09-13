@@ -186,6 +186,21 @@ pub(crate) fn resolve_numbering(input: &NumberingInput<'_>) -> NumberingResoluti
         return NumberingResolution::UnresolvedPack;
     }
 
+    // A cour name two community seasons answer to names neither of them, and
+    // that blocks the absolute reading as well. A release titled after a cour
+    // is numbered within that cour, so falling back to the series-wide
+    // absolute numbering would not be a safer reading of the same evidence —
+    // it is a different episode, chosen by the one thing the release never
+    // said. Refuse the release instead of placing it.
+    if !is_whole_pack(input.parsed)
+        && matches!(
+            exact_cour_title_match(&input.title.name, input.bridge, input.parsed_title_variants),
+            ExactCourTitleMatch::Ambiguous
+        )
+    {
+        return ambiguous_cour_title_resolution(input);
+    }
+
     let official = official_candidate(input);
     let mut candidates = Vec::new();
     candidates.extend(official.clone());
@@ -772,15 +787,34 @@ pub enum ExactCourTitleMatch<'a> {
 
 /// Distinguish an absent exact cour title from one that names multiple bridge
 /// entries. The latter is blocking evidence: it must not be weakened into a
-/// fuzzy match or a whole-series fallback.
+/// fuzzy match, a whole-series fallback, or an absolute reading.
 pub fn exact_cour_title_match<'a>(
     canonical_title: &str,
     bridge: &'a AnimeNumberingBridge,
     parsed_title_variants: &[String],
 ) -> ExactCourTitleMatch<'a> {
+    let mut matched =
+        exact_cour_title_matches(canonical_title, bridge, parsed_title_variants).into_iter();
+    let Some(first) = matched.next() else {
+        return ExactCourTitleMatch::None;
+    };
+    if matched.next().is_some() {
+        return ExactCourTitleMatch::Ambiguous;
+    }
+    ExactCourTitleMatch::Unique(first)
+}
+
+/// Every community cour whose own title the release names exactly. More than
+/// one means the name pins nothing, and the collided cours are the readings
+/// the release left standing against each other.
+fn exact_cour_title_matches<'a>(
+    canonical_title: &str,
+    bridge: &'a AnimeNumberingBridge,
+    parsed_title_variants: &[String],
+) -> Vec<&'a AnimeCommunitySeason> {
     let parsed_titles = normalized_parsed_titles(parsed_title_variants);
     if parsed_titles.is_empty() {
-        return ExactCourTitleMatch::None;
+        return Vec::new();
     }
     let canonical = crate::app_usecase_rss::normalize_for_matching(canonical_title);
     let distinguishing = parsed_titles
@@ -788,10 +822,10 @@ pub fn exact_cour_title_match<'a>(
         .filter(|parsed| **parsed != canonical)
         .collect::<Vec<_>>();
     if distinguishing.is_empty() {
-        return ExactCourTitleMatch::None;
+        return Vec::new();
     }
 
-    let mut matched = None;
+    let mut matched = Vec::new();
     for season in &bridge.seasons {
         let season_titles = season
             .titles
@@ -806,12 +840,39 @@ pub fn exact_cour_title_match<'a>(
         {
             continue;
         }
-        if matched.is_some() {
-            return ExactCourTitleMatch::Ambiguous;
-        }
-        matched = Some(season);
+        matched.push(season);
     }
-    matched.map_or(ExactCourTitleMatch::None, ExactCourTitleMatch::Unique)
+    matched
+}
+
+/// The refusal an ambiguous cour name produces. The colliding cours are
+/// reported as the competing readings so the operator sees what the release
+/// could have meant; when none of them can carry the release's number the
+/// refusal stands on its own.
+fn ambiguous_cour_title_resolution(input: &NumberingInput<'_>) -> NumberingResolution {
+    let numbers = if input.parsed.episode_numbers.is_empty() {
+        parsed_absolute_numbers(input.parsed)
+    } else {
+        input.parsed.episode_numbers.clone()
+    };
+    let candidates =
+        exact_cour_title_matches(&input.title.name, input.bridge, input.parsed_title_variants)
+            .into_iter()
+            .filter_map(|season| {
+                map_community_episodes(
+                    input,
+                    season,
+                    &numbers,
+                    NumberingCandidateKind::TitleAnchored,
+                    &format!(
+                        "release names community season {} (\"{}\"), a title another cour answers to as well",
+                        season.index,
+                        season.titles.first().map_or("", String::as_str)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+    NumberingResolution::Ambiguous(candidates)
 }
 
 /// A cour title has to be long enough that a few edits cannot carry it to a
