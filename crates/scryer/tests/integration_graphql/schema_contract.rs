@@ -846,10 +846,14 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // OBJECT 451->458, public types 836->843. Reason codes and the third
     // requestable mode are additive fields and enum values on types that
     // already existed, so INPUT_OBJECT and ENUM counts are unchanged.
-    assert_eq!(public_types.len(), 843);
+    // Unified automatic-search semantics add the one-variant
+    // `AcquisitionSearchIntentValue` enum, which names why a search was
+    // started: ENUM 152->153, public types 843->844. Nothing else in the
+    // schema moved with it - it is an additive enum on existing types.
+    assert_eq!(public_types.len(), 844);
     assert_eq!(kind_count("OBJECT"), 458);
     assert_eq!(kind_count("INPUT_OBJECT"), 221);
-    assert_eq!(kind_count("ENUM"), 152);
+    assert_eq!(kind_count("ENUM"), 153);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
