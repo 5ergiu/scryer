@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  drainDeferredCollectionEpisodeRefresh,
+  planCollectionEpisodeRefresh,
   shouldHandleTitleOverviewActivity,
   titleOverviewReactiveRefreshKinds,
   titleOverviewReactiveRefreshPlan,
@@ -87,4 +89,45 @@ test("hydration activity reports UI-only transitions except completed", () => {
     titleOverviewReactiveRefreshPlan("metadata_hydration_failed", importKinds),
     { type: "hydrationFailed" },
   );
+});
+
+test("a refresh arriving during the first load is re-run when that load resolves", () => {
+  // The import lands while the open season's first SeriesCollectionEpisodes
+  // query is still in flight. Dropping that refresh leaves the page showing
+  // the pre-import episode list until the next navigation.
+  const inFlight = new Set(["season-1"]);
+  const plan = planCollectionEpisodeRefresh(["season-1"], inFlight);
+  assert.deepEqual(plan.refreshNow, []);
+  assert.deepEqual(plan.deferred, ["season-1"]);
+
+  const drained = drainDeferredCollectionEpisodeRefresh(
+    new Set(plan.deferred),
+    "season-1",
+  );
+  assert.deepEqual(drained.rerun, ["season-1"]);
+  assert.deepEqual([...drained.remaining], []);
+});
+
+test("collections with no load in flight refresh immediately", () => {
+  const plan = planCollectionEpisodeRefresh(
+    ["season-1", "season-2"],
+    new Set(["season-2"]),
+  );
+  assert.deepEqual(plan.refreshNow, ["season-1"]);
+  assert.deepEqual(plan.deferred, ["season-2"]);
+});
+
+test("a resolved load leaves the other deferred collections pending", () => {
+  const drained = drainDeferredCollectionEpisodeRefresh(
+    new Set(["season-1", "season-2"]),
+    "season-1",
+  );
+  assert.deepEqual(drained.rerun, ["season-1"]);
+  assert.deepEqual([...drained.remaining], ["season-2"]);
+});
+
+test("a load resolving with nothing deferred re-runs nothing", () => {
+  const drained = drainDeferredCollectionEpisodeRefresh(new Set(), "season-1");
+  assert.deepEqual(drained.rerun, []);
+  assert.deepEqual([...drained.remaining], []);
 });
