@@ -164,26 +164,29 @@ both are execution steps this pass does not perform.
       import workflow copy sites). (FR-045)
 - [x] T044 Story tests: US9 scenarios 1–5; backfill non-interference (SC-007).
 
-## Phase 6: User Story 3 — files are already there (P2)
+## Phase 6: User Story 3 — files are already there (P2) — RETIRED 2026-09-13
 
-**Built (2026-09-01).** Matcher, verifier, preview accounting, and executor
-branch landed in `cf9f92bcd`; the web mode radio is enabled with the accounting
-panel in `18ec0b542`; a vanished source folder blocks the title instead of
-failing the preview (`f5dc6a71b`); refused titles get
-the deselect control the copy promises (`09bb114c9`).
+**Built (2026-09-01), then removed (2026-09-13).** `FILES_ALREADY_THERE` was
+dropped for Sonarr parity before 0.20.0 shipped: `USER_MOVED_FILES` is the
+re-point path, and Sonarr has no adoption-accounting equivalent. The mode never
+reached a browser entry point (`4f0757a68` replaced the mode chooser with a
+two-card method step), so the adoption UI was already dead code. T050–T053 are
+retired with FR-050, FR-051 and FR-052; FR-053's verification and
+source-cleanup rules survive for every other mode. The original task record is
+kept below for history.
 
-- [x] T050 Adoption matcher in `location/adoption.rs`: stored identity + size +
+- [~] T050 *(RETIRED 2026-09-13 with FILES_ALREADY_THERE)* Adoption matcher in `location/adoption.rs`: stored identity + size +
       sampled proof (+ persisted full BLAKE3 where present); accounted-for /
       missing / additional / ambiguous accounting. (FR-050–051) — `cf9f92bcd`;
       matching is exclusion-first, tiers FullHash > SampledProof > IdentityOnly.
-- [x] T051 Adoption preview + blocked-confirmation rules; stale-source-mount
+- [~] T051 *(RETIRED 2026-09-13 with FILES_ALREADY_THERE)* Adoption preview + blocked-confirmation rules; stale-source-mount
       allowance; user-owned source cleanup with provable-redundancy recycle
       exception. (FR-052–053) — `cf9f92bcd`; unaccounted media are Blocked plan
       items and the shared confirm refuses; FR-053 recycle requires a
       full-hash-proven verification record.
-- [x] T052 [P] Web: adoption mode in the move workflow; accounting UI; i18n;
+- [~] T052 *(RETIRED 2026-09-13 with FILES_ALREADY_THERE)* [P] Web: adoption mode in the move workflow; accounting UI; i18n;
       lint. — `18ec0b542`, `09bb114c9`.
-- [x] T053 Story tests: US3 scenarios 1–4, incl. rejection when tracked media is
+- [~] T053 *(RETIRED 2026-09-13 with FILES_ALREADY_THERE)* Story tests: US3 scenarios 1–4, incl. rejection when tracked media is
       unaccounted for. — `cf9f92bcd` (`lib_tests`), plus the vanished-source
       regression test in `f5dc6a71b`; e2e flow `ui-location-adoption` landed in
       the e2e repo (`e1a3805`).
@@ -333,8 +336,9 @@ offers **Move with Scryer only** — `FILES_ALREADY_THERE` is refused by name
       and crash-window resume tests; the 50 GB scale claim itself is
       operator-gate evidence (T095), not unit-testable. SC-003 never
       overwrite/delete — collision engine preserve+rename tests incl.
-      recycle-unavailable, consolidation dedup-via-recycle, FR-053
-      full-hash-proven adoption recycle. SC-004 preview matches execution —
+      recycle-unavailable and consolidation dedup-via-recycle; FR-053's
+      full-hash-proven recycle exception (its adoption case retired
+      2026-09-13 with the mode). SC-004 preview matches execution —
       stale-fingerprint refusals (incl. merge-state hashing) at the GraphQL
       boundary; web forces a fresh preview on `plan_changed`. SC-005 bulk
       classification 100% — classification counts follow draft downgrades
