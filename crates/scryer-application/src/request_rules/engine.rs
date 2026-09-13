@@ -56,6 +56,8 @@ impl RequestRuleScope {
 pub struct RequestRulesEngineCache {
     pub engine: RequestRulesEngine,
     pub scopes: HashMap<String, RequestRuleScope>,
+    /// Persisted policies that cannot be loaded still participate as scoped errors.
+    pub load_errors: HashMap<String, String>,
     /// Monotonically increasing refresh identity. A rebuild may install its
     /// result only while this still identifies its own refresh.
     pub generation: u64,
@@ -69,6 +71,7 @@ impl Default for RequestRulesEngineCache {
         Self {
             engine: RequestRulesEngine::empty(),
             scopes: HashMap::new(),
+            load_errors: HashMap::new(),
             generation: 0,
             unavailable: false,
         }
@@ -160,11 +163,9 @@ impl AppUseCase {
     /// nothing, not even a compile, and it must not be able to fail the rebuild
     /// of the rules that *are* live.
     ///
-    /// A rule whose stored source no longer compiles is skipped with a warning
-    /// rather than failing the whole rebuild. It was validated when it was
-    /// written, so reaching this branch means the runtime changed under it, and
-    /// the alternative — refusing to build any engine — would silently disarm
-    /// every other rule on the instance.
+    /// A rule whose stored source no longer compiles remains a scoped error.
+    /// Healthy rules still run, while a failed enforcing policy holds requests
+    /// in its libraries instead of silently falling back to auto-approval.
     pub async fn rebuild_request_rules_engine(&self) -> AppResult<()> {
         let generation = self.begin_request_rules_engine_rebuild()?;
         let rule_sets = self
@@ -176,6 +177,7 @@ impl AppUseCase {
 
         let mut policies: Vec<RequestPolicy> = Vec::new();
         let mut scopes: HashMap<String, RequestRuleScope> = HashMap::new();
+        let mut load_errors = HashMap::new();
         for rule_set in rule_sets
             .into_iter()
             .filter(|rule_set| rule_set.evaluation_mode != RequestRuleEvaluationMode::Disabled)
@@ -190,7 +192,21 @@ impl AppUseCase {
                 tracing::warn!(
                     rule_set_id = rule_set.id.as_str(),
                     revision_number = rule_set.current_revision_number,
-                    "request rule set has no current revision; skipping it"
+                    "request rule set has no current revision; retaining a scoped error"
+                );
+                scopes.insert(
+                    rule_set.id.clone(),
+                    RequestRuleScope {
+                        name: rule_set.name,
+                        mode: rule_set.evaluation_mode,
+                        library_ids: rule_set.library_ids,
+                        revision_number: rule_set.current_revision_number,
+                        content_hash: String::new(),
+                    },
+                );
+                load_errors.insert(
+                    rule_set.id,
+                    "request rule current revision is missing".into(),
                 );
                 continue;
             };
@@ -229,9 +245,9 @@ impl AppUseCase {
                             tracing::warn!(
                                 rule_set_id = policy.id.as_str(),
                                 error = %error,
-                                "request rule dropped from the engine; it will not be evaluated"
+                                "request rule cannot compile; retaining a scoped error"
                             );
-                            scopes.remove(&policy.id);
+                            load_errors.insert(policy.id.clone(), error.to_string());
                             false
                         }
                     }
@@ -264,6 +280,7 @@ impl AppUseCase {
         *guard = RequestRulesEngineCache {
             engine,
             scopes,
+            load_errors,
             generation,
             unavailable: false,
         };

@@ -2,6 +2,90 @@ use super::*;
 use crate::lib_tests::request_rules_support::InMemoryRequestRuleRepo;
 
 #[tokio::test]
+async fn unbuildable_persisted_rules_hold_only_their_enforcing_scope() {
+    use crate::ports::RequestRuleSetRepository;
+    for include_healthy_rule in [false, true] {
+        for (mode, in_scope, gate_enabled, should_hold) in [
+            (RequestRuleEvaluationMode::Enforce, true, true, true),
+            (RequestRuleEvaluationMode::Enforce, false, true, false),
+            (RequestRuleEvaluationMode::Shadow, true, true, false),
+            (RequestRuleEvaluationMode::Disabled, true, true, false),
+            (RequestRuleEvaluationMode::Enforce, true, false, false),
+        ] {
+            let mut harness = bootstrap_media_request_app();
+            harness.user.authorization.default_library =
+                scryer_domain::LibraryPermissionMask::from_permissions([
+                    scryer_domain::LibraryPermission::Request,
+                    scryer_domain::LibraryPermission::AutoApproveRequests,
+                ]);
+            let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+            if include_healthy_rule {
+                let healthy = create_rule(&harness, "Healthy approval", APPROVE_EVERYTHING).await;
+                arm(
+                    &harness,
+                    &healthy.rule_set.id,
+                    RequestRuleEvaluationMode::Enforce,
+                )
+                .await;
+            }
+            let broken = create_rule(&harness, "Broken policy", DENY_EVERYTHING).await;
+            arm(&harness, &broken.rule_set.id, mode).await;
+            if !in_scope {
+                harness
+                    .request_rules
+                    .update_rule_set_metadata(
+                        &broken.rule_set.id,
+                        "Broken policy",
+                        "",
+                        &["another-library".into()],
+                        Utc::now(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            // Simulate a stored policy made invalid by a runtime upgrade, bypassing
+            // authoring validation at the persistence boundary.
+            let mut revision = broken.revision.clone();
+            revision.revision_number += 1;
+            revision.rego_source = "not valid rego {".into();
+            harness
+                .request_rules
+                .add_revision(&revision, Utc::now())
+                .await
+                .unwrap();
+            harness.app.rebuild_request_rules_engine().await.unwrap();
+            if gate_enabled {
+                enable_gate(&harness).await;
+            }
+            let cache = harness.app.request_rules_engine_snapshot();
+            assert!(!cache.unavailable);
+            assert_eq!(
+                cache.load_errors.contains_key(&broken.rule_set.id),
+                mode != RequestRuleEvaluationMode::Disabled
+            );
+            let id = submit(&harness, &library_id, 9047, None).await;
+            let requests = harness.media_requests.requests.lock().await;
+            let request = requests.iter().find(|request| request.id == id).unwrap();
+            assert_eq!(
+                request.status,
+                if should_hold {
+                    MediaRequestStatus::Pending
+                } else {
+                    MediaRequestStatus::Approved
+                }
+            );
+            if should_hold {
+                let traces = harness.request_rule_decisions.recorded().await;
+                let trace = traces.last().unwrap();
+                assert_eq!(trace.fallback_reason.as_deref(), Some(FALLBACK_ERROR));
+                assert!(trace.votes_json.contains(&broken.rule_set.id));
+                assert!(harness.titles.store.lock().await.is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn unreadable_request_rule_tag_registry_holds_the_persisted_request() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve with tags", APPROVE_EVERYTHING).await;

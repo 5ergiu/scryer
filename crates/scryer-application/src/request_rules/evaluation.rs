@@ -351,6 +351,18 @@ impl AppUseCase {
             });
         }
         let mut errors: Vec<ScopedError> = Vec::new();
+        for (rule_set_id, scope) in &consulted {
+            if let Some(message) = cache.load_errors.get(rule_set_id) {
+                errors.push(ScopedError {
+                    rule_set_id: rule_set_id.clone(),
+                    rule_set_name: scope.name.clone(),
+                    revision_number: scope.revision_number,
+                    content_hash: scope.content_hash.clone(),
+                    mode: scope.mode,
+                    message: message.clone(),
+                });
+            }
+        }
         for failure in &outcome.errors {
             let Some(scope) = cache.scopes.get(&failure.rule_set_id) else {
                 continue;
