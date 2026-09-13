@@ -572,9 +572,7 @@ async fn newznab_builtin_rss_search_uses_category_only_request() {
         "Example.Show.S01E01.1080p.WEB-DL"
     );
 
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    let request = recv_newznab_search_request(&request_rx);
     assert!(request.contains("GET /api?"), "request was {request}");
     assert!(request.contains("t=tvsearch"), "request was {request}");
     assert!(request.contains("cat=5000"), "request was {request}");
@@ -678,8 +676,23 @@ async fn concurrent_newznab_component_searches_count_each_saved_indexer_dispatch
     first.expect("first search should succeed");
     second.expect("second search should succeed");
 
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
-    assert_eq!(stats.0.load(Ordering::SeqCst), 2);
+    // Newznab 2.2.2 reads `t=caps` before searching, and how many of those two
+    // concurrent searches send depends on which one caches it first. So assert
+    // the two things that do not depend on that race: both searches reached the
+    // indexer, and the saved indexer was credited with every request the
+    // indexer actually received — the concurrency claim this test is named for.
+    let requests = server.received_requests().await.unwrap();
+    let searches = requests
+        .iter()
+        .filter(|request| {
+            request
+                .url
+                .query_pairs()
+                .all(|(key, value)| key != "t" || value != "caps")
+        })
+        .count();
+    assert_eq!(searches, 2);
+    assert_eq!(stats.0.load(Ordering::SeqCst) as usize, requests.len());
 }
 
 #[tokio::test]
@@ -728,9 +741,7 @@ async fn newznab_component_preserves_only_quota_codes_as_typed_errors() {
             )
             .await
             .expect_err("Newznab error document should fail the search");
-        request_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("mock Newznab server should receive a request");
+        recv_newznab_search_request(&request_rx);
 
         assert_eq!(
             matches!(
@@ -801,9 +812,7 @@ async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
         !error.contains("stopped after"),
         "the host should preserve Prowlarr's real reason instead of the guest's generic error: {error}"
     );
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Prowlarr server should receive a Newznab request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -858,9 +867,7 @@ async fn newznab_builtin_search_extracts_password_hints() {
         Some("archive-password")
     );
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -913,9 +920,7 @@ async fn newznab_builtin_search_treats_password_flags_as_protected_only() {
         Some(true)
     );
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -1074,9 +1079,7 @@ async fn newznab_builtin_full_search_canonicalizes_query_bearing_connection_urls
 
     assert_eq!(response.results.len(), 1);
 
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    let request = recv_newznab_search_request(&request_rx);
     assert!(request.starts_with("GET /api?"), "request was {request}");
     assert_eq!(
         request_query_value(&request, "q").as_deref(),
@@ -1147,9 +1150,7 @@ async fn run_newznab_builtin_full_search(additional_params: Option<&str>) -> Str
 
     assert_eq!(response.results.len(), 1);
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request")
+    recv_newznab_search_request(&request_rx)
 }
 
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1164,6 +1165,34 @@ fn request_query_value(request: &str, key: &str) -> Option<String> {
     let url = url::Url::parse(&format!("http://example.test{path}")).ok()?;
     url.query_pairs()
         .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+}
+
+/// What the mock answers a `t=caps` probe with. It carries no `<searching>`
+/// block, which is the documented signal for "keep the permissive request
+/// shape" — so the search request these tests assert on is the one the plugin
+/// would send to a server that advertises nothing.
+const NEWZNAB_PERMISSIVE_CAPS_BODY: &str =
+    r#"<?xml version="1.0" encoding="UTF-8"?><caps><server title="Mock"/><categories/></caps>"#;
+
+fn newznab_request_is_capabilities(request: &str) -> bool {
+    request_query_value(request, "t").as_deref() == Some("caps")
+}
+
+/// The first request that is not the capabilities probe.
+///
+/// Newznab 2.2.2 reads `t=caps` before searching, so the search request these
+/// tests care about is no longer the first one to arrive.
+fn recv_newznab_search_request(requests: &mpsc::Receiver<String>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let request = requests
+            .recv_timeout(remaining)
+            .expect("mock Newznab server should receive a search request");
+        if !newznab_request_is_capabilities(&request) {
+            return request;
+        }
+    }
 }
 
 fn spawn_newznab_response_server() -> (String, mpsc::Receiver<String>) {
@@ -1197,15 +1226,22 @@ fn spawn_newznab_raw_response_server(
                     let mut buffer = [0_u8; 8192];
                     let bytes_read = stream.read(&mut buffer).unwrap_or(0);
                     let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                    let is_capabilities = newznab_request_is_capabilities(&request);
                     let _ = request_tx.send(request);
 
-                    let headers = headers.join("\r\n");
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
+                    let response = if is_capabilities {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{NEWZNAB_PERMISSIVE_CAPS_BODY}",
+                            NEWZNAB_PERMISSIVE_CAPS_BODY.len()
+                        )
+                    } else {
+                        let headers = headers.join("\r\n");
+                        format!(
+                            "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    };
                     let _ = stream.write_all(response.as_bytes());
-                    break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
