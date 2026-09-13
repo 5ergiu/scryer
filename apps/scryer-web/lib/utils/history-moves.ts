@@ -1,6 +1,8 @@
 type MoveHistoryEvent = {
   eventType: string;
-  titleId: string;
+  // Null for a title-less history event; a move always has a title, so this
+  // only widens the structural type to match TitleHistoryEvent.
+  titleId: string | null;
   sourcePath?: string | null;
   destPath?: string | null;
   dataJson?: unknown;

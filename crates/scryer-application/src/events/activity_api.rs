@@ -322,7 +322,14 @@ fn title_history_record_matches(record: &TitleHistoryRecord, filter: &TitleHisto
         && filter
             .title_ids
             .as_ref()
-            .is_none_or(|title_ids| title_ids.contains(&record.title_id))
+            .is_none_or(|title_ids| {
+                // A record with no catalog title behind it (an unlinked grab)
+                // can never satisfy a title-scoped filter.
+                record
+                    .title_id
+                    .as_ref()
+                    .is_some_and(|title_id| title_ids.contains(title_id))
+            })
         && filter
             .download_id
             .as_ref()
@@ -469,7 +476,14 @@ async fn project_title_history_page(
                 };
 
             for record in event_records {
-                if !matched_title_ids.is_empty() && !matched_title_ids.contains(&record.title_id) {
+                // A title-scoped page is about those titles; a record with no
+                // catalog title behind it belongs to none of them.
+                if !matched_title_ids.is_empty()
+                    && !record
+                        .title_id
+                        .as_ref()
+                        .is_some_and(|title_id| matched_title_ids.contains(title_id))
+                {
                     continue;
                 }
                 if !title_history_record_matches(&record, filter) {
@@ -529,7 +543,7 @@ fn media_request_title_history_records(
         .filter(|title| media_request_external_ids_overlap(&title.external_ids, &data.external_ids))
         .map(|title| TitleHistoryRecord {
             id: format!("{}:{}", event.event_id, title.id),
-            title_id: title.id.clone(),
+            title_id: Some(title.id.clone()),
             title_name: Some(title.name.clone()),
             poster_url: title.poster_url.clone(),
             library_id: Some(title.library_id.clone()),
@@ -663,7 +677,8 @@ async fn hydrate_title_history_record_contexts(
                 || record.library_id.is_none()
                 || record.poster_url.is_none()
         })
-        .map(|record| record.title_id.clone())
+        // A record with no catalog title has nothing to hydrate from.
+        .filter_map(|record| record.title_id.clone())
         .collect::<HashSet<_>>();
 
     for title_id in missing_title_ids {
@@ -673,7 +688,7 @@ async fn hydrate_title_history_record_contexts(
 
         for record in records
             .iter_mut()
-            .filter(|record| record.title_id == title_id)
+            .filter(|record| record.title_id.as_deref() == Some(title_id.as_str()))
         {
             if record.title_name.is_none() {
                 record.title_name = Some(title.name.clone());

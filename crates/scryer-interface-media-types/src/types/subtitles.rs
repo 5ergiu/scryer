@@ -76,8 +76,10 @@ pub struct ExternalSubtitleBlocklistEntryPayload {
 pub struct TitleHistoryEventPayload {
     /// History event ID.
     pub id: ID,
-    /// Title ID associated with the event.
-    pub title_id: ID,
+    /// Title ID associated with the event, or null when the event has no
+    /// catalog title behind it: an unlinked grab is recorded against the
+    /// release and the indexer, with no catalog title behind it (FR-026).
+    pub title_id: Option<ID>,
     /// Title name, or null when no name was available.
     pub title_name: Option<String>,
     /// Poster URL of the title, or null when the title is gone or has no poster.
