@@ -1352,6 +1352,7 @@ impl DomainEventRepository for TestDomainEventRepo {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        _include_titleless: bool,
         download_id: Option<&str>,
     ) -> AppResult<i64> {
         let events = self.events.lock().await;
@@ -1376,6 +1377,7 @@ impl DomainEventRepository for TestDomainEventRepo {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        _include_titleless: bool,
         download_id: Option<&str>,
         limit: usize,
         offset: usize,

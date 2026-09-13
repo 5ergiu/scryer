@@ -460,6 +460,95 @@ async fn graphql_restore_recycled_item_returns_accepted_job_run() {
     assert!(root.path().join("graphql-restore.mkv").exists());
 }
 
+/// Seed a committed entry the way the recycle-bin e2e spec's
+/// `seedCommittedRecycleEntries` does: a directory named like `recycle_file`
+/// names one, holding the payload plus a hand-written `manifest.json` with
+/// exactly the key set the spec emits. Nothing here calls product code, which
+/// is the point - it is the spec's bytes, checked against the product's
+/// acceptance rules.
+async fn seed_recycled_file_like_the_e2e_spec(
+    root: &Path,
+    title_id: &str,
+    entry_id: &str,
+    name: &str,
+) -> String {
+    let recycle_root = root.join(".scryer-recycle");
+    std::fs::create_dir_all(&recycle_root).expect("create recycle root");
+    let sentinel = recycle_root.join(".scryer-recycle-root");
+    if !sentinel.exists() {
+        std::fs::write(&sentinel, "scryer.recycle-entry.v1").expect("write sentinel");
+    }
+
+    let original_path = root.join(format!("{name}.mkv"));
+    let entry_dir = recycle_root.join(entry_id);
+    std::fs::create_dir_all(&entry_dir).expect("create entry dir");
+    let payload = format!("scryer-e2e-empty-all-{entry_id}\n").repeat(64);
+    std::fs::write(entry_dir.join(format!("{name}.mkv")), payload.as_bytes())
+        .expect("write payload");
+
+    let manifest = serde_json::json!({
+        "schema": "scryer.recycle-entry.v1",
+        "entry_id": entry_id,
+        "source_operation_id": format!("e2e-empty-all-{entry_id}"),
+        "recycled_at": Utc::now().to_rfc3339(),
+        "original_path": original_path.to_string_lossy(),
+        "size_bytes": payload.len(),
+        "title_id": title_id,
+        "media_root": root.to_string_lossy(),
+        "reason": "title_deleted",
+        "status": "committed",
+    });
+    std::fs::write(
+        entry_dir.join("manifest.json"),
+        format!("{}\n", serde_json::to_string_pretty(&manifest).expect("manifest json")),
+    )
+    .expect("write manifest");
+
+    entry_id.to_string()
+}
+
+/// The empty-all e2e writes its own committed entries, because by the time it
+/// runs no product path is left that would recycle anything. Those entries must
+/// be listed by the product exactly like ones `recycle_file` wrote - if they are
+/// not, the spec is asserting against a shape the product does not accept and
+/// the e2e failure is real, not a harness timeout.
+#[tokio::test]
+async fn hand_seeded_committed_entries_are_listed_like_product_written_ones() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let library = seed_library(&ctx, "Anime", root.path()).await;
+    seed_title(&ctx, "title-a", &library).await;
+
+    let product_entry = seed_recycled_file(root.path(), "title-a", "product-written").await;
+    let seeded_entry = seed_recycled_file_like_the_e2e_spec(
+        root.path(),
+        "title-a",
+        "20260913_204833089_e2e000",
+        "E2E Empty All",
+    )
+    .await;
+
+    let manager = manage_titles_actor("manager", std::slice::from_ref(&library.id));
+    let items = ctx
+        .app
+        .list_recycled_items(&manager, None)
+        .await
+        .expect("list recycled items");
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&product_entry.as_str()),
+        "the product-written entry is listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&seeded_entry.as_str()),
+        "the hand-seeded entry must be listed the same way: {ids:?}"
+    );
+}
+
 #[tokio::test]
 async fn recycled_items_are_filtered_to_manage_title_libraries() {
     let ctx = TestContext::new().await;

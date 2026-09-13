@@ -996,6 +996,7 @@ pub fn build_title_history_filter_sql(
     _datastore: &StoreDatastore,
     event_types: Option<&[TitleHistoryEventType]>,
     title_ids: Option<&[String]>,
+    include_titleless: bool,
     download_id: Option<&str>,
 ) -> (String, Vec<SqlArg>) {
     // No `title_id IS NOT NULL` here. A row with no `title_id` is not a
@@ -1148,14 +1149,26 @@ pub fn build_title_history_filter_sql(
         }
     }
     if let Some(title_ids) = title_ids {
-        if title_ids.is_empty() {
-            clauses.push("0".to_string());
+        // `include_titleless` widens a title scope to also admit rows with no
+        // catalog title. It is set when the scope is the caller's library
+        // authorization rather than a title the user picked: an unlinked grab
+        // (FR-026) belongs to no title and no library, so a library-derived
+        // `title_id IN (...)` would drop it every time, which is what kept
+        // unlinked grabs off /activity/history even once the projection kept
+        // them. A user-chosen title or title search never sets it.
+        let scope = if title_ids.is_empty() {
+            "0".to_string()
         } else if title_ids.len() == 1 {
-            clauses.push("title_id = {}".to_string());
             args.push(SqlArg::Text(title_ids[0].clone()));
+            "title_id = {}".to_string()
         } else {
-            clauses.push(format!("title_id IN ({})", placeholders(title_ids.len())));
             args.extend(title_ids.iter().cloned().map(SqlArg::Text));
+            format!("title_id IN ({})", placeholders(title_ids.len()))
+        };
+        if include_titleless {
+            clauses.push(format!("({scope} OR title_id IS NULL)"));
+        } else {
+            clauses.push(scope);
         }
     }
     if let Some(download_id) = download_id {
