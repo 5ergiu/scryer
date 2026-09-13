@@ -404,6 +404,48 @@ pub(crate) fn canonical_title_lookup_keys(title: &Title) -> Vec<String> {
     keys
 }
 
+/// Present a title's anime numbering bridge cour names as tagged aliases.
+///
+/// A cour's own name is a name the title answers to, but the catalog keeps it
+/// only inside the numbering bridge, and the bridge is not consulted until
+/// long after title matching has already decided a release belongs to nobody.
+/// Folding the cour names into the aliases is what puts them into
+/// `CanonicalTitleEvidence` — lookup keys and spelling identity alike — so
+/// every matcher downstream sees them. Names the catalog already carries are
+/// left alone, and a title with no bridge is returned untouched.
+pub(crate) fn title_with_bridge_cour_titles(
+    title: &Title,
+    bridge: Option<&scryer_domain::AnimeNumberingBridge>,
+) -> Title {
+    let Some(bridge) = bridge.filter(|bridge| !bridge.is_empty()) else {
+        return title.clone();
+    };
+    let mut seen = std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+        .map(crate::title_matching::canonical_lookup_key)
+        .collect::<HashSet<_>>();
+    let mut bridged = title.clone();
+    for name in bridge.seasons.iter().flat_map(|season| &season.titles) {
+        let key = crate::title_matching::canonical_lookup_key(name);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        // Bridge cour names are the upstream anime dataset's, so a Latin one is
+        // a romanization; tagging it as such is what lets the relaxed matcher
+        // treat `Gassho o` and `Gasshou wo` as one spelling.
+        let language = match scryer_domain::title_spelling::title_script(name) {
+            scryer_domain::title_spelling::TitleScript::Latin => "x-jat",
+            _ => "ja",
+        };
+        bridged.tagged_aliases.push(scryer_domain::TaggedAlias {
+            name: name.clone(),
+            language: language.to_string(),
+        });
+    }
+    bridged
+}
+
 pub(crate) fn canonical_title_evidence(title: &Title) -> CanonicalTitleEvidence {
     canonical_title_evidence_for_episode(title, None)
 }
@@ -2528,6 +2570,7 @@ impl AppUseCase {
             episode_num
         )];
         queries.push(format!("{} S{:0>2}", title.name.trim(), season_num));
+        let mut anime_numbering_bridge = None;
         if title.facet == MediaFacet::Anime {
             if let Some(absolute) = absolute_episode {
                 queries.insert(0, format!("{} {:0>3}", title.name.trim(), absolute));
@@ -2541,7 +2584,7 @@ impl AppUseCase {
             // the season and episode numbers the groups actually post under,
             // and the results it does return are whatever the bare title
             // matched.
-            let anime_numbering_bridge = self
+            anime_numbering_bridge = self
                 .services
                 .catalog
                 .shows
@@ -2565,11 +2608,18 @@ impl AppUseCase {
         let mut seen = HashSet::new();
         queries.retain(|query| !query.trim().is_empty() && seen.insert(query.to_ascii_lowercase()));
 
+        // The same cour names the queries are built from are names the results
+        // come back under, so the evidence has to carry them too.
+        let evidence_title = title_with_bridge_cour_titles(title, anime_numbering_bridge.as_ref());
+
         Ok(ResolvedReleaseSearchSubject {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
-            title_evidence: canonical_title_evidence_for_episode(title, episode_record.as_ref())
-                .with_ambiguity(self.title_identity_ambiguity(title).await),
+            title_evidence: canonical_title_evidence_for_episode(
+                &evidence_title,
+                episode_record.as_ref(),
+            )
+            .with_ambiguity(self.title_identity_ambiguity(title).await),
             queries,
             imdb_id,
             tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
@@ -2761,11 +2811,16 @@ impl AppUseCase {
         let absolute_episode = episode
             .and_then(|episode| episode.absolute_number.as_deref())
             .and_then(|value| value.parse::<u32>().ok());
+        // Release groups name a posting after the cour, and the cour's name is
+        // in the bridge rather than the catalog's aliases. The evidence has to
+        // carry it or the walk proves nothing against its own results.
+        let evidence_title =
+            title_with_bridge_cour_titles(search_title, anime_numbering_bridge.as_ref());
 
         ResolvedReleaseSearchSubject {
             title_id: owner_title.id.clone(),
             title_tags: owner_title.tags.clone(),
-            title_evidence: canonical_title_evidence_for_episode(search_title, episode)
+            title_evidence: canonical_title_evidence_for_episode(&evidence_title, episode)
                 .with_ambiguity(self.title_identity_ambiguity(search_title).await),
             queries: query_result.queries,
             imdb_id: query_result.imdb_id,
