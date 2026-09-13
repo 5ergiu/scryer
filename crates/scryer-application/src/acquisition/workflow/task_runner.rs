@@ -4802,6 +4802,19 @@ fn arm_deferred_acquisition_retry(
     Some(armed.map_or(deadline, |armed| armed.min(deadline)))
 }
 
+/// Dispatch long evaluation work without blocking acquisition or queueing
+/// another evaluation behind it. The owner reaps and drains admitted work.
+fn spawn_single_scheduled_task(
+    tasks: &mut tokio::task::JoinSet<()>,
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) -> bool {
+    if !tasks.is_empty() {
+        return false;
+    }
+    tasks.spawn(task);
+    true
+}
+
 pub async fn start_background_acquisition_poller(
     app: AppUseCase,
     token: tokio_util::sync::CancellationToken,
@@ -5021,6 +5034,8 @@ pub async fn start_background_acquisition_poller(
         tokio::time::Instant::now() + maintenance_evaluation_offset,
         maintenance_evaluation_cadence,
     );
+    maintenance_evaluation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut maintenance_evaluation_tasks = tokio::task::JoinSet::new();
     let mut lifecycle_action_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + lifecycle_action_offset,
         lifecycle_action_cadence,
@@ -5240,10 +5255,15 @@ pub async fn start_background_acquisition_poller(
                     }
                 }).await;
             }
+            result = maintenance_evaluation_tasks.join_next(), if !maintenance_evaluation_tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    warn!(%error, "maintenance evaluation worker failed");
+                }
+            }
             _ = maintenance_evaluation_interval.tick() => {
                 let app = app.clone();
                 let cadence = maintenance_evaluation_cadence;
-                run_task("maintenance_rule_evaluation", async move {
+                spawn_single_scheduled_task(&mut maintenance_evaluation_tasks, run_task("maintenance_rule_evaluation", async move {
                     app.set_job_next_run_at(
                         JobKey::MaintenanceRuleEvaluation,
                         Utc::now()
@@ -5254,7 +5274,7 @@ pub async fn start_background_acquisition_poller(
                         warn!(error = %e, "scheduled maintenance rule evaluation failed");
                         metrics::counter!("scryer_task_errors_total", "task" => "maintenance_rule_evaluation").increment(1);
                     }
-                }).await;
+                }));
             }
             _ = lifecycle_action_interval.tick() => {
                 let app = app.clone();
@@ -5301,6 +5321,13 @@ pub async fn start_background_acquisition_poller(
                     }
                 }).await;
             }
+        }
+    }
+    // Stop admitting evaluations at shutdown, but let the admitted job settle
+    // its durable state instead of detaching it from the scheduler lifecycle.
+    while let Some(result) = maintenance_evaluation_tasks.join_next().await {
+        if let Err(error) = result {
+            warn!(%error, "maintenance evaluation worker failed during shutdown");
         }
     }
 }
@@ -5378,6 +5405,41 @@ fn discovery_sync_delay_until(next_run_at: DateTime<Utc>) -> std::time::Duration
 mod task_runner_tests {
     use super::*;
     use crate::acquisition::targets::AcquisitionTarget;
+
+    #[tokio::test]
+    async fn scheduled_evaluation_dispatch_is_nonblocking_and_single_flight() {
+        let mut tasks = tokio::task::JoinSet::new();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (finish, finish_rx) = tokio::sync::oneshot::channel();
+        assert!(spawn_single_scheduled_task(&mut tasks, async move {
+            started.send(()).unwrap();
+            finish_rx.await.unwrap();
+        }));
+        started_rx.await.unwrap();
+        assert!(!spawn_single_scheduled_task(&mut tasks, async {
+            panic!("a second tick must not queue another evaluation");
+        }));
+        // Unrelated work remains schedulable while evaluation is held.
+        let unrelated = tokio::spawn(async { 42 });
+        assert_eq!(unrelated.await.unwrap(), 42);
+        assert!(tasks.try_join_next().is_none());
+        finish.send(()).unwrap();
+        tasks.join_next().await.unwrap().unwrap();
+        assert!(spawn_single_scheduled_task(&mut tasks, async {}));
+        tasks.join_next().await.unwrap().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_scheduled_evaluation_can_be_reaped_and_restarted() {
+        let mut tasks = tokio::task::JoinSet::new();
+        assert!(spawn_single_scheduled_task(&mut tasks, async {
+            panic!("synthetic evaluation failure");
+        }));
+        assert!(tasks.join_next().await.unwrap().unwrap_err().is_panic());
+        assert!(spawn_single_scheduled_task(&mut tasks, async {}));
+        tasks.join_next().await.unwrap().unwrap();
+    }
 
     #[test]
     fn non_metadata_scheduled_job_intervals_remain_unchanged() {

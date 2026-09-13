@@ -432,6 +432,7 @@ impl AppUseCase {
         // Only additions are gated on the registry. Removing a label that was
         // deleted from the registry while it was still on a title is cleanup,
         // and refusing it would strand the title with a tag nothing can clear.
+        let _registry_guard = TITLE_TAG_REGISTRY_MUTATION.lock().await;
         self.require_registered_title_tags(&add).await?;
 
         let mut seen = HashSet::new();
@@ -518,6 +519,7 @@ impl AppUseCase {
         require_disjoint_tag_patch(&add, &remove)?;
         // Additions only, for the same reason titles gate additions only:
         // removing a label the registry no longer defines is cleanup.
+        let _registry_guard = TITLE_TAG_REGISTRY_MUTATION.lock().await;
         self.require_registered_title_tags(&add).await?;
 
         let mut seen = HashSet::new();

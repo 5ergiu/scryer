@@ -7582,6 +7582,15 @@ pub trait LifecycleClaimRepository: Send + Sync {
     /// Returns how many moved.
     async fn expire_due(&self, now: DateTime<Utc>) -> AppResult<u64>;
 
+    /// Release at most `limit` live claims whose titles no longer exist.
+    /// Title absence and the transition must be checked in the same write.
+    async fn release_orphaned(
+        &self,
+        limit: usize,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<u64>;
+
     /// Release every live claim produced by one request. Returns how many moved.
     async fn release_for_producer_ref(
         &self,

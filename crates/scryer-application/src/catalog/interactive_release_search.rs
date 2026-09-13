@@ -1554,20 +1554,27 @@ impl AppUseCase {
             });
         }
 
-        let bundle = if artifacts.len() == 1 {
-            let artifact = &artifacts[0];
-            InteractiveSearchArtifactBundle {
-                file_name: artifact.file_name.clone(),
-                content_type: artifact.content_type.clone(),
-                bytes: artifact.bytes.clone(),
-            }
-        } else {
-            InteractiveSearchArtifactBundle {
-                file_name: format!("scryer-releases-{}.tar.gz", now.format("%Y%m%d-%H%M%S")),
-                content_type: "application/gzip".to_string(),
-                bytes: build_release_artifact_archive(&artifacts, now)?,
-            }
-        };
+        let (artifacts, bundle) = tokio::task::spawn_blocking(move || {
+            let bundle = if artifacts.len() == 1 {
+                let artifact = &artifacts[0];
+                InteractiveSearchArtifactBundle {
+                    file_name: artifact.file_name.clone(),
+                    content_type: artifact.content_type.clone(),
+                    bytes: artifact.bytes.clone(),
+                }
+            } else {
+                InteractiveSearchArtifactBundle {
+                    file_name: format!("scryer-releases-{}.tar.gz", now.format("%Y%m%d-%H%M%S")),
+                    content_type: "application/gzip".to_string(),
+                    bytes: build_release_artifact_archive(&artifacts, now)?,
+                }
+            };
+            Ok::<_, AppError>((artifacts, bundle))
+        })
+        .await
+        .map_err(|error| {
+            AppError::Repository(format!("release archive worker failed: {error}"))
+        })??;
 
         // Every fetch succeeded, so every release was grabbed as far as the
         // indexer is concerned; a failed bundle above emitted nothing.

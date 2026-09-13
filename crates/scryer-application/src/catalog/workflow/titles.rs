@@ -908,6 +908,7 @@ impl AppUseCase {
         // imports, and media-request approvals reach titles by other routes and
         // only ever emit reserved entries, so gating them would add a registry
         // read to every scan for no reachable case.
+        let registry_guard = TITLE_TAG_REGISTRY_MUTATION.lock().await;
         self.require_registered_title_tags(&crate::helpers::normalize_tags(&request.tags))
             .await?;
         let created = self
@@ -918,6 +919,7 @@ impl AppUseCase {
                 options_patch,
             )
             .await?;
+        drop(registry_guard);
         self.finish_add_title_with_outcome(created).await
     }
 

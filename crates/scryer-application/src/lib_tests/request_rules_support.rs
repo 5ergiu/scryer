@@ -509,6 +509,17 @@ impl crate::ports::LifecycleClaimRepository for InMemoryLifecycleClaimRepo {
         Ok(released)
     }
 
+    async fn release_orphaned(
+        &self,
+        _limit: usize,
+        _reason: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<u64> {
+        self.fail_if_armed()?;
+        // This isolated claim fake has no title store; datastore tests cover absence checks.
+        Ok(0)
+    }
+
     async fn release_claim(&self, id: &str, reason: &str, now: DateTime<Utc>) -> AppResult<u64> {
         self.fail_if_armed()?;
         let mut claims = self.claims.lock().await;

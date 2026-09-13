@@ -148,6 +148,37 @@ impl LifecycleClaimRepository for LifecycleClaimStore {
         Ok(by_title)
     }
 
+    async fn release_orphaned(
+        &self,
+        limit: usize,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<u64> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        execute_write_sql(
+            &self.datastore,
+            "release_orphaned_lifecycle_claims",
+            "UPDATE lifecycle_claims
+                SET state = 'released', released_reason = {}, updated_at = {}
+              WHERE state IN ('dormant', 'active') AND id IN (
+                  SELECT claim.id FROM lifecycle_claims AS claim
+                   WHERE claim.state IN ('dormant', 'active')
+                     AND NOT EXISTS (SELECT 1 FROM titles WHERE titles.id = claim.title_id)
+                   ORDER BY claim.created_at ASC, claim.id ASC
+                   LIMIT {}
+              )"
+            .to_string(),
+            vec![
+                SqlArg::Text(reason.to_string()),
+                SqlArg::Timestamp(now),
+                SqlArg::I64(limit.min(i64::MAX as usize) as i64),
+            ],
+        )
+        .await
+    }
+
     async fn list_dormant(&self, limit: usize) -> AppResult<Vec<LifecycleClaim>> {
         if limit == 0 {
             return Ok(Vec::new());
