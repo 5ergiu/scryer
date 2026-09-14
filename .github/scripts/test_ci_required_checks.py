@@ -55,23 +55,31 @@ class RequiredCheckTests(unittest.TestCase):
         for validation in validations:
             self.assertFalse(ancestors(validation) & (builds | (validations - {validation})))
 
-    def test_build_gates_pass_only_success_or_intentional_skip(self):
+    def test_existing_jobs_short_circuit_without_wrappers(self):
+        source = (WORKFLOWS / "scryer.yml").read_text()
+        self.assertNotRegex(source, r"(?m)^  [\w-]+-work:")
         for name in ["web", "winget-xtask-build", "rust-clippy", "launcher-build",
                      "linux-build", "macos-build", "windows-build", "windows-validation"]:
             block = job("scryer.yml", name)
             self.assertIn("    if: always()", block)
             script = first_script(block)
-            for required, result, expected in [
-                ("false", "skipped", True), ("true", "success", True),
-                ("true", "skipped", False), ("true", "failure", False),
-                ("true", "cancelled", False), ("false", "failure", False),
-                ("", "skipped", False),
+            for required, ready, expected in [
+                ("false", "false", True), ("false", "true", True),
+                ("true", "true", True), ("true", "false", False),
+                ("true", "", False), ("", "false", False),
             ]:
-                with self.subTest(job=name, required=required, result=result):
+                with self.subTest(job=name, required=required, ready=ready):
                     self.assertEqual(succeeds(script, CLASSIFICATION="success",
-                                              REQUIRED=required, RESULT=result), expected)
+                                              REQUIRED=required, READY=ready,
+                                              GITHUB_OUTPUT="/dev/null"), expected)
             self.assertFalse(succeeds(script, CLASSIFICATION="failure",
-                                      REQUIRED="false", RESULT="skipped"))
+                                      REQUIRED="false", READY="false", GITHUB_OUTPUT="/dev/null"))
+            steps = re.split(r"(?m)^      - ", block)[1:]
+            self.assertIn("id: scope", steps[0])
+            for step in steps[1:]:
+                condition = re.search(r"(?m)^        if: (.+)$", step)
+                self.assertIsNotNone(condition, (name, step.splitlines()[0]))
+                self.assertIn("steps.scope.outputs.run == 'true'", condition[1])
 
     def test_required_names_are_preserved(self):
         names = {

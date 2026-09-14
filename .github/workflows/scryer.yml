@@ -86,37 +86,34 @@ jobs:
   web:
     name: web
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, web-work]
+    timeout-minutes: 40
+    needs: [changes]
     if: always()
     steps:
-      - name: Validate required check
+      - name: Check applicable changes
+        id: scope
         env:
           CLASSIFICATION: ${{ needs.changes.result }}
           REQUIRED: ${{ needs.changes.outputs.web }}
-          RESULT: ${{ needs.web-work.result }}
+          READY: ${{ needs.changes.outputs.web == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           test "$CLASSIFICATION" = success
           if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
           else
             test "$REQUIRED" = false
-            test "$RESULT" = skipped
             echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-  web-work:
-    name: web (work)
-    runs-on: ubuntu-26.04
-    timeout-minutes: 40
-    needs: [changes]
-    if: ${{ needs.changes.outputs.web == 'true' }}
-    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - name: Setup Node
+        if: steps.scope.outputs.run == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 25
@@ -124,18 +121,22 @@ jobs:
           cache-dependency-path: apps/scryer-web/package-lock.json
 
       - name: Install dependencies
+        if: steps.scope.outputs.run == 'true'
         working-directory: apps/scryer-web
         run: npm ci
 
       - name: Lint
+        if: steps.scope.outputs.run == 'true'
         working-directory: apps/scryer-web
         run: npm run lint
 
       - name: Run web unit tests
+        if: steps.scope.outputs.run == 'true'
         working-directory: apps/scryer-web
         run: npm run test
 
       - name: Build web app
+        if: steps.scope.outputs.run == 'true'
         working-directory: apps/scryer-web
         env:
           SCRYER_GRAPHQL_URL: /graphql
@@ -143,9 +144,11 @@ jobs:
         run: npm run build
 
       - name: Verify static output
+        if: steps.scope.outputs.run == 'true'
         run: test -f apps/scryer-web/dist/index.html
 
       - name: Upload web artifact
+        if: steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: scryer-web-out-${{ github.run_id }}
@@ -201,35 +204,11 @@ jobs:
   winget-xtask-build:
     name: winget-xtask-build
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, winget-xtask-build-work]
-    if: always()
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'scryer-v') }}
-          RESULT: ${{ needs.winget-xtask-build-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  winget-xtask-build-work:
-    name: winget-xtask-build (work)
-    runs-on: ubuntu-26.04
     timeout-minutes: 50
-    needs: [release-trust, builtins-provenance]
+    needs: [changes, release-trust, builtins-provenance]
     permissions:
       contents: read
-    if: ${{ always() && github.ref_type == 'tag' && startsWith(github.ref_name, 'scryer-v') && needs.release-trust.result == 'success' && needs.builtins-provenance.result == 'success' }}
+    if: always()
     env:
       CARGO_INCREMENTAL: "0"
       SCCACHE_BASEDIRS: /home/runner/work/scryer/scryer
@@ -237,22 +216,46 @@ jobs:
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'scryer-v') }}
+          READY: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'scryer-v') && needs.release-trust.result == 'success' && needs.builtins-provenance.result == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1"
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure trusted tag sccache
+        if: steps.scope.outputs.run == 'true'
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -261,6 +264,7 @@ jobs:
           key-prefix: scryer/trusted-release/v1/rust-1.97.1/x86_64-unknown-linux-gnu/
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -268,10 +272,11 @@ jobs:
           sccache --zero-stats || true
 
       - name: Build WinGet xtask binary
+        if: steps.scope.outputs.run == 'true'
         run: cargo build --locked -p xtask-release
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -282,6 +287,7 @@ jobs:
           fi
 
       - name: Upload WinGet xtask binary
+        if: steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: winget-xtask-release-${{ github.run_id }}
@@ -290,7 +296,7 @@ jobs:
           retention-days: 14
 
       - name: Upload WinGet sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: winget-xtask-sccache-stats-${{ github.run_id }}
@@ -301,33 +307,9 @@ jobs:
   rust-clippy:
     name: rust-clippy
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, rust-clippy-work]
-    if: always()
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.rust-clippy-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  rust-clippy-work:
-    name: rust-clippy (work)
-    runs-on: ubuntu-26.04
     timeout-minutes: 50
     needs: [changes, web, builtins-provenance, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     env:
       CARGO_HOME: /home/runner/.cargo
       CARGO_INCREMENTAL: "0"
@@ -341,24 +323,47 @@ jobs:
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1"
           components: clippy
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -367,7 +372,7 @@ jobs:
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/x86_64-unknown-linux-musl/
 
       - name: Configure fork PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         shell: bash
         run: |
           {
@@ -376,6 +381,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -383,12 +389,15 @@ jobs:
           sccache --zero-stats || true
 
       - name: Install system dependencies
+        if: steps.scope.outputs.run == 'true'
         run: sudo apt-get install -y --no-install-recommends musl-tools mold nasm
 
       - name: Add Rust targets
+        if: steps.scope.outputs.run == 'true'
         run: rustup target add x86_64-unknown-linux-musl wasm32-wasip2
 
       - name: Download embedded web artifact
+        if: steps.scope.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: scryer-web-out-${{ github.run_id }}
@@ -398,6 +407,7 @@ jobs:
           digest-mismatch: error
 
       - name: Show starting disk usage
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -405,6 +415,7 @@ jobs:
           du -sh target "$CARGO_HOME" 2>/dev/null | tee -a rust-clippy-disk-start.txt || true
 
       - name: Verify Wasmtime runtime feature surface
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -419,6 +430,7 @@ jobs:
           fi
 
       - name: Run clippy for production binary packages
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -466,7 +478,7 @@ jobs:
             -- -D warnings 2>&1 | tee rust-clippy.log
 
       - name: Show ending disk usage
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -474,14 +486,14 @@ jobs:
           du -sh target "$CARGO_HOME" 2>/dev/null | tee -a rust-clippy-disk-end.txt || true
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
           sccache --show-stats | tee rust-clippy-sccache-stats.txt
 
       - name: Upload rust-clippy artifacts
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: ./.github/actions/upload-ci-diagnostics
         with:
           name: rust-clippy-${{ github.run_id }}
@@ -494,38 +506,10 @@ jobs:
 
   windows-validation:
     name: windows-${{ matrix.mode }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, windows-validation-work]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [clippy, tests]
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.windows-validation-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  windows-validation-work:
-    name: windows-${{ matrix.mode }} (work)
     runs-on: windows-2025
     timeout-minutes: 60
     needs: [changes, web, builtins-provenance, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -547,19 +531,42 @@ jobs:
       SCCACHE_CACHE_SIZE: 10G
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1-x86_64-pc-windows-msvc"
           components: clippy
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        if: steps.scope.outputs.run == 'true'
         with:
           version: v0.17.0
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -567,6 +574,7 @@ jobs:
           secret-access-key: ${{ secrets.SCCACHE_S3_SECRET }}
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/x86_64-pc-windows-msvc/
       - name: Configure compiler and linker
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           "RUSTC_WRAPPER=sccache" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
@@ -575,6 +583,7 @@ jobs:
           "RUSTFLAGS=--remap-path-prefix=$env:GITHUB_WORKSPACE=. -C target-feature=+crt-static -Clinker=lld-link -W linker-messages" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "SCRYER_EMBED_UI_DIR=$env:GITHUB_WORKSPACE/scryer-web-out" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Install pinned NASM
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -586,6 +595,7 @@ jobs:
           Expand-Archive nasm.zip -DestinationPath $destination
           (Get-ChildItem $destination -Directory | Select-Object -First 1).FullName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: steps.scope.outputs.run == 'true'
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
@@ -593,10 +603,11 @@ jobs:
           run-id: ${{ github.run_id }}
           digest-mismatch: error
       - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
-        if: matrix.mode == 'tests'
+        if: ${{ steps.scope.outputs.run == 'true' && (matrix.mode == 'tests') }}
         with:
           tool: nextest
       - name: Run native Windows validation
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         env:
           VALIDATION_MODE: ${{ matrix.mode }}
@@ -606,11 +617,11 @@ jobs:
           python -B .github/scripts/windows_ci.py $env:VALIDATION_MODE 2>&1 | Tee-Object -FilePath windows-validation.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Record compiler cache statistics
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: pwsh
         run: sccache --show-stats | Tee-Object -FilePath windows-validation-cache.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         with:
           name: windows-${{ matrix.mode }}-validation-${{ github.run_id }}
           path: |
@@ -830,38 +841,10 @@ jobs:
 
   launcher-build:
     name: launcher-${{ matrix.arch }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, launcher-build-work]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.launcher-build-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  launcher-build-work:
-    name: launcher-${{ matrix.arch }} (work)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     needs: [changes, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     strategy:
       fail-fast: false
       matrix:
@@ -888,9 +871,30 @@ jobs:
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - name: Configure build target
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
@@ -900,17 +904,20 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1"
 
       - name: Install system dependencies
+        if: steps.scope.outputs.run == 'true'
         run: sudo apt-get install -y --no-install-recommends musl-tools mold
 
       - name: Add target
+        if: steps.scope.outputs.run == 'true'
         run: rustup target add ${{ matrix.target }}
 
       - name: Resolve sccache lane metadata
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         id: launcher-sccache-metadata
         shell: bash
         run: |
@@ -930,7 +937,7 @@ jobs:
           echo "version_line=${version_line}" >> "$GITHUB_OUTPUT"
 
       - name: Restore sccache directory
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         id: launcher-sccache-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -942,12 +949,13 @@ jobs:
             gha-sccache-v3-${{ matrix.sccache_lane }}-release-launcher-
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         shell: bash
         run: |
           {
@@ -956,7 +964,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -965,7 +973,7 @@ jobs:
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Configure trusted tag sccache
-        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v') }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v')) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -974,6 +982,7 @@ jobs:
           key-prefix: scryer/trusted-release/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -981,14 +990,14 @@ jobs:
           sccache --zero-stats || true
 
       - name: Run launcher tests (PR fast feedback; tags use workspace nextest)
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test -p scryer-launcher --locked 2>&1 | tee "${{ matrix.artifact_name }}-test.log"
 
       - name: Prepare clean local release target
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1002,6 +1011,7 @@ jobs:
           ls -la "$CARGO_TARGET_DIR"
 
       - name: Build launcher
+        if: steps.scope.outputs.run == 'true'
         id: launcher-cargo-build
         shell: bash
         run: |
@@ -1018,7 +1028,7 @@ jobs:
           fi
 
       - name: Validate release build diagnostics
-        if: ${{ always() && github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always() && github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1029,10 +1039,11 @@ jobs:
           fi
 
       - name: Package launcher tarball
+        if: steps.scope.outputs.run == 'true'
         run: tar -czf ${{ matrix.artifact_name }}.tar.gz -C "$CARGO_TARGET_DIR/${{ matrix.target }}/release-launcher" scryer-launcher
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1043,7 +1054,7 @@ jobs:
           fi
 
       - name: Upload launcher artifacts
-        if: ${{ always() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -1060,39 +1071,10 @@ jobs:
 
   linux-build:
     name: linux-${{ matrix.arch }}-${{ matrix.variant }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, linux-build-work]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, arm64]
-        variant: [portable]
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.linux-build-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  linux-build-work:
-    name: linux-${{ matrix.arch }}-${{ matrix.variant }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     strategy:
       fail-fast: false
       matrix:
@@ -1136,13 +1118,35 @@ jobs:
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
 
       - name: Configure build target
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
@@ -1152,10 +1156,12 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1"
 
       - name: Install system dependencies
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1166,10 +1172,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends "${packages[@]}"
 
       - name: Add target
+        if: steps.scope.outputs.run == 'true'
         run: rustup target add ${{ matrix.target }}
 
       - name: Restore sccache directory
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         id: linux-sccache-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1180,12 +1187,13 @@ jobs:
             gha-sccache-v5-${{ matrix.sccache_lane }}-rc-
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         shell: bash
         run: |
           {
@@ -1194,7 +1202,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1203,7 +1211,7 @@ jobs:
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Configure trusted tag sccache
-        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v') }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v')) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1212,6 +1220,7 @@ jobs:
           key-prefix: scryer/trusted-release/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Download embedded web artifact
+        if: steps.scope.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: scryer-web-out-${{ github.run_id }}
@@ -1221,12 +1230,13 @@ jobs:
           digest-mismatch: error
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         run: |
           sccache --start-server || true
           sccache --zero-stats || true
 
       - name: Prepare clean local release target
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1240,6 +1250,7 @@ jobs:
           ls -la "$CARGO_TARGET_DIR"
 
       - name: Build scryer
+        if: steps.scope.outputs.run == 'true'
         id: linux-cargo-build
         shell: bash
         run: |
@@ -1286,6 +1297,7 @@ jobs:
           fi
 
       - name: Validate native linkage
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1297,7 +1309,7 @@ jobs:
           fi
 
       - name: Validate release build diagnostics
-        if: ${{ always() && github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always() && github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1313,10 +1325,11 @@ jobs:
           fi
 
       - name: Package tarball
+        if: steps.scope.outputs.run == 'true'
         run: tar -czf ${{ matrix.archive_name }} -C "$CARGO_TARGET_DIR/${{ matrix.target }}/$SCRYER_CARGO_PROFILE" scryer
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1327,7 +1340,7 @@ jobs:
           fi
 
       - name: Upload release package
-        if: ${{ success() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (success()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -1336,7 +1349,7 @@ jobs:
           retention-days: 14
 
       - name: Upload build diagnostics
-        if: ${{ always() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-diagnostics-${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -1353,39 +1366,10 @@ jobs:
 
   macos-build:
     name: macos-${{ matrix.arch }}-${{ matrix.variant }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, macos-build-work]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, x86_64]
-        variant: [portable]
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.macos-build-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  macos-build-work:
-    name: macos-${{ matrix.arch }}-${{ matrix.variant }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     strategy:
       fail-fast: false
       matrix:
@@ -1428,13 +1412,35 @@ jobs:
       SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
 
       - name: Configure build target
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
@@ -1444,12 +1450,13 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: "1.97.1"
           targets: ${{ matrix.target }}
 
       - name: Restore sccache directory
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         id: macos-sccache-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1460,12 +1467,13 @@ jobs:
             gha-sccache-v5-${{ matrix.sccache_lane }}-rc-
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         shell: bash
         run: |
           {
@@ -1474,7 +1482,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1483,7 +1491,7 @@ jobs:
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Configure trusted tag sccache
-        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v') }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v')) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1492,6 +1500,7 @@ jobs:
           key-prefix: scryer/trusted-release/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Download embedded web artifact
+        if: steps.scope.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: scryer-web-out-${{ github.run_id }}
@@ -1501,6 +1510,7 @@ jobs:
           digest-mismatch: error
 
       - name: Install system dependencies
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1513,6 +1523,7 @@ jobs:
           fi
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1520,7 +1531,7 @@ jobs:
           sccache --zero-stats || true
 
       - name: Prepare clean local release target
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1534,6 +1545,7 @@ jobs:
           ls -la "$CARGO_TARGET_DIR"
 
       - name: Build scryer
+        if: steps.scope.outputs.run == 'true'
         id: macos-cargo-build
         shell: bash
         run: |
@@ -1585,6 +1597,7 @@ jobs:
           fi
 
       - name: Validate native linkage
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1596,7 +1609,7 @@ jobs:
           fi
 
       - name: Validate release build diagnostics
-        if: ${{ always() && github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always() && github.event_name != 'pull_request') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1612,7 +1625,7 @@ jobs:
           fi
 
       - name: Codesign binary
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name != 'pull_request') }}
         env:
           CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
@@ -1636,10 +1649,11 @@ jobs:
           security delete-keychain "$KEYCHAIN"
 
       - name: Package tarball
+        if: steps.scope.outputs.run == 'true'
         run: tar -czf ${{ matrix.artifact_name }}.tar.gz -C "$CARGO_TARGET_DIR/${{ matrix.target }}/${SCRYER_CARGO_PROFILE}" scryer
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1650,7 +1664,7 @@ jobs:
           fi
 
       - name: Upload release package
-        if: ${{ success() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (success()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -1659,7 +1673,7 @@ jobs:
           retention-days: 14
 
       - name: Upload build diagnostics
-        if: ${{ always() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-diagnostics-${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -1676,38 +1690,10 @@ jobs:
 
   windows-build:
     name: windows-${{ matrix.arch }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    needs: [changes, windows-build-work]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, arm64]
-    steps:
-      - name: Validate required check
-        env:
-          CLASSIFICATION: ${{ needs.changes.result }}
-          REQUIRED: ${{ needs.changes.outputs.full }}
-          RESULT: ${{ needs.windows-build-work.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$CLASSIFICATION" = success
-          if [ "$REQUIRED" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$REQUIRED" = false
-            test "$RESULT" = skipped
-            echo "No applicable changes; check passed."
-          fi
-
-  windows-build-work:
-    name: windows-${{ matrix.arch }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]
-    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    if: always()
     strategy:
       fail-fast: false
       matrix:
@@ -1752,13 +1738,35 @@ jobs:
       SCCACHE_DIR: ${{ github.workspace }}\.sccache
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
+      - name: Check applicable changes
+        id: scope
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          READY: ${{ needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$READY" = true
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$REQUIRED" = false
+            echo "No applicable changes; check passed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.scope.outputs.run == 'true'
 
       - uses: ./.github/actions/download-builtins
+        if: steps.scope.outputs.run == 'true'
         with:
           run-id: ${{ github.run_id }}
 
       - name: Configure build target
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
@@ -1769,11 +1777,12 @@ jobs:
           "CARGO_TARGET_DIR=$targetDir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.scope.outputs.run == 'true'
         with:
           toolchain: ${{ matrix.toolchain }}
 
       - name: Restore sccache directory
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         id: windows-sccache-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1784,19 +1793,20 @@ jobs:
             gha-sccache-v5-${{ matrix.sccache_lane }}-rc-
 
       - name: Install sccache
+        if: steps.scope.outputs.run == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
 
       - name: Configure sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         shell: pwsh
         run: |
           "RUSTC_WRAPPER=sccache" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "SCRYER_SCCACHE_ENABLED=true" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Configure trusted internal PR sccache
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1805,7 +1815,7 @@ jobs:
           key-prefix: scryer/trusted-pr/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Configure trusted tag sccache
-        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v') }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/scryer-v')) }}
         uses: ./.github/actions/configure-sccache-r2
         with:
           endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
@@ -1814,6 +1824,7 @@ jobs:
           key-prefix: scryer/trusted-release/v1/rust-1.97.1/${{ matrix.target }}/
 
       - name: Download embedded web artifact
+        if: steps.scope.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: scryer-web-out-${{ github.run_id }}
@@ -1823,7 +1834,7 @@ jobs:
           digest-mismatch: error
 
       - name: Install NASM
-        if: ${{ matrix.install_nasm }}
+        if: ${{ steps.scope.outputs.run == 'true' && (matrix.install_nasm) }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1839,6 +1850,7 @@ jobs:
           $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Exclude build dir from Windows Defender
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           # Exclusions only improve build speed; some runner images lack an active Defender service.
@@ -1855,6 +1867,7 @@ jobs:
           }
 
       - name: Prime sccache server
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1862,7 +1875,7 @@ jobs:
           sccache --zero-stats
 
       - name: Prepare clean local release target
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (github.event_name != 'pull_request') }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1877,6 +1890,7 @@ jobs:
           Get-ChildItem -Force $env:CARGO_TARGET_DIR | Format-Table
 
       - name: Build scryer
+        if: steps.scope.outputs.run == 'true'
         id: windows-cargo-build
         shell: pwsh
         env:
@@ -1958,6 +1972,7 @@ jobs:
           }
 
       - name: Validate native linkage
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1973,7 +1988,7 @@ jobs:
           }
 
       - name: Validate release build diagnostics
-        if: ${{ always() && github.event_name != 'pull_request' }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always() && github.event_name != 'pull_request') }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1995,6 +2010,7 @@ jobs:
           }
 
       - name: Verify embedded Windows manifest
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2018,6 +2034,7 @@ jobs:
           }
 
       - name: Create README.txt
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           @"
@@ -2076,6 +2093,7 @@ jobs:
           "@ | Set-Content -Path README.txt -Encoding UTF8
 
       - name: Package zip
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2095,6 +2113,7 @@ jobs:
       # names are passed explicitly: bsdtar would otherwise prefix them with "./",
       # which the signed manifest's member paths do not use.
       - name: Package portable tarball
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2108,6 +2127,7 @@ jobs:
           }
 
       - name: Install WiX v4
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2116,6 +2136,7 @@ jobs:
           $toolPath | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Package unsigned MSI
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2136,6 +2157,7 @@ jobs:
             -DistributionOwner winget
 
       - name: Validate packaged Windows artifact
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: |
           .\.github\scripts\validate-windows-package.ps1 `
@@ -2150,7 +2172,7 @@ jobs:
             -BuiltTrayPath "$env:CARGO_TARGET_DIR\${{ matrix.target }}\$env:SCRYER_CARGO_PROFILE\scryer-tray.exe"
 
       - name: Show sccache stats
-        if: always()
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -2161,7 +2183,7 @@ jobs:
           }
 
       - name: Upload release package
-        if: ${{ success() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (success()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -2176,7 +2198,7 @@ jobs:
           retention-days: 14
 
       - name: Upload build diagnostics
-        if: ${{ always() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-diagnostics-${{ matrix.artifact_name }}-${{ github.run_id }}
@@ -2196,7 +2218,7 @@ jobs:
           retention-days: 14
 
       - name: Upload cargo timings
-        if: ${{ always() }}
+        if: ${{ steps.scope.outputs.run == 'true' && (always()) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-timings-${{ matrix.artifact_name }}-${{ github.run_id }}
