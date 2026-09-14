@@ -1283,7 +1283,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       onSubmitPlexLink={handleSubmitPlexLink}
       onUnlinkExternalAccount={handleUnlinkExternalAccount}
     />
-    <ApiKeysPanel />
+    <ApiKeysPanel adoptSession={adoptSession} />
     <Dialog
       open={securityReauthenticationOpen}
       onOpenChange={handleSecurityReauthenticationOpenChange}
