@@ -203,7 +203,7 @@ async fn seed_stale_running_add_tag_step(
                 &candidate.id,
                 MaintenanceCandidateState::Due,
                 "seed_stale_sequence_lease",
-                &[candidate.state.clone()],
+                std::slice::from_ref(&candidate.state),
                 abandoned_at,
             )
             .await

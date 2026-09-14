@@ -180,7 +180,7 @@ async fn add_movie_file(fixture: &TitleFixture, relative_path: &str) -> (PathBuf
 
 async fn add_movie_file_at(fixture: &TitleFixture, path: &Path) -> String {
     std::fs::create_dir_all(path.parent().expect("media parent")).expect("create media parent");
-    std::fs::write(&path, b"video").expect("write media file");
+    std::fs::write(path, b"video").expect("write media file");
     fixture
         .execution
         .app

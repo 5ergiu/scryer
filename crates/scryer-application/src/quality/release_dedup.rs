@@ -105,14 +105,16 @@ mod stereo_tests {
 
     #[test]
     fn stereo_variants_have_distinct_keys_and_conflicts_are_retained() {
-        let mut parsed = ParsedReleaseMetadata::default();
-        parsed.release_group = Some("Group".into());
-        parsed.episode = Some(ParsedEpisodeMetadata {
-            season: Some(1),
-            episode_numbers: vec![1],
-            release_type: ParsedEpisodeReleaseType::SingleEpisode,
+        let mut parsed = ParsedReleaseMetadata {
+            release_group: Some("Group".into()),
+            episode: Some(ParsedEpisodeMetadata {
+                season: Some(1),
+                episode_numbers: vec![1],
+                release_type: ParsedEpisodeReleaseType::SingleEpisode,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let unknown = build_release_dedup_key(&parsed);
         let mut keys = std::collections::HashSet::from([unknown]);
         for (presentation, layout, sampling, encoding) in [

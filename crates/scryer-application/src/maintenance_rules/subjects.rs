@@ -617,6 +617,61 @@ impl AppUseCase {
     }
 }
 
+async fn file_availability(path: &str) -> EpisodeFileAvailability {
+    if path.trim().is_empty() {
+        return EpisodeFileAvailability::Missing;
+    }
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => EpisodeFileAvailability::Present,
+        Ok(_) => EpisodeFileAvailability::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            EpisodeFileAvailability::Missing
+        }
+        Err(_) => EpisodeFileAvailability::Unreadable,
+    }
+}
+
+impl AppUseCase {
+    /// At most one subject load per (scope, title) for a bounded results page.
+    pub(crate) async fn maintenance_subject_summaries(
+        &self,
+        keys: impl Iterator<Item = (String, String)>,
+    ) -> AppResult<std::collections::HashMap<(String, String), (String, i64, i64)>> {
+        let mut summaries = std::collections::HashMap::new();
+        let mut keys: Vec<_> = keys.collect();
+        keys.sort();
+        keys.dedup();
+        for (kind, title_id) in keys {
+            let Some(kind) = Scope::parse_storage(&kind) else {
+                continue;
+            };
+            let Some(title) = self.services.catalog.titles.get_by_id(&title_id).await? else {
+                continue;
+            };
+            let files = self
+                .services
+                .library
+                .media_files
+                .list_media_files_for_title(&title_id)
+                .await?;
+            for subject in self
+                .maintenance_subjects_for_title(kind, &title, &files)
+                .await?
+            {
+                summaries.insert(
+                    (kind.as_storage_str().to_string(), subject.id),
+                    (
+                        subject.label,
+                        subject.files.len() as i64,
+                        subject.files.iter().map(|file| file.size_bytes).sum(),
+                    ),
+                );
+            }
+        }
+        Ok(summaries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,7 +941,7 @@ mod tests {
         };
         assert_eq!(
             before_other_candidate_finished
-                .retention_ranks_at(at.clone())
+                .retention_ranks_at(at)
                 .season_positions
                 .get("target-season"),
             Some(&3),
@@ -917,7 +972,7 @@ mod tests {
             ]),
             retention_ranks: Mutex::default(),
         };
-        let live = inventory.retention_ranks_at(at.clone());
+        let live = inventory.retention_ranks_at(at);
         assert_eq!(live.episode_positions.get("live-newest"), Some(&1));
         assert!(!live.episode_positions.contains_key("completed-target"));
         assert!(!live.episode_positions.contains_key("other-newer-deleted"));
@@ -941,60 +996,5 @@ mod tests {
                 .is_some_and(|rank| *rank <= 2),
             "the live removal by another candidate protects this target from a > 2 policy"
         );
-    }
-}
-
-async fn file_availability(path: &str) -> EpisodeFileAvailability {
-    if path.trim().is_empty() {
-        return EpisodeFileAvailability::Missing;
-    }
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) if metadata.is_file() => EpisodeFileAvailability::Present,
-        Ok(_) => EpisodeFileAvailability::Missing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            EpisodeFileAvailability::Missing
-        }
-        Err(_) => EpisodeFileAvailability::Unreadable,
-    }
-}
-
-impl AppUseCase {
-    /// At most one subject load per (scope, title) for a bounded results page.
-    pub(crate) async fn maintenance_subject_summaries(
-        &self,
-        keys: impl Iterator<Item = (String, String)>,
-    ) -> AppResult<std::collections::HashMap<(String, String), (String, i64, i64)>> {
-        let mut summaries = std::collections::HashMap::new();
-        let mut keys: Vec<_> = keys.collect();
-        keys.sort();
-        keys.dedup();
-        for (kind, title_id) in keys {
-            let Some(kind) = Scope::parse_storage(&kind) else {
-                continue;
-            };
-            let Some(title) = self.services.catalog.titles.get_by_id(&title_id).await? else {
-                continue;
-            };
-            let files = self
-                .services
-                .library
-                .media_files
-                .list_media_files_for_title(&title_id)
-                .await?;
-            for subject in self
-                .maintenance_subjects_for_title(kind, &title, &files)
-                .await?
-            {
-                summaries.insert(
-                    (kind.as_storage_str().to_string(), subject.id),
-                    (
-                        subject.label,
-                        subject.files.len() as i64,
-                        subject.files.iter().map(|file| file.size_bytes).sum(),
-                    ),
-                );
-            }
-        }
-        Ok(summaries)
     }
 }

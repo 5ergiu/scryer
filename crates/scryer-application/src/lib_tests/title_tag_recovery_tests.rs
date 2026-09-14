@@ -95,7 +95,7 @@ async fn bulk_title_tag_ceiling_preflight_leaves_every_title_unchanged() {
     let labels = seed_ceiling_labels(&app, &user).await;
     app.update_title_tags(
         &user,
-        &[full.id.clone()],
+        std::slice::from_ref(&full.id),
         &labels[..crate::MAX_USER_TAGS_PER_TITLE],
         &[],
     )
@@ -126,7 +126,7 @@ async fn bulk_series_movie_tag_ceiling_preflight_leaves_every_link_unchanged() {
     let labels = seed_ceiling_labels(&app, &user).await;
     app.update_series_movie_tags(
         &user,
-        &[full.id.clone()],
+        std::slice::from_ref(&full.id),
         &labels[..crate::MAX_USER_TAGS_PER_TITLE],
         &[],
     )

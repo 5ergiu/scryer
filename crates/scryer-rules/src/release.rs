@@ -803,8 +803,10 @@ fn validate_managed_entries(entries: &[UserRuleEntry]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    type TimingRecord = (String, String, String, String, String);
+
     #[derive(Default)]
-    struct TimingSink(std::sync::Mutex<Vec<(String, String, String, String, String)>>);
+    struct TimingSink(std::sync::Mutex<Vec<TimingRecord>>);
 
     impl crate::policy::telemetry::PolicyObserver for TimingSink {
         fn observe(&self, event: crate::policy::telemetry::PolicyObservation<'_>) {

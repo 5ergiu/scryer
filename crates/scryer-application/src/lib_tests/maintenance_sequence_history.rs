@@ -185,7 +185,7 @@ async fn fresh_lease_closes_an_abandoned_sequence_history_before_recording_its_r
                 &candidate.id,
                 MaintenanceCandidateState::Due,
                 "seed_abandoned_sequence_history",
-                &[candidate.state.clone()],
+                std::slice::from_ref(&candidate.state),
                 abandoned_at,
             )
             .await

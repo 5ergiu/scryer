@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use crate::lib_tests::request_rules_support::{
@@ -6,6 +7,7 @@ use crate::lib_tests::request_rules_support::{
 };
 
 use async_trait::async_trait;
+#[cfg(unix)]
 use scryer_runtime_info::BinaryLane;
 use tokio::sync::Mutex;
 
@@ -78,6 +80,7 @@ pub(crate) fn bootstrap() -> (AppUseCase, User) {
     bootstrap_with_user_repo(Arc::new(MockUserRepo::default()))
 }
 
+#[cfg(unix)]
 pub(crate) fn bootstrap_application_upgrade(
     config_dir: PathBuf,
 ) -> (AppUseCase, User, Arc<RecordingJobRunRepo>) {

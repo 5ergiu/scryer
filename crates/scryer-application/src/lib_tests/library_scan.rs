@@ -5680,14 +5680,14 @@ async fn pending_import_lists_preserve_recorded_sizes_without_filesystem_backfil
                 "Unknown Movie",
                 None,
             );
-            item.status = status.clone();
+            item.status = status;
             item.size_bytes = size_bytes;
             unmatched_items
                 .upsert_library_scan_unmatched_item(&item)
                 .await
                 .expect("seed item");
             let page = app
-                .pending_imports(&user, MediaFacet::Movie, None, status.clone(), 50, 0)
+                .pending_imports(&user, MediaFacet::Movie, None, status, 50, 0)
                 .await
                 .expect("list pending imports");
             assert_eq!(page.total, 1);
