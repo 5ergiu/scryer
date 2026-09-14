@@ -357,7 +357,14 @@ mod title_history_filter_tests {
         );
         for filter in [None, Some(&[TitleHistoryEventType::TitleMoved][..])] {
             let page = store
-                .list_title_history_page_events(filter, Some(&["title-1".into()]), false, None, 50, 0)
+                .list_title_history_page_events(
+                    filter,
+                    Some(&["title-1".into()]),
+                    false,
+                    None,
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(page, vec![first.clone()]);

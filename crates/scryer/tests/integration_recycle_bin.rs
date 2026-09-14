@@ -500,7 +500,10 @@ async fn seed_recycled_file_like_the_e2e_spec(
     });
     std::fs::write(
         entry_dir.join("manifest.json"),
-        format!("{}\n", serde_json::to_string_pretty(&manifest).expect("manifest json")),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).expect("manifest json")
+        ),
     )
     .expect("write manifest");
 

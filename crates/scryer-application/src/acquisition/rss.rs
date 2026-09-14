@@ -411,7 +411,6 @@ impl std::ops::Deref for TitleContextBank {
     }
 }
 
-
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
     let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
     let mut candidates = titles
