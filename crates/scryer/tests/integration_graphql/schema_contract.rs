@@ -4351,7 +4351,7 @@ async fn graphql_introspection_title_acquisition_inputs_use_id_fields() {
           setEpisodeMonitored: __type(name: "SetEpisodeMonitoredInput") { inputFields { name type { ...TypeRef } } }
           setSeriesMovieMonitored: __type(name: "SetSeriesMovieMonitoredInput") { inputFields { name type { ...TypeRef } } }
           deleteMediaFile: __type(name: "DeleteMediaFileInput") { inputFields { name type { ...TypeRef } } }
-          manualImportCandidateMapping: __type(name: "ManualImportCandidateMappingInput") { inputFields { name type { ...TypeRef } } }
+          manualImportCandidateMapping: __type(name: "ManualImportCandidateMappingInput") { inputFields(includeDeprecated: true) { name type { ...TypeRef } } }
           beginManualImportSelection: __type(name: "BeginManualImportSelectionInput") { inputFields { name type { ...TypeRef } } }
           queueManualImport: __type(name: "QueueManualImportInput") { inputFields { name type { ...TypeRef } } }
           pauseDownload: __type(name: "PauseDownloadInput") { inputFields { name type { ...TypeRef } } }
@@ -4496,6 +4496,7 @@ async fn graphql_introspection_title_acquisition_inputs_use_id_fields() {
     assert_non_null_id_list("deleteEpisodeFiles", "episodeIds");
     assert_non_null_id_list("deleteEpisodeFilesPreview", "episodeIds");
     assert_non_null_id_list("bindPendingImport", "episodeIds");
+    assert_non_null_id_list("manualImportCandidateMapping", "episodeIds");
     assert_nullable_id_list("queueDownloadScope", "episodeSet");
 
     // The interactive search job input replaces the per-item trigger

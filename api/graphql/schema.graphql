@@ -13004,7 +13004,11 @@ input ManualImportCandidateMappingInput {
 	"""
 	Episode target ID for an episodic import; null for a series-movie or movie import.
 	"""
-	episodeId: ID
+	episodeId: ID @deprecated(reason: "Use episodeIds, which also covers a file that holds more than one episode.")
+	"""
+	Episode target IDs for an episodic import; empty for a series-movie or movie import. Merged with the deprecated episodeId.
+	"""
+	episodeIds: [ID!]! = []
 	"""
 	Series-movie link ID for a series-movie import; null for an episode or movie import.
 	"""
@@ -13051,6 +13055,10 @@ type ManualImportFilePreviewPayload {
 	Suggested episode ID, or null when no single suggestion is available.
 	"""
 	suggestedEpisodeId: ID
+	"""
+	Every suggested episode ID for this file, in parsed order; empty means no suggestion. A multi-episode file suggests more than one.
+	"""
+	suggestedEpisodeIds: [ID!]!
 	"""
 	Label for the suggested episode, or null when no suggestion exists.
 	"""
