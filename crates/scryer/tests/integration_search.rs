@@ -129,17 +129,22 @@ async fn nzbgeek_search_movie_by_category() {
         .expect("search should succeed")
         .results;
 
-    // Verify the first request was a structured movie search with IMDB ID
+    // Capability discovery may precede the first structured movie search.
     let requests = ctx
         .nzbgeek_server
         .received_requests()
         .await
         .expect("should capture search request");
-    assert!(
-        !requests.is_empty(),
-        "at least one request should have been made"
-    );
-    let query: std::collections::HashMap<String, String> = requests[0]
+    let first_search = requests
+        .iter()
+        .find(|request| {
+            !request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "t" && value == "caps")
+        })
+        .expect("at least one search request should have been made");
+    let query: std::collections::HashMap<String, String> = first_search
         .url
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))

@@ -508,6 +508,17 @@ fn print_summary(newznab: &[String], torznab: &[String]) {
 }
 
 fn assert_id_only_then_fallback(urls: &[String], id_fragment: &str, fallback_query_fragment: &str) {
+    // A cold plugin may discover capabilities before issuing search requests.
+    // Exclude only that control request; keep every search in its original order.
+    let urls: Vec<_> = urls
+        .iter()
+        .filter(|url| {
+            !url::Url::parse(url)
+                .expect("captured request URL should be valid")
+                .query_pairs()
+                .any(|(key, value)| key == "t" && value == "caps")
+        })
+        .collect();
     assert!(
         !urls.is_empty(),
         "expected at least one request containing {id_fragment}"
@@ -528,6 +539,33 @@ fn assert_id_only_then_fallback(urls: &[String], id_fragment: &str, fallback_que
             .any(|url| url.contains(fallback_query_fragment)),
         "expected a later freetext fallback request containing {fallback_query_fragment}: {:?}",
         urls
+    );
+}
+
+#[test]
+fn id_order_assertion_allows_a_capability_probe() {
+    assert_id_only_then_fallback(
+        &[
+            "http://localhost/api?t=caps".into(),
+            "http://localhost/api?t=movie&imdbid=123".into(),
+            "http://localhost/api?t=movie&q=Example".into(),
+        ],
+        "imdbid=123",
+        "q=Example",
+    );
+}
+
+#[test]
+#[should_panic(expected = "first request should use ID search")]
+fn id_order_assertion_still_rejects_freetext_before_id() {
+    assert_id_only_then_fallback(
+        &[
+            "http://localhost/api?t=caps".into(),
+            "http://localhost/api?t=movie&q=Example".into(),
+            "http://localhost/api?t=movie&imdbid=123".into(),
+        ],
+        "imdbid=123",
+        "q=Example",
     );
 }
 
