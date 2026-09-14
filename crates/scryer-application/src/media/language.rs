@@ -199,7 +199,7 @@ pub fn normalize_metadata_language_code(code: &str) -> Option<String> {
     let normalized = code.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "eng" | "spa" | "fra" | "deu" | "ita" | "por" | "kor" | "zho" | "jpn"
+        "eng" | "spa" | "fra" | "deu" | "ita" | "por" | "kor" | "zho" | "jpn" | "nld"
     )
     .then_some(normalized)
 }
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn normalizes_only_metadata_picker_languages() {
         for language in [
-            "eng", "spa", "fra", "deu", "ita", "por", "kor", "zho", "jpn",
+            "eng", "spa", "fra", "deu", "ita", "por", "kor", "zho", "jpn", "nld",
         ] {
             assert_eq!(
                 normalize_metadata_language_code(&language.to_ascii_uppercase()).as_deref(),

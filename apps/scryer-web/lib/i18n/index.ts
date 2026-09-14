@@ -94,6 +94,7 @@ const METADATA_LANGUAGE_CODES = new Set([
   "kor",
   "zho",
   "jpn",
+  "nld",
 ]);
 
 /** {@link AVAILABLE_LANGUAGES}, less the ones metadata cannot be fetched in. */
