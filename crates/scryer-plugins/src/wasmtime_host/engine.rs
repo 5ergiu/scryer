@@ -347,6 +347,50 @@ mod tests {
     }
 
     #[test]
+    fn expired_same_pid_cleanup_lock_does_not_prevent_cache_reuse() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // Keep the synthetic cache for inspection; no production cache is touched.
+        let directory = tempfile::Builder::new()
+            .prefix("expired-cleanup-lock-")
+            .tempdir_in(env!("OUT_DIR"))
+            .expect("synthetic cache directory")
+            .keep();
+        let lock_path = directory.join(format!(".cleanup.wip-{}", std::process::id()));
+        let lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+        lock.set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        drop(lock);
+        let wasm = wat::parse_str("(module (func (export \"entry\")))").unwrap();
+        let writer_cache = cache_for(&directory);
+        let writer_engine = engine_with_cache(writer_cache.clone());
+        wasmtime::Module::from_binary(&writer_engine, &wasm).unwrap();
+        assert!(writer_cache.cache_misses() >= 1);
+        let reader_cache = cache_for(&directory);
+        let reader_engine = engine_with_cache(reader_cache.clone());
+        wasmtime::Module::from_binary(&reader_engine, &wasm).unwrap();
+        assert_eq!(reader_cache.cache_hits(), 1);
+        assert_eq!(reader_cache.cache_misses(), 0);
+        // Allow the cache workers to process their asynchronous maintenance events.
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            fs::metadata(&lock_path).unwrap().modified().unwrap(),
+            old_time
+        );
+        let error = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .expect_err("expired lock still collides with the reused PID");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        eprintln!("preserved synthetic cache fixture: {}", directory.display());
+    }
+
+    #[test]
     fn shared_engine_is_stable() {
         let a = shared_engine();
         let b = shared_engine();
