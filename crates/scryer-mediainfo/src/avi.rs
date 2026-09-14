@@ -1131,7 +1131,7 @@ mod tests {
         let mut bytes = id.to_vec();
         bytes.extend((payload.len() as u32).to_le_bytes());
         bytes.extend(payload);
-        if payload.len() % 2 != 0 {
+        if !payload.len().is_multiple_of(2) {
             bytes.push(0);
         }
         bytes

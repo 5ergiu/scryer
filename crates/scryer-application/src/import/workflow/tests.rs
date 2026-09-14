@@ -5,6 +5,10 @@ mod tests {
     // Only the runtime-media-analysis tests below use these; gating the import
     // keeps the default-feature lane free of unused-import warnings without
     // breaking the workspace lane, where feature unification turns them on.
+    #[cfg(all(unix, feature = "runtime-media-analysis"))]
+    use super::discover_manual_import_video_candidates;
+    #[cfg(feature = "runtime-media-analysis")]
+    use super::qualify_manual_import_video_candidate;
     use super::{
         CompletedDownloadSubmissionMatch, CompletedDownloadSubmissionResolution,
         CompletedImportEvidenceInputs, CompletedImportEvidenceSource,
@@ -20,8 +24,6 @@ mod tests {
         submission_has_scryer_origin, validate_manual_import_candidate_mapping_targets,
         validate_manual_import_source_under_trusted_root,
     };
-    #[cfg(feature = "runtime-media-analysis")]
-    use super::{discover_manual_import_video_candidates, qualify_manual_import_video_candidate};
     use crate::{DownloadSubmission, DownloadSubmissionPurpose, SubmissionScope};
     use chrono::Utc;
     use scryer_domain::MediaFacet;

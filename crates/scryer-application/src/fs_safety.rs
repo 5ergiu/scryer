@@ -86,6 +86,8 @@ async fn clear_readonly_for_remove(path: &Path) -> AppResult<()> {
     }
     let mut permissions = metadata.permissions();
     if permissions.readonly() {
+        // This Windows-only operation clears the DOS read-only attribute.
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         tokio::fs::set_permissions(path, permissions)
             .await

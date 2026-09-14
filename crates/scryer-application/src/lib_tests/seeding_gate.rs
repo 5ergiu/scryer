@@ -1242,6 +1242,7 @@ async fn host_cleanup_skips_files_that_changed_since_the_inventory() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn host_cleanup_never_follows_a_symlinked_ancestor_planted_after_the_inventory() {
     let client = Arc::new(StubDownloadClient::default());
     let (app, user, _) = bootstrap_with_torrent_clients(client.clone());

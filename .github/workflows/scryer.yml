@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_BUILD_WARNINGS: deny
@@ -166,6 +167,14 @@ jobs:
           persist-credentials: false
 
       - name: Install Cosign
+        id: cosign-first
+        continue-on-error: true
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.5
+
+      - name: Retry Cosign installation
+        if: steps.cosign-first.outcome == 'failure'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v2.6.5
@@ -389,6 +398,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Show starting disk usage
         shell: bash
@@ -475,7 +487,7 @@ jobs:
 
       - name: Upload rust-clippy artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/upload-ci-diagnostics
         with:
           name: rust-clippy-${{ github.run_id }}
           path: |
@@ -484,8 +496,6 @@ jobs:
             rust-clippy-disk-end.txt
             rust-clippy-sccache-stats.txt
             wasmtime-feature-tree.txt
-          if-no-files-found: error
-          retention-days: 14
 
   windows-validation:
     name: windows-${{ matrix.mode }}
@@ -584,6 +594,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
       - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
         if: matrix.mode == 'tests'
         with:
@@ -678,9 +691,7 @@ jobs:
           toolchain: "1.97.1"
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
+        uses: ./.github/actions/install-ci-sccache
 
       - name: Configure trusted internal PR sccache
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -719,6 +730,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Show starting disk usage
         shell: bash
@@ -761,11 +775,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sccache --show-stats | tee rust-nextest-sccache-stats.txt
+          if command -v sccache >/dev/null; then
+            sccache --show-stats | tee rust-nextest-sccache-stats.txt
+          else
+            echo "sccache installation did not complete" | tee rust-nextest-sccache-stats.txt
+          fi
 
       - name: Upload rust-nextest artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/upload-ci-diagnostics
         with:
           name: rust-nextest-${{ matrix.id }}-${{ github.run_id }}
           path: |
@@ -775,8 +793,6 @@ jobs:
             rust-nextest-sccache-stats.txt
             nextest-results/
             target/cargo-timings/
-          if-no-files-found: error
-          retention-days: 14
 
   rust-nextest:
     name: rust-nextest
@@ -806,8 +822,11 @@ jobs:
         if: needs.changes.outputs.full == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: rust-nextest-*-${{ github.run_id }}
+          pattern: rust-nextest-*-${{ github.run_id }}*
           path: nextest-artifacts
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
       - name: Verify target coverage and summarize timings
         if: needs.changes.outputs.full == 'true'
         env:
@@ -1202,6 +1221,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Prime sccache server
         run: |
@@ -1479,6 +1501,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Install system dependencies
         shell: bash
@@ -1798,6 +1823,9 @@ jobs:
         with:
           name: scryer-web-out-${{ github.run_id }}
           path: scryer-web-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Install NASM
         if: ${{ matrix.install_nasm }}

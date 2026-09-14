@@ -81,11 +81,10 @@ fn near(
     reference: Option<f64>,
     tolerance: f64,
 ) {
-    if let Some(reference) = reference.filter(|value| value.is_finite()) {
-        if native.is_none_or(|native| !native.is_finite() || (native - reference).abs() > tolerance)
-        {
-            out.push(format!("{label}: native={native:?} reference={reference}"));
-        }
+    if let Some(reference) = reference.filter(|value| value.is_finite())
+        && native.is_none_or(|native| !native.is_finite() || (native - reference).abs() > tolerance)
+    {
+        out.push(format!("{label}: native={native:?} reference={reference}"));
     }
 }
 fn same(out: &mut Vec<String>, label: &str, native: &Value, reference: &Value) {

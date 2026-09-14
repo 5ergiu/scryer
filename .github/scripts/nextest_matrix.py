@@ -131,7 +131,8 @@ def run_lane(document, lane):
     args = target_args(lane) + feature_args(document, lane)
     output = Path("nextest-results") / lane["id"]
     output.mkdir(parents=True, exist_ok=True)
-    receipt = {"lane": lane, "args": args, "success": False}
+    receipt = {"lane": lane, "args": args, "success": False,
+               "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1"))}
     start = time.monotonic()
     try:
         subprocess.run(["cargo", "nextest", "run", *args, "--no-run", "--timings"], check=True)
@@ -176,13 +177,33 @@ def verify(expected, receipts):
         raise ValueError(f"Missing lanes: {sorted(set(wanted) - seen)}")
 
 
+def select_evidence(records):
+    selected = {}
+    for receipt, inventory in records:
+        key = receipt["lane"]["id"]
+        previous = selected.get(key)
+        attempt = receipt.get("run_attempt", 1)
+        if previous is None or attempt > previous[0].get("run_attempt", 1):
+            selected[key] = (receipt, inventory)
+        elif attempt == previous[0].get("run_attempt", 1) and previous != (receipt, inventory):
+            raise ValueError(f"Conflicting retry evidence: {key}")
+    return list(selected.values())
+
+
 def summarize(expected, directory):
-    receipts = [json.loads(path.read_text()) for path in Path(directory).glob("*/nextest-results/*/receipt.json")]
+    records = []
+    for path in Path(directory).glob("*/nextest-results/*/receipt.json"):
+        inventory_path = path.with_name("inventory.json")
+        records.append((json.loads(path.read_text()),
+                        json.loads(inventory_path.read_text()) if inventory_path.exists() else None))
+    records = select_evidence(records)
+    receipts = [receipt for receipt, _ in records]
     verify({"include": [lane for group in expected["include"] for lane in group["targets"]]}, receipts)
     tests = set()
-    for path in Path(directory).glob("*/nextest-results/*/inventory.json"):
-        inventory = json.loads(path.read_text())
-        lane = json.loads(path.with_name("receipt.json").read_text())["lane"]
+    for receipt, inventory in records:
+        if inventory is None:
+            raise ValueError("Missing test inventories")
+        lane = receipt["lane"]
         for suite_id, suite in inventory["rust-suites"].items():
             if (suite["package-name"], suite["binary-name"], suite["kind"]) != (
                 lane["package"], lane["target"], lane["kind"]
@@ -193,9 +214,6 @@ def summarize(expected, directory):
                 if identity in tests:
                     raise ValueError(f"Duplicate test across lanes: {identity}")
                 tests.add(identity)
-    inventories = list(Path(directory).glob("*/nextest-results/*/inventory.json"))
-    if len(inventories) != len(receipts):
-        raise ValueError("Missing test inventories")
     lines = [f"Validated {len(receipts)} target lanes; {len(tests)} listed tests.", "",
              "| Target | Build seconds | Test seconds |", "|---|---:|---:|"]
     for receipt in sorted(receipts, key=lambda item: item["elapsed_seconds"], reverse=True):

@@ -1,0 +1,36 @@
+name: Upload CI diagnostics
+description: Preserve diagnostics with bounded upload retries and distinct artifact names.
+inputs:
+  name:
+    required: true
+    description: Base artifact name.
+  path:
+    required: true
+    description: Diagnostic paths.
+runs:
+  using: composite
+  steps:
+    - id: first
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.name }}-attempt-${{ github.run_attempt }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: 14
+    - id: second
+      if: steps.first.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.name }}-attempt-${{ github.run_attempt }}-retry-2
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: 14
+    - if: steps.first.outcome == 'failure' && steps.second.outcome == 'failure'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.name }}-attempt-${{ github.run_attempt }}-retry-3
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: 14

@@ -3,7 +3,7 @@ import unittest
 import subprocess
 from unittest.mock import patch
 
-from nextest_matrix import feature_args, matrix, runner_matrix, run_group, target_args, verify
+from nextest_matrix import feature_args, matrix, runner_matrix, run_group, select_evidence, target_args, verify
 
 
 def package(name, targets=None, features=None):
@@ -17,6 +17,26 @@ def document(*packages):
 
 
 class MatrixTests(unittest.TestCase):
+    def test_identical_upload_retries_count_once(self):
+        receipt = {"lane": {"id": "a"}, "success": True, "run_attempt": 1}
+        record = (receipt, {"rust-suites": {}})
+        self.assertEqual(select_evidence([record, copy.deepcopy(record)]), [record])
+
+    def test_conflicting_upload_retries_fail(self):
+        receipt = {"lane": {"id": "a"}, "success": True}
+        with self.assertRaisesRegex(ValueError, "Conflicting retry evidence"):
+            select_evidence([(receipt, {"a": 1}), (receipt, {"a": 2})])
+
+    def test_latest_attempt_wins_even_when_failed(self):
+        lane = matrix(document(package("a")))["include"][0]
+        old = ({"lane": lane, "success": True}, {})
+        new = ({"lane": lane, "success": False, "run_attempt": 2}, None)
+        for records in ([old, new], [new, old]):
+            selected = select_evidence(records)
+            self.assertEqual(selected, [new])
+            with self.assertRaises(ValueError):
+                verify({"include": [lane]}, [receipt for receipt, _ in selected])
+
     def test_grouping_keeps_every_target_and_caps_runners(self):
         names = ["scryer", "scryer-application", "scryer-plugins",
                  "scryer-infrastructure-runtime", "scryer-infrastructure-library",

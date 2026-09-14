@@ -1115,6 +1115,8 @@ fn remove_inventoried_payload_blocking(
         {
             let mut permissions = metadata.permissions();
             if permissions.readonly() {
+                // Windows read-only attributes do not alter Unix permission bits.
+                #[allow(clippy::permissions_set_readonly_false)]
                 permissions.set_readonly(false);
                 let _ = std::fs::set_permissions(&path, permissions);
             }

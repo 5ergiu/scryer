@@ -72,8 +72,10 @@ mod support_indexers_metadata;
 mod support_library_show;
 mod support_settings_scan;
 use support_acquisition_downloads::*;
+pub(crate) use support_bootstrap_fixtures::bootstrap;
+#[cfg(unix)]
+pub(crate) use support_bootstrap_fixtures::bootstrap_application_upgrade;
 use support_bootstrap_fixtures::*;
-pub(crate) use support_bootstrap_fixtures::{bootstrap, bootstrap_application_upgrade};
 use support_catalog::*;
 use support_events_requests::*;
 use support_imports::*;
