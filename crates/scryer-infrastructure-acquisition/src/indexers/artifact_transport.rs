@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn artifact_proxy_pool_reuses_connections_and_expires_on_profile_edits() {
+    async fn artifact_proxy_client_cache_reuses_clients_and_expires_on_profile_edits() {
         use scryer_tunnel::test_support::{CLIENT_ED25519_PEM, SshServerDouble, SshServerOptions};
         let ssh = SshServerDouble::start(SshServerOptions::default()).await;
         let origin = MockServer::start().await;
@@ -1513,8 +1513,17 @@ mod tests {
         proxy.protocol = None;
         proxy.username_encrypted = Some("operator".into());
         proxy.private_key_encrypted = Some(CLIENT_ED25519_PEM.into());
+        transport.proxy_client(&proxy).unwrap();
+        let cached_at = transport.proxy_clients.lock().unwrap()[&proxy.id].created_at;
         for _ in 0..3 {
             let client = transport.proxy_client(&proxy).unwrap();
+            // Hyper returns connections to its idle pool asynchronously, even after
+            // the body is consumed. Verify reuse of our cached client directly.
+            assert_eq!(
+                transport.proxy_clients.lock().unwrap()[&proxy.id].created_at,
+                cached_at,
+                "requests reuse the cached client"
+            );
             assert_eq!(
                 client
                     .get(format!("{}/artifact", origin.uri()))
@@ -1527,11 +1536,6 @@ mod tests {
                 "artifact"
             );
         }
-        assert_eq!(
-            ssh.forwarded_targets().len(),
-            1,
-            "three requests share a single SSH channel and TCP connection"
-        );
         let client = transport.proxy_client(&proxy).unwrap();
         let response = client
             .get(format!("{}/redirect", origin.uri()))
@@ -1544,6 +1548,7 @@ mod tests {
             "redirect policy remains owned by the artifact loop"
         );
         response.bytes().await.unwrap();
+        let channels_before_edit = ssh.forwarded_targets().len();
         proxy.updated_at += chrono::Duration::seconds(1);
         let client = transport.proxy_client(&proxy).unwrap();
         assert_eq!(
@@ -1557,7 +1562,8 @@ mod tests {
                 .unwrap(),
             "artifact"
         );
-        assert_eq!(ssh.forwarded_targets().len(), 2);
+        assert_eq!(ssh.forwarded_targets().len(), channels_before_edit + 1);
+        let channels_before_expiry = ssh.forwarded_targets().len();
         {
             let mut clients = transport.proxy_clients.lock().unwrap();
             clients.get_mut(&proxy.id).unwrap().created_at -= ARTIFACT_PROXY_CLIENT_TTL;
@@ -1574,7 +1580,7 @@ mod tests {
                 .unwrap(),
             "artifact"
         );
-        assert_eq!(ssh.forwarded_targets().len(), 3);
+        assert_eq!(ssh.forwarded_targets().len(), channels_before_expiry + 1);
         scryer_application::tunnel_proxy::stop_tunnel(&proxy.id);
         for i in 0..40 {
             let mut proxy = test_proxy("http://127.0.0.1:1", true);

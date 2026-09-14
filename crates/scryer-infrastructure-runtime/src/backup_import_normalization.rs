@@ -619,9 +619,12 @@ mod tests {
         export_tables.extend(introduced.iter().map(|(table, _)| table.to_string()));
         for source_version in [224, 225, 233, 234, 235, 236] {
             let mut row_counts = BTreeMap::from_iter([("titles".to_string(), 1)]);
-            row_counts.extend(introduced.iter().filter_map(|(table, version)| {
-                (source_version >= *version).then(|| (table.to_string(), 0))
-            }));
+            row_counts.extend(
+                introduced
+                    .iter()
+                    .filter(|(_, version)| source_version >= *version)
+                    .map(|(table, _)| (table.to_string(), 0)),
+            );
             let key = format!("{source_version:04}_fixture");
             validate_restore_manifest_table_set(&row_counts, &export_tables, Some(&key))
                 .expect("only tables introduced after this backup may be absent");

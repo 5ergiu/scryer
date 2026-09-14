@@ -5079,7 +5079,7 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
 
     // The carried-over SSH row keeps its own columns and gains the new ones
     // unset. WireGuard adds fields; it takes nothing away.
-    let existing: (
+    type MigratedSshProxyRow = (
         String,
         Option<String>,
         Option<String>,
@@ -5089,7 +5089,8 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
         Option<String>,
         Option<i64>,
         Option<i64>,
-    ) = sqlx::query_as(
+    );
+    let existing: MigratedSshProxyRow = sqlx::query_as(
         "SELECT host_key_fingerprint, peer_public_key, preshared_key_encrypted,
                 tunnel_public_key, tunnel_addresses, tunnel_dns_servers,
                 private_key_encrypted, tunnel_mtu, tunnel_keepalive_seconds
@@ -5135,7 +5136,7 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
     .await
     .expect("a WireGuard proxy stores its keys, addresses and link settings");
 
-    let stored: (
+    type StoredWireguardProxyRow = (
         Option<String>,
         Option<String>,
         Option<String>,
@@ -5145,7 +5146,8 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
         Option<i64>,
         Option<String>,
         Option<String>,
-    ) = sqlx::query_as(
+    );
+    let stored: StoredWireguardProxyRow = sqlx::query_as(
         "SELECT peer_public_key, preshared_key_encrypted, tunnel_public_key,
                 tunnel_addresses, tunnel_dns_servers, tunnel_mtu,
                 tunnel_keepalive_seconds, username_encrypted, host_key_fingerprint
