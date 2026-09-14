@@ -66,7 +66,9 @@ def main():
         raise SystemExit("Windows validation must run natively on Windows")
     target = ["--locked", "--target", "x86_64-pc-windows-msvc"]
     if args.mode == "clippy":
-        excluded = [value for package in ["xtask", "xtask-release", "xtask-migrations", "xtask-support"]
+        # The Unix launcher is built and tested by the Linux launcher lanes.
+        excluded = [value for package in ["xtask", "xtask-release", "xtask-migrations", "xtask-support",
+                                          "scryer-launcher"]
                     for value in ["--exclude", package]]
         subprocess.run(["cargo", "clippy", *target, "--workspace", *excluded,
                         "--all-targets", "--all-features", "--", "-D", "warnings"], check=True)

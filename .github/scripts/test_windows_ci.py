@@ -64,6 +64,10 @@ class WindowsCiTests(unittest.TestCase):
         self.assertIn("x86_64-pc-windows-msvc", command)
         self.assertIn("--all-targets", command)
         self.assertIn("--all-features", command)
+        excluded = {command[index + 1] for index, value in enumerate(command) if value == "--exclude"}
+        self.assertEqual(excluded, {
+            "xtask", "xtask-release", "xtask-migrations", "xtask-support", "scryer-launcher",
+        })
         self.assertTrue(run.call_args.kwargs["check"])
 
     def test_non_windows_host_is_rejected(self):
