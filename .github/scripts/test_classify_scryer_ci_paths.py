@@ -8,10 +8,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from classify_scryer_ci_paths import FULL, NONE, WEB, classify_paths, requires_xtask_validation
+from classify_scryer_ci_paths import (
+    FULL, NONE, WEB, classify_paths, codeql_languages, requires_xtask_validation,
+)
 
 
 class ClassifyScryerCiPathsTests(unittest.TestCase):
+    def test_codeql_runs_only_applicable_languages(self) -> None:
+        cases = [
+            (["README.md", "docs/setup.md"], (False, False, False)),
+            (["apps/scryer-web/src/app.tsx"], (False, True, False)),
+            (["apps/scryer-web/package-lock.json", "README.md"], (False, True, False)),
+            (["apps/scryer-web/README.md"], (False, False, False)),
+            (["crates/scryer/src/main.rs"], (False, False, True)),
+            (["Cargo.lock"], (False, False, True)),
+            ([".github/workflows/codeql.yml"], (True, False, True)),
+            (["apps/scryer-web/src/app.tsx", "crates/scryer/src/main.rs"], (False, True, True)),
+            ([], (True, True, True)),
+        ]
+        for paths, enabled in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(codeql_languages(paths), dict(zip(
+                    ["actions", "javascript-typescript", "rust"], enabled,
+                )))
+
     def test_documentation_only_changes_need_no_expensive_jobs(self) -> None:
         self.assertEqual(
             classify_paths(["README.md", "docs/getting-started.md", "release-notes/v1.md"]),

@@ -32,8 +32,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Test changed-path classifier
-        run: python3 .github/scripts/test_classify_scryer_ci_paths.py
+      - name: Test change classification and required-check gates
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*ci*.py'
 
       - name: Classify validation scope
         id: classify
@@ -84,6 +84,30 @@ jobs:
 
   web:
     name: web
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, web-work]
+    if: always()
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.web }}
+          RESULT: ${{ needs.web-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  web-work:
+    name: web (work)
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     needs: [changes]
@@ -168,6 +192,30 @@ jobs:
   winget-xtask-build:
     name: winget-xtask-build
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, winget-xtask-build-work]
+    if: always()
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'scryer-v') }}
+          RESULT: ${{ needs.winget-xtask-build-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  winget-xtask-build-work:
+    name: winget-xtask-build (work)
+    runs-on: ubuntu-26.04
     timeout-minutes: 50
     needs: [release-trust, builtins-provenance]
     permissions:
@@ -243,6 +291,35 @@ jobs:
 
   rust-clippy:
     name: rust-clippy
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, rust-clippy-work, windows-validation]
+    if: always()
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.rust-clippy-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+      - name: Require native Windows validation
+        env:
+          WINDOWS_RESULT: ${{ needs.windows-validation.result }}
+        run: test "$WINDOWS_RESULT" = success
+
+  rust-clippy-work:
+    name: rust-clippy (work)
     runs-on: ubuntu-26.04
     timeout-minutes: 50
     needs: [changes, web, builtins-provenance, release-trust]
@@ -410,12 +487,158 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  rust-nextest:
-    name: rust-nextest
+  windows-validation:
+    name: windows-${{ matrix.mode }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 50
+    timeout-minutes: 5
+    needs: [changes, windows-validation-work]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [clippy, tests]
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.windows-validation-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  windows-validation-work:
+    name: windows-${{ matrix.mode }} (work)
+    runs-on: windows-2025
+    timeout-minutes: 60
     needs: [changes, web, builtins-provenance, release-trust]
     if: ${{ always() && needs.changes.outputs.full == 'true' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        mode: [clippy, tests]
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+      RUST_MIN_STACK: "4194304"
+      AWS_LC_SYS_USE_SYSTEM: "0"
+      AWS_LC_SYS_STATIC: "1"
+      AWS_LC_SYS_SMALL: "0"
+      AWS_LC_SYS_CMAKE_BUILDER: "0"
+      AWS_LC_SYS_PREBUILT_NASM: "0"
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_DIR: ${{ github.workspace }}\.sccache
+      SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/download-builtins
+        with:
+          run-id: ${{ github.run_id }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.97.1-x86_64-pc-windows-msvc"
+          components: clippy
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+      - name: Configure trusted internal PR sccache
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: ./.github/actions/configure-sccache-r2
+        with:
+          endpoint: ${{ secrets.SCCACHE_ENDPOINT }}
+          access-key-id: ${{ secrets.SCCACHE_S3_ACCESS_ID }}
+          secret-access-key: ${{ secrets.SCCACHE_S3_SECRET }}
+          key-prefix: scryer/trusted-pr/v1/rust-1.97.1/x86_64-pc-windows-msvc/
+      - name: Configure compiler and linker
+        shell: pwsh
+        run: |
+          "RUSTC_WRAPPER=sccache" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CC=sccache clang-cl" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CXX=sccache clang-cl" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "RUSTFLAGS=--remap-path-prefix=$env:GITHUB_WORKSPACE=. -C target-feature=+crt-static -Clinker=lld-link -W linker-messages" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "SCRYER_EMBED_UI_DIR=$env:GITHUB_WORKSPACE/scryer-web-out" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Install pinned NASM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest "https://www.nasm.us/pub/nasm/releasebuilds/3.01/win64/nasm-3.01-win64.zip" -OutFile nasm.zip
+          if ((Get-FileHash nasm.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne "e0ba5157007abc7b1a65118a96657a961ddf55f7e3f632ee035366dfce039ca4") {
+            throw "NASM checksum mismatch"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "validation-nasm"
+          Expand-Archive nasm.zip -DestinationPath $destination
+          (Get-ChildItem $destination -Directory | Select-Object -First 1).FullName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: scryer-web-out-${{ github.run_id }}
+          path: scryer-web-out
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
+        if: matrix.mode == 'tests'
+        with:
+          tool: nextest
+      - name: Run native Windows validation
+        shell: pwsh
+        env:
+          VALIDATION_MODE: ${{ matrix.mode }}
+          SCRYER_SMG_REGISTRATION_SECRET: ${{ secrets.SMG_REGISTRATION_SECRET }}
+          SCRYER_SMG_GRAPHQL_URL: https://smg.scryer.media/graphql
+        run: |
+          python -B .github/scripts/windows_ci.py $env:VALIDATION_MODE 2>&1 | Tee-Object -FilePath windows-validation.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record compiler cache statistics
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats | Tee-Object -FilePath windows-validation-cache.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: windows-${{ matrix.mode }}-validation-${{ github.run_id }}
+          path: |
+            windows-validation.log
+            windows-validation-cache.txt
+            windows-test-inventory.json
+            target/cargo-timings/
+          retention-days: 14
+
+  nextest-matrix:
+    runs-on: ubuntu-26.04
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.97.1"
+      - name: Validate and generate target matrix
+        id: matrix
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_nextest_matrix.py'
+          python3 .github/scripts/nextest_matrix.py matrix >> "$GITHUB_OUTPUT"
+
+  rust-nextest-target:
+    name: nextest (${{ matrix.id }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 50
+    needs: [changes, nextest-matrix, web, builtins-provenance, release-trust]
+    if: ${{ always() && needs.changes.outputs.full == 'true' && needs.nextest-matrix.result == 'success' && needs.web.result == 'success' && needs.builtins-provenance.result == 'success' && (github.event_name == 'pull_request' || needs.release-trust.result == 'success') }}
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix: ${{ fromJSON(needs.nextest-matrix.outputs.matrix) }}
     env:
       CARGO_HOME: /home/runner/.cargo
       CARGO_INCREMENTAL: "0"
@@ -445,8 +668,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: /home/runner/.cache/scryer-wasmtime-test
-          key: wasmtime-test-v1-${{ hashFiles('Cargo.lock', 'crates/scryer-plugins/builtins/*.wasm.zst') }}
+          key: wasmtime-test-v2-${{ matrix.id }}-${{ hashFiles('Cargo.lock', 'crates/scryer-plugins/builtins/*.wasm.zst') }}
           restore-keys: |
+            wasmtime-test-v2-${{ matrix.id }}-
             wasmtime-test-v1-
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -503,8 +727,10 @@ jobs:
           df -h | tee rust-nextest-disk-start.txt
           du -sh target "$CARGO_HOME" 2>/dev/null | tee -a rust-nextest-disk-start.txt || true
 
-      - name: Run full-feature Scryer tests
+      - name: Build and run selected test target
         shell: bash
+        env:
+          NEXTEST_LANE: ${{ matrix.id }}
         run: |
           set -euo pipefail
           export SCRYER_EMBED_UI_DIR="${GITHUB_WORKSPACE}/scryer-web-out"
@@ -512,14 +738,7 @@ jobs:
           export SCRYER_SMG_GRAPHQL_URL="https://smg.scryer.media/graphql"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
           export RUST_MIN_STACK="4194304"
-          cargo nextest run --locked \
-            --workspace \
-            --exclude xtask \
-            --exclude xtask-release \
-            --exclude xtask-migrations \
-            --exclude xtask-support \
-            --all-features \
-            --no-fail-fast 2>&1 | tee rust-nextest.log
+          python3 .github/scripts/nextest_matrix.py run "$NEXTEST_LANE" 2>&1 | tee rust-nextest.log
 
       # Saved whether or not tests passed: compiled components stay valid.
       - name: Save Wasmtime test cache
@@ -548,17 +767,83 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: rust-nextest-${{ github.run_id }}
+          name: rust-nextest-${{ matrix.id }}-${{ github.run_id }}
           path: |
             rust-nextest.log
             rust-nextest-disk-start.txt
             rust-nextest-disk-end.txt
             rust-nextest-sccache-stats.txt
+            nextest-results/
+            target/cargo-timings/
           if-no-files-found: error
           retention-days: 14
 
+  rust-nextest:
+    name: rust-nextest
+    runs-on: ubuntu-26.04
+    needs: [changes, nextest-matrix, rust-nextest-target]
+    if: always()
+    steps:
+      - name: Check required target results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FULL: ${{ needs.changes.outputs.full }}
+          MATRIX_RESULT: ${{ needs.nextest-matrix.result }}
+          TARGET_RESULT: ${{ needs.rust-nextest-target.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$FULL" = false ]; then
+            test "$MATRIX_RESULT" = skipped
+            test "$TARGET_RESULT" = skipped
+          else
+            test "$FULL" = true
+            test "$MATRIX_RESULT" = success
+            test "$TARGET_RESULT" = success
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.changes.outputs.full == 'true'
+      - name: Download target receipts
+        if: needs.changes.outputs.full == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: rust-nextest-*-${{ github.run_id }}
+          path: nextest-artifacts
+      - name: Verify target coverage and summarize timings
+        if: needs.changes.outputs.full == 'true'
+        env:
+          EXPECTED_MATRIX: ${{ needs.nextest-matrix.outputs.matrix }}
+        run: python3 .github/scripts/nextest_matrix.py verify nextest-artifacts
+
   launcher-build:
     name: launcher-${{ matrix.arch }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, launcher-build-work]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.launcher-build-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  launcher-build-work:
+    name: launcher-${{ matrix.arch }} (work)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     needs: [changes, release-trust]
@@ -761,6 +1046,35 @@ jobs:
 
   linux-build:
     name: linux-${{ matrix.arch }}-${{ matrix.variant }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, linux-build-work]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+        variant: [portable]
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.linux-build-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  linux-build-work:
+    name: linux-${{ matrix.arch }}-${{ matrix.variant }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]
@@ -1022,6 +1336,35 @@ jobs:
 
   macos-build:
     name: macos-${{ matrix.arch }}-${{ matrix.variant }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, macos-build-work]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+        variant: [portable]
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.macos-build-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  macos-build-work:
+    name: macos-${{ matrix.arch }}-${{ matrix.variant }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]
@@ -1313,6 +1656,34 @@ jobs:
 
   windows-build:
     name: windows-${{ matrix.arch }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [changes, windows-build-work]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - name: Validate required check
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.full }}
+          RESULT: ${{ needs.windows-build-work.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLASSIFICATION" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$RESULT" = skipped
+            echo "No applicable changes; check passed."
+          fi
+
+  windows-build-work:
+    name: windows-${{ matrix.arch }} (work)
     runs-on: ${{ github.event_name == 'pull_request' && matrix.runner || matrix.release_runner }}
     timeout-minutes: 90
     needs: [changes, web, builtins-provenance, release-trust]

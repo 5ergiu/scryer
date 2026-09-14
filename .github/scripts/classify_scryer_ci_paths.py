@@ -67,6 +67,18 @@ def read_paths() -> list[str]:
     return raw_paths.decode("utf-8", "surrogateescape").splitlines()
 
 
+def codeql_languages(paths: Iterable[str]) -> dict[str, bool]:
+    paths = [path.strip() for path in paths if path.strip()]
+    if not paths:
+        return {"actions": True, "javascript-typescript": True, "rust": True}
+    sources = [path for path in paths if not is_documentation_path(path)]
+    return {
+        "actions": any(path.startswith(".github/") for path in sources),
+        "javascript-typescript": any(path.startswith(WEB_PREFIX) for path in sources),
+        "rust": classify_paths(paths) == FULL,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -76,7 +88,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        choices=("scope", "xtask"),
+        choices=("scope", "xtask", "codeql"),
         default="scope",
         help="Select the requested CI classification result.",
     )
@@ -93,8 +105,11 @@ def main() -> None:
 
     if args.output == "scope":
         print(classify_paths(paths))
-    else:
+    elif args.output == "xtask":
         print(str(requires_xtask_validation(paths)).lower())
+    else:
+        for language, enabled in codeql_languages(paths).items():
+            print(f"{language}={str(enabled).lower()}")
 
 
 if __name__ == "__main__":
