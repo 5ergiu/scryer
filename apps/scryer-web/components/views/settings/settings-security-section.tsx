@@ -115,9 +115,6 @@ export function SettingsSecuritySection({
                 <h3 className={SECURITY_PANEL_TITLE_CLASS}>
                   {t("settings.securityEnableFormLogin")}
                 </h3>
-                <p className="text-xs text-[var(--scry-muted3)]">
-                  {t("settings.securityEnableFormLoginHelp")}
-                </p>
               </div>
               <Button
                 id="settings-security-toggle-form-login"
@@ -134,114 +131,99 @@ export function SettingsSecuritySection({
             </div>
           </div>
           <div className="grid gap-4 p-4 lg:grid-cols-2">
-            <section className={`${SECURITY_INSET_CLASS} p-4`}>
+            <section className={`${SECURITY_INSET_CLASS} p-4 lg:col-span-2`}>
               <div className="mb-3">
                 <h4 className="text-sm font-semibold text-[var(--scry-ink2)]">
-                  Password policy
+                  {t("settings.securityAccessControl")}
                 </h4>
               </div>
-              <div className="max-w-sm space-y-1.5">
-                <Label className="text-sm font-medium" htmlFor="security-password-min-length">
-                  {t("settings.securityPasswordMinLength")}
-                </Label>
-                <Input
-                  id="security-password-min-length"
-                  type="number"
-                  inputMode="numeric"
-                  min={minPasswordLength}
-                  step={1}
-                  value={passwordMinLengthDraft}
-                  disabled={busy}
-                  onBlur={(event) =>
-                    void onPasswordMinLengthSubmit(event.currentTarget.value)
-                  }
-                  onChange={(event) => onPasswordMinLengthDraftChange(event.target.value)}
-                  onWheel={(event) => event.currentTarget.blur()}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void onPasswordMinLengthSubmit(event.currentTarget.value);
-                    }
-                  }}
-                />
-                <p className="text-xs leading-relaxed text-[var(--scry-muted3)]">
-                  {t("settings.securityPasswordMinLengthHelp", {
-                    min: minPasswordLength,
-                  })}
-                </p>
-              </div>
-            </section>
-
-            <section className={`${SECURITY_INSET_CLASS} p-4`}>
-              <div className="max-w-sm space-y-1.5">
-                <Label htmlFor="security-session-duration-days">
-                  {t("settings.securitySessionDuration")}
-                </Label>
-                <Input
-                  id="security-session-duration-days"
-                  type="number"
-                  inputMode="numeric"
-                  min={1}
-                  max={365}
-                  step={1}
-                  value={sessionDurationDraft}
-                  disabled={busy}
-                  onChange={(event) => onSessionDurationDraftChange(event.target.value)}
-                  onBlur={(event) => void onSessionDurationSubmit(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void onSessionDurationSubmit(event.currentTarget.value);
-                    }
-                  }}
-                />
-                <p className="text-xs leading-relaxed text-[var(--scry-muted3)]">
-                  {t("settings.securitySessionDurationHelp")}
-                </p>
-              </div>
-            </section>
-
-            <section className={`${SECURITY_INSET_CLASS} p-4`}>
-              <div className="mb-2">
-                <h4 className="text-sm font-semibold text-[var(--scry-ink2)]">
-                  Access controls
-                </h4>
-              </div>
-              <div className="divide-y divide-[var(--scry-line2)]">
-                <CheckboxField
-                  id="security-skip-local-ips"
-                  checked={settings.skipLoginForLocalIps}
-                  disabled={busy}
-                  onCheckedChange={(checked) =>
-                    onSkipLocalIpsChange(checked === true)
-                  }
-                  label={t("settings.securitySkipLocalIps")}
-                  labelAccessory={
-                    <InfoHelp
-                      ariaLabel={t("settings.securitySkipLocalIps")}
-                      text={t("settings.securitySkipLocalIpsHelp")}
+              <div className="grid gap-6 lg:grid-cols-2">
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-sm font-medium" htmlFor="security-password-min-length">
+                      {t("settings.securityPasswordMinLength")}
+                    </Label>
+                    <Input
+                      id="security-password-min-length"
+                      type="number"
+                      inputMode="numeric"
+                      min={minPasswordLength}
+                      step={1}
+                      value={passwordMinLengthDraft}
+                      disabled={busy}
+                      onBlur={(event) =>
+                        void onPasswordMinLengthSubmit(event.currentTarget.value)
+                      }
+                      onChange={(event) => onPasswordMinLengthDraftChange(event.target.value)}
+                      onWheel={(event) => event.currentTarget.blur()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void onPasswordMinLengthSubmit(event.currentTarget.value);
+                        }
+                      }}
                     />
-                  }
-                  className="w-full items-center py-3"
-                  checkboxClassName="mt-0"
-                />
-                <CheckboxField
-                  id="security-api-keys-restrict-to-system-settings-users"
-                  checked={settings.apiKeysRestrictToSystemSettingsUsers}
-                  disabled={busy || !canManageApiKeysRestriction}
-                  onCheckedChange={(checked) =>
-                    onApiKeysRestrictionChange(checked === true)
-                  }
-                  label="Restrict API keys to system-settings users"
-                  labelAccessory={
-                    <InfoHelp
-                      ariaLabel="Restrict API keys to system-settings users"
-                      text="Only users with Manage System Settings can create or use API keys. Existing keys are preserved and resume if permission is restored or this setting is disabled."
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="security-session-duration-days">
+                      {t("settings.securitySessionDuration")}
+                    </Label>
+                    <Input
+                      id="security-session-duration-days"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={365}
+                      step={1}
+                      value={sessionDurationDraft}
+                      disabled={busy}
+                      onChange={(event) => onSessionDurationDraftChange(event.target.value)}
+                      onBlur={(event) => void onSessionDurationSubmit(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void onSessionDurationSubmit(event.currentTarget.value);
+                        }
+                      }}
                     />
-                  }
-                  className="w-full items-center py-3"
-                  checkboxClassName="mt-0"
-                />
+                  </div>
+                </div>
+                <div className="divide-y divide-[var(--scry-line2)]">
+                  <CheckboxField
+                    id="security-skip-local-ips"
+                    checked={settings.skipLoginForLocalIps}
+                    disabled={busy}
+                    onCheckedChange={(checked) =>
+                      onSkipLocalIpsChange(checked === true)
+                    }
+                    label={t("settings.securitySkipLocalIps")}
+                    labelAccessory={
+                      <InfoHelp
+                        ariaLabel={t("settings.securitySkipLocalIps")}
+                        text={t("settings.securitySkipLocalIpsHelp")}
+                      />
+                    }
+                    className="w-full items-center py-3"
+                    checkboxClassName="mt-0"
+                  />
+                  <CheckboxField
+                    id="security-api-keys-restrict-to-system-settings-users"
+                    checked={settings.apiKeysRestrictToSystemSettingsUsers}
+                    disabled={busy || !canManageApiKeysRestriction}
+                    onCheckedChange={(checked) =>
+                      onApiKeysRestrictionChange(checked === true)
+                    }
+                    label="Restrict API keys to system-settings users"
+                    labelAccessory={
+                      <InfoHelp
+                        ariaLabel="Restrict API keys to system-settings users"
+                        text="Only users with Manage System Settings can create or use API keys. Existing keys are preserved and resume if permission is restored or this setting is disabled."
+                      />
+                    }
+                    className="w-full items-center py-3"
+                    checkboxClassName="mt-0"
+                  />
+                </div>
               </div>
             </section>
 
