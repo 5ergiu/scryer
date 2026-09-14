@@ -146,6 +146,48 @@ pub struct ParsedEpisodePayload {
     pub episode_numbers: Vec<i32>,
 }
 
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum StereoPresentationValue {
+    TwoD,
+    ThreeD,
+    #[graphql(name = "MIXED_2D_3D")]
+    Mixed2d3d,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum StereoLayoutValue {
+    SideBySide,
+    TopBottom,
+    FrameSequential,
+    RowInterleaved,
+    ColumnInterleaved,
+    Checkerboard,
+    Anaglyph,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum StereoSamplingValue {
+    Half,
+    Full,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum StereoEncodingValue {
+    Mvc,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Stereoscopic claims in the release name, not verified stream properties.
+pub struct ParsedStereoscopyPayload {
+    pub presentation: StereoPresentationValue,
+    /// Null when not stated, conflicting, or scoped to an unspecified bundle member.
+    pub layout: Option<StereoLayoutValue>,
+    /// Half/full sampling for side-by-side or top/bottom packing.
+    pub sampling: Option<StereoSamplingValue>,
+    /// Optional stereoscopic encoding, independent of packing layout.
+    pub encoding: Option<StereoEncodingValue>,
+}
+
 #[derive(SimpleObject, Clone)]
 /// Parsed release title metadata and parser confidence.
 pub struct ParsedReleasePayload {
@@ -163,6 +205,8 @@ pub struct ParsedReleasePayload {
     pub video_codec: Option<String>,
     /// Video encoding, or null when not detected.
     pub video_encoding: Option<String>,
+    /// Null means no reliable presentation claim, not verified 2D.
+    pub stereoscopy: Option<ParsedStereoscopyPayload>,
     /// Audio description, or null when not detected.
     pub audio: Option<String>,
     /// Whether dual audio was detected.

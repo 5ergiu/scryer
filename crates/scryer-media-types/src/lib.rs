@@ -235,6 +235,8 @@ pub struct StreamMetadata {
     pub level: Option<u32>,
     pub bit_depth: Option<i32>,
     pub field_order: Option<String>,
+    /// An explicit stereoscopic container declaration. False means not detected.
+    pub is_3d: bool,
     pub sample_aspect_ratio: Option<Rational>,
     pub display_aspect_ratio: Option<Rational>,
     pub rotation_degrees: Option<f64>,
@@ -370,9 +372,52 @@ pub struct AnalysisDetails {
     pub report: ProbeReport,
 }
 
+impl AnalysisDetails {
+    /// Whether a video stream declares stereoscopy; absence is not verified 2D.
+    pub fn is_3d(&self) -> bool {
+        self.streams.iter().any(|stream| {
+            stream.kind == StreamKind::Video
+                && (stream.metadata.is_3d
+                    || (stream.codec.as_deref() == Some("h264")
+                        && matches!(
+                            stream.metadata.profile.as_deref(),
+                            Some("Multiview High" | "Stereo High")
+                        )))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stereo_boolean_uses_video_metadata_and_ignores_audio() {
+        let mut details = AnalysisDetails::default();
+        assert!(!details.is_3d());
+        details.streams.push(StreamDetail {
+            kind: StreamKind::Video,
+            codec: Some("h264".into()),
+            metadata: StreamMetadata {
+                is_3d: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(details.is_3d());
+        details.streams[0].metadata.is_3d = false;
+        for (profile, expected) in [
+            ("High", false),
+            ("Multiview High", true),
+            ("Stereo High", true),
+        ] {
+            details.streams[0].metadata.profile = Some(profile.into());
+            assert_eq!(details.is_3d(), expected);
+        }
+        details.streams[0].kind = StreamKind::Audio;
+        details.streams[0].metadata.is_3d = true;
+        assert!(!details.is_3d());
+    }
 
     #[test]
     fn rational_preserves_binary_declarations_without_rounding_or_overflow() {

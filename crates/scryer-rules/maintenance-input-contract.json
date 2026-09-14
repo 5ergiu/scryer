@@ -300,6 +300,11 @@
       "path": "input.facts.files[]",
       "fields": [
         {
+          "field": "is_3d",
+          "type": "bool",
+          "descKey": "settings.refMaintFileIs3d"
+        },
+        {
           "field": "size_bytes",
           "type": "number?",
           "descKey": "settings.refMaintFileSizeBytes"
@@ -1441,6 +1446,11 @@
       "titleKey": "settings.refMaintSectionObsFiles",
       "path": "input.observations.files.value[]",
       "fields": [
+        {
+          "field": "is_3d",
+          "type": "bool",
+          "descKey": "settings.refMaintFileIs3d"
+        },
         {
           "field": "size_bytes",
           "type": "number?",

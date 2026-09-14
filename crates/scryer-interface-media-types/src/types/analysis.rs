@@ -157,6 +157,22 @@ impl From<scryer_media_types::AnalysisAttempt> for MediaAnalysisAttemptPayload {
 }
 
 #[test]
+fn stereo_boolean_survives_storage_and_api_projection() {
+    let mut details: scryer_media_types::AnalysisDetails = serde_json::from_str("{}").unwrap();
+    assert!(!MediaAnalysisDetailsPayload::from(details.clone()).is_3d);
+    details.streams.push(scryer_media_types::StreamDetail {
+        metadata: scryer_media_types::StreamMetadata {
+            is_3d: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let restored: scryer_media_types::AnalysisDetails =
+        serde_json::from_str(&serde_json::to_string(&details).unwrap()).unwrap();
+    assert!(MediaAnalysisDetailsPayload::from(restored).is_3d);
+}
+
+#[test]
 fn analysis_attempt_projection_keeps_failure_separate_and_exposes_typed_fields() {
     let legacy: scryer_media_types::AnalysisAttempt = serde_json::from_value(serde_json::json!({
         "revision": 1, "attempted_at": "2026-09-08T00:00:00Z", "succeeded": false,
@@ -895,6 +911,9 @@ impl From<scryer_media_types::DiscMetadata> for MediaDiscMetadataPayload {
 #[derive(SimpleObject, Clone)]
 /// Versioned native analysis shared by imports, scans, rules, and media details.
 pub struct MediaAnalysisDetailsPayload {
+    /// Explicit media metadata detected stereoscopic video.
+    #[graphql(name = "is3D")]
+    pub is_3d: bool,
     /// Analysis schema revision; zero denotes legacy metadata.
     pub revision: u32,
     /// Playback duration in seconds, when established.
@@ -925,6 +944,7 @@ pub struct MediaAnalysisDetailsPayload {
 impl From<scryer_media_types::AnalysisDetails> for MediaAnalysisDetailsPayload {
     fn from(value: scryer_media_types::AnalysisDetails) -> Self {
         Self {
+            is_3d: value.is_3d(),
             revision: value.revision,
             duration_seconds: value.duration_seconds,
             duration_provenance: value.duration_provenance.into(),

@@ -4,8 +4,9 @@ use scryer_domain::{Collection, Episode, MediaFacet, Title};
 pub use scryer_release_parser::{
     AudioCodec, ContextAlias, ContextEpisode, ContextFacetHint, ContextTitle,
     ContextTitleMatchKind, ExternalIdSource, ParseDisposition, ParsedEpisodeMetadata,
-    ParsedEpisodeReleaseType, ParsedReleaseMetadata, ParsedSpecialKind, ReleaseParseAnalysis,
-    ReleaseParseContext, ReleaseSource, StreamingService, TargetedReleaseParseAnalysis, VideoCodec,
+    ParsedEpisodeReleaseType, ParsedReleaseMetadata, ParsedSpecialKind, ParsedStereoscopy,
+    ReleaseParseAnalysis, ReleaseParseContext, ReleaseSource, StereoEncoding, StereoLayout,
+    StereoPresentation, StereoSampling, StreamingService, TargetedReleaseParseAnalysis, VideoCodec,
     analyze_release_against_targets, analyze_release_for_target, best_parse_for_target,
 };
 

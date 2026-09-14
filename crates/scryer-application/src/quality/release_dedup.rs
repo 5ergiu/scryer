@@ -6,6 +6,13 @@ use crate::ParsedReleaseMetadata;
 /// indexers. Returns an empty string if there's not enough metadata to build a
 /// reliable key (in which case the result should be kept).
 pub fn build_release_dedup_key(parsed: &ParsedReleaseMetadata) -> String {
+    if parsed
+        .parse_hints
+        .iter()
+        .any(|hint| hint.starts_with("stereo:") && hint.ends_with("_conflict"))
+    {
+        return String::new();
+    }
     let group = parsed
         .release_group
         .as_deref()
@@ -74,5 +81,81 @@ pub fn build_release_dedup_key(parsed: &ParsedReleaseMetadata) -> String {
     let dual = if parsed.is_dual_audio { "dual" } else { "" };
     let edition = parsed.edition.as_deref().unwrap_or("").to_ascii_lowercase();
 
-    format!("{group}|{episode_key}|{quality}|{codec}|{proper}|{dual}|{edition}")
+    let base = format!("{group}|{episode_key}|{quality}|{codec}|{proper}|{dual}|{edition}");
+    // Preserve the legacy key when no technical presentation was asserted.
+    let Some(stereo) = parsed.stereoscopy else {
+        return base;
+    };
+    format!(
+        "{base}|stereo:{}:{}:{}:{}",
+        stereo.presentation.as_str(),
+        stereo.layout.map_or("", |value| value.as_str()),
+        stereo.sampling.map_or("", |value| value.as_str()),
+        stereo.encoding.map_or("", |value| value.as_str())
+    )
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+    use crate::{
+        ParsedEpisodeMetadata, ParsedEpisodeReleaseType, ParsedStereoscopy, StereoEncoding,
+        StereoLayout, StereoPresentation, StereoSampling,
+    };
+
+    #[test]
+    fn stereo_variants_have_distinct_keys_and_conflicts_are_retained() {
+        let mut parsed = ParsedReleaseMetadata::default();
+        parsed.release_group = Some("Group".into());
+        parsed.episode = Some(ParsedEpisodeMetadata {
+            season: Some(1),
+            episode_numbers: vec![1],
+            release_type: ParsedEpisodeReleaseType::SingleEpisode,
+            ..Default::default()
+        });
+        let unknown = build_release_dedup_key(&parsed);
+        let mut keys = std::collections::HashSet::from([unknown]);
+        for (presentation, layout, sampling, encoding) in [
+            (StereoPresentation::TwoD, None, None, None),
+            (StereoPresentation::ThreeD, None, None, None),
+            (StereoPresentation::Mixed2d3d, None, None, None),
+            (
+                StereoPresentation::ThreeD,
+                Some(StereoLayout::SideBySide),
+                Some(StereoSampling::Half),
+                None,
+            ),
+            (
+                StereoPresentation::ThreeD,
+                Some(StereoLayout::SideBySide),
+                Some(StereoSampling::Full),
+                None,
+            ),
+            (
+                StereoPresentation::ThreeD,
+                Some(StereoLayout::TopBottom),
+                Some(StereoSampling::Half),
+                None,
+            ),
+            (
+                StereoPresentation::ThreeD,
+                None,
+                None,
+                Some(StereoEncoding::Mvc),
+            ),
+        ] {
+            parsed.stereoscopy = Some(ParsedStereoscopy {
+                presentation,
+                layout,
+                sampling,
+                encoding,
+            });
+            assert!(keys.insert(build_release_dedup_key(&parsed)));
+        }
+        parsed.parse_hints.push("stereo:layout_conflict".into());
+        assert!(build_release_dedup_key(&parsed).is_empty());
+        parsed.parse_hints.clear();
+        parsed.episode = None;
+        assert!(build_release_dedup_key(&parsed).is_empty());
+    }
 }

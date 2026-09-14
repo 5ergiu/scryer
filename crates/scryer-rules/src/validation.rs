@@ -1670,6 +1670,8 @@ fn validate_score_entry_shape(value: &Value) -> Result<(), String> {
 fn synthetic_test_input() -> UserRuleInput {
     UserRuleInput {
         release: ReleaseDoc {
+            stereoscopy_tokens: vec![],
+            stereoscopy: None,
             raw_title: "Test.Movie.2024.2160p.WEB-DL.H.265.DDP.5.1".to_string(),
             normalized_tokens: vec![],
             quality: Some("2160P".to_string()),
@@ -2019,6 +2021,34 @@ mod tests {
 
         assert!(!result.valid);
         assert!(result.errors[0].contains("runtime error"));
+    }
+
+    #[test]
+    fn stereo_rule_fields_validate_with_unknown_presentation() {
+        let source = r#"
+            package scryer.rules.user.stereo_fields
+            import rego.v1
+            score_entry["bonus"] := 10 if {
+                input.release.stereoscopy.presentation == "three_d"
+                input.release.stereoscopy.layout == "side_by_side"
+                input.release.stereoscopy.sampling == "half"
+                input.release.stereoscopy.encoding == "mvc"
+                "stereo:has_3d" in input.release.stereoscopy_tokens
+            }
+        "#;
+        // Synthetic input has null stereoscopy. Optional access must validate
+        // and evaluate safely even when the rule does not match.
+        let result = validate_user_rule(source, "stereo_fields").unwrap();
+        assert!(result.valid, "{:?}", result.errors);
+        let unknown = source.replace(".stereoscopy.layout", ".stereoscopy.eye_order");
+        let result = validate_user_rule(&unknown, "stereo_fields").unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("eye_order"))
+        );
     }
 
     #[test]

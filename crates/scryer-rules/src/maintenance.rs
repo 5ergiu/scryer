@@ -252,6 +252,9 @@ pub struct MaintenanceSeriesMovieDoc {
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct MaintenanceFileDoc {
+    /// Explicit media metadata detected 3D. False also covers unexamined files.
+    #[serde(default)]
+    pub is_3d: bool,
     pub size_bytes: Option<i64>,
     pub quality: Option<String>,
     pub video_codec: Option<String>,
@@ -571,6 +574,7 @@ pub(crate) fn synthetic_maintenance_input() -> MaintenanceInput {
             file_count: Observation::known(1),
             total_file_size_bytes: Observation::known(8_000_000_000),
             files: Observation::known(vec![MaintenanceFileDoc {
+                is_3d: false,
                 size_bytes: Some(8_000_000_000),
                 quality: Some("2160P".to_string()),
                 video_codec: Some("hevc".to_string()),
@@ -635,6 +639,48 @@ mod tests {
             .evaluator()
             .evaluate(&input)
             .expect("evaluation should succeed")
+    }
+
+    #[test]
+    fn stereo_boolean_is_available_to_maintenance_rules() {
+        let policy = policy(
+            "stereo_file",
+            "match if { input.facts.files[_].is_3d == true }",
+        );
+        let validation =
+            crate::validation::validate_maintenance_rule(&policy.rego_source, &policy.id).unwrap();
+        assert!(validation.valid, "{:?}", validation.errors);
+        for is_3d in [false, true] {
+            let mut input = synthetic_maintenance_input();
+            input.facts.files = Observation::known(vec![MaintenanceFileDoc {
+                is_3d,
+                size_bytes: None,
+                quality: None,
+                video_codec: None,
+                video_width: None,
+                video_height: None,
+                audio_languages: vec![],
+                subtitle_languages: vec![],
+                added_at: None,
+            }]);
+            let result = evaluate_against(std::slice::from_ref(&policy), input);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(
+                result.records[0].decision.outcome,
+                if is_3d {
+                    MaintenanceOutcome::Match
+                } else {
+                    MaintenanceOutcome::NoMatch
+                }
+            );
+        }
+        let mut input = synthetic_maintenance_input();
+        input.facts.files = Observation::unknown("not_examined");
+        let result = evaluate_against(&[policy], input);
+        assert_eq!(
+            result.records[0].decision.outcome,
+            MaintenanceOutcome::Unknown
+        );
     }
 
     #[test]

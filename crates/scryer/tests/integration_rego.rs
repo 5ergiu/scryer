@@ -151,6 +151,8 @@ async fn create_rule_with_facets(
 fn test_input() -> scryer_rules::UserRuleInput {
     scryer_rules::UserRuleInput {
         release: scryer_rules::ReleaseDoc {
+            stereoscopy_tokens: vec![],
+            stereoscopy: None,
             raw_title: "Test.Movie.2024.2160p.WEB-DL.H.265.DDP.5.1-GROUP".to_string(),
             normalized_tokens: vec![],
             quality: Some("2160P".to_string()),

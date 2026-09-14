@@ -172,6 +172,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                 label: selectedTitleCodecLabel(file) ?? unknownLabel,
               },
               ...hdrFormatPills(file).map(formatPill),
+              ...(file.analysis?.is3D ? [formatPill("3D")] : []),
               {
                 className:
                   "bg-[var(--scry-facet-anime-bg)] text-[var(--scry-facet-anime-text)]",
