@@ -1396,20 +1396,47 @@ impl AppUseCase {
             &claim_key,
             crate::services::UncertainDownloadSubmissionClaim::accepted(
                 submission.clone(),
-                identity,
+                identity.clone(),
                 grab.seed_goals.clone(),
             ),
         );
-        if let Err(error) = self
+        // Durable with its identity, exactly as `submit_canonical_download`
+        // records an accepted grab. The identity is what a later observation
+        // binds back to this submission; recorded without one, the grab is
+        // watched by the poller and never transitions, so the operator sees the
+        // client finish it and nothing ever reaches the import activity.
+        let disposition = match self
             .services
             .workflow
             .download_submissions
-            .record_submission(submission)
+            .record_submission_with_identity(
+                submission.clone(),
+                identity,
+                grab.seed_goals.clone(),
+            )
             .await
         {
-            return Err(AppError::DownloadSubmitAmbiguous(format!(
-                "accepted unlinked download {download_id} could not be made durable: {error}"
-            )));
+            Ok(disposition) => disposition,
+            Err(error) => {
+                return Err(AppError::DownloadSubmitAmbiguous(format!(
+                    "accepted unlinked download {download_id} could not be made durable: {error}"
+                )));
+            }
+        };
+        if let crate::CanonicalDownloadIdentityDisposition::AdoptedExisting {
+            download_id: effective_download_id,
+        } = disposition
+        {
+            // The client job already belonged to a live submission, so that one
+            // owns it: this grab adds nothing durable of its own. There is no
+            // title to adopt it into the way a canonical grab does, so say so
+            // and leave the existing download alone.
+            tracing::info!(
+                requested_download_id = %download_id,
+                effective_download_id = %effective_download_id,
+                client_item_id = %grab.job_id,
+                "unlinked grab adopted an existing download for the same client job"
+            );
         }
 
         self.append_domain_event(new_global_domain_event(
