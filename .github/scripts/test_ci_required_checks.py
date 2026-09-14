@@ -30,6 +30,31 @@ def succeeds(script, **env):
 
 
 class RequiredCheckTests(unittest.TestCase):
+    def test_builds_and_validation_remain_independent(self):
+        def ancestors(name):
+            found = set()
+            pending = [name]
+            while pending:
+                block = job("scryer.yml", pending.pop())
+                match = re.search(r"^    needs: (.+)$", block, re.M)
+                dependencies = match.group(1).strip("[]").split(",") if match else []
+                for dependency in dependencies:
+                    dependency = dependency.strip()
+                    if dependency not in found:
+                        found.add(dependency)
+                        pending.append(dependency)
+            return found
+
+        builds = {"launcher-build", "linux-build", "macos-build", "windows-build",
+                  "winget-xtask-build"}
+        validations = {"rust-clippy", "rust-nextest", "windows-validation"}
+        for build in builds:
+            self.assertFalse(ancestors(build) & {
+                *validations, "rust-clippy-work", "rust-nextest-target", "windows-validation-work",
+            })
+        for validation in validations:
+            self.assertFalse(ancestors(validation) & (builds | (validations - {validation})))
+
     def test_build_gates_pass_only_success_or_intentional_skip(self):
         for name in ["web", "winget-xtask-build", "rust-clippy", "launcher-build",
                      "linux-build", "macos-build", "windows-build", "windows-validation"]:

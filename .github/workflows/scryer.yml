@@ -302,7 +302,7 @@ jobs:
     name: rust-clippy
     runs-on: ubuntu-26.04
     timeout-minutes: 5
-    needs: [changes, rust-clippy-work, windows-validation]
+    needs: [changes, rust-clippy-work]
     if: always()
     steps:
       - name: Validate required check
@@ -321,11 +321,6 @@ jobs:
             test "$RESULT" = skipped
             echo "No applicable changes; check passed."
           fi
-
-      - name: Require native Windows validation
-        env:
-          WINDOWS_RESULT: ${{ needs.windows-validation.result }}
-        run: test "$WINDOWS_RESULT" = success
 
   rust-clippy-work:
     name: rust-clippy (work)
