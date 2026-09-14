@@ -207,6 +207,7 @@ export type MediaDiscMetadata = {
 };
 
 export type MediaAnalysisDetails = {
+  is3D?: boolean;
   revision: number;
   durationSeconds: number | null;
   durationProvenance: MediaProvenance;
@@ -364,6 +365,7 @@ export const MEDIA_DISC_FIELDS = `
 `;
 
 export const MEDIA_ANALYSIS_FIELDS = `
+  is3D
   revision
   durationSeconds
   durationProvenance

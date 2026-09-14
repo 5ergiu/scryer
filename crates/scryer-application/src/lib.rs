@@ -579,8 +579,9 @@ pub use ports::{
 pub use ports::{MediaServerSignalRepository, MediaServerSignalSource, ProviderPlayedItem};
 pub use quality::release_parser::{
     AudioCodec, ExternalIdSource, ParsedEpisodeMetadata, ParsedEpisodeReleaseType,
-    ParsedReleaseMetadata, ParsedSpecialKind, ReleaseParseAnalysis, ReleaseParseContext,
-    ReleaseSource, StreamingService, TargetedReleaseParseAnalysis, VideoCodec,
+    ParsedReleaseMetadata, ParsedSpecialKind, ParsedStereoscopy, ReleaseParseAnalysis,
+    ReleaseParseContext, ReleaseSource, StereoEncoding, StereoLayout, StereoPresentation,
+    StereoSampling, StreamingService, TargetedReleaseParseAnalysis, VideoCodec,
     analyze_release_against_targets, analyze_release_for_target, best_parse_for_target,
     build_candidate_bank_contexts, build_release_parse_context,
     build_release_parse_context_for_title, parse_release_metadata,

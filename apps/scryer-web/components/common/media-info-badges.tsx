@@ -306,7 +306,7 @@ export function MediaInfoBadges({
   const hasContainer = containerFormat != null;
   const hdrPills = hdrFormatPills(file);
   const audioPills = audioFormatPills(file);
-  const hasVideo = !!(resolution || videoCodec || hdrPills.length > 0);
+  const hasVideo = !!(resolution || videoCodec || hdrPills.length > 0 || file.analysis?.is3D);
   const hasRelease = !!(sourceType || file.edition);
   const audioStreams: AudioStreamDetail[] = file.analysis?.streams.length
     ? file.analysis.streams.filter((stream) => stream.kind === "AUDIO").map((stream) => ({
@@ -328,6 +328,7 @@ export function MediaInfoBadges({
       {containerFormat ? <Badge tone="info">{containerFormat}</Badge> : null}
       {resolution ? <Badge tone="info">{resolution}</Badge> : null}
       {videoCodec ? <Badge tone="info">{videoCodec}</Badge> : null}
+      {file.analysis?.is3D ? <Badge tone="info">3D</Badge> : null}
       {hdrPills.map((pill) => <Badge key={pill} tone="info">{pill}</Badge>)}
       {sourceType ? <Badge tone="info">{sourceType}</Badge> : null}
       {file.edition ? <Badge tone="info">{file.edition}</Badge> : null}

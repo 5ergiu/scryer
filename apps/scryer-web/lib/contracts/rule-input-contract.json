@@ -85,6 +85,16 @@
           "descKey": "settings.refReleaseIsBdDisk"
         },
         {
+          "field": "stereoscopy_tokens",
+          "type": "string[]",
+          "descKey": "settings.refReleaseStereoscopyTokens"
+        },
+        {
+          "field": "stereoscopy",
+          "type": "object?",
+          "descKey": "settings.refReleaseStereoscopy"
+        },
+        {
           "field": "is_proper_upload",
           "type": "bool",
           "descKey": "settings.refReleaseIsProper"
@@ -224,6 +234,16 @@
           "type": "object",
           "descKey": "settings.refReleaseExtra"
         }
+      ]
+    },
+    {
+      "titleKey": "settings.refSectionStereoscopy",
+      "path": "input.release.stereoscopy",
+      "fields": [
+        { "field": "presentation", "type": "string", "descKey": "settings.refStereoPresentation" },
+        { "field": "layout", "type": "string?", "descKey": "settings.refStereoLayout" },
+        { "field": "sampling", "type": "string?", "descKey": "settings.refStereoSampling" },
+        { "field": "encoding", "type": "string?", "descKey": "settings.refStereoEncoding" }
       ]
     },
     {

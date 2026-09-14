@@ -830,6 +830,8 @@ fn mkv_stream_metadata(payload: &[u8], track_number: u64) -> scryer_media_types:
                 children(data, |id, data| match id {
                     EBML_ID_PIXEL_WIDTH => pixel_width = parse_ebml_uint(data),
                     EBML_ID_PIXEL_HEIGHT => pixel_height = parse_ebml_uint(data),
+                    // Matroska StereoMode: 0 is mono, 1..=14 are stereo layouts.
+                    0x53b8 => metadata.is_3d |= matches!(parse_ebml_uint(data), Some(1..=14)),
                     0x54b2 => display_unit = parse_ebml_uint(data),
                     0x54cc => crop[0] = parse_ebml_uint(data),
                     0x54dd => crop[1] = parse_ebml_uint(data),
@@ -2973,6 +2975,29 @@ mod tests {
 
     fn make_ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
         make_ebml_element_with_declared_size(id, payload.len() as u64, payload)
+    }
+
+    #[test]
+    fn stereo_mode_is_detected_from_video_track_metadata() {
+        for (mode, expected) in [
+            (0, false),
+            (1, true),
+            (3, true),
+            (14, true),
+            (15, false),
+            (255, false),
+        ] {
+            let video = make_ebml_element(&[0xe0], &make_ebml_element(&[0x53, 0xb8], &[mode]));
+            let mut entry = make_ebml_element(&[0xd7], &[1]);
+            entry.extend(make_ebml_element(&[0x83], &[1]));
+            entry.extend(make_ebml_element(&[0x86], b"V_MPEG4/ISO/AVC"));
+            entry.extend(video);
+            let track = parse_mkv_track_entry(&entry).unwrap();
+            assert_eq!(track.raw.metadata.is_3d, expected, "mode {mode}");
+        }
+        let truncated = make_ebml_element(&[0xe0], &make_ebml_element(&[0x53, 0xb8], &[]));
+        assert!(!mkv_stream_metadata(&truncated, 1).is_3d);
+        assert!(!mkv_stream_metadata(&[], 1).is_3d);
     }
 
     fn make_ebml_element_with_declared_size(

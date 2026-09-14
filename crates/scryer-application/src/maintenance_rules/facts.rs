@@ -826,6 +826,7 @@ fn episode_count_observation(facet: &MediaFacet) -> Observation<i64> {
 /// fabricated value.
 fn file_doc(file: &TitleMediaFile) -> MaintenanceFileDoc {
     MaintenanceFileDoc {
+        is_3d: file.analysis_details.is_3d(),
         size_bytes: Some(file.size_bytes),
         quality: file.quality_label.clone(),
         video_codec: file

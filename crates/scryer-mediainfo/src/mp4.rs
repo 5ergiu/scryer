@@ -1340,7 +1340,7 @@ fn parse_stsd(data: &[u8], track: &mut Mp4TrackMetadata) {
                     children,
                     &[
                         *b"avcC", *b"hvcC", *b"av1C", *b"dvcC", *b"dvvC", *b"colr", *b"pasp",
-                        *b"vpcC",
+                        *b"vpcC", *b"st3d",
                     ],
                 ) {
                     for_each_mp4_box(children, |child, child_payload| {
@@ -1348,6 +1348,10 @@ fn parse_stsd(data: &[u8], track: &mut Mp4TrackMetadata) {
                         match child_name.as_str() {
                             "avcC" | "hvcC" | "av1C" | "vpcC" => {
                                 track.codec_private = Some(child_payload.to_vec());
+                            }
+                            "st3d" if child_payload.len() >= 5 && child_payload[..4] == [0; 4] => {
+                                // FullBox version 0: mono=0, stereo modes=1..4.
+                                track.details.is_3d |= matches!(child_payload[4], 1..=4);
                             }
                             "colr" => {
                                 if child_payload.len() >= 10
@@ -2704,6 +2708,32 @@ mod tests {
         out.extend_from_slice(name);
         out.extend_from_slice(payload);
         out
+    }
+
+    #[test]
+    fn stereo_box_is_detected_only_for_supported_video_declarations() {
+        for (payload, expected) in [
+            (vec![0, 0, 0, 0, 0], false),
+            (vec![0, 0, 0, 0, 1], true),
+            (vec![0, 0, 0, 0, 2], true),
+            (vec![0, 0, 0, 0, 3], true),
+            (vec![0, 0, 0, 0, 4], true),
+            (vec![0, 0, 0, 0, 5], false),
+            (vec![1, 0, 0, 0, 1], false),
+            (vec![0, 0, 0, 0], false),
+        ] {
+            let mut entry = vec![0_u8; 78];
+            entry.extend(make_box(b"st3d", &payload));
+            let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+            stsd.extend(make_box(b"avc1", &entry));
+            let mut track = Mp4TrackMetadata::default();
+            parse_stsd(&stsd, &mut track);
+            assert_eq!(track.details.is_3d, expected, "{payload:?}");
+            stsd.pop();
+            let mut truncated = Mp4TrackMetadata::default();
+            parse_stsd(&stsd, &mut truncated);
+            assert!(!truncated.details.is_3d);
+        }
     }
 
     fn make_meta_box(payload: &[u8]) -> Vec<u8> {

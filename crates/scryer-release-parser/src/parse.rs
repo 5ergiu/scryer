@@ -243,6 +243,45 @@ pub(crate) fn analyze_inputs(inputs: AnalysisInputs<'_>) -> ReleaseParseAnalysis
         let technical_recovery =
             recover_independent_technical_metadata(&lexed.tokens, &technical_candidate);
         apply_independent_technical_metadata(&mut best_candidate.projected, technical_recovery);
+        // Resolve stereo claims once more against the same conservative title
+        // union used for independent recovery, including conflicting evidence.
+        let mut stereo_candidate = technical_candidate.clone();
+        // A known alias can follow technical metadata without being selected by
+        // the identity beam. It still cannot supply stereo claims.
+        stereo_candidate.zones.title_zones.extend(
+            alias_oracle
+                .hits_at
+                .iter()
+                .flatten()
+                .map(|hit| hit.token_range),
+        );
+        stereo_candidate
+            .zones
+            .title_zones
+            .extend(stereo_interleaved_title_ranges(
+                &lexed.tokens,
+                &context_index,
+                &alias_oracle,
+            ));
+        let stereo = crate::stereoscopy::analyze_candidate(&lexed.tokens, &stereo_candidate);
+        best_candidate.projected.stereoscopy = stereo.metadata;
+        best_candidate.metadata.stereoscopy = stereo.metadata;
+        best_candidate.metadata.stereo_evidence = stereo.evidence.clone();
+        best_candidate
+            .projected
+            .parse_hints
+            .retain(|hint| !hint.starts_with("stereo:"));
+        if let Some(enrichment) = best_candidate.enrichment.as_mut() {
+            enrichment.stereoscopy = stereo.metadata;
+            enrichment.stereo_evidence = stereo.evidence;
+            enrichment
+                .parse_hints
+                .retain(|hint| !hint.starts_with("stereo:"));
+            enrichment.parse_hints.extend(stereo.hints.iter().cloned());
+        }
+        for hint in stereo.hints {
+            push_parse_hint(&mut best_candidate.projected.parse_hints, &hint);
+        }
         if has_unresolved_pack_scope(&lexed.tokens, best_candidate, &alias_oracle) {
             push_parse_hint(
                 &mut best_candidate.projected.parse_hints,
@@ -608,7 +647,59 @@ fn has_unresolved_pack_scope(
         || !has_supported_coverage
 }
 
-fn protected_title_end(candidate: &ReleaseParseCandidate) -> Option<usize> {
+fn stereo_interleaved_title_ranges(
+    tokens: &[Token],
+    context: &ContextIndex,
+    oracle: &AliasOracle,
+) -> Vec<TokenRange> {
+    let mut ranges = Vec::new();
+    // A display name may insert one complete parenthesized known alias inside
+    // the canonical title: `Title (Alias) 3D`. Only exact title words with that
+    // bounded, known insertion receive protection; arbitrary gaps do not.
+    for alias in &context.aliases {
+        if !alias
+            .tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "3D" | "2D"))
+        {
+            continue;
+        }
+        for start in 0..tokens.len() {
+            let mut cursor = start;
+            let mut matched = 0;
+            let mut skipped = false;
+            while matched < alias.tokens.len() && cursor < tokens.len() {
+                if tokens[cursor].normalized == alias.tokens[matched] {
+                    matched += 1;
+                    cursor += 1;
+                } else if matched > 0 && !skipped && tokens[cursor].bracket_depth > 0 {
+                    let hit = oracle
+                        .hits_at
+                        .get(cursor)
+                        .into_iter()
+                        .flatten()
+                        .find(|hit| {
+                            hit.evidence == AliasEvidenceKind::TitleAlias
+                                && !range_is_embedded_in_larger_group(tokens, hit.token_range)
+                        });
+                    let Some(hit) = hit else {
+                        break;
+                    };
+                    cursor = hit.token_range.end_token;
+                    skipped = true;
+                } else {
+                    break;
+                }
+            }
+            if skipped && matched == alias.tokens.len() {
+                ranges.push(TokenRange::new(start, cursor));
+            }
+        }
+    }
+    ranges
+}
+
+pub(crate) fn protected_title_end(candidate: &ReleaseParseCandidate) -> Option<usize> {
     candidate
         .zones
         .title_zones
@@ -633,7 +724,7 @@ fn protected_title_end(candidate: &ReleaseParseCandidate) -> Option<usize> {
         .max()
 }
 
-fn technical_recovery_token(
+pub(crate) fn technical_recovery_token(
     candidate: &ReleaseParseCandidate,
     index: usize,
     token: &Token,
@@ -912,11 +1003,19 @@ struct CompoundMetadata {
 
 fn annotate_tokens(tokens: &[Token], context: &ContextIndex) -> Vec<TokenAnnotations> {
     let episode_roles_allowed = episode_families_seedable(context);
+    let stereo_roles = crate::stereoscopy::marker_roles(tokens);
     tokens
         .iter()
         .enumerate()
         .map(|(index, token)| {
             let mut roles = classify_token(token, tokens.get(index + 1), episode_roles_allowed);
+            if stereo_roles[index] {
+                roles.push(RoleCandidate {
+                    role: TokenRole::ReleaseFlag,
+                    confidence: 86,
+                    strong_anchor: false,
+                });
+            }
             roles.sort_by(|left, right| {
                 right
                     .confidence
@@ -3068,7 +3167,7 @@ fn is_compound_metadata_suffix(tokens: &[Token], index: usize) -> bool {
 /// A pure function of token shape, so it can be answered before the beam search
 /// runs. The search uses it to keep the tag out of the title zone; projection
 /// uses it to render the group's name.
-fn leading_release_group_token_range(tokens: &[Token]) -> Option<TokenRange> {
+pub(crate) fn leading_release_group_token_range(tokens: &[Token]) -> Option<TokenRange> {
     let first = tokens.first()?;
     let group_id = first.group_id?;
     if first.bracket_depth == 0 {
@@ -3087,6 +3186,14 @@ fn leading_release_group_token_range(tokens: &[Token]) -> Option<TokenRange> {
 
     let start_token = *group_indices.first()?;
     let end_token = group_indices.last().map(|index| index + 1)?;
+    if tokens[start_token..end_token].iter().any(|token| {
+        matches!(
+            token.normalized.as_str(),
+            "3D" | "2D" | "2D+3D" | "STEREOSCOPIC"
+        )
+    }) {
+        return None;
+    }
     let standard_group = (group_indices.len() == 1
         && tokens
             .get(start_token)
@@ -4445,6 +4552,7 @@ fn build_candidate(
             .as_deref()
             .and_then(VideoCodec::parse),
         video_encoding: None,
+        stereoscopy: None,
         audio: state
             .metadata
             .audio_codec
@@ -8263,9 +8371,8 @@ fn normalize_source_token(token: &str) -> Option<&'static str> {
         "WEB" | "WEBDL" => Some("WEB-DL"),
         "WEBRIP" => Some("WEBRip"),
         "BDMV" | "BDISO" | "BRDISK" => Some("BRDISK"),
-        "BLURAY" | "BD" | "BDRIP" | "BDRIO" | "BRRIP" | "BDREMUX" | "BLU" | "JPBD" => {
-            Some("BluRay")
-        }
+        "BLURAY" | "BD" | "BDRIP" | "BDRIO" | "BRRIP" | "BDREMUX" | "BLU" | "JPBD" | "BLURAY3D"
+        | "BD3D" => Some("BluRay"),
         "DVD" | "DVDRIP" => Some("DVD"),
         "HDTV" => Some("HDTV"),
         "CAM" | "HQCAM" => Some("CAM"),

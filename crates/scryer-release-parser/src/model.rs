@@ -174,9 +174,8 @@ impl ReleaseSource {
         match value.as_str() {
             "WEBDL" | "WEB" => Some(Self::WebDl),
             "WEBRIP" | "WEBRI" => Some(Self::WebRip),
-            "BLURAY" | "BLU" | "BD" | "UHD" | "BDRIP" | "BRRIP" | "BDREMUX" | "BDRIO" => {
-                Some(Self::BluRay)
-            }
+            "BLURAY" | "BLU" | "BD" | "UHD" | "BDRIP" | "BRRIP" | "BDREMUX" | "BDRIO"
+            | "BLURAY3D" | "BD3D" => Some(Self::BluRay),
             "BRDISK" | "BDMV" | "BDISO" | "BD25" | "BD50" | "BD66" | "BD100" => Some(Self::BrDisk),
             "DVD" | "DVDRIP" => Some(Self::Dvd),
             "HDTV" | "RAWHD" => Some(Self::Hdtv),
@@ -793,6 +792,8 @@ pub struct ParsedReleaseMetadata {
     pub source: Option<ReleaseSource>,
     pub video_codec: Option<VideoCodec>,
     pub video_encoding: Option<String>,
+    /// Explicit release-name stereoscopy; absent does not mean verified 2D.
+    pub stereoscopy: Option<crate::stereoscopy::ParsedStereoscopy>,
     pub audio: Option<AudioCodec>,
     pub audio_codecs: Vec<AudioCodec>,
     pub audio_channels: Option<String>,
@@ -849,6 +850,7 @@ impl ParsedReleaseMetadata {
             source: None,
             video_codec: None,
             video_encoding: None,
+            stereoscopy: None,
             audio: None,
             audio_codecs: Vec::new(),
             audio_channels: None,
@@ -981,6 +983,8 @@ pub struct ContextTitleMatch {
 /// Metadata AST collected before projection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct MetadataAst {
+    pub stereoscopy: Option<crate::stereoscopy::ParsedStereoscopy>,
+    pub stereo_evidence: Vec<crate::stereoscopy::StereoEvidence>,
     pub year: Option<i32>,
     pub quality: Option<String>,
     pub source: Option<String>,
@@ -1077,6 +1081,8 @@ pub struct CandidateZones {
 /// Local metadata classification emitted by the deterministic enrichment pass.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct MetadataEnrichment {
+    pub stereoscopy: Option<crate::stereoscopy::ParsedStereoscopy>,
+    pub stereo_evidence: Vec<crate::stereoscopy::StereoEvidence>,
     pub languages_audio: Vec<String>,
     pub languages_subtitles: Vec<String>,
     pub external_ids: Vec<ParsedExternalId>,

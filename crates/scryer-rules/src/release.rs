@@ -139,8 +139,20 @@ pub struct SubtitleStreamDoc {
     pub default: bool,
 }
 
+/// Stable wire labels supplied by the host parser; null attributes are unknown.
+#[derive(Debug, Clone, Serialize)]
+pub struct StereoscopyDoc {
+    pub presentation: String,
+    pub layout: Option<String>,
+    pub sampling: Option<String>,
+    pub encoding: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseDoc {
+    /// Canonical parser claims and conflict tokens, independent of raw spelling.
+    pub stereoscopy_tokens: Vec<String>,
+    pub stereoscopy: Option<StereoscopyDoc>,
     pub raw_title: String,
     /// Lexer-normalized release tokens in source order.
     pub normalized_tokens: Vec<String>,
@@ -2014,6 +2026,8 @@ score_entry["internal"] := 300 if {
     fn test_input() -> UserRuleInput {
         UserRuleInput {
             release: ReleaseDoc {
+                stereoscopy: None,
+                stereoscopy_tokens: vec![],
                 raw_title: "Test.Movie.2024.2160p.WEB-DL.H.265".to_string(),
                 normalized_tokens: vec![],
                 quality: Some("2160P".to_string()),

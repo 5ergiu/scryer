@@ -10,6 +10,7 @@ mod lex;
 mod model;
 mod parse;
 mod sanitize;
+mod stereoscopy;
 mod trash_guides;
 
 pub use context::{
@@ -25,6 +26,10 @@ pub use model::{
     TitleSegmentKind, TokenAnnotations, TokenRange, TokenRole, VideoCodec,
 };
 pub use parse::SCORING_MODEL_VERSION;
+pub use stereoscopy::{
+    ParsedStereoscopy, StereoEncoding, StereoEvidence, StereoLayout, StereoPresentation,
+    StereoSampling,
+};
 pub use trash_guides::TRASH_GUIDES_SOURCE_REVISION;
 
 use parse::{AnalysisInputs, analyze_inputs};

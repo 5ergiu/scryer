@@ -13092,6 +13092,10 @@ Versioned native analysis shared by imports, scans, rules, and media details.
 """
 type MediaAnalysisDetailsPayload {
 	"""
+	Explicit media metadata detected stereoscopic video.
+	"""
+	is3D: Boolean!
+	"""
 	Analysis schema revision; zero denotes legacy metadata.
 	"""
 	revision: Int!
@@ -18241,6 +18245,10 @@ type ParsedReleasePayload {
 	"""
 	videoEncoding: String
 	"""
+	Null means no reliable presentation claim, not verified 2D.
+	"""
+	stereoscopy: ParsedStereoscopyPayload
+	"""
 	Audio description, or null when not detected.
 	"""
 	audio: String
@@ -18288,6 +18296,25 @@ type ParsedReleasePayload {
 	Parsed episode numbering, or null for non-episodic releases.
 	"""
 	episode: ParsedEpisodePayload
+}
+
+"""
+Stereoscopic claims in the release name, not verified stream properties.
+"""
+type ParsedStereoscopyPayload {
+	presentation: StereoPresentationValue!
+	"""
+	Null when not stated, conflicting, or scoped to an unspecified bundle member.
+	"""
+	layout: StereoLayoutValue
+	"""
+	Half/full sampling for side-by-side or top/bottom packing.
+	"""
+	sampling: StereoSamplingValue
+	"""
+	Optional stereoscopic encoding, independent of packing layout.
+	"""
+	encoding: StereoEncodingValue
 }
 
 """
@@ -24481,6 +24508,31 @@ type StartLocationOperationPayload {
 	Fingerprint of the plan the server rebuilt and accepted.
 	"""
 	planFingerprint: String!
+}
+
+enum StereoEncodingValue {
+	MVC
+}
+
+enum StereoLayoutValue {
+	SIDE_BY_SIDE
+	TOP_BOTTOM
+	FRAME_SEQUENTIAL
+	ROW_INTERLEAVED
+	COLUMN_INTERLEAVED
+	CHECKERBOARD
+	ANAGLYPH
+}
+
+enum StereoPresentationValue {
+	TWO_D
+	THREE_D
+	MIXED_2D_3D
+}
+
+enum StereoSamplingValue {
+	HALF
+	FULL
 }
 
 """

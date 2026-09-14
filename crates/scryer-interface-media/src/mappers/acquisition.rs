@@ -202,6 +202,46 @@ pub fn from_quality_profile_decision(
     }
 }
 
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    #[test]
+    fn stereo_api_mapping_and_nullable_schema() {
+        let parsed =
+            scryer_application::parse_release_metadata("Title.2020.1080p.BluRay.3D.HSBS.x264");
+        let payload = from_parsed_release(parsed);
+        let stereo = payload.stereoscopy.unwrap();
+        assert_eq!(stereo.presentation, StereoPresentationValue::ThreeD);
+        assert_eq!(stereo.layout, Some(StereoLayoutValue::SideBySide));
+        assert_eq!(stereo.sampling, Some(StereoSamplingValue::Half));
+        assert_eq!(stereo.encoding, None);
+        assert!(
+            from_parsed_release(ParsedReleaseMetadata::default())
+                .stereoscopy
+                .is_none()
+        );
+
+        struct Query;
+        #[async_graphql::Object]
+        impl Query {
+            async fn parsed(&self) -> ParsedReleasePayload {
+                from_parsed_release(ParsedReleaseMetadata::default())
+            }
+        }
+        let schema = async_graphql::Schema::build(
+            Query,
+            async_graphql::EmptyMutation,
+            async_graphql::EmptySubscription,
+        )
+        .finish()
+        .sdl();
+        assert!(schema.contains("stereoscopy: ParsedStereoscopyPayload\n"));
+        assert!(schema.contains("layout: StereoLayoutValue\n"));
+        assert!(schema.contains("presentation: StereoPresentationValue!"));
+    }
+}
+
 pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayload {
     ParsedReleasePayload {
         raw_title: result.raw_title,
@@ -211,6 +251,7 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
         source: result.source.map(|source| source.to_string()),
         video_codec: result.video_codec.map(|codec| codec.to_string()),
         video_encoding: result.video_encoding,
+        stereoscopy: result.stereoscopy.map(from_stereoscopy),
         audio: result.audio.map(|codec| codec.to_string()),
         is_dual_audio: result.is_dual_audio,
         is_atmos: result.is_atmos,
@@ -223,6 +264,33 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
         parse_confidence: result.parse_confidence,
         parse_hints: result.parse_hints,
         episode: result.episode.map(from_parsed_episode),
+    }
+}
+
+fn from_stereoscopy(value: scryer_application::ParsedStereoscopy) -> ParsedStereoscopyPayload {
+    use scryer_application::{StereoEncoding, StereoLayout, StereoPresentation, StereoSampling};
+    ParsedStereoscopyPayload {
+        presentation: match value.presentation {
+            StereoPresentation::TwoD => StereoPresentationValue::TwoD,
+            StereoPresentation::ThreeD => StereoPresentationValue::ThreeD,
+            StereoPresentation::Mixed2d3d => StereoPresentationValue::Mixed2d3d,
+        },
+        layout: value.layout.map(|layout| match layout {
+            StereoLayout::SideBySide => StereoLayoutValue::SideBySide,
+            StereoLayout::TopBottom => StereoLayoutValue::TopBottom,
+            StereoLayout::FrameSequential => StereoLayoutValue::FrameSequential,
+            StereoLayout::RowInterleaved => StereoLayoutValue::RowInterleaved,
+            StereoLayout::ColumnInterleaved => StereoLayoutValue::ColumnInterleaved,
+            StereoLayout::Checkerboard => StereoLayoutValue::Checkerboard,
+            StereoLayout::Anaglyph => StereoLayoutValue::Anaglyph,
+        }),
+        sampling: value.sampling.map(|sampling| match sampling {
+            StereoSampling::Half => StereoSamplingValue::Half,
+            StereoSampling::Full => StereoSamplingValue::Full,
+        }),
+        encoding: value.encoding.map(|encoding| match encoding {
+            StereoEncoding::Mvc => StereoEncodingValue::Mvc,
+        }),
     }
 }
 

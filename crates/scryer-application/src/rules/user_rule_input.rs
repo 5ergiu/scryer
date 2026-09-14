@@ -62,8 +62,44 @@ pub(crate) fn build_rule_input(
         !profile.criteria.required_audio_languages.is_empty(),
     );
 
+    let mut stereoscopy_tokens = Vec::new();
+    if let Some(stereo) = parsed.stereoscopy {
+        stereoscopy_tokens.push(format!("stereo:{}", stereo.presentation.as_str()));
+        if stereo.has_3d() {
+            stereoscopy_tokens.push("stereo:has_3d".into());
+        }
+        for (kind, value) in [
+            ("layout", stereo.layout.map(|value| value.as_str())),
+            ("sampling", stereo.sampling.map(|value| value.as_str())),
+            ("encoding", stereo.encoding.map(|value| value.as_str())),
+        ] {
+            if let Some(value) = value {
+                stereoscopy_tokens.push(format!("stereo:{kind}:{value}"));
+            }
+        }
+    }
+    for hint in &parsed.parse_hints {
+        if matches!(
+            hint.as_str(),
+            "stereo:presentation_conflict"
+                | "stereo:layout_conflict"
+                | "stereo:sampling_conflict"
+                | "stereo:encoding_conflict"
+        ) && !stereoscopy_tokens.contains(hint)
+        {
+            stereoscopy_tokens.push(hint.clone());
+        }
+    }
+
     UserRuleInput {
         release: ReleaseDoc {
+            stereoscopy_tokens,
+            stereoscopy: parsed.stereoscopy.map(|stereo| StereoscopyDoc {
+                presentation: stereo.presentation.as_str().into(),
+                layout: stereo.layout.map(|value| value.as_str().into()),
+                sampling: stereo.sampling.map(|value| value.as_str().into()),
+                encoding: stereo.encoding.map(|value| value.as_str().into()),
+            }),
             raw_title: parsed.raw_title.clone(),
             normalized_tokens: parsed.normalized_tokens.clone(),
             quality: parsed.quality.clone(),
@@ -394,6 +430,154 @@ mod tests {
 
     fn test_parsed() -> ParsedReleaseMetadata {
         crate::parse_release_metadata("Test.Movie.2024.2160p.WEB-DL.H.265.DDP5.1-Group")
+    }
+
+    #[test]
+    fn stereo_rule_input_and_neutral_parser_preserve_optional_metadata() {
+        for (suffix, expected, tokens, score) in [
+            ("", serde_json::Value::Null, vec![], 0),
+            (
+                "3D.HSBS",
+                serde_json::json!({"presentation":"three_d", "layout":"side_by_side", "sampling":"half", "encoding":null}),
+                vec![
+                    "stereo:three_d",
+                    "stereo:has_3d",
+                    "stereo:layout:side_by_side",
+                    "stereo:sampling:half",
+                ],
+                100,
+            ),
+            (
+                "2D",
+                serde_json::json!({"presentation":"two_d", "layout":null, "sampling":null, "encoding":null}),
+                vec!["stereo:two_d"],
+                0,
+            ),
+            (
+                "3D.FSBS",
+                serde_json::json!({"presentation":"three_d", "layout":"side_by_side", "sampling":"full", "encoding":null}),
+                vec![
+                    "stereo:three_d",
+                    "stereo:has_3d",
+                    "stereo:layout:side_by_side",
+                    "stereo:sampling:full",
+                ],
+                25,
+            ),
+            (
+                "3D.MVC",
+                serde_json::json!({"presentation":"three_d", "layout":null, "sampling":null, "encoding":"mvc"}),
+                vec!["stereo:three_d", "stereo:has_3d", "stereo:encoding:mvc"],
+                75,
+            ),
+            (
+                "2D+3D",
+                serde_json::json!({"presentation":"mixed_2d_3d", "layout":null, "sampling":null, "encoding":null}),
+                vec!["stereo:mixed_2d_3d", "stereo:has_3d"],
+                scryer_rules::BLOCK_SCORE,
+            ),
+            (
+                "2D.3D",
+                serde_json::Value::Null,
+                vec!["stereo:presentation_conflict"],
+                scryer_rules::BLOCK_SCORE,
+            ),
+        ] {
+            let parsed = crate::parse_release_metadata(&format!(
+                "Test.Movie.2024.1080p.BluRay.{suffix}.x264-Group"
+            ));
+            let input = build_rule_input(
+                &parsed,
+                &test_profile(),
+                &test_decision(),
+                ReleaseRuntimeInfo {
+                    size_bytes: None,
+                    published_at: None,
+                    thumbs_up: None,
+                    thumbs_down: None,
+                    is_password_protected: None,
+                    extra: None,
+                    indexer_languages: None,
+                },
+                RuleContextInfo {
+                    title_id: None,
+                    library_name: None,
+                    category: Some("movie"),
+                    original_language: None,
+                    original_country: None,
+                    title_tags: &[],
+                    has_existing_file: false,
+                    existing_score: None,
+                    search_mode: "interactive",
+                    runtime_minutes: None,
+                    coverage_total_runtime_minutes: None,
+                    coverage_member_runtime_minutes: None,
+                    coverage_member_count: None,
+                    is_filler: false,
+                },
+                None,
+            );
+            assert_eq!(
+                serde_json::to_value(&input).unwrap()["release"]["stereoscopy"],
+                expected,
+                "{suffix}"
+            );
+            assert_eq!(input.release.stereoscopy_tokens, tokens, "{suffix}");
+            assert_eq!(input.release.normalized_tokens, parsed.normalized_tokens);
+            for origin in [
+                scryer_rules::PolicyOrigin::User,
+                scryer_rules::PolicyOrigin::System,
+            ] {
+                let policy = scryer_rules::UserPolicy {
+                    id: "stereo_tokens".into(),
+                    name: "Stereo token evaluation".into(),
+                    origin,
+                    applied_facets: vec![],
+                    rego_source: scryer_rules::rewrite_package_declaration(
+                        r#"
+                        import rego.v1
+                        score_entry["three_d"] := 25 if {
+                            "stereo:three_d" in input.release.stereoscopy_tokens
+                        }
+                        score_entry["half_sbs"] := 75 if {
+                            "stereo:layout:side_by_side" in input.release.stereoscopy_tokens
+                            "stereo:sampling:half" in input.release.stereoscopy_tokens
+                        }
+                        score_entry["mvc"] := 50 if {
+                            "stereo:encoding:mvc" in input.release.stereoscopy_tokens
+                        }
+                        score_entry["mixed"] := scryer.block_score() if {
+                            "stereo:mixed_2d_3d" in input.release.stereoscopy_tokens
+                        }
+                        score_entry["conflict"] := scryer.block_score() if {
+                            "stereo:presentation_conflict" in input.release.stereoscopy_tokens
+                        }
+                    "#,
+                        "stereo_tokens",
+                    ),
+                };
+                let validation =
+                    scryer_rules::validation::validate_user_rule(&policy.rego_source, &policy.id)
+                        .unwrap();
+                assert!(validation.valid, "{:?}", validation.errors);
+                let result = scryer_rules::UserRulesEngine::build(&[policy])
+                    .unwrap()
+                    .evaluator()
+                    .evaluate(&input, "movie")
+                    .unwrap();
+                assert!(result.errors.is_empty(), "{suffix} {origin:?}: {result:?}");
+                assert_eq!(
+                    result.entries.iter().map(|entry| entry.delta).sum::<i32>(),
+                    score,
+                    "{suffix} {origin:?}"
+                );
+            }
+        }
+        assert!(
+            crate::parse_release_metadata("3D.Title.2024.1080p.x264")
+                .stereoscopy
+                .is_none()
+        );
     }
 
     #[cfg(feature = "runtime-media-analysis")]
