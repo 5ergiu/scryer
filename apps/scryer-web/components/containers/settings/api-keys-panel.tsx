@@ -67,6 +67,7 @@ export function ApiKeysPanel({ adoptSession }: {
   const [label, setLabel] = useState("");
   const [expiry, setExpiry] = useState("DAYS_90");
   const [revealed, setRevealed] = useState<string | null>(null);
+  const [revealedCopied, setRevealedCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<ApiKeySummary | null>(null);
@@ -175,6 +176,7 @@ export function ApiKeysPanel({ adoptSession }: {
         return;
       }
       setRevealed(created.apiKey);
+      setRevealedCopied(false);
       setLabel("");
       await load();
     } catch (error) {
@@ -193,7 +195,8 @@ export function ApiKeysPanel({ adoptSession }: {
         throw new Error("Clipboard access is unavailable.");
       }
       await navigator.clipboard.writeText(revealed);
-      setStatus("API key copied.");
+      setRevealedCopied(true);
+      setStatus(null);
     } catch (error) {
       setStatus(errorMessage(error, "Unable to copy the API key."));
     }
@@ -282,9 +285,29 @@ export function ApiKeysPanel({ adoptSession }: {
                 </p>
               </div>
             </div>
-            <code className="block break-all rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-bg)] px-3 py-2 font-[var(--font-code)] text-sm text-[var(--scry-ink2)]">
-              {revealed}
-            </code>
+            <div className="flex w-fit max-w-full items-center">
+              <Input
+                readOnly
+                value={revealed}
+                size={revealed.length + 2}
+                aria-label="New API key"
+                className="h-10 w-auto max-w-full rounded-r-none font-[var(--font-code)] text-sm text-[var(--scry-ink2)]"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                className={`-ml-px h-10 shrink-0 rounded-l-none ${revealedCopied ? "text-emerald-600 dark:text-emerald-300" : ""}`}
+                aria-label={revealedCopied ? "API key copied" : "Copy API key"}
+                onClick={() => void copyRevealedKey()}
+              >
+                {revealedCopied ? (
+                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <Clipboard className="h-4 w-4" aria-hidden="true" />
+                )}
+              </Button>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button type="button" onClick={() => void copyRevealedKey()}>
                 <Clipboard aria-hidden="true" />
