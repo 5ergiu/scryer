@@ -1,9 +1,8 @@
 # Feature Specification: Indexer Search (aggregate raw search + assign-on-grab)
 
 **Status**: Draft — 2026-09-02, awaiting the operator's sign-off on the decisions in plan.md
-**Design handoff**: `~/.claude/plans/indexer-search/handoff/` (README.md + `IndexersView.dc.html`
-prototype + screenshots). When this spec and the handoff disagree on visuals, the prototype wins;
-when they disagree on behaviour, plan.md's decisions win.
+**Design precedence**: When this spec and the approved design handoff disagree on visuals, the
+handoff wins; when they disagree on behaviour, plan.md's decisions win.
 **Oracle**: Prowlarr's Search page (flat aggregate table, category dropdown, per-indexer grab).
 Scryer must match its coverage and exceed it on health visibility and grab semantics.
 
