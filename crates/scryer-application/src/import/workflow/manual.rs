@@ -1148,19 +1148,18 @@ async fn preview_manual_import(
         )
         | None => HashSet::new(),
     };
-    // Loaded once for the whole preview: community (per-cour) anime numbering
-    // for this title, when SMG published one. `None` for every non-anime title
-    // and for anime whose community numbering matches the catalog's.
-    let anime_numbering_bridge = if title.facet == MediaFacet::Anime {
-        app.services
-            .catalog
-            .shows
-            .get_anime_numbering_bridge(title_id)
-            .await
-            .unwrap_or_default()
-    } else {
-        None
-    };
+    // Loaded once for the whole preview: the release numbering this title's
+    // groups use, when the catalog stores one — community (per-cour) numbering
+    // for anime, a TVDB alternate order for an ordinary series. `None` for
+    // every title whose upstream numbering matches the catalog's, which is
+    // almost all of them.
+    let anime_numbering_bridge = app
+        .services
+        .catalog
+        .shows
+        .get_anime_numbering_bridge(title_id)
+        .await
+        .unwrap_or_default();
     // A verified pack vouches for every standard episode in the seasons its
     // release name declares, not only the season (or episode set) the grab was
     // scoped to: a two-season pack grabbed for season 1 imports its season 2

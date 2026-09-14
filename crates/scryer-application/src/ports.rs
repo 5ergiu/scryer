@@ -131,6 +131,10 @@ pub struct TitleOptionsPatch {
     pub inter_season_movies: Option<Option<bool>>,
     pub filler_policy: Option<Option<String>>,
     pub recap_policy: Option<Option<String>>,
+    /// Which episode numbering this title's releases are read in
+    /// (`auto`/`official`/`alternate`/`dvd`). `Some(None)` clears it back to
+    /// the `auto` default.
+    pub release_numbering: Option<Option<String>>,
     /// Explicit season/series-movie picks for the `advanced` monitor type.
     /// `Some(None)` clears the stored selection.
     pub monitor_selection: Option<Option<MonitorSelection>>,

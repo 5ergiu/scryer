@@ -4190,6 +4190,13 @@ fn apply_reused_title_options_patch(
     if let Some(value) = &patch.recap_policy {
         set_reused_title_option_tag(&mut title.tags, "scryer:recap-policy:", value.clone());
     }
+    if let Some(value) = &patch.release_numbering {
+        set_reused_title_option_tag(
+            &mut title.tags,
+            scryer_domain::RELEASE_NUMBERING_TAG_PREFIX,
+            value.clone(),
+        );
+    }
     if let Some(value) = patch.use_season_folders {
         set_reused_title_option_tag(
             &mut title.tags,

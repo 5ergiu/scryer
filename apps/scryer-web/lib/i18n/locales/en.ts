@@ -2682,6 +2682,11 @@ const en: LocaleDictionary = {
   "settings.recapPolicyLabel": "Recap episode policy",
   "settings.recapPolicyDownloadAll": "Download all episodes",
   "settings.recapPolicySkipRecap": "Skip recap episodes",
+  "settings.releaseNumberingLabel": "Release numbering",
+  "settings.releaseNumberingAuto": "Auto",
+  "settings.releaseNumberingOfficial": "Official order",
+  "settings.releaseNumberingAlternate": "Alternate order",
+  "settings.releaseNumberingDvd": "DVD order",
   "settings.monitorSpecialsLabel": "Monitor Specials & OVAs",
   "settings.monitorSpecialsDescription":
     "Automatically monitor special episodes and OVAs when adding anime",

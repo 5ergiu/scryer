@@ -22476,6 +22476,29 @@ type ReleaseDecisionsPagePayload {
 }
 
 """
+Which episode numbering a title's releases are read in.
+"""
+enum ReleaseNumberingValue {
+	"""
+	Bridge to a differing TVDB alternate order when one exists, and require
+	corroboration before a reading through it moves an import.
+	"""
+	AUTO
+	"""
+	Always read releases in the catalog's official numbering.
+	"""
+	OFFICIAL
+	"""
+	Trust TVDB's alternate order for this title's releases.
+	"""
+	ALTERNATE
+	"""
+	Trust TVDB's DVD order for this title's releases.
+	"""
+	DVD
+}
+
+"""
 Withdraws a claim by hand.
 """
 input ReleaseTitleClaimInput {
@@ -26495,6 +26518,10 @@ input TitleOptionsInput {
 	"""
 	recapPolicy: RecapPolicyValue
 	"""
+	Which episode numbering this title's releases are read in; omission preserves the current value, null clears it (back to `AUTO`), and a value replaces it. Movies reject this field.
+	"""
+	releaseNumbering: ReleaseNumberingValue
+	"""
 	Seasons and series movies to monitor under `ADVANCED`; omission preserves the current selection, null clears it, and a value replaces it. Required with `ADVANCED`, and rejected for movies.
 	"""
 	monitorSelection: MonitorSelectionInput
@@ -26652,6 +26679,11 @@ type TitlePayload {
 	Policy for recap episodes, or null when unset.
 	"""
 	recapPolicy: RecapPolicyValue
+	"""
+	Which episode numbering this title's releases are read in, or null when
+	the title follows the default (`AUTO`).
+	"""
+	releaseNumbering: ReleaseNumberingValue
 	"""
 	Provider-native playback links for this title, when an exact catalog mapping exists.
 	"""

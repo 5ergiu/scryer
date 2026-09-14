@@ -9277,6 +9277,7 @@ async fn automatic_single_file_import_uses_its_filename_title_evidence_for_anime
     }
     let official_41 = official_41.expect("official episode 41");
     let bridge = scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
         generated_on: "2026-08-30".to_string(),
         corroborating_order: None,
         seasons: vec![
@@ -15136,5 +15137,122 @@ async fn proxy_deletion_serializes_against_download_client_proxy_assignment() {
             .expect("seeded client remains")
             .proxy_config_id,
         None
+    );
+}
+
+/// WP2: a non-anime series pinned to TVDB's alternate order imports a grabbed
+/// double episode onto the official numbers the bridge maps it to, not onto the
+/// literal numbers in the release name.
+#[tokio::test]
+async fn automatic_import_maps_a_double_episode_through_an_alternate_order_bridge() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            library_dir,
+            ..
+        },
+        _submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        series_root_at_library_dir: true,
+        ..Default::default()
+    })
+    .await;
+    let mut official = Vec::new();
+    for number in 2..=30 {
+        official.push(create_pack_episode_in_fixture_season(&app, &user, &title.id, number).await);
+    }
+    let official_26 = official
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("26"))
+        .expect("official episode 26")
+        .clone();
+    let official_27 = official
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("27"))
+        .expect("official episode 27")
+        .clone();
+
+    app.services
+        .catalog
+        .titles
+        .update_metadata(
+            &title.id,
+            None,
+            None,
+            Some(vec![format!(
+                "{}alternate",
+                scryer_domain::RELEASE_NUMBERING_TAG_PREFIX
+            )]),
+            None,
+        )
+        .await
+        .expect("pin the title to the alternate order");
+
+    // TVDB's alternate order runs one ahead of the official one from the very
+    // first episode, so alternate E27E28 is official E26E27.
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        source: scryer_domain::NumberingBridgeSource::TvdbAlternate,
+        generated_on: "alternate".to_string(),
+        corroborating_order: Some("alternate".to_string()),
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 1,
+            anidb_id: None,
+            anilist_id: None,
+            mal_id: None,
+            titles: Vec::new(),
+            ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                community_episode_start: 2,
+                community_episode_end: Some(30),
+                tvdb_season: 1,
+                tvdb_episode_start: 1,
+                tvdb_episode_end: Some(29),
+            }],
+            absolute_start: None,
+            episode_count: None,
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store the alternate order bridge");
+
+    let release_title = "Fail.Closed.Pack.S01E27E28.1080p.WEB-DL.x264";
+    let item_id = "alternate-order-double-episode";
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let mut completed =
+        series_pack_completed_download(item_id, &title.id, release_title, source_dir.path());
+    completed.parameters = vec![
+        ("*scryer_title_id".to_string(), title.id.clone()),
+        ("*scryer_facet".to_string(), "series".to_string()),
+    ];
+
+    let result = {
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        crate::import::import::import_completed_download(&app, &user, &completed)
+            .await
+            .expect("alternate-numbered import should run")
+    };
+
+    assert_eq!(result.decision, scryer_domain::ImportDecision::Imported);
+    let mut imported = result.episode_ids.clone();
+    imported.sort();
+    let mut expected = vec![official_26.id.clone(), official_27.id.clone()];
+    expected.sort();
+    assert_eq!(imported, expected, "{result:?}");
+    let library_files = library_video_file_names(library_dir.path());
+    assert!(
+        library_files.iter().any(|name| name.contains("S01E26")),
+        "official numbering must drive the destination: {library_files:?}"
+    );
+    assert!(
+        !library_files
+            .iter()
+            .any(|name| name.contains("S01E27") || name.contains("S01E28") || name.contains("E28")),
+        "the literal alternate numbering must not reach the library: {library_files:?}"
     );
 }
