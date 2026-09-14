@@ -2345,7 +2345,7 @@ mod tests {
             );
             assert_eq!(
                 inspected.row_counts.get("settings_values").copied(),
-                Some(4),
+                Some(5),
                 "inspected bundle should persist the seeded setting value row count"
             );
             assert_eq!(
@@ -2632,6 +2632,16 @@ mod tests {
                 "acquisition.convergence_seeded_at",
                 None,
                 serde_json::json!("2026-07-17T00:00:00Z").to_string(),
+                "backup_matrix_test",
+                None,
+            )
+            .await?;
+        settings
+            .upsert_setting_json(
+                "system",
+                "acquisition.convergence_hot_resume_after",
+                None,
+                serde_json::json!("title:backup-hot-title").to_string(),
                 "backup_matrix_test",
                 None,
             )
@@ -3300,6 +3310,9 @@ mod tests {
         vec![
             backup_matrix_setting_definition(),
             backup_matrix_convergence_setting_definition("acquisition.convergence_resume_after"),
+            backup_matrix_convergence_setting_definition(
+                "acquisition.convergence_hot_resume_after",
+            ),
             backup_matrix_convergence_setting_definition("acquisition.convergence_seeded_at"),
             SettingDefinitionSeed {
                 category: "authentication".to_string(),
@@ -3349,6 +3362,13 @@ mod tests {
                 .await?
                 .as_deref(),
             Some("\"title:backup-lattice-title\"")
+        );
+        assert_eq!(
+            settings
+                .get_setting_json("system", "acquisition.convergence_hot_resume_after", None)
+                .await?
+                .as_deref(),
+            Some("\"title:backup-hot-title\"")
         );
         assert_eq!(
             settings

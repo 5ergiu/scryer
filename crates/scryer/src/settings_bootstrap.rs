@@ -989,6 +989,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
             scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "acquisition.convergence_hot_resume_after",
+            data_type: "json",
+            default_value_json: "null",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_ACQUISITION,
+            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "acquisition.delay_profiles",
             data_type: "json",
             default_value_json: "[]",
@@ -2040,6 +2048,7 @@ mod tests {
         for key in [
             "acquisition.convergence_seeded_at",
             "acquisition.convergence_resume_after",
+            "acquisition.convergence_hot_resume_after",
         ] {
             let seed = seeds
                 .iter()
@@ -2050,6 +2059,176 @@ mod tests {
             assert_eq!(seed.default_value_json, "null");
             assert!(!seed.is_sensitive);
         }
+    }
+
+    #[tokio::test]
+    async fn convergence_cursor_bootstrap_preserves_positions_across_reopen() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("cursor.db").to_string_lossy().to_string();
+        let services = SqliteServices::new_with_mode(db_path.clone(), MigrationMode::Apply)
+            .await
+            .expect("sqlite services");
+        let store = Arc::new(SettingsStore::new(
+            services.datastore(),
+            services.encryption_key_state(),
+        ));
+        let hot_key = "acquisition.convergence_hot_resume_after";
+        let cold_key = "acquisition.convergence_resume_after";
+        // Model the upgraded installation: all previous definitions, but no hot cursor.
+        let definitions = service_setting_seeds()
+            .iter()
+            .filter(|seed| seed.key_name != hot_key)
+            .map(
+                |seed| scryer_infrastructure_sql::types::SettingDefinitionSeed {
+                    category: seed.category.into(),
+                    scope: seed.scope.into(),
+                    key_name: seed.key_name.into(),
+                    data_type: seed.data_type.into(),
+                    default_value_json: seed.default_value_json.into(),
+                    is_sensitive: seed.is_sensitive,
+                    validation_json: None,
+                },
+            )
+            .collect();
+        store
+            .batch_ensure_setting_definitions(definitions)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .upsert_setting_json(
+                    "system",
+                    hot_key,
+                    None,
+                    json!("hot-b").to_string(),
+                    "system",
+                    None
+                )
+                .await
+                .is_err()
+        );
+        store
+            .upsert_setting_json(
+                "system",
+                cold_key,
+                None,
+                json!("cold-c").to_string(),
+                "system",
+                None,
+            )
+            .await
+            .unwrap();
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        store
+            .upsert_setting_json(
+                "system",
+                hot_key,
+                None,
+                json!("hot-b").to_string(),
+                "system",
+                None,
+            )
+            .await
+            .unwrap();
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        drop(store);
+        services.pool().close().await;
+        let reopened = SqliteServices::new_with_mode(db_path, MigrationMode::Apply)
+            .await
+            .expect("reopen sqlite");
+        let store = Arc::new(SettingsStore::new(
+            reopened.datastore(),
+            reopened.encryption_key_state(),
+        ));
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, expected) in [(hot_key, "hot-b"), (cold_key, "cold-c")] {
+            assert_eq!(
+                store
+                    .get_setting_json_explicit("system", key, None)
+                    .await
+                    .unwrap(),
+                Some(json!(expected).to_string())
+            );
+        }
+        reopened.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_convergence_cursor_bootstrap_preserves_positions_from_env() {
+        let Some(url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping PostgreSQL cursor test; SCRYER_TEST_POSTGRES_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        // Match the PostgreSQL baseline types; one connection keeps
+        // these temporary tables private to this test.
+        for statement in [
+            "CREATE TEMP TABLE settings_definitions (
+                id text PRIMARY KEY, category text NOT NULL, scope text NOT NULL,
+                key_name text NOT NULL, data_type text NOT NULL, default_value_json jsonb NOT NULL,
+                is_sensitive boolean NOT NULL DEFAULT false, validation_json jsonb,
+                created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+                UNIQUE(category, scope, key_name)) ON COMMIT PRESERVE ROWS",
+            "CREATE TEMP TABLE settings_values (
+                id text PRIMARY KEY, setting_definition_id text NOT NULL, scope text NOT NULL,
+                scope_id text, value_json jsonb NOT NULL, source text NOT NULL,
+                updated_by_user_id text, created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL) ON COMMIT PRESERVE ROWS",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let store = Arc::new(SettingsStore::new(
+            scryer_infrastructure_sql::runtime::StoreDatastore::Postgres { pool: pool.clone() },
+            Arc::new(std::sync::RwLock::new(None)),
+        ));
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, position) in [
+            ("acquisition.convergence_hot_resume_after", "hot-b"),
+            ("acquisition.convergence_resume_after", "cold-c"),
+        ] {
+            store
+                .upsert_setting_json(
+                    "system",
+                    key,
+                    None,
+                    json!(position).to_string(),
+                    "system",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, position) in [
+            ("acquisition.convergence_hot_resume_after", "hot-b"),
+            ("acquisition.convergence_resume_after", "cold-c"),
+        ] {
+            assert_eq!(
+                store
+                    .get_setting_json_explicit("system", key, None)
+                    .await
+                    .unwrap(),
+                Some(json!(position).to_string())
+            );
+        }
+        pool.close().await;
     }
 
     #[test]

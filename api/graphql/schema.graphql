@@ -18450,6 +18450,9 @@ type ParsedReleasePayload {
 Stereoscopic claims in the release name, not verified stream properties.
 """
 type ParsedStereoscopyPayload {
+	"""
+	Whether the release claims 2D, 3D, or a bundle containing both presentations.
+	"""
 	presentation: StereoPresentationValue!
 	"""
 	Null when not stated, conflicting, or scoped to an unspecified bundle member.
@@ -24738,28 +24741,79 @@ type StartLocationOperationPayload {
 	planFingerprint: String!
 }
 
+"""
+Stereoscopic video encoding claimed by a release name.
+"""
 enum StereoEncodingValue {
+	"""
+	Multiview Video Coding encodes related views for stereoscopic playback.
+	"""
 	MVC
 }
 
+"""
+Arrangement of the left-eye and right-eye images claimed by a release name.
+"""
 enum StereoLayoutValue {
+	"""
+	The two eye images are placed next to each other horizontally.
+	"""
 	SIDE_BY_SIDE
+	"""
+	The two eye images are stacked vertically.
+	"""
 	TOP_BOTTOM
+	"""
+	Successive frames alternate between the left and right eyes.
+	"""
 	FRAME_SEQUENTIAL
+	"""
+	Alternating rows contain the left-eye and right-eye images.
+	"""
 	ROW_INTERLEAVED
+	"""
+	Alternating columns contain the left-eye and right-eye images.
+	"""
 	COLUMN_INTERLEAVED
+	"""
+	The eye images alternate in a checkerboard pattern.
+	"""
 	CHECKERBOARD
+	"""
+	The eye images are combined using different color channels.
+	"""
 	ANAGLYPH
 }
 
+"""
+Presentation claimed by a release name, without verifying the video streams.
+"""
 enum StereoPresentationValue {
+	"""
+	The release name explicitly identifies a 2D presentation.
+	"""
 	TWO_D
+	"""
+	The release name identifies a 3D presentation.
+	"""
 	THREE_D
+	"""
+	The release name identifies a bundle containing both 2D and 3D presentations.
+	"""
 	MIXED_2D_3D
 }
 
+"""
+Resolution sampling claimed for side-by-side or top/bottom image packing.
+"""
 enum StereoSamplingValue {
+	"""
+	Each eye uses half the resolution along the packing axis.
+	"""
 	HALF
+	"""
+	Each eye retains full resolution along the packing axis.
+	"""
 	FULL
 }
 

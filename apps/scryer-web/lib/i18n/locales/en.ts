@@ -284,6 +284,10 @@ const en: LocaleDictionary = {
   "settings.securityCredentialsInsufficient":
     "That account cannot manage settings.",
   "settings.mfaStepUpTitle": "Verify to open settings",
+  "settings.securityAccessControl": "Access control",
+  "profile.apiKeyMfaTitle": "Verify to create an API key",
+  "profile.apiKeyMfaDescription": "Enter an authenticator or recovery code to continue creating your API key.",
+  "profile.apiKeyMfaCode": "Authenticator or recovery code",
   "settings.mfaStepUpDescription":
     "Enter an authenticator code before viewing or changing configuration settings.",
   "settings.mfaStepUpSubmit": "Continue",

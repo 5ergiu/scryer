@@ -147,38 +147,56 @@ pub struct ParsedEpisodePayload {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+/// Presentation claimed by a release name, without verifying the video streams.
 pub enum StereoPresentationValue {
+    /// The release name explicitly identifies a 2D presentation.
     TwoD,
+    /// The release name identifies a 3D presentation.
     ThreeD,
+    /// The release name identifies a bundle containing both 2D and 3D presentations.
     #[graphql(name = "MIXED_2D_3D")]
     Mixed2d3d,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+/// Arrangement of the left-eye and right-eye images claimed by a release name.
 pub enum StereoLayoutValue {
+    /// The two eye images are placed next to each other horizontally.
     SideBySide,
+    /// The two eye images are stacked vertically.
     TopBottom,
+    /// Successive frames alternate between the left and right eyes.
     FrameSequential,
+    /// Alternating rows contain the left-eye and right-eye images.
     RowInterleaved,
+    /// Alternating columns contain the left-eye and right-eye images.
     ColumnInterleaved,
+    /// The eye images alternate in a checkerboard pattern.
     Checkerboard,
+    /// The eye images are combined using different color channels.
     Anaglyph,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+/// Resolution sampling claimed for side-by-side or top/bottom image packing.
 pub enum StereoSamplingValue {
+    /// Each eye uses half the resolution along the packing axis.
     Half,
+    /// Each eye retains full resolution along the packing axis.
     Full,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+/// Stereoscopic video encoding claimed by a release name.
 pub enum StereoEncodingValue {
+    /// Multiview Video Coding encodes related views for stereoscopic playback.
     Mvc,
 }
 
 #[derive(SimpleObject, Clone)]
 /// Stereoscopic claims in the release name, not verified stream properties.
 pub struct ParsedStereoscopyPayload {
+    /// Whether the release claims 2D, 3D, or a bundle containing both presentations.
     pub presentation: StereoPresentationValue,
     /// Null when not stated, conflicting, or scoped to an unspecified bundle member.
     pub layout: Option<StereoLayoutValue>,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useClient } from "urql";
 import {
   CheckCircle2,
@@ -9,14 +9,20 @@ import {
   Trash2,
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import { TotpCodeForm } from "@/components/auth/totp-code-form";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SingleSelectField } from "@/components/ui/select";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
+import { useTranslate } from "@/lib/context/translate-context";
+import type { AuthUser } from "@/lib/hooks/use-auth";
+import { withMfaStepUp } from "@/lib/utils/with-mfa-step-up";
 import {
   createMyApiKeyMutation,
+  mfaVerifyStepUpMutation,
   revokeMyApiKeyMutation,
 } from "@/lib/graphql/mutations";
 import { myApiKeysQuery } from "@/lib/graphql/queries";
@@ -49,8 +55,11 @@ function formatTimestamp(value: string, dateTimeFormat: UiDateTimeFormat) {
   return formatUiDateTime(value, dateTimeFormat, { fallback: value });
 }
 
-export function ApiKeysPanel() {
+export function ApiKeysPanel({ adoptSession }: {
+  adoptSession: (token: string, user: AuthUser | null, persistSession?: boolean) => void;
+}) {
   const client = useClient();
+  const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
   const [keys, setKeys] = useState<ApiKeySummary[]>([]);
   const [canCreate, setCanCreate] = useState(false);
@@ -62,6 +71,59 @@ export function ApiKeysPanel() {
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<ApiKeySummary | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [mfaOpen, setMfaOpen] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaError, setMfaError] = useState<string | null>(null);
+  const verificationRef = useRef<((token: string | null) => void) | null>(null);
+
+  useEffect(() => () => {
+    verificationRef.current?.(null);
+    verificationRef.current = null;
+  }, []);
+
+  const requestMfa = useCallback(() => new Promise<string | null>((resolve) => {
+    verificationRef.current = resolve;
+    setMfaCode("");
+    setMfaError(null);
+    setMfaOpen(true);
+  }), []);
+
+  const cancelMfa = useCallback(() => {
+    if (mfaBusy) return;
+    verificationRef.current?.(null);
+    verificationRef.current = null;
+    setMfaOpen(false);
+    setMfaCode("");
+    setMfaError(null);
+  }, [mfaBusy]);
+
+  const verifyMfa = useCallback(async () => {
+    if (mfaBusy || !mfaCode.trim()) return;
+    setMfaBusy(true);
+    setMfaError(null);
+    try {
+      const result = await client.mutation<{
+        mfaVerifyStepUp?: { token: string; user: AuthUser | null; persistSession: boolean };
+      }>(mfaVerifyStepUpMutation, { input: { code: mfaCode } }).toPromise();
+      if (!verificationRef.current) return;
+      const session = result.data?.mfaVerifyStepUp;
+      if (result.error || !session) {
+        setMfaError(t("settings.mfaStepUpFailed"));
+        setMfaCode("");
+        return;
+      }
+      adoptSession(session.token, session.user, session.persistSession);
+      verificationRef.current(session.token);
+      verificationRef.current = null;
+      setMfaOpen(false);
+      setMfaCode("");
+    } catch {
+      setMfaError(t("settings.mfaStepUpFailed"));
+    } finally {
+      setMfaBusy(false);
+    }
+  }, [adoptSession, client, mfaBusy, mfaCode, t]);
 
   const load = useCallback(async () => {
     const result = await client
@@ -90,6 +152,7 @@ export function ApiKeysPanel() {
   }, [load]);
 
   const create = useCallback(async () => {
+    if (busy) return;
     const trimmedLabel = label.trim();
     if (!trimmedLabel) {
       setStatus("Enter a name for this API key.");
@@ -98,12 +161,14 @@ export function ApiKeysPanel() {
     setBusy(true);
     setStatus(null);
     try {
-      const result = await client
+      const result = await withMfaStepUp((verifiedToken) => client
         .mutation<{ createMyApiKey?: { apiKey: string; key: ApiKeySummary } }>(
           createMyApiKeyMutation,
           { input: { label: trimmedLabel, expiry } },
+          verifiedToken ? { fetchOptions: { headers: { Authorization: `Bearer ${verifiedToken}` } } } : undefined,
         )
-        .toPromise();
+        .toPromise(), requestMfa);
+      if (!result) return;
       const created = result.data?.createMyApiKey;
       if (result.error || !created) {
         setStatus(errorMessage(result.error, "Unable to create API key."));
@@ -112,10 +177,12 @@ export function ApiKeysPanel() {
       setRevealed(created.apiKey);
       setLabel("");
       await load();
+    } catch (error) {
+      setStatus(errorMessage(error, "Unable to create API key."));
     } finally {
       setBusy(false);
     }
-  }, [client, expiry, label, load]);
+  }, [busy, client, expiry, label, load, requestMfa]);
 
   const copyRevealedKey = useCallback(async () => {
     if (!revealed) {
@@ -150,6 +217,30 @@ export function ApiKeysPanel() {
 
   return (
     <>
+      <Dialog open={mfaOpen} onOpenChange={(open) => { if (!open) cancelMfa(); }}>
+        <DialogContent onInteractOutside={(event) => event.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>{t("profile.apiKeyMfaTitle")}</DialogTitle>
+            <DialogDescription>{t("profile.apiKeyMfaDescription")}</DialogDescription>
+          </DialogHeader>
+          <TotpCodeForm
+            id="api-key-mfa-form"
+            inputId="api-key-mfa-code"
+            code={mfaCode}
+            title={t("profile.apiKeyMfaCode")}
+            description={t("profile.apiKeyMfaDescription")}
+            submitLabel={t("settings.mfaStepUpSubmit")}
+            busyLabel={t("settings.mfaStepUpVerifying")}
+            cancelLabel={t("label.cancel")}
+            busy={mfaBusy}
+            allowRecoveryCode
+            onCodeChange={setMfaCode}
+            onSubmit={verifyMfa}
+            onCancel={cancelMfa}
+          />
+          {mfaError ? <p role="alert" className="text-sm text-destructive">{mfaError}</p> : null}
+        </DialogContent>
+      </Dialog>
       <section
         id="settings-profile-api-keys"
         className="mt-6 space-y-4 rounded-[14px] border border-[var(--scry-border)] bg-[var(--scry-surf)] p-5 shadow-[0_10px_24px_rgba(0,0,0,0.16)]"

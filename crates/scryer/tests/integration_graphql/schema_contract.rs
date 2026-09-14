@@ -850,10 +850,12 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // `AcquisitionSearchIntentValue` enum, which names why a search was
     // started: ENUM 152->153, public types 843->844. Nothing else in the
     // schema moved with it - it is an additive enum on existing types.
-    assert_eq!(public_types.len(), 844);
-    assert_eq!(kind_count("OBJECT"), 458);
+    // Parsed stereoscopy adds one payload object and four enums for
+    // presentation, layout, sampling, and encoding: public types 844->849.
+    assert_eq!(public_types.len(), 849);
+    assert_eq!(kind_count("OBJECT"), 459);
     assert_eq!(kind_count("INPUT_OBJECT"), 221);
-    assert_eq!(kind_count("ENUM"), 153);
+    assert_eq!(kind_count("ENUM"), 157);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
