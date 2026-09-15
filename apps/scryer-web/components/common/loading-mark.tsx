@@ -35,7 +35,13 @@ export function LoadingMark({
 }) {
   return (
     <picture className="contents">
-      <source media="(prefers-reduced-motion: reduce)" srcSet={LOADING_MARK_STILL_SRC} />
+      {/* The picture's box is dropped, so an unhidden source would sit in a
+          flex row as an empty item and push the mark's neighbours a gap away. */}
+      <source
+        media="(prefers-reduced-motion: reduce)"
+        srcSet={LOADING_MARK_STILL_SRC}
+        className="hidden"
+      />
       <img
         src={LOADING_MARK_SRC}
         width={163}
