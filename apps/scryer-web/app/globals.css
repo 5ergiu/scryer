@@ -821,6 +821,79 @@ body {
   animation: scryer-loading-reveal 200ms ease-out 400ms both;
 }
 
+/*
+ * The setup wizard's welcome (see components/setup/setup-intro.tsx), timed like
+ * Weaver's first-run setup: the big logo lands on the header logo at 1.2s, the
+ * header name fades in as it lands, and the rest of the page rises in with it.
+ */
+.setup-intro .setup-intro-logo {
+  opacity: 0;
+}
+
+.setup-intro > :not(.setup-intro-header),
+.setup-intro .setup-intro-wordmark {
+  opacity: 0;
+}
+
+.setup-intro-playing .setup-intro-wordmark {
+  animation: setup-intro-fade 0.27s ease-out 0.93s both;
+}
+
+.setup-intro-playing > :not(.setup-intro-header) {
+  animation: setup-intro-rise 0.33s cubic-bezier(0.2, 0.7, 0.2, 1) 0.96s both;
+}
+
+.setup-intro-mark {
+  animation: setup-intro-mark 1.2s both;
+  will-change: transform, opacity;
+}
+
+@keyframes setup-intro-mark {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+
+  48% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+    animation-timing-function: cubic-bezier(0.65, 0, 0.25, 1);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate(var(--setup-intro-x), var(--setup-intro-y)) scale(var(--setup-intro-scale));
+  }
+}
+
+@keyframes setup-intro-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes setup-intro-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* Library scan toast — active phase-bar shimmer sweep */
 @keyframes scry-shimmer {
   0% {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { useClient } from "urql";
@@ -39,6 +39,7 @@ import type {
 import type { ProviderTypeInfo } from "@/lib/types";
 
 import ScryerLogo from "@/components/scryer-logo";
+import { cn } from "@/lib/utils";
 import { SetupProgressBar } from "./setup-progress-bar";
 import { SetupWelcomeView } from "./setup-welcome-view";
 import { SetupPersonaView } from "./setup-persona-view";
@@ -49,6 +50,7 @@ import { SetupSummaryView } from "./setup-summary-view";
 import SetupImportWizard from "./setup-import-wizard";
 import { SetupPluginsView } from "./setup-plugins-view";
 import { SetupRestoreView } from "./setup-restore-view";
+import { SetupIntroMark, prefersReducedMotion } from "./setup-intro";
 
 const FALLBACK_PROVIDER_OPTIONS: SetupIndexerProviderOption[] = [];
 
@@ -102,6 +104,15 @@ export function SetupWizardContainer({
         : "fresh";
   const currentStep = parseInt(searchParams.get("step") || "0", 10);
   const [canRestoreSetup, setCanRestoreSetup] = useState(false);
+
+  // The welcome plays once, when setup first opens — not when it is reopened
+  // from Settings, and not on moving between steps.
+  const [intro, setIntro] = useState<"waiting" | "playing" | null>(() =>
+    isReentry || prefersReducedMotion() ? null : "waiting",
+  );
+  const headerLogoRef = useRef<HTMLDivElement>(null);
+  const startIntro = useCallback(() => setIntro("playing"), []);
+  const finishIntro = useCallback(() => setIntro(null), []);
   const [restoreAvailabilityChecked, setRestoreAvailabilityChecked] =
     useState(false);
 
@@ -536,16 +547,33 @@ export function SetupWizardContainer({
 
   return (
     <div
-      className={`mx-auto flex min-h-screen w-full flex-col items-center justify-center px-4 py-10 ${shellMaxWidth}`}
+      className={cn(
+        "mx-auto flex min-h-screen w-full flex-col items-center justify-center px-4 py-10",
+        shellMaxWidth,
+        intro && "setup-intro",
+        intro === "playing" && "setup-intro-playing",
+      )}
     >
-      <div className="mb-8 flex items-center gap-2.5">
-        {wizardPath !== "import" ? <ScryerLogo className="h-20 w-20" /> : null}
+      <div className="setup-intro-header mb-8 flex items-center gap-2.5">
+        {wizardPath !== "import" ? (
+          <div ref={headerLogoRef} className="setup-intro-logo">
+            <ScryerLogo className="h-20 w-20" />
+          </div>
+        ) : null}
         {currentStep > 0 ? (
-          <span className="font-[var(--font-space-grotesk)] text-lg font-bold tracking-tight text-[var(--scry-ink2)]">
+          <span className="setup-intro-wordmark font-[var(--font-space-grotesk)] text-lg font-bold tracking-tight text-[var(--scry-ink2)]">
             Scryer
           </span>
         ) : null}
       </div>
+      {intro ? (
+        <SetupIntroMark
+          targetRef={headerLogoRef}
+          ready={restoreAvailabilityChecked}
+          onStart={startIntro}
+          onDone={finishIntro}
+        />
+      ) : null}
 
       {currentStep > 0 && (
         <div className="mb-8 w-full">
