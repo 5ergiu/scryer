@@ -2326,3 +2326,20 @@ kind = "sql"
 file = "postgres/migrations/0240_numbering_bridge_source.sql"
 engine = "postgres"
 scope = "all"
+
+[[migration]]
+version = 241
+description = "download client status"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0241_download_client_status.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0241_download_client_status.sql"
+engine = "postgres"
+scope = "all"
