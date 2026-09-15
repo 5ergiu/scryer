@@ -524,14 +524,34 @@ impl TrackedDownloadService {
 
     #[cfg(test)]
     pub(crate) fn insert_for_tests(&mut self, tracked: TrackedDownload) -> DownloadId {
-        self.restore_cleanup_download(tracked)
+        let download_id = tracked.download_id;
+        self.restore_cleanup_download(tracked);
+        download_id
     }
 
-    pub(crate) fn restore_cleanup_download(&mut self, tracked: TrackedDownload) -> DownloadId {
+    /// Re-seat a tracked download the durable cleanup tick rebuilt, and return
+    /// the id the cleanup outcome must be applied to.
+    ///
+    /// The rebuilt entry carries the short `"{client_id}:{item_id}"` id, while a
+    /// live entry the poller created for the same canonical download carries the
+    /// long `"download:{client_id}:{client_type}:{download_id}"` one. The cache
+    /// is keyed by `DownloadId`, so inserting unconditionally replaced the live
+    /// entry with the short-id rebuild. The next poll's `seen_ids` is built from
+    /// the poller id, the authoritative-client prune has no grace window, and a
+    /// torrent still held for seeding was therefore dropped from the queue,
+    /// ignored, and re-adopted a moment later as a foreign observation.
+    ///
+    /// So a live entry is never clobbered: it keeps its id, its client item and
+    /// its runtime flags, and the caller is handed *its* id. Only an empty slot
+    /// — restart recovery, where the tick is the one rebuilding the world —
+    /// takes the rebuilt entry.
+    pub(crate) fn restore_cleanup_download(&mut self, tracked: TrackedDownload) -> String {
         let download_id = tracked.download_id;
         self.last_seen_at.insert(download_id, Utc::now());
-        self.cache.insert(download_id, tracked);
-        download_id
+        match self.cache.entry(download_id) {
+            std::collections::hash_map::Entry::Occupied(live) => live.get().id.clone(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(tracked).id.clone(),
+        }
     }
 
     pub fn find_mut(&mut self, id: &str) -> Option<&mut TrackedDownload> {
@@ -6658,5 +6678,161 @@ mod tests {
             .expect("restart should re-track the download");
         assert_eq!(recovered.download_id, canonical_download_id);
         assert_eq!(recovered.state, TrackedDownloadState::Ignored);
+    }
+
+    /// A poller-shaped torrent item: the observed download id is the info hash,
+    /// so `tracked_download_id_for_item` yields the long `download:…` form.
+    fn build_seeding_torrent_item() -> DownloadQueueItem {
+        let mut item = build_client_item();
+        item.client_type = "qbittorrent".to_string();
+        item.client_name = "qBittorrent".to_string();
+        item.title_name = "Example Synthetic Series".to_string();
+        item.download_client_item_id = "5b4ba67100000000".to_string();
+        item.download_id = Some("5b4ba67100000000".to_string());
+        item
+    }
+
+    /// Regression: the durable cleanup tick must not re-key a live entry.
+    ///
+    /// The tick rebuilds the tracked download with the short
+    /// `"{client_id}:{item_id}"` id while the poller's live entry carries the
+    /// long `download:…` one. The cache is keyed by canonical `DownloadId`, so
+    /// restoring the rebuild used to replace the live entry; the next poll's
+    /// `seen_ids` holds the poller id, the authoritative-client prune has no
+    /// grace window, and a torrent held for seeding was dropped from the queue
+    /// and ignored a second after the hold was logged.
+    #[tokio::test]
+    async fn cleanup_restore_keeps_the_live_entry_so_a_seeding_hold_survives_the_next_poll() {
+        let download_submissions = Arc::new(TestDownloadSubmissionRepo::default());
+        let imports = Arc::new(TestImportRepo::default());
+        let app = build_app(download_submissions, imports);
+        let mut tracker = TrackedDownloadService::new();
+
+        let item = build_seeding_torrent_item();
+        let poller_id = tracked_download_id_for_item(&item);
+        let short_id = tracked_download_id(
+            Some(item.client_id.as_str()),
+            &item.client_type,
+            &item.download_client_item_id,
+        );
+        assert_ne!(poller_id, short_id, "the two id shapes must differ");
+
+        tracker.track(&app, item.clone()).await;
+        let download_id = tracker.find(&poller_id).expect("live entry").download_id;
+        tracker.find_mut(&poller_id).expect("live entry").state =
+            TrackedDownloadState::ImportedSeeding;
+
+        // The cleanup tick's rebuild, shaped exactly as `run_claimed_download_cleanup`
+        // used to shape it, down to the short id.
+        let mut rebuilt = TrackedDownloadService::build_new_tracked_download(
+            &app,
+            download_id,
+            short_id.clone(),
+            item,
+        )
+        .await;
+        rebuilt.state = TrackedDownloadState::ImportedSeeding;
+        let effective_id = tracker.restore_cleanup_download(rebuilt);
+
+        // The caller settles the cleanup outcome against the live entry's id.
+        assert_eq!(effective_id, poller_id);
+
+        let unavailable = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::from([poller_id.clone()]),
+                &[],
+                Some(&HashSet::from(["client-1".to_string()])),
+            );
+        assert!(
+            unavailable.is_empty(),
+            "a torrent the client still lists must keep its binding"
+        );
+        assert_eq!(tracker.get_all().len(), 1, "the rebuild must not duplicate");
+        assert!(tracker.find(&short_id).is_none());
+        let live = tracker.find(&poller_id).expect("live entry");
+        assert!(live.is_trackable);
+        assert_eq!(live.state, TrackedDownloadState::ImportedSeeding);
+    }
+
+    /// Restart recovery: the tick rebuilds into an empty cache, and the entry it
+    /// leaves behind must be the one the first poll afterwards names in its
+    /// `seen_ids` — otherwise the same prune drops it for the same reason.
+    #[tokio::test]
+    async fn restart_recovery_restore_keeps_the_poller_id_and_survives_the_first_poll() {
+        let download_submissions = Arc::new(TestDownloadSubmissionRepo::default());
+        let imports = Arc::new(TestImportRepo::default());
+        let app = build_app(download_submissions, imports);
+        let item = build_seeding_torrent_item();
+        let poller_id = tracked_download_id_for_item(&item);
+
+        // The canonical identity this client job resolves to, so the rebuild and
+        // the poll after the restart address the same cache slot.
+        let mut before_restart = TrackedDownloadService::new();
+        before_restart.track(&app, item.clone()).await;
+        let download_id = before_restart
+            .find(&poller_id)
+            .expect("live entry")
+            .download_id;
+
+        // Restart: the cache is empty and the cleanup tick rebuilds the entry,
+        // deriving its id with the poller's own function from the poller's own
+        // observed item, exactly as `run_claimed_download_cleanup` now does.
+        let mut tracker = TrackedDownloadService::new();
+        let mut rebuilt = TrackedDownloadService::build_new_tracked_download(
+            &app,
+            download_id,
+            tracked_download_id_for_item(&item),
+            item.clone(),
+        )
+        .await;
+        rebuilt.state = TrackedDownloadState::ImportedSeeding;
+
+        // Empty cache: the rebuilt entry is inserted, and its own id comes back.
+        let effective_id = tracker.restore_cleanup_download(rebuilt);
+        assert_eq!(effective_id, poller_id);
+        assert_eq!(tracker.get_all().len(), 1);
+        assert_eq!(
+            tracker.find(&poller_id).expect("restored entry").id,
+            poller_id
+        );
+
+        tracker.track(&app, item.clone()).await;
+        assert_eq!(tracker.get_all().len(), 1, "the poll must not duplicate");
+
+        let unavailable = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::from([poller_id.clone()]),
+                &[],
+                Some(&HashSet::from(["client-1".to_string()])),
+            );
+        assert!(unavailable.is_empty());
+        let restored = tracker.find(&poller_id).expect("restored entry");
+        assert_eq!(restored.id, poller_id);
+        assert!(restored.is_trackable);
+
+        // Why the derivation matters: the short id the rebuild used to carry is
+        // not what the poll names, and this prune has no grace window.
+        let short_id = tracked_download_id(
+            Some(item.client_id.as_str()),
+            &item.client_type,
+            &item.download_client_item_id,
+        );
+        let mut short_id_tracker = TrackedDownloadService::new();
+        let mut short_id_rebuild =
+            TrackedDownloadService::build_new_tracked_download(&app, download_id, short_id, item)
+                .await;
+        short_id_rebuild.state = TrackedDownloadState::ImportedSeeding;
+        short_id_tracker.restore_cleanup_download(short_id_rebuild);
+        assert_eq!(
+            short_id_tracker
+                .update_trackable_excluding_client_types_for_authoritative_clients(
+                    &HashSet::from([poller_id]),
+                    &[],
+                    Some(&HashSet::from(["client-1".to_string()])),
+                )
+                .len(),
+            1,
+            "a short-id rebuild is not named by the poll and is pruned on the first tick"
+        );
     }
 }
