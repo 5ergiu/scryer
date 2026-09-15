@@ -687,6 +687,23 @@ impl AppUseCase {
             });
         }
 
+        // The create-and-bind store call stamps the new title onto the row.
+        // For a folder-level series or anime row that leaves a title bound to
+        // a directory, which no episode bind can use, so take the folder route
+        // now: the new title claims the folder and each file becomes its own
+        // title-bound row for episode binding once metadata arrives.
+        if item.facet != MediaFacet::Movie && pending_import_path_is_directory(&item).await {
+            let (title, library_scan) = self
+                .bind_pending_import_to_existing_title(actor, &item, &outcome.title)
+                .await?;
+            return Ok(ResolvePendingImportResult {
+                title,
+                created: true,
+                library_scan,
+                metadata_hydration_state: outcome.metadata_hydration_state,
+            });
+        }
+
         Ok(ResolvePendingImportResult {
             title: outcome.title,
             created: true,
