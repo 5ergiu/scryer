@@ -689,7 +689,87 @@ impl AppUseCase {
         }
     }
 }
+
+/// One lane's claim on a title's hydration persistence.
+enum TitleHydrationClaim {
+    /// This lane owns the title until the guard drops. `title` is the row as it
+    /// stands right now, re-read under the lock, so the result is applied to
+    /// current state rather than to the struct the lane queued.
+    Claimed {
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+        title: Title,
+    },
+    /// Another lane hydrated this title while we waited. The caller only wanted
+    /// an unhydrated title hydrated, and it now is; its work is done.
+    AlreadyHydrated(Title),
+}
+
 impl AppUseCase {
+    /// Take the title's hydration lock and decide whether there is still work.
+    ///
+    /// Only a lane that queued an *unhydrated* title short-circuits: a refresh
+    /// or a language change deliberately re-hydrates a title that already has
+    /// `metadata_fetched_at`, and must not be skipped.
+    async fn claim_title_hydration(&self, title: &Title) -> TitleHydrationClaim {
+        let wanted_first_hydration = title.metadata_fetched_at.is_none();
+        let guard = self
+            .runtime
+            .catalog
+            .title_hydration_locks
+            .acquire(&title.id)
+            .await;
+        let current = self
+            .services
+            .catalog
+            .titles
+            .get_by_id(&title.id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| title.clone());
+        if wanted_first_hydration && current.metadata_fetched_at.is_some() {
+            debug!(
+                title_id = %current.id,
+                "title hydration: another lane hydrated this title while we waited"
+            );
+            return TitleHydrationClaim::AlreadyHydrated(current);
+        }
+        TitleHydrationClaim::Claimed {
+            _guard: guard,
+            title: current,
+        }
+    }
+
+    /// Persist a series hydration result and read the row back, serialized
+    /// against every other hydration of the same title.
+    async fn persist_series_hydration(
+        &self,
+        target: HydrationTarget,
+        result: super::HydrationResult,
+    ) -> AppResult<Title> {
+        let (_guard, title) = match self.claim_title_hydration(&target.title).await {
+            TitleHydrationClaim::Claimed { _guard, title } => (_guard, title),
+            TitleHydrationClaim::AlreadyHydrated(title) => return Ok(title),
+        };
+        let hydrated = self
+            .apply_hydration_result(title, result, target.source)
+            .await?;
+        self.complete_title_hydration(
+            &hydrated,
+            HydrationCompletionOptions {
+                sync_wanted_after_completion: target.sync_wanted_after_completion,
+            },
+        )
+        .await;
+        Ok(self
+            .services
+            .catalog
+            .titles
+            .get_by_id(&hydrated.id)
+            .await?
+            .unwrap_or(hydrated))
+    }
+
     async fn complete_movie_hydration(
         &self,
         target: &HydrationTarget,
@@ -697,6 +777,14 @@ impl AppUseCase {
         language: &str,
         redirects: &[(i64, i64)],
     ) -> AppResult<Title> {
+        let (_guard, current_title) = match self.claim_title_hydration(&target.title).await {
+            TitleHydrationClaim::Claimed { _guard, title } => (_guard, title),
+            TitleHydrationClaim::AlreadyHydrated(title) => return Ok(title),
+        };
+        let target = &HydrationTarget {
+            title: current_title,
+            ..target.clone()
+        };
         let _location_guard = self
             .acquire_location_title_mutation(
                 &crate::location::ownership_guard::TITLE_HYDRATION_ENTRY,
@@ -1021,33 +1109,16 @@ impl AppUseCase {
                                     let mut result =
                                         super::series_to_hydration_result(series.clone(), &language);
                                     result.movie_metadata = movie_metadata.clone();
-                                    let hydrated = match self
-                                        .apply_hydration_result(target.title, result, title_source)
-                                        .await
-                                    {
-                                        Ok(hydrated) => hydrated,
-                                        Err(error) => {
-                                            outcome
-                                                .failed_titles
-                                                .insert(title_id, error.to_string());
-                                            continue;
-                                        }
-                                    };
-                                    self.complete_title_hydration(
-                                        &hydrated,
-                                        HydrationCompletionOptions {
-                                            sync_wanted_after_completion: target
-                                                .sync_wanted_after_completion,
-                                        },
-                                    )
-                                    .await;
-                                    let refreshed = self
-                                        .services
-                                        .catalog
-                                        .titles
-                                        .get_by_id(&hydrated.id)
-                                        .await?
-                                        .unwrap_or(hydrated);
+                                    let refreshed =
+                                        match self.persist_series_hydration(target, result).await {
+                                            Ok(refreshed) => refreshed,
+                                            Err(error) => {
+                                                outcome
+                                                    .failed_titles
+                                                    .insert(title_id, error.to_string());
+                                                continue;
+                                            }
+                                        };
                                     if refreshed.metadata_fetched_at.is_some() {
                                         outcome
                                             .hydrated_titles
@@ -1181,23 +1252,7 @@ impl AppUseCase {
                     .get_series(tvdb_id, language)
                     .await?;
                 let result = super::series_to_hydration_result(series, language);
-                let hydrated = self
-                    .apply_hydration_result(target.title, result, target.source)
-                    .await?;
-                self.complete_title_hydration(
-                    &hydrated,
-                    HydrationCompletionOptions {
-                        sync_wanted_after_completion: target.sync_wanted_after_completion,
-                    },
-                )
-                .await;
-                let refreshed = self
-                    .services
-                    .catalog
-                    .titles
-                    .get_by_id(&hydrated.id)
-                    .await?
-                    .unwrap_or(hydrated);
+                let refreshed = self.persist_series_hydration(target, result).await?;
                 if refreshed.metadata_fetched_at.is_some() {
                     Ok(refreshed)
                 } else {
