@@ -7135,6 +7135,8 @@ fn pending_import_title_request(
 
 struct PendingImportSearchMetadataGateway {
     results: Vec<RichMetadataSearchItem>,
+    /// Series served to bulk hydration, keyed by TVDB id.
+    series: HashMap<i64, SeriesMetadata>,
 }
 
 #[async_trait]
@@ -7180,17 +7182,26 @@ impl MetadataGateway for PendingImportSearchMetadataGateway {
         Err(AppError::Repository("not implemented in tests".into()))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::Repository("not implemented in tests".into()))
+    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
+        self.series
+            .get(&tvdb_id)
+            .cloned()
+            .ok_or_else(|| AppError::Repository("not implemented in tests".into()))
     }
 
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],
-        _series_tvdb_ids: &[i64],
+        series_tvdb_ids: &[i64],
         _language: &str,
     ) -> AppResult<BulkMetadataResult> {
-        Err(AppError::Repository("not implemented in tests".into()))
+        Ok(BulkMetadataResult {
+            movies: HashMap::new(),
+            series: series_tvdb_ids
+                .iter()
+                .filter_map(|id| self.series.get(id).map(|series| (*id, series.clone())))
+                .collect(),
+        })
     }
 }
 
@@ -7225,6 +7236,7 @@ async fn pending_import_title_search_annotates_same_library_titles_only() {
         library_scanner,
         unmatched_items.clone(),
         Arc::new(PendingImportSearchMetadataGateway {
+            series: HashMap::new(),
             results: vec![
                 pending_import_search_result("123456", "Other Library Movie"),
                 pending_import_search_result("333333", "Existing Movie"),
@@ -8335,6 +8347,123 @@ async fn resolve_pending_import_attaches_series_folder_to_existing_title() {
         "leftover files stay bound to the title so they can be bound per file"
     );
     assert_eq!(stray_item.status, PendingImportStatus::Pending);
+}
+
+#[tokio::test]
+async fn resolve_pending_import_creating_series_title_from_folder_claims_folder_and_splits_files() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let series_root = tempdir.path().join("series");
+    let series_folder = series_root.join("Fixture Drama (2026)");
+    std::fs::create_dir_all(&series_folder).expect("create series folder");
+    let first_path = series_folder.join("Fixture Drama - S01E01 - Opening WEBDL-1080p.mkv");
+    let second_path = series_folder.join("Fixture Drama - S01E02 - Second WEBDL-1080p.mkv");
+    std::fs::write(&first_path, vec![0_u8; 128]).expect("write first file");
+    std::fs::write(&second_path, vec![0_u8; 128]).expect("write second file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "series.path",
+            series_root.to_string_lossy().as_ref(),
+        )
+        .await;
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(build_test_library_files(&[
+            first_path.as_path(),
+            second_path.as_path(),
+        ]))
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, _titles) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
+        settings,
+        library_scanner,
+        unmatched_items.clone(),
+        Arc::new(PendingImportSearchMetadataGateway {
+            results: Vec::new(),
+            // The folder scan hydrates the brand-new title before it walks
+            // the files; this series has no episodes yet, so nothing matches.
+            series: HashMap::from([(
+                778_899,
+                SeriesMetadata {
+                    tvdb_id: 778_899,
+                    name: "Fixture Drama".to_string(),
+                    sort_name: "Fixture Drama".to_string(),
+                    slug: "fixture-drama".to_string(),
+                    year: Some(2026),
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile series root");
+
+    let item = build_test_unmatched_item(
+        "series-folder-create-1",
+        MediaFacet::Series,
+        series_root.to_string_lossy().as_ref(),
+        series_folder.to_string_lossy().as_ref(),
+        "Fixture Drama (2026)",
+        "Fixture Drama",
+        Some(2026),
+    );
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&item)
+        .await
+        .expect("seed folder-level pending import");
+
+    let result = app
+        .resolve_pending_import(
+            &user,
+            &item.id,
+            pending_import_title_request(
+                MediaFacet::Series,
+                "Fixture Drama",
+                Some("778899"),
+                Some(2026),
+            ),
+            false,
+        )
+        .await
+        .expect("create a series title from the folder");
+
+    assert!(result.created);
+    assert_eq!(
+        result.title.folder_path.as_deref(),
+        Some(series_folder.to_string_lossy().as_ref()),
+        "creating a title from a folder must claim the folder"
+    );
+    let summary = result
+        .library_scan
+        .expect("a folder resolution reports the scan it ran");
+    assert_eq!(summary.scanned, 2);
+    assert_eq!(
+        summary.matched, 0,
+        "a new title has no episodes to match yet"
+    );
+    assert_eq!(summary.unmatched, 2);
+
+    let remaining = unmatched_items.items().await;
+    assert!(
+        remaining
+            .iter()
+            .all(|pending| pending.item_path != series_folder.to_string_lossy()),
+        "the folder-level pending row must not stay bound to a directory"
+    );
+    for path in [&first_path, &second_path] {
+        let file_item = remaining
+            .iter()
+            .find(|pending| pending.item_path == path.to_string_lossy())
+            .expect("each file becomes its own pending row");
+        assert_eq!(
+            file_item.title_id.as_deref(),
+            Some(result.title.id.as_str())
+        );
+        assert_eq!(file_item.status, PendingImportStatus::Pending);
+    }
 }
 
 #[tokio::test]
