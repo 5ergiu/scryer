@@ -1,6 +1,207 @@
 use super::*;
 
 #[tokio::test]
+async fn location_move_drains_an_already_admitted_download_submission() {
+    let client = Arc::new(StubDownloadClient::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        client.clone(),
+        submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Draining Download".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *client.submit_gate.lock().await = Some(gate.clone());
+    let submit_app = app.clone();
+    let title_id = title.id.clone();
+    let submit = tokio::spawn(async move {
+        submit_app
+            .queue_existing_title_download(
+                &user,
+                &title_id,
+                QueuedReleaseSelection {
+                    source_hint: Some("https://example.invalid/draining.nzb".into()),
+                    source_kind: Some(DownloadSourceKind::NzbUrl),
+                    source_title: Some("Draining.Download.2026.1080p.WEB-DL".into()),
+                    ..Default::default()
+                },
+                SubmissionScope::Title,
+                SubmissionConflictPolicy::Abort,
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.submit_started.notified(),
+    )
+    .await
+    .unwrap();
+    let entities = [crate::location::ownership_guard::OwnedEntity::Title(
+        title.id.clone(),
+    )];
+    let drain = app
+        .runtime
+        .library
+        .location_ownership
+        .drain_title_mutations(&entities);
+    tokio::pin!(drain);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut drain)
+            .await
+            .is_err()
+    );
+    assert!(submissions.store.lock().await.is_empty());
+    gate.notify_one();
+    let exclusive = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+        .await
+        .unwrap();
+    assert_eq!(
+        submissions.store.lock().await.len(),
+        1,
+        "submission must be durable before the move can claim ownership"
+    );
+    app.runtime
+        .library
+        .location_ownership
+        .claim_all("move", &entities);
+    drop(exclusive);
+    submit.await.unwrap().unwrap();
+    assert!(
+        app.acquire_location_title_mutation(
+            &crate::location::ownership_guard::TITLE_DOWNLOAD_ENTRY,
+            &title.id
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn location_locked_title_cannot_download_or_upgrade_and_does_not_blocklist_release() {
+    let client = Arc::new(StubDownloadClient::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        client.clone(),
+        submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Locked Download".into(),
+                facet: MediaFacet::Series,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let collection = app
+        .create_collection(
+            &user,
+            title.id.clone(),
+            "season".into(),
+            "1".into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let episode = app
+        .create_episode(
+            &user,
+            title.id.clone(),
+            Some(collection.id.clone()),
+            "standard".into(),
+            Some("1".into()),
+            Some("1".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let scope = SubmissionScope::Episode {
+        episode_id: episode.id,
+    };
+    let release = QueuedReleaseSelection {
+        source_hint: Some("https://example.invalid/locked.nzb".into()),
+        source_kind: Some(DownloadSourceKind::NzbUrl),
+        source_title: Some("Locked.Download.S01E01.1080p.WEB-DL".into()),
+        ..Default::default()
+    };
+    app.runtime.library.location_ownership.claim_all(
+        "move",
+        &[crate::location::ownership_guard::OwnedEntity::Title(
+            title.id.clone(),
+        )],
+    );
+    for purpose in [
+        DownloadSubmissionPurpose::Standard,
+        DownloadSubmissionPurpose::OperatorQueued,
+        DownloadSubmissionPurpose::ManualReplacement,
+        DownloadSubmissionPurpose::AdditionalFile,
+    ] {
+        let error = app
+            .queue_existing_title_download_with_purpose(
+                &user,
+                &title.id,
+                release.clone(),
+                scope.clone(),
+                SubmissionConflictPolicy::ReplaceEarly,
+                purpose,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::LocationOperationBusy(_)),
+            "{error}"
+        );
+    }
+    assert!(client.submitted_title_ids.lock().await.is_empty());
+    assert!(client.deleted_items.lock().await.is_empty());
+    assert!(submissions.store.lock().await.is_empty());
+    assert!(title_blocklist_entries(&app, &title.id).await.is_empty());
+    assert!(
+        app.derive_acquisition_targets_for_title(&Utc::now(), Some(&title.id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    app.runtime
+        .library
+        .location_ownership
+        .release_operation("move");
+    app.queue_existing_title_download(
+        &user,
+        &title.id,
+        release,
+        scope,
+        SubmissionConflictPolicy::Abort,
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.submitted_title_ids.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn canonical_submission_holds_artifact_lease_until_client_accepts() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1518,6 +1719,94 @@ async fn queue_existing_title_download_adopts_same_title_client_identity() {
     assert_eq!(submissions[0].title_id, title.id);
     assert!(!submissions[0].download_client_item_id.is_empty());
     assert!(submissions[0].request_signature.is_some());
+    drop(submissions);
+    assert_eq!(download_client.submitted_download_ids.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn queue_existing_title_download_adopts_a_foreign_observation_stub_identity() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Observed First".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    // The client already holds the job Scryer is about to grab, and the tracker
+    // has persisted its title-less observation stub under the job's foreign
+    // canonical identity.
+    let foreign_download_id = scryer_domain::download_identity::DownloadId::new();
+    let job_id = format!("job-for-{}", title.id);
+    let stub = DownloadSubmission {
+        download_id: foreign_download_id,
+        title_id: String::new(),
+        facet: String::new(),
+        download_client_id: Some("primary".to_string()),
+        download_client_type: "nzbget".to_string(),
+        download_client_item_id: job_id.clone(),
+        source_hint: None,
+        source_provider_id: None,
+        source_provider_name: None,
+        source_kind: None,
+        source_title: None,
+        info_hash: None,
+        release_size_bytes: None,
+        request_signature: None,
+        purpose: crate::DownloadSubmissionPurpose::Standard,
+        scope: SubmissionScope::Orphan,
+    };
+    assert!(stub.is_observation_stub());
+    download_submissions
+        .record_submission(stub)
+        .await
+        .expect("record the tracker's observation stub");
+
+    let outcome = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/observed.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Observed.First.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a grab of a job Scryer only observed adopts that job's identity");
+    let QueueDownloadOutcome::Queued(queued) = outcome else {
+        panic!("the adopted grab should be returned as queued");
+    };
+
+    // Scryer's grab is what now owns the job, so it is not a reuse of an
+    // earlier Scryer submission.
+    assert!(!queued.reused_existing);
+    assert_eq!(queued.job_id, job_id);
+    let submissions = download_submissions.store.lock().await;
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].download_id, foreign_download_id);
+    assert_eq!(submissions[0].title_id, title.id);
+    assert_eq!(
+        submissions[0].source_title.as_deref(),
+        Some("Observed.First.2026.1080p.WEB-DL")
+    );
+    assert!(submissions[0].request_signature.is_some());
+    assert!(!submissions[0].is_observation_stub());
     drop(submissions);
     assert_eq!(download_client.submitted_download_ids.lock().await.len(), 1);
 }
@@ -3194,6 +3483,7 @@ async fn queue_replacement_release_from_candidate_token_marks_manual_replacement
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -3306,6 +3596,7 @@ async fn queue_existing_title_download_additional_file_uses_signed_candidate_sco
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -3508,6 +3799,7 @@ async fn queue_best_release_prefers_first_auto_eligible_candidate() {
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -3600,6 +3892,7 @@ async fn queue_best_release_reports_auto_eligibility_reason_counts() {
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -3738,6 +4031,7 @@ async fn queue_best_release_supports_series_movie_scope() {
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -3908,6 +4202,11 @@ async fn series_movie_wanted_subject_uses_parent_owner_when_title_facet_is_missi
     ));
     let (app, user) = bootstrap_with_search_settings_and_indexer(settings, indexer_client);
 
+    // Creation is registry-gated now, so the vocabulary has to exist before a
+    // title can be born carrying it.
+    app.create_title_tag_definition(&user, "anime-hd", None)
+        .await
+        .expect("tag should be defined");
     let title = app
         .add_title(
             &user,
@@ -4047,6 +4346,7 @@ async fn search_indexers_for_series_movie_merges_categories_and_accepts_short_ti
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -4136,6 +4436,11 @@ async fn convergence_test_title_and_subject(
     Title,
     crate::acquisition_release_search::ResolvedReleaseSearchSubject,
 ) {
+    // Creation is registry-gated now, so the vocabulary has to exist before a
+    // title can be born carrying it.
+    app.create_title_tag_definition(user, "anime-hd", None)
+        .await
+        .expect("tag should be defined");
     let title = app
         .add_title(
             user,
@@ -5368,4 +5673,92 @@ async fn queue_existing_title_download_treats_legacy_failover_text_as_definitive
         false,
     )
     .await;
+}
+
+/// The acquisition walk asks the same question RSS does: does this release
+/// name the title? A cour's own name lives only in the anime numbering
+/// bridge, so a romanized cour-numbered release proved nothing against the
+/// walk's subject evidence and every result was discarded in silence.
+#[tokio::test]
+async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
+    let (app, user) = bootstrap();
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Fullmetal Alchemist Brotherhood".into(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create anime title");
+
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        generated_on: "2026-01-01".into(),
+        corroborating_order: None,
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 4,
+            titles: vec![
+                "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                    .into(),
+            ],
+            absolute_start: Some(37),
+            ..Default::default()
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store the anime numbering bridge");
+
+    let now = Utc::now().to_rfc3339();
+    let wanted = AcquisitionScopeState {
+        id: Id::new().0,
+        title_id: title.id.clone(),
+        title_name: Some(title.name.clone()),
+        title_slug: title.slug.clone(),
+        title_facet: Some("anime".to_string()),
+        library_id: Some(title.library_id.clone()),
+        library_name: None,
+        library_slug: None,
+        episode_id: None,
+        collection_id: None,
+        series_movie_link_id: None,
+        season_number: Some("1".to_string()),
+        episode_number: Some("59".to_string()),
+        media_type: "episode".to_string(),
+        last_search_at: None,
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    let search_title = app
+        .release_search_title_for_wanted_item(&title, &wanted, None)
+        .await;
+    let subject = app
+        .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
+        .await;
+
+    let release = "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb";
+    let parsed = crate::release_parser::parse_release_metadata_for_target(
+        release,
+        &subject.title_evidence.parse_context,
+    );
+
+    assert!(
+        crate::acquisition_release_search::parsed_release_matches_title_evidence(
+            &parsed,
+            &subject.title_evidence
+        ),
+        "the walk must recognise a release named after a bridge cour"
+    );
 }

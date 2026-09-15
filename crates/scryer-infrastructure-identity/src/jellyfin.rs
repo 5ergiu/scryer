@@ -179,8 +179,15 @@ async fn hydrate_parent_series(
         .collect::<Vec<_>>();
 
     for series_id in missing_series_ids {
-        let mut url = catalog_url(base_url, &format!("Items/{series_id}"))?;
-        url.query_pairs_mut().append_pair("Fields", CATALOG_FIELDS);
+        // Jellyfin 10.11 resolves a user before serving `GET /Items/{id}` and
+        // answers an API-key caller with 400 "Guid can't be empty". `GET
+        // /Items?Ids=` is the list endpoint the scan above already uses; it
+        // explicitly supports API keys without a user, so the parent series
+        // is fetched through it instead.
+        let mut url = catalog_url(base_url, "Items")?;
+        url.query_pairs_mut()
+            .append_pair("Ids", &series_id)
+            .append_pair("Fields", CATALOG_FIELDS);
         let response = client
             .get(url)
             .header("Accept", "application/json")
@@ -199,16 +206,59 @@ async fn hydrate_parent_series(
                 response.status()
             )));
         }
-        let value = response.json::<Value>().await.map_err(|error| {
+        let page = response.json::<Value>().await.map_err(|error| {
             AppError::Repository(format!("invalid Jellyfin parent-series response: {error}"))
         })?;
-        if let Some(series) = catalog_item(&value)
-            && series.kind == MediaServerCatalogItemKind::Series
-        {
+        // A series that no longer exists yields an empty page rather than a 404.
+        let Some(series) = page
+            .get("Items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(catalog_item)
+        else {
+            continue;
+        };
+        if series.kind == MediaServerCatalogItemKind::Series {
             catalog.push(series);
         }
     }
     Ok(catalog)
+}
+
+/// Ask Jellyfin to re-read specific folders: `POST /Library/Media/Updated`
+/// with one `MediaUpdateInfo` per path, the notification its own filesystem
+/// watcher raises. Targeted, never a full library scan.
+pub(super) async fn refresh_paths(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+    paths: &[&str],
+) -> AppResult<()> {
+    let base_url = self::base_url(base_url)?;
+    let url = base_url
+        .join("Library/Media/Updated")
+        .map_err(|error| AppError::Repository(format!("invalid Jellyfin refresh URL: {error}")))?;
+    let body = serde_json::json!({
+        "Updates": paths
+            .iter()
+            .map(|path| serde_json::json!({ "Path": path, "UpdateType": "Modified" }))
+            .collect::<Vec<_>>(),
+    });
+    let response = client
+        .post(url)
+        .header("Accept", "application/json")
+        .jellyfin_auth(api_key, None)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| AppError::Repository(format!("Jellyfin refresh failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Repository(format!(
+            "Jellyfin refresh failed with status {}",
+            response.status()
+        )));
+    }
+    Ok(())
 }
 
 fn catalog_item(value: &Value) -> Option<MediaServerCatalogItem> {
@@ -348,11 +398,18 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        // Jellyfin 10.11 rejects `GET /Items/{id}` from an API-key caller with
+        // 400, so the parent series must come back through the list endpoint's
+        // `Ids=` filter.
         Mock::given(method("GET"))
-            .and(path("/Items/series-1"))
+            .and(path("/Items"))
+            .and(query_param("Ids", "series-1"))
             .and(authorization_header(authorization(Some("api-key"), None)))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "Type": "Series", "Id": "series-1", "ProviderIds": {"Tvdb": "2002"}
+                "Items": [
+                    {"Type": "Series", "Id": "series-1", "ProviderIds": {"Tvdb": "2002"}}
+                ],
+                "TotalRecordCount": 1
             })))
             .expect(1)
             .mount(&server)
@@ -375,5 +432,52 @@ mod tests {
         assert_eq!(catalog[1].episode_number_end, Some(4));
         assert_eq!(catalog[2].kind, MediaServerCatalogItemKind::Series);
         assert_eq!(catalog[2].provider_item_id, "series-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_posts_the_changed_paths_with_the_media_browser_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/Library/Media/Updated"))
+            .and(authorization_header(authorization(Some("api-key"), None)))
+            .and(wiremock::matchers::body_json(json!({
+                "Updates": [
+                    { "Path": "/data/tv/Some Show", "UpdateType": "Modified" },
+                    { "Path": "/data/tv/Other Show", "UpdateType": "Modified" },
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        refresh_paths(
+            &test_client(),
+            &server.uri(),
+            "api-key",
+            &["/data/tv/Some Show", "/data/tv/Other Show"],
+        )
+        .await
+        .expect("refresh");
+    }
+
+    #[tokio::test]
+    async fn refresh_surfaces_a_rejected_notification() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/Library/Media/Updated"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let error = refresh_paths(
+            &test_client(),
+            &server.uri(),
+            "api-key",
+            &["/data/tv/Some Show"],
+        )
+        .await
+        .expect_err("a rejected notification is not a success");
+        assert!(error.to_string().contains("401"), "{error}");
     }
 }

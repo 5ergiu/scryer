@@ -1,0 +1,1131 @@
+[
+  {
+    "id": "stereo-001",
+    "release": "[Groupa][Titlea][3D FSBS][BDRIP][10bit][dual audio]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlea"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "full",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-002",
+    "release": "[Groupa][Titleb][3D FSBS][BDRIP][10bit]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleb"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "full",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-003",
+    "release": "[Groupa][Titleb][MOVIE][1080p 10bit][3D FSBS][V2]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleb"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "full",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-004",
+    "release": "[Groupa][Titlec][Movie][BDRIP][1080p 10bit(HEVC)][3D FSBS][Dual Audio]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlec"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "full",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-005",
+    "release": "[Groupb] Titled 3D - Titlee (3D BD 1080p Full SBS) [A1B2C3D4].mkv (Titlef)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titled 3D - Titlee"
+      },
+      "aliases": [
+        {
+          "name": "Titlef"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "full",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-006",
+    "release": "[Groupc]Titlec.(2014)[BDRIP][3D.HSBS][x264][1920x1036].mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlec"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "half",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-007",
+    "release": "[Groupd] Titleg (2021) PV [3D SBS Half 60FPS 1080p AC3 5.1]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleg"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": "half",
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-008",
+    "release": "Titleh 3D-SBS English Subs",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleh"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "side_by_side",
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-009",
+    "release": "[Groupe] Titlei - Titlej (3D SBS Row Interlaced 1920x1080 x264 AAC).mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlei - Titlej"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": "layout"
+  },
+  {
+    "id": "stereo-010",
+    "release": "Titlea (Titlek) [Groupf][Blu-ray-3D.FA.1080p.H264.FLAC]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlea"
+      },
+      "aliases": [
+        {
+          "name": "Titlek"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": "frame_sequential",
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-011",
+    "release": "Titlel 3D (stereoscopic)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlel"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-012",
+    "release": "Titlel 3D (stereoscopic) v2",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlel"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-013",
+    "release": "[Groupg]Titlem 3D - Titlen [1080p 3D]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlem 3D - Titlen"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-014",
+    "release": "[Groupg]Titlem 3D - Titlen [720p 3D]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlem 3D - Titlen"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-015",
+    "release": "[Groupb] Titled 3D - Titlee (3D BD 240p 3DS) [A1B2C3D4].moflex (Titlef)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titled 3D - Titlee"
+      },
+      "aliases": [
+        {
+          "name": "Titlef"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-016",
+    "release": "Titleo 3D Titlep 0 (Titleq) [3DS - 400x240 3D mjpeg - pcm_s16le][Grouph subs]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleo 3D Titlep 0"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-017",
+    "release": "[BDMV] [Texta-28] Titler (3D 1080i)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titler"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-018",
+    "release": "[Groupi] Titles / Titlet (3D) [BD 1080p AAC] [PL]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titles"
+      },
+      "aliases": [
+        {
+          "name": "Titlet"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-019",
+    "release": "[Groupj] Titles [Both Cuts + 3D Version] [Dual Audio]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titles"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-020",
+    "release": "Titleu (3D Ver. Viewable in 2D).DVD.x264-Groupk.mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleu"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-021",
+    "release": "[Groupl] Titlev (Texta version - 2D and 3D ver) (BD 1920x1080 h264 AAC)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlev"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-022",
+    "release": "[Groupl] Titlev (Texta version - 2D and 3D ver) (BD 1280x720 h264 AAC)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlev"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-023",
+    "release": "[Groupm&Groupn][Titlew][BDRip][2D+3D][Movie][720P]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlew"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-024",
+    "release": "[Groupm&Groupn][Titlew][BDRip][2D+3D][Movie][1080P]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlew"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-025",
+    "release": "[Groupo] Titlel (2D y 3D - BD - 1080p)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlel"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-026",
+    "release": "[Groupa][Titlex][BDRIP][movie 2D+3D][JP][10bit][three audio]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlex"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-027",
+    "release": "[BDMV] Titley (2D/3D)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titley"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-028",
+    "release": "[Groupp][Titlez Movie][BDRip][2D+3D][1080P][HEVC Ma10p FLAC MKV]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlez Movie"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-029",
+    "release": "Titlec 2014 TW Blu-ray 2D+3D 1080p AVC DTS-HD MA 5.1-Groupq",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlec"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-030",
+    "release": "Texta1[Groupp][Titleaa][Titleab][4K+2D+3D][HEVC Ma10p MKV]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleaa"
+      },
+      "aliases": [
+        {
+          "name": "Titleab"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-031",
+    "release": "Texta11[Groupr&Groupt][Movie][Titles][2D+3D][BDrip][HEVC Main10P FLAC][MKV]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titles"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-032",
+    "release": "[BDMV+BDISO] Titlea(Titlek) Texta [2D BD+3D BD]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlea"
+      },
+      "aliases": [
+        {
+          "name": "Titlek"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "stereo-033",
+    "release": "[Groupb] Titled 3D - Titlee (1080p BD Remux FLAC 5.1) [A1B2C3D4].mkv (Titlef)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titled 3D - Titlee"
+      },
+      "aliases": [
+        {
+          "name": "Titlef"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-034",
+    "release": "[Groupg]Titlem 3D - Titlen [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlem 3D - Titlen"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-035",
+    "release": "[Groupg]Titlem 3D - Titlen [720p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlem 3D - Titlen"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-036",
+    "release": "[Groupu] 3D Titleac - 01 [1080p].mkv",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "3D Titleac"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-037",
+    "release": "[Groupv] 3D Titleac 2018 [BluRay REMUX] [1080p] [ID]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "3D Titleac"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-038",
+    "release": "[Groupw] Titlead (2018) - Season 1 (S01) (BD Remux 1080p AVC FLAC 2.0) | 3D Titleac",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titlead"
+      },
+      "aliases": [
+        {
+          "name": "3D Titleac"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-039",
+    "release": "[Groupx] Titlead Season 1 (BD 1080p HEVC 10-bit FLAC) | 3D Titleac",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titlead"
+      },
+      "aliases": [
+        {
+          "name": "3D Titleac"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-040",
+    "release": "Titleae.3D.Titleaf.2011.1080p.HULU.WEB-DL.AAC2.0.H.265-Groupy",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleae 3D Titleaf"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-041",
+    "release": "[Groupz] Titled 3D! Titleag S01E01 1080p B-Global WEB-DL AAC2.0 H.265 (Titled 3D Titleah, Multi-Subs)",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titled 3D Titleag"
+      },
+      "aliases": [
+        {
+          "name": "Titled 3D Titleah"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-042",
+    "release": "Titleai S01E08 Titleaj in 3D Titleak 1080p CR WEB-DL AAC2.0 H 264-Groupaa (Titleal, Multi-Subs)",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleai"
+      },
+      "aliases": [
+        {
+          "name": "Titleal"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": [
+        {
+          "season": 1,
+          "episode": 8,
+          "absolute_number": null,
+          "air_date": null,
+          "title": "Titleaj in 3D Titleak",
+          "title_aliases": []
+        }
+      ]
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-043",
+    "release": "[Groupab] Titleam 3D&3D Plus (BD 1920x1080 x.264 FLACx2) - TV + SP",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleam 3D and 3D Plus"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-044",
+    "release": "Titlean (Titleao) 3D DVD Remux (Dual Audio)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlean 3D"
+      },
+      "aliases": [
+        {
+          "name": "Titleao"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-045",
+    "release": "Titleap - 14 RAW (SBS XviD1.1.2 1280x720 24fps).avi",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleap"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-046",
+    "release": "[Groupac] Titleaq - 01 (1280x720 x264 AAC 24fps[MBS+SBS]).mp4",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleaq"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-047",
+    "release": "[SBS] Titlear 1-12 (H264) COMPLETE",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titlear"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-048",
+    "release": "[Groupad] Titleas - 58 (SBS 1280x720 x264 AAC).mkv",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleas"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-049",
+    "release": "Titleat SBS Broadcasts (VHS) (1999)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleat SBS Broadcasts"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-050",
+    "release": "Titleau (2024) HARDSUB 720p SBS WEB-DL AAC2.0 x264-Groupae",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleau"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-051",
+    "release": "[Groupaf] Titleav S4 - 21 (1080p) [3DA1B2C3].mkv",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleav"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-052",
+    "release": "[Groupag] Titleaw - 10 [1080p CR WEB-DL AVC AAC][MultiSub][BD3D1234]",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleaw"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-053",
+    "release": "[Groupah][2000.06.28] Titleax [CD][FLAC+CUE+LOG+BK][MVCH-12345]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleax"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-054",
+    "release": "Titleay [AMZN WEB-DL] [MPEG-H 3D Audio | 24bits/48kHz | 22.2 | 1600kbits]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleay"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-055",
+    "release": "Titleaz.S01-S03.60fps.HEVC.EngHardSubs.(S01.Special.3D.Noise.Reduction.and.Image.Enhancement).Texta",
+    "context": {
+      "facet_hint": "series",
+      "title": {
+        "name": "Titleaz"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-056",
+    "release": "[Groupai] Titleba 3D LIVE 2026 [WEBRip 1080P H264 AAC].mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleba"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "stereo-057",
+    "release": "Titlebb unity assets 3d models Texta",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlebb"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  }
+]

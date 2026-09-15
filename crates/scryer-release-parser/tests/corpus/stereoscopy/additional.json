@@ -1,0 +1,556 @@
+[
+  {
+    "id": "second-001",
+    "release": "[BD] Titlealpha LIVE BD plus Titlebeta in 3D Disc2 2D Movie (1920x1080 x264 AAC).mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlealpha LIVE BD plus Titlebeta in 3D"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "two_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-002",
+    "release": "[Groupa] Titlegamma_583__720p__HD_3D_vostfr.mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlegamma"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-003",
+    "release": "[Groupa] Titlegamma_600__720p__HD_3D_vostfr",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlegamma"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-004",
+    "release": "[Groupb]Titledelta - Subtitleepsilon 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titledelta - Subtitleepsilon"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-005",
+    "release": "[Groupb]Titlezeta - Subtitleeta 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlezeta - Subtitleeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-006",
+    "release": "[Groupc]_Titlegamma_-_686_UHD_4k_3D_VOSTFR_[ABC12345].mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlegamma"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-007",
+    "release": "[Groupb]Titletheta - Subtitleiota 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titletheta - Subtitleiota"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-008",
+    "release": "[Group3DFS]_Titlekappa_-_012_[H.264]_[3D]_[ABC12345]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlekappa"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-009",
+    "release": "[Groupb]Titlelambda - Subtitlemu 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlelambda - Subtitlemu"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-010",
+    "release": "[Groupb]Titlenu - Subtitlexi 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlenu - Subtitlexi"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-011",
+    "release": "[Groupb]Titleomicron 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleomicron"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-012",
+    "release": "[Groupb]Titlepi - Subtitlerho 3D [1080p]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlepi - Subtitlerho"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-013",
+    "release": "Titlesigma S01e01 - Episodetau [3D](Multilingual)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlesigma"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "three_d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-014",
+    "release": "[Groupd&Groupe][Titleupsilon][OVA×3+Movie2D&3D+SP][BDRIP][1080p 10bit][Dual audio]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleupsilon"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": {
+      "presentation": "mixed_2d_3d",
+      "layout": null,
+      "sampling": null,
+      "encoding": null
+    },
+    "conflict": null
+  },
+  {
+    "id": "second-015",
+    "release": "[sbS]_(PV)_Artistalpha_-_Songbeta_[ABC12345].mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Artistalpha Songbeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-016",
+    "release": "[Groupf] Titlephi Live Action - 01 (SBS 1280x720 x264 AAC).mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlephi Live Action"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-017",
+    "release": "Titlephi 2011 SBS HDTV-Film 720p-Groupg (Complete Batch)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlephi"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-018",
+    "release": "Artistepsilon - Songzeta (2011.12.18 SBS Inkigayo).720p.HDTV.x264-Grouph.mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Artistepsilon Songzeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-019",
+    "release": "[SBS]Titlechi - Subtitlepsi 01 [ABC12345]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlechi Subtitlepsi"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-020",
+    "release": "[Groupi] Titleomega 3D Titlealpha Love 01v0 [BD][1080p-AAC][ABC12345].mkv",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleomega 3D Titlealpha Love"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-021",
+    "release": "[Groupj][BDMV] Titlebeta 3D: Subtitlegamma!!",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlebeta 3D Subtitlegamma"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-022",
+    "release": "[Groupk] Titlegamma 3D Subtitledelta SD",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlegamma 3D Subtitledelta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-023",
+    "release": "[Groupl]Titleomega_3D_Titlealpha_Love_E01(x264_AAC_1280x720)[ABC12345].mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleomega 3D Titlealpha Love"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-024",
+    "release": "[Groupm] Titleepsilon - Subtitletheta (3D-CGI) [ABC12345]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleepsilon Subtitletheta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-025",
+    "release": "[Groupn] Titlezeta - 437 (SBS 1280x720 x264 10bit AAC).mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlezeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-026",
+    "release": "[Groupo] Titleeta (2019) - 136 (SBS 1920х1080 x264 AAC).mp4",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-027",
+    "release": "Titleiota 2023 3D LIVE Subtitlekappa! [BD 1080p60 AV1 FLAC]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleiota"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-028",
+    "release": "【3D GRADUATION STREAM】Titlelambda ! (Performermu)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlelambda"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-029",
+    "release": "Titleeta (SBS 640x480 AVC1 AAC) [Korean Dub]",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titleeta"
+      },
+      "aliases": [],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  },
+  {
+    "id": "second-030",
+    "release": "[Groupp] Titlenu 3D! Subtitlexi S01E01 1080p B-Global WEB-DL AAC2.0 H.264 (Titlenu 3D Subtitleomicron, Multi-Subs)",
+    "context": {
+      "facet_hint": "movie",
+      "title": {
+        "name": "Titlenu 3D Subtitlexi"
+      },
+      "aliases": [
+        {
+          "name": "Titlenu 3D Subtitleomicron"
+        }
+      ],
+      "known_years": [],
+      "imdb_ids": [],
+      "episodes": []
+    },
+    "expected": null,
+    "conflict": null
+  }
+]

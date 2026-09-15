@@ -371,7 +371,7 @@ async fn process_pending_manual_import(app: AppUseCase, record: scryer_domain::I
     )
     .await;
 }
-async fn maybe_remove_completed_manual_import_download(
+pub(crate) async fn maybe_remove_completed_manual_import_download(
     app: &AppUseCase,
     completed: Option<&CompletedDownload>,
     title_id: Option<&str>,
@@ -392,29 +392,41 @@ async fn maybe_remove_completed_manual_import_download(
         return;
     };
 
-    if app
+    let locator = crate::ClientJobLocator::new(
+        Some(&completed.client_id),
+        &completed.client_type,
+        &completed.download_client_item_id,
+    );
+    // A job Scryer neither submitted nor observed before the operator
+    // imported it has no durable binding to hang a cleanup row on. The
+    // import itself was verified, so it still gets the direct cleanup below
+    // instead of being left in the client.
+    let durable_binding = if app
         .services
         .workflow
         .download_submissions
         .supports_durable_download_cleanup()
     {
-        let locator = crate::ClientJobLocator::new(
-            Some(&completed.client_id),
-            &completed.client_type,
-            &completed.download_client_item_id,
-        );
+        match app
+            .services
+            .workflow
+            .download_registry
+            .find_active_binding_by_locator(&locator)
+            .await
+        {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::warn!(client_id = %completed.client_id,
+                    item_id = %completed.download_client_item_id, error = %error,
+                    "verified manual import cleanup remains unresolved");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(binding) = durable_binding {
         let result = async {
-            let binding = app
-                .services
-                .workflow
-                .download_registry
-                .find_active_binding_by_locator(&locator)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Validation(
-                        "verified manual import has no durable client binding".into(),
-                    )
-                })?;
             if let Some(title_id) = title_id.filter(|id| !id.trim().is_empty()) {
                 app.services
                     .workflow
@@ -495,6 +507,8 @@ pub struct ManualImportVideoFacts {
     pub video_width: Option<i32>,
     pub video_height: Option<i32>,
     pub duration_seconds: Option<i32>,
+    pub disc: Option<scryer_media_types::DiscMetadata>,
+    pub report: scryer_media_types::ProbeReport,
 }
 
 struct ManualImportFilePreview {
@@ -551,6 +565,7 @@ pub struct ManualImportCandidateMapping {
     pub candidate_id: String,
     pub episode_id: Option<String>,
     pub series_movie_link_id: Option<String>,
+    pub disc_selection: Option<scryer_media_types::DiscSelection>,
 }
 
 async fn manual_import_preview_targets(
@@ -947,7 +962,8 @@ pub(crate) async fn qualify_manual_import_video_candidate(
         return Ok(None);
     }
 
-    if has_known_video_extension {
+    let is_disc_image = scryer_domain::is_disc_image(&canonical_path);
+    if has_known_video_extension && !is_disc_image {
         return Ok(Some(QualifiedManualImportVideo {
             source_entry_path: source_path.to_path_buf(),
             canonical_path,
@@ -956,7 +972,9 @@ pub(crate) async fn qualify_manual_import_video_candidate(
         }));
     }
 
-    if has_file_extension || metadata.len() < OPAQUE_MANUAL_IMPORT_PROBE_MIN_BYTES {
+    if !is_disc_image
+        && (has_file_extension || metadata.len() < OPAQUE_MANUAL_IMPORT_PROBE_MIN_BYTES)
+    {
         return Ok(None);
     }
 
@@ -965,12 +983,26 @@ pub(crate) async fn qualify_manual_import_video_candidate(
         let probe_path = canonical_path.clone();
         let analysis = tokio::task::spawn_blocking(move || {
             crate::nice_thread();
-            scryer_mediainfo::analyze_file_with_options(
-                &probe_path,
-                scryer_mediainfo::AnalyzeOptions {
-                    profile: scryer_mediainfo::AnalysisProfile::ContentProbe,
-                },
-            )
+            let started = std::time::Instant::now();
+            let result = if is_disc_image {
+                scryer_mediainfo::analyze_disc_file(&probe_path, Default::default())
+            } else {
+                scryer_mediainfo::analyze_file_with_options(
+                    &probe_path,
+                    scryer_mediainfo::AnalyzeOptions {
+                        profile: scryer_mediainfo::AnalysisProfile::ContentProbe,
+                    },
+                )
+            };
+            crate::media::metrics::record_probe(
+                crate::media::metrics::ProbeOperation::Discovery,
+                started.elapsed(),
+                result
+                    .as_ref()
+                    .ok()
+                    .map(|analysis| &analysis.details.report),
+            );
+            result
         })
         .await
         .map_err(|error| {
@@ -978,7 +1010,7 @@ pub(crate) async fn qualify_manual_import_video_candidate(
         })?;
 
         match analysis {
-            Ok(analysis) if scryer_mediainfo::is_valid_video(&analysis) => {
+            Ok(analysis) if is_disc_image || scryer_mediainfo::is_valid_video(&analysis) => {
                 Some(ManualImportVideoFacts {
                     container_format: analysis.container_format,
                     video_codec: analysis.video_codec,
@@ -986,6 +1018,8 @@ pub(crate) async fn qualify_manual_import_video_candidate(
                     video_width: analysis.video_width,
                     video_height: analysis.video_height,
                     duration_seconds: analysis.duration_seconds,
+                    disc: analysis.details.disc,
+                    report: analysis.details.report,
                 })
             }
             Ok(_) | Err(scryer_mediainfo::MediaInfoError::Parse(_)) => return Ok(None),
@@ -1812,6 +1846,8 @@ pub struct ManualImportFileMapping {
     pub episode_id: Option<String>,
     #[serde(default)]
     pub series_movie_link_id: Option<String>,
+    #[serde(default)]
+    pub disc_selection: Option<scryer_media_types::DiscSelection>,
 }
 
 #[derive(Clone, Copy)]
@@ -1843,6 +1879,51 @@ fn manual_import_mapping_target<'a>(
     let episode_id = normalize_manual_import_target(mapping.episode_id.as_deref());
     let series_movie_link_id =
         normalize_manual_import_target(mapping.series_movie_link_id.as_deref());
+
+    if let Some(selection) = &mapping.disc_selection {
+        if episode_id.is_some() || series_movie_link_id.is_some() {
+            return Err(AppError::Validation(
+                "disc selection cannot include a separate episode or series-movie target".into(),
+            ));
+        }
+        let valid_id = |id: &str| {
+            !id.is_empty() && id.len() <= 16 && id.bytes().all(|byte| byte.is_ascii_digit())
+        };
+        if selection
+            .title_id
+            .as_deref()
+            .is_some_and(|id| !valid_id(id))
+            || selection.episode_mappings.len() > 512
+        {
+            return Err(AppError::Validation(
+                "invalid disc selection or mapping limit exceeded".into(),
+            ));
+        }
+        let mut episodes = std::collections::HashSet::new();
+        for mapping in &selection.episode_mappings {
+            if !valid_id(&mapping.disc_title_id)
+                || mapping.episode_ids.len() != 1
+                || mapping.episode_ids[0].trim().is_empty()
+                || !episodes.insert(&mapping.episode_ids[0])
+            {
+                return Err(AppError::Validation(
+                    "disc titles require distinct, explicit single-episode mappings".into(),
+                ));
+            }
+        }
+        if matches!(facet, MediaFacet::Movie) && selection.episode_mappings.is_empty() {
+            return Ok(ManualImportMappingTarget::Movie);
+        }
+        if !matches!(facet, MediaFacet::Movie)
+            && let Some(first) = selection.episode_mappings.first()
+        {
+            return Ok(ManualImportMappingTarget::Episode(&first.episode_ids[0]));
+        }
+        return Err(AppError::Validation(
+            "episodic discs require playback-title mappings; movie discs cannot map episodes"
+                .into(),
+        ));
+    }
 
     match (episode_id, series_movie_link_id) {
         (Some(episode_id), None) => Ok(ManualImportMappingTarget::Episode(episode_id)),
@@ -1930,6 +2011,7 @@ pub(crate) fn validate_manual_import_candidate_mapping_targets(
             file_path: String::new(),
             episode_id: mapping.episode_id.clone(),
             series_movie_link_id: mapping.series_movie_link_id.clone(),
+            disc_selection: mapping.disc_selection.clone(),
         };
         manual_import_mapping_target(&target, facet)?;
     }
@@ -1949,6 +2031,15 @@ pub(crate) async fn validate_manual_import_candidate_mapping_scope(
             mapping.series_movie_link_id.as_deref(),
         )
         .await?;
+        if let Some(selection) = &mapping.disc_selection {
+            for episode_id in selection
+                .episode_mappings
+                .iter()
+                .flat_map(|mapping| &mapping.episode_ids)
+            {
+                validate_manual_import_target_scope(app, title_id, Some(episode_id), None).await?;
+            }
+        }
     }
 
     Ok(())
@@ -2363,6 +2454,7 @@ async fn execute_manual_series_movie_import(
     completed: Option<&CompletedDownload>,
     release_evidence: &ReleaseEvidence,
     source: &Path,
+    content_qualified: Option<ContentQualifiedVideo>,
     mapping: &ManualImportFileMapping,
     series_movie_link_id: &str,
     full_folder_path: &Path,
@@ -2408,9 +2500,7 @@ async fn execute_manual_series_movie_import(
     let search_title = crate::acquisition_release_search::series_movie_search_title(title, &link);
     let parsed =
         build_augmented_movie_import_metadata_for_title(source, release_evidence, &search_title);
-    let ext = scryer_domain::canonical_video_extension(source)
-        .unwrap_or("mkv")
-        .to_string();
+    let ext = import_video_destination_extension(source, content_qualified).to_string();
     let linked_episode = resolve_series_movie_linked_episode(app, title, &link).await?;
     // The resolved episode, not `link.linked_episode_id`, is this import's episode
     // everywhere below, so a film the fallback identified is mapped and owned by
@@ -2719,6 +2809,14 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         scryer_domain::LibraryPermission::ResolveImports,
     )
     .await?;
+    // Manual imports do not pass through the completed-download dispatcher, so
+    // they carry their own check (FR-084).
+    let _location_guard = app
+        .acquire_location_title_mutation(
+            &crate::location::ownership_guard::MANUAL_IMPORT_ENTRY,
+            &title.id,
+        )
+        .await?;
     for mapping in &files {
         validate_manual_import_target_scope(
             app,
@@ -2788,6 +2886,12 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     continue;
                 }
             };
+        // Only a source this re-qualification content-probed as video carries
+        // that proof into the import checks and destination naming.
+        let content_qualified = qualified
+            .video_facts
+            .as_ref()
+            .map(ContentQualifiedVideo::from_video_facts);
         let source = qualified.canonical_path;
 
         let target = match manual_import_mapping_target(mapping, &title.facet) {
@@ -2861,7 +2965,9 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     import_id,
                     completed,
                     release_evidence,
-                    std::slice::from_ref(&source),
+                    // Manual import never asks srrdb: an operator already told
+                    // Scryer what this file is.
+                    std::slice::from_ref(&ImportVideoFile::physical(source.clone()).with_disc_selection(mapping.disc_selection.clone()).with_content_qualified(content_qualified)),
                     Utc::now(),
                     // An operator picked this file. The same bypass the manual
                     // episode path passes: no automatic sample rail, and no
@@ -2905,6 +3011,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     completed,
                     release_evidence,
                     &source,
+                    content_qualified,
                     mapping,
                     series_movie_link_id,
                     &full_folder_path,
@@ -2978,21 +3085,39 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
         let ep_num_str = episode.episode_number.clone().unwrap_or_default();
+        let target_episodes = if let Some(selection) = &mapping.disc_selection {
+            let ids = selection
+                .episode_mappings
+                .iter()
+                .flat_map(|mapping| mapping.episode_ids.iter().cloned())
+                .collect::<Vec<_>>();
+            let episodes = app.services.catalog.shows.get_episodes_by_ids(&ids).await?;
+            if episodes.len() != ids.len() || episodes.iter().any(|item| item.title_id != title.id)
+            {
+                return Err(AppError::Validation(
+                    "a mapped disc episode no longer belongs to the import title".into(),
+                ));
+            }
+            episodes
+        } else {
+            vec![episode.clone()]
+        };
         match execute_resolved_episode_import(
             app,
             actor,
             &title,
             import_id,
             completed,
-            rename_enabled,
+            rename_enabled && mapping.disc_selection.is_none(),
             &rename_template,
             &season_folder_template,
             &specials_folder_template,
             &full_folder_path,
             &source,
+            content_qualified,
             &parsed,
-            std::slice::from_ref(&episode),
-            std::slice::from_ref(&episode),
+            &target_episodes,
+            &target_episodes,
             season_num,
             &ep_num_str,
             episode.absolute_number.as_deref(),
@@ -3003,6 +3128,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             crate::import_decide::ImportOrigin::OperatorQueued,
             release_evidence.announced_size_bytes(),
             false,
+            mapping.disc_selection.as_ref(),
         )
         .await
         {
@@ -3026,7 +3152,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                         "imported",
                         reason_code.as_deref(),
                         imported_media_file_id.as_deref(),
-                        std::slice::from_ref(&episode),
+                        &target_episodes,
                     )
                     .await?;
                 }
@@ -3073,7 +3199,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                             "already_present",
                             reason_code.as_deref(),
                             None,
-                            std::slice::from_ref(&episode),
+                            &target_episodes,
                         )
                         .await?;
                     }
@@ -3597,6 +3723,15 @@ async fn execute_queued_manual_import_with_outcome_inner(
     // skipped mappings (movie samples/extras) were never expected to land.
     let expected_mapping_count = Some(results.iter().filter(|result| !result.skipped).count());
     let (status, error_code, error_message) = manual_import_terminal_status_and_error(&results);
+    if status == ImportStatus::Failed {
+        tracing::warn!(
+            import_id,
+            title_id,
+            error_code = error_code.map(ImportErrorCode::as_str),
+            error = error_message.as_deref(),
+            "manual import failed"
+        );
+    }
 
     if status == ImportStatus::Completed
         && let Err(error) = app
@@ -4088,6 +4223,7 @@ mod manual_movie_primary_selection_tests {
         file.set_len(len).expect("size video");
         ManualImportFileMapping {
             file_path: path_to_stored_string(&path),
+            disc_selection: None,
             episode_id: None,
             series_movie_link_id: None,
         }
@@ -4121,6 +4257,7 @@ mod manual_movie_primary_selection_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonical root");
         let missing = ManualImportFileMapping {
+            disc_selection: None,
             file_path: path_to_stored_string(root.join("gone.mkv")),
             episode_id: None,
             series_movie_link_id: None,

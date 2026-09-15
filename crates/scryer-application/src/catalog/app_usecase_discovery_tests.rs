@@ -525,7 +525,7 @@ fn synthetic_indexer_config(
         is_enabled,
         enable_interactive_search,
         enable_auto_search,
-        indexer_proxy_config_id: None,
+        proxy_config_id: None,
         download_client_id: None,
         seeding_profile_id: None,
         managed_parent_config_id: managed_parent_config_id.map(str::to_string),
@@ -630,6 +630,7 @@ fn scored_search_result(
         },
         preference_score,
         tier_index,
+        size_fit_penalty: 0,
     });
     result
 }

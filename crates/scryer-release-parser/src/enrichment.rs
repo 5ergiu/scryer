@@ -56,6 +56,10 @@ pub(crate) fn enrich_candidate(
         .collect::<Vec<_>>();
 
     let mut enrichment = MetadataEnrichment::default();
+    let stereo = crate::stereoscopy::analyze_candidate(tokens, candidate);
+    enrichment.stereoscopy = stereo.metadata;
+    enrichment.stereo_evidence = stereo.evidence;
+    enrichment.parse_hints.extend(stereo.hints);
     let mut language_context = LanguageScope::Auto;
     let mut saw_bare_hdr = false;
 
@@ -403,6 +407,7 @@ pub(crate) fn project_final_metadata(
         projected.audio_channels = enrichment.audio_channels.clone();
     }
 
+    projected.stereoscopy = enrichment.stereoscopy;
     projected.is_dual_audio = enrichment.is_dual_audio;
     projected.is_atmos = enrichment.is_atmos;
     projected.is_dolby_vision = enrichment.is_dolby_vision;

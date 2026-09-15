@@ -140,19 +140,6 @@ fn assert_score_bearing_facts_match(
     assert_eq!(actual.audio, expected.audio, "audio codec");
     assert_eq!(actual.is_remux, expected.is_remux, "remux");
     assert_eq!(actual.year, expected.year, "year");
-    assert_eq!(
-        actual
-            .guide_facts
-            .iter()
-            .map(|fact| fact.code.as_str())
-            .collect::<Vec<_>>(),
-        expected
-            .guide_facts
-            .iter()
-            .map(|fact| fact.code.as_str())
-            .collect::<Vec<_>>(),
-        "guide facts"
-    );
 }
 
 // ── extract_parameter ─────────────────────────────────────────────────────────
@@ -654,7 +641,7 @@ fn canonical_episode_import_parse_matches_grab_time_parse_for_aliased_title() {
 }
 
 #[test]
-fn canonical_import_parse_derives_title_facet_guide_facts() {
+fn canonical_import_parse_exposes_normalized_tokens_for_rego_detection() {
     let dir = tempfile::tempdir().expect("tempdir");
     let file_path = dir.path().join("4f8e2c7a91b6d3e0.mkv");
     std::fs::write(&file_path, b"episode").expect("write file");
@@ -663,14 +650,6 @@ fn canonical_import_parse_derives_title_facet_guide_facts() {
     completed.release_name = Some(release_title.to_string());
     let title = titled(MediaFacet::Series, "Test Title", Some(2024));
 
-    // The context-free parse carries no facet-specific guide facts; the
-    // canonical (grab-equivalent) parse does, in a single pass.
-    assert!(
-        !crate::parse_release_metadata(release_title)
-            .guide_facts
-            .iter()
-            .any(|fact| fact.code == "trash.blocked.lq_release_title")
-    );
     let parsed = build_augmented_episode_import_metadata_for_title(
         &file_path,
         &observation_evidence(&completed),
@@ -679,9 +658,37 @@ fn canonical_import_parse_derives_title_facet_guide_facts() {
     );
     assert!(
         parsed
-            .guide_facts
+            .normalized_tokens
             .iter()
-            .any(|fact| fact.code == "trash.blocked.lq_release_title")
+            .any(|token| token == "BITOR")
+    );
+
+    let normalized_token_rule = r#"
+package scryer.rules.user.normalized_token_detection
+import rego.v1
+
+score_entry["bitor_detection"] := 1 if {
+    "BITOR" in input.release.normalized_tokens
+}
+"#;
+    assert!(
+        scryer_rules::validation::validate_user_rule(
+            normalized_token_rule,
+            "normalized_token_detection",
+        )
+        .expect("normalized-token rule validates")
+        .valid
+    );
+    assert_eq!(
+        scryer_rules::validation::retired_release_input_fields(
+            r#"package scryer.rules.user.legacy
+import rego.v1
+
+score_entry["legacy"] := 1 if { input.release.guide_facts != [] }
+"#,
+        )
+        .expect("legacy source parses"),
+        vec!["input.release.guide_facts"],
     );
 }
 
@@ -1010,7 +1017,8 @@ fn title_evidence_candidates_from_video_files_uses_immediate_parent_for_obfuscat
         release_dir.join("aUUKqrO833LbSr7VlByumnR24y7ULADpVJ7K0FTnPhPMqpp0KIIaLSLYXJmyjm.mkv");
     std::fs::write(&file_path, b"movie").expect("write file");
 
-    let candidates = title_evidence_candidates_from_video_files(&[file_path]);
+    let candidates =
+        title_evidence_candidates_from_video_files(&[ImportVideoFile::physical(file_path)]);
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(
@@ -1028,7 +1036,8 @@ fn title_evidence_candidates_from_video_files_prefers_usable_file_name() {
     let file_path = release_dir.join("Paper.Lantern.2012.1080p.BluRay.x264-GRP.mkv");
     std::fs::write(&file_path, b"movie").expect("write file");
 
-    let candidates = title_evidence_candidates_from_video_files(&[file_path]);
+    let candidates =
+        title_evidence_candidates_from_video_files(&[ImportVideoFile::physical(file_path)]);
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].normalized_title, "PAPER LANTERN");
@@ -1161,6 +1170,7 @@ fn build_rename_tokens_includes_quality() {
 
 fn test_media_analysis(video_height: Option<i32>) -> crate::MediaFileAnalysis {
     crate::MediaFileAnalysis {
+        details: Default::default(),
         video_codec: Some(crate::release_parser::VideoCodec::H264),
         video_width: Some(1920),
         video_height,
@@ -1192,6 +1202,7 @@ fn test_rule_file_doc(
     dovi_bl_compat_id: Option<u8>,
 ) -> scryer_rules::FileDoc {
     scryer_rules::FileDoc {
+        details: Default::default(),
         video_codec: Some("hevc".to_string()),
         video_width: Some(3840),
         video_height: Some(2160),
@@ -1251,10 +1262,17 @@ fn rescore_from_mediainfo_updates_quality_when_parsed_quality_is_missing() {
 }
 
 #[tokio::test]
-async fn post_download_score_uses_rescored_quality_and_records_negative_audit() {
+async fn post_download_score_uses_rescored_quality_and_records_downgrade_audit() {
     let app = build_manual_import_cleanup_app(
         Vec::new(),
         Arc::new(ManualImportCleanupDownloadClient::default()),
+    );
+    app.swap_user_rules_engine(
+        AppUseCase::build_user_rules_engine(
+            crate::rules::builtin_trash::baseline_rule_sets(),
+            Vec::new(),
+        )
+        .expect("bundled scoring rules compile"),
     );
     let title = test_title(MediaFacet::Movie);
     let profile = crate::QualityProfile::parse(
@@ -1279,28 +1297,47 @@ async fn post_download_score_uses_rescored_quality_and_records_negative_audit() 
         audio_language_warning: None,
     };
 
-    let result = {
+    let (result, announced_score) = {
         let context = app
             .resolve_canonical_scoring_context(&title, &profile)
             .await;
-        crate::post_download_gate::compute_post_download_acquisition_decision(
+        let size_basis = crate::quality_profile::CoverageSizeBasis::single(title.runtime_minutes);
+        let announced_score = crate::canonical_scoring::score_release(
+            &crate::canonical_scoring::ReleaseEvidence::announced(
+                parsed.clone(),
+                Some(5 * 1024 * 1024),
+            ),
+            &context.view(size_basis, false),
+        )
+        .total;
+        let result = crate::post_download_gate::compute_post_download_acquisition_decision(
             &context,
             &title,
             &parsed,
             &acceptance,
-            crate::quality_profile::CoverageSizeBasis::single(title.runtime_minutes),
+            size_basis,
             5 * 1024 * 1024,
             &[],
             false,
-        )
+        );
+        (result, announced_score)
     };
 
     assert_eq!(result.parsed.quality.as_deref(), Some("720p"));
-    assert!(result.score < 0);
+    assert_eq!(result.tier_index, Some(1));
+    assert_eq!(
+        announced_score - result.score,
+        100,
+        "the analyzed 720p file must lose the announced 1080p resolution bonus"
+    );
     // The resolution the file actually has contradicts the one it advertised.
     // The score reflects the truth; the verdict names the disagreement.
     assert!(
-        !result.truth_verdict.is_consistent(),
+        matches!(
+            &result.truth_verdict,
+            crate::canonical_scoring::TruthVerdict::Contradicted { codes }
+                if codes.iter().any(|code| code == "quality_contradicted:1080P->720P")
+        ),
         "a 720p file sold as 1080p must be recorded as contradicted, got {:?}",
         result.truth_verdict
     );
@@ -1312,6 +1349,27 @@ async fn post_download_score_uses_rescored_quality_and_records_negative_audit() 
         serde_json::Value::String("post_download_acquisition_score".to_string())
     );
     assert_eq!(scoring_log["preference_score"], result.score);
+    let entries = scoring_log["scoring_log"].as_array().unwrap();
+    assert!(!entries.iter().any(|entry| {
+        entry["code"]
+            .as_str()
+            .is_some_and(|code| code.starts_with("quality_resolution_"))
+    }));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["code"] == "size_tiny_for_quality")
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| {
+                entry["code"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("size_"))
+            })
+            .all(|entry| entry["delta"] == 0)
+    );
     assert!(
         scoring_log["rescore_changes"]
             .as_array()
@@ -1848,6 +1906,8 @@ fn scoped_media_file(
 ) -> crate::EpisodeScopedMediaFile {
     crate::EpisodeScopedMediaFile {
         media_file: crate::TitleMediaFile {
+            analysis_details: Default::default(),
+            analysis_attempt: None,
             id: id.to_string(),
             title_id: "title-1".to_string(),
             episode_id: episode_ids.first().map(|value| (*value).to_string()),
@@ -1858,6 +1918,7 @@ fn scoped_media_file(
             announced_size_bytes: None,
             source_signature_scheme: None,
             source_signature_value: None,
+            content_hashes: None,
             quality_label: Some("1080p".to_string()),
             scan_status: "scanned".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -2541,7 +2602,6 @@ fn build_manual_import_cleanup_app(
         services,
         JwtAuthConfig {
             issuer: "test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(FacetRegistry::new()),

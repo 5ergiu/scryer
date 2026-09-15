@@ -7,7 +7,8 @@ use tracing::{info, warn};
 
 use crate::acquisition::seed_goals::ReleaseSeedMinimums;
 use crate::acquisition::submission::{
-    CanonicalDownloadSubmissionIntent, CanonicalDownloadSubmissionOutcome,
+    CanonicalDownloadSubmissionIntent, CanonicalDownloadSubmissionOutcome, GrabTrigger,
+    record_grab_submission_outcome,
 };
 use crate::delay_profile::DelayProfile;
 use crate::types::{
@@ -29,6 +30,22 @@ pub(crate) enum PendingGrabOutcome {
     SourceGone,
     Rejected,
     Deferred,
+    /// The submission was made and refused in a way that must not burn the
+    /// release — an unavailable client, an ambiguous submit, a title briefly
+    /// locked by a location operation. The release is kept exactly as for
+    /// `Deferred`; the refusal is reported separately because, unlike a
+    /// deferral that never reached a download client, it is a failed
+    /// submission that an acquisition job's accounting has to count.
+    SubmitRefused(RefusedSubmission),
+}
+
+/// A submission refused without burning its release, reduced to what failure
+/// accounting reads (the error itself is not `Clone`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefusedSubmission {
+    /// The refusal was a retryable download-submission failure: the download
+    /// client was unavailable, as a mapped client that is globally disabled is.
+    pub(crate) submit_unavailable: bool,
 }
 
 /// Which path is promoting a pending release.
@@ -160,8 +177,8 @@ impl AppUseCase {
     /// now rather than remembered from when they were parked (BL3).
     ///
     /// The key is `RankHead`'s: refused releases last, then tier, then revision,
-    /// then score — the same order `evaluate_admission` compares in, so the
-    /// release this picks is the one the gate would prefer. A scope whose title
+    /// then score, with size fit breaking otherwise equal search preferences.
+    /// The admission ladder remains unchanged. A scope whose title
     /// or profile cannot be resolved keeps the stored order: an unorderable
     /// group is still worth trying, and the gate refuses whatever it should.
     async fn order_expired_releases_by_rank(
@@ -204,7 +221,7 @@ impl AppUseCase {
             .await
             .unwrap_or_default();
 
-        let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32)> =
+        let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32, i32)> =
             std::collections::HashMap::with_capacity(releases.len());
         for release in releases.iter() {
             let facts = crate::quality::canonical_context::score_parked_release_title(
@@ -222,6 +239,7 @@ impl AppUseCase {
                     crate::admission::tier_sort_key(facts.tier_index),
                     facts.revision.saturating_neg(),
                     facts.score.saturating_neg(),
+                    facts.size_fit_penalty,
                 ),
             );
         }
@@ -399,7 +417,7 @@ impl AppUseCase {
             // 400 and marked the 2160p `Superseded` without ever scoring it.
             //
             // Ordered by the search rank's own key, which is the same ladder
-            // admission compares on: allowed, tier, revision, score.
+            // admission compares on, then size fit breaks equal preferences.
             self.order_expired_releases_by_rank(&wanted, &mut releases)
                 .await;
 
@@ -435,7 +453,7 @@ impl AppUseCase {
                             .expire_pending_release(&pr.id, "pending_release_rejected")
                             .await;
                     }
-                    Ok(PendingGrabOutcome::Deferred) => {
+                    Ok(PendingGrabOutcome::Deferred | PendingGrabOutcome::SubmitRefused(_)) => {
                         info!(
                             release = pr.release_title.as_str(),
                             "pending release: download client unavailable, keeping release pending"
@@ -797,6 +815,18 @@ impl AppUseCase {
         now: &chrono::DateTime<Utc>,
         trigger: PendingGrabTrigger,
     ) -> AppResult<PendingGrabOutcome> {
+        if let Some(denial) = self
+            .location_ownership_denial_for_title(
+                &crate::location::ownership_guard::TITLE_DOWNLOAD_ENTRY,
+                &pr.title_id,
+            )
+            .await?
+        {
+            if trigger == PendingGrabTrigger::Operator {
+                return Err(denial.into_app_error());
+            }
+            return Ok(PendingGrabOutcome::Deferred);
+        }
         // Load title
         let Some(title) = self.services.catalog.titles.get_by_id(&pr.title_id).await? else {
             return Ok(PendingGrabOutcome::Rejected);
@@ -1252,21 +1282,6 @@ impl AppUseCase {
         {
             return Ok(PendingGrabOutcome::Rejected);
         }
-        if let Some(incumbent) = admission.best_incumbent()
-            && crate::acquisition_policy::upgrade_cooldown_is_active(
-                crate::acquisition_policy::CooldownCandidate {
-                    tier_index: candidate_facts.tier_index,
-                    score: candidate_score,
-                },
-                incumbent,
-                wanted.last_search_at.as_deref(),
-                now,
-                &upgrade_context.thresholds,
-            )
-        {
-            return Ok(PendingGrabOutcome::Rejected);
-        }
-
         let source_hint = pr.release_url.clone();
         let source_kind = pr
             .source_kind
@@ -1421,6 +1436,7 @@ impl AppUseCase {
                     season_pack_seed_time_minutes: pr.seed_minimums.season_pack_seed_time_minutes,
                     is_recent,
                     season_pack: is_season_pack.then_some(true),
+                    pinned_download_client_id: None,
                 },
                 scope: pending_scope.clone(),
                 conflict_policy: SubmissionConflictPolicy::Skip,
@@ -1429,6 +1445,16 @@ impl AppUseCase {
                 release_size_bytes: pr.release_size_bytes,
             })
             .await;
+
+        let grab_indexer = self
+            .grab_indexer_name(pr.indexer_id.as_deref(), pr.indexer_source.as_deref())
+            .await;
+        record_grab_submission_outcome(
+            GrabTrigger::Pending,
+            &title.facet,
+            grab_indexer.as_deref(),
+            &canonical_result,
+        );
 
         let canonical_submission = match canonical_result {
             Ok(CanonicalDownloadSubmissionOutcome::Accepted(submission)) => Ok(submission),
@@ -1440,20 +1466,11 @@ impl AppUseCase {
 
         match canonical_submission {
             Ok(canonical_submission) => {
+                let newly_submitted = canonical_submission.newly_submitted;
                 let grab = canonical_submission.grab;
-                {
-                    let facet_label = serde_json::to_string(&title.facet)
-                        .unwrap_or_else(|_| "\"other\"".to_string())
-                        .trim_matches('"')
-                        .to_string();
-                    let indexer_label = pr
-                        .indexer_source
-                        .as_deref()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    metrics::counter!("scryer_grabs_total", "indexer" => indexer_label, "facet" => facet_label).increment(1);
+                if newly_submitted {
+                    self.record_indexer_grab(pr.indexer_id.as_deref(), grab_indexer.as_deref());
                 }
-                self.record_indexer_grab(pr.indexer_id.as_deref(), pr.indexer_source.as_deref());
 
                 let _ = self
                     .services
@@ -1565,7 +1582,9 @@ impl AppUseCase {
                 }
 
                 if defer {
-                    return Ok(PendingGrabOutcome::Deferred);
+                    return Ok(PendingGrabOutcome::SubmitRefused(RefusedSubmission {
+                        submit_unavailable: err.is_retryable_download_submit_failure(),
+                    }));
                 }
 
                 // A definitive submit failure burns the release for this title:

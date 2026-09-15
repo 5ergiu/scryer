@@ -1,7 +1,13 @@
 use super::*;
+#[cfg(unix)]
 use std::path::PathBuf;
 
+use crate::lib_tests::request_rules_support::{
+    InMemoryLifecycleClaimRepo, InMemoryRequestRuleDecisionRepo, InMemoryRequestRuleRepo,
+};
+
 use async_trait::async_trait;
+#[cfg(unix)]
 use scryer_runtime_info::BinaryLane;
 use tokio::sync::Mutex;
 
@@ -74,6 +80,7 @@ pub(crate) fn bootstrap() -> (AppUseCase, User) {
     bootstrap_with_user_repo(Arc::new(MockUserRepo::default()))
 }
 
+#[cfg(unix)]
 pub(crate) fn bootstrap_application_upgrade(
     config_dir: PathBuf,
 ) -> (AppUseCase, User, Arc<RecordingJobRunRepo>) {
@@ -253,7 +260,6 @@ fn bootstrap_with_services(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -274,6 +280,17 @@ pub(super) struct MediaRequestTestHarness {
     pub(super) quality_profiles: Arc<StoredQualityProfileRepo>,
     pub(super) media_requests: Arc<MockMediaRequestRepo>,
     pub(super) domain_events: Arc<MockDomainEventRepo>,
+    /// Request-rule previews resolve a *real* sample requester through this
+    /// repository, so a preview test has to seed the person it names.
+    pub(super) users: Arc<MockUserRepo>,
+    /// Wired now so the evaluation and lease waves inherit a harness that
+    /// already carries them; nothing reads them until those waves land.
+    #[allow(dead_code)]
+    pub(super) request_rules: Arc<InMemoryRequestRuleRepo>,
+    #[allow(dead_code)]
+    pub(super) request_rule_decisions: Arc<InMemoryRequestRuleDecisionRepo>,
+    #[allow(dead_code)]
+    pub(super) lifecycle_claims: Arc<InMemoryLifecycleClaimRepo>,
 }
 
 pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
@@ -294,8 +311,14 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     let indexer_client = Arc::new(MockIndexerClient);
     let libraries = Arc::new(MockLibraryRepo::default());
     let domain_events = Arc::new(MockDomainEventRepo::default());
-    let media_requests = Arc::new(MockMediaRequestRepo::with_domain_events(
-        domain_events.clone(),
+    let media_requests = Arc::new(MockMediaRequestRepo {
+        titles: Some(titles.clone()),
+        ..MockMediaRequestRepo::with_domain_events(domain_events.clone())
+    });
+    let request_rules = Arc::new(InMemoryRequestRuleRepo::default());
+    let request_rule_decisions = Arc::new(InMemoryRequestRuleDecisionRepo::default());
+    let lifecycle_claims = Arc::new(InMemoryLifecycleClaimRepo::with_media_requests(
+        media_requests.clone(),
     ));
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
@@ -309,7 +332,7 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     let services = AppServices::builder(
         titles.clone(),
         shows,
-        users,
+        users.clone(),
         indexer_configs,
         indexer_client,
         download_client,
@@ -322,6 +345,9 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     .with_domain_events(domain_events.clone())
     .with_libraries(libraries.clone())
     .with_media_requests(media_requests.clone())
+    .with_request_rule_set_store(request_rules.clone())
+    .with_request_rule_decision_store(request_rule_decisions.clone())
+    .with_lifecycle_claim_store(lifecycle_claims.clone())
     .with_metadata_gateway(metadata_gateway)
     .with_acquisition_scope_states(wanted_items.clone())
     .with_pending_releases(pending_releases.clone())
@@ -357,7 +383,6 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
             services,
             JwtAuthConfig {
                 issuer: "scryer-test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(registry),
@@ -369,6 +394,10 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
         quality_profiles,
         media_requests,
         domain_events,
+        users,
+        request_rules,
+        request_rule_decisions,
+        lifecycle_claims,
     }
 }
 
@@ -391,6 +420,7 @@ pub(super) fn media_request_input(
         requested_quality_profile_id: None,
         requested_monitor_type: None,
         requested_monitor_selection: None,
+        requested_lease_days: None,
         external_ids: vec![
             ExternalId {
                 source: "TVDB".to_string(),
@@ -507,7 +537,7 @@ pub(super) fn bootstrap_with_metadata_gateway_settings_and_titles(
     let services = AppServices::builder(
         titles.clone(),
         shows,
-        users,
+        users.clone(),
         indexer_configs,
         indexer_client,
         download_client,
@@ -534,7 +564,6 @@ pub(super) fn bootstrap_with_metadata_gateway_settings_and_titles(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -616,6 +645,7 @@ pub(super) fn make_movie_metadata(tvdb_id: i64, name: &str) -> MovieMetadata {
         tmdb_release_date: Some("2026-01-01".to_string()),
         ratings: Default::default(),
         credits: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -680,7 +710,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_queue_commands(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -740,7 +769,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_tracked_handle(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -800,7 +828,6 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_indexer(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -888,7 +915,6 @@ pub(super) fn bootstrap_with_search_settings_indexer_configs_and_management(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -958,7 +984,6 @@ pub(super) fn bootstrap_with_settings_repo_and_profiles_and_libraries(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -980,7 +1005,7 @@ pub(super) fn synthetic_direct_nab_indexer_config(id: &str, provider_type: &str)
         is_enabled: true,
         enable_interactive_search: true,
         enable_auto_search: true,
-        indexer_proxy_config_id: None,
+        proxy_config_id: None,
         download_client_id: None,
         seeding_profile_id: None,
         managed_parent_config_id: None,
@@ -1013,7 +1038,7 @@ pub(super) fn bootstrap_with_cutoff_projection_state(
     let services = AppServices::builder(
         titles.clone(),
         shows,
-        users,
+        users.clone(),
         indexer_configs,
         indexer_client,
         download_client,
@@ -1040,7 +1065,6 @@ pub(super) fn bootstrap_with_cutoff_projection_state(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1093,7 +1117,6 @@ pub(super) fn bootstrap_with_delete_queue(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1171,6 +1194,7 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
             last_seen_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            proxy_config_id: None,
         });
     let release_attempts = Arc::new(MockReleaseAttemptRepo::default());
     let settings = Arc::new(StoredSettingsRepo::default());
@@ -1179,7 +1203,7 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
     let services = AppServices::builder(
         titles.clone(),
         shows,
-        users,
+        users.clone(),
         indexer_configs,
         indexer_client,
         download_client,
@@ -1215,7 +1239,6 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1273,6 +1296,7 @@ pub(super) fn bootstrap_with_library_delete_repositories(
             last_seen_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            proxy_config_id: None,
         });
     let release_attempts = Arc::new(MockReleaseAttemptRepo::default());
     let quality_profiles = Arc::new(MockQualityProfileRepo);
@@ -1316,7 +1340,6 @@ pub(super) fn bootstrap_with_library_delete_repositories(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1363,7 +1386,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
     let services = AppServices::builder(
         titles.clone(),
         shows,
-        users,
+        users.clone(),
         indexer_configs,
         indexer_client,
         download_client,
@@ -1394,7 +1417,6 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(registry),
@@ -1770,6 +1792,7 @@ pub(super) fn test_series_movie_link(
         metadata_active: true,
         monitored: true,
         legacy_collection_id: None,
+        tags: Vec::new(),
         created_at: now,
         updated_at: now,
     }
@@ -1927,6 +1950,7 @@ pub(super) async fn create_enabled_download_client_config(
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await

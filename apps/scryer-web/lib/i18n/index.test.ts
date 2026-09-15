@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  METADATA_LANGUAGES,
   getLocaleDictionary,
   isLocaleLoaded,
   loadLocaleDictionary,
@@ -14,6 +15,10 @@ test("normalizes supported locale aliases and falls back to English", () => {
   assert.equal(normalizeLocale("nl-NL"), "nld");
   assert.equal(normalizeLocale("nl-BE"), "nld");
   assert.equal(normalizeLocale("unknown"), "eng");
+});
+
+test("offers Dutch for metadata hydration", () => {
+  assert.equal(METADATA_LANGUAGES.some(({ code }) => code === "nld"), true);
 });
 
 test("keeps English synchronously available", () => {

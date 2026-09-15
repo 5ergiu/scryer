@@ -26,7 +26,7 @@ use crate::queries::sql_runtime::{
 };
 use crate::types::WorkflowOperationRecord;
 
-use super::download_submission_store::claim_or_create_binding_download_id_tx;
+use super::download_submission_store::{BindingClaim, claim_or_create_binding_download_id_tx};
 
 pub const DOMAIN_EVENT_COLUMNS: &str = "sequence, event_id, occurred_at, actor_kind, actor_user_id, actor_display_name, title_id, facet, correlation_id, causation_id, schema_version, stream_kind, stream_id, event_type, payload_json, import_status, media_file_delete_reason, download_id";
 pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
@@ -52,6 +52,21 @@ pub async fn append_domain_events(
     datastore: &StoreDatastore,
     events: Vec<NewDomainEvent>,
 ) -> AppResult<Vec<DomainEvent>> {
+    append_domain_events_with_replay(datastore, events, false).await
+}
+
+pub async fn append_domain_events_once(
+    datastore: &StoreDatastore,
+    events: Vec<NewDomainEvent>,
+) -> AppResult<Vec<DomainEvent>> {
+    append_domain_events_with_replay(datastore, events, true).await
+}
+
+async fn append_domain_events_with_replay(
+    datastore: &StoreDatastore,
+    events: Vec<NewDomainEvent>,
+    allow_replay: bool,
+) -> AppResult<Vec<DomainEvent>> {
     SqlRuntime::run_in_transaction(datastore, "append_domain_events", move |tx| {
         let events = events.clone();
         Box::pin(async move {
@@ -68,12 +83,20 @@ pub async fn append_domain_events(
                 let projections = derive_domain_event_projections(event_type, &payload);
                 SqlRuntime::execute(
                     SqlExec::Tx(tx),
-                    "INSERT INTO domain_events (
+                    &[
+                        "INSERT INTO domain_events (
                         event_id, occurred_at, actor_kind, actor_user_id, actor_display_name,
                         title_id, facet, correlation_id, causation_id, schema_version,
                         stream_kind, stream_id, event_type, payload_json, import_status,
                         media_file_delete_reason, download_id
                      ) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+                        if allow_replay {
+                            " ON CONFLICT(event_id) DO NOTHING"
+                        } else {
+                            ""
+                        },
+                    ]
+                    .concat(),
                     &[
                         SqlArg::Text(event.event_id.clone()),
                         SqlArg::Timestamp(event.occurred_at),
@@ -373,9 +396,16 @@ async fn record_download_submission_tx_inner(
         && !submission.download_client_item_id.trim().is_empty()
     {
         let locator = ClientJobLocator::from_submission(&submission);
+        // The tracker's observation stub adopts the job's binding like any
+        // recording, but it is not a Scryer submission and must leave a foreign
+        // download foreign.
+        let claim = if submission.is_observation_stub() {
+            BindingClaim::Observation(Some(submission.download_id))
+        } else {
+            BindingClaim::Submission(submission.download_id)
+        };
         submission.download_id =
-            claim_or_create_binding_download_id_tx(tx, &locator, Some(submission.download_id))
-                .await?;
+            claim_or_create_binding_download_id_tx(tx, &locator, claim).await?;
     }
     let (episode_id, collection_id, series_movie_link_id) =
         persisted_submission_scope(&submission.scope);
@@ -966,9 +996,19 @@ pub fn build_title_history_filter_sql(
     _datastore: &StoreDatastore,
     event_types: Option<&[TitleHistoryEventType]>,
     title_ids: Option<&[String]>,
+    include_titleless: bool,
     download_id: Option<&str>,
 ) -> (String, Vec<SqlArg>) {
-    let mut clauses = vec!["title_id IS NOT NULL".to_string()];
+    // No `title_id IS NOT NULL` here. A row with no `title_id` is not a
+    // malformed row, it is an event with no catalog title behind it: FR-026
+    // says an unlinked grab is "recorded as history against the release and
+    // indexer, with no catalog title behind it". Excluding it unconditionally
+    // deleted it in SQL before the projection ever saw it, so the unfiltered
+    // History page could not show it however the projection behaved. Title
+    // scoping is `title_ids` below, and `title_id = {}` / `IN (...)` already
+    // excludes NULLs on its own - which is exactly right, since a row with no
+    // catalog title can never satisfy a title-scoped filter.
+    let mut clauses: Vec<String> = Vec::new();
     let mut args = Vec::new();
     match event_types {
         None => {
@@ -1075,6 +1115,10 @@ pub fn build_title_history_filter_sql(
                             DomainEventType::TitleRematched.as_str().into(),
                         ));
                     }
+                    TitleHistoryEventType::TitleMoved => {
+                        parts.push("event_type = {}".to_string());
+                        args.push(SqlArg::Text(DomainEventType::TitleMoved.as_str().into()));
+                    }
                     TitleHistoryEventType::SeedingStarted => {
                         parts.push("event_type = {}".to_string());
                         args.push(SqlArg::Text(
@@ -1105,19 +1149,36 @@ pub fn build_title_history_filter_sql(
         }
     }
     if let Some(title_ids) = title_ids {
-        if title_ids.is_empty() {
-            clauses.push("0".to_string());
+        // `include_titleless` widens a title scope to also admit rows with no
+        // catalog title. It is set when the scope is the caller's library
+        // authorization rather than a title the user picked: an unlinked grab
+        // (FR-026) belongs to no title and no library, so a library-derived
+        // `title_id IN (...)` would drop it every time, which is what kept
+        // unlinked grabs off /activity/history even once the projection kept
+        // them. A user-chosen title or title search never sets it.
+        let scope = if title_ids.is_empty() {
+            "0".to_string()
         } else if title_ids.len() == 1 {
-            clauses.push("title_id = {}".to_string());
             args.push(SqlArg::Text(title_ids[0].clone()));
+            "title_id = {}".to_string()
         } else {
-            clauses.push(format!("title_id IN ({})", placeholders(title_ids.len())));
             args.extend(title_ids.iter().cloned().map(SqlArg::Text));
+            format!("title_id IN ({})", placeholders(title_ids.len()))
+        };
+        if include_titleless {
+            clauses.push(format!("({scope} OR title_id IS NULL)"));
+        } else {
+            clauses.push(scope);
         }
     }
     if let Some(download_id) = download_id {
         clauses.push("download_id = {}".to_string());
         args.push(SqlArg::Text(download_id.to_string()));
+    }
+    // Every `event_types` arm pushes a clause, so this is never empty today;
+    // emit no WHERE at all rather than a dangling one if that ever changes.
+    if clauses.is_empty() {
+        return (String::new(), args);
     }
     (format!(" WHERE {}", clauses.join(" AND ")), args)
 }
@@ -1185,6 +1246,7 @@ pub fn build_dashboard_activity_stats_sql(
 }
 
 pub const TITLE_HISTORY_PAGE_DOMAIN_EVENT_TYPES: &[DomainEventType] = &[
+    DomainEventType::TitleMoved,
     DomainEventType::TitleRematched,
     DomainEventType::ReleaseGrabbed,
     DomainEventType::ImportCompleted,

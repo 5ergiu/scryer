@@ -44,7 +44,7 @@ fn new_nzbgeek_client(uri: &str) -> Arc<dyn IndexerClient> {
         is_enabled: true,
         enable_interactive_search: true,
         enable_auto_search: true,
-        indexer_proxy_config_id: None,
+        proxy_config_id: None,
         download_client_id: None,
         seeding_profile_id: None,
         managed_parent_config_id: None,
@@ -120,6 +120,7 @@ async fn nzbgeek_search_movie_by_category() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -128,17 +129,22 @@ async fn nzbgeek_search_movie_by_category() {
         .expect("search should succeed")
         .results;
 
-    // Verify the first request was a structured movie search with IMDB ID
+    // Capability discovery may precede the first structured movie search.
     let requests = ctx
         .nzbgeek_server
         .received_requests()
         .await
         .expect("should capture search request");
-    assert!(
-        !requests.is_empty(),
-        "at least one request should have been made"
-    );
-    let query: std::collections::HashMap<String, String> = requests[0]
+    let first_search = requests
+        .iter()
+        .find(|request| {
+            !request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "t" && value == "caps")
+        })
+        .expect("at least one search request should have been made");
+    let query: std::collections::HashMap<String, String> = first_search
         .url
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -182,6 +188,7 @@ async fn nzbgeek_search_movie_extracts_size() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -222,6 +229,7 @@ async fn nzbgeek_search_movie_extracts_download_url() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -270,6 +278,7 @@ async fn nzbgeek_search_series_by_category() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -308,6 +317,7 @@ async fn nzbgeek_search_series_endpoint_by_anime_category() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -347,6 +357,7 @@ async fn nzbgeek_search_series_endpoint_by_series_category() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -387,6 +398,7 @@ async fn nzbgeek_search_infers_movie_from_imdb_id() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -426,6 +438,7 @@ async fn nzbgeek_search_infers_series_endpoint_from_tvdb_id() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -466,6 +479,7 @@ async fn nzbgeek_search_generic_without_ids() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -508,6 +522,7 @@ async fn nzbgeek_search_empty_results() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -546,6 +561,7 @@ async fn nzbgeek_search_single_item_response() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -576,7 +592,7 @@ async fn nzbgeek_search_no_api_key_fails() {
         is_enabled: true,
         enable_interactive_search: true,
         enable_auto_search: true,
-        indexer_proxy_config_id: None,
+        proxy_config_id: None,
         download_client_id: None,
         seeding_profile_id: None,
         managed_parent_config_id: None,
@@ -616,6 +632,7 @@ async fn nzbgeek_search_no_api_key_fails() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -648,6 +665,7 @@ async fn nzbgeek_search_http_error() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -684,6 +702,7 @@ async fn nzbgeek_search_rate_limited() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -731,6 +750,7 @@ async fn nzbgeek_search_server_error_is_deferred() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -773,6 +793,7 @@ async fn nzbgeek_search_empty_query_and_no_ids_fails() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -816,6 +837,7 @@ async fn newznab_search_extracts_standard_metadata_attributes() {
             None,
             None,
             None, // absolute_episode
+            None, // year
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),

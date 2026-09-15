@@ -565,7 +565,10 @@ fn a_cour_named_for_the_series_anchors_nothing() {
     assert_eq!(resolution, NumberingResolution::Unchanged);
 }
 
-/// A name shared by two community seasons pins neither.
+/// A name shared by two community seasons pins neither, and it refuses the
+/// release outright rather than leaving the catalog's own reading standing:
+/// the release names a cour, so reading its number series-wide would place it
+/// on an episode nothing in the release pointed at.
 #[test]
 fn a_name_shared_by_two_cours_anchors_nothing() {
     let mut shared = bridge();
@@ -585,7 +588,12 @@ fn a_name_shared_by_two_cours_anchors_nothing() {
         None,
     );
 
-    assert_eq!(resolution, NumberingResolution::Unchanged);
+    assert!(
+        resolution.is_ambiguous(),
+        "a shared cour name must refuse the release, got {resolution:?}"
+    );
+    assert_eq!(resolution.resolved(), None);
+    assert_ne!(resolution, NumberingResolution::Unchanged);
 }
 
 /// The shape this rule exists for. Groups that title a release after its cour
@@ -1293,6 +1301,10 @@ fn ambiguous_exact_titles_block_fuzzy_and_whole_pack_widening() {
         NumberingResolution::UnresolvedPack
     );
 
+    // The ambiguous cour name blocks the absolute reading too. A release that
+    // names a cour is numbered within that cour, so when the name answers to
+    // two of them the series-wide absolute reading is not a safe fallback —
+    // it is a different episode. Refuse instead.
     let episodic = resolve(
         &ambiguous,
         &title(SERIES_NAME),
@@ -1304,13 +1316,12 @@ fn ambiguous_exact_titles_block_fuzzy_and_whole_pack_widening() {
         ],
         None,
     );
-    assert_eq!(
-        episodic
-            .resolved()
-            .expect("catalog absolute candidate")
-            .kind,
-        NumberingCandidateKind::Absolute
+    assert!(
+        episodic.is_ambiguous(),
+        "an ambiguous cour name must refuse the release, got {episodic:?}"
     );
+    assert_eq!(episodic.resolved(), None);
+    assert_ne!(episodic, NumberingResolution::Unchanged);
 }
 
 #[test]

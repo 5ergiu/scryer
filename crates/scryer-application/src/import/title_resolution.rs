@@ -27,6 +27,7 @@ pub(crate) struct MonitoredTitleMatcherCache {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MonitoredTitleMatcher {
+    spelling_index: Arc<crate::title_matching::relaxed::SpellingIndex>,
     titles: Vec<Title>,
     normalized_title_index: HashMap<String, Vec<usize>>,
     imdb_index: HashMap<String, Vec<usize>>,
@@ -56,7 +57,10 @@ pub(crate) fn strip_trailing_year_key(key: &str) -> &str {
 
 impl MonitoredTitleMatcher {
     pub(crate) fn new(titles: Vec<Title>) -> Self {
-        let mut matcher = Self::default();
+        let mut matcher = Self {
+            spelling_index: Arc::new(crate::title_matching::relaxed::SpellingIndex::new(&titles)),
+            ..Self::default()
+        };
 
         for title in &titles {
             for normalized in crate::acquisition_release_search::canonical_title_lookup_keys(title)
@@ -132,6 +136,19 @@ impl MonitoredTitleMatcher {
                 .get(strip_trailing_year_key(key))
                 .is_some_and(|ids| ids.iter().any(|id| id != title_id))
         })
+    }
+
+    pub(crate) fn identity_ambiguity(
+        &self,
+        title: &Title,
+    ) -> crate::acquisition_release_search::TitleIdentityAmbiguity {
+        crate::acquisition_release_search::TitleIdentityAmbiguity {
+            shared_lookup_keys: self.shared_lookup_keys(
+                &title.id,
+                &crate::acquisition_release_search::canonical_title_lookup_keys(title),
+            ),
+            spelling_index: Some(self.spelling_index.clone()),
+        }
     }
 
     pub(crate) fn resolve_movie<'a>(
@@ -303,6 +320,29 @@ impl MonitoredTitleMatcher {
             }
         }
 
+        if any_matches.is_empty() {
+            let (anchors, _) =
+                crate::title_matching::relaxed::neutral_spelling_anchors(&parsed.raw_title);
+            let ids = self.spelling_index.candidates(&anchors, None);
+            for title in self
+                .titles
+                .iter()
+                .filter(|title| ids.contains(&title.id) && filter(title))
+            {
+                let evidence = crate::acquisition_release_search::canonical_title_evidence(title)
+                    .with_ambiguity(self.identity_ambiguity(title));
+                if crate::acquisition_release_search::match_parsed_release_to_title_evidence(
+                    parsed, &evidence,
+                )
+                .is_some()
+                {
+                    any_matches.push(title);
+                    if parsed.year.is_some() && parsed.year == title.year {
+                        year_matches.push(title);
+                    }
+                }
+            }
+        }
         (year_matches, any_matches)
     }
 }
@@ -366,6 +406,17 @@ pub(crate) fn resolve_monitored_movie_title_from_release<'a>(
                 }
             })
         })
+        .or_else(|| {
+            let matcher = MonitoredTitleMatcher::new(titles.to_vec());
+            let resolved = matcher.resolve_movie(parsed)?;
+            titles
+                .iter()
+                .find(|title| title.id == resolved.title.id)
+                .map(|title| ResolvedMonitoredTitle {
+                    title,
+                    match_type: resolved.match_type,
+                })
+        })
 }
 
 pub(crate) fn resolve_monitored_episode_title_from_release<'a>(
@@ -393,6 +444,17 @@ pub(crate) fn resolve_monitored_episode_title_from_release<'a>(
                 }
             })
         })
+        .or_else(|| {
+            let matcher = MonitoredTitleMatcher::new(titles.to_vec());
+            let resolved = matcher.resolve_episode(parsed, facet_hint)?;
+            titles
+                .iter()
+                .find(|title| title.id == resolved.title.id)
+                .map(|title| ResolvedMonitoredTitle {
+                    title,
+                    match_type: resolved.match_type,
+                })
+        })
 }
 
 pub(crate) fn normalize_imdb_id(raw_imdb_id: &str) -> Option<String> {
@@ -408,6 +470,9 @@ fn episodic_facet_matches_hint(facet: MediaFacet, facet_hint: Option<&str>) -> b
 }
 
 fn normalized_release_title_candidates(parsed: &ParsedReleaseMetadata) -> Vec<String> {
+    if !parsed.raw_title.is_ascii() {
+        return crate::title_matching::relaxed::neutral_spelling_anchors(&parsed.raw_title).0;
+    }
     let raw_candidates = if parsed.normalized_title_variants.is_empty() {
         vec![parsed.normalized_title.clone()]
     } else {
@@ -813,6 +878,36 @@ mod tests {
                 .expect("contextual match");
 
         assert_eq!(matched.id, titles[1].id);
+    }
+
+    /// Import and manual-import candidacy both run through
+    /// `collect_name_matches`, which falls back to the same canonical relaxed
+    /// matcher acquisition uses. A downloaded file named in romaji must
+    /// resolve to the title whose romanized alias spells the name another way.
+    #[test]
+    fn resolves_a_romanized_file_name_to_the_tagged_romaji_alias() {
+        let mut title = test_title(
+            "Fullmetal Alchemist Brotherhood",
+            MediaFacet::Anime,
+            None,
+            &[],
+        );
+        title.metadata_language = Some("eng".into());
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                .into(),
+            language: "x-jat".into(),
+        }];
+        let title_id = title.id.clone();
+        let matcher = MonitoredTitleMatcher::new(vec![title]);
+        let parsed = crate::parse_release_metadata(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+        );
+
+        let matched = matcher
+            .resolve_episode(&parsed, Some("anime"))
+            .expect("a romanized file name must resolve to the romaji alias");
+        assert_eq!(matched.title.id, title_id);
     }
 
     #[test]

@@ -117,7 +117,6 @@ type SettingsPluginsSectionProps = {
   autoUpdateLoading: boolean;
   autoUpdateSaving: boolean;
   remoteActionsBlocked: {
-    refresh: boolean;
     install: boolean;
     installManual: boolean;
     upgrade: boolean;
@@ -423,6 +422,7 @@ function PluginTable({
               data-plugin-installed={plugin.isInstalled ? "true" : "false"}
               data-plugin-enabled={plugin.isEnabled ? "true" : "false"}
               data-plugin-update-available={plugin.updateAvailable ? "true" : "false"}
+              data-plugin-blocked={plugin.blockedReason ? "true" : "false"}
               data-ui="settings-plugin-table-row"
               className={PLUGIN_TABLE_ROW_CLASS}
             >
@@ -441,6 +441,14 @@ function PluginTable({
                     <div className={`whitespace-normal break-words text-xs ${PLUGIN_MUTED_TEXT_CLASS}`}>
                       {plugin.description}
                     </div>
+                    {plugin.blockedReason && (
+                      <div
+                        data-ui="settings-plugin-blocked-reason"
+                        className="mt-1 whitespace-normal break-words text-xs text-destructive"
+                      >
+                        {plugin.blockedReason}
+                      </div>
+                    )}
                     {(sourceLink || showDocsLink) && (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                         {sourceLink && (
@@ -522,14 +530,31 @@ function PluginTable({
                   {isDownloadedBuiltinOverride(plugin) && (
                     <Badge tone="warning">{t("settings.pluginOverride")}</Badge>
                   )}
+                  {plugin.blockedReason && (
+                    <Badge tone="negative">{t("settings.pluginBlocked")}</Badge>
+                  )}
                 </div>
               </TableCell>
               {showActions === "installed" && (
                 <TableCell className={cn(enabledColumnClass, PLUGIN_TABLE_CELL_CLASS)}>
-                  <RenderBooleanIcon
-                    value={plugin.isEnabled}
-                    label={`${t("label.enabled")}: ${plugin.name}`}
-                  />
+                  {plugin.blockedReason ? (
+                    // The plugin is still switched on and its configuration is
+                    // retained, but it is not running. A checkmark here read as
+                    // "working", which is the opposite of the truth.
+                    <span
+                      data-ui="settings-plugin-enabled-blocked"
+                      title={plugin.blockedReason}
+                      aria-label={`${t("settings.pluginBlocked")}: ${plugin.name}`}
+                      className="text-xs font-medium text-destructive"
+                    >
+                      {t("settings.pluginBlockedNotRunning")}
+                    </span>
+                  ) : (
+                    <RenderBooleanIcon
+                      value={plugin.isEnabled}
+                      label={`${t("label.enabled")}: ${plugin.name}`}
+                    />
+                  )}
                 </TableCell>
               )}
               <TableActionsCell className={cn(actionsColumnClass, PLUGIN_TABLE_CELL_CLASS)}>
@@ -725,7 +750,7 @@ export function SettingsPluginsSection({
         variant="outline"
         size="sm"
         className="h-9"
-        disabled={refreshing || remoteActionsBlocked.refresh}
+        disabled={refreshing}
         onClick={onRefreshRegistry}
       >
         <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />

@@ -565,6 +565,7 @@ impl NotificationPluginProvider for TestNotificationPluginProvider {
             host_binding: None,
             options: Vec::new(),
             help_text: None,
+            ..Default::default()
         }]
     }
 
@@ -611,6 +612,7 @@ impl DomainEventRepository for TestDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
     ) -> AppResult<i64> {
         Ok(0)
@@ -630,6 +632,7 @@ impl DomainEventRepository for TestDomainEventRepository {
         &self,
         _: Option<&[TitleHistoryEventType]>,
         _: Option<&[String]>,
+        _: bool,
         _: Option<&str>,
         _: usize,
         _: usize,
@@ -691,7 +694,6 @@ fn app_with_repository_and_verifier(
         services,
         JwtAuthConfig {
             issuer: "scryer-test".to_string(),
-            access_ttl_seconds: 3600,
             jwt_signing_salt: "test-salt".to_string(),
         },
         Arc::new(FacetRegistry::new()),

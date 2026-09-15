@@ -827,7 +827,6 @@ async fn graphql_introspection_exposes_typed_timestamps_as_datetime() {
         ("postProcessingScriptRun", "id"),
         ("postProcessingScriptRun", "scriptId"),
         ("titleHistoryEvent", "id"),
-        ("titleHistoryEvent", "titleId"),
         ("restoreInspect", "uploadId"),
         // 0.17.0: QueueDownloadScopePayload became a union; the scope ids are
         // non-null fields on the member payloads now.
@@ -849,6 +848,10 @@ async fn graphql_introspection_exposes_typed_timestamps_as_datetime() {
         ("domainEventEnvelope", "titleId"),
         ("libraryScanProgress", "libraryId"),
         ("postProcessingScriptRun", "titleId"),
+        // FR-026: an unlinked grab is recorded as history against the release
+        // and the indexer, with no catalog title behind it, so a history event
+        // legitimately has no `titleId`.
+        ("titleHistoryEvent", "titleId"),
         ("titleHistoryEvent", "episodeId"),
         ("titleHistoryEvent", "collectionId"),
         ("titleHistoryEvent", "actorUserId"),
@@ -1808,6 +1811,7 @@ async fn graphql_traverses_core_graph_relationships() {
         &ctx.media_files,
         &file_id,
         scryer_application::MediaFileAnalysis {
+            details: Default::default(),
             video_codec: None,
             video_width: Some(1920),
             video_height: Some(1080),
@@ -2181,7 +2185,12 @@ async fn graphql_manual_import_schema_exposes_candidate_only_contract() {
     assert_eq!(field_names("queueInput"), ["selectionId", "files"]);
     assert_eq!(
         field_names("mappingInput"),
-        ["candidateId", "episodeId", "seriesMovieLinkId"]
+        [
+            "candidateId",
+            "episodeId",
+            "seriesMovieLinkId",
+            "discSelection"
+        ]
     );
     assert_eq!(
         field_names("selectionInput"),

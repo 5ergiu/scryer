@@ -30,6 +30,14 @@ impl DomainEventRepository for DomainEventStore {
             .ok_or_else(|| AppError::Repository("failed to append domain event".into()))
     }
 
+    async fn append_once(&self, event: NewDomainEvent) -> AppResult<DomainEvent> {
+        append_domain_events_once(&self.datastore, vec![event])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::Repository("failed to append domain event".into()))
+    }
+
     async fn append_many(&self, events: Vec<NewDomainEvent>) -> AppResult<Vec<DomainEvent>> {
         append_domain_events(&self.datastore, events).await
     }
@@ -54,10 +62,16 @@ impl DomainEventRepository for DomainEventStore {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
     ) -> AppResult<i64> {
-        let (where_sql, args) =
-            build_title_history_filter_sql(&self.datastore, event_types, title_ids, download_id);
+        let (where_sql, args) = build_title_history_filter_sql(
+            &self.datastore,
+            event_types,
+            title_ids,
+            include_titleless,
+            download_id,
+        );
         let row = SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
             &format!("SELECT COUNT(*) AS count FROM domain_events{where_sql}"),
@@ -72,13 +86,19 @@ impl DomainEventRepository for DomainEventStore {
         &self,
         event_types: Option<&[TitleHistoryEventType]>,
         title_ids: Option<&[String]>,
+        include_titleless: bool,
         download_id: Option<&str>,
         limit: usize,
         offset: usize,
     ) -> AppResult<Vec<DomainEvent>> {
         let page_size = if limit == 0 { 50 } else { limit.min(500) };
-        let (where_sql, mut args) =
-            build_title_history_filter_sql(&self.datastore, event_types, title_ids, download_id);
+        let (where_sql, mut args) = build_title_history_filter_sql(
+            &self.datastore,
+            event_types,
+            title_ids,
+            include_titleless,
+            download_id,
+        );
         args.push(SqlArg::I64(page_size as i64));
         args.push(SqlArg::I64(offset as i64));
         fetch_domain_events(
@@ -298,6 +318,73 @@ mod title_history_filter_tests {
         event
     }
 
+    #[tokio::test]
+    async fn title_move_history_is_idempotent_and_filterable() {
+        let store = store().await;
+        let event = event_with_payload(
+            "location:op:title-1",
+            DomainEventPayload::TitleMoved(scryer_domain::TitleMovedEventData {
+                title: title_snapshot(),
+                operation_id: "op".into(),
+                operation_type: "root_move".into(),
+                mode: "move_with_scryer".into(),
+                source_title_id: "title-1".into(),
+                source_title_name: "Projection Test".into(),
+                source_library_id: "library".into(),
+                source_library_name: "Movies".into(),
+                destination_library_id: "library".into(),
+                destination_library_name: "Movies".into(),
+                source_root_id: "old".into(),
+                destination_root_id: "new".into(),
+                source_path: Some("/old/Film".into()),
+                destination_path: Some("/new/Film".into()),
+                completed_with_warnings: true,
+                detail: Some("Kept both versions of season.nfo".into()),
+            }),
+        );
+        let (first, replay) = tokio::join!(
+            store.append_once(event.clone()),
+            store.append_once(event.clone())
+        );
+        let first = first.unwrap();
+        assert_eq!(first, replay.unwrap());
+        let mut changed_replay = event.clone();
+        changed_replay.occurred_at += chrono::Duration::hours(1);
+        assert_eq!(store.append_once(changed_replay).await.unwrap(), first);
+        assert!(
+            store.append(event).await.is_err(),
+            "ordinary append still rejects duplicate IDs"
+        );
+        for filter in [None, Some(&[TitleHistoryEventType::TitleMoved][..])] {
+            let page = store
+                .list_title_history_page_events(
+                    filter,
+                    Some(&["title-1".into()]),
+                    false,
+                    None,
+                    50,
+                    0,
+                )
+                .await
+                .unwrap();
+            assert_eq!(page, vec![first.clone()]);
+            assert_eq!(
+                store
+                    .count_title_history_page_events(filter, None, false, None)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert!(
+                store
+                    .list_title_history_page_events(filter, None, false, None, 50, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
     /// Filtering the history page by "download ignored" used to push a literal
     /// never-match clause, so the filtered page came back empty while the
     /// unfiltered page showed the very same rows.
@@ -310,7 +397,7 @@ mod title_history_filter_tests {
             .expect("event should append");
 
         let unfiltered = store
-            .list_title_history_page_events(None, None, None, 50, 0)
+            .list_title_history_page_events(None, None, false, None, 50, 0)
             .await
             .expect("unfiltered page should load");
         assert_eq!(unfiltered.len(), 1, "the row is on the unfiltered page");
@@ -319,6 +406,7 @@ mod title_history_filter_tests {
             .list_title_history_page_events(
                 Some(&[TitleHistoryEventType::DownloadIgnored]),
                 None,
+                false,
                 None,
                 50,
                 0,
@@ -333,11 +421,113 @@ mod title_history_filter_tests {
                 .count_title_history_page_events(
                     Some(&[TitleHistoryEventType::DownloadIgnored]),
                     None,
+                    false,
                     None
                 )
                 .await
                 .expect("filtered count should load"),
             1
+        );
+    }
+
+    /// FR-026: an unlinked grab has no catalog title behind it, so its domain
+    /// event carries a NULL `title_id`. The history page filter opened with an
+    /// unconditional `title_id IS NOT NULL`, which deleted those rows in SQL
+    /// before any projection ran - the unfiltered History page simply never
+    /// showed them. They belong on the unfiltered page, and only an actual
+    /// title filter may exclude them.
+    #[tokio::test]
+    async fn an_untitled_grab_is_on_the_unfiltered_history_page() {
+        let store = store().await;
+        let mut untitled = event_with_payload(
+            "event-untitled-grab",
+            DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
+                title: title_snapshot(),
+                source_title: Some("Example.2026.1080p.WEB-DL".to_string()),
+                source_hint: Some("https://indexer.example/api".to_string()),
+                source_provider: Some("Configured Indexer".to_string()),
+                download_id: Some("download-1".to_string()),
+                episode_ids: Vec::new(),
+            }),
+        );
+        untitled.title_id = None;
+        untitled.facet = None;
+        untitled.stream = DomainEventStream::Global;
+        store.append(untitled).await.expect("event should append");
+        store
+            .append(download_ignored_event())
+            .await
+            .expect("titled event should append");
+
+        let unfiltered = store
+            .list_title_history_page_events(None, None, false, None, 50, 0)
+            .await
+            .expect("unfiltered page should load");
+        assert_eq!(
+            unfiltered.len(),
+            2,
+            "both the titled and the untitled row are on the unfiltered page"
+        );
+        assert!(
+            unfiltered
+                .iter()
+                .any(|event| event.event_id == "event-untitled-grab"),
+            "the untitled grab is one of them"
+        );
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, None, false, None)
+                .await
+                .expect("unfiltered count should load"),
+            2
+        );
+
+        let grabs = store
+            .list_title_history_page_events(
+                Some(&[TitleHistoryEventType::Grabbed]),
+                None,
+                false,
+                None,
+                50,
+                0,
+            )
+            .await
+            .expect("event-type filtered page should load");
+        assert_eq!(grabs.len(), 1, "and survives its own event-type filter");
+        assert_eq!(grabs[0].event_id, "event-untitled-grab");
+
+        let title_scoped = store
+            .list_title_history_page_events(None, Some(&["title-1".into()]), false, None, 50, 0)
+            .await
+            .expect("title-scoped page should load");
+        assert_eq!(
+            title_scoped.len(),
+            1,
+            "a title filter still excludes it: it has no catalog title to match"
+        );
+        assert_eq!(title_scoped[0].event_id, "event-1");
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, Some(&["title-1".into()]), false, None)
+                .await
+                .expect("title-scoped count should load"),
+            1
+        );
+
+        // The same scope, widened: this is what /activity/history sends, where
+        // the title list is the caller's library authorization rather than a
+        // title the user chose, so the untitled grab comes back alongside.
+        let authorization_scoped = store
+            .list_title_history_page_events(None, Some(&["title-1".into()]), true, None, 50, 0)
+            .await
+            .expect("authorization-scoped page should load");
+        assert_eq!(authorization_scoped.len(), 2, "{authorization_scoped:?}");
+        assert_eq!(
+            store
+                .count_title_history_page_events(None, Some(&["title-1".into()]), true, None)
+                .await
+                .expect("authorization-scoped count should load"),
+            2
         );
     }
 
@@ -355,6 +545,7 @@ mod title_history_filter_tests {
             .list_title_history_page_events(
                 Some(&[TitleHistoryEventType::DownloadCompleted]),
                 None,
+                false,
                 None,
                 50,
                 0,

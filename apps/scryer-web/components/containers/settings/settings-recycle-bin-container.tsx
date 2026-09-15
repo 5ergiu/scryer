@@ -374,15 +374,26 @@ export function SettingsRecycleBinContainer() {
   };
 
   const confirmEmpty = async () => {
-    if (!canManageItems) return;
+    if (!canManageItems || pendingAction?.type !== "empty") return;
     setMutatingId("__empty__");
     try {
       const { data, error } = await client
-        .mutation(emptyRecycleBinMutation, { libraryIds: selectedLibraryIdsToQueryValue(selectedLibraryIds) })
+        .mutation<{ emptyRecycleBin?: { jobRun?: unknown } }>(
+          emptyRecycleBinMutation,
+          { libraryIds: selectedLibraryIdsToQueryValue(selectedLibraryIds) },
+        )
         .toPromise();
       if (error) throw error;
-      setGlobalStatus(t("status.recycleBinEmptied", { count: data?.emptyRecycleBin?.purgedCount ?? 0 }));
-      await fetchItems();
+      registerBatchJob(
+        data?.emptyRecycleBin?.jobRun,
+        items.map((item) => item.id),
+        t(
+          pendingAction.count === 1
+            ? "settings.recycleBinDeleteQueuedOne"
+            : "settings.recycleBinDeleteQueuedOther",
+          { count: pendingAction.count },
+        ),
+      );
       setPendingAction(null);
     } catch (error) {
       setGlobalStatus(error instanceof Error ? error.message : t("status.failedToDelete"));

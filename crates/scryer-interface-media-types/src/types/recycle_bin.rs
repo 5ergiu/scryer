@@ -127,8 +127,8 @@ pub struct DeleteRecycledItemPayload {
 }
 
 #[derive(SimpleObject, Clone)]
-/// Count of files permanently purged from the recycle bin.
+/// Accepted background request to empty the selected recycle bins.
 pub struct EmptyRecycleBinPayload {
-    /// Number of recycle-bin entries purged.
-    pub purged_count: i32,
+    /// Background job whose result reports the number of entries purged.
+    pub job_run: JobRunPayload,
 }

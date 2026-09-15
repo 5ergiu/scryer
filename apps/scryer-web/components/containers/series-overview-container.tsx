@@ -1,5 +1,7 @@
 
 import * as React from "react";
+import { useAutomaticSearch } from "@/lib/hooks/use-automatic-search";
+import { parseSearchSeason } from "@/lib/utils/automatic-search";
 import { facetById } from "@/lib/facets/registry";
 import {
   deleteEpisodeFilesPreviewQuery,
@@ -27,7 +29,6 @@ import {
   setPrimaryMovieFileMutation,
   setSeriesMovieMonitoredMutation,
   setTitleMonitoredMutation,
-  triggerAcquisitionSearchMutation,
   updateTitleMutation,
 } from "@/lib/graphql/mutations";
 import type { DownloadQueueItem } from "@/lib/types/download-queue";
@@ -43,6 +44,10 @@ import {
   hasPrimaryMediaFile,
   releaseQueueScopeInput,
 } from "@/lib/utils/release-queue-scope";
+import {
+  drainDeferredCollectionEpisodeRefresh,
+  planCollectionEpisodeRefresh,
+} from "@/lib/utils/title-overview-refresh-policy";
 import {
   episodeIdsForEpisodeRecord,
   mergeLoadedEpisodeDetailsForCollections,
@@ -71,14 +76,19 @@ import type { OverviewTitleTarget } from "@/components/root/types";
 import type { TitleOptionUpdates } from "@/lib/types/title-options";
 import type {
   CanonicalMediaTag,
+  LibraryRecord,
   LibraryRootRecord,
   TitleCreditRecord,
 } from "@/lib/types/titles";
 import { useDeletePreview } from "@/lib/hooks/use-delete-preview";
 import { useJobRunToasts } from "@/components/root/job-run-provider";
 import { normalizeJobRun } from "@/lib/utils/job-runs";
+import { mediaFileOwnerKeys } from "@/lib/utils/media-file-owners";
 import type { JobRun } from "@/lib/types/jobs";
-import type { DeleteEpisodeFilesPreview } from "@/lib/types/delete-preview";
+import {
+  episodeIdsCoveredByEpisodeFileDelete,
+  type DeleteEpisodeFilesPreview,
+} from "@/lib/types/delete-preview";
 import {
   assertNoReplaceConflict,
   retryWithReplaceOnConflict,
@@ -106,6 +116,7 @@ const SERIES_OVERVIEW_IMPORT_REFRESH_KINDS = new Set([
 
 export type TitleDetail = {
   id: string;
+  sizeBytes?: number | null;
   name: string;
   facet: string;
   libraryId: string;
@@ -169,6 +180,7 @@ export type TitleCollection = {
   label: string | null;
   orderedPath: string | null;
   narrativeOrder: string | null;
+  sizeBytes?: number | null;
   fileSizeBytes: number | null;
   firstEpisodeNumber: string | null;
   lastEpisodeNumber: string | null;
@@ -223,6 +235,9 @@ export type SeriesMovieLink = {
   monitoringOverride: boolean | null;
   metadataActive: boolean;
   monitored: boolean;
+  /// User tags on the link itself. A series movie is not a title, so this is
+  /// its own bag rather than the series title's.
+  tags?: string[] | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -246,6 +261,7 @@ export type CollectionEpisode = {
   seasonNumber: string | null;
   episodeLabel: string | null;
   title: string | null;
+  sizeBytes?: number | null;
   overview?: string | null;
   airDate: string | null;
   durationSeconds: number | null;
@@ -256,7 +272,7 @@ export type CollectionEpisode = {
   monitored: boolean;
   playbackLinks?: import("@/components/common/watch-in-media-server-menu").MediaServerPlaybackLink[];
   mediaAvailability: {
-    state: "AVAILABLE" | "PENDING_SCAN" | "SCAN_FAILED" | "MISSING" | "UNMONITORED";
+    state: "AVAILABLE" | "PENDING_SCAN" | "SCAN_FAILED" | "REVIEW_REQUIRED" | "MISSING" | "UNMONITORED";
     primaryQualityLabel: string | null;
   };
   createdAt: string;
@@ -277,6 +293,8 @@ export type EpisodeMediaFile = {
   videoWidth: number | null;
   videoHeight: number | null;
   videoBitrateKbps: number | null;
+  analysis?: import("@/lib/types/media-analysis").MediaAnalysisDetails;
+  analysisAttempt?: import("@/lib/types/media-analysis").MediaAnalysisAttempt | null;
   videoBitDepth: number | null;
   videoHdrFormat: string | null;
   videoFrameRate: string | null;
@@ -399,6 +417,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
   const setGlobalStatus = useGlobalStatus();
   const { registerInteractiveJobRun } = useJobRunToasts();
   const t = useTranslate();
+  const { startAutomaticSearch, isSearching } = useAutomaticSearch();
   const client = useClient();
   const auth = useAuth();
   const { confirmReplaceConflict, replaceConflictDialog } =
@@ -433,11 +452,20 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     Record<string, boolean>
   >({});
   const collectionEpisodesLoadingRef = React.useRef<Set<string>>(new Set());
+  // Refresh requests that arrived while the collection's own load was in
+  // flight; released by releaseDeferredCollectionRefresh as each load resolves.
+  const deferredCollectionRefreshRef = React.useRef<Set<string>>(new Set());
+  const refreshLoadedCollectionEpisodesRef = React.useRef<
+    (collectionIds: readonly string[]) => void
+  >(() => {});
   const deepLinkResolveAttemptedRef = React.useRef<string | null>(null);
   const [qualityProfiles, setQualityProfiles] = React.useState<{ id: string; name: string }[]>([]);
   const [defaultRootFolder, setDefaultRootFolder] = React.useState(DEFAULT_SERIES_LIBRARY_PATH);
   const [renameEnabled, setRenameEnabled] = React.useState(true);
   const [rootFolders, setRootFolders] = React.useState<LibraryRootRecord[]>([]);
+  // Every library this facet offers, not just the title's own: the move
+  // workflow needs the full list to reach a cross-library destination.
+  const [libraries, setLibraries] = React.useState<LibraryRecord[]>([]);
   const [mediaFilesByEpisode, setMediaFilesByEpisode] = React.useState<
     Record<string, EpisodeMediaFile[]>
   >({});
@@ -577,6 +605,20 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     [],
   );
 
+  const releaseDeferredCollectionRefresh = React.useCallback(
+    (collectionId: string) => {
+      const { rerun, remaining } = drainDeferredCollectionEpisodeRefresh(
+        deferredCollectionRefreshRef.current,
+        collectionId,
+      );
+      deferredCollectionRefreshRef.current = remaining;
+      if (rerun.length > 0) {
+        refreshLoadedCollectionEpisodesRef.current(rerun);
+      }
+    },
+    [],
+  );
+
   const loadCollectionEpisodes = React.useCallback(
     async (collectionId: string, options: { force?: boolean } = {}) => {
       if (!titleId) {
@@ -646,9 +688,10 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
           delete next[collectionId];
           return next;
         });
+        releaseDeferredCollectionRefresh(collectionId);
       }
     },
-    [client, setGlobalStatus, t, titleId],
+    [client, releaseDeferredCollectionRefresh, setGlobalStatus, t, titleId],
   );
 
   const refreshLoadedCollectionEpisodes = React.useCallback(
@@ -657,9 +700,17 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         return;
       }
 
-      const collectionIdsToRefresh = collectionIds.filter(
-        (collectionId) => !collectionEpisodesLoadingRef.current.has(collectionId),
-      );
+      const { refreshNow: collectionIdsToRefresh, deferred } =
+        planCollectionEpisodeRefresh(
+          collectionIds,
+          collectionEpisodesLoadingRef.current,
+        );
+      // The in-flight query was issued before the event that asked for this
+      // refresh, so its answer cannot carry the change. Hold the request until
+      // that load resolves instead of dropping it.
+      for (const collectionId of deferred) {
+        deferredCollectionRefreshRef.current.add(collectionId);
+      }
       if (collectionIdsToRefresh.length === 0) {
         return;
       }
@@ -751,10 +802,19 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
           }
           return changed ? next : current;
         });
+        for (const collectionId of collectionIdsToRefresh) {
+          releaseDeferredCollectionRefresh(collectionId);
+        }
       }
     },
-    [client, setGlobalStatus, t, titleId],
+    [client, releaseDeferredCollectionRefresh, setGlobalStatus, t, titleId],
   );
+
+  React.useEffect(() => {
+    refreshLoadedCollectionEpisodesRef.current = (collectionIds) => {
+      void refreshLoadedCollectionEpisodes(collectionIds);
+    };
+  }, [refreshLoadedCollectionEpisodes]);
 
   const applySidePanelOverviewSnapshot = React.useCallback(
     (
@@ -1296,6 +1356,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     setEpisodesByCollection({});
     setCollectionEpisodesLoading({});
     collectionEpisodesLoadingRef.current = new Set();
+    deferredCollectionRefreshRef.current = new Set();
     deepLinkResolveAttemptedRef.current = null;
     setMediaFilesByEpisode({});
     setMediaFilesBySeriesMovieLink({});
@@ -1384,11 +1445,13 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
       const libraryId = title?.libraryId;
       if (!libraryId) {
         setRootFolders([]);
+        setLibraries([]);
         return;
       }
       const facet = facetById(title?.facet)?.id;
       if (!facet) {
         setRootFolders([]);
+        setLibraries([]);
         return;
       }
       try {
@@ -1401,12 +1464,17 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
           .toPromise();
         if (error) throw error;
         if (cancelled) return;
-        const library = (data.libraries ?? []).find(
-          (candidate: { id: string }) => candidate.id === libraryId,
-        );
+        const all: LibraryRecord[] = Array.isArray(data.libraries)
+          ? data.libraries
+          : [];
+        const library = all.find((candidate) => candidate.id === libraryId);
         setRootFolders(Array.isArray(library?.roots) ? library.roots : []);
+        setLibraries(all);
       } catch {
-        if (!cancelled) setRootFolders([]);
+        if (!cancelled) {
+          setRootFolders([]);
+          setLibraries([]);
+        }
       }
     };
     void load();
@@ -1495,22 +1563,14 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
 
     setSearchMonitoredLoading(true);
     try {
-      // One interactive acquisition-search job for this title
-      // replaces the retired per-title trigger mutation.
-      const { error } = await client
-        .mutation(triggerAcquisitionSearchMutation, {
-          input: { titleId: title.id },
-        })
-        .toPromise();
-      if (error) throw error;
-      setGlobalStatus(t("wanted.searchJobStarted"));
+      await startAutomaticSearch(title.id);
     } catch (error: unknown) {
       setGlobalStatus(error instanceof Error ? error.message : t("status.apiError"));
     } finally {
       setSearchMonitoredLoading(false);
     }
   }, [
-    client,
+    startAutomaticSearch,
     hasDownloadClients,
     setGlobalStatus,
     t,
@@ -1647,49 +1707,6 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     setMediaFileDeleteTypedConfirmation("");
   }, [mediaFileDeleteLoading]);
 
-  const handleConfirmDeleteMediaFile = React.useCallback(async () => {
-    if (!mediaFileToDelete || !mediaFileDeletePreview) return;
-    const deletedFileId = mediaFileToDelete.id;
-    setMediaFileDeleteLoading(true);
-    try {
-      const { error } = await client.mutation(deleteMediaFileMutation, {
-        input: {
-          fileId: deletedFileId,
-          deleteFromDisk: true,
-          previewFingerprint: mediaFileDeletePreview.fingerprint,
-          typedConfirmation: mediaFileDeleteTypedConfirmation.trim() || undefined,
-        },
-      }).toPromise();
-      if (error) throw error;
-      const removeDeletedFile = (
-        current: Record<string, EpisodeMediaFile[]>,
-      ): Record<string, EpisodeMediaFile[]> =>
-        Object.fromEntries(
-          Object.entries(current).map(([key, files]) => [
-            key,
-            files.filter((file) => file.id !== deletedFileId),
-          ]),
-        );
-      setMediaFilesByEpisode(removeDeletedFile);
-      setMediaFilesBySeriesMovieLink(removeDeletedFile);
-      await refreshTitleDetail();
-      setMediaFileToDelete(null);
-      setMediaFileDeleteTypedConfirmation("");
-    } catch (error: unknown) {
-      setGlobalStatus(error instanceof Error ? error.message : t("status.apiError"));
-    } finally {
-      setMediaFileDeleteLoading(false);
-    }
-  }, [
-    client,
-    mediaFileDeletePreview,
-    mediaFileDeleteTypedConfirmation,
-    mediaFileToDelete,
-    refreshTitleDetail,
-    setGlobalStatus,
-    t,
-  ]);
-
   React.useEffect(() => {
     const unregisters = episodeFileDeletionUnregistersRef.current;
     return () => {
@@ -1701,7 +1718,11 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
   }, []);
 
   const handleEpisodeFileDeletionTerminal = React.useCallback(
-    async (run: JobRun, targetedEpisodeIds: ReadonlySet<string>) => {
+    async (
+      run: JobRun,
+      targetedEpisodeIds: ReadonlySet<string>,
+      completedMessage?: string,
+    ) => {
       setPendingEpisodeFileDeletionEpisodeIds((current) => {
         const next = new Set(current);
         for (const episodeId of targetedEpisodeIds) {
@@ -1735,14 +1756,83 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
 
       setGlobalStatus(
         run.status === "COMPLETED"
-          ? t("status.episodeFilesDeleted", {
-              count: deletedFileIds?.size ?? targetedEpisodeIds.size,
-            })
+          ? (completedMessage ??
+              t("status.episodeFilesDeleted", {
+                count: deletedFileIds?.size ?? targetedEpisodeIds.size,
+              }))
           : (run.errorText ?? run.summaryText ?? t("status.apiError")),
       );
     },
     [refreshTitleDetail, setGlobalStatus, t],
   );
+
+  // Deleting one file accepts a background job exactly like deleting a whole
+  // episode's files does. The row's availability, its quality pill included,
+  // only changes once that job has run, so wait for the run to finish rather
+  // than refetching a title the job has not touched yet.
+  const handleConfirmDeleteMediaFile = React.useCallback(async () => {
+    if (!mediaFileToDelete || !mediaFileDeletePreview) return;
+    const deletedFileId = mediaFileToDelete.id;
+    const targetedEpisodeIds = mediaFileOwnerKeys(deletedFileId, [
+      mediaFilesByEpisode,
+      mediaFilesBySeriesMovieLink,
+    ]);
+    setMediaFileDeleteLoading(true);
+    try {
+      const { data, error } = await client.mutation<{
+        deleteMediaFile?: { jobRun?: unknown };
+      }>(deleteMediaFileMutation, {
+        input: {
+          fileId: deletedFileId,
+          deleteFromDisk: true,
+          previewFingerprint: mediaFileDeletePreview.fingerprint,
+          typedConfirmation: mediaFileDeleteTypedConfirmation.trim() || undefined,
+        },
+      }).toPromise();
+      if (error) throw error;
+      const run = normalizeJobRun(data?.deleteMediaFile?.jobRun);
+      if (!run) {
+        throw new Error(t("status.apiError"));
+      }
+
+      setPendingEpisodeFileDeletionEpisodeIds((current) => {
+        const next = new Set(current);
+        for (const episodeId of targetedEpisodeIds) {
+          next.add(episodeId);
+        }
+        return next;
+      });
+      const unregister = registerInteractiveJobRun(run, (terminalRun) => {
+        unregister();
+        episodeFileDeletionUnregistersRef.current.delete(unregister);
+        void handleEpisodeFileDeletionTerminal(
+          terminalRun,
+          targetedEpisodeIds,
+          t("status.mediaFileDeleted"),
+        );
+      });
+      episodeFileDeletionUnregistersRef.current.add(unregister);
+
+      setGlobalStatus(t("status.mediaFileDeleteQueued"));
+      setMediaFileToDelete(null);
+      setMediaFileDeleteTypedConfirmation("");
+    } catch (error: unknown) {
+      setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.apiError")));
+    } finally {
+      setMediaFileDeleteLoading(false);
+    }
+  }, [
+    client,
+    handleEpisodeFileDeletionTerminal,
+    mediaFileDeletePreview,
+    mediaFileDeleteTypedConfirmation,
+    mediaFileToDelete,
+    mediaFilesByEpisode,
+    mediaFilesBySeriesMovieLink,
+    registerInteractiveJobRun,
+    setGlobalStatus,
+    t,
+  ]);
 
   const handleRequestDeleteEpisodeFiles = React.useCallback((episodeIds: string[]) => {
     if (episodeIds.length === 0) return;
@@ -1762,8 +1852,8 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     // Captured before the request so the terminal handler can restore exactly
     // the rows this run locked, and drop their cached files if the run does not
     // report which files it removed.
-    const targetedEpisodeIds = new Set(
-      (episodeFilesDeletePreviewPayload?.items ?? []).map((item) => item.episodeId),
+    const targetedEpisodeIds = episodeIdsCoveredByEpisodeFileDelete(
+      episodeFilesDeletePreviewPayload?.items ?? [],
     );
     setEpisodeFilesDeleteLoading(true);
     try {
@@ -1861,12 +1951,11 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     (mediaFileDeletePreview.requiresTypedConfirmation &&
       mediaFileDeleteTypedConfirmation.trim() !== "DELETE");
   // Selected episodes without any media file contribute nothing to the delete,
-  // so the summary counts the episodes the preview actually resolved files for.
+  // so the summary counts the episodes the preview actually resolved files for,
+  // including every episode a shared multi-episode file covers.
   const episodeFilesDeleteEpisodeCount = React.useMemo(
     () =>
-      new Set(
-        (episodeFilesDeletePreviewPayload?.items ?? []).map((item) => item.episodeId),
-      ).size,
+      episodeIdsCoveredByEpisodeFileDelete(episodeFilesDeletePreviewPayload?.items ?? []).size,
     [episodeFilesDeletePreviewPayload],
   );
   const deleteEpisodeFilesConfirmDisabled =
@@ -1902,10 +1991,14 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: title.name }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, title.name) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, title.name);
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       }
     },
     [refreshTitleDetail, client, confirmReplaceConflict, title, t, setGlobalStatus],
@@ -1935,10 +2028,14 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: link.movie.title }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, link.movie.title) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, link.movie.title);
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       }
     },
     [refreshTitleDetail, client, confirmReplaceConflict, title, t, setGlobalStatus],
@@ -1954,26 +2051,22 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
   const handleRunSeasonSearch = React.useCallback(
     async (collection: TitleCollection) => {
       if (!title) return;
-      const seasonNum = parseInt(collection.collectionIndex?.trim().replace(/\D+/g, "") || "0", 10);
-      if (!seasonNum) return;
+      const seasonNum = parseSearchSeason(collection.collectionIndex);
+      if (seasonNum === null) {
+        setGlobalStatus(t("wanted.searchInvalidSeason"));
+        return;
+      }
 
       setSeasonSearchLoadingByCollection((prev) => ({ ...prev, [collection.id]: true }));
       try {
-        // A season search is the interactive job scoped to one season.
-        const { error } = await client
-          .mutation(triggerAcquisitionSearchMutation, {
-            input: { titleId: title.id, seasonNumber: seasonNum },
-          })
-          .toPromise();
-        if (error) throw error;
-        setGlobalStatus(t("wanted.searchJobStarted"));
+        await startAutomaticSearch(title.id, seasonNum);
       } catch (error: unknown) {
         setGlobalStatus(error instanceof Error ? error.message : t("status.apiError"));
       } finally {
         setSeasonSearchLoadingByCollection((prev) => ({ ...prev, [collection.id]: false }));
       }
     },
-    [client, setGlobalStatus, t, title],
+    [startAutomaticSearch, setGlobalStatus, t, title],
   );
 
   const handleQueueFromSeasonSearch = React.useCallback(
@@ -2014,7 +2107,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: title.name }));
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [
@@ -2071,6 +2164,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         onSetCollectionMonitored={handleSetCollectionMonitored}
         onSetEpisodeMonitored={handleSetEpisodeMonitored}
         onSetSeriesMovieMonitored={handleSetSeriesMovieMonitored}
+        onSeriesMovieTagsChanged={refreshTitleDetail}
         onSetTitleMonitored={handleSetTitleMonitored}
         onSearchMonitored={handleSearchMonitored}
         onAutoSearchEpisode={handleAutoSearchEpisode}
@@ -2082,16 +2176,21 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         defaultRootFolder={defaultRootFolder}
         renameEnabled={renameEnabled}
         rootFolders={rootFolders}
+        libraries={libraries}
         onUpdateTitleOptions={handleUpdateTitleOptions}
         completedDownloads={completedDownloads}
         onOpenManualImport={handleOpenManualImport}
         initialEpisodeId={initialEpisodeId}
         seasonSearchResultsByCollection={seasonSearchResultsByCollection}
-        seasonSearchLoadingByCollection={seasonSearchLoadingByCollection}
+        seasonSearchLoadingByCollection={Object.fromEntries(collections.map((collection) => {
+          const season = parseSearchSeason(collection.collectionIndex);
+          return [collection.id, seasonSearchLoadingByCollection[collection.id] === true ||
+            (!!title && season !== null && isSearching(title.id, season))];
+        }))}
         onRunSeasonSearch={handleRunSeasonSearch}
         onQueueFromSeasonSearch={handleQueueFromSeasonSearch}
         monitoredUpdating={monitoredUpdating}
-        searchMonitoredLoading={searchMonitoredLoading}
+        searchMonitoredLoading={searchMonitoredLoading || (!!title && isSearching(title.id))}
         onRefreshAndScan={handleRefreshAndScan}
         refreshAndScanLoading={refreshAndScanLoading}
         onRequestDeleteTitle={handleRequestDeleteTitle}
@@ -2216,6 +2315,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
       </ConfirmDialog>
       {manualImportItem && title && (
         <ManualImportDialog
+          facet={title.facet}
           open={true}
           onOpenChange={(open) => { if (!open) setManualImportItem(null); }}
           titleId={title.id}

@@ -102,7 +102,7 @@ impl RecycleBinMutations {
         })
     }
 
-    /// Empty recycle bins for the selected libraries. Returns the number of items purged.
+    /// Empty recycle bins for the selected libraries using a background job.
     async fn empty_recycle_bin(
         &self,
         ctx: &Context<'_>,
@@ -114,11 +114,12 @@ impl RecycleBinMutations {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
         let library_ids = library_ids.map(|ids| ids.into_iter().map(|id| id.to_string()).collect());
-        let purged_count = app
-            .empty_recycle_bin(&actor, library_ids)
+        let job_run = app
+            .start_empty_recycle_bin_job(&actor, library_ids)
             .await
-            .map(|n| n as i32)
             .map_err(to_gql_error)?;
-        Ok(EmptyRecycleBinPayload { purged_count })
+        Ok(EmptyRecycleBinPayload {
+            job_run: from_job_run(job_run),
+        })
     }
 }

@@ -250,8 +250,14 @@ fn initialize_wasm_runtime_for_tests() {
     if WASM_RUNTIME_CONFIG.get().is_some() {
         return;
     }
-    // Unit tests also run in independent test processes under Nextest.
-    let cache_dir = std::env::temp_dir().join("scryer-wasmtime-test-cache");
+    // Unit tests also run in independent test processes under Nextest. The
+    // shared cache lives under the build directory, not the system temp dir,
+    // which macOS clears on reboot; CI points the root at a restored cache.
+    let root = match std::env::var_os("SCRYER_WASMTIME_TEST_CACHE_ROOT") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => PathBuf::from(env!("OUT_DIR")),
+    };
+    let cache_dir = root.join("scryer-wasmtime-test-cache");
     initialize_wasm_runtime_at(&cache_dir).expect("test Wasmtime cache must initialize");
 }
 
@@ -338,6 +344,50 @@ mod tests {
         assert_eq!(deadline_ticks(EPOCH_TICK * 2), 2);
         // 1-hour archive budget at a 100ms tick.
         assert_eq!(deadline_ticks(Duration::from_secs(3600)), 36_000);
+    }
+
+    #[test]
+    fn expired_same_pid_cleanup_lock_does_not_prevent_cache_reuse() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // Keep the synthetic cache for inspection; no production cache is touched.
+        let directory = tempfile::Builder::new()
+            .prefix("expired-cleanup-lock-")
+            .tempdir_in(env!("OUT_DIR"))
+            .expect("synthetic cache directory")
+            .keep();
+        let lock_path = directory.join(format!(".cleanup.wip-{}", std::process::id()));
+        let lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+        lock.set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        drop(lock);
+        let wasm = wat::parse_str("(module (func (export \"entry\")))").unwrap();
+        let writer_cache = cache_for(&directory);
+        let writer_engine = engine_with_cache(writer_cache.clone());
+        wasmtime::Module::from_binary(&writer_engine, &wasm).unwrap();
+        assert!(writer_cache.cache_misses() >= 1);
+        let reader_cache = cache_for(&directory);
+        let reader_engine = engine_with_cache(reader_cache.clone());
+        wasmtime::Module::from_binary(&reader_engine, &wasm).unwrap();
+        assert_eq!(reader_cache.cache_hits(), 1);
+        assert_eq!(reader_cache.cache_misses(), 0);
+        // Allow the cache workers to process their asynchronous maintenance events.
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            fs::metadata(&lock_path).unwrap().modified().unwrap(),
+            old_time
+        );
+        let error = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .expect_err("expired lock still collides with the reused PID");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        eprintln!("preserved synthetic cache fixture: {}", directory.display());
     }
 
     #[test]

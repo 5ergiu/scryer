@@ -14,7 +14,13 @@ fn initialize_wasm_runtime_for_tests() {
     TEST_WASM_RUNTIME.call_once(|| {
         // Nextest gives each test a process, so this test-only cache is shared
         // across the suite instead of recompiling the same modules per test.
-        let cache_dir = std::env::temp_dir().join("scryer-wasmtime-integration-cache");
+        // It lives under the build directory, not the system temp dir, which
+        // macOS clears on reboot; CI points the root at a restored cache.
+        let root = match std::env::var_os("SCRYER_WASMTIME_TEST_CACHE_ROOT") {
+            Some(root) if !root.is_empty() => std::path::PathBuf::from(root),
+            _ => std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+        };
+        let cache_dir = root.join("scryer-wasmtime-integration-cache");
         scryer_plugins::initialize_wasm_runtime_at(cache_dir)
             .expect("test Wasmtime cache must initialize");
     });
@@ -41,7 +47,7 @@ fn test_config(provider_type: &str) -> IndexerConfig {
         is_enabled: true,
         enable_interactive_search: true,
         enable_auto_search: true,
-        indexer_proxy_config_id: None,
+        proxy_config_id: None,
         download_client_id: None,
         seeding_profile_id: None,
         managed_parent_config_id: None,
@@ -112,6 +118,7 @@ async fn test_indexer_search() {
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -125,6 +132,241 @@ async fn test_indexer_search() {
     assert!(r.title.contains("Glass Harbor Part Two"));
     assert_eq!(r.size_bytes, Some(8_000_000_000));
     assert!(r.source.contains("Test"));
+}
+
+/// This is intentionally opt-in: the component artifact is built in the plugin
+/// worktree, while this suite owns only the normal Scryer host path. When both
+/// are available it proves the artifact registers as a WASIp2 indexer component
+/// and reaches the assigned Trawl proxy through the ordinary indexer
+/// provider/client route, for search and for the indexer-owned grab.
+///
+/// Point `CARDIGANN_COMPONENT_WASM` at
+/// `indexers/cardigann-engine/target/variants/baseline/wasm32-wasip2/plugin-release/cardigann_engine.wasm`.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_cardigann_component_wasm_searches_through_assigned_trawl_proxy() {
+    use scryer_application::PluginDescriptorLoader;
+    use wiremock::matchers::{body_json, header_regex, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let Some(wasm_path) = std::env::var_os("CARDIGANN_COMPONENT_WASM") else {
+        return;
+    };
+    initialize_wasm_runtime_for_tests();
+    let wasm = std::fs::read(wasm_path).expect("CARDIGANN_COMPONENT_WASM must be readable");
+    let target = MockServer::start().await;
+    let proxy = MockServer::start().await;
+    let target_url = format!("{}/search?q=debian", target.uri());
+    let download_url = format!("{}/download/1", target.uri());
+    let result_html = "<table><tr class=result><td><a class=title href='/details/1'>Debian 13</a><a class=download href='/download/1'>DL</a></td><td class=size>2 GiB</td><td class=seeders>42</td></tr></table>";
+    let torrent_body = "d4:infod4:name4:testee";
+
+    // The tracker challenges anything without clearance, and serves the real
+    // page once the solver's cookie is present. That is the shape the component
+    // host expects: it solves, then replays against the origin so the guest sees
+    // raw tracker bytes rather than browser-rendered solver content.
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "debian"))
+        .and(header_regex("cookie", "cf_clearance=ready"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string(result_html),
+        )
+        .with_priority(1)
+        .mount(&target)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/1"))
+        .and(header_regex("cookie", "cf_clearance=ready"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/x-bittorrent")
+                .set_body_string(torrent_body),
+        )
+        .with_priority(1)
+        .mount(&target)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("content-type", "text/html")
+                .set_body_string("<title>Just a moment...</title><div>cf-chl</div>"),
+        )
+        .with_priority(100)
+        .mount(&target)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1"))
+        .and(body_json(serde_json::json!({
+            "cmd": "request.get",
+            "url": target_url,
+            "maxTimeout": 60_000,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "solution": {
+                "url": target_url,
+                "status": 200,
+                "headers": { "content-type": "text/html" },
+                "cookies": [{ "name": "cf_clearance", "value": "ready" }],
+                "userAgent": "Trawl test",
+                "response": result_html,
+            }
+        })))
+        .with_priority(1)
+        .mount(&proxy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1"))
+        .and(body_json(serde_json::json!({
+            "cmd": "request.get",
+            "url": download_url,
+            "maxTimeout": 60_000,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "solution": {
+                "url": download_url,
+                "status": 200,
+                "headers": { "content-type": "application/x-bittorrent" },
+                "cookies": [{ "name": "cf_clearance", "value": "ready" }],
+                "userAgent": "Trawl test",
+                "response": torrent_body,
+            }
+        })))
+        .with_priority(1)
+        .mount(&proxy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("unexpected Trawl request"))
+        .with_priority(100)
+        .mount(&proxy)
+        .await;
+
+    let descriptor = scryer_plugins::WasmPluginDescriptorLoader
+        .load_descriptor_from_wasm_bytes(&wasm)
+        .expect("the component artifact must pass the normal descriptor loader");
+    let provider = scryer_plugins::WasmIndexerPluginProvider::empty().with_external_bytes(&wasm);
+    assert!(
+        provider
+            .available_provider_types()
+            .contains(&descriptor.provider_type().to_string()),
+        "the component artifact must register through the normal external indexer provider"
+    );
+    assert_eq!(descriptor.provider_type(), "cardigann");
+    let mut config = test_config("cardigann");
+    let definition_yaml = format!(
+        r#"
+id: fixture
+name: Fixture
+type: public
+links: ["{}/"]
+caps:
+  categorymappings:
+    - {{ id: 7, cat: Movies }}
+search:
+  paths:
+    - path: search
+      inputs: {{ q: "{{{{ .Keywords }}}}" }}
+  rows:
+    selector: tr.result
+  fields:
+    title: {{ selector: a.title }}
+    details: {{ selector: a.title, attribute: href }}
+    download: {{ selector: a.download, attribute: href }}
+    size: {{ selector: td.size }}
+    seeders: {{ selector: td.seeders }}
+"#,
+        target.uri(),
+    );
+    config.config_json = Some(
+        serde_json::json!({
+            "base_url": target.uri(),
+            "definition_yaml": definition_yaml,
+        })
+        .to_string(),
+    );
+    let now = Utc::now();
+    let proxy_config = scryer_domain::ProxyConfig {
+        id: "trawl-cardigann".to_string(),
+        name: "Trawl".to_string(),
+        provider_type: scryer_domain::ProxyProviderType::Trawl,
+        protocol: Some(scryer_domain::ChallengeSolverProtocol::RequestSolutionV1),
+        username_encrypted: None,
+        password_encrypted: None,
+        remote_dns: false,
+        base_url: proxy.uri(),
+        request_timeout_seconds: 60,
+        is_enabled: true,
+        last_health_status: None,
+        last_error_message: None,
+        last_error_at: None,
+        created_at: now,
+        updated_at: now,
+        host_key_fingerprint: None,
+        host_key_pinned_at: None,
+        private_key_encrypted: None,
+        private_key_passphrase_encrypted: None,
+        peer_public_key: None,
+        preshared_key_encrypted: None,
+        tunnel_public_key: None,
+        tunnel_addresses: Vec::new(),
+        tunnel_dns_servers: Vec::new(),
+        tunnel_mtu: None,
+        tunnel_keepalive_seconds: None,
+    };
+
+    let client = provider
+        .client_for_provider_with_proxy(&config, Some(&proxy_config))
+        .expect("normal provider path must build a component client");
+    let response = client
+        .search(
+            "debian".to_string(),
+            std::collections::HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            scryer_application::SearchMode::Interactive,
+            scryer_application::IndexerErrorOperation::InteractiveSearch,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("proxied component search should complete");
+
+    assert_eq!(response.results.len(), 1);
+    let result = &response.results[0];
+    assert_eq!(result.title, "Debian 13");
+    assert_eq!(result.size_bytes, Some(2 * 1024 * 1024 * 1024));
+    assert_eq!(
+        result.download_url.as_deref(),
+        Some(format!("{}/download/1", target.uri()).as_str())
+    );
+    let artifact = client
+        .resolve_download(&download_url)
+        .await
+        .expect("proxied component grab should complete")
+        .expect("the component implements grab");
+    match artifact {
+        scryer_application::ResolvedDownloadArtifact::TorrentFile { bytes, .. } => {
+            assert_eq!(bytes, torrent_body.as_bytes());
+        }
+        other => panic!("expected torrent artifact, got {other:?}"),
+    }
+    // The tracker sees exactly one cleared request per operation and never an
+    // unproxied one. Only the search needed a solve: the grab reused the stored
+    // clearance session, so the proxy was asked once.
+    assert_eq!(target.received_requests().await.unwrap().len(), 2);
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
 }
 
 #[test]
@@ -316,6 +558,7 @@ async fn newznab_builtin_rss_search_uses_category_only_request() {
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -329,9 +572,7 @@ async fn newznab_builtin_rss_search_uses_category_only_request() {
         "Example.Show.S01E01.1080p.WEB-DL"
     );
 
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    let request = recv_newznab_search_request(&request_rx);
     assert!(request.contains("GET /api?"), "request was {request}");
     assert!(request.contains("t=tvsearch"), "request was {request}");
     assert!(request.contains("cat=5000"), "request was {request}");
@@ -408,6 +649,7 @@ async fn concurrent_newznab_component_searches_count_each_saved_indexer_dispatch
         None,
         None,
         None,
+        None,
         vec![],
         None,
         tokio_util::sync::CancellationToken::new(),
@@ -425,6 +667,7 @@ async fn concurrent_newznab_component_searches_count_each_saved_indexer_dispatch
         None,
         None,
         None,
+        None,
         vec![],
         None,
         tokio_util::sync::CancellationToken::new(),
@@ -433,8 +676,23 @@ async fn concurrent_newznab_component_searches_count_each_saved_indexer_dispatch
     first.expect("first search should succeed");
     second.expect("second search should succeed");
 
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
-    assert_eq!(stats.0.load(Ordering::SeqCst), 2);
+    // Newznab 2.2.2 reads `t=caps` before searching, and how many of those two
+    // concurrent searches send depends on which one caches it first. So assert
+    // the two things that do not depend on that race: both searches reached the
+    // indexer, and the saved indexer was credited with every request the
+    // indexer actually received — the concurrency claim this test is named for.
+    let requests = server.received_requests().await.unwrap();
+    let searches = requests
+        .iter()
+        .filter(|request| {
+            request
+                .url
+                .query_pairs()
+                .all(|(key, value)| key != "t" || value != "caps")
+        })
+        .count();
+    assert_eq!(searches, 2);
+    assert_eq!(stats.0.load(Ordering::SeqCst) as usize, requests.len());
 }
 
 #[tokio::test]
@@ -476,15 +734,14 @@ async fn newznab_component_preserves_only_quota_codes_as_typed_errors() {
                 None,
                 None,
                 None,
+                None,
                 vec![],
                 None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
             .expect_err("Newznab error document should fail the search");
-        request_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("mock Newznab server should receive a request");
+        recv_newznab_search_request(&request_rx);
 
         assert_eq!(
             matches!(
@@ -537,6 +794,7 @@ async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -554,9 +812,7 @@ async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
         !error.contains("stopped after"),
         "the host should preserve Prowlarr's real reason instead of the guest's generic error: {error}"
     );
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Prowlarr server should receive a Newznab request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -590,6 +846,7 @@ async fn newznab_builtin_search_extracts_password_hints() {
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -610,9 +867,7 @@ async fn newznab_builtin_search_extracts_password_hints() {
         Some("archive-password")
     );
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -646,6 +901,7 @@ async fn newznab_builtin_search_treats_password_flags_as_protected_only() {
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -664,9 +920,7 @@ async fn newznab_builtin_search_treats_password_flags_as_protected_only() {
         Some(true)
     );
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    recv_newznab_search_request(&request_rx);
 }
 
 #[tokio::test]
@@ -815,6 +1069,7 @@ async fn newznab_builtin_full_search_canonicalizes_query_bearing_connection_urls
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -824,9 +1079,7 @@ async fn newznab_builtin_full_search_canonicalizes_query_bearing_connection_urls
 
     assert_eq!(response.results.len(), 1);
 
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request");
+    let request = recv_newznab_search_request(&request_rx);
     assert!(request.starts_with("GET /api?"), "request was {request}");
     assert_eq!(
         request_query_value(&request, "q").as_deref(),
@@ -887,6 +1140,7 @@ async fn run_newznab_builtin_full_search(additional_params: Option<&str>) -> Str
             None,
             None,
             None,
+            None,
             vec![],
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -896,9 +1150,7 @@ async fn run_newznab_builtin_full_search(additional_params: Option<&str>) -> Str
 
     assert_eq!(response.results.len(), 1);
 
-    request_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("mock Newznab server should receive a request")
+    recv_newznab_search_request(&request_rx)
 }
 
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
@@ -913,6 +1165,34 @@ fn request_query_value(request: &str, key: &str) -> Option<String> {
     let url = url::Url::parse(&format!("http://example.test{path}")).ok()?;
     url.query_pairs()
         .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+}
+
+/// What the mock answers a `t=caps` probe with. It carries no `<searching>`
+/// block, which is the documented signal for "keep the permissive request
+/// shape" — so the search request these tests assert on is the one the plugin
+/// would send to a server that advertises nothing.
+const NEWZNAB_PERMISSIVE_CAPS_BODY: &str =
+    r#"<?xml version="1.0" encoding="UTF-8"?><caps><server title="Mock"/><categories/></caps>"#;
+
+fn newznab_request_is_capabilities(request: &str) -> bool {
+    request_query_value(request, "t").as_deref() == Some("caps")
+}
+
+/// The first request that is not the capabilities probe.
+///
+/// Newznab 2.2.2 reads `t=caps` before searching, so the search request these
+/// tests care about is no longer the first one to arrive.
+fn recv_newznab_search_request(requests: &mpsc::Receiver<String>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let request = requests
+            .recv_timeout(remaining)
+            .expect("mock Newznab server should receive a search request");
+        if !newznab_request_is_capabilities(&request) {
+            return request;
+        }
+    }
 }
 
 fn spawn_newznab_response_server() -> (String, mpsc::Receiver<String>) {
@@ -946,15 +1226,22 @@ fn spawn_newznab_raw_response_server(
                     let mut buffer = [0_u8; 8192];
                     let bytes_read = stream.read(&mut buffer).unwrap_or(0);
                     let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                    let is_capabilities = newznab_request_is_capabilities(&request);
                     let _ = request_tx.send(request);
 
-                    let headers = headers.join("\r\n");
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
+                    let response = if is_capabilities {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{NEWZNAB_PERMISSIVE_CAPS_BODY}",
+                            NEWZNAB_PERMISSIVE_CAPS_BODY.len()
+                        )
+                    } else {
+                        let headers = headers.join("\r\n");
+                        format!(
+                            "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    };
                     let _ = stream.write_all(response.as_bytes());
-                    break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {

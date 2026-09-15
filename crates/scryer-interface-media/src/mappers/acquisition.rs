@@ -55,6 +55,7 @@ pub fn from_delete_episode_files_preview(
             .map(|item| DeleteEpisodeFilePreviewResultPayload {
                 file_id: item.file_id.into(),
                 episode_id: item.episode_id.into(),
+                episode_ids: item.episode_ids.into_iter().map(Into::into).collect(),
                 preview: item.preview.map(from_delete_preview),
                 error: item.error,
             })
@@ -101,6 +102,7 @@ pub fn from_search_result(result: IndexerSearchResult) -> IndexerSearchResultPay
 
     IndexerSearchResultPayload {
         source: result.source,
+        indexer_id: result.indexer_id.map(Into::into),
         title: result.title,
         link: result.link,
         download_url: result.download_url,
@@ -111,6 +113,7 @@ pub fn from_search_result(result: IndexerSearchResult) -> IndexerSearchResultPay
         published_at: parse_optional_datetime(result.published_at, "indexer search published_at"),
         thumbs_up: result.thumbs_up,
         thumbs_down: result.thumbs_down,
+        grabs: result.indexer_grabs.map(|grabs| grabs as i32),
         parsed_release: result.parsed_release_metadata.map(from_parsed_release),
         quality_profile_decision: result
             .quality_profile_decision
@@ -191,11 +194,52 @@ pub fn from_quality_profile_decision(
                 ScoringEntryPayload {
                     code: e.code,
                     delta: e.delta,
+                    kind: e.kind.as_str().to_string(),
                     source,
                     rule_set_name,
                 }
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    #[test]
+    fn stereo_api_mapping_and_nullable_schema() {
+        let parsed =
+            scryer_application::parse_release_metadata("Title.2020.1080p.BluRay.3D.HSBS.x264");
+        let payload = from_parsed_release(parsed);
+        let stereo = payload.stereoscopy.unwrap();
+        assert_eq!(stereo.presentation, StereoPresentationValue::ThreeD);
+        assert_eq!(stereo.layout, Some(StereoLayoutValue::SideBySide));
+        assert_eq!(stereo.sampling, Some(StereoSamplingValue::Half));
+        assert_eq!(stereo.encoding, None);
+        assert!(
+            from_parsed_release(ParsedReleaseMetadata::default())
+                .stereoscopy
+                .is_none()
+        );
+
+        struct Query;
+        #[async_graphql::Object]
+        impl Query {
+            async fn parsed(&self) -> ParsedReleasePayload {
+                from_parsed_release(ParsedReleaseMetadata::default())
+            }
+        }
+        let schema = async_graphql::Schema::build(
+            Query,
+            async_graphql::EmptyMutation,
+            async_graphql::EmptySubscription,
+        )
+        .finish()
+        .sdl();
+        assert!(schema.contains("stereoscopy: ParsedStereoscopyPayload\n"));
+        assert!(schema.contains("layout: StereoLayoutValue\n"));
+        assert!(schema.contains("presentation: StereoPresentationValue!"));
     }
 }
 
@@ -208,6 +252,7 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
         source: result.source.map(|source| source.to_string()),
         video_codec: result.video_codec.map(|codec| codec.to_string()),
         video_encoding: result.video_encoding,
+        stereoscopy: result.stereoscopy.map(from_stereoscopy),
         audio: result.audio.map(|codec| codec.to_string()),
         is_dual_audio: result.is_dual_audio,
         is_atmos: result.is_atmos,
@@ -220,6 +265,33 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
         parse_confidence: result.parse_confidence,
         parse_hints: result.parse_hints,
         episode: result.episode.map(from_parsed_episode),
+    }
+}
+
+fn from_stereoscopy(value: scryer_application::ParsedStereoscopy) -> ParsedStereoscopyPayload {
+    use scryer_application::{StereoEncoding, StereoLayout, StereoPresentation, StereoSampling};
+    ParsedStereoscopyPayload {
+        presentation: match value.presentation {
+            StereoPresentation::TwoD => StereoPresentationValue::TwoD,
+            StereoPresentation::ThreeD => StereoPresentationValue::ThreeD,
+            StereoPresentation::Mixed2d3d => StereoPresentationValue::Mixed2d3d,
+        },
+        layout: value.layout.map(|layout| match layout {
+            StereoLayout::SideBySide => StereoLayoutValue::SideBySide,
+            StereoLayout::TopBottom => StereoLayoutValue::TopBottom,
+            StereoLayout::FrameSequential => StereoLayoutValue::FrameSequential,
+            StereoLayout::RowInterleaved => StereoLayoutValue::RowInterleaved,
+            StereoLayout::ColumnInterleaved => StereoLayoutValue::ColumnInterleaved,
+            StereoLayout::Checkerboard => StereoLayoutValue::Checkerboard,
+            StereoLayout::Anaglyph => StereoLayoutValue::Anaglyph,
+        }),
+        sampling: value.sampling.map(|sampling| match sampling {
+            StereoSampling::Half => StereoSamplingValue::Half,
+            StereoSampling::Full => StereoSamplingValue::Full,
+        }),
+        encoding: value.encoding.map(|encoding| match encoding {
+            StereoEncoding::Mvc => StereoEncodingValue::Mvc,
+        }),
     }
 }
 
@@ -250,6 +322,9 @@ pub fn from_active_import_stream(
         }
         scryer_application::ActiveImportStreamPhase::Finalizing => {
             ActiveImportStreamPhaseValue::Finalizing
+        }
+        scryer_application::ActiveImportStreamPhase::Verifying => {
+            ActiveImportStreamPhaseValue::Verifying
         }
     };
     let cancellable = stream.cancellable();

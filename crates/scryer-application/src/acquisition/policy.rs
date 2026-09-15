@@ -49,68 +49,6 @@ impl AcquisitionThresholds {
     }
 }
 
-/// The candidate side of the cooldown comparison: where it sits in the profile's
-/// quality ordering, and what it scores within that tier — the same two facts
-/// [`crate::admission::CandidateFacts`] carries, in the same order of priority.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CooldownCandidate {
-    pub tier_index: Option<usize>,
-    pub score: i32,
-}
-
-/// Whether a freshly-filled scope should be left alone for now.
-///
-/// A cooldown rate-limits *starting* work, so it is grab-only and deliberately
-/// absent from the shared admission verdict — time passes between grab and
-/// import, and a cooldown evaluated at both ends would let the two disagree
-/// about an identical release.
-///
-/// Two things get through it: a candidate in a **better quality tier** than the
-/// best file in scope, and a same-tier improvement at least
-/// `forced_upgrade_delta_bypass` large. The tier clause is not a convenience —
-/// before tier left the score, a whole-tier jump was worth 900–3200 points and
-/// sailed past the 400-point bypass on the delta alone. With tier out of the
-/// number a 720p → 2160p upgrade can score a handful of points, so without this
-/// it would sit behind a 24-hour cooldown that exists to stop *trimmings*.
-pub(crate) fn upgrade_cooldown_is_active(
-    candidate: CooldownCandidate,
-    best_incumbent: (Option<usize>, i32),
-    last_import_at: Option<&str>,
-    now: &DateTime<Utc>,
-    thresholds: &AcquisitionThresholds,
-) -> bool {
-    let Some(import_time) = last_import_at.and_then(|value| {
-        DateTime::parse_from_rfc3339(value)
-            .ok()
-            .map(|parsed| parsed.with_timezone(&Utc))
-    }) else {
-        return false;
-    };
-
-    let cooldown_end = import_time + Duration::hours(thresholds.upgrade_cooldown_hours);
-    if *now >= cooldown_end {
-        return false;
-    }
-
-    let (incumbent_tier, incumbent_score) = best_incumbent;
-    if candidate_tier_is_better(candidate.tier_index, incumbent_tier) {
-        return false;
-    }
-
-    candidate.score.saturating_sub(incumbent_score) < thresholds.forced_upgrade_delta_bypass
-}
-
-/// Lower index is better; a quality the profile does not list ranks below every
-/// listed one. Mirrors `admission::tier_cmp`, which is the ordering the gate
-/// itself applies.
-fn candidate_tier_is_better(candidate: Option<usize>, incumbent: Option<usize>) -> bool {
-    match (candidate, incumbent) {
-        (Some(candidate), Some(incumbent)) => candidate < incumbent,
-        (Some(_), None) => true,
-        (None, _) => false,
-    }
-}
-
 pub(crate) fn parse_schedule_baseline_date(baseline_date: Option<&str>) -> Option<DateTime<Utc>> {
     baseline_date.and_then(|d| {
         // Try RFC 3339 first, then fall back to "YYYY-MM-DD" (midnight UTC).

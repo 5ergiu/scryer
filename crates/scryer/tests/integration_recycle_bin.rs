@@ -190,10 +190,6 @@ async fn seed_title_with_folder_path(
     library: &Library,
     folder_path: Option<String>,
 ) {
-    let root_folder_path = folder_path
-        .as_deref()
-        .or_else(|| library.roots.first().map(|root| root.path.as_str()))
-        .unwrap_or_default();
     let title = Title {
         id: id.to_string(),
         name: format!("{} Title", library.name),
@@ -229,7 +225,12 @@ async fn seed_title_with_folder_path(
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
-        root_folder_id: scryer_domain::root_folder_id_for_path(root_folder_path),
+        // Root ids are allocated, not derived from a path, so take the library's own.
+        root_folder_id: library
+            .roots
+            .first()
+            .map(|root| root.id.clone())
+            .unwrap_or_else(|| format!("missing-root-for-{}", library.id)),
         folder_path,
     };
     TitleRepository::create(&ctx.titles, title)
@@ -375,14 +376,25 @@ async fn graphql_recycle_bin_settings_and_scoped_item_args_work() {
         &ctx,
         r#"mutation($libraryIds: [ID!]) {
             emptyRecycleBin(libraryIds: $libraryIds) {
-                purgedCount
+                jobRun { id jobKey status }
             }
         }"#,
         json!({ "libraryIds": null }),
     )
     .await;
     assert_no_errors(&body);
-    assert_eq!(body["data"]["emptyRecycleBin"]["purgedCount"], 0);
+    let run = &body["data"]["emptyRecycleBin"]["jobRun"];
+    assert_eq!(run["jobKey"], "RECYCLE_BIN_PURGE");
+    assert_eq!(run["status"], "RUNNING");
+    let admin = ctx.app.find_or_create_default_user().await.expect("admin");
+    let terminal = wait_for_terminal_job(
+        &ctx,
+        &admin,
+        JobKey::RecycleBinPurge,
+        run["id"].as_str().expect("accepted job id"),
+    )
+    .await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
 }
 
 #[tokio::test]
@@ -446,6 +458,98 @@ async fn graphql_restore_recycled_item_returns_accepted_job_run() {
     .expect("restore job should complete");
     assert_eq!(terminal.status, JobRunStatus::Completed);
     assert!(root.path().join("graphql-restore.mkv").exists());
+}
+
+/// Seed a committed entry the way the recycle-bin e2e spec's
+/// `seedCommittedRecycleEntries` does: a directory named like `recycle_file`
+/// names one, holding the payload plus a hand-written `manifest.json` with
+/// exactly the key set the spec emits. Nothing here calls product code, which
+/// is the point - it is the spec's bytes, checked against the product's
+/// acceptance rules.
+async fn seed_recycled_file_like_the_e2e_spec(
+    root: &Path,
+    title_id: &str,
+    entry_id: &str,
+    name: &str,
+) -> String {
+    let recycle_root = root.join(".scryer-recycle");
+    std::fs::create_dir_all(&recycle_root).expect("create recycle root");
+    let sentinel = recycle_root.join(".scryer-recycle-root");
+    if !sentinel.exists() {
+        std::fs::write(&sentinel, "scryer.recycle-entry.v1").expect("write sentinel");
+    }
+
+    let original_path = root.join(format!("{name}.mkv"));
+    let entry_dir = recycle_root.join(entry_id);
+    std::fs::create_dir_all(&entry_dir).expect("create entry dir");
+    let payload = format!("scryer-e2e-empty-all-{entry_id}\n").repeat(64);
+    std::fs::write(entry_dir.join(format!("{name}.mkv")), payload.as_bytes())
+        .expect("write payload");
+
+    let manifest = serde_json::json!({
+        "schema": "scryer.recycle-entry.v1",
+        "entry_id": entry_id,
+        "source_operation_id": format!("e2e-empty-all-{entry_id}"),
+        "recycled_at": Utc::now().to_rfc3339(),
+        "original_path": original_path.to_string_lossy(),
+        "size_bytes": payload.len(),
+        "title_id": title_id,
+        "media_root": root.to_string_lossy(),
+        "reason": "title_deleted",
+        "status": "committed",
+    });
+    std::fs::write(
+        entry_dir.join("manifest.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).expect("manifest json")
+        ),
+    )
+    .expect("write manifest");
+
+    entry_id.to_string()
+}
+
+/// The empty-all e2e writes its own committed entries, because by the time it
+/// runs no product path is left that would recycle anything. Those entries must
+/// be listed by the product exactly like ones `recycle_file` wrote - if they are
+/// not, the spec is asserting against a shape the product does not accept and
+/// the e2e failure is real, not a harness timeout.
+#[tokio::test]
+async fn hand_seeded_committed_entries_are_listed_like_product_written_ones() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let library = seed_library(&ctx, "Anime", root.path()).await;
+    seed_title(&ctx, "title-a", &library).await;
+
+    let product_entry = seed_recycled_file(root.path(), "title-a", "product-written").await;
+    let seeded_entry = seed_recycled_file_like_the_e2e_spec(
+        root.path(),
+        "title-a",
+        "20260913_204833089_e2e000",
+        "E2E Empty All",
+    )
+    .await;
+
+    let manager = manage_titles_actor("manager", std::slice::from_ref(&library.id));
+    let items = ctx
+        .app
+        .list_recycled_items(&manager, None)
+        .await
+        .expect("list recycled items");
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&product_entry.as_str()),
+        "the product-written entry is listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&seeded_entry.as_str()),
+        "the hand-seeded entry must be listed the same way: {ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -539,6 +643,82 @@ async fn empty_recycle_bin_only_purges_selected_authorized_libraries() {
         .expect("list remaining items");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].library_id, library_b.id);
+}
+
+#[tokio::test]
+async fn empty_recycle_bin_job_returns_before_purge_and_preserves_unselected_files() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root_a = tempfile::tempdir().expect("root a");
+    let root_b = tempfile::tempdir().expect("root b");
+    let library_a = seed_library(&ctx, "Async A", root_a.path()).await;
+    let library_b = seed_library(&ctx, "Async B", root_b.path()).await;
+    seed_title(&ctx, "async-a", &library_a).await;
+    seed_title(&ctx, "async-b", &library_b).await;
+    let entry_a = seed_recycled_file(root_a.path(), "async-a", "selected").await;
+    let entry_b = seed_recycled_file(root_b.path(), "async-b", "unselected").await;
+    let unrelated = root_a.path().join("keep.mkv");
+    std::fs::write(&unrelated, b"unrelated file").expect("unrelated fixture");
+    let malformed = root_a.path().join(".scryer-recycle").join("unrecognized");
+    std::fs::create_dir(&malformed).expect("unrecognized entry");
+    std::fs::write(malformed.join("keep.mkv"), b"unrecognized file").unwrap();
+    let manager = persisted_manage_titles_actor(
+        &ctx,
+        "async-manager",
+        &[library_a.id.clone(), library_b.id.clone()],
+    )
+    .await;
+
+    assert!(
+        ctx.app
+            .start_empty_recycle_bin_job(&no_permission_actor(), None)
+            .await
+            .is_err()
+    );
+    let accepted = ctx
+        .app
+        .start_empty_recycle_bin_job(&manager, Some(vec![library_a.id.clone()]))
+        .await
+        .expect("accept empty job");
+    assert_eq!(accepted.status, JobRunStatus::Running);
+    // This single-threaded runtime has not yielded to the spawned purge yet.
+    assert!(
+        root_a
+            .path()
+            .join(".scryer-recycle")
+            .join(&entry_a)
+            .exists()
+    );
+    let admin = ctx.app.find_or_create_default_user().await.expect("admin");
+    let terminal = wait_for_terminal_job(&ctx, &admin, JobKey::RecycleBinPurge, &accepted.id).await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
+    assert!(!root_a.path().join(".scryer-recycle").join(entry_a).exists());
+    assert!(root_b.path().join(".scryer-recycle").join(entry_b).exists());
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated file");
+    assert_eq!(
+        std::fs::read(malformed.join("keep.mkv")).unwrap(),
+        b"unrecognized file"
+    );
+    let summary: Value = serde_json::from_str(terminal.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["succeeded"], 1);
+    assert_eq!(summary["action"], "empty");
+
+    // Resolving an inaccessible selection to an empty set must not expand to all libraries.
+    let accepted = ctx
+        .app
+        .start_empty_recycle_bin_job(&manager, Some(vec!["unknown-library".into()]))
+        .await
+        .expect("accept empty scope");
+    let terminal = wait_for_terminal_job(&ctx, &admin, JobKey::RecycleBinPurge, &accepted.id).await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
+    assert_eq!(
+        ctx.app
+            .list_recycled_items(&manager, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

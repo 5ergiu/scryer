@@ -2021,14 +2021,21 @@ fn archive_error(error: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::JobRunRepository;
-    use crate::application_upgrade::manifest::{
-        UPGRADE_MANIFEST_SCHEMA_VERSION, UpgradeArtifactMember,
-    };
-    use crate::application_upgrade::{ApplicationUpgradeRestartHandle, InstallationKind};
+    #[cfg(unix)]
+    use crate::application_upgrade::ApplicationUpgradeRestartHandle;
+    use crate::application_upgrade::InstallationKind;
+    #[cfg(unix)]
+    use crate::application_upgrade::manifest::UPGRADE_MANIFEST_SCHEMA_VERSION;
+    use crate::application_upgrade::manifest::UpgradeArtifactMember;
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(unix)]
     use wiremock::matchers::{method, path};
+    #[cfg(unix)]
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]

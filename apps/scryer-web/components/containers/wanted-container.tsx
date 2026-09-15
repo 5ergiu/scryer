@@ -504,7 +504,7 @@ export const WantedContainer = memo(function WantedContainer({
           setGlobalStatus(t("wanted.searchJobStarted"));
         }
       } catch (error) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       } finally {
         setSearchJobStarting(false);
       }
@@ -672,10 +672,14 @@ export const WantedContainer = memo(function WantedContainer({
       try {
         await searchAndQueueCutoffItem(item, { allowReplaceConfirmation: true });
       } catch (error) {
-        setGlobalStatus(
-          autoSearchOutcomeMessage(error, t, cutoffItemLabel(item)) ??
-            userFacingGraphQlErrorMessage(error, t("status.queueFailed")),
-        );
+        const outcome = autoSearchOutcomeMessage(error, t, cutoffItemLabel(item));
+        if (outcome) {
+          setGlobalStatus(outcome);
+        } else {
+          setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), {
+            level: "ERROR",
+          });
+        }
       } finally {
         setCutoffAutoSearchingId(null);
       }
@@ -763,7 +767,7 @@ export const WantedContainer = memo(function WantedContainer({
         assertNoReplaceConflict(payload, conflictMessage);
         setGlobalStatus(t("status.queueSuccess", { name: release.title }));
       } catch (error) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")));
+        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [client, confirmReplaceConflict, setGlobalStatus, t],

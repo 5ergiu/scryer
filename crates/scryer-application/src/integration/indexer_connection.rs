@@ -10,9 +10,42 @@ impl AppUseCase {
         provider_type: &str,
         config_json: Option<&str>,
         indexer_id: Option<&str>,
-        indexer_proxy_config_id_override: Option<Option<&str>>,
+        proxy_config_id_override: Option<Option<&str>>,
     ) -> AppResult<()> {
+        if let Some(indexer_id) = self
+            .probe_indexer_connection(
+                actor,
+                provider_type,
+                config_json,
+                indexer_id,
+                proxy_config_id_override,
+            )
+            .await?
+        {
+            self.services
+                .integrations
+                .indexer_configs
+                .clear_last_error(&indexer_id)
+                .await?;
+            self.publish_indexers_changed();
+        }
+        Ok(())
+    }
+
+    /// Validate the proposed connection without clearing the saved config's
+    /// health. A save clears health only after its remaining checks succeed.
+    pub(crate) async fn probe_indexer_connection(
+        &self,
+        actor: &User,
+        provider_type: &str,
+        config_json: Option<&str>,
+        indexer_id: Option<&str>,
+        proxy_config_id_override: Option<Option<&str>>,
+    ) -> AppResult<Option<String>> {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+
+        self.ensure_provider_plugin_not_blocked(provider_type)
             .await?;
 
         let fields = self.indexer_config_fields_for_provider_type(provider_type)?;
@@ -82,38 +115,40 @@ impl AppUseCase {
             }
         }
 
-        let indexer_proxy_config_id = match indexer_proxy_config_id_override {
+        let proxy_config_id = match proxy_config_id_override {
             Some(Some(id)) => Some(id.to_string()),
             Some(None) => None,
             None => persisted_config
                 .as_ref()
-                .and_then(|config| config.indexer_proxy_config_id.clone()),
+                .and_then(|config| config.proxy_config_id.clone()),
         };
-        let indexer_proxy_config = if let Some(indexer_proxy_config_id) =
-            indexer_proxy_config_id.as_deref()
-        {
-            if provider_type.trim().eq_ignore_ascii_case("prowlarr")
-                || persisted_config
-                    .as_ref()
-                    .is_some_and(IndexerConfig::is_prowlarr_nab_proxy)
+        let proxy_config = if let Some(proxy_config_id) = proxy_config_id.as_deref() {
+            let proxy_config = self
+                .services
+                .integrations
+                .proxy_configs
+                .get_by_id(proxy_config_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Validation("Proxy configuration was not found.".to_string())
+                })?;
+            if !proxy_config.is_enabled {
+                return Err(AppError::Validation(
+                    "Proxy is disabled for this indexer.".to_string(),
+                ));
+            }
+            // Prowlarr owns challenge handling for the indexers it fronts, so
+            // a challenge solver can never sit in front of it. Transport and
+            // tunnel proxies only carry bytes and remain allowed.
+            if proxy_config.is_challenge_solver()
+                && (provider_type.trim().eq_ignore_ascii_case("prowlarr")
+                    || persisted_config
+                        .as_ref()
+                        .is_some_and(IndexerConfig::is_prowlarr_nab_proxy))
             {
                 return Err(AppError::Validation(
                     "Prowlarr indexers cannot use challenge solvers; Prowlarr owns challenge handling."
                         .to_string(),
-                ));
-            }
-            let proxy_config = self
-                .services
-                .integrations
-                .indexer_proxy_configs
-                .get_by_id(indexer_proxy_config_id)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Validation("Indexer proxy configuration was not found.".to_string())
-                })?;
-            if !proxy_config.is_enabled {
-                return Err(AppError::Validation(
-                    "Indexer proxy is disabled for this indexer.".to_string(),
                 ));
             }
             Some(proxy_config)
@@ -138,7 +173,7 @@ impl AppUseCase {
             enable_interactive_search: true,
             enable_auto_search: true,
             disabled_until: None,
-            indexer_proxy_config_id,
+            proxy_config_id,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -155,6 +190,7 @@ impl AppUseCase {
 
         preflight_test_flight_url(
             &validated_base_url,
+            proxy_config.as_ref(),
             accounting.as_ref(),
             self.services.integrations.indexer_stats.clone(),
         )
@@ -174,21 +210,13 @@ impl AppUseCase {
                 let result = client.validate_connection().await?;
                 validate_indexer_connection_result(result)?;
             }
-            if let Some(config) = persisted_config.as_ref() {
-                self.services
-                    .integrations
-                    .indexer_configs
-                    .clear_last_error(&config.id)
-                    .await?;
-                self.publish_indexers_changed();
-            }
-            return Ok(());
+            return Ok(persisted_config.map(|config| config.id));
         }
 
         let client = provider
             .client_for_provider_with_accounting(
                 &temp_config,
-                indexer_proxy_config.as_ref(),
+                proxy_config.as_ref(),
                 accounting.as_ref(),
             )
             .ok_or_else(|| {
@@ -196,30 +224,38 @@ impl AppUseCase {
                     "no indexer provider available for provider type '{provider_type}'"
                 ))
             })?;
-        let capabilities = provider.capabilities_for_provider(provider_type);
-        let (query, ids, facet) = build_connection_test_search_request(&capabilities);
-
-        // Perform a real search request to validate the full pipeline.
-        client
-            .search(
-                query,
-                ids,
-                None,
-                facet,
-                None,
-                None,
-                None,
-                SearchMode::Interactive,
-                IndexerErrorOperation::ConnectionTest,
-                None,
-                None,
-                None,
-                vec![],
-                None,
-                tokio_util::sync::CancellationToken::new(),
-            )
+        if !client
+            .probe_connection()
             .await
-            .map_err(map_indexer_connection_test_error)?;
+            .map_err(map_indexer_connection_test_error)?
+        {
+            let capabilities = provider.capabilities_for_provider(provider_type);
+            let (query, ids, facet) = build_connection_test_search_request(&capabilities);
+
+            // Older components and providers without a dedicated probe retain
+            // the established minimal-search validation path.
+            client
+                .search(
+                    query,
+                    ids,
+                    None,
+                    facet,
+                    None,
+                    None,
+                    None,
+                    SearchMode::Interactive,
+                    IndexerErrorOperation::ConnectionTest,
+                    None,
+                    None,
+                    None,
+                    None, // a connection probe has no subject, so no year
+                    vec![],
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .map_err(map_indexer_connection_test_error)?;
+        }
 
         let caps_refresh_available = self
             .services
@@ -228,7 +264,11 @@ impl AppUseCase {
             .available()
             .is_some();
         let caps_snapshot = self
-            .fetch_caps_snapshot_json_for_config_with_accounting(&temp_config, accounting.as_ref())
+            .fetch_caps_snapshot_json_for_config_with_accounting(
+                &temp_config,
+                proxy_config.as_ref(),
+                accounting.as_ref(),
+            )
             .await
             .map_err(map_indexer_connection_test_error)?;
         if caps_refresh_available && temp_config.is_direct_nab() && caps_snapshot.is_none() {
@@ -237,16 +277,7 @@ impl AppUseCase {
             ));
         }
 
-        if let Some(config) = persisted_config.as_ref() {
-            self.services
-                .integrations
-                .indexer_configs
-                .clear_last_error(&config.id)
-                .await?;
-            self.publish_indexers_changed();
-        }
-
-        Ok(())
+        Ok(persisted_config.map(|config| config.id))
     }
 
     pub async fn preview_managed_indexer_children(
@@ -269,8 +300,11 @@ impl AppUseCase {
             Some(&normalized_config_json),
         )?;
         let validated_base_url = validate_test_flight_url(&base_url)?;
+        // The preview API takes no proxy identity, so this Prowlarr preview
+        // preflight has none to honor.
         preflight_test_flight_url(
             &validated_base_url,
+            None,
             None,
             self.services.integrations.indexer_stats.clone(),
         )
@@ -321,7 +355,7 @@ impl AppUseCase {
             enable_interactive_search: false,
             enable_auto_search: false,
             disabled_until: None,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -639,19 +673,27 @@ fn format_preflight_transport_error(url: &url::Url, origin: &str, error: &str) -
 #[cfg(not(test))]
 async fn preflight_test_flight_url(
     url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     accounting: Option<&crate::IndexerAccountingContext>,
     stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
-    observed_preflight_test_flight_url(url, accounting, stats).await
+    observed_preflight_test_flight_url(url, proxy, accounting, stats).await
 }
 
 async fn observed_preflight_test_flight_url(
     url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     accounting: Option<&crate::IndexerAccountingContext>,
     stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
     let origin = url.origin().ascii_serialization();
-    let client = scryer_outbound_http::indexer_reqwest_client();
+    // The preflight is the first request a save sends the indexer, so it goes
+    // through the indexer's proxy like every search does, or not at all.
+    let client = crate::transport_proxy::indexer_host_request_client(
+        proxy,
+        scryer_outbound_http::indexer_reqwest_client,
+    )
+    .map_err(AppError::Validation)?;
     let outbound_http = scryer_outbound_http::OutboundHttpClient::new(
         client,
         scryer_outbound_http::RateLimitRegistry::new(),
@@ -701,11 +743,27 @@ async fn observed_preflight_test_flight_url(
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The proxy id each unit-test preflight was handed, in call order. Unit
+    /// tests never send the preflight; they only prove which egress it was
+    /// given. `observed_preflight_test_flight_url` is tested for the send.
+    static PREFLIGHT_PROXY_IDS: std::cell::RefCell<Vec<Option<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_preflight_proxy_ids() -> Vec<Option<String>> {
+    PREFLIGHT_PROXY_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+#[cfg(test)]
 async fn preflight_test_flight_url(
     _url: &url::Url,
+    proxy: Option<&scryer_domain::ProxyConfig>,
     _accounting: Option<&crate::IndexerAccountingContext>,
     _stats: Arc<dyn crate::IndexerStatsTracker>,
 ) -> AppResult<()> {
+    PREFLIGHT_PROXY_IDS.with(|ids| ids.borrow_mut().push(proxy.map(|proxy| proxy.id.clone())));
     Ok(())
 }
 
@@ -794,19 +852,166 @@ mod tests {
             indexer_id: "saved-preflight".into(),
             indexer_name: "Saved".into(),
         };
-        observed_preflight_test_flight_url(&url, Some(&accounting), stats.clone())
+        observed_preflight_test_flight_url(&url, None, Some(&accounting), stats.clone())
             .await
             .unwrap();
-        observed_preflight_test_flight_url(&url, None, stats.clone())
+        observed_preflight_test_flight_url(&url, None, None, stats.clone())
             .await
             .unwrap();
         stats.gate.close();
         assert!(
-            observed_preflight_test_flight_url(&url, Some(&accounting), stats.clone())
+            observed_preflight_test_flight_url(&url, None, Some(&accounting), stats.clone())
                 .await
                 .is_err()
         );
         assert_eq!(*stats.ids.lock().unwrap(), vec!["saved-preflight"]);
+    }
+
+    /// Minimal HTTP forward proxy: records each absolute-form request line and
+    /// answers it itself, without contacting the origin.
+    async fn spawn_recording_http_proxy() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy double should bind");
+        let address = listener.local_addr().expect("proxy double address");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorder = Arc::clone(&recorder);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 4096];
+                    let mut received = Vec::new();
+                    while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => received.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    if let Some(line) = String::from_utf8_lossy(&received).lines().next() {
+                        recorder.lock().unwrap().push(line.to_string());
+                    }
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    fn transport_proxy_config(id: &str, base_url: &str) -> scryer_domain::ProxyConfig {
+        scryer_domain::ProxyConfig {
+            id: id.to_string(),
+            name: "House Proxy".into(),
+            provider_type: scryer_domain::ProxyProviderType::Http,
+            protocol: None,
+            base_url: base_url.to_string(),
+            ..solver_proxy_config(id)
+        }
+    }
+
+    /// The e2e proxy matrix caught the save-time preflight `HEAD /` reaching a
+    /// proxied indexer straight from Scryer's own address. The preflight is
+    /// indexer traffic like the search that follows it, so the indexer's proxy
+    /// carries it.
+    #[tokio::test]
+    async fn preflight_for_a_proxied_indexer_travels_through_its_transport_proxy() {
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&origin)
+            .await;
+        let (proxy_url, proxy_requests) = spawn_recording_http_proxy().await;
+        let proxy = transport_proxy_config("house-proxy", &proxy_url);
+        let url = url::Url::parse(&format!("{}/api", origin.uri())).unwrap();
+
+        observed_preflight_test_flight_url(
+            &url,
+            Some(&proxy),
+            None,
+            Arc::new(crate::NullIndexerStatsTracker),
+        )
+        .await
+        .expect("the proxy answers the preflight");
+
+        let proxy_requests = proxy_requests.lock().unwrap().clone();
+        assert_eq!(
+            proxy_requests,
+            vec![format!("HEAD {}/ HTTP/1.1", origin.uri())],
+            "the proxy must carry the preflight"
+        );
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the indexer must never be reached directly"
+        );
+    }
+
+    /// Fail closed: when the assigned proxy cannot carry the preflight, the
+    /// preflight fails and names the proxy. It never falls back to a direct
+    /// request. A challenge solver is not a hop, so it keeps the direct
+    /// preflight exactly as the plugin hosts keep an indexer's first request
+    /// direct.
+    #[tokio::test]
+    async fn preflight_fails_closed_when_the_assigned_proxy_cannot_carry_it() {
+        let origin = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&origin)
+            .await;
+        let url = url::Url::parse(&origin.uri()).unwrap();
+
+        let unbuildable = transport_proxy_config("house-proxy", "not a proxy url");
+        let mut disabled = transport_proxy_config("house-proxy", "http://127.0.0.1:1");
+        disabled.is_enabled = false;
+        let mut unusable_tunnel = crate::tunnel_proxy::tests::tunnel_config();
+        unusable_tunnel.id = "preflight-unusable-tunnel".into();
+        unusable_tunnel.username_encrypted = None;
+
+        for proxy in [unbuildable, disabled, unusable_tunnel] {
+            let error = observed_preflight_test_flight_url(
+                &url,
+                Some(&proxy),
+                None,
+                Arc::new(crate::NullIndexerStatsTracker),
+            )
+            .await
+            .expect_err("an unusable proxy must fail the preflight");
+            assert!(
+                error.to_string().contains(proxy.name.trim()),
+                "the failure must name the proxy: {error}"
+            );
+        }
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing may reach the indexer directly when its proxy is unusable"
+        );
+
+        observed_preflight_test_flight_url(
+            &url,
+            Some(&solver_proxy_config("solver")),
+            None,
+            Arc::new(crate::NullIndexerStatsTracker),
+        )
+        .await
+        .expect("a solver-assigned preflight is direct");
+        assert_eq!(
+            origin.received_requests().await.unwrap_or_default().len(),
+            1
+        );
     }
     use crate::NullSettingsRepository;
     use crate::null_repositories::test_nulls::{
@@ -857,6 +1062,7 @@ mod tests {
         calls: Arc<std::sync::Mutex<Vec<RecordedSearchCall>>>,
         pruned_indexers: Arc<std::sync::Mutex<Vec<String>>>,
         search_error: Option<String>,
+        probe_result: bool,
     }
 
     impl RecordingIndexerClient {
@@ -870,7 +1076,13 @@ mod tests {
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
                 pruned_indexers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 search_error,
+                probe_result: false,
             }
+        }
+
+        fn with_connection_probe(mut self) -> Self {
+            self.probe_result = true;
+            self
         }
 
         fn pruned_indexers(&self) -> Vec<String> {
@@ -880,6 +1092,10 @@ mod tests {
 
     #[async_trait]
     impl IndexerClient for RecordingIndexerClient {
+        async fn probe_connection(&self) -> AppResult<bool> {
+            Ok(self.probe_result)
+        }
+
         async fn search(
             &self,
             query: String,
@@ -894,6 +1110,7 @@ mod tests {
             _season: Option<u32>,
             _episode: Option<u32>,
             _absolute_episode: Option<u32>,
+            _year: Option<i32>,
             _tagged_aliases: Vec<scryer_domain::TaggedAlias>,
             _learning_context: Option<crate::IndexerSearchLearningContext>,
             _cancel_token: tokio_util::sync::CancellationToken,
@@ -986,6 +1203,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             Ok(None)
         }
@@ -998,6 +1216,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
         }
@@ -1020,6 +1239,7 @@ mod tests {
         async fn fetch_for_config(
             &self,
             _config: &IndexerConfig,
+            _proxy: Option<&scryer_domain::ProxyConfig>,
         ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
@@ -1029,12 +1249,47 @@ mod tests {
         }
     }
 
+    /// Stands in for the outbound `t=caps` request: every call is one send.
+    #[derive(Default)]
+    struct RecordingCapsSnapshotRefresher {
+        requested_ids: std::sync::Mutex<Vec<String>>,
+        requested_proxy_ids: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl RecordingCapsSnapshotRefresher {
+        fn requested_ids(&self) -> Vec<String> {
+            self.requested_ids.lock().unwrap().clone()
+        }
+
+        /// The proxy each send was handed, in call order.
+        fn requested_proxy_ids(&self) -> Vec<Option<String>> {
+            self.requested_proxy_ids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IndexerCapsSnapshotRefresher for RecordingCapsSnapshotRefresher {
+        async fn fetch_for_config(
+            &self,
+            config: &IndexerConfig,
+            proxy: Option<&scryer_domain::ProxyConfig>,
+        ) -> AppResult<Option<scryer_domain::IndexerCapsSnapshot>> {
+            self.requested_ids.lock().unwrap().push(config.id.clone());
+            self.requested_proxy_ids
+                .lock()
+                .unwrap()
+                .push(proxy.map(|proxy| proxy.id.clone()));
+            Ok(Some(scryer_domain::IndexerCapsSnapshot::default()))
+        }
+    }
+
     type RecordedIndexerErrors = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
     struct RecordingIndexerConfigRepo {
         created: Arc<Mutex<Vec<IndexerConfig>>>,
         cleared_ids: Arc<Mutex<Vec<String>>>,
         recorded_errors: RecordedIndexerErrors,
+        system_backoffs: Arc<Mutex<HashMap<String, crate::IndexerSystemBackoff>>>,
     }
 
     impl RecordingIndexerConfigRepo {
@@ -1043,6 +1298,7 @@ mod tests {
                 created: Arc::new(Mutex::new(Vec::new())),
                 cleared_ids: Arc::new(Mutex::new(Vec::new())),
                 recorded_errors: Arc::new(Mutex::new(Vec::new())),
+                system_backoffs: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -1140,6 +1396,12 @@ mod tests {
                 .await
                 .push((id.to_string(), message));
             Ok(())
+        }
+
+        async fn list_system_backoffs(
+            &self,
+        ) -> AppResult<HashMap<String, crate::IndexerSystemBackoff>> {
+            Ok(self.system_backoffs.lock().await.clone())
         }
     }
 
@@ -1438,7 +1700,7 @@ mod tests {
         fn client_for_provider_with_accounting(
             &self,
             config: &IndexerConfig,
-            _proxy_config: Option<&scryer_domain::IndexerProxyConfig>,
+            _proxy_config: Option<&scryer_domain::ProxyConfig>,
             accounting: Option<&crate::IndexerAccountingContext>,
         ) -> Option<Arc<dyn IndexerClient>> {
             self.seen_client_accounting
@@ -1540,6 +1802,7 @@ mod tests {
             host_binding: None,
             options: vec![],
             help_text: None,
+            ..Default::default()
         }
     }
 
@@ -1555,6 +1818,7 @@ mod tests {
             host_binding: None,
             options: vec![],
             help_text: None,
+            ..Default::default()
         }
     }
 
@@ -1620,11 +1884,132 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(FacetRegistry::new()),
         )
+    }
+
+    fn test_app_with_proxy_configs(
+        indexer_configs: Arc<dyn IndexerConfigRepository>,
+        plugin_provider: Option<Arc<dyn IndexerPluginProvider>>,
+        settings: Arc<dyn SettingsRepository>,
+        proxy_configs: Arc<dyn crate::ProxyConfigRepository>,
+    ) -> AppUseCase {
+        let services = AppServices::builder(
+            Arc::new(NullTitleRepository),
+            Arc::new(NullShowRepository),
+            Arc::new(NullUserRepository),
+            indexer_configs,
+            Arc::new(NullIndexerClient),
+            Arc::new(NullDownloadClient),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(NullReleaseAttemptRepository),
+            settings,
+            Arc::new(NullQualityProfileRepository),
+            String::new(),
+        )
+        .with_proxy_config_store(proxy_configs);
+        let services = if let Some(plugin_provider) = plugin_provider {
+            services
+                .with_plugin_provider(plugin_provider)
+                .build_partial_for_tests()
+        } else {
+            services.build_partial_for_tests()
+        };
+
+        AppUseCase::new(
+            services,
+            JwtAuthConfig {
+                issuer: "test".to_string(),
+                jwt_signing_salt: "test-salt".to_string(),
+            },
+            Arc::new(FacetRegistry::new()),
+        )
+    }
+
+    /// A proxy repository holding exactly one proxy.
+    struct SingleProxyRepository(scryer_domain::ProxyConfig);
+
+    fn solver_proxy_config(id: &str) -> scryer_domain::ProxyConfig {
+        let now = Utc::now();
+        scryer_domain::ProxyConfig {
+            id: id.to_string(),
+            name: "Solver".into(),
+            provider_type: scryer_domain::ProxyProviderType::Byparr,
+            protocol: Some(scryer_domain::ChallengeSolverProtocol::RequestSolutionV1),
+            base_url: "http://solver.internal:8191".into(),
+            request_timeout_seconds: 5,
+            is_enabled: true,
+            username_encrypted: None,
+            password_encrypted: None,
+            remote_dns: false,
+            private_key_encrypted: None,
+            private_key_passphrase_encrypted: None,
+            peer_public_key: None,
+            preshared_key_encrypted: None,
+            tunnel_public_key: None,
+            tunnel_addresses: Vec::new(),
+            tunnel_dns_servers: Vec::new(),
+            tunnel_mtu: None,
+            tunnel_keepalive_seconds: None,
+            host_key_fingerprint: None,
+            host_key_pinned_at: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[async_trait]
+    impl crate::ProxyConfigRepository for SingleProxyRepository {
+        async fn list(
+            &self,
+            _: Option<scryer_domain::ProxyProviderType>,
+        ) -> AppResult<Vec<scryer_domain::ProxyConfig>> {
+            Ok(vec![self.0.clone()])
+        }
+        async fn get_by_id(&self, id: &str) -> AppResult<Option<scryer_domain::ProxyConfig>> {
+            Ok((id == self.0.id).then(|| self.0.clone()))
+        }
+        async fn create(
+            &self,
+            config: scryer_domain::ProxyConfig,
+        ) -> AppResult<scryer_domain::ProxyConfig> {
+            Ok(config)
+        }
+        async fn update(
+            &self,
+            config: scryer_domain::ProxyConfig,
+        ) -> AppResult<scryer_domain::ProxyConfig> {
+            Ok(config)
+        }
+        async fn delete(&self, _: &str) -> AppResult<()> {
+            Ok(())
+        }
+        async fn record_health(
+            &self,
+            _: &str,
+            _: scryer_domain::ProxyHealthStatus,
+            _: Option<String>,
+            _: Option<chrono::DateTime<Utc>>,
+        ) -> AppResult<()> {
+            Ok(())
+        }
+        async fn pin_host_key(
+            &self,
+            _: &str,
+            _: &str,
+            _: chrono::DateTime<Utc>,
+            _: chrono::DateTime<Utc>,
+        ) -> AppResult<bool> {
+            Ok(true)
+        }
+        async fn clear_host_key(&self, _: &str) -> AppResult<()> {
+            Ok(())
+        }
     }
 
     async fn wait_for_plan_sync_calls(provider: &RecordingPluginProvider, expected_calls: usize) {
@@ -1729,10 +2114,11 @@ mod tests {
             searchable_capabilities(),
             Arc::new(RecordingIndexerClient::new(false)),
         ));
-        let app = test_app(
+        let app = test_app_with_proxy_configs(
             Arc::new(RecordingIndexerConfigRepo::new()),
             Some(provider),
             Arc::new(NullSettingsRepository),
+            Arc::new(SingleProxyRepository(solver_proxy_config("solver"))),
         );
         let input = NewIndexerConfig {
             name: "Prowlarr".into(),
@@ -1742,7 +2128,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: false,
             enable_auto_search: false,
-            indexer_proxy_config_id: Some("solver".into()),
+            proxy_config_id: Some("solver".into()),
             download_client_id: None,
             config_json: Some(r#"{"base_url":"http://localhost:9696"}"#.into()),
         };
@@ -1774,7 +2160,7 @@ mod tests {
             .create_indexer_config(
                 &test_admin(),
                 NewIndexerConfig {
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     ..input
                 },
             )
@@ -1785,7 +2171,7 @@ mod tests {
                 &test_admin(),
                 IndexerConfigUpdate {
                     id: created.id,
-                    indexer_proxy_config_id: Some(Some("solver".into())),
+                    proxy_config_id: Some(Some("solver".into())),
                     ..Default::default()
                 },
             )
@@ -1827,7 +2213,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(
                         r#"{"feed_url":"https://ipt.beelyrics.net/t.rss?u=2203846"}"#.to_string(),
@@ -1870,7 +2256,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: true,
                 enable_auto_search: true,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 config_json: Some(
                     r#"{"feed_url":"https://ipt.beelyrics.net/t.rss?u=2203846"}"#.to_string(),
@@ -1916,7 +2302,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(
                         r#"{"base_url":"https://api.nzbgeek.info/","api_key":"bad-key"}"#
@@ -1949,7 +2335,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -1997,7 +2383,7 @@ mod tests {
                     is_enabled: None,
                     enable_interactive_search: None,
                     enable_auto_search: None,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     seeding_profile_id: None,
                     managed_parent_config_id: None,
@@ -2043,7 +2429,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2092,7 +2478,7 @@ mod tests {
                     is_enabled: None,
                     enable_interactive_search: None,
                     enable_auto_search: None,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     seeding_profile_id: None,
                     managed_parent_config_id: None,
@@ -2126,7 +2512,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2174,7 +2560,7 @@ mod tests {
                 is_enabled: None,
                 enable_interactive_search: None,
                 enable_auto_search: None,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -2209,7 +2595,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2245,7 +2631,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2290,7 +2675,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2333,7 +2718,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2352,6 +2736,131 @@ mod tests {
         );
     }
 
+    /// The startup and daily caps pass is unattended traffic. A caps request is
+    /// a counted API hit, so an indexer that search dispatch is holding off —
+    /// a persisted system backoff (e.g. a Newznab quota wall) or a config-level
+    /// `disabled_until` — must not be sent one either. Restarting inside the
+    /// window must not buy a send; an expired window refreshes normally.
+    #[tokio::test]
+    async fn background_caps_refresh_sends_nothing_to_an_indexer_in_active_backoff() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let now = Utc::now();
+        let base = IndexerConfig {
+            id: String::new(),
+            name: String::new(),
+            provider_type: "newznab".into(),
+            base_url: String::new(),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: None,
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: Some(r#"{"known":"snapshot"}"#.into()),
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let indexer = |id: &str, disabled_until: Option<chrono::DateTime<Utc>>| IndexerConfig {
+            id: id.into(),
+            name: format!("Synthetic {id}"),
+            base_url: format!("https://{id}.example.test"),
+            disabled_until,
+            ..base.clone()
+        };
+        indexer_repo.created.lock().await.extend([
+            indexer("cfg-quota-backoff", None),
+            indexer("cfg-backoff-expired", None),
+            indexer(
+                "cfg-config-disabled",
+                Some(now + chrono::Duration::minutes(10)),
+            ),
+            indexer("cfg-healthy", None),
+        ]);
+        indexer_repo.system_backoffs.lock().await.extend([
+            (
+                "cfg-quota-backoff".to_string(),
+                crate::IndexerSystemBackoff {
+                    disabled_until: now + chrono::Duration::minutes(10),
+                    escalation_level: 2,
+                },
+            ),
+            (
+                "cfg-backoff-expired".to_string(),
+                crate::IndexerSystemBackoff {
+                    disabled_until: now - chrono::Duration::minutes(1),
+                    escalation_level: 1,
+                },
+            ),
+        ]);
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let indexer_client = Arc::new(RecordingIndexerClient::new(false));
+        let services = AppServices::builder(
+            Arc::new(NullTitleRepository),
+            Arc::new(NullShowRepository),
+            Arc::new(NullUserRepository),
+            indexer_repo.clone(),
+            indexer_client.clone(),
+            Arc::new(NullDownloadClient),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(NullReleaseAttemptRepository),
+            Arc::new(NullSettingsRepository),
+            Arc::new(NullQualityProfileRepository),
+            String::new(),
+        )
+        .with_indexer_caps_refresher(refresher.clone())
+        .build_partial_for_tests();
+        let app = AppUseCase::new(
+            services,
+            JwtAuthConfig {
+                issuer: "test".into(),
+                jwt_signing_salt: "test-salt".into(),
+            },
+            Arc::new(FacetRegistry::new()),
+        );
+
+        let (refreshed, failures) = app
+            .refresh_enabled_direct_nab_caps_snapshots(&User::new_admin("system-indexer-caps"))
+            .await
+            .expect("a caps pass that holds off backed-off indexers is not a failure");
+
+        assert_eq!(
+            refresher.requested_ids(),
+            vec!["cfg-backoff-expired".to_string(), "cfg-healthy".to_string()],
+            "only indexers outside an active backoff may be sent a caps request"
+        );
+        assert_eq!(refreshed, 2);
+        assert!(failures.is_empty());
+        // Holding off is not a caps failure: the known snapshot, health and
+        // learning of a held-off indexer stay exactly as they were. (The two
+        // refreshed indexers do prune learning, because their snapshot changed.)
+        assert!(indexer_repo.recorded_errors.lock().await.is_empty());
+        let pruned = indexer_client.pruned_indexers();
+        let stored = indexer_repo.created.lock().await;
+        for id in ["cfg-quota-backoff", "cfg-config-disabled"] {
+            assert!(!pruned.iter().any(|pruned_id| pruned_id == id));
+            let config = stored.iter().find(|config| config.id == id).unwrap();
+            assert_eq!(
+                config.caps_snapshot_json.as_deref(),
+                Some(r#"{"known":"snapshot"}"#)
+            );
+        }
+        assert_eq!(
+            indexer_repo.system_backoffs.lock().await["cfg-quota-backoff"].escalation_level,
+            2
+        );
+    }
+
     #[tokio::test]
     async fn validated_update_does_not_clear_a_caps_refresh_failure() {
         let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
@@ -2367,7 +2876,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2425,7 +2934,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".into(),
-                access_ttl_seconds: 3_600,
                 jwt_signing_salt: "test-salt".into(),
             },
             Arc::new(FacetRegistry::new()),
@@ -2460,6 +2968,191 @@ mod tests {
         );
     }
 
+    fn proxied_newznab_app(
+        indexer_repo: Arc<RecordingIndexerConfigRepo>,
+        refresher: Arc<RecordingCapsSnapshotRefresher>,
+        proxy: scryer_domain::ProxyConfig,
+    ) -> AppUseCase {
+        let indexer_client = Arc::new(RecordingIndexerClient::new(false));
+        let plugin_provider = Arc::new(RecordingPluginProvider::new(
+            "newznab",
+            vec![
+                string_field(
+                    "base_url",
+                    "Base URL",
+                    Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+                ),
+                password_field("api_key", "API Key"),
+            ],
+            searchable_capabilities(),
+            indexer_client.clone(),
+        ));
+        let services = AppServices::builder(
+            Arc::new(NullTitleRepository),
+            Arc::new(NullShowRepository),
+            Arc::new(NullUserRepository),
+            indexer_repo,
+            indexer_client,
+            Arc::new(NullDownloadClient),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(NullReleaseAttemptRepository),
+            Arc::new(NullSettingsRepository),
+            Arc::new(NullQualityProfileRepository),
+            String::new(),
+        )
+        .with_proxy_config_store(Arc::new(SingleProxyRepository(proxy)))
+        .with_indexer_caps_refresher(refresher)
+        .with_plugin_provider(plugin_provider)
+        .build_partial_for_tests();
+        AppUseCase::new(
+            services,
+            JwtAuthConfig {
+                issuer: "test".into(),
+                jwt_signing_salt: "test-salt".into(),
+            },
+            Arc::new(FacetRegistry::new()),
+        )
+    }
+
+    /// The e2e proxy matrix saved a Newznab indexer behind an HTTP proxy and
+    /// found three requests in the indexer's log from Scryer's own address:
+    /// the save's preflight `HEAD /` and a `t=caps` from each of the save's
+    /// connection probe and caps refresh. Only the plugin search went through
+    /// the proxy. Every request Scryer issues to that indexer itself — on
+    /// create, on update, and in the unattended caps pass — must be handed the
+    /// indexer's proxy.
+    #[tokio::test]
+    async fn every_host_request_for_a_proxied_newznab_indexer_is_given_its_proxy() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let app = proxied_newznab_app(
+            indexer_repo.clone(),
+            refresher.clone(),
+            transport_proxy_config("house-proxy", "http://proxy.internal:3128"),
+        );
+        take_preflight_proxy_ids();
+
+        let created = app
+            .create_indexer_config(
+                &test_admin(),
+                NewIndexerConfig {
+                    name: "Proxied Newznab".into(),
+                    provider_type: "newznab".into(),
+                    rate_limit_seconds: None,
+                    rate_limit_burst: None,
+                    is_enabled: true,
+                    enable_interactive_search: true,
+                    enable_auto_search: true,
+                    proxy_config_id: Some("house-proxy".into()),
+                    download_client_id: None,
+                    config_json: Some(
+                        serde_json::json!({
+                            "base_url": "http://newznab.internal:8088",
+                            "api_key": "secret",
+                        })
+                        .to_string(),
+                    ),
+                },
+            )
+            .await
+            .expect("a proxied indexer saves");
+        assert_eq!(created.proxy_config_id.as_deref(), Some("house-proxy"));
+
+        let house_proxy = Some("house-proxy".to_string());
+        assert_eq!(
+            take_preflight_proxy_ids(),
+            vec![house_proxy.clone()],
+            "the save's preflight must be given the indexer's proxy"
+        );
+        assert_eq!(
+            refresher.requested_proxy_ids(),
+            vec![house_proxy.clone(), house_proxy.clone()],
+            "the probe's and the save's caps requests must be given the indexer's proxy"
+        );
+
+        app.update_indexer_config(
+            &test_admin(),
+            IndexerConfigUpdate {
+                id: created.id.clone(),
+                name: Some("Renamed Proxied Newznab".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rename saves");
+        app.refresh_enabled_direct_nab_caps_snapshots(&test_admin())
+            .await
+            .expect("unattended caps pass");
+
+        assert_eq!(
+            refresher.requested_proxy_ids(),
+            vec![house_proxy; 4],
+            "the update's and the unattended pass's caps requests must be given the indexer's proxy"
+        );
+    }
+
+    /// Fail closed: a direct Newznab indexer whose assigned proxy is disabled
+    /// or gone is not sent a caps request at all — not directly, not through
+    /// anything else — and the refresh is recorded as failed.
+    #[tokio::test]
+    async fn caps_pass_sends_nothing_for_an_indexer_whose_proxy_is_unusable() {
+        let now = Utc::now();
+        let indexer = |id: &str, proxy_config_id: &str| IndexerConfig {
+            id: id.into(),
+            name: format!("Synthetic {id}"),
+            provider_type: "newznab".into(),
+            base_url: format!("http://{id}.internal:8088"),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: Some(proxy_config_id.into()),
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        indexer_repo.created.lock().await.extend([
+            indexer("cfg-disabled-proxy", "house-proxy"),
+            indexer("cfg-missing-proxy", "deleted-proxy"),
+        ]);
+        let refresher = Arc::new(RecordingCapsSnapshotRefresher::default());
+        let mut disabled = transport_proxy_config("house-proxy", "http://proxy.internal:3128");
+        disabled.is_enabled = false;
+        let app = proxied_newznab_app(indexer_repo.clone(), refresher.clone(), disabled);
+
+        let (refreshed, failures) = app
+            .refresh_enabled_direct_nab_caps_snapshots(&test_admin())
+            .await
+            .expect("an unusable proxy is a per-indexer failure");
+
+        assert!(
+            refresher.requested_ids().is_empty(),
+            "no caps request may be sent for an indexer whose proxy is unusable"
+        );
+        assert_eq!(refreshed, 0);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        let errors = indexer_repo.recorded_errors.lock().await;
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|(_, message)| {
+            message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("caps refresh failed:"))
+        }));
+    }
+
     #[tokio::test]
     async fn test_indexer_connection_uses_submitted_config_with_saved_accounting_context() {
         let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
@@ -2475,7 +3168,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2597,7 +3290,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2670,7 +3363,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(r#"{"base_url":"https://manager.example"}"#.to_string()),
                 },
@@ -2711,7 +3404,7 @@ mod tests {
             is_enabled: false,
             enable_interactive_search: false,
             enable_auto_search: false,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -2747,7 +3440,7 @@ mod tests {
                     is_enabled: Some(true),
                     enable_interactive_search: None,
                     enable_auto_search: None,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     seeding_profile_id: None,
                     managed_parent_config_id: None,
@@ -2913,6 +3606,38 @@ mod tests {
         assert_eq!(calls[0].query, "scryer connection test");
         assert!(calls[0].ids.is_empty());
         assert_eq!(calls[0].facet, None);
+    }
+
+    #[tokio::test]
+    async fn test_indexer_connection_skips_generic_search_after_provider_probe() {
+        let client = Arc::new(RecordingIndexerClient::new(false).with_connection_probe());
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "newznab",
+            vec![string_field(
+                "base_url",
+                "Base URL",
+                Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+            )],
+            searchable_capabilities(),
+            client.clone(),
+        ));
+        let app = test_app(
+            Arc::new(RecordingIndexerConfigRepo::new()),
+            Some(provider),
+            Arc::new(NullSettingsRepository),
+        );
+
+        app.test_indexer_connection(
+            &test_admin(),
+            "newznab",
+            Some(r#"{"base_url":"https://api.nzbgeek.info/"}"#),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(client.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3256,7 +3981,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(r#"{"base_url":"https://manager.example"}"#.to_string()),
                 },
@@ -3302,7 +4027,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(r#"{"base_url":"https://manager.example"}"#.to_string()),
                 },
@@ -3339,7 +4064,7 @@ mod tests {
                     is_enabled: true,
                     enable_interactive_search: true,
                     enable_auto_search: true,
-                    indexer_proxy_config_id: None,
+                    proxy_config_id: None,
                     download_client_id: None,
                     config_json: Some(r#"{"base_url":"https://manager.example"}"#.to_string()),
                 },
@@ -3386,7 +4111,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3415,7 +4140,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: true,
                 enable_auto_search: true,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: Some("parent".to_string()),
@@ -3476,7 +4201,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3507,7 +4232,7 @@ mod tests {
                 is_enabled: false,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: Some("parent".to_string()),
@@ -3665,7 +4390,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3727,7 +4452,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3758,7 +4483,7 @@ mod tests {
                 is_enabled: false,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3817,7 +4542,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3846,7 +4571,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -3907,7 +4632,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -4003,7 +4728,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: false,
             enable_auto_search: false,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -4080,7 +4805,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -4106,7 +4831,7 @@ mod tests {
             is_enabled: false,
             enable_interactive_search: false,
             enable_auto_search: false,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: Some(parent.id.clone()),
@@ -4143,7 +4868,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: Some(parent.id.clone()),
@@ -4351,7 +5076,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: false,
             enable_auto_search: false,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -4379,7 +5104,7 @@ mod tests {
             is_enabled: true,
             enable_interactive_search: true,
             enable_auto_search: true,
-            indexer_proxy_config_id: None,
+            proxy_config_id: None,
             download_client_id: None,
             seeding_profile_id: None,
             managed_parent_config_id: Some(parent.id.clone()),
@@ -4464,7 +5189,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -4528,7 +5253,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: false,
                 enable_auto_search: false,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: None,
@@ -4557,7 +5282,7 @@ mod tests {
                 is_enabled: true,
                 enable_interactive_search: true,
                 enable_auto_search: true,
-                indexer_proxy_config_id: None,
+                proxy_config_id: None,
                 download_client_id: None,
                 seeding_profile_id: None,
                 managed_parent_config_id: Some("parent".to_string()),

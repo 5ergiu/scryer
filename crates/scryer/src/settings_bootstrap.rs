@@ -9,8 +9,10 @@ use scryer_application::{
     FILE_CHMOD_KEY, FOLDER_CHMOD_KEY, FOLDER_TEMPLATE_KEY, FORM_LOGIN_ENABLED_KEY,
     HISTORY_KEEP_FOREVER_KEY, HISTORY_RETENTION_DAYS_KEY, IMAGE_CACHE_MAX_SIZE_MB_KEY,
     IMPORT_MODE_KEY, INDEXER_ROUTING_SETTINGS_KEY, LEGACY_NZBGET_CATEGORY_SETTING_KEY,
-    LEGACY_NZBGET_CLIENT_ROUTING_SETTINGS_KEY, METADATA_LANGUAGE_KEY,
-    MFA_REQUIRE_CONFIG_STEP_UP_KEY, MFA_REQUIRE_PASSWORD_LOGIN_KEY,
+    LEGACY_NZBGET_CLIENT_ROUTING_SETTINGS_KEY, MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
+    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
+    MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+    METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY, MFA_REQUIRE_PASSWORD_LOGIN_KEY,
     MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON, MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_ROOT_FOLDERS_KEY,
     NZBGET_OLDER_PRIORITY_SETTING_KEY, NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY,
     POST_PROCESSING_SCRIPT_ANIME_KEY, POST_PROCESSING_SCRIPT_MOVIE_KEY,
@@ -21,13 +23,14 @@ use scryer_application::{
     RENAME_MISSING_METADATA_POLICY_GLOBAL_KEY, RENAME_MISSING_METADATA_POLICY_KEY,
     RENAME_MISSING_METADATA_POLICY_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_ANIME_GLOBAL_KEY,
     RENAME_TEMPLATE_KEY, RENAME_TEMPLATE_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_SERIES_GLOBAL_KEY,
-    REQUEST_QUALITY_PROFILE_IDS_KEY, REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY,
-    SEASON_FOLDER_TEMPLATE_KEY, SERIES_ROOT_FOLDERS_KEY, SET_PERMISSIONS_LINUX_KEY,
-    SETUP_COMPLETE_KEY, SKIP_LOGIN_FOR_LOCAL_IPS_KEY, SPECIALS_FOLDER_TEMPLATE_KEY,
+    REQUEST_QUALITY_PROFILE_IDS_KEY, REQUEST_RULE_GATE_EVALUATION_KEY,
+    REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY, SEASON_FOLDER_TEMPLATE_KEY,
+    SERIES_ROOT_FOLDERS_KEY, SET_PERMISSIONS_LINUX_KEY, SETUP_COMPLETE_KEY,
+    SKIP_LOGIN_FOR_LOCAL_IPS_KEY, SPECIALS_FOLDER_TEMPLATE_KEY,
     TITLE_METADATA_LANGUAGE_OVERRIDE_KEY, TITLE_REQUIRED_AUDIO_OVERRIDE_KEY,
     TLS_CERT_PATH_KEY as TLS_CERT_KEY, TLS_KEY_PATH_KEY as TLS_KEY_KEY,
     TOTP_REQUIRE_EMBY_LOGIN_KEY, TOTP_REQUIRE_JELLYFIN_LOGIN_KEY, USE_SEASON_FOLDERS_KEY,
-    builtin_4k_profile, builtin_1080p_profile, builtin_anime_profile,
+    VERIFICATION_DEPTH_KEY, builtin_4k_profile, builtin_1080p_profile, builtin_anime_profile,
     builtin_default_quality_profile,
 };
 pub(crate) use scryer_application::{
@@ -64,6 +67,14 @@ pub(crate) struct ServiceSettingSeed {
 
 pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
     &[
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::FULL_HASH_BACKFILL_CURSOR_KEY,
+            data_type: "object",
+            default_value_json: "{\"after_id\":null}",
+            is_sensitive: false,
+        },
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_SERVICE,
             scope: SETTINGS_SCOPE_SYSTEM,
@@ -150,6 +161,18 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: RECYCLE_BIN_ENABLED_KEY,
             data_type: "boolean",
             default_value_json: "true",
+            is_sensitive: false,
+        },
+        // Import-copy verification depth (FR-042). Without a definition the
+        // Settings > General control cannot save at all. Seeded `full`, the
+        // default `resolve_verification_depth` already falls back to, so a
+        // fresh install reads exactly what an unseeded one did.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_MEDIA,
+            key_name: VERIFICATION_DEPTH_KEY,
+            data_type: "string",
+            default_value_json: "\"full\"",
             is_sensitive: false,
         },
         ServiceSettingSeed {
@@ -246,6 +269,48 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: CHOWN_GROUP_KEY,
             data_type: "string",
             default_value_json: "null",
+            is_sensitive: false,
+        },
+        // Instance-wide opt in for surfaces that are still being finished.
+        // Seeded false so existing installs keep them hidden until an
+        // administrator opts in.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::EXPERIMENTAL_FEATURES_ENABLED_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::API_EXPLORER_ENABLED_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        // Instance-wide switch for sending the library context to the metadata
+        // gateway. Seeded true so existing installs keep personalized
+        // discovery working with no data change.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::DISCOVERY_PERSONALIZED_ENABLED_KEY,
+            data_type: "boolean",
+            default_value_json: "true",
+            is_sensitive: false,
+        },
+        // Instance-wide opt in for asking srrdb.com to recover obfuscated
+        // filenames during automatic SABnzbd/NZBGet imports. Seeded false so no
+        // install contacts the third-party service until an administrator opts
+        // in.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::SRRDB_FILENAME_RECOVERY_ENABLED_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
             is_sensitive: false,
         },
         ServiceSettingSeed {
@@ -354,6 +419,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: FORM_LOGIN_ENABLED_KEY,
             data_type: "boolean",
             default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_SECURITY,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::SESSION_DURATION_DAYS_KEY,
+            data_type: "integer",
+            default_value_json: "3",
             is_sensitive: false,
         },
         ServiceSettingSeed {
@@ -916,6 +989,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
             scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "acquisition.convergence_hot_resume_after",
+            data_type: "json",
+            default_value_json: "null",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_ACQUISITION,
+            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "acquisition.delay_profiles",
             data_type: "json",
             default_value_json: "[]",
@@ -1150,6 +1231,61 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: TITLE_IMAGE_ARTWORK_URL_REFRESH_STATE_KEY,
             data_type: "string",
             default_value_json: "\"none\"",
+            is_sensitive: false,
+        },
+        // The five maintenance gates (RFC 137 section 10). Every default is
+        // false, and they are seeded separately rather than as one blob so a
+        // partial write can never arm a gate the operator did not ask for.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: MAINTENANCE_GATE_EVALUATION_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
+            is_sensitive: false,
+        },
+        // The single request-rule gate (spec 0003 FR-013). One switch where
+        // maintenance has five: a request rule votes and executes nothing, so
+        // there is one blast radius. It ships disarmed for the same reason the
+        // maintenance gates do.
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_GENERAL,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: REQUEST_RULE_GATE_EVALUATION_KEY,
+            data_type: "boolean",
+            default_value_json: "false",
             is_sensitive: false,
         },
     ]
@@ -1912,6 +2048,7 @@ mod tests {
         for key in [
             "acquisition.convergence_seeded_at",
             "acquisition.convergence_resume_after",
+            "acquisition.convergence_hot_resume_after",
         ] {
             let seed = seeds
                 .iter()
@@ -1922,6 +2059,176 @@ mod tests {
             assert_eq!(seed.default_value_json, "null");
             assert!(!seed.is_sensitive);
         }
+    }
+
+    #[tokio::test]
+    async fn convergence_cursor_bootstrap_preserves_positions_across_reopen() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("cursor.db").to_string_lossy().to_string();
+        let services = SqliteServices::new_with_mode(db_path.clone(), MigrationMode::Apply)
+            .await
+            .expect("sqlite services");
+        let store = Arc::new(SettingsStore::new(
+            services.datastore(),
+            services.encryption_key_state(),
+        ));
+        let hot_key = "acquisition.convergence_hot_resume_after";
+        let cold_key = "acquisition.convergence_resume_after";
+        // Model the upgraded installation: all previous definitions, but no hot cursor.
+        let definitions = service_setting_seeds()
+            .iter()
+            .filter(|seed| seed.key_name != hot_key)
+            .map(
+                |seed| scryer_infrastructure_sql::types::SettingDefinitionSeed {
+                    category: seed.category.into(),
+                    scope: seed.scope.into(),
+                    key_name: seed.key_name.into(),
+                    data_type: seed.data_type.into(),
+                    default_value_json: seed.default_value_json.into(),
+                    is_sensitive: seed.is_sensitive,
+                    validation_json: None,
+                },
+            )
+            .collect();
+        store
+            .batch_ensure_setting_definitions(definitions)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .upsert_setting_json(
+                    "system",
+                    hot_key,
+                    None,
+                    json!("hot-b").to_string(),
+                    "system",
+                    None
+                )
+                .await
+                .is_err()
+        );
+        store
+            .upsert_setting_json(
+                "system",
+                cold_key,
+                None,
+                json!("cold-c").to_string(),
+                "system",
+                None,
+            )
+            .await
+            .unwrap();
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        store
+            .upsert_setting_json(
+                "system",
+                hot_key,
+                None,
+                json!("hot-b").to_string(),
+                "system",
+                None,
+            )
+            .await
+            .unwrap();
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        drop(store);
+        services.pool().close().await;
+        let reopened = SqliteServices::new_with_mode(db_path, MigrationMode::Apply)
+            .await
+            .expect("reopen sqlite");
+        let store = Arc::new(SettingsStore::new(
+            reopened.datastore(),
+            reopened.encryption_key_state(),
+        ));
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, expected) in [(hot_key, "hot-b"), (cold_key, "cold-c")] {
+            assert_eq!(
+                store
+                    .get_setting_json_explicit("system", key, None)
+                    .await
+                    .unwrap(),
+                Some(json!(expected).to_string())
+            );
+        }
+        reopened.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_convergence_cursor_bootstrap_preserves_positions_from_env() {
+        let Some(url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping PostgreSQL cursor test; SCRYER_TEST_POSTGRES_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        // Match the PostgreSQL baseline types; one connection keeps
+        // these temporary tables private to this test.
+        for statement in [
+            "CREATE TEMP TABLE settings_definitions (
+                id text PRIMARY KEY, category text NOT NULL, scope text NOT NULL,
+                key_name text NOT NULL, data_type text NOT NULL, default_value_json jsonb NOT NULL,
+                is_sensitive boolean NOT NULL DEFAULT false, validation_json jsonb,
+                created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+                UNIQUE(category, scope, key_name)) ON COMMIT PRESERVE ROWS",
+            "CREATE TEMP TABLE settings_values (
+                id text PRIMARY KEY, setting_definition_id text NOT NULL, scope text NOT NULL,
+                scope_id text, value_json jsonb NOT NULL, source text NOT NULL,
+                updated_by_user_id text, created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL) ON COMMIT PRESERVE ROWS",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let store = Arc::new(SettingsStore::new(
+            scryer_infrastructure_sql::runtime::StoreDatastore::Postgres { pool: pool.clone() },
+            Arc::new(std::sync::RwLock::new(None)),
+        ));
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, position) in [
+            ("acquisition.convergence_hot_resume_after", "hot-b"),
+            ("acquisition.convergence_resume_after", "cold-c"),
+        ] {
+            store
+                .upsert_setting_json(
+                    "system",
+                    key,
+                    None,
+                    json!(position).to_string(),
+                    "system",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        seed_service_setting_definitions(store.clone())
+            .await
+            .unwrap();
+        for (key, position) in [
+            ("acquisition.convergence_hot_resume_after", "hot-b"),
+            ("acquisition.convergence_resume_after", "cold-c"),
+        ] {
+            assert_eq!(
+                store
+                    .get_setting_json_explicit("system", key, None)
+                    .await
+                    .unwrap(),
+                Some(json!(position).to_string())
+            );
+        }
+        pool.close().await;
     }
 
     #[test]
@@ -2206,6 +2513,164 @@ mod tests {
         }
     }
 
+    /// `updateVerificationSettings` writes `media.verification.depth` through the
+    /// settings store, which refuses a key with no definition. Without the seed
+    /// the import-copy verification control fails with "unknown setting key".
+    #[tokio::test]
+    async fn verification_depth_definition_is_seeded_and_accepts_writes() {
+        let seed = service_setting_seeds()
+            .iter()
+            .find(|seed| {
+                seed.scope == SETTINGS_SCOPE_MEDIA && seed.key_name == VERIFICATION_DEPTH_KEY
+            })
+            .expect("verification depth definition must be registered");
+        assert_eq!(seed.category, SETTINGS_CATEGORY_MEDIA);
+        assert_eq!(seed.data_type, "string");
+        assert_eq!(seed.default_value_json, "\"full\"");
+        assert!(!seed.is_sensitive);
+
+        let (_temp, store) = bootstrap_settings_store().await;
+        let initial = store
+            .get_setting_json(SETTINGS_SCOPE_MEDIA, VERIFICATION_DEPTH_KEY, None)
+            .await
+            .expect("read default")
+            .expect("verification depth default");
+        assert_eq!(
+            serde_json::from_str::<Value>(&initial).unwrap(),
+            json!("full")
+        );
+
+        for depth in ["quick", "full"] {
+            store
+                .upsert_setting_json(
+                    SETTINGS_SCOPE_MEDIA,
+                    VERIFICATION_DEPTH_KEY,
+                    None,
+                    json!(depth).to_string(),
+                    "typed_graphql",
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("verification depth should persist: {error}"));
+            // Startup reseeding must keep the operator's choice.
+            seed_service_setting_definitions(store.clone())
+                .await
+                .expect("reseed definitions");
+            let actual = store
+                .get_setting_json(SETTINGS_SCOPE_MEDIA, VERIFICATION_DEPTH_KEY, None)
+                .await
+                .expect("read depth")
+                .expect("saved depth");
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual).unwrap(),
+                json!(depth)
+            );
+        }
+    }
+
+    async fn assert_full_hash_backfill_cursor_round_trips(store: Arc<SettingsStore>) {
+        let key = scryer_application::FULL_HASH_BACKFILL_CURSOR_KEY;
+        let seed = service_setting_seeds()
+            .iter()
+            .find(|seed| seed.scope == SETTINGS_SCOPE_SYSTEM && seed.key_name == key)
+            .expect("full-hash cursor definition must be registered");
+        assert_eq!(seed.data_type, "object");
+        assert!(!seed.is_sensitive);
+        seed_service_setting_definitions(store.clone())
+            .await
+            .expect("seed definitions");
+        let initial = store
+            .get_setting_json(SETTINGS_SCOPE_SYSTEM, key, None)
+            .await
+            .expect("read default")
+            .expect("cursor default");
+        assert_eq!(
+            serde_json::from_str::<Value>(&initial).unwrap(),
+            json!({"after_id": null})
+        );
+
+        for cursor in [
+            json!({"after_id": "media-file-001"}),
+            json!({"after_id": "media-file-250"}),
+            json!({"after_id": null}),
+        ] {
+            store
+                .upsert_setting_json(
+                    SETTINGS_SCOPE_SYSTEM,
+                    key,
+                    None,
+                    cursor.to_string(),
+                    "typed_graphql",
+                    None,
+                )
+                .await
+                .expect("persist cursor");
+            // Startup reseeding must preserve an interrupted run's progress.
+            seed_service_setting_definitions(store.clone())
+                .await
+                .expect("reseed definitions");
+            let actual = store
+                .get_setting_json(SETTINGS_SCOPE_SYSTEM, key, None)
+                .await
+                .expect("read cursor")
+                .expect("saved cursor");
+            assert_eq!(serde_json::from_str::<Value>(&actual).unwrap(), cursor);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_full_hash_backfill_cursor_round_trips() {
+        let (_temp, store) = bootstrap_settings_store().await;
+        assert_full_hash_backfill_cursor_round_trips(store).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_full_hash_backfill_cursor_round_trips() {
+        let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping PostgreSQL cursor test; SCRYER_TEST_POSTGRES_URL is not set");
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&raw_url)
+            .await
+            .expect("connect test database");
+        let schema = format!("cursor_settings_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated schema");
+        let mut schema_url = url::Url::parse(&raw_url).expect("test database URL");
+        schema_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={schema}"));
+
+        // Capture assertion failures too, so even a failed test cleans up its schema.
+        let result = tokio::spawn(async move {
+            let services =
+                scryer_infrastructure_datastore::postgres::PostgresServices::new_with_mode(
+                    schema_url.to_string(),
+                    MigrationMode::Apply,
+                )
+                .await
+                .expect("migrate PostgreSQL fixture");
+            let store = Arc::new(SettingsStore::new(
+                services.datastore(),
+                services.encryption_key_state(),
+            ));
+            assert_full_hash_backfill_cursor_round_trips(store).await;
+            services.pool().close().await;
+        })
+        .await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        cleanup.expect("remove isolated schema");
+        result.expect("PostgreSQL cursor round trip");
+    }
+
     #[tokio::test]
     async fn service_setting_definitions_allow_title_metadata_rehydration_state_to_persist() {
         const KEY: &str = "catalog.title_metadata_rehydration_017_state";
@@ -2300,6 +2765,31 @@ mod tests {
         }));
     }
 
+    /// Every maintenance gate ships disarmed. This is the one seed list where a
+    /// wrong default is not a cosmetic bug: a `true` here would arm an
+    /// instance-wide capability on upgrade without anyone asking for it.
+    #[test]
+    fn every_maintenance_gate_is_seeded_and_defaults_to_off() {
+        for key_name in [
+            MAINTENANCE_GATE_EVALUATION_KEY,
+            MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+            MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
+            MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+            MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
+        ] {
+            assert!(
+                service_setting_seeds().iter().any(|seed| {
+                    seed.scope == SETTINGS_SCOPE_SYSTEM
+                        && seed.key_name == key_name
+                        && seed.data_type == "boolean"
+                        && seed.default_value_json == "false"
+                        && !seed.is_sensitive
+                }),
+                "{key_name} must be registered and default to false"
+            );
+        }
+    }
+
     #[test]
     fn service_setting_seeds_include_metadata_language() {
         assert!(service_setting_seeds().iter().any(|seed| {
@@ -2313,6 +2803,36 @@ mod tests {
                 && seed.key_name == TITLE_METADATA_LANGUAGE_OVERRIDE_KEY
                 && seed.data_type == "string"
                 && seed.default_value_json == "null"
+        }));
+    }
+
+    #[test]
+    fn service_setting_seeds_include_instance_feature_switch_defaults() {
+        assert!(service_setting_seeds().iter().any(|seed| {
+            seed.scope == SETTINGS_SCOPE_SYSTEM
+                && seed.key_name == scryer_application::EXPERIMENTAL_FEATURES_ENABLED_KEY
+                && seed.data_type == "boolean"
+                && seed.default_value_json == "false"
+                && !seed.is_sensitive
+        }));
+        assert!(service_setting_seeds().iter().any(|seed| {
+            seed.scope == SETTINGS_SCOPE_SYSTEM
+                && seed.key_name == scryer_application::DISCOVERY_PERSONALIZED_ENABLED_KEY
+                && seed.data_type == "boolean"
+                && seed.default_value_json == "true"
+                && !seed.is_sensitive
+        }));
+    }
+
+    #[test]
+    fn service_setting_seeds_include_srrdb_filename_recovery_default() {
+        assert!(service_setting_seeds().iter().any(|seed| {
+            seed.category == SETTINGS_CATEGORY_GENERAL
+                && seed.scope == SETTINGS_SCOPE_SYSTEM
+                && seed.key_name == scryer_application::SRRDB_FILENAME_RECOVERY_ENABLED_KEY
+                && seed.data_type == "boolean"
+                && seed.default_value_json == "false"
+                && !seed.is_sensitive
         }));
     }
 

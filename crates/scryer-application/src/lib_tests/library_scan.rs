@@ -534,6 +534,7 @@ impl CountingValidMediaAnalyzer {
 
 fn test_valid_media_analysis() -> MediaFileAnalysis {
     MediaFileAnalysis {
+        details: Default::default(),
         video_codec: None,
         video_width: Some(1920),
         video_height: Some(1080),
@@ -1118,6 +1119,7 @@ async fn movie_title_scan_removes_missing_tracked_movie_file() {
             config_json: "{}".to_string(),
             client_priority: 1,
             is_enabled: true,
+            proxy_config_id: None,
         },
     )
     .await
@@ -5654,6 +5656,50 @@ async fn ensure_library_scan_cancellation_token_reuses_existing_token() {
 }
 
 #[tokio::test]
+async fn pending_import_lists_preserve_recorded_sizes_without_filesystem_backfill() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file_path = temp.path().join("Unknown.Movie.mkv");
+    std::fs::write(&file_path, b"actual file contents").expect("write media fixture");
+    let root = crate::stored_paths::path_to_stored_string(temp.path());
+    let path = crate::stored_paths::path_to_stored_string(&file_path);
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched_items.clone(),
+    );
+
+    for status in [PendingImportStatus::Pending, PendingImportStatus::Ignored] {
+        for size_bytes in [None, Some(0), Some(7)] {
+            let mut item = build_test_unmatched_item(
+                "recorded-size",
+                MediaFacet::Movie,
+                &root,
+                &path,
+                "Unknown Movie",
+                "Unknown Movie",
+                None,
+            );
+            item.status = status;
+            item.size_bytes = size_bytes;
+            unmatched_items
+                .upsert_library_scan_unmatched_item(&item)
+                .await
+                .expect("seed item");
+            let page = app
+                .pending_imports(&user, MediaFacet::Movie, None, status, 50, 0)
+                .await
+                .expect("list pending imports");
+            assert_eq!(page.total, 1);
+            assert_eq!(
+                page.items[0].size_bytes, size_bytes,
+                "list feedback must reflect the recorded size, not live file metadata"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn pending_import_counts_and_items_are_facet_scoped() {
     let settings = Arc::new(StoredSettingsRepo::default());
     let library_scanner = Arc::new(MutableLibraryScanner::default());
@@ -7327,6 +7373,7 @@ async fn resolve_pending_import_creates_unmonitored_movie_title_and_keeps_item_b
                     tmdb_release_date: Some("2020-01-01".into()),
                     ratings: Default::default(),
                     credits: Vec::new(),
+                    ..Default::default()
                 },
             )]),
         }),
@@ -7430,6 +7477,7 @@ async fn resolve_ignored_pending_import_creates_unmonitored_movie_title_and_clea
                     tmdb_release_date: Some("2020-01-01".into()),
                     ratings: Default::default(),
                     credits: Vec::new(),
+                    ..Default::default()
                 },
             )]),
         }),
@@ -7573,6 +7621,7 @@ async fn hydrate_titles_bulk_updates_title_name_for_selected_metadata_language()
                     tmdb_release_date: Some("2021-10-22".into()),
                     ratings: Default::default(),
                     credits: Vec::new(),
+                    ..Default::default()
                 },
             )]),
         }),
@@ -7845,18 +7894,12 @@ async fn resolve_pending_import_rejects_existing_title_in_same_library() {
         .resolve_pending_import(
             &user,
             "movie-resolve-existing-failure-1",
-            NewTitle {
-                name: "Existing Movie".to_string(),
-                facet: MediaFacet::Movie,
-                monitored: true,
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
-                root_folder_id: None,
-                year: Some(2020),
-                ..NewTitle::default()
-            },
+            pending_import_title_request(
+                MediaFacet::Movie,
+                "Existing Movie",
+                Some("123456"),
+                Some(2020),
+            ),
             false,
         )
         .await

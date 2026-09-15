@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useTranslate } from "@/lib/context/translate-context";
 import { cn } from "@/lib/utils";
+import { scoringEntryText } from "@/lib/utils/release-decision-explanation";
 import { releaseCoversMultipleEpisodes } from "@/lib/utils/release-queue-scope";
 import {
   releaseSearchResultQueueAdditionalId,
@@ -22,8 +23,8 @@ import {
 } from "@/lib/utils/dom-ids";
 import type { Release } from "@/lib/types";
 
-export type ReleaseSearchSortKey = "score" | "size";
-export type ReleaseSearchSortDirection = "asc" | "desc";
+import { sortReleaseSearchResults as sortBy, type ReleaseSearchSortKey, type ReleaseSearchSortDirection } from "@/lib/utils/release-search-sort";
+export type { ReleaseSearchSortKey, ReleaseSearchSortDirection } from "@/lib/utils/release-search-sort";
 type SortKey = ReleaseSearchSortKey;
 type SortDirection = ReleaseSearchSortDirection;
 type SearchResultPresentation = "default" | "selected-title";
@@ -57,41 +58,16 @@ function bytesToWholeReadable(raw: number | null | undefined) {
   const mb = 1024 * 1024;
   const kb = 1024;
 
-  if (raw > gb) {
-    return `${Math.floor(raw / gb)} GB`;
+  if (raw >= gb) {
+    return `${(raw / gb).toFixed(2)} GiB`;
   }
-  if (raw > mb) {
-    return `${Math.floor(raw / mb)} MB`;
+  if (raw >= mb) {
+    return `${(raw / mb).toFixed(1)} MiB`;
   }
-  if (raw > kb) {
-    return `${Math.floor(raw / kb)} KB`;
+  if (raw >= kb) {
+    return `${(raw / kb).toFixed(1)} KiB`;
   }
   return `${Math.floor(raw)} B`;
-}
-
-function getSortableValue(a: Release, key: SortKey): number {
-  if (key === "score") {
-    return a.qualityProfileDecision?.releaseScore ?? Number.NEGATIVE_INFINITY;
-  }
-  return a.sizeBytes ?? 0;
-}
-
-function sortBy(
-  releaseList: Release[],
-  sortKey: SortKey,
-  sortDirection: SortDirection,
-): Release[] {
-  const factor = sortDirection === "asc" ? 1 : -1;
-
-  return [...releaseList].sort((left, right) => {
-    const leftValue = getSortableValue(left, sortKey);
-    const rightValue = getSortableValue(right, sortKey);
-    const delta = (leftValue - rightValue) * factor;
-    if (delta !== 0) {
-      return delta;
-    }
-    return left.title.localeCompare(right.title);
-  });
 }
 
 function ScoringLogPanel({
@@ -135,13 +111,12 @@ function ScoringLogPanel({
               </span>
               <span
                 className={
-                  entry.delta < 0
+                  entry.delta < 0 || entry.kind === "mandatory_rejection" || entry.kind === "final_score_rejection"
                     ? "text-[var(--scry-danger-text-soft)]"
                     : "text-[var(--scry-success-text-soft)]"
                 }
               >
-                {entry.delta > 0 ? "+" : ""}
-                {entry.delta}
+                {scoringEntryText(entry, t)}
               </span>
             </div>
           );
@@ -825,7 +800,7 @@ export function SearchResultBuckets({
   presentation?: SearchResultPresentation;
 }) {
   const t = useTranslate();
-  const [localSortKey, setLocalSortKey] = React.useState<SortKey>("score");
+  const [localSortKey, setLocalSortKey] = React.useState<SortKey>("recommended");
   const [localSortDirection, setLocalSortDirection] =
     React.useState<SortDirection>("desc");
   const sortKey = controlledSortKey ?? localSortKey;
@@ -880,9 +855,16 @@ export function SearchResultBuckets({
             <div
               className={cn(
                 "flex flex-wrap items-center gap-2",
-                !compact && "md:hidden",
               )}
             >
+              <Button
+                type="button"
+                size="xs"
+                variant={sortKey === "recommended" ? "secondary" : "outline"}
+                onClick={() => handleSort("recommended")}
+              >
+                {t("nzb.recommended")}
+              </Button>
               <Button
                 type="button"
                 size="xs"

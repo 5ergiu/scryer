@@ -1,6 +1,8 @@
 export type TitleHistoryEvent = {
   id: string;
-  titleId: string;
+  // Null for an event with no catalog title behind it: an unlinked grab is
+  // recorded against the release and the indexer (FR-026).
+  titleId: string | null;
   titleName: string | null;
   facet: string | null;
   episodeId: string | null;

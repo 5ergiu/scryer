@@ -1,14 +1,15 @@
 use super::*;
 use crate::acquisition::submission::{
-    CanonicalDownloadSubmissionIntent, CanonicalDownloadSubmissionOutcome,
+    CanonicalDownloadSubmissionIntent, CanonicalDownloadSubmissionOutcome, GrabTrigger,
+    record_grab_submission_outcome,
 };
 use crate::acquisition_decision_helpers::is_download_submit_unavailable_error;
 use crate::acquisition_release_search::{
     AutoCandidateEvaluationContext, CandidateTitleMatch, ReleaseAutoDecisionCode,
     annotate_auto_decision, candidate_presents_identity_disambiguator, canonical_title_evidence,
     context_free_identity_anchor_keys, evaluate_auto_candidate, external_id_agreement,
-    match_parsed_release_to_title_evidence, parsed_release_matches_title_evidence,
-    serialize_decision_explanation, series_movie_search_title,
+    parsed_release_matches_title_evidence, serialize_decision_explanation,
+    series_movie_search_title, title_with_bridge_cour_titles,
 };
 use crate::acquisition_search_queries::{
     imdb_id_from_title, tmdb_id_from_external_ids, tvdb_id_from_external_ids,
@@ -393,7 +394,9 @@ struct TitleContextCandidate {
 }
 
 struct TitleContextBank {
+    spelling_index: Arc<crate::title_matching::relaxed::SpellingIndex>,
     candidates: Vec<TitleContextCandidate>,
+    title_id_index: HashMap<String, usize>,
     key_index: HashMap<String, Vec<usize>>,
     tvdb_index: HashMap<String, Vec<usize>>,
     tmdb_index: HashMap<String, Vec<usize>>,
@@ -409,6 +412,7 @@ impl std::ops::Deref for TitleContextBank {
 }
 
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
+    let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
     let mut candidates = titles
         .iter()
         .filter(|title| title.monitored)
@@ -500,7 +504,16 @@ fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
         }
     }
 
+    for candidate in &mut candidates {
+        candidate.evidence.ambiguity.spelling_index = Some(spelling_index.clone());
+    }
     TitleContextBank {
+        spelling_index,
+        title_id_index: candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.info.title_id.clone(), index))
+            .collect(),
         candidates,
         key_index,
         tvdb_index,
@@ -547,7 +560,7 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
 /// Candidates come from exact lookups of the release's context-free anchor
 /// keys (plus the indexer's own id assertions) — there is no lexical
 /// containment scan to admit junk — and every candidate then faces the full
-/// contextual proof in [`match_parsed_release_to_title_evidence`].
+/// contextual proof in [`crate::acquisition_release_search::match_parsed_release_to_title_evidence`].
 /// `response_attributes` carries the indexer's own id assertions so a collision
 /// on a shared canonical key can still be resolved (A2(2)).
 fn match_release_to_title_context<'a>(
@@ -596,6 +609,18 @@ fn match_release_to_title_context<'a>(
             }
         }
     }
+    let (spelling_anchors, _) =
+        crate::title_matching::relaxed::neutral_spelling_anchors(release_title);
+    let spelling_ids = context_bank
+        .spelling_index
+        .candidates(&spelling_anchors, None);
+    for id in spelling_ids {
+        if let Some(&index) = context_bank.title_id_index.get(&id)
+            && !candidate_indexes.contains(&index)
+        {
+            candidate_indexes.push(index);
+        }
+    }
     if candidate_indexes.is_empty() {
         return None;
     }
@@ -617,8 +642,18 @@ fn match_release_to_title_context<'a>(
         {
             continue;
         }
+        let asserted_ids = crate::acquisition_release_search::strict_external_id_agreement(
+            response_attributes,
+            candidate.info.tvdb_id.as_deref(),
+            candidate.info.tmdb_id.as_deref(),
+            candidate.info.imdb_id.as_deref(),
+        );
         let Some(evidence_match) =
-            match_parsed_release_to_title_evidence(&parsed, &candidate.evidence)
+            crate::acquisition_release_search::match_parsed_release_with_asserted_ids(
+                &parsed,
+                &candidate.evidence,
+                asserted_ids,
+            )
         else {
             continue;
         };
@@ -730,11 +765,29 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
-        let title_context_bank = build_title_context_bank(&titles);
+        // A feed item named after an anime cour carries a name the catalog
+        // keeps only in the numbering bridge, so the bank is built over titles
+        // whose bridge names have been folded in. `titles` itself stays as the
+        // catalog gave it: routing and scoping below are about the title rows.
+        let mut bridged_titles = Vec::with_capacity(titles.len());
+        for title in &titles {
+            let bridge = if title.monitored && title.facet == MediaFacet::Anime {
+                self.services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                None
+            };
+            bridged_titles.push(title_with_bridge_cour_titles(title, bridge.as_ref()));
+        }
+        let title_context_bank = build_title_context_bank(&bridged_titles);
 
         if title_context_bank.is_empty() {
             debug!("RSS sync: no monitored titles, skipping");
-            metrics::counter!("scryer_rss_sync_total").increment(1);
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_titles").increment(1);
             metrics::histogram!("scryer_rss_sync_duration_seconds")
                 .record(sync_start.elapsed().as_secs_f64());
             return Ok(RssSyncReport::default());
@@ -742,7 +795,7 @@ impl AppUseCase {
 
         if !super::acquisition_workflow::has_enabled_download_clients(self).await {
             warn!("RSS sync: no enabled download clients configured, skipping indexer search");
-            metrics::counter!("scryer_rss_sync_total").increment(1);
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_clients").increment(1);
             metrics::histogram!("scryer_rss_sync_duration_seconds")
                 .record(sync_start.elapsed().as_secs_f64());
             return Ok(RssSyncReport::default());
@@ -783,6 +836,7 @@ impl AppUseCase {
                 None,
                 None,
                 None,
+                None, // an RSS poll has no subject, so no year
                 vec![],
                 None,
                 tokio_util::sync::CancellationToken::new(),
@@ -962,7 +1016,11 @@ impl AppUseCase {
         // scope that is missing or below cutoff — never gated on a pre-existing
         // wanted row. The activity ledger row, when present, still supplies
         // upgrade state and is created on the first anchored write.
+        let locked_titles = self.location_owned_title_ids().await?;
         for (title_id, releases) in &matched_by_title {
+            if locked_titles.contains(title_id) {
+                continue;
+            }
             let title = match self.services.catalog.titles.get_by_id(title_id).await {
                 Ok(Some(t)) => t,
                 _ => continue,
@@ -1044,7 +1102,7 @@ impl AppUseCase {
             "RSS sync cycle completed"
         );
 
-        metrics::counter!("scryer_rss_sync_total").increment(1);
+        metrics::counter!("scryer_rss_sync_total", "outcome" => "completed").increment(1);
         metrics::histogram!("scryer_rss_sync_duration_seconds")
             .record(sync_start.elapsed().as_secs_f64());
         metrics::counter!("scryer_rss_releases_fetched_total")
@@ -2185,7 +2243,6 @@ impl AppUseCase {
                 title,
                 subject: &subject,
                 admission: &admission,
-                last_search_at: wanted.last_search_at.as_deref(),
                 profile: &upgrade_context.profile,
                 thresholds: &upgrade_context.thresholds,
                 incumbent_at_cutoff: crate::acquisition_release_search::incumbent_at_cutoff(
@@ -2571,6 +2628,7 @@ impl AppUseCase {
                     season_pack_seed_time_minutes: seed_minimums.season_pack_seed_time_minutes,
                     is_recent,
                     season_pack: is_season_pack.then_some(true),
+                    pinned_download_client_id: None,
                 },
                 scope: submission_scope.clone(),
                 conflict_policy: SubmissionConflictPolicy::Skip,
@@ -2580,6 +2638,16 @@ impl AppUseCase {
             })
             .await;
 
+        let grab_indexer = self
+            .grab_indexer_name(best.indexer_id.as_deref(), Some(best.source.as_str()))
+            .await;
+        record_grab_submission_outcome(
+            GrabTrigger::Rss,
+            &title.facet,
+            grab_indexer.as_deref(),
+            &canonical_result,
+        );
+
         let canonical_submission = match canonical_result {
             Ok(CanonicalDownloadSubmissionOutcome::Accepted(submission)) => Ok(submission),
             Ok(CanonicalDownloadSubmissionOutcome::Conflict(_)) => return,
@@ -2587,15 +2655,13 @@ impl AppUseCase {
         };
 
         match canonical_submission {
-            Ok(_canonical_submission) => {
-                {
-                    let facet_label = serde_json::to_string(&title.facet)
-                        .unwrap_or_else(|_| "\"other\"".to_string())
-                        .trim_matches('"')
-                        .to_string();
-                    metrics::counter!("scryer_grabs_total", "indexer" => best.source.clone(), "facet" => facet_label).increment(1);
+            Ok(canonical_submission) => {
+                // A reused submission re-attached to an existing download; the
+                // indexer was not asked for the release again, so it is not a
+                // grab — the same rule `scryer_grabs_total` applies.
+                if canonical_submission.newly_submitted {
+                    self.record_indexer_grab(best.indexer_id.as_deref(), grab_indexer.as_deref());
                 }
-                self.record_indexer_grab(best.indexer_id.as_deref(), Some(best.source.as_str()));
 
                 let _ = self
                     .services
@@ -2905,6 +2971,203 @@ pub struct RssSyncReport {
 mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, Title};
+
+    #[tokio::test]
+    async fn recoverable_scores_agree_in_search_rss_and_pending_reevaluation() {
+        let (app, user) = crate::lib_tests::bootstrap();
+        let title = app
+            .add_title(
+                &user,
+                scryer_domain::NewTitle {
+                    name: "Score Movie".into(),
+                    facet: MediaFacet::Movie,
+                    monitored: true,
+                    tags: vec!["scryer:quality-profile:1080p".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let raw = "Score.Movie.2024.1080p.WEB-DL.H.264-GROUP";
+        let release = IndexerSearchResult {
+            indexer_id: None,
+            source: "fixture".into(),
+            title: raw.into(),
+            link: None,
+            download_url: None,
+            // This scoring fixture has no configured download client.
+            source_kind: None,
+            size_bytes: None,
+            published_at: None,
+            thumbs_up: None,
+            thumbs_down: None,
+            indexer_languages: None,
+            indexer_subtitles: None,
+            indexer_grabs: None,
+            password_hint: None,
+            parsed_release_metadata: None,
+            quality_profile_decision: None,
+            extra: Default::default(),
+            response_attributes: Default::default(),
+            guid: None,
+            info_url: None,
+            provenance: None,
+            candidate_token: None,
+            queue_scope: None,
+            coverage_scope: None,
+            auto_eligible: None,
+            auto_decision_code: None,
+            auto_decision_summary: None,
+        };
+        let parse_context = crate::release_parser::build_release_parse_context_for_title(
+            &title,
+            &[],
+            Some("movie"),
+        );
+        let profile = app.resolve_quality_profile_for_title(&title).await.unwrap();
+        for rescued in [false, true] {
+            let mut policies = vec![scryer_rules::UserPolicy {
+                id: "pack".into(),
+                name: "Pack".into(),
+                applied_facets: vec![],
+                origin: scryer_rules::PolicyOrigin::System,
+                rego_source: scryer_rules::rewrite_package_declaration(
+                    "score_entry[\"penalty\"] := scryer.block_score()",
+                    "pack",
+                ),
+            }];
+            if rescued {
+                policies.push(scryer_rules::UserPolicy {
+                    id: "boost".into(), name: "Boost".into(), applied_facets: vec![],
+                    origin: scryer_rules::PolicyOrigin::User,
+                    rego_source: scryer_rules::rewrite_package_declaration("score_entry[\"boost\"] := 20000 if { lower(input.release.release_group) == \"group\" }", "boost"),
+                });
+            }
+            *app.services.customization.user_rules.write().unwrap() =
+                scryer_rules::UserRulesEngine::build(&policies).unwrap();
+            let rss = app
+                .score_rss_releases(
+                    std::slice::from_ref(&release),
+                    &title.id,
+                    &title.library_id,
+                    None,
+                    None,
+                    Some("movie".into()),
+                    &title.tags,
+                    title.runtime_minutes,
+                    &parse_context,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let search = app
+                .score_release_results(
+                    vec![release.clone()],
+                    &profile,
+                    &title.id,
+                    None,
+                    title.runtime_minutes,
+                    &parse_context,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let context = app
+                .resolve_canonical_scoring_context(&title, &profile)
+                .await;
+            let parked = crate::quality::canonical_context::score_parked_release_title(
+                &title,
+                raw,
+                None,
+                &[],
+                &[],
+                &context,
+            );
+            let rss_decision = rss[0].quality_profile_decision.as_ref().unwrap();
+            assert_eq!(rss_decision.allowed, rescued, "{rss_decision:?}");
+            assert_eq!(
+                search[0].quality_profile_decision.as_ref().unwrap(),
+                rss_decision
+            );
+            assert_eq!(parked.allowed, rescued);
+            assert_eq!(parked.score, rss_decision.release_score);
+        }
+    }
+
+    #[test]
+    fn multilingual_spelling_rss_retains_raw_id_proof() {
+        let mut title = make_title("popes", "Die zwei Päpste", Some(2019));
+        title.metadata_language = Some("deu".into());
+        title.imdb_id = Some("tt8404614".into());
+        let bank = build_title_context_bank(std::slice::from_ref(&title));
+        let raw = "Die.zwei.Paepste.1080p.WEB.H265.IMDB.tt8404614-GRP";
+        let mut attributes = IndexerResponseAttributes::default();
+        assert_eq!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .expect("raw ID")
+                .title_id,
+            title.id
+        );
+        attributes.imdb_id = Some("tt0000001".into());
+        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+    }
+
+    #[test]
+    fn multilingual_spelling_rss_rejects_a_different_roman_volume() {
+        let mut title = make_title("volume-one", "Nymphomaniac Volume I", Some(2013));
+        title.metadata_language = Some("eng".into());
+        let bank = build_title_context_bank(&[title]);
+        assert!(
+            match_release_to_title_context(
+                "Nymphomaniac.Volume.II.2013.1080p.BluRay.x264-GROUP",
+                &IndexerResponseAttributes::default(),
+                &bank
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn multilingual_spelling_rss_discovers_german_release_and_rejects_collision() {
+        let mut title = make_title("popes", "Die zwei Päpste", Some(2019));
+        title.metadata_language = Some("deu".to_string());
+        let raw = "Die.zwei.Paepste.2019.GERMAN.DL.1080p.HDR.WEB.H265-TSCC";
+        let bank = build_title_context_bank(std::slice::from_ref(&title));
+        let attributes = IndexerResponseAttributes::default();
+        assert_eq!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .expect("RSS spelling match")
+                .title_id,
+            title.id
+        );
+        let mut rival = make_title("other", "Die zwei Paepste", Some(2019));
+        rival.monitored = false;
+        let bank = build_title_context_bank(&[title, rival]);
+        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+    }
+
+    #[test]
+    fn multilingual_spelling_rss_native_typo_requires_consistent_ids() {
+        let mut title = make_title("native", "静かな夜に遠い空を見上げる物語", Some(2019));
+        title.metadata_language = Some("jpn".to_string());
+        title.imdb_id = Some("tt1234567".to_string());
+        title.external_ids.push(scryer_domain::ExternalId {
+            source: "tmdb".to_string(),
+            value: "42".to_string(),
+        });
+        let bank = build_title_context_bank(std::slice::from_ref(&title));
+        let raw = "静かな夜に遠い海を見上げる物語.2019.1080p.WEB.H265-GRP";
+        let mut attributes = IndexerResponseAttributes::default();
+        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+        attributes.imdb_id = title.imdb_id.clone();
+        assert!(match_release_to_title_context(raw, &attributes, &bank).is_some());
+        attributes.tmdb_id = Some("99".to_string());
+        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+    }
 
     fn make_title(id: &str, name: &str, year: Option<i32>) -> Title {
         Title {
@@ -3298,6 +3561,101 @@ mod tests {
         // Should match via the reverse year-addition path
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
+    }
+
+    /// A romanized release name spells the cour alias slightly differently
+    /// than the catalog does (`Gasshou wo` against `Gassho o`). The canonical
+    /// relaxed matcher knows those are the same romanization, so RSS must not
+    /// drop the release.
+    #[test]
+    fn match_romanized_release_to_a_tagged_romaji_alias() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        title.tagged_aliases = vec![
+            scryer_domain::TaggedAlias {
+                name: "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                language: "x-jat".into(),
+            },
+            scryer_domain::TaggedAlias {
+                name:
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
+                language: "x-jat".into(),
+            },
+        ];
+        let titles = vec![title];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a romanized cour alias spelling must still resolve to the title"
+        );
+    }
+
+    /// The catalog's aliases carry the series name; a cour's own name lives
+    /// only in the anime numbering bridge. A release named after the cour has
+    /// to reach title matching with that name in evidence, or it is dropped
+    /// before numbering is ever consulted.
+    #[test]
+    fn match_romanized_release_to_a_bridge_cour_title() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        title.metadata_language = Some("eng".into());
+        let bridge = scryer_domain::AnimeNumberingBridge {
+            generated_on: "2026-01-01".into(),
+            corroborating_order: None,
+            seasons: vec![scryer_domain::AnimeCommunitySeason {
+                index: 4,
+                titles: vec![
+                    "Hagane no Renkinjutsushi Fullmetal Alchemist Final Chorus".into(),
+                    "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
+                        .into(),
+                ],
+                ..Default::default()
+            }],
+        };
+        let titles = vec![title_with_bridge_cour_titles(&title, Some(&bridge))];
+        let bank = build_title_context_bank(&titles);
+
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+
+        assert_eq!(
+            result.map(|info| info.title_id.as_str()),
+            Some("t1"),
+            "a bridge cour name must be title-matching evidence for its title"
+        );
+    }
+
+    /// The bridge is the only source allowed to add these names: a title with
+    /// no bridge keeps exactly the aliases the catalog gave it, and a release
+    /// named after a cour it does not carry still matches nothing.
+    #[test]
+    fn a_title_without_a_bridge_keeps_its_own_aliases_only() {
+        let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
+        title.facet = MediaFacet::Anime;
+        let bridged = title_with_bridge_cour_titles(&title, None);
+        assert_eq!(bridged.aliases, title.aliases);
+        assert_eq!(bridged.tagged_aliases, title.tagged_aliases);
+
+        let bank = build_title_context_bank(&[bridged]);
+        let result = match_release(
+            "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
+            &bank,
+        );
+        assert!(
+            result.is_none(),
+            "without a bridge there is no cour name to match on"
+        );
     }
 
     #[test]

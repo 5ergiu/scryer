@@ -12,8 +12,49 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      actions: ${{ steps.classify.outputs.actions }}
+      javascript-typescript: ${{ steps.classify.outputs.javascript-typescript }}
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test change classification and required-check gates
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*ci*.py'
+      - name: Select CodeQL languages
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = schedule ]; then
+            printf 'actions=true\njavascript-typescript=true\nrust=true\n' >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            test -n "$PR_BASE"
+            test -n "$PR_HEAD"
+            git diff --name-only --no-renames -z "$PR_BASE" "$PR_HEAD" |
+              python3 .github/scripts/classify_scryer_ci_paths.py --output codeql >> "$GITHUB_OUTPUT"
+          elif [ -n "$PUSH_BASE" ] && git cat-file -e "$PUSH_BASE^{commit}"; then
+            git diff --name-only --no-renames -z "$PUSH_BASE" "$PUSH_HEAD" |
+              python3 .github/scripts/classify_scryer_ci_paths.py --output codeql >> "$GITHUB_OUTPUT"
+          else
+            printf 'actions=true\njavascript-typescript=true\nrust=true\n' >> "$GITHUB_OUTPUT"
+          fi
+
   analyze:
     name: CodeQL (${{ matrix.language }})
+    needs: changes
+    if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -26,18 +67,32 @@ jobs:
       matrix:
         language: [actions, javascript-typescript, rust]
     steps:
+      - name: Validate scan selection
+        env:
+          CLASSIFICATION: ${{ needs.changes.result }}
+          ENABLED: ${{ needs.changes.outputs[matrix.language] }}
+        run: |
+          test "$CLASSIFICATION" = success
+          case "$ENABLED" in
+            true) echo "Running applicable CodeQL analysis." ;;
+            false) echo "No applicable changes; check passed." ;;
+            *) exit 1 ;;
+          esac
       - name: Checkout code
+        if: needs.changes.outputs[matrix.language] == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Initialize CodeQL
+        if: needs.changes.outputs[matrix.language] == 'true'
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
 
       - name: Analyze
+        if: needs.changes.outputs[matrix.language] == 'true'
         uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           category: /language:${{ matrix.language }}

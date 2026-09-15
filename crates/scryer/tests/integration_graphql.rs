@@ -20,8 +20,12 @@ mod downloads_housekeeping_system;
 mod emby_contract;
 #[path = "integration_graphql/external_import_secret_drafts.rs"]
 mod external_import_secret_drafts;
+#[path = "integration_graphql/folder_match.rs"]
+mod folder_match;
 #[path = "integration_graphql/library_scan.rs"]
 mod library_scan;
+#[path = "integration_graphql/location_operations.rs"]
+mod location_operations;
 #[path = "integration_graphql/media_rename.rs"]
 mod media_rename;
 #[path = "integration_graphql/metadata_search.rs"]
@@ -548,6 +552,25 @@ impl MediaFileRepository for FailingMediaFileRepo {
             .await
     }
 
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        self.inner
+            .refresh_media_file_source_signature(
+                file_id,
+                size_bytes,
+                source_signature_scheme,
+                source_signature_value,
+                invalidate_full_hashes,
+            )
+            .await
+    }
+
     async fn update_media_file_path(&self, file_id: &str, file_path: &str) -> AppResult<()> {
         if file_id == self.fail_file_id {
             return Err(AppError::Repository(format!(
@@ -834,6 +857,25 @@ impl MediaFileRepository for CountingMediaFileRepo {
                 size_bytes,
                 source_signature_scheme,
                 source_signature_value,
+            )
+            .await
+    }
+
+    async fn refresh_media_file_source_signature(
+        &self,
+        file_id: &str,
+        size_bytes: i64,
+        source_signature_scheme: Option<String>,
+        source_signature_value: Option<String>,
+        invalidate_full_hashes: bool,
+    ) -> AppResult<()> {
+        self.inner
+            .refresh_media_file_source_signature(
+                file_id,
+                size_bytes,
+                source_signature_scheme,
+                source_signature_value,
+                invalidate_full_hashes,
             )
             .await
     }
@@ -1290,6 +1332,33 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
             SettingDefinitionSeed {
                 category: "general".into(),
                 scope: "system".into(),
+                key_name: "ui.experimental_features_enabled".into(),
+                data_type: "boolean".into(),
+                default_value_json: "false".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "general".into(),
+                scope: "system".into(),
+                key_name: "discovery.personalized_enabled".into(),
+                data_type: "boolean".into(),
+                default_value_json: "true".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "general".into(),
+                scope: "system".into(),
+                key_name: "imports.srrdb_filename_recovery.enabled".into(),
+                data_type: "boolean".into(),
+                default_value_json: "false".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "general".into(),
+                scope: "system".into(),
                 key_name: "history.keep_forever".into(),
                 data_type: "boolean".into(),
                 default_value_json: "false".into(),
@@ -1338,6 +1407,15 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 key_name: "auth.password_min_length".into(),
                 data_type: "integer".into(),
                 default_value_json: "8".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "security".into(),
+                scope: "system".into(),
+                key_name: "auth.session_duration_days".into(),
+                data_type: "integer".into(),
+                default_value_json: "3".into(),
                 is_sensitive: false,
                 validation_json: None,
             },
@@ -1822,7 +1900,8 @@ async fn configure_default_library_root(
         .expect("lookup default library")
         .expect("default library exists");
     let media_root_path = media_root.to_string_lossy().to_string();
-    ctx.libraries
+    let updated = ctx
+        .libraries
         .update(
             &library_id,
             library.name,
@@ -1834,7 +1913,14 @@ async fn configure_default_library_root(
         )
         .await
         .expect("configure default library root");
-    scryer_domain::root_folder_id_for_path(&media_root_path)
+    // Root ids are allocated, not derived from the path, so read the stored id back.
+    updated
+        .roots
+        .iter()
+        .find(|root| root.is_default)
+        .or_else(|| updated.roots.first())
+        .map(|root| root.id.clone())
+        .expect("configured library should expose its root")
 }
 
 async fn default_library_root_id(ctx: &TestContext, facet: &MediaFacet) -> String {
@@ -2160,6 +2246,7 @@ async fn create_test_series_movie_link(
         metadata_active: true,
         monitored: true,
         legacy_collection_id,
+        tags: Vec::new(),
         created_at: now,
         updated_at: now,
     };

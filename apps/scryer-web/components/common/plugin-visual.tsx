@@ -70,7 +70,7 @@ const LEGACY_PLUGIN_LOGO_SRC_BY_SLUG: Record<string, string> = {
   plex: "/auth-providers/plex.svg",
   prowlarr: "/media-sites/prowlarr.svg",
   sabnzbd: "/download-clients/sabnzbd.svg",
-  weaver: "/download-clients/weaver.webp",
+  weaver: "/download-clients/weaver.svg",
 };
 
 const PLUGIN_LOGO_ALIASES: Record<string, string> = {

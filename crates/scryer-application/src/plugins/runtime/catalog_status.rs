@@ -5,9 +5,13 @@ impl AppUseCase {
             .await?;
 
         let stored_status_record = self.load_stored_plugin_catalog_status().await?;
-        let (stored_status, stored_checked_at) = stored_status_record
+        let (mut stored_status, stored_checked_at) = stored_status_record
             .map(|(payload, checked_at)| (payload, Some(checked_at)))
             .unwrap_or_default();
+        // Older versions persisted a refresh block on failure, preventing retries.
+        stored_status
+            .blocked_actions
+            .retain(|action| action != "catalog_refresh");
         let central_source = self
             .services
             .customization
@@ -49,9 +53,22 @@ impl AppUseCase {
     }
 }
 
+#[test]
+fn plugin_catalog_failure_keeps_refresh_available() {
+    let blocked = plugin_catalog_blocked_actions();
+    assert!(!blocked.iter().any(|action| action == "catalog_refresh"));
+    for action in [
+        "install",
+        "install_manual",
+        "upgrade",
+        "manual_repo_inspection",
+    ] {
+        assert!(blocked.contains(&action.to_string()));
+    }
+}
+
 fn plugin_catalog_blocked_actions() -> Vec<String> {
     [
-        "catalog_refresh",
         "install",
         "install_manual",
         "upgrade",

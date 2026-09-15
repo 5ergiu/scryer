@@ -14,11 +14,12 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useClient } from "urql";
+import { useClient, useQuery } from "urql";
 
 import { toast } from "@/components/ui/sonner";
 import type { Translate } from "@/components/root/types";
 import { cancelLibraryScanMutation } from "@/lib/graphql/mutations";
+import { librariesQuery } from "@/lib/graphql/queries";
 import { facetById } from "@/lib/facets/registry";
 import type { Facet } from "@/lib/types/titles";
 import type { LibraryScanPhaseProgress, LibraryScanProgress } from "@/lib/types";
@@ -341,6 +342,13 @@ export function LibraryScanToast({
   autoDismissMs?: number;
 }) {
   const client = useClient();
+  const [{ data: libraryData }] = useQuery<{ libraries: { id: string; name: string }[] }>({
+    query: librariesQuery,
+    variables: { facet: session.facet },
+    requestPolicy: "cache-and-network",
+    pause: !session.libraryId,
+  });
+  const libraryName = libraryData?.libraries.find((library) => library.id === session.libraryId)?.name;
   const facet = FACET_CONFIG[session.facet] ?? FACET_CONFIG.MOVIE;
   const FacetIcon = facet.Icon;
   const terminal = isTerminal(session.status);
@@ -580,7 +588,7 @@ export function LibraryScanToast({
       : "pending";
 
   const titleText = t("settings.libraryScanToastTitle", {
-    facet: facetLabel(session.facet, t),
+    facet: libraryName || facetLabel(session.facet, t),
   });
   const subtitle =
     visualState === "scanning"

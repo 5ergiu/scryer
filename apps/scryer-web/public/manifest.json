@@ -12,19 +12,19 @@
   "orientation": "any",
   "icons": [
     {
-      "src": "./scryer-logo.svg",
+      "src": "./scryer-logo.svg?v=0.20.0",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
     },
     {
-      "src": "./scryer-icon-192.png",
+      "src": "./scryer-icon-192.png?v=0.20.0",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "./scryer-icon-512.png",
+      "src": "./scryer-icon-512.png?v=0.20.0",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

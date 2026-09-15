@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "key_constraints.rs"]
+mod key_constraints;
+
 use crate::migration_hook_ids;
 use blake3::Hasher as Blake3Hasher;
 use serde::{Deserialize, Serialize};
@@ -368,6 +371,7 @@ pub fn compile_source_bundle(db_root: &Path) -> Result<CompiledMigrationBundle, 
         let path = db_root.join(&baseline.file);
         let sql = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        key_constraints::validate(baseline.through_version, &baseline.file, &sql)?;
         let payload = push_payload(sql.as_bytes(), &mut payload_bytes);
         baselines.push(CompiledBaseline {
             through_version: baseline.through_version,
@@ -432,6 +436,7 @@ fn compile_legacy_migrations(
 
         let sql = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        key_constraints::validate(version, &normalize_relative_path(db_root, &path), &sql)?;
         let payload = push_payload(sql.as_bytes(), payload_bytes);
         entries.push(CompiledMigration {
             version,
@@ -481,6 +486,7 @@ fn compile_explicit_migration(
                 let path = db_root.join(file);
                 let sql = fs::read_to_string(&path)
                     .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+                key_constraints::validate(migration.version, file, &sql)?;
                 let payload = push_payload(sql.as_bytes(), payload_bytes);
                 compiled_steps.push(CompiledMigrationStep::Sql {
                     file: file.clone(),

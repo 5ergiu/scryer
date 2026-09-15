@@ -24,7 +24,12 @@ const MANAGED_CHILD_LOCAL_DISABLES_KEY: &str = "locally_disabled_children";
 fn managed_child_is_locally_disabled(metadata: Option<&str>, child_key: &str) -> bool {
     metadata
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.get(MANAGED_CHILD_LOCAL_DISABLES_KEY)?.as_array().cloned())
+        .and_then(|value| {
+            value
+                .get(MANAGED_CHILD_LOCAL_DISABLES_KEY)?
+                .as_array()
+                .cloned()
+        })
         .is_some_and(|keys| {
             keys.iter()
                 .filter_map(serde_json::Value::as_str)
@@ -38,8 +43,9 @@ fn with_managed_child_local_disable(
     locally_disabled: bool,
 ) -> AppResult<Option<String>> {
     let mut value = match metadata.map(str::trim).filter(|raw| !raw.is_empty()) {
-        Some(raw) => serde_json::from_str::<serde_json::Value>(raw)
-            .map_err(|error| AppError::Repository(format!("invalid managed child metadata: {error}")))?,
+        Some(raw) => serde_json::from_str::<serde_json::Value>(raw).map_err(|error| {
+            AppError::Repository(format!("invalid managed child metadata: {error}"))
+        })?,
         None => serde_json::json!({}),
     };
     let object = value.as_object_mut().ok_or_else(|| {
@@ -276,7 +282,18 @@ pub(crate) fn normalize_indexer_config_json(
             );
         }
 
-        if field.required && config_value_is_empty(object.get(&field.key)) {
+        // Requiredness is read through the shared evaluator rather than off
+        // `required` alone: a field the form is hiding must not be demanded
+        // here, or the operator is left with an error about a field they
+        // cannot see.
+        let value_of = |key: &str| {
+            object
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+        };
+        if scryer_domain::config_field_is_required(field, value_of)
+            && config_value_is_empty(object.get(&field.key))
+        {
             return Err(AppError::Validation(format!(
                 "{} is required",
                 field.label.trim()
@@ -341,16 +358,63 @@ impl AppUseCase {
         &self,
         config: &IndexerConfig,
     ) -> AppResult<Option<String>> {
+        if self
+            .services
+            .integrations
+            .indexer_caps_refresher
+            .available()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        // Only a direct Newznab indexer has its caps fetched by Scryer itself;
+        // for every other kind the refresher sends nothing, so there is no
+        // request to route.
+        let proxy = if config.is_direct_nab() {
+            self.assigned_indexer_proxy(config).await?
+        } else {
+            None
+        };
         self.fetch_caps_snapshot_json_for_config_with_accounting(
             config,
+            proxy.as_ref(),
             crate::IndexerAccountingContext::for_config(config).as_ref(),
         )
         .await
     }
 
+    /// The proxy a stored indexer's own requests must travel through.
+    ///
+    /// Resolved the way the search client resolves it, so a caps fetch leaves
+    /// by the same route as the indexer's searches: an assignment that points at
+    /// a missing or disabled proxy is an error, never a reason to send the
+    /// request directly.
+    async fn assigned_indexer_proxy(
+        &self,
+        config: &IndexerConfig,
+    ) -> AppResult<Option<scryer_domain::ProxyConfig>> {
+        let Some(proxy_config_id) = config.proxy_config_id.as_deref() else {
+            return Ok(None);
+        };
+        let proxy = self
+            .services
+            .integrations
+            .proxy_configs
+            .get_by_id(proxy_config_id)
+            .await?
+            .ok_or_else(|| AppError::Validation("Proxy configuration was not found.".into()))?;
+        if !proxy.is_enabled {
+            return Err(AppError::Validation(
+                "Proxy is disabled for this indexer.".into(),
+            ));
+        }
+        Ok(Some(proxy))
+    }
+
     pub(crate) async fn fetch_caps_snapshot_json_for_config_with_accounting(
         &self,
         config: &IndexerConfig,
+        proxy: Option<&scryer_domain::ProxyConfig>,
         accounting: Option<&crate::IndexerAccountingContext>,
     ) -> AppResult<Option<String>> {
         let Some(refresher) = self
@@ -361,7 +425,10 @@ impl AppUseCase {
         else {
             return Ok(None);
         };
-        let Some(snapshot) = refresher.fetch_for_config_with_accounting(config, accounting).await? else {
+        let Some(snapshot) = refresher
+            .fetch_for_config_with_accounting(config, proxy, accounting)
+            .await?
+        else {
             if config.is_direct_nab() {
                 return Err(AppError::Repository(
                     "caps refresh returned no Newznab caps snapshot".into(),
@@ -430,11 +497,11 @@ impl AppUseCase {
                 if config.last_error_message.as_deref().is_some_and(|message| {
                     message.starts_with(crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX)
                 }) && let Err(error) = self
-                        .services
-                        .integrations
-                        .indexer_configs
-                        .clear_last_error(&config.id)
-                        .await
+                    .services
+                    .integrations
+                    .indexer_configs
+                    .clear_last_error(&config.id)
+                    .await
                 {
                     tracing::warn!(config_id = %config.id, error = %error, "failed to clear recovered indexer caps error");
                 }
@@ -448,8 +515,7 @@ impl AppUseCase {
                 error_message: None,
             },
             Err(error) => {
-                let error_message =
-                    format!("{} {error}", crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX);
+                let error_message = format!("{} {error}", crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX);
                 self.record_caps_refresh_failure(config, &error).await;
                 tracing::warn!(
                     config_id = %config.id,
@@ -491,6 +557,11 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// The unattended caps pass (startup and daily). It is not an operator
+    /// action, so it holds off every indexer that search dispatch is holding
+    /// off: a caps request is a counted API hit, and a restart inside a quota
+    /// backoff must not buy a send. Saving or testing an indexer is the
+    /// operator's explicit retry and still fetches caps.
     pub async fn refresh_enabled_direct_nab_caps_snapshots(
         &self,
         actor: &User,
@@ -498,12 +569,13 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
-        let configs = self
-            .services
-            .integrations
-            .indexer_configs
-            .list(None)
-            .await?;
+        let indexer_configs = &self.services.integrations.indexer_configs;
+        let configs = indexer_configs.list(None).await?;
+        // Without the persisted backoffs the pass cannot tell which indexers
+        // may be contacted, so it fails rather than risk a send; every indexer
+        // keeps its last known snapshot until the next pass.
+        let system_backoffs = indexer_configs.list_system_backoffs().await?;
+        let now = Utc::now();
         let mut refreshed = 0_u32;
         let mut failures = Vec::new();
 
@@ -511,24 +583,42 @@ impl AppUseCase {
             if !config.is_enabled || !config.is_direct_nab() {
                 continue;
             }
+            if let Some(disabled_until) = config
+                .disabled_until
+                .into_iter()
+                .chain(
+                    system_backoffs
+                        .get(&config.id)
+                        .map(|backoff| backoff.disabled_until),
+                )
+                .filter(|until| *until > now)
+                .max()
+            {
+                tracing::info!(
+                    config_id = %config.id,
+                    indexer = %config.name,
+                    disabled_until = %disabled_until,
+                    "skipping direct indexer caps refresh while the indexer is backed off"
+                );
+                continue;
+            }
 
             match self.fetch_caps_snapshot_json_for_config(&config).await {
                 Ok(Some(snapshot_json)) => {
-                    let updated = if config.caps_snapshot_json.as_deref()
-                        != Some(snapshot_json.as_str())
-                    {
-                        self.services
-                            .integrations
-                            .indexer_configs
-                            .update(IndexerConfigUpdate {
-                                id: config.id.clone(),
-                                caps_snapshot_json: Some(Some(snapshot_json)),
-                                ..Default::default()
-                            })
-                            .await?
-                    } else {
-                        config.clone()
-                    };
+                    let updated =
+                        if config.caps_snapshot_json.as_deref() != Some(snapshot_json.as_str()) {
+                            self.services
+                                .integrations
+                                .indexer_configs
+                                .update(IndexerConfigUpdate {
+                                    id: config.id.clone(),
+                                    caps_snapshot_json: Some(Some(snapshot_json)),
+                                    ..Default::default()
+                                })
+                                .await?
+                        } else {
+                            config.clone()
+                        };
                     if crate::indexer_search_identity(&config, None)
                         != crate::indexer_search_identity(&updated, None)
                     {
@@ -541,11 +631,11 @@ impl AppUseCase {
                     if config.last_error_message.as_deref().is_some_and(|message| {
                         message.starts_with(crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX)
                     }) && let Err(error) = self
-                            .services
-                            .integrations
-                            .indexer_configs
-                            .clear_last_error(&config.id)
-                            .await
+                        .services
+                        .integrations
+                        .indexer_configs
+                        .clear_last_error(&config.id)
+                        .await
                     {
                         tracing::warn!(config_id = %config.id, error = %error, "failed to clear recovered indexer caps error");
                     }
@@ -599,7 +689,7 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
-    async fn validate_enabled_indexer_proxy_config_id_for_provider(
+    async fn validate_enabled_proxy_config_id_for_provider(
         &self,
         provider_type: &str,
         raw_id: &str,
@@ -607,27 +697,28 @@ impl AppUseCase {
         let id = raw_id.trim();
         if id.is_empty() {
             return Err(AppError::Validation(
-                "indexer proxy config id cannot be empty".into(),
-            ));
-        }
-        if provider_type.trim().eq_ignore_ascii_case("prowlarr") {
-            return Err(AppError::Validation(
-                "Prowlarr indexers cannot use challenge solvers; Prowlarr owns challenge handling."
-                    .into(),
+                "proxy config id cannot be empty".into(),
             ));
         }
         let config = self
             .services
             .integrations
-            .indexer_proxy_configs
+            .proxy_configs
             .get_by_id(id)
             .await?
-            .ok_or_else(|| {
-                AppError::Validation("Indexer proxy configuration was not found.".into())
-            })?;
+            .ok_or_else(|| AppError::Validation("Proxy configuration was not found.".into()))?;
         if !config.is_enabled {
             return Err(AppError::Validation(
-                "Indexer proxy is disabled for this indexer.".into(),
+                "Proxy is disabled for this indexer.".into(),
+            ));
+        }
+        // Prowlarr owns challenge handling for the indexers it fronts, so a
+        // challenge solver can never sit in front of it. Transport and tunnel
+        // proxies only carry bytes and remain allowed.
+        if config.is_challenge_solver() && provider_type.trim().eq_ignore_ascii_case("prowlarr") {
+            return Err(AppError::Validation(
+                "Prowlarr indexers cannot use challenge solvers; Prowlarr owns challenge handling."
+                    .into(),
             ));
         }
         Ok(config.id)
@@ -674,9 +765,9 @@ impl AppUseCase {
             normalize_indexer_config_json(&fields, input.config_json.as_deref(), None)?;
         let base_url =
             derive_indexer_base_url_from_config_fields(&fields, Some(&normalized_config_json))?;
-        let indexer_proxy_config_id = match input.indexer_proxy_config_id {
+        let proxy_config_id = match input.proxy_config_id {
             Some(id) => Some(
-                self.validate_enabled_indexer_proxy_config_id_for_provider(&provider_type, &id)
+                self.validate_enabled_proxy_config_id_for_provider(&provider_type, &id)
                     .await?,
             ),
             None => None,
@@ -690,7 +781,7 @@ impl AppUseCase {
             &provider_type,
             Some(&normalized_config_json),
             None,
-            Some(indexer_proxy_config_id.as_deref()),
+            Some(proxy_config_id.as_deref()),
         )
         .await?;
 
@@ -714,7 +805,7 @@ impl AppUseCase {
             } else {
                 input.enable_auto_search
             },
-            indexer_proxy_config_id,
+            proxy_config_id,
             download_client_id,
             seeding_profile_id: None,
             managed_parent_config_id: None,
@@ -736,9 +827,7 @@ impl AppUseCase {
                 .get_by_id(client_id)
                 .await?
                 .ok_or_else(|| {
-                    AppError::NotFound(format!(
-                        "download client config '{client_id}' not found"
-                    ))
+                    AppError::NotFound(format!("download client config '{client_id}' not found"))
                 })?;
             self.validate_indexer_download_client_mapping(&config, &client)?;
         }
@@ -751,12 +840,28 @@ impl AppUseCase {
             config.last_error_at = Some(Utc::now());
         }
 
+        let proxy_assignment = self
+            .services
+            .integrations
+            .proxy_assignment_lock
+            .lock()
+            .await;
+        if let Some(proxy_config_id) = config.proxy_config_id.clone() {
+            config.proxy_config_id = Some(
+                self.validate_enabled_proxy_config_id_for_provider(
+                    &config.provider_type,
+                    &proxy_config_id,
+                )
+                .await?,
+            );
+        }
         let created = self
             .services
             .integrations
             .indexer_configs
             .create(config)
             .await?;
+        drop(proxy_assignment);
         self.ensure_indexer_routing_entry_for_indexer(actor, &created.id)
             .await?;
         if management_capabilities.supports_managed_children_sync && created.is_enabled {
@@ -852,26 +957,41 @@ impl AppUseCase {
             };
         let management_capabilities =
             self.indexer_management_capabilities_for_provider_type(&effective_provider);
-        let normalized_indexer_proxy_config_id = match update.indexer_proxy_config_id.clone() {
+        // A provider switch to Prowlarr sheds a lingering challenge-solver
+        // assignment; transport and tunnel proxies only carry bytes and stay.
+        let existing_prowlarr_solver_assignment = if effective_provider
+            .trim()
+            .eq_ignore_ascii_case("prowlarr")
+            && let Some(existing_proxy_id) = existing.proxy_config_id.as_deref()
+        {
+            self.services
+                .integrations
+                .proxy_configs
+                .get_by_id(existing_proxy_id)
+                .await?
+                .is_some_and(|proxy| proxy.is_challenge_solver())
+        } else {
+            false
+        };
+        let mut normalized_proxy_config_id = match update.proxy_config_id.clone() {
             Some(Some(id)) => {
                 if existing.managed_parent_config_id.is_some() {
                     return Err(AppError::Validation(
-                        "managed indexers cannot use an indexer proxy; the managing application owns challenge solving".into(),
+                        "managed indexers cannot use a proxy; the managing application owns challenge solving".into(),
                     ));
                 }
                 Some(Some(
-                    self.validate_enabled_indexer_proxy_config_id_for_provider(&effective_provider, &id)
+                    self.validate_enabled_proxy_config_id_for_provider(&effective_provider, &id)
                         .await?,
                 ))
             }
             Some(None) => Some(None),
-            None if effective_provider.trim().eq_ignore_ascii_case("prowlarr")
-                && existing.indexer_proxy_config_id.is_some() => Some(None),
+            None if existing_prowlarr_solver_assignment => Some(None),
             None => None,
         };
         let should_validate_connection = normalized_provider.is_some()
             || normalized_config_json.is_some()
-            || normalized_indexer_proxy_config_id.is_some()
+            || normalized_proxy_config_id.is_some()
             || matches!(update.is_enabled, Some(true)) && !existing.is_enabled;
         let should_sync_managed_children = management_capabilities.supports_managed_children_sync
             && updated_managed_parent_requires_sync(
@@ -879,21 +999,21 @@ impl AppUseCase {
                 update.is_enabled,
                 normalized_provider.is_some(),
                 normalized_config_json.is_some(),
-                normalized_indexer_proxy_config_id.is_some(),
+                normalized_proxy_config_id.is_some(),
             );
 
         if should_validate_connection {
             let validation_config_json = normalized_config_json
                 .as_deref()
                 .or(existing.config_json.as_deref());
-            let proxy_override = normalized_indexer_proxy_config_id
+            let proxy_override = normalized_proxy_config_id
                 .as_ref()
                 .map(|value| value.as_deref());
-            self.test_indexer_connection(
+            self.probe_indexer_connection(
                 actor,
                 &effective_provider,
                 validation_config_json,
-                None,
+                Some(&existing.id),
                 proxy_override,
             )
             .await?;
@@ -929,9 +1049,9 @@ impl AppUseCase {
                     .enable_auto_search
                     .unwrap_or(existing.enable_auto_search)
             },
-            indexer_proxy_config_id: normalized_indexer_proxy_config_id
+            proxy_config_id: normalized_proxy_config_id
                 .clone()
-                .unwrap_or_else(|| existing.indexer_proxy_config_id.clone()),
+                .unwrap_or_else(|| existing.proxy_config_id.clone()),
             download_client_id: normalized_download_client_id
                 .clone()
                 .unwrap_or_else(|| existing.download_client_id.clone()),
@@ -981,7 +1101,29 @@ impl AppUseCase {
             )
             .await;
 
-        let updated = self
+        let proxy_assignment = self
+            .services
+            .integrations
+            .proxy_assignment_lock
+            .lock()
+            .await;
+        let proxy_config_id_to_validate = match normalized_proxy_config_id.as_ref() {
+            Some(Some(proxy_config_id)) => Some(proxy_config_id.as_str()),
+            Some(None) => None,
+            None if update.is_enabled == Some(true) && !existing.is_enabled => {
+                existing.proxy_config_id.as_deref()
+            }
+            None => None,
+        };
+        if let Some(proxy_config_id) = proxy_config_id_to_validate {
+            let validated_proxy_config_id = self
+                .validate_enabled_proxy_config_id_for_provider(&effective_provider, proxy_config_id)
+                .await?;
+            if normalized_proxy_config_id.is_some() {
+                normalized_proxy_config_id = Some(Some(validated_proxy_config_id));
+            }
+        }
+        let mut updated = self
             .services
             .integrations
             .indexer_configs
@@ -1004,7 +1146,7 @@ impl AppUseCase {
                 } else {
                     update.enable_auto_search
                 },
-                indexer_proxy_config_id: normalized_indexer_proxy_config_id,
+                proxy_config_id: normalized_proxy_config_id,
                 download_client_id: normalized_download_client_id,
                 seeding_profile_id: None,
                 managed_parent_config_id: update.managed_parent_config_id,
@@ -1014,9 +1156,10 @@ impl AppUseCase {
                 config_json: normalized_config_json,
             })
             .await?;
+        drop(proxy_assignment);
         if caps_refresh.error_message.is_none()
             && crate::indexer_search_identity(&existing, None)
-            != crate::indexer_search_identity(&updated, None)
+                != crate::indexer_search_identity(&updated, None)
         {
             self.prune_indexer_search_learning_best_effort(
                 &updated.id,
@@ -1025,11 +1168,18 @@ impl AppUseCase {
             .await;
         }
         if should_validate_connection && caps_refresh.error_message.is_none() {
+            let indexer_configs = &self.services.integrations.indexer_configs;
+            indexer_configs.clear_last_error(&updated.id).await?;
+            // A save that just passed validation is the operator's "try again":
+            // drop the persisted system backoff and its in-memory mirror so the
+            // next search dispatches to this indexer instead of skipping it.
+            indexer_configs.clear_system_backoff(&updated.id).await?;
+            updated.disabled_until = None;
             self.services
                 .integrations
-                .indexer_configs
-                .clear_last_error(&updated.id)
-                .await?;
+                .indexer_client
+                .reset_indexer_backoff(&updated.id)
+                .await;
         }
         if should_sync_managed_children {
             if updated.is_enabled {
@@ -1355,7 +1505,7 @@ impl AppUseCase {
                             is_enabled: Some(desired.is_enabled && !locally_disabled),
                             enable_interactive_search: Some(desired.enable_interactive_search),
                             enable_auto_search: Some(desired.enable_auto_search),
-                            indexer_proxy_config_id: Some(parent.indexer_proxy_config_id.clone()),
+                            proxy_config_id: Some(parent.proxy_config_id.clone()),
                             download_client_id: None,
                             seeding_profile_id: None,
                             managed_parent_config_id: Some(Some(parent.id.clone())),
@@ -1406,7 +1556,7 @@ impl AppUseCase {
                                 ),
                             enable_interactive_search: desired.enable_interactive_search,
                             enable_auto_search: desired.enable_auto_search,
-                            indexer_proxy_config_id: parent.indexer_proxy_config_id.clone(),
+                            proxy_config_id: parent.proxy_config_id.clone(),
                             download_client_id: None,
                             seeding_profile_id: None,
                             managed_parent_config_id: Some(parent.id.clone()),
@@ -1474,7 +1624,8 @@ impl AppUseCase {
         }
 
         if let Err(error) = self.sync_indexer_config(actor, &parent_id).await {
-            if let Err(restore_error) = self.set_managed_child_local_disable(&child_id, true).await {
+            if let Err(restore_error) = self.set_managed_child_local_disable(&child_id, true).await
+            {
                 tracing::error!(
                     child_id = %child_id,
                     error = %restore_error,
@@ -1528,7 +1679,9 @@ impl AppUseCase {
                 .indexer_configs
                 .get_by_id(&parent_id)
                 .await?
-                .ok_or_else(|| AppError::NotFound(format!("indexer config '{parent_id}' not found")))?;
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("indexer config '{parent_id}' not found"))
+                })?;
             let metadata = with_managed_child_local_disable(
                 parent.managed_metadata_json.as_deref(),
                 child_key,
@@ -1670,9 +1823,12 @@ fn download_client_supports_protocol_families(
     required_families: &[&str],
 ) -> bool {
     let accepted_inputs = crate::accepted_inputs_for_client(client_type, plugin_provider);
-    let supports_usenet = accepted_inputs
-        .iter()
-        .any(|input| matches!(input, DownloadSourceKind::NzbFile | DownloadSourceKind::NzbUrl));
+    let supports_usenet = accepted_inputs.iter().any(|input| {
+        matches!(
+            input,
+            DownloadSourceKind::NzbFile | DownloadSourceKind::NzbUrl
+        )
+    });
     let supports_torrent = accepted_inputs.iter().any(|input| {
         matches!(
             input,

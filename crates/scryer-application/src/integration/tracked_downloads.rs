@@ -1021,7 +1021,10 @@ impl TrackedDownloadService {
         }
 
         // Persist an observation row before accepting a provisional parse match.
-        // It carries durable tracked state without claiming Scryer provenance.
+        // It carries durable tracked state without claiming Scryer provenance:
+        // the store keeps the job foreign only while this row stays
+        // `DownloadSubmission::is_observation_stub`, so it carries no release
+        // metadata.
         let category_admission = app.download_client_category_admission_snapshot().await;
         if existing_submission.is_none()
             && crate::services::download_observation_is_admitted(
@@ -2985,6 +2988,7 @@ mod tests {
             &self,
             event_types: Option<&[TitleHistoryEventType]>,
             title_ids: Option<&[String]>,
+            _include_titleless: bool,
             download_id: Option<&str>,
         ) -> AppResult<i64> {
             let events = self.events.lock().await;
@@ -2994,7 +2998,12 @@ mod tests {
                 .filter_map(crate::event_views::title_history_record_from_domain_event)
                 .filter(|record| {
                     event_types.is_none_or(|values| values.contains(&record.event_type))
-                        && title_ids.is_none_or(|values| values.contains(&record.title_id))
+                        && title_ids.is_none_or(|values| {
+                            record
+                                .title_id
+                                .as_ref()
+                                .is_some_and(|title_id| values.contains(title_id))
+                        })
                         && download_id
                             .is_none_or(|value| record.download_id.as_deref() == Some(value))
                 })
@@ -3005,6 +3014,7 @@ mod tests {
             &self,
             event_types: Option<&[TitleHistoryEventType]>,
             title_ids: Option<&[String]>,
+            _include_titleless: bool,
             download_id: Option<&str>,
             limit: usize,
             offset: usize,
@@ -3018,7 +3028,12 @@ mod tests {
                     crate::event_views::title_history_record_from_domain_event(event).is_some_and(
                         |record| {
                             event_types.is_none_or(|values| values.contains(&record.event_type))
-                                && title_ids.is_none_or(|values| values.contains(&record.title_id))
+                                && title_ids.is_none_or(|values| {
+                                    record
+                                        .title_id
+                                        .as_ref()
+                                        .is_some_and(|title_id| values.contains(title_id))
+                                })
                                 && download_id.is_none_or(|value| {
                                     record.download_id.as_deref() == Some(value)
                                 })
@@ -3464,7 +3479,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(facet_registry),
@@ -4724,7 +4738,6 @@ mod tests {
             services,
             JwtAuthConfig {
                 issuer: "test".to_string(),
-                access_ttl_seconds: 3600,
                 jwt_signing_salt: "test-salt".to_string(),
             },
             Arc::new(FacetRegistry::new()),
@@ -5039,6 +5052,9 @@ mod tests {
             recorded[0].download_client_item_id,
             "job-unmatched-repeat".to_string()
         );
+        // The store keeps a foreign job foreign only for this shape; a stub that
+        // gained release metadata would be recorded as a Scryer submission.
+        assert!(recorded[0].is_observation_stub());
     }
 
     #[tokio::test]

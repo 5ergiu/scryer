@@ -80,48 +80,27 @@ pub async fn stage_or_buffer_nzb_response(
             }
             Err(_) => body_failed = true,
         });
-        let first = tokio::select! {
-            _ = cancellation.cancelled() => return cancellation_error(),
-            next = stream.next() => next,
-        };
-        let Some(first) = first else {
-            return Err(AppError::Repository(
-                "nzb download response body was empty".into(),
-            ));
-        };
-        let first = first.map_err(|error| {
-            AppError::Repository(format!("nzb download body read failed: {error}"))
-        })?;
-        if first.len() > MAX_NZB_BYTES as usize {
-            return Err(AppError::Repository(format!(
-                "download artifact payload exceeded {} bytes",
-                MAX_NZB_BYTES
-            )));
-        }
+        let first = read_artifact_prefix(&mut stream, cancellation).await?;
         if first
             .iter()
             .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| matches!(*byte, b'd' | b'm'))
+            .is_some_and(|byte| matches!(*byte, b'd' | b'm' | b'M'))
         {
-            let mut bytes = first.to_vec();
+            let mut bytes = first;
             while let Some(chunk) = tokio::select! {
                 _ = cancellation.cancelled() => return cancellation_error(),
                 next = stream.next() => next,
             } {
-                let chunk = chunk.map_err(|error| {
-                    AppError::Repository(format!("nzb download body read failed: {error}"))
-                })?;
+                let chunk = chunk.map_err(body_read_failed)?;
                 if bytes.len().saturating_add(chunk.len()) > MAX_NZB_BYTES as usize {
-                    return Err(AppError::Repository(format!(
-                        "download artifact payload exceeded {} bytes",
-                        MAX_NZB_BYTES
-                    )));
+                    return Err(payload_exceeded("download artifact"));
                 }
                 bytes.extend_from_slice(&chunk);
             }
             return Ok(BufferedOrStagedNzb::Buffered(bytes));
         }
-        let stream = futures_util::stream::iter(vec![Ok::<_, reqwest::Error>(first)]).chain(stream);
+        let stream = futures_util::stream::iter(vec![Ok::<_, reqwest::Error>(first)])
+            .chain(stream.map(|chunk| chunk.map(|bytes| bytes.to_vec())));
         Ok(BufferedOrStagedNzb::Staged(
             stage_nzb_from_stream(
                 stream,
@@ -146,6 +125,39 @@ pub async fn stage_or_buffer_nzb_response(
         }
     }
     result
+}
+
+/// Wait for the first non-whitespace byte without depending on HTTP chunk boundaries.
+async fn read_artifact_prefix<S, B, E>(
+    stream: &mut S,
+    cancellation: &CancellationToken,
+) -> AppResult<Vec<u8>>
+where
+    S: Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut prefix = Vec::new();
+    while let Some(chunk) = tokio::select! {
+        _ = cancellation.cancelled() => return cancellation_error(),
+        next = stream.next() => next,
+    } {
+        let chunk = chunk.map_err(body_read_failed)?;
+        let chunk = chunk.as_ref();
+        if prefix.len().saturating_add(chunk.len()) > MAX_NZB_BYTES as usize {
+            return Err(payload_exceeded("download artifact"));
+        }
+        prefix.extend_from_slice(chunk);
+        if chunk.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            return Ok(prefix);
+        }
+    }
+    if prefix.is_empty() {
+        return Err(AppError::Repository(
+            "nzb download response body was empty".into(),
+        ));
+    }
+    Ok(prefix)
 }
 
 pub async fn stage_nzb_from_bytes(
@@ -219,11 +231,7 @@ where
             };
             let chunk = match chunk {
                 Ok(chunk) => chunk,
-                Err(error) => {
-                    break Err(AppError::Repository(format!(
-                        "nzb download body read failed: {error}"
-                    )));
-                }
+                Err(error) => break Err(body_read_failed(error)),
             };
             let bytes = chunk.as_ref();
             if bytes.is_empty() {
@@ -231,10 +239,7 @@ where
             }
             raw_size_bytes = raw_size_bytes.saturating_add(bytes.len() as u64);
             if raw_size_bytes > MAX_NZB_BYTES {
-                break Err(AppError::Repository(format!(
-                    "nzb download payload exceeded {} bytes",
-                    MAX_NZB_BYTES
-                )));
+                break Err(payload_exceeded("nzb download"));
             }
             let remaining = 4096usize.saturating_sub(error_probe.len());
             error_probe.extend_from_slice(&bytes[..remaining.min(bytes.len())]);
@@ -290,6 +295,25 @@ where
         Arc::clone(store),
         Some(permit),
     ))
+}
+
+/// The indexer's response body broke off mid-stream (a reset connection, a
+/// truncated chunked body, a decode failure).
+///
+/// A transport failure at the indexer, reported the way every other artifact
+/// transport failure is — a timeout or a 5xx from the same fetch is already
+/// [`AppError::DownloadSubmitUnavailable`] — so it is retryable rather than
+/// burning the release, and its text reaches the operator instead of being
+/// masked as an internal repository error.
+fn body_read_failed(error: impl std::fmt::Display) -> AppError {
+    AppError::DownloadSubmitUnavailable(format!("nzb download body read failed: {error}"))
+}
+
+/// The indexer served more than [`MAX_NZB_BYTES`]. A property of the artifact
+/// itself, so a retry would fetch the same oversized payload: a validation
+/// failure the operator can read, not a masked repository error.
+fn payload_exceeded(label: &str) -> AppError {
+    AppError::Validation(format!("{label} payload exceeded {MAX_NZB_BYTES} bytes"))
 }
 
 fn cancellation_error<T>() -> AppResult<T> {
@@ -628,10 +652,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_prefix_preserves_fragmented_whitespace_and_magnets() {
+        for marker in ["magnet:", "MAGNET:", "MaGnEt:"] {
+            let body =
+                format!(" \r\n\t{marker}?xt=urn:btih:0123456789012345678901234567890123456789");
+            for split in 0..body.len() {
+                let mut chunks = stream::iter(vec![
+                    Ok::<_, std::io::Error>(&body.as_bytes()[..split]),
+                    Ok(&body.as_bytes()[split..]),
+                ]);
+                let mut bytes = super::read_artifact_prefix(&mut chunks, &CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert!(
+                    bytes
+                        .iter()
+                        .find(|b| !b.is_ascii_whitespace())
+                        .unwrap()
+                        .eq_ignore_ascii_case(&b'm')
+                );
+                while let Some(chunk) = chunks.next().await {
+                    bytes.extend_from_slice(chunk.unwrap());
+                }
+                let artifact = crate::indexers::artifact_transport::classify(
+                    "fixture", None, None, bytes, None,
+                )
+                .unwrap();
+                assert!(matches!(
+                    artifact,
+                    scryer_application::ResolvedDownloadArtifact::Magnet { .. }
+                ));
+            }
+        }
+        let mut oversized = stream::iter(vec![Ok::<_, std::io::Error>(vec![
+            b' ';
+            super::MAX_NZB_BYTES
+                as usize
+                + 1
+        ])]);
+        assert!(
+            super::read_artifact_prefix(&mut oversized, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut stalled = stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        assert!(
+            super::read_artifact_prefix(&mut stalled, &cancellation)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn generic_http_artifacts_preserve_torrents_and_body_magnets() {
         for body in [
             b"d4:infod4:name4:testee".to_vec(),
             b"magnet:?xt=urn:btih:0123456789012345678901234567890123456789".to_vec(),
+            b" \r\nMAGNET:?xt=urn:btih:0123456789012345678901234567890123456789".to_vec(),
         ] {
             let server = wiremock::MockServer::start().await;
             wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -811,5 +890,93 @@ mod tests {
         };
         assert!(matches!(error, AppError::TemporaryUnavailable { .. }));
         assert!(!contains_partial(tempdir.path()));
+    }
+
+    /// An oversized or truncated artifact is the indexer's fault, and the
+    /// operator who clicked grab sees the message. `AppError::Repository` is
+    /// masked as "Internal server error" at the API, so neither may be one: an
+    /// oversized payload is a validation failure (a retry fetches the same
+    /// bytes), a body that broke off mid-stream is a retryable transport
+    /// failure like the artifact fetch's own timeouts.
+    #[tokio::test]
+    async fn oversized_and_truncated_artifacts_are_reported_rather_than_masked() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let store = store(&tempdir).await;
+        let limit = Arc::new(Semaphore::new(1));
+
+        let oversized_stream = stream::iter(vec![
+            Ok::<_, std::io::Error>(b"<?xml version=\"1.0\"?><nzb>".to_vec()),
+            Ok(vec![b' '; MAX_NZB_BYTES as usize]),
+        ]);
+        let error = match stage_nzb_from_stream(
+            oversized_stream,
+            &store,
+            &limit,
+            "oversized",
+            None,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(_) => panic!("an oversized stream must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, AppError::Validation(message) if message.contains("payload exceeded")),
+            "{error:?}"
+        );
+        assert!(!contains_partial(tempdir.path()));
+
+        let oversized_chunk = vec![b' '; MAX_NZB_BYTES as usize + 1];
+        let mut oversized_prefix = stream::iter(vec![Ok::<_, std::io::Error>(oversized_chunk)]);
+        let error = super::read_artifact_prefix(&mut oversized_prefix, &CancellationToken::new())
+            .await
+            .expect_err("an oversized prefix must reject");
+        assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+
+        let truncated = stream::iter(vec![
+            Ok::<_, std::io::Error>(b"<?xml version=\"1.0\"?><nzb>".to_vec()),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "error decoding response body",
+            )),
+        ]);
+        let error = match stage_nzb_from_stream(
+            truncated,
+            &store,
+            &limit,
+            "truncated",
+            None,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(_) => panic!("a truncated stream must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                &error,
+                AppError::DownloadSubmitUnavailable(message)
+                    if message.contains("body read failed") && message.contains("decoding")
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_retryable_download_submit_failure());
+        assert!(!contains_partial(tempdir.path()));
+
+        let mut broken_prefix = stream::iter(vec![Err::<Vec<u8>, _>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ))]);
+        let error = super::read_artifact_prefix(&mut broken_prefix, &CancellationToken::new())
+            .await
+            .expect_err("a broken prefix must reject");
+        assert!(
+            matches!(error, AppError::DownloadSubmitUnavailable(_)),
+            "{error:?}"
+        );
     }
 }

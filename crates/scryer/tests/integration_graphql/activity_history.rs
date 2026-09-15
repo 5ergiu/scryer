@@ -41,6 +41,142 @@ async fn graphql_title_history_rejects_unsupported_event_type_filters() {
     assert!(message.contains("rematched"));
 }
 
+/// FR-026: an unlinked grab is "recorded as history against the release and
+/// indexer, with no catalog title behind it". This asks the way
+/// `/activity/history` asks - `title-history-container.tsx` always sends
+/// `groupByEvent: true` and the full `WANTED_HISTORY_FILTERS` event-type list,
+/// and leaves `titleIds`/`libraryIds` null for "All Titles"/"All Libraries" -
+/// so an untitled grab must come back on that page alongside the titled ones.
+#[tokio::test]
+async fn graphql_title_history_page_lists_an_untitled_grab() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Untitled Grab History Fixture",
+        MediaFacet::Movie,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+
+    // A titled grab, so the page has something to show either way, and an
+    // untitled one - emitted the way `interactive_release_search` emits an
+    // unlinked grab: a global event with no `title_id` and a stand-in snapshot
+    // whose name is the release itself.
+    for (title_id, stream, release) in [
+        (
+            Some(title.id.clone()),
+            DomainEventStream::Title {
+                title_id: title.id.clone(),
+            },
+            "Linked.Release.2026.1080p.WEB-DL",
+        ),
+        (
+            None,
+            DomainEventStream::Global,
+            "Unlinked.Release.2026.1080p.WEB-DL",
+        ),
+    ] {
+        ctx.app
+            .append_domain_event(NewDomainEvent {
+                event_id: Id::new().0,
+                occurred_at: Utc::now(),
+                actor_kind: DomainEventActorKind::User,
+                actor_user_id: Some("user-1".to_string()),
+                actor_display_name: "Fixture User".to_string(),
+                facet: title_id.as_ref().map(|_| MediaFacet::Movie),
+                title_id,
+                correlation_id: None,
+                causation_id: None,
+                schema_version: 1,
+                stream,
+                payload: DomainEventPayload::ReleaseGrabbed(
+                    scryer_domain::ReleaseGrabbedEventData {
+                        title: TitleContextSnapshot {
+                            title_name: release.to_string(),
+                            facet: MediaFacet::Movie,
+                            external_ids: DomainExternalIds::default(),
+                            poster_url: None,
+                            year: None,
+                        },
+                        source_title: Some(release.to_string()),
+                        source_hint: Some("https://indexer.example/api".to_string()),
+                        source_provider: Some("Configured Indexer".to_string()),
+                        download_id: Some(format!("download-{release}")),
+                        episode_ids: Vec::new(),
+                    },
+                ),
+            })
+            .await
+            .expect("append release grabbed event");
+    }
+
+    let body = gql(
+        &ctx,
+        // The selection set the page actually asks for (queries.ts
+        // `titleHistoryQuery`), trimmed to the fields this asserts on - the
+        // shape matters because `titleId` must be allowed to come back null.
+        r#"
+        query TitleHistory($filter: TitleHistoryFilterInput!) {
+          titleHistory(filter: $filter) {
+            totalCount
+            items {
+              id
+              titleId
+              titleName
+              eventType
+              sourceTitle
+              sourceProvider
+              sourceHint
+            }
+          }
+        }
+        "#,
+        json!({
+            "filter": {
+                "eventTypes": [
+                    "GRABBED",
+                    "DOWNLOAD_FAILED",
+                    "BLOCKLISTED",
+                    "IMPORTED",
+                    "IMPORT_FAILED",
+                    "IMPORT_SKIPPED",
+                ],
+                "titleIds": null,
+                "libraryIds": null,
+                "groupByEvent": true,
+                "limit": 50,
+                "offset": 0,
+            }
+        }),
+    )
+    .await;
+    assert_no_errors(&body);
+
+    let items = body["data"]["titleHistory"]["items"]
+        .as_array()
+        .expect("titleHistory items");
+    let untitled = items
+        .iter()
+        .find(|item| item["sourceTitle"] == "Unlinked.Release.2026.1080p.WEB-DL")
+        .unwrap_or_else(|| panic!("the unlinked grab must be on the history page; got {items:#?}"));
+    assert!(
+        untitled["titleId"].is_null(),
+        "it has no catalog title behind it: {untitled:#?}"
+    );
+    assert_eq!(untitled["eventType"], "grabbed");
+    assert_eq!(untitled["titleName"], "Unlinked.Release.2026.1080p.WEB-DL");
+    assert_eq!(untitled["sourceHint"], "Configured Indexer");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["sourceTitle"] == "Linked.Release.2026.1080p.WEB-DL"),
+        "and the titled grab is still there: {items:#?}"
+    );
+    assert_eq!(body["data"]["titleHistory"]["totalCount"], 2);
+}
+
 #[tokio::test]
 async fn graphql_title_history_includes_download_ignored_events() {
     let ctx = TestContext::new().await;

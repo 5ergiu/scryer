@@ -76,6 +76,32 @@ export const AVAILABLE_LANGUAGES: LanguageOption[] = [
   { code: "nld", label: "Nederlands" },
 ];
 
+/**
+ * The codes a metadata provider can be asked to hydrate in, mirroring
+ * `normalize_metadata_language_code` on the backend. Scryer's interface is
+ * translated into more languages than the metadata gateway serves, and the
+ * backend rejects anything outside this set outright -- so a metadata-language
+ * picker offered the interface list put an option in front of the operator
+ * that could only ever fail to save.
+ */
+const METADATA_LANGUAGE_CODES = new Set([
+  "eng",
+  "spa",
+  "fra",
+  "deu",
+  "ita",
+  "por",
+  "kor",
+  "zho",
+  "jpn",
+  "nld",
+]);
+
+/** {@link AVAILABLE_LANGUAGES}, less the ones metadata cannot be fetched in. */
+export const METADATA_LANGUAGES: LanguageOption[] = AVAILABLE_LANGUAGES.filter(
+  (language) => METADATA_LANGUAGE_CODES.has(language.code),
+);
+
 export function getLanguageLabel(code: string): string {
   const normalized = normalizeLocale(code);
   return AVAILABLE_LANGUAGES.find((language) => language.code === normalized)?.label ?? normalized;

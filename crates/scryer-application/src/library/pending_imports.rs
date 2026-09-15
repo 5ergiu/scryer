@@ -84,6 +84,7 @@ fn pending_import_item_from_unmatched(item: LibraryScanUnmatchedItem) -> Pending
         title_id: item.title_id,
         title_name: None,
         title_slug: None,
+        title_folder_path: None,
         display_name: item.display_name,
         path: item.item_path,
         folder_path,
@@ -94,26 +95,6 @@ fn pending_import_item_from_unmatched(item: LibraryScanUnmatchedItem) -> Pending
         search_attempts,
         size_bytes: item.size_bytes,
         created_at: item.created_at,
-    }
-}
-
-/// Fill in `size_bytes` for page rows the scanner never recorded a size for.
-///
-/// Only rows that read back as `None` are stat'ed, and only the current page
-/// (capped at [`MAX_PENDING_IMPORTS_PAGE_SIZE`]), so this stays bounded. The
-/// resolved value is deliberately not written back: the store column records
-/// what the scanner observed, and a read-path backfill would silently rewrite
-/// scan history.
-async fn hydrate_pending_import_sizes(items: &mut [PendingImportItem]) {
-    for item in items.iter_mut().filter(|item| item.size_bytes.is_none()) {
-        let path = stored_path_to_path_buf(item.path.trim());
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        item.size_bytes = i64::try_from(metadata.len()).ok();
     }
 }
 
@@ -287,16 +268,23 @@ fn library_scan_summary_has_pending_import_success(summary: &LibraryScanSummary)
     summary.imported > 0 || summary.matched > 0
 }
 
-fn pending_import_item_requires_action(item: &LibraryScanUnmatchedItem) -> bool {
+/// Whether this item names a folder-ownership problem a person has to settle:
+/// either a scan found a title already owning some other folder, or a user
+/// deliberately took a folder away from its owner (FR-007).
+fn pending_import_item_is_folder_ownership_item(item: &LibraryScanUnmatchedItem) -> bool {
     item.reason_code
         == crate::library_scan_unmatched::LIBRARY_SCAN_TITLE_ALREADY_OWNS_ANOTHER_FOLDER
+        || item.reason_code
+            == crate::library_scan_unmatched::LIBRARY_SCAN_FOLDER_OWNERSHIP_CHANGED_BY_USER
+}
+
+fn pending_import_item_requires_action(item: &LibraryScanUnmatchedItem) -> bool {
+    pending_import_item_is_folder_ownership_item(item)
         || !(item.facet == MediaFacet::Movie && item.title_id.is_some())
 }
 
 fn reject_folder_ownership_conflict_resolution(item: &LibraryScanUnmatchedItem) -> AppResult<()> {
-    if item.reason_code
-        == crate::library_scan_unmatched::LIBRARY_SCAN_TITLE_ALREADY_OWNS_ANOTHER_FOLDER
-    {
+    if pending_import_item_is_folder_ownership_item(item) {
         return Err(AppError::Validation(
             "folder ownership conflicts cannot be bound or adopted".into(),
         ));
@@ -431,7 +419,8 @@ impl AppUseCase {
             .map(pending_import_item_from_unmatched)
             .collect::<Vec<_>>();
         self.hydrate_pending_import_known_titles(&mut items).await?;
-        hydrate_pending_import_sizes(&mut items).await;
+        // Keep list requests independent of media storage: unknown scan-time
+        // sizes stay unknown rather than blocking the page on filesystem I/O.
 
         Ok(PendingImportConnection { total, items })
     }
@@ -453,7 +442,10 @@ impl AppUseCase {
         let mut known_titles = HashMap::with_capacity(title_ids.len());
         for title_id in title_ids {
             if let Some(title) = self.services.catalog.titles.get_by_id(title_id).await? {
-                known_titles.insert(title_id.to_string(), (title.name, title.slug));
+                known_titles.insert(
+                    title_id.to_string(),
+                    (title.name, title.slug, title.folder_path),
+                );
             }
         }
 
@@ -467,9 +459,10 @@ impl AppUseCase {
                 continue;
             };
 
-            if let Some((title_name, title_slug)) = known_titles.get(title_id) {
+            if let Some((title_name, title_slug, title_folder_path)) = known_titles.get(title_id) {
                 item.title_name = Some(title_name.clone());
                 item.title_slug = title_slug.clone();
+                item.title_folder_path = title_folder_path.clone();
             }
         }
 
@@ -1002,10 +995,7 @@ impl AppUseCase {
             crate::parse_release_metadata_for_target(parse_raw_name.as_str(), &parse_context);
         let snapshot = file_source_snapshot_from_path(&stored_path_to_path_buf(&file.path)).await?;
         let analysis_outcome = match self
-            .services
-            .library
-            .media_analyzer
-            .analyze_file(stored_path_to_path_buf(&file.path))
+            .analyze_catalogued_media_file(None, stored_path_to_path_buf(&file.path))
             .await
         {
             Ok(outcome) => Some(outcome),

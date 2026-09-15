@@ -612,7 +612,12 @@ impl AppUseCase {
             } else {
                 Some(ep.aired.clone())
             };
-            let episode_monitored = if (skip_filler && ep.is_filler) || (skip_recap && ep.is_recap)
+            // A retained, unmonitored season also governs episodes discovered
+            // after a scoped maintenance deletion or a manual unmonitor.
+            let collection_unmonitored = collection_id.as_ref()
+                .and_then(|id| existing_collections_by_id.get(id))
+                .is_some_and(|collection| !collection.monitored);
+            let episode_monitored = if collection_unmonitored || (skip_filler && ep.is_filler) || (skip_recap && ep.is_recap)
             {
                 false
             } else {
@@ -839,6 +844,44 @@ impl AppUseCase {
             .library
             .media_files
             .list_title_media_size_summaries(&title_ids)
+            .await
+    }
+
+    pub async fn list_collection_media_size_summaries(
+        &self,
+        actor: &User,
+        title_ids: &[String],
+    ) -> AppResult<Vec<crate::types::CollectionMediaSizeSummary>> {
+        let title_ids = self
+            .filter_title_ids_for_permission(
+                actor,
+                title_ids,
+                scryer_domain::LibraryPermission::View,
+            )
+            .await?;
+        self.services
+            .library
+            .media_files
+            .list_collection_media_size_summaries(&title_ids)
+            .await
+    }
+
+    pub async fn list_episode_media_size_summaries(
+        &self,
+        actor: &User,
+        title_ids: &[String],
+    ) -> AppResult<Vec<crate::types::EpisodeMediaSizeSummary>> {
+        let title_ids = self
+            .filter_title_ids_for_permission(
+                actor,
+                title_ids,
+                scryer_domain::LibraryPermission::View,
+            )
+            .await?;
+        self.services
+            .library
+            .media_files
+            .list_episode_media_size_summaries(&title_ids)
             .await
     }
 
@@ -1222,6 +1265,12 @@ impl AppUseCase {
         )
         .await?;
 
+        let _location_guard = self
+            .acquire_location_title_mutation(
+                &crate::location::ownership_guard::COLLECTION_CREATE_ENTRY,
+                &title_id,
+            )
+            .await?;
         if collection_type.trim().is_empty() {
             return Err(AppError::Validation("collection type is required".into()));
         }
@@ -1282,6 +1331,12 @@ impl AppUseCase {
         )
         .await?;
 
+        let _location_guard = self
+            .acquire_location_title_mutation(
+                &crate::location::ownership_guard::EPISODE_CREATE_ENTRY,
+                &title_id,
+            )
+            .await?;
         if episode_type.trim().is_empty() {
             return Err(AppError::Validation("episode type is required".into()));
         }

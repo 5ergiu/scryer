@@ -575,8 +575,21 @@ impl AppUseCase {
         Ok(())
     }
 
-    pub fn token_lifetime(&self) -> i64 {
-        self.auth.access_ttl_seconds as i64
+    pub(crate) async fn session_duration_days(&self) -> AppResult<i32> {
+        let days = self
+            .read_setting_i64_value(settings::keys::SESSION_DURATION_DAYS_KEY, None)
+            .await?
+            .unwrap_or(3);
+        if !(1..=365).contains(&days) {
+            return Err(AppError::Validation(
+                "session duration must be between 1 and 365 days".into(),
+            ));
+        }
+        Ok(days as i32)
+    }
+
+    pub async fn token_lifetime(&self) -> AppResult<i64> {
+        Ok(i64::from(self.session_duration_days().await?) * 86_400)
     }
 
     pub fn mfa_enrollment_token_lifetime(&self) -> i64 {
@@ -607,7 +620,7 @@ impl AppUseCase {
             mfa_verified_until,
             mfa_step_up_verified_until,
             JwtSessionScope::Full,
-            self.token_lifetime(),
+            self.token_lifetime().await?,
             false,
         )
         .await
@@ -625,7 +638,7 @@ impl AppUseCase {
             mfa_verified_until,
             mfa_step_up_verified_until,
             JwtSessionScope::Full,
-            self.token_lifetime(),
+            self.token_lifetime().await?,
             persist_session,
         )
         .await
@@ -649,7 +662,7 @@ impl AppUseCase {
                 mfa_step_up_verified_until,
                 security_action_verified_until: Some(self.security_action_verified_until()),
                 auth_scope: JwtSessionScope::Full,
-                ttl_seconds: self.token_lifetime(),
+                ttl_seconds: self.token_lifetime().await?,
                 persist_session,
                 password_change_required_after_enrollment: false,
                 oauth: None,

@@ -176,7 +176,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn client_authorization(connection_id: &str, user_id: Option<&str>) -> String {
+pub(super) fn client_authorization(connection_id: &str, user_id: Option<&str>) -> String {
     let connection_id = connection_id.replace(['"', '\\'], "");
     let user = user_id
         .map(|id| format!(" UserId=\"{}\",", id.replace(['"', '\\'], "")))
@@ -1604,8 +1604,12 @@ async fn hydrate_parent_series(
         .collect::<Vec<_>>();
 
     for series_id in missing_series_ids {
-        let mut url = endpoint(base, &format!("Items/{series_id}"))?;
-        url.query_pairs_mut().append_pair("Fields", CATALOG_FIELDS);
+        // The list endpoint's `Ids=` filter, as the scan above uses: it needs
+        // no resolved user, so an API-key caller is served on every version.
+        let mut url = endpoint(base, "Items")?;
+        url.query_pairs_mut()
+            .append_pair("Ids", &series_id)
+            .append_pair("Fields", CATALOG_FIELDS);
         let response = client
             .get(url)
             .header("Accept", "application/json")
@@ -1628,16 +1632,62 @@ async fn hydrate_parent_series(
                 response.status()
             )));
         }
-        let value = response.json::<Value>().await.map_err(|error| {
+        let page = response.json::<Value>().await.map_err(|error| {
             AppError::Repository(format!("invalid Emby parent-series response: {error}"))
         })?;
-        if let Some(series) = catalog_item(&value)
-            && series.kind == MediaServerCatalogItemKind::Series
-        {
+        // A series that no longer exists yields an empty page rather than a 404.
+        let Some(series) = page
+            .get("Items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(catalog_item)
+        else {
+            continue;
+        };
+        if series.kind == MediaServerCatalogItemKind::Series {
             catalog.push(series);
         }
     }
     Ok(catalog)
+}
+
+/// Ask Emby to re-read specific folders: `POST /Library/Media/Updated` with
+/// one `MediaUpdateInfo` per path, the notification its own filesystem
+/// watcher raises. Targeted, never a full library scan.
+pub(super) async fn refresh_paths(
+    client: &Client,
+    connection_id: &str,
+    base_url: &str,
+    api_key: &str,
+    paths: &[&str],
+) -> AppResult<()> {
+    let base = normalized_candidate(base_url)?;
+    let url = endpoint(&base, "Library/Media/Updated")?;
+    let body = serde_json::json!({
+        "Updates": paths
+            .iter()
+            .map(|path| serde_json::json!({ "Path": path, "UpdateType": "Modified" }))
+            .collect::<Vec<_>>(),
+    });
+    let response = client
+        .post(url)
+        .header("Accept", "application/json")
+        .header("X-Emby-Token", api_key.trim())
+        .header(
+            "X-Emby-Authorization",
+            client_authorization(connection_id, None),
+        )
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| AppError::Repository(format!("Emby refresh failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Repository(format!(
+            "Emby refresh failed with status {}",
+            response.status()
+        )));
+    }
+    Ok(())
 }
 
 fn catalog_item(value: &Value) -> Option<MediaServerCatalogItem> {
@@ -1734,11 +1784,16 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/Items/series-1"))
+            .and(path("/Items"))
+            .and(query_param("Ids", "series-1"))
             .and(header("X-Emby-Token", "api-key"))
+            .and(emby_client_header)
             .and(no_media_browser_header)
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "Type": "Series", "Id": "series-1", "ProviderIds": {"Tvdb": "2002"}
+                "Items": [
+                    {"Type": "Series", "Id": "series-1", "ProviderIds": {"Tvdb": "2002"}}
+                ],
+                "TotalRecordCount": 1
             })))
             .expect(1)
             .mount(&server)
@@ -1757,6 +1812,68 @@ mod tests {
         );
         assert_eq!(catalog[2].kind, MediaServerCatalogItemKind::Series);
         assert_eq!(catalog[2].provider_item_id, "series-1");
+    }
+
+    /// FR-088 on the Emby side: one library-update notification carrying
+    /// exactly the folders that changed, on Emby's own credential path.
+    #[tokio::test]
+    async fn refresh_posts_the_changed_paths_as_a_library_update() {
+        let server = MockServer::start().await;
+        let no_media_browser_header =
+            |request: &wiremock::Request| request.headers.get("authorization").is_none();
+        let emby_client_header = |request: &wiremock::Request| {
+            request
+                .headers
+                .get("x-emby-authorization")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == client_authorization("emby-main", None))
+        };
+        Mock::given(method("POST"))
+            .and(path("/Library/Media/Updated"))
+            .and(header("X-Emby-Token", "api-key"))
+            .and(emby_client_header)
+            .and(no_media_browser_header)
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "Updates": [
+                    { "Path": "/data/tv/Some Show", "UpdateType": "Modified" },
+                    { "Path": "/data/tv/Other Show", "UpdateType": "Modified" },
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        refresh_paths(
+            &test_client(),
+            "emby-main",
+            &server.uri(),
+            "api-key",
+            &["/data/tv/Some Show", "/data/tv/Other Show"],
+        )
+        .await
+        .expect("refresh");
+    }
+
+    #[tokio::test]
+    async fn refresh_surfaces_a_rejected_notification() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/Library/Media/Updated"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let error = refresh_paths(
+            &test_client(),
+            "emby-main",
+            &server.uri(),
+            "api-key",
+            &["/data/tv/Some Show"],
+        )
+        .await
+        .expect_err("a rejected notification is not a success");
+        assert!(error.to_string().contains("401"), "{error}");
     }
 
     async fn mount_public_info(server: &MockServer, server_id: &str) {
