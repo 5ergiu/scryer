@@ -1531,6 +1531,15 @@ impl AppUseCase {
                 })
                 .await
                 .map_err(|error| prefix_app_error(error, &result.title))?;
+            // The indexer served the release file, so this is a grab in exactly
+            // the sense the unlinked-queue path counts one — and counted under
+            // the configured indexer name, like every other trigger. Recorded
+            // per member as the fetch completes, so a later failure in the batch
+            // does not discard the grabs that already happened.
+            let grab_indexer = self
+                .grab_indexer_name(result.indexer_id.as_deref(), Some(result.source.as_str()))
+                .await;
+            self.record_indexer_grab(result.indexer_id.as_deref(), grab_indexer.as_deref());
 
             let (extension, default_content_type, bytes, content_type) = match artifact {
                 ResolvedDownloadArtifact::Nzb {

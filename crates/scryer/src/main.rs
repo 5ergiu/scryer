@@ -1590,6 +1590,7 @@ async fn bootstrap_application(
         restore_restart_controller.application_upgrade_handle(),
     );
 
+    let mut location_reservations_readable = true;
     let mut upgrade_reconcile_exclusions = match app_use_case
         .finalize_application_upgrade_journal_with_boot_time(application_upgrade_boot_time())
         .await
@@ -1601,10 +1602,24 @@ async fn bootstrap_application(
         }
     };
 
+    // An interrupted location operation is resumed further down, after root
+    // reconciliation — but its Activity run must be spared here, before the
+    // generic reconciler can mark it Failed under the still-running move.
+    match app_use_case
+        .resumable_location_operation_job_run_ids()
+        .await
+    {
+        Ok(reserved) => upgrade_reconcile_exclusions.extend(reserved),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not read the interrupted location operations to spare their runs; preserved interrupted jobs for the next restart");
+            location_reservations_readable = false;
+        }
+    }
+
     // Durable maintenance search intents resume with their original job ids.
     // Keep those reservations out of generic interrupted-job reconciliation.
     match app_use_case.resume_interrupted_maintenance_searches().await {
-        Ok(recovered) => {
+        Ok(recovered) if location_reservations_readable => {
             upgrade_reconcile_exclusions.extend(recovered);
             // Other abandoned jobs cannot be resumed; close them before pollers start.
             if let Err(e) = app_use_case
@@ -1614,9 +1629,13 @@ async fn bootstrap_application(
                 tracing::warn!(error = %e, "failed to reconcile interrupted job runs on startup");
             }
         }
+        // Either the location reservations could not be read, or the
+        // maintenance-search reservation failed. Keep recovery evidence: an
+        // optional recovery pass must not prevent the rest of the application
+        // from starting, and reconciling against a partial exclusion list
+        // would fail runs that are about to be resumed.
+        Ok(_) => {}
         Err(error) => {
-            // Keep recovery evidence if its read failed. An optional recovery
-            // pass must not prevent the rest of the application from starting.
             tracing::warn!(error = %error, "could not reserve maintenance searches; preserved interrupted jobs for the next restart");
         }
     }
