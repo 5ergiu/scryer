@@ -220,7 +220,7 @@ const nl: LocaleDictionary = {
   "settings.backups": "Back-ups",
   "settings.security": "Beveiliging",
   "settings.enableFormLogin": "Inloggen inschakelen",
-  "settings.securityEnableFormLogin": "Formulierlogin",
+  "settings.securityLoginSettings": "Inloginstellingen",
   "settings.securityEnableFormLoginHelp":
     "Wanneer ingeschakeld, vereist Scryer een geauthenticeerde gebruikerssessie. Wanneer uitgeschakeld, worden verzoeken afgehandeld als de standaardbeheerder.",
   "settings.securityPasswordMinLength": "Minimale wachtwoordlengte",

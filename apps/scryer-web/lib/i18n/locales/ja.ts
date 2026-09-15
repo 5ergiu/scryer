@@ -166,7 +166,7 @@ const ja: LocaleDictionary = {
   "settings.profile": "プロファイル",
   "settings.general": "一般",
   "settings.security": "Security",
-  "settings.securityEnableFormLogin": "Form login",
+  "settings.securityLoginSettings": "Login settings",
   "settings.securityEnableFormLoginHelp":
     "When enabled, Scryer requires an authenticated user session. When disabled, requests resolve as the default admin user.",
   "settings.securitySkipLocalIps": "Skip for local IPs",
