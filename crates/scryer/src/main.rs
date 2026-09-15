@@ -2421,12 +2421,12 @@ fn resolve_explicit_log_file_path(path: &Path, data_dir: &Path) -> PathBuf {
 fn default_windows_log_file_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return directories::BaseDirs::new().map(|dirs| {
+        directories::BaseDirs::new().map(|dirs| {
             dirs.data_local_dir()
                 .join("scryer")
                 .join("logs")
                 .join("scryer.log")
-        });
+        })
     }
 
     #[cfg(not(windows))]
