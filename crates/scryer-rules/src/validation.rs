@@ -108,6 +108,10 @@ struct InputPathContext {
     /// must name its fact with a literal, because the engine reads that set to
     /// decide whether the subject is even knowable enough to consult the rule.
     static_facts_only: bool,
+    /// The family's own source bounds. Static analysis parses exactly what the
+    /// family's engine would load, so a rule the engine accepts is never
+    /// refused here for its size.
+    limits: RuntimeLimits,
 }
 
 impl InputPathContext {
@@ -117,6 +121,7 @@ impl InputPathContext {
             catalog: RELEASE_CONTRACT.catalog(),
             allow_release_extra: true,
             static_facts_only: false,
+            limits: RuntimeLimits::release_defaults(),
         }
     }
 
@@ -126,6 +131,7 @@ impl InputPathContext {
             catalog: MAINTENANCE_CONTRACT.catalog(),
             allow_release_extra: false,
             static_facts_only: true,
+            limits: RuntimeLimits::maintenance_defaults(),
         }
     }
 
@@ -135,6 +141,7 @@ impl InputPathContext {
             catalog: REQUEST_CONTRACT.catalog(),
             allow_release_extra: false,
             static_facts_only: true,
+            limits: RuntimeLimits::request_defaults(),
         }
     }
 }
@@ -374,9 +381,25 @@ fn unsupported_dynamic_input_path_message(path: &str) -> String {
     )
 }
 
-fn parse_module(rego_source: &str, policy_path: &str) -> Result<Module, String> {
-    let source = Source::from_contents(policy_path.to_string(), rego_source.to_string())
-        .map_err(|e| e.to_string())?;
+/// Parses a policy for static analysis under the same source bounds the
+/// family's engine loads it with.
+///
+/// The limits must be passed rather than left to Regorus: its defaults are
+/// narrower than every family Scryer runs, so a source the engine already holds
+/// — a large community pack, say — would fail to parse here and turn a static
+/// question into an error the caller cannot answer.
+fn parse_module(
+    rego_source: &str,
+    policy_path: &str,
+    limits: &RuntimeLimits,
+) -> Result<Module, String> {
+    let source = Source::from_contents_with_limits(
+        policy_path.to_string(),
+        rego_source.to_string(),
+        limits.max_policy_bytes,
+        limits.max_policy_lines,
+    )
+    .map_err(|e| e.to_string())?;
     let mut parser = Parser::new(&source).map_err(|e| e.to_string())?;
     parser.enable_rego_v1().map_err(|e| e.to_string())?;
     parser.parse().map_err(|e| e.to_string())
@@ -706,7 +729,11 @@ fn object_get_reference(
 /// the current host contract. Dynamic object keys are intentionally ignored:
 /// a retained source is only classified when the AST proves the retired field.
 pub fn retired_release_input_fields(rego_source: &str) -> Result<Vec<String>, String> {
-    let module = parse_module(rego_source, "scryer.rules.retired_input")?;
+    let module = parse_module(
+        rego_source,
+        "scryer.rules.retired_input",
+        &RuntimeLimits::release_defaults(),
+    )?;
     let mut retired = BTreeSet::new();
     for import in &module.imports {
         if static_reference(&import.refr)
@@ -730,7 +757,11 @@ pub fn validate_baseline_dependencies(
     rego_source: &str,
     additional_rule_ids: &[String],
 ) -> Result<(), String> {
-    let module = parse_module(rego_source, "scryer.rules.baseline_dependencies")?;
+    let module = parse_module(
+        rego_source,
+        "scryer.rules.baseline_dependencies",
+        &RuntimeLimits::release_defaults(),
+    )?;
     let additional_rule_ids = additional_rule_ids
         .iter()
         .map(String::as_str)
@@ -881,7 +912,7 @@ fn fact_references(
     policy_path: &str,
     ctx: InputPathContext,
 ) -> Result<BTreeSet<String>, String> {
-    let module = parse_module(rego_source, policy_path)?;
+    let module = parse_module(rego_source, policy_path, &ctx.limits)?;
     module_fact_references(&module, ctx)
 }
 
@@ -961,8 +992,8 @@ pub fn request_person_targeted_paths(
     rule_set_id: &str,
 ) -> Result<Vec<String>, String> {
     let policy_path = request::user_policy_path(rule_set_id);
-    let module = parse_module(rego_source, &policy_path)?;
     let ctx = InputPathContext::request();
+    let module = parse_module(rego_source, &policy_path, &ctx.limits)?;
     if let Some(error) = input_import_error(&module, ctx.family) {
         return Err(error);
     }
@@ -1959,6 +1990,26 @@ mod tests {
         assert!(crate::UserRulesEngine::build(&[test_policy(rule_set_id, &source)]).is_ok());
     }
 
+    /// A community pack larger than Regorus' own default bound is a rule the
+    /// release engine holds happily, so every static question asked about it
+    /// must answer rather than fail. Startup asks them about each stored rule,
+    /// and an error there took the whole instance down instead of reporting one
+    /// unreadable rule.
+    #[test]
+    fn release_static_analysis_reads_sources_above_regorus_defaults() {
+        let limits = RuntimeLimits::release_defaults();
+        let rule_set_id = "large_pack_policy";
+        let source = padded_rule_source(rule_set_id, 20_001, 60);
+        assert!(source.len() > 1024 * 1024);
+        assert!(source.len() < limits.max_policy_bytes.get());
+
+        assert_eq!(
+            retired_release_input_fields(&source).expect("large source parses"),
+            Vec::<String>::new()
+        );
+        assert_eq!(validate_baseline_dependencies(&source, &[]), Ok(()));
+    }
+
     #[test]
     fn release_policy_limits_reject_sources_over_line_limit_everywhere() {
         let limits = RuntimeLimits::release_defaults();
@@ -2128,7 +2179,12 @@ mod tests {
         ] {
             let policy = maintenance_policy(id, body);
             let path = maintenance::user_policy_path(id);
-            let module = parse_module(&policy.rego_source, &path).expect("source should parse");
+            let module = parse_module(
+                &policy.rego_source,
+                &path,
+                &RuntimeLimits::release_defaults(),
+            )
+            .expect("source should parse");
 
             let source_result =
                 <maintenance::MaintenanceFamily as crate::policy::PolicyFamily>::referenced_facts(
@@ -2836,7 +2892,12 @@ mod tests {
         ] {
             let policy = request_policy(id, body);
             let path = request::user_policy_path(id);
-            let module = parse_module(&policy.rego_source, &path).expect("source should parse");
+            let module = parse_module(
+                &policy.rego_source,
+                &path,
+                &RuntimeLimits::release_defaults(),
+            )
+            .expect("source should parse");
 
             let source_result =
                 <request::RequestFamily as crate::policy::PolicyFamily>::referenced_facts(
