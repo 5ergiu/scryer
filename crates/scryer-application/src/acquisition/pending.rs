@@ -807,6 +807,31 @@ impl AppUseCase {
         Ok(true)
     }
 
+    /// Whether this release's route names one specific download client.
+    ///
+    /// A pinned route is an indexer-to-client mapping: the operator said *this*
+    /// indexer's grabs go to *that* client, so there is no fallback to pick and
+    /// no blind double-submit to protect against — an unreadable queue cannot
+    /// hide a second client that already has the release. Sonarr treats a fresh
+    /// search grab the same way (`DownloadService` only block-filters when it is
+    /// re-processing pending releases), and letting the grab reach the router
+    /// turns an invisible "keeping release pending" into a recorded attempt the
+    /// operator can read.
+    pub(crate) async fn release_route_is_pinned(&self, indexer_id: Option<&str>) -> bool {
+        let Some(indexer_id) = indexer_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return false;
+        };
+        self.services
+            .integrations
+            .indexer_configs
+            .get_by_id(indexer_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|config| config.download_client_id)
+            .is_some_and(|client_id| !client_id.trim().is_empty())
+    }
+
     /// Attempt to grab a single pending release.
     pub(crate) async fn try_grab_pending_release(
         &self,
@@ -851,7 +876,13 @@ impl AppUseCase {
         // that's currently downloading (e.g. grabbed via background search
         // while this pending release was waiting).
         let dl_snapshot = super::acquisition_workflow::DownloadClientSnapshot::fetch(self).await;
-        if dl_snapshot.is_active(&pr.release_title) {
+        // An unreadable queue makes `is_active` answer "possibly" for every
+        // release. That blind "yes" must not burn a pinned release: the pinned
+        // client is the only place the release could be, and the router will
+        // find out by asking it.
+        let route_pinned = dl_snapshot.queue_listing_failed()
+            && self.release_route_is_pinned(pr.indexer_id.as_deref()).await;
+        if !route_pinned && dl_snapshot.is_active(&pr.release_title) {
             info!(
                 release = pr.release_title.as_str(),
                 "pending release: skipping, already active in download client"

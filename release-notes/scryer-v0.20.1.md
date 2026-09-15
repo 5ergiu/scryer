@@ -35,6 +35,7 @@ These notes cover what's changed since **0.20.0**.
   - A connection that's turned back on is treated as not yet synced until its next successful sync.
   - Maintenance searches that were running when Scryer restarted resume instead of failing.
 - **Library and rename:**
+  - A title being scanned and looked up at the same time no longer ends up with no metadata and its files skipped.
   - Titles whose files are outside every configured root folder are skipped by rename, with a reason, instead of being moved.
   - An external subtitle or `.nfo` file that can't be moved back after a failed rename is reported at the location it was moved to, with the reason.
 - **Search and downloads:**
@@ -45,6 +46,8 @@ These notes cover what's changed since **0.20.0**.
   - Operators that need different indexer backoff periods can now set `SCRYER_INDEXER_BACKOFF_LADDER_SECS` to a comma-separated, ascending list of seconds, for example `15,30,45,90,180`. Unset or unusable values keep the shipped 5/10/15/30/60-minute backoff, so the existing default behavior is unchanged.
   - `SCRYER_RSS_TARGET_INTERVAL_SECS` now also sets how often the RSS sync worker wakes, so a cadence shorter than a minute takes effect instead of being rounded up to the worker's next wake. A cadence of a minute or longer, and leaving the variable unset, keep the existing once-a-minute wake.
   - A torrent held for seeding after its import no longer disappears from the queue a second later and gets ignored, then re-added as if Scryer had never started it.
+  - When an indexer is pinned to one download client, a grab from that indexer is now sent to it even while its queue can't be read, so the client's own error is recorded instead of the release quietly staying pending.
+  - When a season pack and the individual episodes it contains score the same, the season pack is grabbed instead of one download per episode. An episode release that scores higher than the pack still wins.
 - **Login settings:**
   - If you set the login lifetime with the `SCRYER_JWT_ACCESS_TTL_SECONDS` environment variable, it's honored again. It's rounded to the nearest whole day, from 1 to 365. A value you've set in **Settings → Security** takes precedence.
   - The Security page's form login panel is now called **Login settings**. **Minimum password length** and **Login valid for** sit side by side, with the lifetime entered in days.

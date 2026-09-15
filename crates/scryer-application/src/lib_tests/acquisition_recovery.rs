@@ -13135,3 +13135,184 @@ async fn a_cutoff_unmet_title_request_does_not_search_the_titles_missing_scopes(
         "the missing scopes the request did resolve are still searched"
     );
 }
+
+/// An unreadable client queue parks a standby release only when the route still
+/// has somewhere else to go. A pinned route (an indexer-to-client mapping) names
+/// the one client that could hold the release, so the grab must reach the router
+/// and let that client answer for itself.
+#[tokio::test]
+async fn a_pinned_route_grabs_the_standby_release_when_the_queue_cannot_be_read() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking(
+        download_client.clone(),
+        download_submissions,
+        pending_releases.clone(),
+        wanted_items.clone(),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Pinned Route", 2024).await;
+    app.services
+        .integrations
+        .indexer_configs
+        .set_download_client_mapping(
+            "acquisition-indexer",
+            Some("background-search-default-client".to_string()),
+        )
+        .await
+        .expect("pin the indexer to a download client");
+    download_client
+        .set_queue_error(Some("client queue is unreadable"))
+        .await;
+
+    let now = Utc::now();
+    let mut standby = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Pinned.Route.2024.1080p.WEB-DL-GRP",
+        PendingReleaseStatus::Standby,
+    );
+    standby.indexer_id = Some("acquisition-indexer".to_string());
+    pending_releases
+        .insert_pending_release(&standby)
+        .await
+        .expect("seed standby row");
+    let wanted = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted_id)
+        .await
+        .expect("load wanted scope")
+        .expect("wanted scope exists");
+    let snapshot = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+    assert!(
+        snapshot.queue_listing_failed(),
+        "the fixture must reproduce an unreadable queue"
+    );
+
+    assert_eq!(
+        crate::acquisition_workflow::try_saved_candidates(
+            &app, &wanted, None, None, &snapshot, &now,
+        )
+        .await,
+        crate::acquisition_workflow::StandbyRecoveryOutcome::Recovered {
+            scope: SubmissionScope::Title
+        },
+        "a pinned route must reach the download client instead of parking"
+    );
+    assert_eq!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .as_slice(),
+        ["Pinned.Route.2024.1080p.WEB-DL-GRP"],
+        "the pinned client must be asked for the release"
+    );
+}
+
+/// The unpinned case is unchanged: with no mapping there could be another client
+/// already holding the release, so an unreadable queue still parks the row.
+#[tokio::test]
+async fn an_unpinned_route_keeps_the_standby_release_pending_when_the_queue_cannot_be_read() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking(
+        download_client.clone(),
+        download_submissions,
+        pending_releases.clone(),
+        wanted_items.clone(),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Unpinned Route", 2024).await;
+    download_client
+        .set_queue_error(Some("client queue is unreadable"))
+        .await;
+
+    let now = Utc::now();
+    let mut standby = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Unpinned.Route.2024.1080p.WEB-DL-GRP",
+        PendingReleaseStatus::Standby,
+    );
+    standby.indexer_id = Some("acquisition-indexer".to_string());
+    pending_releases
+        .insert_pending_release(&standby)
+        .await
+        .expect("seed standby row");
+    let wanted = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted_id)
+        .await
+        .expect("load wanted scope")
+        .expect("wanted scope exists");
+    let snapshot = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+
+    assert_eq!(
+        crate::acquisition_workflow::try_saved_candidates(
+            &app, &wanted, None, None, &snapshot, &now,
+        )
+        .await,
+        crate::acquisition_workflow::StandbyRecoveryOutcome::Deferred {
+            scope: Some(SubmissionScope::Title),
+            refused: None,
+        },
+        "an unreadable queue with no pinned route must keep the release pending"
+    );
+    assert_eq!(
+        pending_releases
+            .get_pending_release(&standby.id)
+            .await
+            .expect("load standby row")
+            .expect("standby row exists")
+            .status,
+        PendingReleaseStatus::Standby,
+    );
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .is_empty(),
+        "nothing may be submitted while the queue is unreadable and unpinned"
+    );
+}
+
+/// A season pack and the episodes it covers usually come from the same group at
+/// the same quality, so their scores tie. The tie used to go to whichever
+/// proposal the walk built first — always the per-episode ones — and the pack
+/// was set aside for covering episodes that had just been claimed. One release
+/// that covers the whole season is the better answer at equal worth, which is
+/// also what Sonarr does.
+#[tokio::test]
+async fn a_season_pack_wins_a_tie_against_the_episodes_it_covers() {
+    let pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-PACK".to_string();
+    let first_episode = "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-PACK".to_string();
+    let second_episode = "Recent.Failed.Season.Pack.S07E24.1080p.WEB-DL-PACK".to_string();
+    let indexer_client = Arc::new(TrackingIndexerClient::default().with_season_pack_titles([
+        // Episode rows first: without the tie-break they win on insertion order.
+        first_episode.clone(),
+        second_episode.clone(),
+        pack.clone(),
+    ]));
+    let (app, _title, _indexer_client, download_client) =
+        seed_recent_failed_season_pack_fixture_with_indexer(indexer_client).await;
+
+    app.run_background_acquisition_cycle_once().await;
+
+    let submitted = download_client
+        .submitted_release_titles
+        .lock()
+        .await
+        .clone();
+    assert!(
+        submitted.contains(&pack),
+        "the pack must win the tie against the episodes it covers: {submitted:?}"
+    );
+    assert!(
+        !submitted.contains(&first_episode) && !submitted.contains(&second_episode),
+        "the covered episode proposals must be set aside, not grabbed too: {submitted:?}"
+    );
+}
