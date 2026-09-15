@@ -61,7 +61,7 @@ function SetupIntroLogo({
         draggable={false}
         style={flight ?? { animationDelay: appearDelay }}
         className={cn(
-          "size-[min(38vmin,260px)] select-none object-contain",
+          "size-[min(56vmin,420px)] select-none object-contain",
           flight ? "setup-intro-fly" : "setup-intro-appear",
         )}
         onAnimationEnd={(event) => {
