@@ -823,8 +823,11 @@ body {
 
 /*
  * The setup wizard's welcome (see components/setup/setup-intro.tsx), timed like
- * Weaver's first-run setup: the big logo lands on the header logo at 1.2s, the
- * header name fades in as it lands, and the rest of the page rises in with it.
+ * Weaver's first-run setup. The big logo appears and holds in the middle while
+ * setup loads (0.576s at least), then flies onto the header logo in 0.624s; the
+ * header name fades in and the rest of the page rises in as it lands. The
+ * flight may wait for setup to finish loading, so the page's animations are
+ * timed from `--setup-intro-flight-delay`.
  */
 .setup-intro .setup-intro-logo {
   opacity: 0;
@@ -836,38 +839,54 @@ body {
 }
 
 .setup-intro-playing .setup-intro-wordmark {
-  animation: setup-intro-fade 0.27s ease-out 0.93s both;
+  animation: setup-intro-fade 0.27s ease-out both;
+  animation-delay: calc(var(--setup-intro-flight-delay, 0ms) + 0.354s);
 }
 
 .setup-intro-playing > :not(.setup-intro-header) {
-  animation: setup-intro-rise 0.33s cubic-bezier(0.2, 0.7, 0.2, 1) 0.96s both;
+  animation: setup-intro-rise 0.33s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--setup-intro-flight-delay, 0ms) + 0.384s);
 }
 
-.setup-intro-mark {
-  animation: setup-intro-mark 1.2s both;
-  will-change: transform, opacity;
+.setup-intro-appear {
+  animation: setup-intro-appear 0.576s both;
 }
 
-@keyframes setup-intro-mark {
+.setup-intro-fly {
+  animation: setup-intro-fly 0.624s cubic-bezier(0.65, 0, 0.25, 1) both;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-intro-appear {
+    animation: none;
+  }
+}
+
+@keyframes setup-intro-appear {
   0% {
     opacity: 0;
     transform: scale(0.6);
     animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
   }
 
-  40% {
+  83.33% {
     opacity: 1;
-    transform: translate(0, 0) scale(1);
-  }
-
-  48% {
-    opacity: 1;
-    transform: translate(0, 0) scale(1);
-    animation-timing-function: cubic-bezier(0.65, 0, 0.25, 1);
+    transform: scale(1);
   }
 
   100% {
     opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes setup-intro-fly {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+
+  to {
     transform: translate(var(--setup-intro-x), var(--setup-intro-y)) scale(var(--setup-intro-scale));
   }
 }
