@@ -1,4 +1,4 @@
-import { Blocks, Download, Loader2, PlugZap, RefreshCw, Trash2 } from "lucide-react";
+import { Blocks, Download, PlugZap, RefreshCw, Trash2 } from "lucide-react";
 
 import { PluginLogo } from "@/components/common/plugin-visual";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import {
   SetupPrimaryButton,
   SetupStepHeader,
 } from "./setup-chrome";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 interface SetupPluginsViewProps {
   t: (
@@ -199,7 +200,7 @@ export function SetupPluginsView({
           onClick={onRefreshRegistry}
         >
           {refreshing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <LoadingMark className="h-4 w-4" />
           ) : (
             <RefreshCw className="h-4 w-4" />
           )}
@@ -214,7 +215,7 @@ export function SetupPluginsView({
 
       {loading ? (
         <div className="mx-auto flex w-full max-w-6xl items-center justify-center gap-2 rounded-xl border border-dashed border-border py-10 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <LoadingMark className="h-4 w-4" />
           {t("label.loading")}
         </div>
       ) : (
@@ -321,7 +322,7 @@ export function SetupPluginsView({
                                     onClick={() => onUninstallPlugin(plugin)}
                                   >
                                     {isBusy ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      <LoadingMark className="h-3.5 w-3.5" />
                                     ) : (
                                       <Trash2 className="h-3.5 w-3.5" />
                                     )}
@@ -343,7 +344,7 @@ export function SetupPluginsView({
                                   onClick={() => onInstallPlugin(plugin)}
                                 >
                                   {isBusy ? (
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    <LoadingMark className="h-3.5 w-3.5" />
                                   ) : (
                                     <Download className="h-3.5 w-3.5" />
                                   )}

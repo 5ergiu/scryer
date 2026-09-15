@@ -15,7 +15,6 @@ import {
   ChevronsUpDown,
   Eye,
   EyeOff,
-  Loader2,
   Search,
   Trash2,
   Zap,
@@ -78,6 +77,7 @@ import {
   VirtualizedTitleTableBody,
   type VirtualizedTitleTableBodyHandle,
 } from "./title-table-shared";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 type CompactTitleTableProps = {
   view: string;
@@ -934,7 +934,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
                   className={COMPACT_TITLE_TABLE_ACTION_BUTTON_CLASS}
                 >
                   {autoQueueLoading ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--scry-accent-text)]" />
+                    <LoadingMark className="h-3.5 w-3.5 text-[var(--scry-accent-text)]" />
                   ) : (
                     <Zap className="h-3.5 w-3.5" />
                   )}
@@ -963,7 +963,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
                     className={COMPACT_TITLE_TABLE_ACTION_BUTTON_CLASS}
                   >
                     {monitorToggleLoading ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <LoadingMark className="h-3.5 w-3.5" />
                     ) : item.monitored ? (
                       <EyeOff className="h-3.5 w-3.5" />
                     ) : (
@@ -980,7 +980,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
                   className={COMPACT_TITLE_TABLE_ACTION_BUTTON_CLASS}
                 >
                   {deleteLoading ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <LoadingMark className="h-3.5 w-3.5" />
                   ) : (
                     <Trash2 className="h-3.5 w-3.5" />
                   )}
@@ -1021,7 +1021,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
                 </div>
                 {interactiveSearchLoading ? (
                   <div className="flex items-center gap-3 py-3">
-                    <Loader2 className="h-5 w-5 animate-spin text-[var(--scry-accent-text)]" />
+                    <LoadingMark className="h-5 w-5 text-[var(--scry-accent-text)]" />
                     <p className="text-sm text-muted-foreground">
                       {t("label.searching")}
                     </p>

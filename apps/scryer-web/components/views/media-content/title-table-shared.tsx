@@ -1,6 +1,5 @@
 import * as React from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Loader2 } from "lucide-react";
 import { Link } from "react-router";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -16,6 +15,7 @@ import {
 } from "@/lib/utils/title-ratings";
 import { cn } from "@/lib/utils";
 import type { BoxedActionButtonTone } from "@/lib/utils/action-button-styles";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 export type TitleTableSortKey =
   | "name"
@@ -1163,7 +1163,7 @@ export function TitleCollectionLoadingState() {
       aria-live="polite"
       aria-busy="true"
     >
-      <Loader2 className="h-5 w-5 animate-spin text-primary" />
+      <LoadingMark className="h-5 w-5 text-primary" />
       <div className="text-left">
         <p className="text-sm font-medium text-foreground">
           Loading library...
@@ -1225,7 +1225,7 @@ export function TitleCollectionEmptyState({
             disabled={scanDisabled || scanLoading}
           >
             {scanLoading ? (
-              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              <LoadingMark className="mr-1.5 h-4 w-4" />
             ) : null}
             {t("settings.libraryScanButton")}
           </Button>

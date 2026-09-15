@@ -806,6 +806,21 @@ body {
   }
 }
 
+/* The loading mark's delayed entrance: a load that finishes first never shows it. */
+@keyframes scryer-loading-reveal {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@utility animate-loading-reveal {
+  animation: scryer-loading-reveal 200ms ease-out 400ms both;
+}
+
 /* Library scan toast — active phase-bar shimmer sweep */
 @keyframes scry-shimmer {
   0% {

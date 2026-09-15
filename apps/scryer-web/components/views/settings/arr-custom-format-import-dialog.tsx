@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { productLogoUrl } from "@/components/setup/import/import-instance-pill";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,7 @@ import {
   recommendScore,
   sourceFacets,
 } from "@/lib/utils/arr-custom-format-import-state";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 export type ArrCustomFormatDraft = {
   name: string;
@@ -346,12 +347,12 @@ export default function ArrCustomFormatImportDialog({
           </Button>
           {inspection ? (
             <Button type="button" disabled={translating} onClick={translate}>
-              {translating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {translating ? <LoadingMark className="mr-2 h-4 w-4" /> : null}
               {t("settings.arrImportTranslate")}
             </Button>
           ) : (
             <Button type="button" disabled={reviewing || !json.trim()} onClick={() => void review()}>
-              {reviewing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {reviewing ? <LoadingMark className="mr-2 h-4 w-4" /> : null}
               {t("settings.arrImportReviewAction")}
             </Button>
           )}

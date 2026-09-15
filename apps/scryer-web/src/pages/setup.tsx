@@ -1,12 +1,12 @@
 import { useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/hooks/use-auth";
 import { useLanguage } from "@/lib/hooks/use-language";
 import { ScryerGraphqlProvider } from "@/lib/graphql/urql-provider";
 import { SetupWizardContainer } from "@/components/setup/setup-wizard-container";
 import { useBackendRestarting } from "@/lib/hooks/use-backend-restarting";
 import { BackendRestartOverlay } from "@/components/common/backend-restart-overlay";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 export default function SetupPage() {
   const { serviceRestarting, setServiceRestarting } = useBackendRestarting();
@@ -31,7 +31,7 @@ export default function SetupPage() {
   if (authLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-fixed text-[var(--scry-body)] [background-image:var(--scry-shell-bg)]">
-        <Loader2 className="h-6 w-6 animate-spin text-emerald-700 dark:text-emerald-300" />
+        <LoadingMark className="h-6 w-6 text-emerald-700 dark:text-emerald-300" />
       </div>
     );
   }
