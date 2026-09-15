@@ -101,7 +101,7 @@ export function RegoAiPromptDialog({
     <Dialog open={open} onOpenChange={setOpen}>
       <TextActionButton
         id={id}
-        tone="accent"
+        tone="accentBright"
         size="default"
         onClick={() => setOpen(true)}
         leadingIcon={<Sparkles className="h-4 w-4" />}
