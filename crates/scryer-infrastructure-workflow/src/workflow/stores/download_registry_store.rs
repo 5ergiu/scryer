@@ -10,6 +10,11 @@ use super::unique_violation::is_unique_violation;
 use super::{normalize_download_client_id, opt_timestamp_string, timestamp_string};
 use crate::queries::sql_runtime::{SqlArg, SqlExec, SqlRow, SqlRuntime, SqlTx, StoreDatastore};
 
+/// Maximum native item ids bound into one `IN (...)` list. Kept well under
+/// SQLite's historical 999-parameter ceiling so a title with a long grab
+/// history never trips the statement limit on either dialect.
+const ACTIVE_BINDING_LOOKUP_CHUNK: usize = 200;
+
 #[derive(Clone)]
 pub struct DownloadRegistryStore {
     datastore: StoreDatastore,
@@ -144,6 +149,22 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         &self,
         locator: &ClientJobLocator,
     ) -> AppResult<Option<DownloadClientBindingRecord>> {
+        let client_id = locator.client_id.clone().unwrap_or_default();
+        // One statement, two ways to match:
+        //
+        // 1. the exact locator, as before; or
+        // 2. a *legacy* row (migration 0179 backfilled it from a submission
+        //    that predates per-client attribution, so its `client_config_id` is
+        //    NULL or blank) with the same type and item id, but only when the
+        //    requested client is this install's single configured client of
+        //    that type. Same attribution rule as the cleanup store's
+        //    `resolve_legacy_cleanup_client_tx`; disabled clients still count,
+        //    so a second configured instance makes the owner ambiguous and the
+        //    legacy arm matches nothing.
+        //
+        // The `ORDER BY` keeps an exact match strictly ahead of a legacy one,
+        // and the legacy arm is inert for a locator with no client id, which is
+        // what the first arm already resolves.
         SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
             "SELECT download_id, client_config_id, client_type_snapshot, client_name_snapshot,
@@ -151,15 +172,36 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
              FROM download_client_bindings
              WHERE ended_at IS NULL
                AND native_item_id IS NOT NULL
-               AND COALESCE(client_config_id, '') = {}
                AND LOWER(TRIM(COALESCE(client_type_snapshot, ''))) = {}
                AND native_item_id = {}
-             ORDER BY created_at, download_id
+               AND (
+                     COALESCE(client_config_id, '') = {}
+                  OR (
+                       {} <> ''
+                       AND TRIM(COALESCE(client_config_id, '')) = ''
+                       AND EXISTS (
+                             SELECT 1 FROM download_clients dc
+                             WHERE dc.id = {}
+                               AND LOWER(TRIM(COALESCE(dc.client_type, ''))) = {}
+                           )
+                       AND (
+                             SELECT COUNT(*) FROM download_clients dc_all
+                             WHERE LOWER(TRIM(COALESCE(dc_all.client_type, ''))) = {}
+                           ) = 1
+                     )
+               )
+             ORDER BY CASE WHEN COALESCE(client_config_id, '') = {} THEN 0 ELSE 1 END,
+                      created_at, download_id
              LIMIT 1",
             &[
-                SqlArg::Text(locator.client_id.clone().unwrap_or_default()),
                 SqlArg::Text(locator.client_type.clone()),
                 SqlArg::Text(locator.item_id.clone()),
+                SqlArg::Text(client_id.clone()),
+                SqlArg::Text(client_id.clone()),
+                SqlArg::Text(client_id.clone()),
+                SqlArg::Text(locator.client_type.clone()),
+                SqlArg::Text(locator.client_type.clone()),
+                SqlArg::Text(client_id),
             ],
         )
         .await?
@@ -167,42 +209,204 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .transpose()
     }
 
+    async fn list_active_bindings_for_native_item_ids(
+        &self,
+        native_item_ids: &[String],
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        let mut seen = std::collections::HashSet::new();
+        let wanted: Vec<String> = native_item_ids
+            .iter()
+            .map(|item_id| item_id.trim())
+            .filter(|item_id| !item_id.is_empty())
+            .filter(|item_id| seen.insert(item_id.to_string()))
+            .map(str::to_string)
+            .collect();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut bindings = Vec::new();
+        for chunk in wanted.chunks(ACTIVE_BINDING_LOOKUP_CHUNK) {
+            let placeholders = (0..chunk.len())
+                .map(|_| "{}")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let args: Vec<SqlArg> = chunk.iter().cloned().map(SqlArg::Text).collect();
+            let rows = SqlRuntime::fetch_all(
+                self.datastore.read_exec(),
+                &format!(
+                    "SELECT download_id, client_config_id, client_type_snapshot, client_name_snapshot,
+                            native_item_id, created_at, last_seen_at, ended_at
+                     FROM download_client_bindings
+                     WHERE ended_at IS NULL
+                       AND native_item_id IS NOT NULL
+                       AND native_item_id IN ({placeholders})
+                     ORDER BY created_at, download_id"
+                ),
+                &args,
+            )
+            .await?;
+            for row in rows {
+                bindings.push(binding_from_row(row)?);
+            }
+        }
+        Ok(bindings)
+    }
+
     async fn list_active_bindings_for_client_before(
         &self,
         client_config_id: &str,
         client_type: &str,
         observed_before: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, DownloadId)>,
         limit: usize,
     ) -> AppResult<Vec<DownloadClientBindingRecord>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
+        let mut args = vec![
+            SqlArg::Text(client_config_id.to_string()),
+            SqlArg::Text(client_type.trim().to_ascii_lowercase()),
+            SqlArg::Timestamp(observed_before),
+            SqlArg::Timestamp(observed_before),
+        ];
+        // Keyset over the result's own `(created_at, download_id)` ordering, so
+        // a pass resumes where the previous one stopped instead of re-reading
+        // the oldest prefix that the disposition rules deliberately preserve.
+        let keyset = match after {
+            Some((cursor_created_at, cursor_download_id)) => {
+                args.push(SqlArg::Timestamp(cursor_created_at));
+                args.push(SqlArg::Timestamp(cursor_created_at));
+                args.push(SqlArg::Text(cursor_download_id.to_string()));
+                "AND (created_at > {} OR (created_at = {} AND download_id > {}))"
+            }
+            None => "",
+        };
+        args.push(SqlArg::I64(limit as i64));
+
         SqlRuntime::fetch_all(
             self.datastore.read_exec(),
-            "SELECT download_id, client_config_id, client_type_snapshot, client_name_snapshot,
-                    native_item_id, created_at, last_seen_at, ended_at
-             FROM download_client_bindings
-             WHERE ended_at IS NULL
-               AND native_item_id IS NOT NULL
-               AND client_config_id = {}
-               AND LOWER(TRIM(COALESCE(client_type_snapshot, ''))) = {}
-               AND created_at <= {}
-               AND (last_seen_at IS NULL OR last_seen_at <= {})
-             ORDER BY created_at, download_id
-             LIMIT {}",
-            &[
-                SqlArg::Text(client_config_id.to_string()),
-                SqlArg::Text(client_type.trim().to_ascii_lowercase()),
-                SqlArg::Timestamp(observed_before),
-                SqlArg::Timestamp(observed_before),
-                SqlArg::I64(limit as i64),
-            ],
+            &format!(
+                "SELECT download_id, client_config_id, client_type_snapshot, client_name_snapshot,
+                        native_item_id, created_at, last_seen_at, ended_at
+                 FROM download_client_bindings
+                 WHERE ended_at IS NULL
+                   AND native_item_id IS NOT NULL
+                   AND client_config_id = {{}}
+                   AND LOWER(TRIM(COALESCE(client_type_snapshot, ''))) = {{}}
+                   AND created_at <= {{}}
+                   AND (last_seen_at IS NULL OR last_seen_at <= {{}})
+                   {keyset}
+                 ORDER BY created_at, download_id
+                 LIMIT {{}}"
+            ),
+            &args,
         )
         .await?
         .into_iter()
         .map(binding_from_row)
         .collect()
+    }
+
+    async fn list_active_legacy_client_bindings_before(
+        &self,
+        observed_before: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, DownloadId)>,
+        limit: usize,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut args = vec![
+            SqlArg::Timestamp(observed_before),
+            SqlArg::Timestamp(observed_before),
+        ];
+        // Same keyset contract as the per-client listing above.
+        let keyset = match after {
+            Some((cursor_created_at, cursor_download_id)) => {
+                args.push(SqlArg::Timestamp(cursor_created_at));
+                args.push(SqlArg::Timestamp(cursor_created_at));
+                args.push(SqlArg::Text(cursor_download_id.to_string()));
+                "AND (created_at > {} OR (created_at = {} AND download_id > {}))"
+            }
+            None => "",
+        };
+        args.push(SqlArg::I64(limit as i64));
+
+        SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT download_id, client_config_id, client_type_snapshot, client_name_snapshot,
+                        native_item_id, created_at, last_seen_at, ended_at
+                 FROM download_client_bindings
+                 WHERE ended_at IS NULL
+                   AND native_item_id IS NOT NULL
+                   AND TRIM(COALESCE(client_config_id, '')) = ''
+                   AND created_at <= {{}}
+                   AND (last_seen_at IS NULL OR last_seen_at <= {{}})
+                   {keyset}
+                 ORDER BY created_at, download_id
+                 LIMIT {{}}"
+            ),
+            &args,
+        )
+        .await?
+        .into_iter()
+        .map(binding_from_row)
+        .collect()
+    }
+
+    async fn attribute_legacy_binding_client(
+        &self,
+        id: &DownloadId,
+        client_config_id: &str,
+    ) -> AppResult<()> {
+        let client_config_id = client_config_id.trim().to_string();
+        if client_config_id.is_empty() {
+            return Ok(());
+        }
+        let id = id.to_string();
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "attribute_legacy_download_client_binding",
+            move |tx| {
+                let id = id.clone();
+                let client_config_id = client_config_id.clone();
+                Box::pin(async move {
+                    // Only fills a blank attribution, and never one that would
+                    // collide with `idx_download_client_bindings_active_locator_unique`:
+                    // if another live binding already holds this
+                    // (client, type, item) the legacy row stays as it is rather
+                    // than failing the pass.
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE download_client_bindings
+                         SET client_config_id = {}
+                         WHERE download_id = {}
+                           AND TRIM(COALESCE(client_config_id, '')) = ''
+                           AND NOT EXISTS (
+                                 SELECT 1 FROM download_client_bindings other
+                                 WHERE other.download_id <> download_client_bindings.download_id
+                                   AND other.ended_at IS NULL
+                                   AND other.native_item_id = download_client_bindings.native_item_id
+                                   AND LOWER(TRIM(COALESCE(other.client_type_snapshot, '')))
+                                       = LOWER(TRIM(COALESCE(download_client_bindings.client_type_snapshot, '')))
+                                   AND COALESCE(other.client_config_id, '') = {}
+                               )",
+                        &[
+                            SqlArg::Text(client_config_id.clone()),
+                            SqlArg::Text(id),
+                            SqlArg::Text(client_config_id),
+                        ],
+                    )
+                    .await?;
+                    Ok(())
+                })
+            },
+        )
+        .await
     }
 
     async fn list_active_binding_clients(&self) -> AppResult<Vec<(String, String)>> {
@@ -875,7 +1079,8 @@ mod tests {
              );
              CREATE TABLE download_clients (
                  id TEXT PRIMARY KEY,
-                 name TEXT NOT NULL
+                 name TEXT NOT NULL,
+                 client_type TEXT NOT NULL DEFAULT ''
              )",
         )
         .execute(&pool)
@@ -957,13 +1162,40 @@ mod tests {
     }
 
     async fn insert_download_client(store: &DownloadRegistryStore, id: &str, name: &str) {
+        insert_download_client_of_type(store, id, name, "qbittorrent").await;
+    }
+
+    async fn insert_download_client_of_type(
+        store: &DownloadRegistryStore,
+        id: &str,
+        name: &str,
+        client_type: &str,
+    ) {
         SqlRuntime::execute(
             store.datastore.read_exec(),
-            "INSERT INTO download_clients (id, name) VALUES ({}, {})",
-            &[SqlArg::Text(id.to_string()), SqlArg::Text(name.to_string())],
+            "INSERT INTO download_clients (id, name, client_type) VALUES ({}, {}, {})",
+            &[
+                SqlArg::Text(id.to_string()),
+                SqlArg::Text(name.to_string()),
+                SqlArg::Text(client_type.to_string()),
+            ],
         )
         .await
         .expect("download client should insert");
+    }
+
+    async fn attributed_client(store: &DownloadRegistryStore, download_id: &str) -> String {
+        SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT COALESCE(client_config_id, '') AS client_config_id
+             FROM download_client_bindings WHERE download_id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("the binding should read back")
+        .expect("the binding row exists")
+        .text("client_config_id")
+        .expect("the column is present")
     }
 
     async fn insert_ambiguous_submission(
@@ -2057,6 +2289,527 @@ mod tests {
         );
     }
 
+    fn synthetic_download_id(index: usize) -> String {
+        format!("00000000-0000-4000-8000-{index:012}")
+    }
+
+    #[tokio::test]
+    async fn bulk_active_binding_lookup_skips_ended_rows_and_ignores_unknown_item_ids() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-active"), None).await;
+        insert_download(&store, SECOND_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            SECOND_ID,
+            Some("client-1"),
+            Some("job-ended"),
+            Some("2026-08-24T13:00:00Z"),
+        )
+        .await;
+
+        let bindings = store
+            .list_active_bindings_for_native_item_ids(&[
+                "job-active".to_string(),
+                "job-ended".to_string(),
+                "job-never-existed".to_string(),
+                // Blank and duplicate entries must not widen the read.
+                "  ".to_string(),
+                "job-active".to_string(),
+            ])
+            .await
+            .expect("bulk binding lookup should succeed");
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].download_id.to_string(), FIRST_ID);
+        assert_eq!(bindings[0].native_item_id.as_deref(), Some("job-active"));
+        assert!(bindings[0].ended_at.is_none());
+
+        assert!(
+            store
+                .list_active_bindings_for_native_item_ids(&[])
+                .await
+                .expect("an empty request should not touch the database")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_active_binding_lookup_spans_the_chunk_boundary() {
+        let store = store().await;
+        let total = ACTIVE_BINDING_LOOKUP_CHUNK + 1;
+        let mut native_item_ids = Vec::with_capacity(total);
+        for index in 0..total {
+            let download_id = synthetic_download_id(index + 1);
+            let native_item_id = format!("job-{index}");
+            insert_download(&store, &download_id, "scryer_submission", None).await;
+            insert_binding(
+                &store,
+                &download_id,
+                Some("client-1"),
+                Some(&native_item_id),
+                None,
+            )
+            .await;
+            native_item_ids.push(native_item_id);
+        }
+
+        let bindings = store
+            .list_active_bindings_for_native_item_ids(&native_item_ids)
+            .await
+            .expect("a request larger than one chunk should still resolve");
+
+        let mut found: Vec<String> = bindings
+            .into_iter()
+            .filter_map(|binding| binding.native_item_id)
+            .collect();
+        found.sort();
+        let mut expected = native_item_ids;
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    /// The reconcile listing is a rotation: a pass resumes strictly after the
+    /// `(created_at, download_id)` the previous pass stopped on, so bindings the
+    /// reconciler preserves cannot pin it to the same oldest prefix forever.
+    #[tokio::test]
+    async fn active_binding_reconcile_listing_resumes_after_its_keyset_cursor() {
+        let store = store().await;
+        // Two rows share a `created_at`, so only the download-id tie-break can
+        // order them; the third is strictly newer.
+        let tie_at = DateTime::parse_from_rfc3339(CREATED_AT)
+            .expect("fixture timestamp")
+            .with_timezone(&Utc);
+        let newer_at = tie_at + Duration::days(1);
+        let tie_one = synthetic_download_id(1);
+        let tie_two = synthetic_download_id(2);
+        let newer = synthetic_download_id(3);
+        for (download_id, native_item_id, created_at) in [
+            (&tie_one, "keyset-tie-one", tie_at),
+            (&tie_two, "keyset-tie-two", tie_at),
+            (&newer, "keyset-newer", newer_at),
+        ] {
+            insert_download(&store, download_id, "scryer_submission", None).await;
+            insert_binding(
+                &store,
+                download_id,
+                Some("client-1"),
+                Some(native_item_id),
+                None,
+            )
+            .await;
+            // The fixture inserts a literal timestamp string; rewrite it the way
+            // production writes one so the stored text and the bound cursor share
+            // a format.
+            SqlRuntime::execute(
+                store.datastore.read_exec(),
+                "UPDATE download_client_bindings SET created_at = {} WHERE download_id = {}",
+                &[
+                    SqlArg::Timestamp(created_at),
+                    SqlArg::Text(download_id.to_string()),
+                ],
+            )
+            .await
+            .expect("binding timestamp should normalize");
+        }
+
+        let observed_before = Utc::now();
+        let item_ids = |bindings: Vec<DownloadClientBindingRecord>| {
+            bindings
+                .into_iter()
+                .filter_map(|binding| binding.native_item_id)
+                .collect::<Vec<_>>()
+        };
+
+        let first = store
+            .list_active_bindings_for_client_before(
+                "client-1",
+                "qBittorrent",
+                observed_before,
+                None,
+                1,
+            )
+            .await
+            .expect("the first page should load");
+        assert_eq!(
+            item_ids(first),
+            vec!["keyset-tie-one".to_string()],
+            "equal created_at ties break by download_id"
+        );
+
+        let cursor = (
+            tie_at,
+            DownloadId::parse(&tie_one).expect("fixture download id"),
+        );
+        let resumed = store
+            .list_active_bindings_for_client_before(
+                "client-1",
+                "qBittorrent",
+                observed_before,
+                Some(cursor),
+                10,
+            )
+            .await
+            .expect("the cursor page should load");
+        assert_eq!(
+            item_ids(resumed),
+            vec!["keyset-tie-two".to_string(), "keyset-newer".to_string()],
+            "a cursor page starts strictly after the cursor, in (created_at, download_id) order"
+        );
+
+        let bounded = store
+            .list_active_bindings_for_client_before(
+                "client-1",
+                "qBittorrent",
+                observed_before,
+                Some(cursor),
+                1,
+            )
+            .await
+            .expect("the bounded cursor page should load");
+        assert_eq!(
+            item_ids(bounded),
+            vec!["keyset-tie-two".to_string()],
+            "the limit still bounds a cursor page"
+        );
+
+        let exhausted = store
+            .list_active_bindings_for_client_before(
+                "client-1",
+                "qBittorrent",
+                observed_before,
+                Some((
+                    newer_at,
+                    DownloadId::parse(&newer).expect("fixture download id"),
+                )),
+                10,
+            )
+            .await
+            .expect("the exhausted page should load");
+        assert!(
+            exhausted.is_empty(),
+            "a cursor at the newest eligible row returns nothing, which wraps the rotation"
+        );
+    }
+
+    /// Migration 0179 backfilled bindings from submissions that predate
+    /// per-client attribution, so those rows carry no `client_config_id` and no
+    /// exact locator can reach them. A locator that names the install's single
+    /// configured client of the type must resolve one; anything ambiguous must
+    /// not.
+    #[tokio::test]
+    async fn legacy_client_less_binding_resolves_only_for_a_single_configured_client_of_its_type() {
+        let store = store().await;
+        let legacy = synthetic_download_id(41);
+        insert_download(&store, &legacy, "scryer_submission", None).await;
+        insert_binding_with_client(
+            &store,
+            &legacy,
+            None,
+            Some("sabnzbd"),
+            Some("Legacy Client"),
+            Some("legacy-item-1"),
+            None,
+        )
+        .await;
+        insert_download_client_of_type(&store, "client-sab", "Primary Usenet", "sabnzbd").await;
+        // A client of another type must not make the row resolvable for itself.
+        insert_download_client_of_type(&store, "client-torrent", "Primary Torrent", "qbittorrent")
+            .await;
+
+        let resolved = store
+            .find_active_binding_by_locator(&ClientJobLocator::new(
+                Some("client-sab"),
+                "sabnzbd",
+                "legacy-item-1",
+            ))
+            .await
+            .expect("the legacy lookup should run");
+        let resolved = resolved.expect("the single configured sabnzbd client owns the legacy row");
+        assert_eq!(resolved.download_id.to_string(), legacy);
+        assert!(
+            resolved.client_config_id.is_none(),
+            "the row itself is still unattributed: {resolved:?}"
+        );
+
+        assert!(
+            store
+                .find_active_binding_by_locator(&ClientJobLocator::new(
+                    Some("client-torrent"),
+                    "sabnzbd",
+                    "legacy-item-1",
+                ))
+                .await
+                .expect("the mismatched lookup should run")
+                .is_none(),
+            "a client that is not configured for the row's type may not claim it"
+        );
+
+        // A second configured sabnzbd client makes the original owner
+        // ambiguous, even though only one of them could be enabled.
+        insert_download_client_of_type(&store, "client-sab-2", "Secondary Usenet", "sabnzbd").await;
+        assert!(
+            store
+                .find_active_binding_by_locator(&ClientJobLocator::new(
+                    Some("client-sab"),
+                    "sabnzbd",
+                    "legacy-item-1",
+                ))
+                .await
+                .expect("the ambiguous lookup should run")
+                .is_none(),
+            "two configured clients of the type make the attribution ambiguous"
+        );
+        // The client-less locator still resolves it, exactly as before.
+        assert_eq!(
+            store
+                .find_active_binding_by_locator(&ClientJobLocator::new(
+                    None,
+                    "sabnzbd",
+                    "legacy-item-1",
+                ))
+                .await
+                .expect("the client-less lookup should run")
+                .map(|binding| binding.download_id.to_string()),
+            Some(legacy)
+        );
+    }
+
+    /// The legacy arm is a fallback, never a replacement: a row that actually
+    /// names the client wins.
+    #[tokio::test]
+    async fn an_exact_binding_wins_over_a_legacy_one_for_the_same_locator() {
+        let store = store().await;
+        let legacy = synthetic_download_id(42);
+        let exact = synthetic_download_id(43);
+        insert_download(&store, &legacy, "scryer_submission", None).await;
+        insert_download(&store, &exact, "scryer_submission", None).await;
+        insert_binding_with_client(
+            &store,
+            &legacy,
+            None,
+            Some("sabnzbd"),
+            Some("Legacy Client"),
+            Some("shared-item-1"),
+            None,
+        )
+        .await;
+        insert_binding_with_client(
+            &store,
+            &exact,
+            Some("client-sab"),
+            Some("sabnzbd"),
+            Some("Primary Usenet"),
+            Some("shared-item-1"),
+            None,
+        )
+        .await;
+        insert_download_client_of_type(&store, "client-sab", "Primary Usenet", "sabnzbd").await;
+
+        assert_eq!(
+            store
+                .find_active_binding_by_locator(&ClientJobLocator::new(
+                    Some("client-sab"),
+                    "sabnzbd",
+                    "shared-item-1",
+                ))
+                .await
+                .expect("the lookup should run")
+                .map(|binding| binding.download_id.to_string()),
+            Some(exact),
+            "an exact attribution is preferred over a legacy one"
+        );
+    }
+
+    /// The legacy listing sees only unattributed rows, respects the recency
+    /// floor and the limit, and resumes strictly after its keyset cursor.
+    #[tokio::test]
+    async fn legacy_binding_listing_is_bounded_and_resumes_after_its_cursor() {
+        let store = store().await;
+        let floor_at = DateTime::parse_from_rfc3339(CREATED_AT)
+            .expect("fixture timestamp")
+            .with_timezone(&Utc);
+        let first = synthetic_download_id(44);
+        let second = synthetic_download_id(45);
+        let attributed = synthetic_download_id(46);
+        for (download_id, client, item_id) in [
+            (&first, None, "legacy-listed-1"),
+            (&second, None, "legacy-listed-2"),
+            (&attributed, Some("client-sab"), "legacy-listed-3"),
+        ] {
+            insert_download(&store, download_id, "scryer_submission", None).await;
+            insert_binding_with_client(
+                &store,
+                download_id,
+                client,
+                Some("sabnzbd"),
+                Some("Primary Usenet"),
+                Some(item_id),
+                None,
+            )
+            .await;
+            SqlRuntime::execute(
+                store.datastore.read_exec(),
+                "UPDATE download_client_bindings SET created_at = {} WHERE download_id = {}",
+                &[
+                    SqlArg::Timestamp(floor_at),
+                    SqlArg::Text(download_id.to_string()),
+                ],
+            )
+            .await
+            .expect("binding timestamp should normalize");
+        }
+        // A blank (not NULL) attribution is just as unusable as a NULL one.
+        let blank = synthetic_download_id(47);
+        insert_download(&store, &blank, "scryer_submission", None).await;
+        insert_binding_with_client(
+            &store,
+            &blank,
+            Some("  "),
+            Some("sabnzbd"),
+            Some("Primary Usenet"),
+            Some("legacy-listed-4"),
+            None,
+        )
+        .await;
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "UPDATE download_client_bindings SET created_at = {} WHERE download_id = {}",
+            &[SqlArg::Timestamp(floor_at), SqlArg::Text(blank.clone())],
+        )
+        .await
+        .expect("binding timestamp should normalize");
+
+        let item_ids = |bindings: Vec<DownloadClientBindingRecord>| {
+            bindings
+                .into_iter()
+                .filter_map(|binding| binding.native_item_id)
+                .collect::<Vec<_>>()
+        };
+
+        let all = store
+            .list_active_legacy_client_bindings_before(Utc::now(), None, 10)
+            .await
+            .expect("the legacy listing should load");
+        assert_eq!(
+            item_ids(all),
+            vec![
+                "legacy-listed-1".to_string(),
+                "legacy-listed-2".to_string(),
+                "legacy-listed-4".to_string(),
+            ],
+            "only rows with no usable client id are listed"
+        );
+
+        assert!(
+            store
+                .list_active_legacy_client_bindings_before(
+                    floor_at - Duration::seconds(1),
+                    None,
+                    10
+                )
+                .await
+                .expect("the floored listing should load")
+                .is_empty(),
+            "the recency floor still applies"
+        );
+
+        let page = store
+            .list_active_legacy_client_bindings_before(Utc::now(), None, 1)
+            .await
+            .expect("the bounded page should load");
+        assert_eq!(item_ids(page), vec!["legacy-listed-1".to_string()]);
+
+        let resumed = store
+            .list_active_legacy_client_bindings_before(
+                Utc::now(),
+                Some((
+                    floor_at,
+                    DownloadId::parse(&first).expect("fixture download id"),
+                )),
+                10,
+            )
+            .await
+            .expect("the cursor page should load");
+        assert_eq!(
+            item_ids(resumed),
+            vec!["legacy-listed-2".to_string(), "legacy-listed-4".to_string()],
+            "a cursor page starts strictly after the cursor"
+        );
+
+        assert!(
+            store
+                .list_active_legacy_client_bindings_before(Utc::now(), None, 0)
+                .await
+                .expect("a zero budget should short-circuit")
+                .is_empty()
+        );
+    }
+
+    /// Persisting the derived attribution fills only a blank one, and never
+    /// one that would collide with the active-locator unique index.
+    #[tokio::test]
+    async fn attributing_a_legacy_binding_fills_only_a_blank_and_never_collides() {
+        let store = store().await;
+        let legacy = synthetic_download_id(48);
+        let already_owned = synthetic_download_id(49);
+        let contended = synthetic_download_id(50);
+        let holder = synthetic_download_id(51);
+        for (download_id, client, item_id) in [
+            (&legacy, None, "attribute-item-1"),
+            (&already_owned, Some("client-other"), "attribute-item-2"),
+            (&contended, None, "attribute-item-3"),
+            (&holder, Some("client-sab"), "attribute-item-3"),
+        ] {
+            insert_download(&store, download_id, "scryer_submission", None).await;
+            insert_binding_with_client(
+                &store,
+                download_id,
+                client,
+                Some("sabnzbd"),
+                Some("Primary Usenet"),
+                Some(item_id),
+                None,
+            )
+            .await;
+        }
+
+        store
+            .attribute_legacy_binding_client(
+                &DownloadId::parse(&legacy).expect("fixture download id"),
+                "client-sab",
+            )
+            .await
+            .expect("attribution should apply");
+        assert_eq!(attributed_client(&store, &legacy).await, "client-sab");
+
+        store
+            .attribute_legacy_binding_client(
+                &DownloadId::parse(&already_owned).expect("fixture download id"),
+                "client-sab",
+            )
+            .await
+            .expect("attribution should run");
+        assert_eq!(
+            attributed_client(&store, &already_owned).await,
+            "client-other",
+            "a binding that already names a client is never re-pointed"
+        );
+
+        store
+            .attribute_legacy_binding_client(
+                &DownloadId::parse(&contended).expect("fixture download id"),
+                "client-sab",
+            )
+            .await
+            .expect("attribution should run");
+        assert_eq!(
+            attributed_client(&store, &contended).await,
+            "",
+            "attribution that would duplicate a live locator is skipped, not forced"
+        );
+    }
+
     /// Mirrors the canonical postgres DDL from migrations 0179/0180 — including
     /// the active-locator partial unique index that concurrent first
     /// observations race on.
@@ -2093,7 +2846,8 @@ mod tests {
          )",
         "CREATE TABLE download_clients (
              id TEXT PRIMARY KEY,
-             name TEXT NOT NULL
+             name TEXT NOT NULL,
+             client_type TEXT NOT NULL DEFAULT ''
          )",
     ];
 

@@ -3095,11 +3095,30 @@ async fn process_single_target(
                     return Ok(());
                 }
                 StandbyRecoveryOutcome::Deferred { refused, .. } => {
-                    info!(
-                        title = title.name.as_str(),
-                        scope_key = target.scope_key.as_str(),
-                        "saved search result kept pending until the download client recovers"
-                    );
+                    // The client is only implicated when the refusal was not the
+                    // guard's lifecycle deferral; that one is a hold on an
+                    // earlier download, not an outage.
+                    match refused
+                        .as_ref()
+                        .and_then(|refused| refused.lifecycle_deferral.as_deref())
+                    {
+                        Some(deferral) => info!(
+                            title = title.name.as_str(),
+                            scope_key = target.scope_key.as_str(),
+                            blocking_download_id = %deferral.download_id,
+                            blocking_state = %deferral.tracked_state,
+                            blocking_client_type = %deferral.client_type,
+                            blocking_binding_age_seconds = deferral.binding_age_seconds,
+                            blocking_last_seen_age_seconds = ?deferral.last_seen_age_seconds,
+                            blocking_release = ?deferral.source_title,
+                            "acquisition deferred: lifecycle reconciliation pending"
+                        ),
+                        None => info!(
+                            title = title.name.as_str(),
+                            scope_key = target.scope_key.as_str(),
+                            "saved search result kept pending until the download client recovers"
+                        ),
+                    }
                     // A refused saved result is a failed submission, counted like
                     // the same refusal on the search lane. Only the episode's own
                     // `Scope` stage counts it: every pack stage's anchor has one,

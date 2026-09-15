@@ -71,6 +71,30 @@ impl DownloadRegistryRepository for FixtureDownloadRegistry {
         }))
     }
 
+    async fn list_active_bindings_for_native_item_ids(
+        &self,
+        native_item_ids: &[String],
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        let wanted: HashSet<&str> = native_item_ids.iter().map(String::as_str).collect();
+        Ok(self
+            .rows
+            .lock()
+            .await
+            .iter()
+            .filter(|(locator, _)| wanted.contains(locator.item_id.as_str()))
+            .map(|(locator, download_id)| DownloadClientBindingRecord {
+                download_id: *download_id,
+                client_config_id: locator.client_id.clone(),
+                client_type_snapshot: Some(locator.client_type.clone()),
+                client_name_snapshot: None,
+                native_item_id: Some(locator.item_id.clone()),
+                created_at: Utc::now(),
+                last_seen_at: None,
+                ended_at: None,
+            })
+            .collect())
+    }
+
     async fn end_binding(&self, _: &scryer_domain::download_identity::DownloadId) -> AppResult<()> {
         Ok(())
     }

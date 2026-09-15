@@ -40,12 +40,16 @@ pub(crate) enum PendingGrabOutcome {
 }
 
 /// A submission refused without burning its release, reduced to what failure
-/// accounting reads (the error itself is not `Clone`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// accounting and refusal logging read (the error itself is not `Clone`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RefusedSubmission {
     /// The refusal was a retryable download-submission failure: the download
     /// client was unavailable, as a mapped client that is globally disabled is.
     pub(crate) submit_unavailable: bool,
+    /// Set when the refusal was the canonical-submission guard's lifecycle
+    /// deferral rather than a downloader problem. Accounting treats it exactly
+    /// like any other retryable refusal; only the log wording reads it.
+    pub(crate) lifecycle_deferral: Option<std::sync::Arc<crate::DownloadLifecycleDeferral>>,
 }
 
 /// Which path is promoting a pending release.
@@ -1537,13 +1541,6 @@ impl AppUseCase {
                 })
             }
             Err(err) => {
-                warn!(
-                    title = title.name.as_str(),
-                    release = pr.release_title.as_str(),
-                    error = %err,
-                    "pending release: download submission failed"
-                );
-
                 // An ambiguous submit (the request may have been accepted but
                 // the response was lost) is deferred exactly like an
                 // unavailable client. A gone source is similarly never a
@@ -1551,6 +1548,36 @@ impl AppUseCase {
                 let defer = is_download_submit_unavailable_error(&err)
                     || err.is_download_submit_ambiguous();
                 let source_gone = err.is_download_source_gone();
+
+                // Only the branch that actually burns the release warns. A
+                // deferral is a retry the lane schedules for itself, and a gone
+                // source logs its own line below, so neither is a failure worth
+                // waking an operator for.
+                if let Some(deferral) = err.download_lifecycle_deferral() {
+                    info!(
+                        title = title.name.as_str(),
+                        release = pr.release_title.as_str(),
+                        blocking_download_id = %deferral.download_id,
+                        blocking_state = %deferral.tracked_state,
+                        blocking_client_type = %deferral.client_type,
+                        blocking_release = ?deferral.source_title,
+                        "pending release: acquisition deferred"
+                    );
+                } else if defer {
+                    info!(
+                        title = title.name.as_str(),
+                        release = pr.release_title.as_str(),
+                        error = %err,
+                        "pending release: download submission deferred"
+                    );
+                } else if !source_gone {
+                    warn!(
+                        title = title.name.as_str(),
+                        release = pr.release_title.as_str(),
+                        error = %err,
+                        "pending release: download submission failed"
+                    );
+                }
 
                 let _ = self
                     .services
@@ -1581,6 +1608,10 @@ impl AppUseCase {
                 if defer {
                     return Ok(PendingGrabOutcome::SubmitRefused(RefusedSubmission {
                         submit_unavailable: err.is_retryable_download_submit_failure(),
+                        lifecycle_deferral: err
+                            .download_lifecycle_deferral()
+                            .cloned()
+                            .map(std::sync::Arc::new),
                     }));
                 }
 

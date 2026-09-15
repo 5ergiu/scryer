@@ -750,6 +750,7 @@ async fn active_binding_reconcile_query_is_client_scoped_recency_filtered_and_bo
             "client-one",
             "qBittorrent",
             chrono::Utc::now() - chrono::Duration::minutes(10),
+            None,
             1,
         )
         .await
@@ -759,6 +760,256 @@ async fn active_binding_reconcile_query_is_client_scoped_recency_filtered_and_bo
     assert_eq!(
         candidates[0].native_item_id.as_deref(),
         Some("eligible-old")
+    );
+
+    drop(services);
+    let _ = std::fs::remove_file(db);
+}
+
+/// The reconcile listing is a rotation: a pass resumes from the
+/// `(created_at, download_id)` of the last row the previous pass read, so
+/// bindings the reconciler deliberately preserves cannot pin it to the same
+/// oldest prefix forever.
+#[tokio::test]
+async fn active_binding_reconcile_query_resumes_strictly_after_its_keyset_cursor() {
+    let db = std::env::temp_dir().join(format!(
+        "scryer_active_binding_keyset_{}.db",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let services = SqliteServices::new(db.to_string_lossy())
+        .await
+        .expect("database should migrate through the canonical binding schema");
+    let registry = DownloadRegistryStore::new(services.datastore());
+    let older = chrono::Utc::now() - chrono::Duration::minutes(30);
+    let newer = chrono::Utc::now() - chrono::Duration::minutes(20);
+    let floor = chrono::Utc::now() - chrono::Duration::minutes(10);
+
+    let mut bound = Vec::new();
+    for item_id in ["keyset-tie-one", "keyset-tie-two", "keyset-newer"] {
+        let download_id = match registry
+            .resolve_observation(&ObservedClientJob {
+                locator: ClientJobLocator::new(Some("client-one"), "qbittorrent", item_id),
+                wire_token: None,
+                observed_name: Some(item_id.to_string()),
+                observed_at: older,
+            })
+            .await
+            .expect("observation should resolve")
+        {
+            ObservationResolution::Resolved { download_id, .. } => download_id,
+            ObservationResolution::Conflict { .. } => panic!("observation should not conflict"),
+            ObservationResolution::BindingAlreadyEnded => {
+                panic!("observation should not use an ended binding")
+            }
+        };
+        // The two tie rows share a `created_at`, so only the download-id
+        // tie-break can order them.
+        let created_at = if item_id == "keyset-newer" {
+            newer
+        } else {
+            older
+        };
+        sqlx::query(
+            "UPDATE download_client_bindings
+             SET created_at = ?1, last_seen_at = ?2
+             WHERE download_id = ?3",
+        )
+        .bind(created_at.to_rfc3339())
+        .bind(created_at.to_rfc3339())
+        .bind(download_id.to_string())
+        .execute(services.pool())
+        .await
+        .expect("binding should age");
+        bound.push((item_id.to_string(), created_at, download_id));
+    }
+
+    let mut tied: Vec<_> = bound
+        .iter()
+        .filter(|(item_id, _, _)| item_id != "keyset-newer")
+        .cloned()
+        .collect();
+    tied.sort_by_key(|(_, _, download_id)| download_id.to_string());
+
+    let first = registry
+        .list_active_bindings_for_client_before("client-one", "qBittorrent", floor, None, 1)
+        .await
+        .expect("first page should load");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].download_id, tied[0].2,
+        "equal created_at ties break by download_id"
+    );
+
+    let rest = registry
+        .list_active_bindings_for_client_before(
+            "client-one",
+            "qBittorrent",
+            floor,
+            Some((first[0].created_at, first[0].download_id)),
+            10,
+        )
+        .await
+        .expect("cursor page should load");
+    assert_eq!(
+        rest.iter().map(|row| row.download_id).collect::<Vec<_>>(),
+        vec![tied[1].2, bound[2].2],
+        "the cursor page must start strictly after the cursor and stay in (created_at, download_id) order"
+    );
+
+    let exhausted = registry
+        .list_active_bindings_for_client_before(
+            "client-one",
+            "qBittorrent",
+            floor,
+            Some((newer, bound[2].2)),
+            10,
+        )
+        .await
+        .expect("exhausted page should load");
+    assert!(
+        exhausted.is_empty(),
+        "a cursor at the newest eligible row must return nothing"
+    );
+
+    let bounded = registry
+        .list_active_bindings_for_client_before(
+            "client-one",
+            "qBittorrent",
+            floor,
+            Some((first[0].created_at, first[0].download_id)),
+            1,
+        )
+        .await
+        .expect("bounded cursor page should load");
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|row| row.download_id)
+            .collect::<Vec<_>>(),
+        vec![tied[1].2],
+        "the limit still bounds a cursor page"
+    );
+
+    drop(services);
+    let _ = std::fs::remove_file(db);
+}
+
+/// Migration 0179 backfilled bindings from submissions that predate per-client
+/// attribution, so a real upgraded install holds rows with a NULL
+/// `client_config_id`. Against the production schema, such a row must be
+/// listable, resolvable for the single configured client of its type, and
+/// attributable — and must stay unresolvable once that type has two clients.
+#[tokio::test]
+async fn legacy_client_less_bindings_are_listed_resolved_and_attributed_on_the_real_schema() {
+    let db = std::env::temp_dir().join(format!(
+        "scryer_legacy_client_less_binding_{}.db",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let services = SqliteServices::new(db.to_string_lossy())
+        .await
+        .expect("database should migrate through the canonical binding schema");
+    let registry = DownloadRegistryStore::new(services.datastore());
+    let created_at = chrono::Utc::now() - chrono::Duration::minutes(30);
+    let floor = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+
+    sqlx::query(
+        "INSERT INTO downloads (id, origin, created_at) VALUES (?1, 'scryer_submission', ?2)",
+    )
+    .bind(download_id.to_string())
+    .bind(created_at.to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("canonical download should insert");
+    sqlx::query(
+        "INSERT INTO download_client_bindings (
+             download_id, client_config_id, client_type_snapshot, client_name_snapshot,
+             native_item_id, created_at, last_seen_at
+         ) VALUES (?1, NULL, 'sabnzbd', NULL, 'legacy-backfilled-1', ?2, ?2)",
+    )
+    .bind(download_id.to_string())
+    .bind(created_at.to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("legacy binding should insert");
+    sqlx::query(
+        "INSERT INTO download_clients (
+             id, name, client_type, config_json, created_at, updated_at
+         ) VALUES ('client-usenet', 'Primary Usenet', 'sabnzbd', '{}', ?1, ?1)",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("configured client should insert");
+
+    let listed = registry
+        .list_active_legacy_client_bindings_before(floor, None, 10)
+        .await
+        .expect("legacy listing should load");
+    assert_eq!(
+        listed.iter().map(|row| row.download_id).collect::<Vec<_>>(),
+        vec![download_id],
+        "an unattributed binding older than the floor is listed"
+    );
+
+    let resolved_locator =
+        ClientJobLocator::new(Some("client-usenet"), "sabnzbd", "legacy-backfilled-1");
+    assert_eq!(
+        registry
+            .find_active_binding_by_locator(&resolved_locator)
+            .await
+            .expect("resolved lookup should run")
+            .map(|binding| binding.download_id),
+        Some(download_id),
+        "the single configured client of the type resolves the legacy row"
+    );
+
+    registry
+        .attribute_legacy_binding_client(&download_id, "client-usenet")
+        .await
+        .expect("attribution should apply");
+    let attributed: Option<String> = sqlx::query_scalar(
+        "SELECT client_config_id FROM download_client_bindings WHERE download_id = ?1",
+    )
+    .bind(download_id.to_string())
+    .fetch_one(services.pool())
+    .await
+    .expect("binding should read back");
+    assert_eq!(attributed.as_deref(), Some("client-usenet"));
+    assert!(
+        registry
+            .list_active_legacy_client_bindings_before(floor, None, 10)
+            .await
+            .expect("legacy listing should load")
+            .is_empty(),
+        "an attributed row is no longer legacy"
+    );
+
+    // A second configured client of the type makes any remaining legacy row
+    // ambiguous, so the fallback arm must stop matching.
+    sqlx::query(
+        "INSERT INTO download_clients (
+             id, name, client_type, config_json, created_at, updated_at
+         ) VALUES ('client-usenet-2', 'Secondary Usenet', 'sabnzbd', '{}', ?1, ?1)",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("second configured client should insert");
+    sqlx::query(
+        "UPDATE download_client_bindings SET client_config_id = NULL WHERE download_id = ?1",
+    )
+    .bind(download_id.to_string())
+    .execute(services.pool())
+    .await
+    .expect("binding should revert to unattributed");
+    assert!(
+        registry
+            .find_active_binding_by_locator(&resolved_locator)
+            .await
+            .expect("ambiguous lookup should run")
+            .is_none(),
+        "two configured clients of the type make the attribution ambiguous"
     );
 
     drop(services);

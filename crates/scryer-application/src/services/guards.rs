@@ -69,7 +69,21 @@ pub struct DownloadSubmissionGuardTable {
     uncertain_titles: Arc<std::sync::Mutex<HashMap<String, UncertainDownloadSubmissionClaim>>>,
     title_states: Arc<std::sync::Mutex<HashMap<String, CanonicalSubmissionTitleState>>>,
     client_snapshot: Arc<std::sync::Mutex<Option<CachedDownloadClientSnapshot>>>,
+    /// Locators for which a lifecycle reconciliation was already scheduled,
+    /// with the instant it was scheduled at. See
+    /// [`DownloadSubmissionGuardTable::claim_absent_source_reconcile_schedule`].
+    absent_source_reconcile_schedules: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
+
+/// How long one scheduled lifecycle reconciliation suppresses further
+/// scheduling for the same client job.
+///
+/// Sized above the guard's own cached-state window (30s) so the attempts that
+/// re-read the same cached snapshot cannot each schedule again, and far below
+/// the fallback pass's recency floor so a genuinely new discovery is never
+/// starved.
+const ABSENT_SOURCE_RECONCILE_SCHEDULE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct CanonicalSubmissionTitleState {
@@ -215,6 +229,39 @@ impl DownloadSubmissionGuardTable {
             .client_snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Take the scheduling window for `key` (a client-job locator), or report
+    /// that one is already open.
+    ///
+    /// RSS, background search, standby recovery and an operator's interactive
+    /// grab can all rediscover the same blocked scope inside a few seconds.
+    /// Each discovery is real, but they describe one binding, so only the
+    /// first needs to schedule reconciliation. This is per-process best
+    /// effort; the loop-side window is the authority.
+    pub(crate) fn claim_absent_source_reconcile_schedule(&self, key: &str) -> bool {
+        let mut schedules = self
+            .absent_source_reconcile_schedules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        schedules.retain(|_, scheduled_at| {
+            scheduled_at.elapsed() <= ABSENT_SOURCE_RECONCILE_SCHEDULE_TTL
+        });
+        if schedules.contains_key(key) {
+            return false;
+        }
+        schedules.insert(key.to_string(), std::time::Instant::now());
+        true
+    }
+
+    /// Give the window back when the claimed scheduling did not happen (a
+    /// full or closed command channel), so the next discovery may try again
+    /// instead of waiting out a TTL that suppressed nothing.
+    pub(crate) fn release_absent_source_reconcile_schedule(&self, key: &str) {
+        self.absent_source_reconcile_schedules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     pub(crate) fn prime_title_state(

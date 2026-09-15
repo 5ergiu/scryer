@@ -1415,6 +1415,195 @@ async fn queue_existing_title_download_submit_unavailable_records_pending_withou
     assert!(blocklist.is_empty());
 }
 
+/// The guard's lifecycle deferral is a *new* error variant, and the pending
+/// lane must keep treating it exactly as it treats an unavailable downloader:
+/// the release stays pending, the attempt is recorded `Pending`, and nothing is
+/// blocklisted. A release burned here would be unrecoverable, so this is the
+/// regression that guards the new variant's routing.
+#[tokio::test]
+async fn pending_grab_defers_without_blocklisting_when_lifecycle_reconciliation_is_pending() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    let (base_app, user, release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            download_client.clone(),
+            download_submissions.clone(),
+            pending_releases,
+            wanted_items.clone(),
+            Arc::new(MockIndexerClient),
+        );
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_blocklist_repo(blocklist.clone())
+    });
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Lifecycle Deferred Pending".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    // An earlier grab on the same title whose client binding is still open, and
+    // which the (configured, enabled) client no longer lists. That is exactly
+    // the guard's Absent-with-an-active-binding branch.
+    let blocking_item_id = "lifecycle-pending-job";
+    let blocking_download_id = scryer_domain::download_identity::DownloadId::new();
+    let blocking_release_title = "Lifecycle.Deferred.Pending.2026.480p.WEB-DL.H.264-GRP";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: blocking_download_id,
+            title_id: title.id.clone(),
+            facet: "movie".to_string(),
+            download_client_id: Some("background-search-default-client".to_string()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: blocking_item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            // Deliberately a worse release than the pending one, so the pending
+            // lane reaches the submission guard instead of refusing the grab as
+            // a non-upgrade over this in-flight pseudo-incumbent.
+            source_title: Some(blocking_release_title.to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            purpose: crate::DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("record the blocking submission");
+    registry
+        .bind_at(
+            ClientJobLocator::new(
+                Some("background-search-default-client"),
+                "nzbget",
+                blocking_item_id,
+            ),
+            blocking_download_id,
+            Utc::now() - chrono::Duration::hours(2),
+            None,
+        )
+        .await;
+
+    let wanted = AcquisitionScopeState {
+        id: Id::new().0,
+        title_id: title.id.clone(),
+        title_name: Some(title.name.clone()),
+        title_slug: None,
+        title_facet: None,
+        library_id: None,
+        library_name: None,
+        library_slug: None,
+        episode_id: None,
+        collection_id: None,
+        series_movie_link_id: None,
+        season_number: None,
+        episode_number: None,
+        media_type: "movie".to_string(),
+        last_search_at: Some((Utc::now() - chrono::Duration::days(7)).to_rfc3339()),
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    wanted_items
+        .upsert_acquisition_scope_state(&wanted)
+        .await
+        .expect("seed wanted item");
+
+    let release_title = "Lifecycle.Deferred.Pending.2026.1080p.WEB-DL.H.264-GRP";
+    let pending = pending_movie_release(
+        &wanted.id,
+        &title,
+        release_title,
+        PendingReleaseStatus::Waiting,
+    );
+    let outcome = app
+        .try_grab_pending_release(
+            &wanted,
+            &pending,
+            &Utc::now(),
+            crate::acquisition::pending::PendingGrabTrigger::Automatic,
+        )
+        .await
+        .expect("a lifecycle deferral must resolve, not error out of the lane");
+
+    let crate::acquisition::pending::PendingGrabOutcome::SubmitRefused(refused) = &outcome else {
+        panic!("expected a refused submission, got {outcome:?}");
+    };
+    assert!(
+        refused.submit_unavailable,
+        "the lifecycle deferral must count as a retryable submit failure"
+    );
+    let deferral = refused
+        .lifecycle_deferral
+        .as_deref()
+        .expect("the refusal must carry the structured lifecycle deferral");
+    assert_eq!(deferral.download_id, blocking_download_id.to_string());
+    assert_eq!(deferral.client_type, "nzbget");
+    assert_eq!(deferral.native_item_id, blocking_item_id);
+    assert!(
+        deferral.binding_age_seconds >= 7_000,
+        "a two-hour-old binding must be reported as such: {}",
+        deferral.binding_age_seconds
+    );
+
+    let attempts = release_attempts.attempts.lock().await.clone();
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.outcome != ReleaseDownloadAttemptOutcome::Failed),
+        "a lifecycle deferral must never record a failed attempt: {:?}",
+        attempts
+            .iter()
+            .map(|attempt| (&attempt.source_title, &attempt.outcome))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        attempts.iter().any(|attempt| {
+            attempt.source_title.as_deref() == Some(release_title)
+                && attempt.outcome == ReleaseDownloadAttemptOutcome::Pending
+                && attempt
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("awaiting lifecycle reconciliation"))
+        }),
+        "the deferral must be recorded as a pending attempt naming its cause: {:?}",
+        attempts
+            .iter()
+            .map(|attempt| (&attempt.source_title, &attempt.outcome))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        blocklist.entries.lock().await.is_empty(),
+        "a deferred release must never be blocklisted"
+    );
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .is_empty(),
+        "the deferred acquisition must never reach the download client"
+    );
+}
+
 #[tokio::test]
 async fn queue_existing_title_download_definitive_submit_error_records_failed_and_blocklists() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -1975,11 +2164,17 @@ async fn queue_existing_title_download_requires_the_relevant_client_to_be_author
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
-    let (app, user) = bootstrap_with_cleanup_tracking(
+    // The guard only rechecks a submission whose client binding is still
+    // active, so the claim under test carries one; a binding-less row is
+    // covered by the bounded-guard tests in `lib_tests::downloads`.
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
         download_client.clone(),
         download_submissions.clone(),
         pending_releases,
     );
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
     let title = app
         .add_title(
             &user,
@@ -1992,9 +2187,10 @@ async fn queue_existing_title_download_requires_the_relevant_client_to_be_author
         )
         .await
         .expect("create title");
+    let prior_download_id = scryer_domain::download_identity::DownloadId::new();
     download_submissions
         .record_submission(DownloadSubmission {
-            download_id: scryer_domain::download_identity::DownloadId::new(),
+            download_id: prior_download_id,
             title_id: title.id.clone(),
             purpose: crate::DownloadSubmissionPurpose::Standard,
             facet: "movie".to_string(),
@@ -2013,6 +2209,12 @@ async fn queue_existing_title_download_requires_the_relevant_client_to_be_author
         })
         .await
         .expect("record prior submission");
+    registry
+        .bind(
+            ClientJobLocator::new(Some("primary"), "nzbget", "missing-primary-job"),
+            prior_download_id,
+        )
+        .await;
     download_client
         .set_snapshot_authoritative_client_ids(["secondary".to_string()])
         .await;
@@ -5761,5 +5963,391 @@ async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
             &subject.title_evidence
         ),
         "the walk must recognise a release named after a bridge cour"
+    );
+}
+
+/// A submission written before per-client attribution (migration 0179's
+/// population) carries no client id, and nothing downstream can act on such a
+/// locator: the router cannot observe it and no reconciler can end its binding.
+/// The guard must attribute it to the install's single configured client of its
+/// type, so the deferral names a real client and the scope becomes reconcilable
+/// instead of blocked forever.
+#[tokio::test]
+async fn legacy_client_less_submission_is_deferred_under_its_resolved_client_then_admitted() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    let (base_app, user, _release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            download_client.clone(),
+            download_submissions.clone(),
+            pending_releases,
+            wanted_items.clone(),
+            Arc::new(MockIndexerClient),
+        );
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_blocklist_repo(blocklist.clone())
+    });
+    // The bootstrap configures exactly one client, and it is an nzbget one.
+    let configured_client_id = "background-search-default-client".to_string();
+    registry
+        .set_configured_clients([(configured_client_id.clone(), "nzbget".to_string())])
+        .await;
+    // The client answers, as a configured, reachable client does; its snapshot
+    // is therefore authoritative for its own jobs.
+    download_client
+        .set_snapshot_authoritative_client_ids([configured_client_id.clone()])
+        .await;
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Legacy Client Less Grab".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let blocking_item_id = "legacy-client-less-job";
+    let blocking_download_id = scryer_domain::download_identity::DownloadId::new();
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: blocking_download_id,
+            title_id: title.id.clone(),
+            facet: "movie".to_string(),
+            // The 0179 shape: a client type, an item id, and no client id.
+            download_client_id: None,
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: blocking_item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some("Legacy.Client.Less.Grab.2026.480p.WEB-DL.H.264-GRP".to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            purpose: crate::DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("record the blocking legacy submission");
+    let legacy_locator = ClientJobLocator::new(None, "nzbget", blocking_item_id);
+    registry
+        .bind_at(
+            legacy_locator.clone(),
+            blocking_download_id,
+            Utc::now() - chrono::Duration::hours(2),
+            None,
+        )
+        .await;
+
+    let wanted = AcquisitionScopeState {
+        id: Id::new().0,
+        title_id: title.id.clone(),
+        title_name: Some(title.name.clone()),
+        title_slug: None,
+        title_facet: None,
+        library_id: None,
+        library_name: None,
+        library_slug: None,
+        episode_id: None,
+        collection_id: None,
+        series_movie_link_id: None,
+        season_number: None,
+        episode_number: None,
+        media_type: "movie".to_string(),
+        last_search_at: Some((Utc::now() - chrono::Duration::days(7)).to_rfc3339()),
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    wanted_items
+        .upsert_acquisition_scope_state(&wanted)
+        .await
+        .expect("seed wanted item");
+
+    let release_title = "Legacy.Client.Less.Grab.2026.1080p.WEB-DL.H.264-GRP";
+    let pending = pending_movie_release(
+        &wanted.id,
+        &title,
+        release_title,
+        PendingReleaseStatus::Waiting,
+    );
+    let outcome = app
+        .try_grab_pending_release(
+            &wanted,
+            &pending,
+            &Utc::now(),
+            crate::acquisition::pending::PendingGrabTrigger::Automatic,
+        )
+        .await
+        .expect("a lifecycle deferral must resolve, not error out of the lane");
+    let crate::acquisition::pending::PendingGrabOutcome::SubmitRefused(refused) = &outcome else {
+        panic!("expected a refused submission, got {outcome:?}");
+    };
+    let deferral = refused
+        .lifecycle_deferral
+        .as_deref()
+        .expect("the refusal must carry the structured lifecycle deferral");
+    assert_eq!(deferral.download_id, blocking_download_id.to_string());
+    assert_eq!(
+        deferral.client_id.as_deref(),
+        Some(configured_client_id.as_str()),
+        "the legacy row must be attributed to the only configured client of its type"
+    );
+    assert_eq!(deferral.native_item_id, blocking_item_id);
+    assert!(
+        download_client
+            .observed_locators
+            .lock()
+            .await
+            .iter()
+            .any(
+                |locator| locator.client_id.as_deref() == Some(configured_client_id.as_str())
+                    && locator.item_id == blocking_item_id
+            ),
+        "the guard must observe the job against the client it resolved"
+    );
+
+    // The reconciler can now reach the row through that resolved locator — the
+    // whole point of the attribution — and ending the binding unblocks the
+    // scope.
+    let resolved_locator = ClientJobLocator::new(
+        Some(configured_client_id.as_str()),
+        "nzbget",
+        blocking_item_id,
+    );
+    crate::app_usecase_integration::reconcile_authoritatively_absent_source(
+        &app,
+        &mut crate::tracked_downloads::TrackedDownloadService::new(),
+        &resolved_locator,
+    )
+    .await;
+    assert!(
+        registry
+            .find_active_binding_by_locator(&legacy_locator)
+            .await
+            .expect("binding lookup should run")
+            .is_none(),
+        "the legacy binding must be ended by the reconciliation the guard made possible"
+    );
+
+    let admitted = app
+        .try_grab_pending_release(
+            &wanted,
+            &pending,
+            &Utc::now(),
+            crate::acquisition::pending::PendingGrabTrigger::Automatic,
+        )
+        .await
+        .expect("the follow-up grab must resolve");
+    assert!(
+        matches!(
+            admitted,
+            crate::acquisition::pending::PendingGrabOutcome::Grabbed { .. }
+        ),
+        "once the legacy binding is reconciled the grab must be admitted, got {admitted:?}"
+    );
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .iter()
+            .any(|title| title == release_title),
+        "the admitted grab must reach the download client"
+    );
+}
+
+/// With two configured clients of the type the legacy row cannot be attributed,
+/// so the guard stays fail-closed — but it must say which row is holding the
+/// scope instead of reporting an anonymous client outage.
+#[tokio::test]
+async fn ambiguous_legacy_client_less_submission_names_the_row_holding_the_scope() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    let (base_app, user, _release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            download_client.clone(),
+            download_submissions.clone(),
+            pending_releases,
+            wanted_items.clone(),
+            Arc::new(MockIndexerClient),
+        );
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_blocklist_repo(blocklist.clone())
+    });
+    // A second nzbget client makes the legacy row's owner ambiguous.
+    let second =
+        create_enabled_download_client_config(&app, &user, "Secondary NZBGet", "nzbget").await;
+    registry
+        .set_configured_clients([
+            (
+                "background-search-default-client".to_string(),
+                "nzbget".to_string(),
+            ),
+            (second.id.clone(), "nzbget".to_string()),
+        ])
+        .await;
+    // The router answers a locator it cannot attribute with `Unknown`; script
+    // that exactly, so this covers the guard's fail-closed arm.
+    download_client.observation_script.lock().await.push_back(
+        crate::DownloadClientObservation::Unknown {
+            reason: "original download client is unavailable or ambiguous".to_string(),
+            next_history_offset: 0,
+        },
+    );
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Ambiguous Legacy Grab".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let blocking_item_id = "ambiguous-legacy-job";
+    let blocking_download_id = scryer_domain::download_identity::DownloadId::new();
+    let blocking_release_title = "Ambiguous.Legacy.Grab.2026.480p.WEB-DL.H.264-GRP";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: blocking_download_id,
+            title_id: title.id.clone(),
+            facet: "movie".to_string(),
+            download_client_id: None,
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: blocking_item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some(blocking_release_title.to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            purpose: crate::DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("record the blocking legacy submission");
+    registry
+        .bind_at(
+            ClientJobLocator::new(None, "nzbget", blocking_item_id),
+            blocking_download_id,
+            Utc::now() - chrono::Duration::hours(3),
+            None,
+        )
+        .await;
+
+    let wanted = AcquisitionScopeState {
+        id: Id::new().0,
+        title_id: title.id.clone(),
+        title_name: Some(title.name.clone()),
+        title_slug: None,
+        title_facet: None,
+        library_id: None,
+        library_name: None,
+        library_slug: None,
+        episode_id: None,
+        collection_id: None,
+        series_movie_link_id: None,
+        season_number: None,
+        episode_number: None,
+        media_type: "movie".to_string(),
+        last_search_at: Some((Utc::now() - chrono::Duration::days(7)).to_rfc3339()),
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    wanted_items
+        .upsert_acquisition_scope_state(&wanted)
+        .await
+        .expect("seed wanted item");
+
+    let release_title = "Ambiguous.Legacy.Grab.2026.1080p.WEB-DL.H.264-GRP";
+    let pending = pending_movie_release(
+        &wanted.id,
+        &title,
+        release_title,
+        PendingReleaseStatus::Waiting,
+    );
+    let outcome = app
+        .try_grab_pending_release(
+            &wanted,
+            &pending,
+            &Utc::now(),
+            crate::acquisition::pending::PendingGrabTrigger::Automatic,
+        )
+        .await
+        .expect("an unattributable legacy row must defer, not error out of the lane");
+    let crate::acquisition::pending::PendingGrabOutcome::SubmitRefused(refused) = &outcome else {
+        panic!("expected a refused submission, got {outcome:?}");
+    };
+    assert!(
+        refused.submit_unavailable,
+        "an unattributable legacy row must still defer fail-closed"
+    );
+    let deferral = refused
+        .lifecycle_deferral
+        .as_deref()
+        .expect("the refusal must name the legacy row holding the scope");
+    assert_eq!(deferral.download_id, blocking_download_id.to_string());
+    assert_eq!(deferral.client_id, None, "the row names no client");
+    assert_eq!(deferral.client_type, "nzbget");
+    assert_eq!(deferral.native_item_id, blocking_item_id);
+    assert_eq!(
+        deferral.source_title.as_deref(),
+        Some(blocking_release_title)
+    );
+    assert!(
+        deferral.binding_age_seconds >= 10_000,
+        "a three-hour-old binding must be reported as such: {}",
+        deferral.binding_age_seconds
+    );
+    assert_eq!(
+        download_client.observed_history_offsets.lock().await.len(),
+        1,
+        "the scripted Unknown answer must be the one the guard acted on"
+    );
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .is_empty(),
+        "an unattributable legacy row must not let a duplicate grab through"
+    );
+    assert!(
+        blocklist.entries.lock().await.is_empty(),
+        "a deferred release must never be blocklisted"
     );
 }

@@ -1060,9 +1060,18 @@ impl AppUseCase {
             snapshot,
             &episodes,
             &HashSet::new(),
+            &HashMap::new(),
         )
     }
 
+    /// `legacy_client_ids` attributes submissions that predate per-client
+    /// attribution (migration 0179) to a configured client, keyed by canonical
+    /// download id. Such a submission names no client, so the authority check
+    /// below could never be satisfied for it and every overlapping acquisition
+    /// failed as "download client state is unavailable" for good. The caller
+    /// derives the attribution with the single-configured-client rule; an
+    /// entry here is only ever *read* as the client whose snapshot authority
+    /// answers for the row, never written back onto the submission.
     pub(crate) fn find_blocking_download_submissions_in_state(
         title: &Title,
         scope: &SubmissionScope,
@@ -1070,6 +1079,7 @@ impl AppUseCase {
         snapshot: &DownloadClientSnapshotOutcome,
         episodes: &[scryer_domain::Episode],
         accepted_download_ids: &HashSet<scryer_domain::download_identity::DownloadId>,
+        legacy_client_ids: &HashMap<scryer_domain::download_identity::DownloadId, String>,
     ) -> AppResult<Vec<SubmissionScopeConflict>> {
         if submissions.is_empty() {
             return Ok(Vec::new());
@@ -1106,6 +1116,11 @@ impl AppUseCase {
                 .as_deref()
                 .map(str::trim)
                 .filter(|client_id| !client_id.is_empty())
+                .or_else(|| {
+                    legacy_client_ids
+                        .get(&submission.download_id)
+                        .map(String::as_str)
+                })
                 .is_some_and(|client_id| snapshot.authoritative_client_ids.contains(client_id));
             let Some(queue_item) = queue_item else {
                 if !authoritative {
