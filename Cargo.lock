@@ -6374,7 +6374,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wiremock",
  "x509-cert 0.2.5",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -6431,7 +6431,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -6496,7 +6496,7 @@ dependencies = [
  "url",
  "uuid",
  "windows-native-keyring-store",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -6555,7 +6555,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
- "zstd 0.13.3",
+ "zstd 0.14.0",
  "zune-core",
 ]
 
@@ -6647,7 +6647,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -6662,7 +6662,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -6983,7 +6983,7 @@ dependencies = [
  "wasmtime-wasi",
  "wat",
  "wiremock",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -9956,7 +9956,7 @@ dependencies = [
  "toml_edit",
  "x509-cert 0.3.0",
  "xtask-support",
- "zstd 0.13.3",
+ "zstd 0.14.0",
 ]
 
 [[package]]
