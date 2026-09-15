@@ -989,6 +989,19 @@ impl ReleaseNumbering {
             Self::Auto | Self::Official => None,
         }
     }
+
+    /// Whether a stored bridge from `source` may be read under this setting.
+    /// `auto` reads whichever bridge hydration stored, `official` reads none,
+    /// and a pinned order reads only the TVDB order it names.
+    #[must_use]
+    pub fn admits_bridge_source(self, source: NumberingBridgeSource) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Official => false,
+            Self::Alternate => source == NumberingBridgeSource::TvdbAlternate,
+            Self::Dvd => source == NumberingBridgeSource::TvdbDvd,
+        }
+    }
 }
 
 /// How an alternate numbering of a series relates to the TVDB official order

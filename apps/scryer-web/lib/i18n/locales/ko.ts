@@ -1025,6 +1025,9 @@ const ko: LocaleDictionary = {
   "queue.transfer.finalizing": "Finalizing",
   "queue.manualImportQueued": "수동 가져오기가 대기열에 추가되었습니다.",
   "queue.manualImportFailed": "수동 가져오기에 실패했습니다.",
+  "queue.manualImportMultipleEpisodes": "이 파일에 여러 에피소드",
+  "queue.manualImportMultipleEpisodesLabel": "이 파일에 여러 에피소드 지정",
+  "queue.manualImportApplySuggestions": "모두에 제안 적용",
   "queue.removeFailed": "제거 실패",
   "queue.manualImportTooltip":
     "수동 가져오기는 주의가 필요한 대기열 항목에서 사용할 수 있습니다.",

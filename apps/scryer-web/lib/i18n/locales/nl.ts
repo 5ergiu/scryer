@@ -1439,6 +1439,9 @@ const nl: LocaleDictionary = {
   "queue.transfer.finalizing": "Afronden",
   "queue.manualImportQueued": "Handmatige import in wachtrij gezet.",
   "queue.manualImportFailed": "Handmatige import mislukt.",
+  "queue.manualImportMultipleEpisodes": "Meerdere afleveringen in dit bestand",
+  "queue.manualImportMultipleEpisodesLabel": "Meerdere afleveringen aan dit bestand toewijzen",
+  "queue.manualImportApplySuggestions": "Suggesties op alles toepassen",
   "queue.removeFailed": "Mislukte verwijderen",
   "queue.manualImportTooltip":
     "Handmatige import is beschikbaar voor wachtrijitems die aandacht vereisen.",

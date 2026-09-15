@@ -776,14 +776,23 @@ impl AppUseCase {
             }) else {
                 continue;
             };
-            match self
+            let rollback = self
                 .services
                 .library
                 .library_renamer
                 .rollback(std::slice::from_ref(&item_results[index]))
-                .await
-            {
-                Ok(_) => restored += 1,
+                .await;
+            let item = &mut item_results[index];
+            item.status = RenameApplyStatus::Failed;
+            match rollback {
+                Ok(_) => {
+                    restored += 1;
+                    item.reason_code = "companion_rolled_back_with_primary".into();
+                    item.error_message = Some(
+                        "companion restored because its media file was rolled back".to_string(),
+                    );
+                    item.final_path = Some(item.current_path.clone());
+                }
                 Err(error) => {
                     failures += 1;
                     warn!(
@@ -792,14 +801,14 @@ impl AppUseCase {
                         error = %error,
                         "failed to roll back a companion alongside its media file"
                     );
+                    // The companion is still where the rename put it, so the
+                    // result keeps that destination as its final path.
+                    item.reason_code = "companion_rollback_failed".into();
+                    item.error_message = Some(format!(
+                        "its media file was rolled back but this companion could not be restored: {error}"
+                    ));
                 }
             }
-            let item = &mut item_results[index];
-            item.status = RenameApplyStatus::Failed;
-            item.reason_code = "companion_rolled_back_with_primary".into();
-            item.error_message =
-                Some("companion restored because its media file was rolled back".to_string());
-            item.final_path = Some(item.current_path.clone());
         }
 
         if restored == 0 && failures == 0 {

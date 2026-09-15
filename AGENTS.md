@@ -23,6 +23,7 @@
 - Follow the configured repository search workflow. Start with bounded discovery, narrow to the owning implementation and relevant tests, and read exact targets before editing. Reuse established context instead of repeatedly scanning the workspace.
 - Inspect the working tree before editing and preserve concurrent work. Change only the assigned files and regions; an unrelated failing check is evidence to report, not permission to rewrite another task's work.
 - Prefer extending the existing implementation. Keep public behavior and compatibility stable unless the requested change requires otherwise, and use the existing localization path for user-visible text.
+- There is exactly one metadata gateway: SMG, a centrally operated SaaS service. Operators do not self-host or pin their own SMG version, and SMG is deployed ahead of any Scryer release that depends on its schema. Do not add capability probes, legacy query retries, or other fallbacks for Scryer running against an older SMG. Compatibility runs the other way: SMG changes must keep serving the Scryer releases already in the field.
 - Keep updates concise: state the outcome, material evidence, and remaining work. At handoff, record the changed scope, checks actually run, deferred checks, and concrete blockers. Do not claim a performance improvement without measurements.
 
 ## Validation cadence

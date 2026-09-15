@@ -2928,6 +2928,152 @@ async fn apply_media_rename_rolls_companions_back_with_their_primary_on_a_db_fai
     assert_eq!(stored.file_path, source_path.to_string_lossy().to_string());
 }
 
+/// A renamer whose rollback refuses one companion, so that companion stays at
+/// the rename's destination while everything else is put back.
+struct CompanionRollbackRefusingRenamer {
+    inner: FileSystemLibraryRenamer,
+    refuse_suffix: &'static str,
+}
+
+#[async_trait]
+impl scryer_application::LibraryRenamer for CompanionRollbackRefusingRenamer {
+    async fn validate_targets(&self, plan: &scryer_application::RenamePlan) -> AppResult<()> {
+        self.inner.validate_targets(plan).await
+    }
+
+    async fn apply_plan(
+        &self,
+        plan: &scryer_application::RenamePlan,
+        permissions: &scryer_application::ImportFilePermissions,
+    ) -> AppResult<Vec<scryer_application::RenameApplyItemResult>> {
+        self.inner.apply_plan(plan, permissions).await
+    }
+
+    async fn rollback(
+        &self,
+        applied_items: &[scryer_application::RenameApplyItemResult],
+    ) -> AppResult<Vec<scryer_application::RenameApplyItemResult>> {
+        if applied_items
+            .iter()
+            .any(|item| item.current_path.ends_with(self.refuse_suffix))
+        {
+            return Err(AppError::Repository("synthetic rollback refusal".into()));
+        }
+        self.inner.rollback(applied_items).await
+    }
+}
+
+/// A companion whose rollback fails is reported where it actually is: the
+/// rename's destination, with the rollback error, not as restored.
+#[tokio::test]
+async fn apply_media_rename_reports_a_companion_that_could_not_be_rolled_back_at_its_destination() {
+    let mut ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    set_folder_template(&ctx, "MOVIE", "{title} ({year})").await;
+    let media_root = tempfile::tempdir().expect("media root tempdir");
+    configure_default_library_root(&ctx, MediaFacet::Movie, media_root.path()).await;
+
+    let title = create_catalog_title(
+        &ctx,
+        "Tessellate Ferry",
+        MediaFacet::Movie,
+        vec![ExternalId {
+            source: "tvdb".to_string(),
+            value: "94109".to_string(),
+        }],
+        vec![],
+        true,
+    )
+    .await;
+
+    let old_dir = media_root.path().join("Tessellate Ferry");
+    std::fs::create_dir_all(&old_dir).expect("create old movie dir");
+    set_title_folder_path(&ctx, &title.id, &old_dir).await;
+    let source_stem = "Tessellate.Ferry.2024.1080p.WEB-DL";
+    let source_path = old_dir.join(format!("{source_stem}.mkv"));
+    let source_srt = old_dir.join(format!("{source_stem}.hi.srt"));
+    let source_nfo = old_dir.join(format!("{source_stem}.nfo"));
+    std::fs::write(&source_path, b"tessellate-ferry").expect("write movie file");
+    std::fs::write(&source_srt, b"subs").expect("write srt");
+    std::fs::write(&source_nfo, b"nfo").expect("write nfo");
+    let file_id = seed_movie_file(&ctx, &title, &source_path).await;
+
+    ctx.app = ctx.app.with_test_overrides(|builder| {
+        builder
+            .with_library_renamer(std::sync::Arc::new(CompanionRollbackRefusingRenamer {
+                inner: FileSystemLibraryRenamer::new(),
+                refuse_suffix: ".srt",
+            }))
+            .with_media_files(std::sync::Arc::new(FailingMediaFileRepo {
+                inner: ctx.media_files.clone(),
+                fail_file_id: file_id.clone(),
+            }))
+    });
+
+    let actor = ctx
+        .app
+        .find_or_create_default_user()
+        .await
+        .expect("default user");
+    let preview = ctx
+        .app
+        .preview_rename_for_title(&actor, &title.id, MediaFacet::Movie)
+        .await
+        .expect("preview rename plan");
+    assert_eq!(preview.renamable, 3);
+    let result = ctx
+        .app
+        .apply_rename_for_title(&actor, &title.id, MediaFacet::Movie, &preview.fingerprint)
+        .await
+        .expect("apply rename");
+
+    assert_eq!(result.applied, 0);
+    assert_eq!(result.failed, 3);
+    let primary = result
+        .items
+        .iter()
+        .find(|item| item.current_path.ends_with(".mkv"))
+        .expect("primary item");
+    assert!(
+        primary.error_message.as_deref().is_some_and(|message| {
+            message.contains("1 companion(s) restored, 1 could not be restored")
+        }),
+        "the primary reports the split: {:?}",
+        primary.error_message
+    );
+
+    let srt = result
+        .items
+        .iter()
+        .find(|item| item.current_path.ends_with(".srt"))
+        .expect("subtitle item");
+    assert_eq!(srt.status.as_str(), "failed");
+    assert_eq!(srt.reason_code, "companion_rollback_failed");
+    let stranded_at = srt.final_path.clone().expect("destination kept");
+    assert_ne!(stranded_at, srt.current_path);
+    assert!(
+        std::path::Path::new(&stranded_at).is_file(),
+        "the reported path is where the subtitle really is"
+    );
+    assert!(
+        srt.error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("synthetic rollback refusal")),
+        "the rollback error is carried: {:?}",
+        srt.error_message
+    );
+
+    let nfo = result
+        .items
+        .iter()
+        .find(|item| item.current_path.ends_with(".nfo"))
+        .expect("sidecar item");
+    assert_eq!(nfo.reason_code, "companion_rolled_back_with_primary");
+    assert_eq!(nfo.final_path.as_deref(), Some(nfo.current_path.as_str()));
+    assert!(source_nfo.is_file(), "the sidecar is back");
+    assert!(source_path.is_file(), "the media file is back");
+}
+
 /// The emptied-folder cleanup stops at the title folder. An operator's
 /// organising directory above it is not the rename's to remove, even when the
 /// rename happens to leave it empty.

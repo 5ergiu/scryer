@@ -1136,3 +1136,18 @@ fn release_numbering_parses_stored_tag_values() {
     assert_eq!(ReleaseNumbering::Dvd.forced_season_type(), Some("dvd"));
     assert_eq!(ReleaseNumbering::Alternate.as_str(), "alternate");
 }
+
+#[test]
+fn release_numbering_admits_only_the_bridge_its_setting_names() {
+    use NumberingBridgeSource::{AnimeCommunity, TvdbAlternate, TvdbDvd};
+    for source in [AnimeCommunity, TvdbAlternate, TvdbDvd] {
+        assert!(ReleaseNumbering::Auto.admits_bridge_source(source));
+        assert!(!ReleaseNumbering::Official.admits_bridge_source(source));
+    }
+    assert!(ReleaseNumbering::Alternate.admits_bridge_source(TvdbAlternate));
+    assert!(!ReleaseNumbering::Alternate.admits_bridge_source(TvdbDvd));
+    assert!(!ReleaseNumbering::Alternate.admits_bridge_source(AnimeCommunity));
+    assert!(ReleaseNumbering::Dvd.admits_bridge_source(TvdbDvd));
+    assert!(!ReleaseNumbering::Dvd.admits_bridge_source(TvdbAlternate));
+    assert!(!ReleaseNumbering::Dvd.admits_bridge_source(AnimeCommunity));
+}
