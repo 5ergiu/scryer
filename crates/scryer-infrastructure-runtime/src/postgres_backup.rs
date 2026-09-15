@@ -19,8 +19,7 @@ use scryer_domain::MediaFacet;
 
 use crate::backup_import_normalization::{
     ImportColumnKind, ImportColumnRule, normalize_import_object_for_target,
-    rename_legacy_import_columns, restore_manifest_table_name, strip_nonportable_backup_fields,
-    validate_restore_manifest_table_set,
+    strip_nonportable_backup_fields, validate_restore_manifest_table_set,
 };
 use crate::postgres::PostgresServices;
 use crate::queries::title_search::{
@@ -190,26 +189,14 @@ async fn restore_bundle_parts_into_postgres_pool(
             })?;
     }
 
-    // A bundle written before a table was renamed carries it under the old
-    // manifest key and part filename; the gate accepted it, so the rows have to
-    // be read from that name rather than skipped.
-    fn manifest_name<'a>(
-        table: &'a str,
-        row_counts: &std::collections::BTreeMap<String, u64>,
-        source_migration_key: Option<&str>,
-    ) -> Option<&'a str> {
-        restore_manifest_table_name(table, row_counts, source_migration_key)
-    }
-
-    for table in export_tables.iter() {
-        let Some(source_table) = manifest_name(table, row_counts, source_migration_key) else {
-            continue;
-        };
+    for table in export_tables
+        .iter()
+        .filter(|table| row_counts.contains_key(*table))
+    {
         import_table_part(
             &mut tx,
             table,
-            &tables_dir.join(backup_table_part_filename(source_table)),
-            source_migration_key,
+            &tables_dir.join(backup_table_part_filename(table)),
         )
         .await?;
     }
@@ -217,11 +204,11 @@ async fn restore_bundle_parts_into_postgres_pool(
     rebuild_title_search_projection(&mut tx).await?;
     repair_sequences(&mut tx).await?;
 
-    for table in export_tables.iter() {
-        let Some(source_table) = manifest_name(table, row_counts, source_migration_key) else {
-            continue;
-        };
-        let expected_rows = row_counts.get(source_table).ok_or_else(|| {
+    for table in export_tables
+        .iter()
+        .filter(|table| row_counts.contains_key(*table))
+    {
+        let expected_rows = row_counts.get(table).ok_or_else(|| {
             AppError::Validation(format!(
                 "backup bundle table set does not match the current restore catalog: missing [{}], unexpected []",
                 table
@@ -626,7 +613,6 @@ async fn import_table_part(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table: &str,
     part_path: &Path,
-    source_migration_key: Option<&str>,
 ) -> AppResult<()> {
     let target_columns = table_columns(tx, table).await?;
     let target_column_rules = target_columns
@@ -657,7 +643,6 @@ async fn import_table_part(
                 "backup row for {table}:{line_number} is not an object"
             ))
         })?;
-        rename_legacy_import_columns(table, &mut object, source_migration_key);
         normalize_import_object_for_target(
             table,
             &mut object,
