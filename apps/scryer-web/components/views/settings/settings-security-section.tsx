@@ -233,13 +233,10 @@ export function SettingsSecuritySection({
             </section>
 
             <section className={`${SECURITY_INSET_CLASS} p-4 lg:col-span-2`}>
-              <div className={`${SECURITY_INSET_HEADER_CLASS} space-y-1`}>
+              <div className={SECURITY_INSET_HEADER_CLASS}>
                 <h4 className={SECURITY_INSET_TITLE_CLASS}>
                   Multi-factor authentication
                 </h4>
-                <p className="text-xs text-[var(--scry-muted3)]">
-                  Choose where an enrolled passkey or authenticator is required.
-                </p>
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
                 <CheckboxField
