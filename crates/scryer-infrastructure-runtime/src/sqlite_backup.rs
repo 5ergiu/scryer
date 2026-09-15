@@ -17,7 +17,8 @@ use sqlx::{Column, Row, TypeInfo, ValueRef};
 
 use crate::backup_import_normalization::{
     ImportColumnKind, ImportColumnRule, normalize_import_object_for_target,
-    strip_nonportable_backup_fields, validate_restore_manifest_table_set,
+    rename_legacy_import_columns, restore_manifest_table_name, strip_nonportable_backup_fields,
+    validate_restore_manifest_table_set,
 };
 
 #[derive(Clone, Debug)]
@@ -169,14 +170,27 @@ pub async fn restore_backup_bundle_into_sqlite_pool(
                 })?;
         }
 
-        for table in export_tables
-            .iter()
-            .filter(|table| payload.manifest().row_counts.contains_key(*table))
-        {
+        // A bundle written before a table was renamed carries it under the old
+        // manifest key and part filename; the gate accepted it, so the rows
+        // have to be read from that name rather than skipped.
+        let manifest_name = |table: &str| {
+            restore_manifest_table_name(
+                table,
+                &payload.manifest().row_counts,
+                payload.manifest().source_migration_key.as_deref(),
+            )
+            .map(str::to_string)
+        };
+
+        for table in export_tables.iter() {
+            let Some(source_table) = manifest_name(table) else {
+                continue;
+            };
             import_table_part(
                 &mut conn,
                 table,
-                &tables_dir.join(backup_table_part_filename(table)),
+                &tables_dir.join(backup_table_part_filename(&source_table)),
+                payload.manifest().source_migration_key.as_deref(),
             )
             .await?;
         }
@@ -189,11 +203,11 @@ pub async fn restore_backup_bundle_into_sqlite_pool(
             )));
         }
 
-        for table in export_tables
-            .iter()
-            .filter(|table| payload.manifest().row_counts.contains_key(*table))
-        {
-            let expected_rows = payload.manifest().row_counts.get(table).ok_or_else(|| {
+        for table in export_tables.iter() {
+            let Some(source_table) = manifest_name(table) else {
+                continue;
+            };
+            let expected_rows = payload.manifest().row_counts.get(&source_table).ok_or_else(|| {
                 AppError::Validation(format!(
                     "backup bundle table set does not match the current restore catalog: missing [{}], unexpected []",
                     table
@@ -586,6 +600,7 @@ async fn import_table_part(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     table: &str,
     part_path: &Path,
+    source_migration_key: Option<&str>,
 ) -> AppResult<()> {
     let target_columns = table_columns(conn, table).await?;
 
@@ -613,6 +628,7 @@ async fn import_table_part(
                 "backup row for {table}:{line_number} is not an object"
             ))
         })?;
+        rename_legacy_import_columns(table, &mut object, source_migration_key);
         normalize_import_object_for_target(
             table,
             &mut object,

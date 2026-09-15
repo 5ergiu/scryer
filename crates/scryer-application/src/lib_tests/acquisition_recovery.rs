@@ -12731,6 +12731,54 @@ async fn accepted_maintenance_searches_recover_once_with_original_job_ids() {
     );
 }
 
+/// A maintenance sequence dispatches its Search step as the synthetic system
+/// actor, which has no persisted user row: recovery has to reconstruct it or
+/// the step is lost with its receipt already marked accepted.
+#[tokio::test]
+async fn a_maintenance_search_dispatched_by_the_system_actor_recovers() {
+    let harness = bootstrap_media_request_app();
+    harness.users.create(harness.manager.clone()).await.unwrap();
+    let jobs = Arc::new(RecordingJobRunRepo::default());
+    let app = harness.app.with_test_overrides({
+        let jobs = jobs.clone();
+        move |services| services.with_job_runs(jobs)
+    });
+    let now = Utc::now();
+    jobs.seed(JobRunRecord {
+        id: "recover-system-actor".into(),
+        job_key: JobKey::AcquisitionSearch,
+        operation_type: "maintenance_acquisition_search:missing:0".into(),
+        status: JobRunStatus::Running,
+        trigger_source: JobTriggerSource::SystemInternal,
+        actor_user_id: Some(User::SYSTEM_EXECUTION_ID.to_string()),
+        progress_json: None,
+        summary_json: Some(
+            serde_json::json!({"schema_version": 1, "maintenance_action_request": {
+                "wanted_kind": "missing", "facet": null, "library_ids": [],
+                "title_id": null, "season_number": null, "wanted_item_id": null
+            }})
+            .to_string(),
+        ),
+        summary_text: None,
+        error_text: None,
+        started_at: now,
+        completed_at: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await;
+
+    assert_eq!(
+        app.resume_interrupted_maintenance_searches().await.unwrap(),
+        vec!["recover-system-actor".to_string()]
+    );
+    let view = await_acquisition_search_job(&app, &harness.manager, "recover-system-actor").await;
+    assert_eq!(
+        view.state, "completed",
+        "the synthetic actor is reconstructed rather than looked up: {view:?}"
+    );
+}
+
 #[tokio::test]
 async fn recovered_maintenance_search_does_not_resubmit_pending_downloads() {
     let (app, title, _, downloads) = seed_recent_failed_season_pack_fixture_with_indexer(Arc::new(

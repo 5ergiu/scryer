@@ -405,6 +405,7 @@ pub use security::backup_bundle::{
     BackupTableCatalogEntry, BackupTableClassification, EXPORT_BATCH_SIZE,
     PreparedBackupBundleDirectory, RESTORE_VERSION_CONTRACT_HINT, backup_export_table_names,
     backup_table_part_filename, inspect_backup_bundle, prepare_backup_restore_payload,
+    rename_legacy_import_columns, restore_manifest_table_name,
     restore_resets_hydration_derived_state, validate_inspected_bundle_is_restorable,
     validate_restore_manifest_table_set,
 };

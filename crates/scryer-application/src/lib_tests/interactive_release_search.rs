@@ -1359,6 +1359,39 @@ async fn one_release_downloads_its_own_file_and_records_a_grab() {
 }
 
 #[tokio::test]
+async fn browser_downloads_count_against_the_indexer_even_when_a_later_member_fails() {
+    let (app, user, search_id, urls) = browser_download_fixture(vec![
+        nzb_release("Paperman.2012.1080p.WEB-DL", "g1"),
+        nzb_release("Paperman.2012.2160p.WEB-DL", "g2"),
+    ])
+    .await;
+    let stats = Arc::new(RecordingIndexerStatsTracker::default());
+    // Only the first release resolves; the second makes the batch fail.
+    let artifacts = HashMap::from([(urls[0].clone(), nzb_artifact("first"))]);
+    let app = app.with_test_overrides(|services| {
+        services
+            .with_download_client(Arc::new(ArtifactDownloadClient { artifacts }))
+            .with_indexer_stats(stats.clone())
+    });
+
+    let error = app
+        .download_interactive_search_artifacts(&user, &targets(&search_id, &urls))
+        .await
+        .expect_err("the second fetch fails the batch");
+    assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+
+    // The indexer served the first file, so that grab happened and is counted
+    // under the configured indexer name, exactly as the unlinked-queue path
+    // counts one.
+    let grabs = stats.grabs.lock().expect("grab log mutex").clone();
+    assert_eq!(
+        grabs,
+        vec![("idx-a".to_string(), "Synthetic newznab".to_string())],
+        "each served artifact counts once: {grabs:?}"
+    );
+}
+
+#[tokio::test]
 async fn browser_download_rejects_an_oversized_aggregate_without_grab_history() {
     let (app, user, search_id, urls) = browser_download_fixture(vec![
         nzb_release("First.Release", "large-1"),
