@@ -261,7 +261,7 @@ impl AppUseCase {
         requested_library_ids: Option<Vec<String>>,
         query: Option<String>,
         filter: crate::TitleCatalogFilter,
-        sort: crate::TitleCatalogSort,
+        mut sort: crate::TitleCatalogSort,
         limit: usize,
         offset: usize,
         include_external_ids: bool,
@@ -283,6 +283,9 @@ impl AppUseCase {
             .unwrap_or_default();
         if !requested_library_ids.is_empty() {
             library_ids.retain(|library_id| requested_library_ids.contains(library_id));
+        }
+        if sort.key == crate::TitleCatalogSortKey::Profile && sort.profile_names.is_none() {
+            sort.profile_names = Some(self.title_catalog_profile_names(&library_ids).await?);
         }
         self.services
             .catalog

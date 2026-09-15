@@ -53,6 +53,8 @@ import {
   formatRuntimeMinutes,
   formatTitleDate,
   resolveDisplayedQualityLabel,
+  resolveMediaQualityColumnLabel,
+  resolveQualityProfileColumnLabel,
   resolveOverviewTargetView,
   StatusBadge,
   TitleEpisodeProgressBar,
@@ -61,7 +63,7 @@ import {
   TitleTableTooltipActionButton,
   TitleTableLoadingState,
   COMPACT_TITLE_TABLE_ACTION_BUTTON_CLASS,
-  DEFAULT_TITLE_TABLE_VISIBLE_COLUMNS,
+  defaultTitleTableVisibleColumnsForView,
   TITLE_TABLE_HEADER_CELL_CLASS,
   TITLE_TABLE_HEADER_ROW_CLASS,
   TITLE_TABLE_INTERACTIVE_PANEL_BODY_CLASS,
@@ -174,7 +176,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
   const catalogLoadingMoreTitles = catalogLoadingMoreTitlesProp ?? false;
   const catalogPagingEnabled = catalogPagingEnabledProp ?? true;
   const visibleColumns =
-    visibleColumnsProp ?? DEFAULT_TITLE_TABLE_VISIBLE_COLUMNS;
+    visibleColumnsProp ?? defaultTitleTableVisibleColumnsForView(view);
   const selectedDrawerMode = selectedDrawerModeProp ?? false;
   const selectionMode = selectionModeProp ?? false;
   const showScanLibraryAction = showScanLibraryActionProp ?? false;
@@ -194,7 +196,9 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
   const showMonitoredColumn =
     !selectedDrawerMode && visibleColumns.monitored;
   const showQualityColumn =
-    !selectedDrawerMode && visibleColumns.quality;
+    !selectedDrawerMode && isMovieView && visibleColumns.quality;
+  const showProfileColumn =
+    !selectedDrawerMode && visibleColumns.profile;
   const showEpisodesColumn =
     !selectedDrawerMode &&
     !isMovieView &&
@@ -248,6 +252,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
       (showLibraryColumn ? 7 : 0) +
       (showMonitoredColumn ? 4 : 0) +
       (showQualityColumn ? 7 : 0) +
+      (showProfileColumn ? 8 : 0) +
       (showEpisodesColumn ? 7.5 : 0) +
       (showRuntimeColumn ? 6 : 0) +
       (showStatusColumn ? 6.75 : 0) +
@@ -270,6 +275,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
       (showLibraryColumn ? 1 : 0) +
       (showMonitoredColumn ? 1 : 0) +
       (showQualityColumn ? 1 : 0) +
+      (showProfileColumn ? 1 : 0) +
       (showEpisodesColumn ? 1 : 0) +
       (showRuntimeColumn ? 1 : 0) +
       (showStatusColumn ? 1 : 0) +
@@ -312,6 +318,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
       {showLibraryColumn ? <col style={{ width: "7rem" }} /> : null}
       {showMonitoredColumn ? <col style={{ width: "4rem" }} /> : null}
       {showQualityColumn ? <col style={{ width: "7rem" }} /> : null}
+      {showProfileColumn ? <col style={{ width: "8rem" }} /> : null}
       {showEpisodesColumn ? <col style={{ width: "7.5rem" }} /> : null}
       {showRuntimeColumn ? <col style={{ width: "6rem" }} /> : null}
       {showStatusColumn ? <col style={{ width: "6.75rem" }} /> : null}
@@ -333,6 +340,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
         showLibraryColumn && "library",
         showMonitoredColumn && "monitored",
         showQualityColumn && "quality",
+        showProfileColumn && "profile",
         showEpisodesColumn && "episodes",
         showRuntimeColumn && "runtime",
         showStatusColumn && "status",
@@ -856,7 +864,12 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
           ) : null}
           {showQualityColumn ? (
             <TableCell className="whitespace-nowrap py-1.5 text-center align-middle text-[12.5px] text-[var(--scry-text4)]">
-              {resolveDisplayedQualityLabel(item, t("label.unknown"))}
+              {resolveMediaQualityColumnLabel(item, t("label.unknown"))}
+            </TableCell>
+          ) : null}
+          {showProfileColumn ? (
+            <TableCell className="max-w-0 truncate whitespace-nowrap py-1.5 text-center align-middle text-[12.5px] text-[var(--scry-text4)]">
+              {resolveQualityProfileColumnLabel(item, t("label.unknown"))}
             </TableCell>
           ) : null}
           {showEpisodesColumn ? (
@@ -1147,6 +1160,14 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
           ? renderSortableHeader(
               "quality",
               t("title.table.qualityTier"),
+              cn("whitespace-nowrap text-center", TITLE_TABLE_HEADER_CELL_CLASS),
+              "justify-center text-center uppercase tracking-[0.05em] text-[var(--scry-faint2)]",
+            )
+          : null}
+        {showProfileColumn
+          ? renderSortableHeader(
+              "profile",
+              t("title.table.profile"),
               cn("whitespace-nowrap text-center", TITLE_TABLE_HEADER_CELL_CLASS),
               "justify-center text-center uppercase tracking-[0.05em] text-[var(--scry-faint2)]",
             )

@@ -212,6 +212,8 @@ function titleTableColumnLabel(
       return t("title.table.monitored");
     case "quality":
       return t("title.table.qualityTier");
+    case "profile":
+      return t("title.table.profile");
     case "episodes":
       return t("title.table.episodes");
     case "year":
@@ -2524,6 +2526,7 @@ export function MediaContentView({
             "library",
             "monitored",
             "quality",
+            "profile",
             "episodes",
             "year",
             "runtime",

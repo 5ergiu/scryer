@@ -52,7 +52,8 @@ import {
   formatResolutionLabel,
   formatRuntimeMinutes,
   formatTitleDate,
-  resolveDisplayedQualityLabel,
+  resolveMediaQualityColumnLabel,
+  resolveQualityProfileColumnLabel,
   resolveOverviewTargetView,
   StatusBadge,
   TitleEpisodeProgressBar,
@@ -66,7 +67,7 @@ import {
   TITLE_TABLE_INTERACTIVE_PANEL_BODY_CLASS,
   TITLE_TABLE_INTERACTIVE_PANEL_ESTIMATED_HEIGHT,
   TITLE_TABLE_ROW_CLASS,
-  DEFAULT_TITLE_TABLE_VISIBLE_COLUMNS,
+  defaultTitleTableVisibleColumnsForView,
   titleTableRatingColumnLabel,
   titleTableRatingColumnValue,
   titleTableRatingColumnWidthRem,
@@ -171,7 +172,7 @@ export const TitleTable = React.memo(function TitleTable({
   const catalogHasMoreTitles = catalogHasMoreTitlesProp ?? false;
   const catalogLoadingMoreTitles = catalogLoadingMoreTitlesProp ?? false;
   const visibleColumns =
-    visibleColumnsProp ?? DEFAULT_TITLE_TABLE_VISIBLE_COLUMNS;
+    visibleColumnsProp ?? defaultTitleTableVisibleColumnsForView(view);
   const selectedPaneMode = selectedPaneModeProp ?? false;
   const selectionMode = selectionModeProp ?? false;
   const showScanLibraryAction = showScanLibraryActionProp ?? false;
@@ -187,7 +188,8 @@ export const TitleTable = React.memo(function TitleTable({
   const overviewTargetView: ViewId = resolveOverviewTargetView(view);
   const showActionsColumn = visibleColumns.actions;
   const showMonitoredColumn = visibleColumns.monitored;
-  const showQualityColumn = visibleColumns.quality;
+  const showQualityColumn = isMovieView && visibleColumns.quality;
+  const showProfileColumn = visibleColumns.profile;
   const showEpisodesColumn = !isMovieView && visibleColumns.episodes;
   const showSizeColumn = visibleColumns.size;
   const showLibraryColumn = visibleColumns.library;
@@ -212,6 +214,7 @@ export const TitleTable = React.memo(function TitleTable({
     (showLibraryColumn ? 7 : 0) +
     (showMonitoredColumn ? 5.25 : 0) +
     (showQualityColumn ? 8 : 0) +
+    (showProfileColumn ? 9 : 0) +
     (showEpisodesColumn ? 9.5 : 0) +
     (showRuntimeColumn ? 6.5 : 0) +
     (showStatusColumn ? 7 : 0) +
@@ -233,6 +236,7 @@ export const TitleTable = React.memo(function TitleTable({
     (showLibraryColumn ? 1 : 0) +
     (showMonitoredColumn ? 1 : 0) +
     (showQualityColumn ? 1 : 0) +
+    (showProfileColumn ? 1 : 0) +
     (showEpisodesColumn ? 1 : 0) +
     (showRuntimeColumn ? 1 : 0) +
     (showStatusColumn ? 1 : 0) +
@@ -269,6 +273,7 @@ export const TitleTable = React.memo(function TitleTable({
       {showLibraryColumn ? <col style={{ width: "7rem" }} /> : null}
       {showMonitoredColumn ? <col style={{ width: "5.25rem" }} /> : null}
       {showQualityColumn ? <col style={{ width: "8rem" }} /> : null}
+      {showProfileColumn ? <col style={{ width: "9rem" }} /> : null}
       {showEpisodesColumn ? <col style={{ width: "9.5rem" }} /> : null}
       {showRuntimeColumn ? <col style={{ width: "6.5rem" }} /> : null}
       {showStatusColumn ? <col style={{ width: "7rem" }} /> : null}
@@ -288,6 +293,7 @@ export const TitleTable = React.memo(function TitleTable({
     showLibraryColumn && "library",
     showMonitoredColumn && "monitored",
     showQualityColumn && "quality",
+    showProfileColumn && "profile",
     showEpisodesColumn && "episodes",
     showRuntimeColumn && "runtime",
     showStatusColumn && "status",
@@ -712,7 +718,12 @@ export const TitleTable = React.memo(function TitleTable({
           ) : null}
           {showQualityColumn ? (
             <TableCell className="whitespace-nowrap text-center align-middle text-[12.5px] text-[var(--scry-text4)]">
-              {resolveDisplayedQualityLabel(item, t("label.unknown"))}
+              {resolveMediaQualityColumnLabel(item, t("label.unknown"))}
+            </TableCell>
+          ) : null}
+          {showProfileColumn ? (
+            <TableCell className="max-w-0 truncate whitespace-nowrap text-center align-middle text-[12.5px] text-[var(--scry-text4)]">
+              {resolveQualityProfileColumnLabel(item, t("label.unknown"))}
             </TableCell>
           ) : null}
           {showEpisodesColumn ? (
@@ -966,6 +977,14 @@ export const TitleTable = React.memo(function TitleTable({
           ? renderSortableHeader(
               "quality",
               t("title.table.qualityTier"),
+              cn("whitespace-nowrap text-center", TITLE_TABLE_HEADER_CELL_CLASS),
+              "justify-center text-center uppercase tracking-[0.05em] text-[var(--scry-faint2)]",
+            )
+          : null}
+        {showProfileColumn
+          ? renderSortableHeader(
+              "profile",
+              t("title.table.profile"),
               cn("whitespace-nowrap text-center", TITLE_TABLE_HEADER_CELL_CLASS),
               "justify-center text-center uppercase tracking-[0.05em] text-[var(--scry-faint2)]",
             )

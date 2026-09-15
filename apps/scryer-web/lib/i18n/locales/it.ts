@@ -847,6 +847,7 @@ const it: LocaleDictionary = {
   "title.table.facet": "Tipo",
   "title.table.monitored": "Monitorato",
   "title.table.qualityTier": "Qualità",
+  "title.table.profile": "Profilo",
   "title.table.episodes": "Episodi",
   "title.table.status": "Stato",
   "title.table.size": "Dimensione",

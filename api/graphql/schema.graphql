@@ -25721,9 +25721,13 @@ enum TitleCatalogSortKeyValue {
 	"""
 	MONITORED
 	"""
-	Sort by quality profile or media quality.
+	Sort by the quality of the title's media; ascending runs from lowest to highest resolution.
 	"""
 	QUALITY
+	"""
+	Sort by the name of the title's effective quality profile.
+	"""
+	PROFILE
 	"""
 	Sort by episode count.
 	"""

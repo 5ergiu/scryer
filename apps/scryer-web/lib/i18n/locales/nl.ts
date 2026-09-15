@@ -1196,6 +1196,7 @@ const nl: LocaleDictionary = {
   "title.table.library": "Bibliotheek",
   "title.table.monitored": "Gemonitord",
   "title.table.qualityTier": "Kwaliteit",
+  "title.table.profile": "Profiel",
   "title.table.episodes": "Afleveringen",
   "title.table.year": "Jaar",
   "title.table.runtime": "Speelduur",

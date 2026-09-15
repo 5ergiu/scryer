@@ -1361,6 +1361,7 @@ const en: LocaleDictionary = {
   "title.table.library": "Library",
   "title.table.monitored": "Monitored",
   "title.table.qualityTier": "Quality",
+  "title.table.profile": "Profile",
   "title.table.episodes": "Episodes",
   "title.table.year": "Year",
   "title.table.runtime": "Runtime",
