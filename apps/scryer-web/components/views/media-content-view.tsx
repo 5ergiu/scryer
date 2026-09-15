@@ -1758,6 +1758,7 @@ function TitleContextPanel({
               subtitleSearchIdPrefix={`title-context-file-search-subtitles-${title.id}`}
               deleteFileIdPrefix={`title-context-file-delete-${title.id}`}
               makePrimaryFileIdPrefix={`title-context-file-make-primary-${title.id}`}
+              mediaInfoIdPrefix={`title-context-file-info-${title.id}`}
               presentation="selected-title"
             />
           </TitleFilesOnDiskRail>
