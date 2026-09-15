@@ -33,9 +33,6 @@ pub fn strip_nonportable_backup_fields(table: &str, object: &mut JsonMap<String,
 // that inspect-time callers, which cannot reach this crate, run the identical
 // check. Re-exported here to keep every existing caller and test unchanged.
 pub use scryer_application::validate_restore_manifest_table_set;
-// Pre-rename bundles reach the apply path under their old spellings; both
-// translations live with the catalog that dates them.
-pub use scryer_application::{rename_legacy_import_columns, restore_manifest_table_name};
 
 pub fn normalize_import_object_for_target(
     table: &str,
@@ -486,8 +483,8 @@ mod tests {
     use super::{
         ImportColumnKind, ImportColumnRule, normalize_domain_event_import_object,
         normalize_import_object_for_target, normalize_release_decision_import_object,
-        normalize_title_import_object, rename_legacy_import_columns, restore_manifest_table_name,
-        strip_nonportable_backup_fields, validate_restore_manifest_table_set,
+        normalize_title_import_object, strip_nonportable_backup_fields,
+        validate_restore_manifest_table_set,
     };
 
     #[test]
@@ -677,127 +674,6 @@ mod tests {
         let error = validate_restore_manifest_table_set(&row_counts, &export_tables, None)
             .expect_err("bundles without migration metadata remain strict");
         assert!(error.to_string().contains("rule_pack_members"));
-    }
-
-    /// A 0.19 bundle ends at migration 0211, so every table added by 0212-0235
-    /// is legitimately absent and the proxy table is still under its old name.
-    #[test]
-    fn a_pre_0212_bundle_restores_despite_the_whole_0_20_table_set() {
-        let export_tables = scryer_application::backup_export_table_names();
-        let added_since_0211 = [
-            "maintenance_rule_sets",
-            "maintenance_rule_set_libraries",
-            "maintenance_rule_revisions",
-            "maintenance_evaluation_runs",
-            "maintenance_rule_exclusions",
-            "lifecycle_candidates",
-            "lifecycle_action_runs",
-            "media_server_user_media_signals",
-            "library_root_id_remaps",
-            "location_operations",
-            "location_operation_owned_entities",
-            "location_operation_title_checkpoints",
-            "location_operation_verifications",
-            "proxy_configs",
-            "title_tag_definitions",
-            "request_rule_sets",
-            "request_rule_set_libraries",
-            "request_rule_revisions",
-            "request_rule_decisions",
-            "lifecycle_claims",
-            "rule_pack_installations",
-            "rule_pack_members",
-            "application_compatibility_journal",
-            "maintenance_action_steps",
-            "maintenance_action_step_attempts",
-            "maintenance_action_job_receipts",
-            "maintenance_sequence_terminal_memberships",
-            "location_transfer_progress",
-            "location_transfer_titles",
-            "location_file_resolutions",
-        ];
-        for table in added_since_0211 {
-            assert!(
-                export_tables.iter().any(|entry| entry == table),
-                "{table} must still be an exported table"
-            );
-        }
-        let mut row_counts = export_tables
-            .iter()
-            .filter(|table| !added_since_0211.contains(&table.as_str()))
-            .map(|table| (table.clone(), 0u64))
-            .collect::<BTreeMap<_, _>>();
-        // Migration 0219 renamed it; a 0.19 bundle carries the old spelling.
-        row_counts.insert("indexer_proxy_configs".to_string(), 3);
-
-        validate_restore_manifest_table_set(
-            &row_counts,
-            &export_tables,
-            Some("0211_durable_download_cleanup"),
-        )
-        .expect("a 0.19 bundle restores into the 0.20 schema");
-
-        // The rename translation is dated too: a post-0219 bundle carrying the
-        // old name really is carrying an unexpected table.
-        let error = validate_restore_manifest_table_set(
-            &row_counts,
-            &export_tables,
-            Some("0235_location_file_resolutions"),
-        )
-        .expect_err("a current bundle must use the current names");
-        assert!(
-            error.to_string().contains("indexer_proxy_configs"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn a_pre_0219_bundle_reads_the_renamed_proxy_table_and_column() {
-        let row_counts = BTreeMap::from_iter([("indexer_proxy_configs".to_string(), 2)]);
-        assert_eq!(
-            restore_manifest_table_name(
-                "proxy_configs",
-                &row_counts,
-                Some("0211_durable_download_cleanup")
-            ),
-            Some("indexer_proxy_configs"),
-            "the rows are read from the name the bundle actually carries"
-        );
-        assert_eq!(
-            restore_manifest_table_name(
-                "proxy_configs",
-                &row_counts,
-                Some("0219_first_class_proxies")
-            ),
-            None,
-            "a post-rename bundle is not translated"
-        );
-
-        let mut object = JsonMap::from_iter([
-            ("id".to_string(), JsonValue::String("idx-1".to_string())),
-            (
-                "indexer_proxy_config_id".to_string(),
-                JsonValue::String("proxy-1".to_string()),
-            ),
-        ]);
-        rename_legacy_import_columns(
-            "indexers",
-            &mut object,
-            Some("0211_durable_download_cleanup"),
-        );
-        assert_eq!(
-            object.get("proxy_config_id").and_then(JsonValue::as_str),
-            Some("proxy-1"),
-            "the assignment survives the rename instead of being dropped"
-        );
-        assert!(!object.contains_key("indexer_proxy_config_id"));
-
-        let mut untouched = JsonMap::from_iter([(
-            "indexer_proxy_config_id".to_string(),
-            JsonValue::String("proxy-1".to_string()),
-        )]);
-        rename_legacy_import_columns("indexers", &mut untouched, Some("0219_first_class_proxies"));
-        assert!(!untouched.contains_key("proxy_config_id"));
     }
 
     #[test]

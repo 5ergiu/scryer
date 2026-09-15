@@ -1276,129 +1276,13 @@ pub fn backup_export_table_names() -> Vec<String> {
 /// here keeps the advice with the only error an operator sees.
 pub const RESTORE_VERSION_CONTRACT_HINT: &str = "A backup restores only into the same Scryer version that created it. To roll back, start a fresh container on the previous version and apply this backup on its first boot.";
 
-/// The migration that first created each exported table added since the 0.19
-/// line, so a bundle written before it can be missing that table without the
-/// set looking wrong.
-///
-/// Dated per table rather than per release: the gate's question is "could the
-/// schema this bundle was taken from have held this table?", and the migration
-/// number is the only thing that answers it. Every future migration that adds
-/// an exported table adds its row here — a table absent from this list is
-/// treated as expected in every bundle, which is the safe default.
-const EXPORT_TABLE_INTRODUCED_IN: &[(&str, u32)] = &[
-    ("maintenance_rule_sets", 212),
-    ("maintenance_rule_set_libraries", 212),
-    ("maintenance_rule_revisions", 212),
-    ("maintenance_evaluation_runs", 213),
-    ("maintenance_rule_exclusions", 213),
-    ("lifecycle_candidates", 213),
-    ("lifecycle_action_runs", 214),
-    ("media_server_user_media_signals", 215),
-    ("library_root_id_remaps", 216),
-    ("location_operations", 218),
-    ("location_operation_owned_entities", 218),
-    ("location_operation_title_checkpoints", 218),
-    ("location_operation_verifications", 218),
-    ("proxy_configs", 219),
-    ("title_tag_definitions", 221),
-    ("request_rule_sets", 222),
-    ("request_rule_set_libraries", 222),
-    ("request_rule_revisions", 222),
-    ("request_rule_decisions", 222),
-    ("lifecycle_claims", 223),
-    ("rule_pack_installations", 225),
-    ("rule_pack_members", 225),
-    ("application_compatibility_journal", 226),
-    ("maintenance_action_steps", 232),
-    ("maintenance_action_step_attempts", 232),
-    ("maintenance_action_job_receipts", 232),
-    ("maintenance_sequence_terminal_memberships", 232),
-    ("location_transfer_progress", 234),
-    ("location_transfer_titles", 234),
-    ("location_file_resolutions", 235),
-];
-
-/// Tables a bundle may carry under an older name, with the migration that
-/// renamed them. Migration 0219 renamed `indexer_proxy_configs` to
-/// `proxy_configs`, so a pre-0219 bundle carries the old spelling: it is the
-/// same table, not an unexpected one.
-const EXPORT_TABLE_LEGACY_NAMES: &[(&str, &str, u32)] =
-    &[("proxy_configs", "indexer_proxy_configs", 219)];
-
-/// The manifest key and part file a bundle actually carries `table` under.
-///
-/// Returns the legacy spelling when the bundle predates the rename and only
-/// the legacy key is present, so the restore reads the rows instead of
-/// silently importing nothing for a table the gate just accepted.
-pub fn restore_manifest_table_name<'a>(
-    table: &'a str,
-    row_counts: &BTreeMap<String, u64>,
-    source_migration_key: Option<&str>,
-) -> Option<&'a str> {
-    if row_counts.contains_key(table) {
-        return Some(table);
-    }
-    let number = source_migration_key.and_then(migration_number)?;
-    EXPORT_TABLE_LEGACY_NAMES
-        .iter()
-        .find(|(current, legacy, renamed_in)| {
-            *current == table && number < *renamed_in && row_counts.contains_key(*legacy)
-        })
-        .map(|(_, legacy, _)| *legacy)
-}
-
-/// Columns a bundle may carry under an older name, with the migration that
-/// renamed them: `(table, legacy column, current column, renamed in)`.
-const IMPORT_COLUMN_LEGACY_NAMES: &[(&str, &str, &str, u32)] = &[(
-    "indexers",
-    "indexer_proxy_config_id",
-    "proxy_config_id",
-    219,
-)];
-
-/// Rewrite pre-rename column keys onto their current names.
-///
-/// The insert only binds keys that match a target column, so a legacy key that
-/// is not translated is dropped silently — for `indexers` that would quietly
-/// unassign every proxy on restore.
-pub fn rename_legacy_import_columns(
-    table: &str,
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    source_migration_key: Option<&str>,
-) {
-    let Some(number) = source_migration_key.and_then(migration_number) else {
-        return;
-    };
-    for (owner, legacy, current, renamed_in) in IMPORT_COLUMN_LEGACY_NAMES {
-        if *owner != table || number >= *renamed_in || object.contains_key(*current) {
-            continue;
-        }
-        if let Some(value) = object.remove(*legacy) {
-            object.insert((*current).to_string(), value);
-        }
-    }
-}
-
 pub fn validate_restore_manifest_table_set(
     row_counts: &BTreeMap<String, u64>,
     export_tables: &[String],
     source_migration_key: Option<&str>,
 ) -> AppResult<()> {
     let expected_tables = export_tables.iter().cloned().collect::<BTreeSet<_>>();
-    let mut manifest_tables = row_counts.keys().cloned().collect::<BTreeSet<_>>();
-    let source_migration = source_migration_key.and_then(migration_number);
-
-    // Translate pre-rename spellings onto the current name before the set is
-    // compared, so a renamed table is neither missing nor unexpected.
-    for (current, legacy, renamed_in) in EXPORT_TABLE_LEGACY_NAMES {
-        if source_migration.is_some_and(|number| number < *renamed_in)
-            && manifest_tables.remove(*legacy)
-            && expected_tables.contains(*current)
-        {
-            manifest_tables.insert((*current).to_string());
-        }
-    }
-
+    let manifest_tables = row_counts.keys().cloned().collect::<BTreeSet<_>>();
     if manifest_tables == expected_tables {
         return Ok(());
     }
@@ -1412,13 +1296,16 @@ pub fn validate_restore_manifest_table_set(
         .cloned()
         .collect::<Vec<_>>();
     if unexpected.is_empty()
-        && source_migration.is_some_and(|number| {
-            missing.iter().all(|table| {
-                EXPORT_TABLE_INTRODUCED_IN
-                    .iter()
-                    .any(|(name, introduced_in)| *name == table.as_str() && number < *introduced_in)
+        && source_migration_key
+            .and_then(migration_number)
+            .is_some_and(|number| {
+                missing.iter().all(|table| match table.as_str() {
+                    "rule_pack_installations" | "rule_pack_members" => number < 225,
+                    "location_transfer_progress" | "location_transfer_titles" => number < 234,
+                    "location_file_resolutions" => number < 235,
+                    _ => false,
+                })
             })
-        })
     {
         return Ok(());
     }
@@ -3055,20 +2942,18 @@ mod restore_gate_tests {
 
     #[test]
     fn inspect_rejects_a_bundle_whose_table_set_apply_would_refuse() {
-        // A bundle whose own migration key says it postdates both the table it
-        // is missing (0226) and the rename it still spells the old way (0219),
-        // so neither gap is explained by its age.
+        // A bundle from an older line: it lacks tables this build exports and
+        // carries one this build renamed away.
         let mut row_counts = backup_export_table_names()
             .into_iter()
             .map(|table| (table, 0))
             .collect::<BTreeMap<_, _>>();
         row_counts.remove("application_compatibility_journal");
-        row_counts.remove("proxy_configs");
         row_counts.insert("indexer_proxy_configs".to_string(), 0);
 
         let error = validate_inspected_bundle_is_restorable(&summary_with(
             row_counts,
-            Some("0235_fixture"),
+            Some("0211_fixture"),
         ))
         .expect_err("inspect must refuse what apply would refuse");
         let message = error.to_string();
@@ -3080,43 +2965,6 @@ mod restore_gate_tests {
         assert!(
             message.contains(RESTORE_VERSION_CONTRACT_HINT),
             "the refusal must state the supported rollback path: {message}"
-        );
-    }
-
-    /// The same shape, from a bundle old enough that both gaps are explained:
-    /// every table it lacks postdates its migration key, and the table it
-    /// spells the old way was renamed after it. Refusing this one was the bug
-    /// — a 0.19 backup is inside the supported rollback window.
-    #[test]
-    fn inspect_accepts_an_older_bundle_whose_gaps_its_migration_key_explains() {
-        let mut row_counts = backup_export_table_names()
-            .into_iter()
-            .map(|table| (table, 0))
-            .collect::<BTreeMap<_, _>>();
-        row_counts.remove("application_compatibility_journal");
-        row_counts.remove("proxy_configs");
-        row_counts.insert("indexer_proxy_configs".to_string(), 0);
-
-        validate_inspected_bundle_is_restorable(&summary_with(
-            row_counts.clone(),
-            Some("0211_fixture"),
-        ))
-        .expect("a pre-0212 bundle restores under the current catalog");
-
-        // And the restore reads the rows it accepted, under the spelling the
-        // bundle actually carries.
-        assert_eq!(
-            restore_manifest_table_name("proxy_configs", &row_counts, Some("0211_fixture")),
-            Some("indexer_proxy_configs"),
-        );
-        assert_eq!(
-            restore_manifest_table_name(
-                "application_compatibility_journal",
-                &row_counts,
-                Some("0211_fixture")
-            ),
-            None,
-            "a table the bundle predates has no part file to read"
         );
     }
 
