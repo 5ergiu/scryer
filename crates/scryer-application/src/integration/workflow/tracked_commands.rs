@@ -3167,9 +3167,12 @@ async fn reconcile_terminal_tracked_downloads(
             if let Some((download_id, tracked, cleanup)) = result {
                 *settled.entry(format!("{:?}", cleanup.outcome)).or_default() += 1;
                 let (id, state) = if let Some(tracked) = tracked {
-                    let id = tracked.id.clone();
                     let state = tracked.state;
-                    tracker.restore_cleanup_download(tracked);
+                    // The effective id, not the rebuilt one: a live poller entry
+                    // for this canonical download keeps its own id, and settling
+                    // the outcome against the rebuilt short id would address an
+                    // entry that is not in the cache.
+                    let id = tracker.restore_cleanup_download(tracked);
                     (id, state)
                 } else if let Some(id) = tracker.cached_id_for_canonical_download_id(&download_id) {
                     let state = tracker.find(&id).expect("cached cleanup download").state;

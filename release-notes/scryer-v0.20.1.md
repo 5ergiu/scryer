@@ -41,6 +41,7 @@ These notes cover what's changed since **0.20.0**.
   - Downloads you start from interactive search in the browser now count toward the indexer's grab limits.
   - Archive extraction never writes through a symbolic link found in the output folder.
   - A failure while reading anime numbering data no longer leaves an incomplete episode matcher in use.
+  - A torrent held for seeding after its import no longer disappears from the queue a second later and gets ignored, then re-added as if Scryer had never started it.
 - **Login settings:**
   - If you set the login lifetime with the `SCRYER_JWT_ACCESS_TTL_SECONDS` environment variable, it's honored again. It's rounded to the nearest whole day, from 1 to 365. A value you've set in **Settings → Security** takes precedence.
   - The Security page's form login panel is now called **Login settings**. **Minimum password length** and **Login valid for** sit side by side, with the lifetime entered in days.
