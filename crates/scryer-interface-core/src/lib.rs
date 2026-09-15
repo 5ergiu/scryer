@@ -470,44 +470,6 @@ pub fn to_gql_error(err: AppError) -> Error {
         | AppError::DownloadSourceGone(message) => {
             coded_gql_error(message, "DOWNLOAD_SUBMIT_UNAVAILABLE")
         }
-        // Retryable like the unavailable submitter above, but a different
-        // cause: the downloader answered and an earlier download on this scope
-        // is awaiting lifecycle reconciliation. Its own code so a client can
-        // present it as a transient hold rather than a downloader failure, and
-        // the blocking download travels in the extensions so nobody has to
-        // parse the sentence to find it.
-        AppError::DownloadLifecycleDeferred(deferral) => {
-            let message = deferral.to_string();
-            let scryer_application::DownloadLifecycleDeferral {
-                download_id,
-                client_id,
-                client_type,
-                native_item_id,
-                tracked_state,
-                binding_age_seconds,
-                last_seen_age_seconds,
-                source_title,
-                scope,
-            } = *deferral;
-            Error::new(message).extend_with(|_, extensions| {
-                extensions.set("code", "DOWNLOAD_LIFECYCLE_DEFERRED");
-                extensions.set("blockingDownloadId", download_id);
-                if let Some(client_id) = client_id {
-                    extensions.set("blockingClientId", client_id);
-                }
-                extensions.set("blockingClientType", client_type);
-                extensions.set("blockingNativeItemId", native_item_id);
-                extensions.set("blockingTrackedState", tracked_state);
-                extensions.set("blockingBindingAgeSeconds", binding_age_seconds);
-                if let Some(last_seen_age_seconds) = last_seen_age_seconds {
-                    extensions.set("blockingLastSeenAgeSeconds", last_seen_age_seconds);
-                }
-                if let Some(source_title) = source_title {
-                    extensions.set("blockingReleaseTitle", source_title);
-                }
-                extensions.set("requestedScope", scope);
-            })
-        }
         AppError::ArchiveExtractionPluginRequired {
             message,
             source_path,
@@ -645,7 +607,6 @@ fn app_error_kind(err: &AppError) -> &'static str {
         AppError::DownloadSubmitAmbiguousWithClient { .. } => "DownloadSubmitAmbiguous",
         AppError::DownloadSubmitRejected(_) => "DownloadSubmitRejected",
         AppError::DownloadSubmitUnavailable(_) => "DownloadSubmitUnavailable",
-        AppError::DownloadLifecycleDeferred(_) => "DownloadLifecycleDeferred",
         AppError::DownloadSourceGone(_) => "DownloadSourceGone",
         AppError::DownloadSubmitFailoverExhausted(_) => "DownloadSubmitFailoverExhausted",
         AppError::ArchiveExtractionPluginRequired { .. } => "ArchiveExtractionPluginRequired",
@@ -1124,137 +1085,6 @@ mod tests {
             assert_eq!(error.message, expected_message);
             assert_eq!(graphql_error_code(&error), Some(expected_code));
         }
-    }
-
-    /// A lifecycle deferral is retryable like an unavailable submitter, but it
-    /// is not a downloader outage, so it carries its own code and names the
-    /// blocking download in extensions rather than forcing a client to parse
-    /// the sentence.
-    #[test]
-    fn a_lifecycle_deferral_carries_its_own_code_and_the_blocking_download() {
-        let error = to_gql_error(AppError::download_lifecycle_deferred(
-            scryer_application::DownloadLifecycleDeferral {
-                download_id: "dl-fixture-1".to_string(),
-                client_id: Some("client-fixture-1".to_string()),
-                client_type: "nzbget".to_string(),
-                native_item_id: "native-fixture-1".to_string(),
-                tracked_state: "downloading".to_string(),
-                binding_age_seconds: 7_200,
-                last_seen_age_seconds: Some(720),
-                source_title: Some("Fixture.Release.2026.1080p.WEB-DL".to_string()),
-                scope: "title".to_string(),
-            },
-        ));
-
-        assert_eq!(
-            graphql_error_code(&error),
-            Some("DOWNLOAD_LIFECYCLE_DEFERRED")
-        );
-        assert!(
-            error.message.contains("acquisition deferred")
-                && error.message.contains("Fixture.Release.2026.1080p.WEB-DL")
-                && error.message.contains("state downloading")
-                && error.message.contains("bound 2h ago")
-                && error.message.contains("last seen 12m ago")
-                && error.message.contains("nzbget")
-                && error.message.contains("awaiting lifecycle reconciliation"),
-            "the sentence must name what is blocking: {}",
-            error.message
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingDownloadId"),
-            Some("dl-fixture-1")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingClientId"),
-            Some("client-fixture-1")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingClientType"),
-            Some("nzbget")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingNativeItemId"),
-            Some("native-fixture-1")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingTrackedState"),
-            Some("downloading")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingReleaseTitle"),
-            Some("Fixture.Release.2026.1080p.WEB-DL")
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "requestedScope"),
-            Some("title")
-        );
-        let age = error
-            .extensions
-            .as_ref()
-            .and_then(|extensions| extensions.get("blockingBindingAgeSeconds"))
-            .expect("blockingBindingAgeSeconds extension should be present");
-        assert_eq!(age.to_string(), "7200");
-        let last_seen_age = error
-            .extensions
-            .as_ref()
-            .and_then(|extensions| extensions.get("blockingLastSeenAgeSeconds"))
-            .expect("blockingLastSeenAgeSeconds extension should be present");
-        assert_eq!(last_seen_age.to_string(), "720");
-    }
-
-    /// The optional halves of the payload are genuinely optional: an unnamed
-    /// release or a binding with no configured client still maps cleanly.
-    #[test]
-    fn a_lifecycle_deferral_without_optional_context_still_maps() {
-        let error = to_gql_error(AppError::download_lifecycle_deferred(
-            scryer_application::DownloadLifecycleDeferral {
-                download_id: "dl-fixture-2".to_string(),
-                client_id: None,
-                client_type: "sabnzbd".to_string(),
-                native_item_id: "native-fixture-2".to_string(),
-                tracked_state: "unknown".to_string(),
-                binding_age_seconds: 0,
-                last_seen_age_seconds: None,
-                source_title: None,
-                scope: "episode ep-fixture-2".to_string(),
-            },
-        ));
-
-        assert_eq!(
-            graphql_error_code(&error),
-            Some("DOWNLOAD_LIFECYCLE_DEFERRED")
-        );
-        assert!(
-            error.message.contains("dl-fixture-2"),
-            "an unnamed release falls back to the canonical download id: {}",
-            error.message
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingClientId"),
-            None
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "blockingReleaseTitle"),
-            None
-        );
-        assert!(
-            error
-                .extensions
-                .as_ref()
-                .and_then(|extensions| extensions.get("blockingLastSeenAgeSeconds"))
-                .is_none(),
-            "a binding the client never re-confirmed carries no last-seen age"
-        );
-        assert!(
-            !error.message.contains("last seen"),
-            "the sentence omits the last-seen clause entirely: {}",
-            error.message
-        );
-        assert_eq!(
-            graphql_error_extension_string(&error, "requestedScope"),
-            Some("episode ep-fixture-2")
-        );
     }
 
     #[test]

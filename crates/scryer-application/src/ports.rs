@@ -3893,6 +3893,36 @@ pub trait ScopeIndexerCoverageRepository: Send + Sync {
     ) -> AppResult<Vec<ScopeCoverageRow>>;
 }
 
+/// One download client's failure record, mirroring Sonarr's
+/// `DownloadClientStatus` / `ProviderStatusBase`. A client whose
+/// `disabled_until` is still in the future is blocked: the refresh tick does
+/// not ask it and grabs route past it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DownloadClientStatus {
+    pub initial_failure_at: Option<DateTime<Utc>>,
+    pub most_recent_failure_at: Option<DateTime<Utc>>,
+    pub escalation_level: usize,
+    pub disabled_until: Option<DateTime<Utc>>,
+}
+
+impl DownloadClientStatus {
+    pub fn is_blocked(&self, now: DateTime<Utc>) -> bool {
+        self.disabled_until.is_some_and(|until| until > now)
+    }
+}
+
+#[async_trait]
+pub trait DownloadClientStatusRepository: Send + Sync {
+    async fn list(&self) -> AppResult<std::collections::HashMap<String, DownloadClientStatus>>;
+    async fn record_failure(
+        &self,
+        client_config_id: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<DownloadClientStatus>;
+    async fn record_success(&self, client_config_id: &str) -> AppResult<()>;
+    async fn clear(&self, client_config_id: &str) -> AppResult<()>;
+}
+
 #[async_trait]
 pub trait DownloadClientConfigRepository: Send + Sync {
     async fn list(&self, client_type: Option<String>) -> AppResult<Vec<DownloadClientConfig>>;
@@ -4427,99 +4457,12 @@ pub trait DownloadRegistryRepository: Send + Sync {
 
     /// Find a non-ended binding with an exact configured-client/type/native-item locator.
     ///
-    /// A locator that carries a client id also resolves a *legacy* binding —
-    /// one whose `client_config_id` is NULL or empty because migration 0179
-    /// backfilled it from a submission that predates per-client attribution —
-    /// with the same client type and native item id, but only when that client
-    /// is the install's single configured client of the type. That is the same
-    /// attribution rule the cleanup store applies, and without it nothing can
-    /// reconcile a legacy row: every reconciler resolves its binding by an
-    /// exact locator. An exact match is always preferred over a legacy one.
+    /// Resolve the active binding for an exact locator (client id, client type
+    /// and native item id).
     async fn find_active_binding_by_locator(
         &self,
         locator: &ClientJobLocator,
     ) -> AppResult<Option<DownloadClientBindingRecord>>;
-
-    /// Old active bindings that carry no `client_config_id` at all, so the
-    /// reconciler can attribute and visit them.
-    ///
-    /// [`Self::list_active_bindings_for_client_before`] is keyed on a client
-    /// id and [`Self::list_active_binding_clients`] filters NULL/empty ids, so
-    /// a legacy row is invisible to both passes. Ordering, the recency floor
-    /// and the `after` keyset cursor work exactly as they do for the per-client
-    /// listing; the caller groups the result by `client_type_snapshot` and
-    /// applies the single-configured-client rule itself.
-    async fn list_active_legacy_client_bindings_before(
-        &self,
-        _observed_before: DateTime<Utc>,
-        _after: Option<(DateTime<Utc>, DownloadId)>,
-        _limit: usize,
-    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
-        Ok(Vec::new())
-    }
-
-    /// Persist the client a legacy binding was attributed to, so later passes
-    /// resolve it exactly instead of re-deriving the attribution.
-    ///
-    /// Only fills a NULL/empty `client_config_id`; a binding that already names
-    /// a client is left untouched.
-    async fn attribute_legacy_binding_client(
-        &self,
-        _id: &DownloadId,
-        _client_config_id: &str,
-    ) -> AppResult<()> {
-        Ok(())
-    }
-
-    /// Every non-ended binding whose `native_item_id` appears in
-    /// `native_item_ids`, in one round-trip.
-    ///
-    /// The canonical-submission guard has to decide which of a title's
-    /// submissions could still be held by a live client job before it spends a
-    /// download-client round-trip on each of them. Only a submission with an
-    /// active binding can defer an acquisition, so one bulk read over the
-    /// title's locators bounds the guard's work to the rows that can actually
-    /// block. Keyed on the native item id rather than on the canonical download
-    /// id because the guard's blocking check is
-    /// [`Self::find_active_binding_by_locator`], which resolves by locator and
-    /// can therefore land on a binding owned by a different download.
-    /// Implementations must return a superset of what the per-locator lookup
-    /// would find for those item ids; callers still re-check the exact locator
-    /// before treating an absence as a deferral.
-    async fn list_active_bindings_for_native_item_ids(
-        &self,
-        native_item_ids: &[String],
-    ) -> AppResult<Vec<DownloadClientBindingRecord>>;
-
-    /// List old active bindings for one configured client/type so an
-    /// authoritative snapshot can reconcile jobs that disappeared while the
-    /// tracker was not running. Implementations must bound the result.
-    ///
-    /// `after` is a keyset cursor over the `(created_at, download_id)` ordering
-    /// the result is returned in: when set, only rows strictly after it are
-    /// returned. A binding the reconciler keeps (import-pending, import-blocked,
-    /// failed-pending, or one whose bounded history scan is still walking) stays
-    /// eligible for the next pass, so without a cursor a large install re-reads
-    /// the same oldest prefix forever and never reaches newer rows. Callers
-    /// clear their cursor when a pass comes back short, which wraps the rotation
-    /// back to the oldest row.
-    async fn list_active_bindings_for_client_before(
-        &self,
-        _client_config_id: &str,
-        _client_type: &str,
-        _observed_before: DateTime<Utc>,
-        _after: Option<(DateTime<Utc>, DownloadId)>,
-        _limit: usize,
-    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
-        Ok(Vec::new())
-    }
-
-    /// Distinct `(client_config_id, client_type)` pairs that still hold an
-    /// active binding, so the reconciler can find bindings whose client
-    /// configuration has since been deleted.
-    async fn list_active_binding_clients(&self) -> AppResult<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
 
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
@@ -9478,7 +9421,7 @@ pub trait DownloadClient: Send + Sync {
         self.mark_imported_non_destructive(request).await
     }
 
-    async fn get_client_status(&self) -> AppResult<DownloadClientStatus> {
+    async fn get_client_status(&self) -> AppResult<crate::contracts::DownloadClientStatus> {
         Err(AppError::Repository(
             "client status is not supported for this download client".to_string(),
         ))
@@ -9487,7 +9430,7 @@ pub trait DownloadClient: Send + Sync {
     async fn get_client_status_for_client_id(
         &self,
         _client_id: &str,
-    ) -> AppResult<DownloadClientStatus> {
+    ) -> AppResult<crate::contracts::DownloadClientStatus> {
         self.get_client_status().await
     }
 

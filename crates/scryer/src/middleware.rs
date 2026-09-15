@@ -3040,13 +3040,6 @@ pub(crate) fn map_app_error(error: AppError) -> Response {
         | AppError::DownloadSubmitFailoverExhausted(message) => {
             (StatusCode::BAD_GATEWAY, Json(ErrorResponse::new(message))).into_response()
         }
-        // Retryable exactly like the unavailable submitter above, so it keeps
-        // the same status; only the wording differs.
-        AppError::DownloadLifecycleDeferred(deferral) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(deferral.to_string())),
-        )
-            .into_response(),
         AppError::ArchiveExtractionPluginRequired { message, .. } => {
             (StatusCode::CONFLICT, Json(ErrorResponse::new(message))).into_response()
         }

@@ -92,6 +92,10 @@ pub struct AppIntegrationServices {
     pub(crate) builtin_download_client_connection_tester:
         Arc<dyn BuiltinDownloadClientConnectionTester>,
     pub(crate) download_client_configs: Arc<dyn DownloadClientConfigRepository>,
+    /// Per-client failure record and escalation backoff, mirroring Sonarr's
+    /// `DownloadClientStatusService`. A blocked client is neither read by the
+    /// refresh tick nor offered a grab.
+    pub(crate) download_client_status: Arc<dyn crate::ports::DownloadClientStatusRepository>,
     pub(crate) seeding_profiles: Arc<dyn SeedingProfileRepository>,
     pub(crate) subtitle_provider_configs: RuntimeFeature<Arc<dyn SubtitleProviderConfigRepository>>,
     pub(crate) external_identity_verifier: Arc<dyn ExternalIdentityVerifier>,
@@ -358,6 +362,9 @@ impl AppServices {
                     null_repositories::NullBuiltinDownloadClientConnectionTester,
                 ),
                 download_client_configs,
+                download_client_status: Arc::new(
+                    null_repositories::NullDownloadClientStatusRepository,
+                ),
                 seeding_profiles: Arc::new(null_repositories::NullSeedingProfileRepository),
                 subtitle_provider_configs: RuntimeFeature::Disabled,
                 external_identity_verifier: Arc::new(

@@ -518,6 +518,13 @@ pub use null_repositories::{
 pub use null_repositories::NullMediaServerPlaybackProbe;
 // ── Media-server watch signals (RFC 137 §7.3, WP-M) ─────────────────────────
 pub use null_repositories::{NullMediaServerSignalRepository, NullMediaServerSignalSource};
+/// Per-client failure record and its repository port.
+///
+/// The struct is re-exported under a distinct name because
+/// `contracts::DownloadClientStatus` (the live health-probe result) already
+/// owns `DownloadClientStatus` at the crate root.
+pub use ports::DownloadClientStatus as DownloadClientBackoffStatus;
+pub use ports::DownloadClientStatusRepository;
 pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, BlocklistRepository, BuiltinDownloadClientConnectionTester,
@@ -746,93 +753,6 @@ pub struct AutoEligibilityReason {
     pub block_codes: Vec<String>,
 }
 
-/// Why an acquisition was deferred by the canonical-submission guard: an
-/// earlier download covering the same scope is missing from its (configured,
-/// enabled) download client while its registry binding is still active, so the
-/// lifecycle reconciler has not yet decided what happened to it.
-///
-/// This is *not* a download-client outage. The client answered; it simply no
-/// longer lists a job Scryer still believes it owns. The payload names the
-/// blocking download so an operator can find and settle it instead of hunting a
-/// downloader problem that is not happening.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DownloadLifecycleDeferral {
-    /// Canonical download id of the blocking submission.
-    pub download_id: String,
-    /// Configured client the blocking binding points at, when the submission
-    /// recorded one.
-    pub client_id: Option<String>,
-    /// Client type snapshot of the blocking binding (`sabnzbd`, `weaver`, ...).
-    pub client_type: String,
-    /// The client's own item id for the blocking job.
-    pub native_item_id: String,
-    /// Durable tracked state of the blocking download, or `"unknown"` when the
-    /// registry holds no state for it.
-    pub tracked_state: String,
-    /// How long the blocking binding has been open, in seconds.
-    pub binding_age_seconds: i64,
-    /// How long since the client last confirmed the blocking job, in seconds.
-    /// `None` when the binding has never been re-confirmed since it was
-    /// created — the two ages answer different questions ("how long has this
-    /// claim existed" vs "how stale is it"), so both travel.
-    pub last_seen_age_seconds: Option<i64>,
-    /// Release name of the blocking submission, when it recorded one.
-    pub source_title: Option<String>,
-    /// Human description of the scope the *new* acquisition asked for.
-    pub scope: String,
-}
-
-impl DownloadLifecycleDeferral {
-    /// What the operator should look for: the blocking release when its name is
-    /// known, otherwise the canonical download id.
-    pub fn blocking_label(&self) -> &str {
-        self.source_title
-            .as_deref()
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or(self.download_id.as_str())
-    }
-}
-
-/// An age an operator can read at a glance: seconds up to 90s, then minutes up
-/// to 90m, then hours up to 48h, then days. Precision below the chosen unit is
-/// noise when the question is "how long has this been stuck".
-fn humanize_age_seconds(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 90 {
-        format!("{seconds}s")
-    } else if seconds < 90 * 60 {
-        format!("{}m", seconds / 60)
-    } else if seconds < 48 * 60 * 60 {
-        format!("{}h", seconds / 3_600)
-    } else {
-        format!("{}d", seconds / 86_400)
-    }
-}
-
-impl std::fmt::Display for DownloadLifecycleDeferral {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "acquisition deferred: an earlier download for this scope ({}, state {}, bound {} ago",
-            self.blocking_label(),
-            self.tracked_state,
-            humanize_age_seconds(self.binding_age_seconds),
-        )?;
-        if let Some(last_seen_age_seconds) = self.last_seen_age_seconds {
-            write!(
-                f,
-                ", last seen {} ago",
-                humanize_age_seconds(last_seen_age_seconds)
-            )?;
-        }
-        write!(
-            f,
-            ") is missing from {} and awaiting lifecycle reconciliation",
-            self.client_type
-        )
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("unauthorized: {0}")]
@@ -909,16 +829,6 @@ pub enum AppError {
 
     #[error("{0}")]
     DownloadSubmitUnavailable(String),
-
-    /// The canonical-submission guard deferred this acquisition because an
-    /// earlier download on the same scope is still bound to a client that no
-    /// longer lists it. Retryable exactly like `DownloadSubmitUnavailable` —
-    /// every deferral/retry classification treats the two identically — but
-    /// kept distinct because the cause is a lifecycle reconciliation that has
-    /// not run yet, not a downloader outage, and because the payload names the
-    /// blocking download instead of forcing the operator to guess.
-    #[error("{0}")]
-    DownloadLifecycleDeferred(Box<DownloadLifecycleDeferral>),
 
     /// The indexer accepted the search result but no longer serves its download
     /// artifact. This is neither retryable client unavailability nor a release
@@ -1021,20 +931,6 @@ impl AppError {
         Self::DownloadSubmitUnavailable(message.into())
     }
 
-    pub fn download_lifecycle_deferred(deferral: DownloadLifecycleDeferral) -> Self {
-        Self::DownloadLifecycleDeferred(Box::new(deferral))
-    }
-
-    /// The structured deferral context, when this error is one. Consumers that
-    /// want to log or surface the blocking download read it here rather than
-    /// parsing the message.
-    pub fn download_lifecycle_deferral(&self) -> Option<&DownloadLifecycleDeferral> {
-        match self {
-            Self::DownloadLifecycleDeferred(deferral) => Some(deferral.as_ref()),
-            _ => None,
-        }
-    }
-
     pub fn download_submit_failover_exhausted(message: impl Into<String>) -> Self {
         Self::DownloadSubmitFailoverExhausted(message.into())
     }
@@ -1104,7 +1000,6 @@ impl AppError {
     pub fn into_download_submit_unavailable(self) -> Self {
         match self {
             Self::DownloadSubmitUnavailable(_)
-            | Self::DownloadLifecycleDeferred(_)
             | Self::DownloadSubmitFailoverExhausted(_)
             | Self::DownloadSubmitAmbiguous(_)
             | Self::DownloadSubmitAmbiguousWithClient { .. }
@@ -1130,9 +1025,7 @@ impl AppError {
     pub fn is_retryable_download_submit_failure(&self) -> bool {
         matches!(
             self,
-            Self::DownloadSubmitUnavailable(_)
-                | Self::DownloadLifecycleDeferred(_)
-                | Self::DownloadSubmitFailoverExhausted(_)
+            Self::DownloadSubmitUnavailable(_) | Self::DownloadSubmitFailoverExhausted(_)
         )
     }
 

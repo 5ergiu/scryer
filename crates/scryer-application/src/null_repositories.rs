@@ -77,6 +77,34 @@ use crate::{
 };
 
 #[derive(Default)]
+pub struct NullDownloadClientStatusRepository;
+
+#[async_trait]
+impl crate::ports::DownloadClientStatusRepository for NullDownloadClientStatusRepository {
+    async fn list(
+        &self,
+    ) -> AppResult<std::collections::HashMap<String, crate::ports::DownloadClientStatus>> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    async fn record_failure(
+        &self,
+        _client_config_id: &str,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::ports::DownloadClientStatus> {
+        Ok(crate::ports::DownloadClientStatus::default())
+    }
+
+    async fn record_success(&self, _client_config_id: &str) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn clear(&self, _client_config_id: &str) -> AppResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 pub struct NullSeedingProfileRepository;
 
 #[async_trait]
@@ -2591,13 +2619,6 @@ impl DownloadRegistryRepository for NullDownloadRegistryRepository {
         _: &ClientJobLocator,
     ) -> AppResult<Option<DownloadClientBindingRecord>> {
         Ok(None)
-    }
-
-    async fn list_active_bindings_for_native_item_ids(
-        &self,
-        _: &[String],
-    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
-        Ok(Vec::new())
     }
 
     async fn end_binding(&self, _: &scryer_domain::download_identity::DownloadId) -> AppResult<()> {

@@ -79,15 +79,3 @@ test("an empty status never toasts, whatever level was asked for", () => {
   assert.equal(resolveStatusToastLevel("   ", { level: "ERROR" }), null);
 });
 
-// A deferred acquisition is a transient hold, not a failure: the server retries
-// it on its own and no download client is down. It must toast amber even when a
-// caller wraps it in a sentence that would otherwise read as an error.
-test("a lifecycle-deferred acquisition classifies as a warning, not an error", () => {
-  const deferral =
-    "acquisition deferred: an earlier download for this scope " +
-    "(Fixture.Release.2026.1080p.WEB-DL, state downloading, bound 7200s ago) " +
-    "is missing from nzbget and awaiting lifecycle reconciliation";
-  assert.equal(classifyStatusToastLevel(deferral), "WARNING");
-  assert.equal(classifyStatusToastLevel(`Failed to queue: ${deferral}`), "WARNING");
-  assert.equal(resolveStatusToastLevel(deferral), "WARNING");
-});

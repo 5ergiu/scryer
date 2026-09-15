@@ -632,6 +632,11 @@ impl AppServicesBuilder {
         Arc<dyn DownloadClientPluginProvider>
     );
     app_services_builder_setter!(
+        with_download_client_status,
+        integrations.download_client_status,
+        Arc<dyn crate::ports::DownloadClientStatusRepository>
+    );
+    app_services_builder_setter!(
         with_seeding_profiles,
         integrations.seeding_profiles,
         Arc<dyn SeedingProfileRepository>
