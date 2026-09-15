@@ -1,6 +1,5 @@
 import * as React from "react";
 import { Check, Copy, Sparkles } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -10,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { IconButton } from "@/components/ui/icon-button";
 import { Label } from "@/components/ui/label";
+import { TextActionButton } from "@/components/ui/text-action-button";
 import { Textarea } from "@/components/ui/textarea";
 import { useTranslate } from "@/lib/context/translate-context";
 
@@ -99,15 +99,14 @@ export function RegoAiPromptDialog({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button
+      <TextActionButton
         id={id}
-        type="button"
-        variant="secondary"
+        tone="accent"
+        size="default"
         onClick={() => setOpen(true)}
-      >
-        <Sparkles className="mr-2 h-4 w-4" />
-        {t("settings.ruleAiPrompt")}
-      </Button>
+        leadingIcon={<Sparkles className="h-4 w-4" />}
+        label={t("settings.ruleAiPrompt")}
+      />
       <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-[48rem]">
         <DialogHeader>
           <DialogTitle>{t("settings.ruleAiPromptTitle")}</DialogTitle>
