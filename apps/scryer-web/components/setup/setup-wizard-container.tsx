@@ -569,18 +569,13 @@ export function SetupWizardContainer({
           : undefined
       }
     >
-      <div className="setup-intro-header mb-8 flex items-center gap-2.5">
-        {wizardPath !== "import" ? (
+      {wizardPath !== "import" ? (
+        <div className="setup-intro-header mb-8 flex items-center">
           <div ref={headerLogoRef} className="setup-intro-logo">
             <ScryerLogo className="h-20 w-20" />
           </div>
-        ) : null}
-        {currentStep > 0 ? (
-          <span className="setup-intro-wordmark font-[var(--font-space-grotesk)] text-lg font-bold tracking-tight text-[var(--scry-ink2)]">
-            Scryer
-          </span>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {intro ? (
         <SetupIntroMark
           targetRef={headerLogoRef}

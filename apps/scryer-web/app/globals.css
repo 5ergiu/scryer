@@ -824,8 +824,8 @@ body {
 /*
  * The setup wizard's welcome (see components/setup/setup-intro.tsx), timed like
  * Weaver's first-run setup. The big logo appears and holds in the middle while
- * setup loads (0.576s at least), then flies onto the header logo in 0.624s; the
- * header name fades in and the rest of the page rises in as it lands. The
+ * setup loads (0.576s at least), then flies onto the header logo in 0.624s, and
+ * the rest of the page rises in as it lands. The
  * flight may wait for setup to finish loading, so the page's animations are
  * timed from `--setup-intro-flight-delay`.
  */
@@ -833,14 +833,8 @@ body {
   opacity: 0;
 }
 
-.setup-intro > :not(.setup-intro-header),
-.setup-intro .setup-intro-wordmark {
+.setup-intro > :not(.setup-intro-header) {
   opacity: 0;
-}
-
-.setup-intro-playing .setup-intro-wordmark {
-  animation: setup-intro-fade 0.27s ease-out both;
-  animation-delay: calc(var(--setup-intro-flight-delay, 0ms) + 0.354s);
 }
 
 .setup-intro-playing > :not(.setup-intro-header) {
@@ -888,16 +882,6 @@ body {
 
   to {
     transform: translate(var(--setup-intro-x), var(--setup-intro-y)) scale(var(--setup-intro-scale));
-  }
-}
-
-@keyframes setup-intro-fade {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
   }
 }
 
