@@ -36,7 +36,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 pub const NOTIFICATION_REQUEST_SCHEMA_VERSION: u32 = 1;
-const TITLE_QUALITY_PROFILE_TAG_PREFIX: &str = "scryer:quality-profile:";
 
 /// Fallback for repositories that have no tag registry behind them (the null
 /// repository and the non-SQL test doubles). Reads answer empty; writes say so
@@ -1165,7 +1164,7 @@ pub trait TitleRepository: Send + Sync {
             TitleCatalogFilterCounts::default()
         };
         titles.retain(|title| title_matches_catalog_filter(title, &filter));
-        sort_titles_for_catalog(&mut titles, sort);
+        sort_titles_for_catalog(&mut titles, &sort);
 
         let total_count = if include_catalog_counts {
             titles.len()
@@ -1636,7 +1635,7 @@ pub trait TitleRepository: Send + Sync {
     }
 }
 
-fn sort_titles_for_catalog(titles: &mut [Title], sort: TitleCatalogSort) {
+fn sort_titles_for_catalog(titles: &mut [Title], sort: &TitleCatalogSort) {
     titles.sort_by(|left, right| match sort.key {
         TitleCatalogSortKey::Year => {
             compare_nullable_ord_null_last(left.year, right.year, sort.direction)
@@ -1652,6 +1651,16 @@ fn sort_titles_for_catalog(titles: &mut [Title], sort: TitleCatalogSort) {
             compare_nullable_partial_null_last(left.popularity, right.popularity, sort.direction)
                 .then_with(|| compare_titles_by_catalog_title(left, right))
         }
+        TitleCatalogSortKey::Profile => {
+            let profile_name = |title: &Title| {
+                sort.profile_names
+                    .as_ref()
+                    .and_then(|names| names.name_for(title))
+                    .map(str::to_lowercase)
+            };
+            compare_nullable_ord_null_last(profile_name(left), profile_name(right), sort.direction)
+                .then_with(|| compare_titles_by_catalog_title(left, right))
+        }
         _ => {
             let ordering = match sort.key {
                 TitleCatalogSortKey::Title => compare_titles_by_catalog_title(left, right),
@@ -1663,13 +1672,11 @@ fn sort_titles_for_catalog(titles: &mut [Title], sort: TitleCatalogSort) {
                     .monitored
                     .cmp(&right.monitored)
                     .then_with(|| compare_titles_by_catalog_title(left, right)),
-                TitleCatalogSortKey::Quality => title_catalog_quality_profile_id(left)
-                    .cmp(&title_catalog_quality_profile_id(right))
-                    .then_with(|| compare_titles_by_catalog_title(left, right)),
                 TitleCatalogSortKey::Status => title_catalog_status_sort_value(left)
                     .cmp(&title_catalog_status_sort_value(right))
                     .then_with(|| compare_titles_by_catalog_title(left, right)),
-                TitleCatalogSortKey::Episodes
+                TitleCatalogSortKey::Quality
+                | TitleCatalogSortKey::Episodes
                 | TitleCatalogSortKey::Size
                 | TitleCatalogSortKey::Root
                 | TitleCatalogSortKey::MediaResolution
@@ -1697,7 +1704,8 @@ fn sort_titles_for_catalog(titles: &mut [Title], sort: TitleCatalogSort) {
                     .then_with(|| compare_titles_by_catalog_title(left, right)),
                 TitleCatalogSortKey::Year
                 | TitleCatalogSortKey::Runtime
-                | TitleCatalogSortKey::Popularity => Ordering::Equal,
+                | TitleCatalogSortKey::Popularity
+                | TitleCatalogSortKey::Profile => Ordering::Equal,
             };
             match sort.direction {
                 SortDirection::Asc => ordering,
@@ -1756,17 +1764,6 @@ fn title_catalog_sort_value(title: &Title) -> String {
 
 fn title_catalog_name_tie_value(title: &Title) -> String {
     title_catalog_name_tie_key(&title.name)
-}
-
-fn title_catalog_quality_profile_id(title: &Title) -> String {
-    title
-        .tags
-        .iter()
-        .find_map(|tag| tag.strip_prefix(TITLE_QUALITY_PROFILE_TAG_PREFIX))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_lowercase()
 }
 
 fn title_catalog_status_sort_value(title: &Title) -> String {

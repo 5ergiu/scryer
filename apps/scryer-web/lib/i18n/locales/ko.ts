@@ -830,6 +830,7 @@ const ko: LocaleDictionary = {
   "title.table.facet": "유형",
   "title.table.monitored": "모니터링됨",
   "title.table.qualityTier": "품질",
+  "title.table.profile": "프로필",
   "title.table.episodes": "에피소드",
   "title.table.status": "상태",
   "title.table.size": "크기",

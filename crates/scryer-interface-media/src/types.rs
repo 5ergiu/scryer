@@ -148,8 +148,10 @@ pub enum TitleCatalogSortKeyValue {
     Library,
     /// Sort by monitored status.
     Monitored,
-    /// Sort by quality profile or media quality.
+    /// Sort by the quality of the title's media; ascending runs from lowest to highest resolution.
     Quality,
+    /// Sort by the name of the title's effective quality profile.
+    Profile,
     /// Sort by episode count.
     Episodes,
     /// Sort by content status.

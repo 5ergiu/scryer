@@ -853,6 +853,7 @@ const pt_BR: LocaleDictionary = {
   "title.table.facet": "Tipo",
   "title.table.monitored": "Monitorado",
   "title.table.qualityTier": "Qualidade",
+  "title.table.profile": "Perfil",
   "title.table.episodes": "Episódios",
   "title.table.status": "Estado",
   "title.table.size": "Tamanho",

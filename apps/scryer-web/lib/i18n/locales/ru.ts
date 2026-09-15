@@ -1311,6 +1311,7 @@ const ru: LocaleDictionary = {
     "title.table.monitored": "Отслеживается",
     "title.table.poster": "Постер",
     "title.table.qualityTier": "Качество",
+    "title.table.profile": "Профиль",
     "title.table.episodes": "Эпизоды",
     "title.table.year": "Год",
     "title.table.runtime": "Продолжительность",

@@ -800,6 +800,7 @@ const zh_CN: LocaleDictionary = {
   "title.table.facet": "类型",
   "title.table.monitored": "已监控",
   "title.table.qualityTier": "质量",
+  "title.table.profile": "配置",
   "title.table.episodes": "剧集",
   "title.table.status": "状态",
   "title.table.size": "大小",

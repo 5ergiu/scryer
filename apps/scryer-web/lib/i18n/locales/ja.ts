@@ -839,6 +839,7 @@ const ja: LocaleDictionary = {
   "title.table.facet": "タイプ",
   "title.table.monitored": "モニタリング",
   "title.table.qualityTier": "品質",
+  "title.table.profile": "プロファイル",
   "title.table.episodes": "エピソード",
   "title.table.status": "状態",
   "title.table.size": "サイズ",
