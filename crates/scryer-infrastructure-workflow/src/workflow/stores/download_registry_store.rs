@@ -289,6 +289,21 @@ async fn resolve_observation_tx(
         });
     }
 
+    // A tokenless observation of a native item Scryer has already finished
+    // with is the same item still sitting in the client, not a new download.
+    // The ended binding is the durable record of that decision (a queue or
+    // history delete, an import, a failure), the way Sonarr's latest
+    // download-history row for the client's native id makes later polls skip
+    // an Ignored, Imported or Failed item instead of re-tracking it. Minting a
+    // foreign identity here would give one locator two canonical downloads —
+    // the poll whose listing predates a history delete resolves after the
+    // binding ended and used to do exactly that. A genuine re-grab is
+    // unaffected: its submission binding is resolved by the arms above before
+    // this check is reached.
+    if ended_binding_exists_by_locator_tx(tx, &observation.locator).await? {
+        return Ok(ObservationResolution::BindingAlreadyEnded);
+    }
+
     let download_id = DownloadId::new();
     create_foreign_observation_tx(tx, download_id, observation).await?;
     Ok(ObservationResolution::Resolved {
@@ -369,6 +384,35 @@ async fn active_observation_binding_by_locator_tx(
         })
     })
     .transpose()
+}
+
+/// Whether any ended binding names this locator's configured client and
+/// native item. Compared the way `active_observation_binding_by_locator_tx`
+/// compares them, so the two lookups agree on which bindings belong to a
+/// locator.
+async fn ended_binding_exists_by_locator_tx(
+    tx: &mut SqlTx<'_>,
+    locator: &ClientJobLocator,
+) -> AppResult<bool> {
+    Ok(SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        "SELECT download_id
+         FROM download_client_bindings
+         WHERE ended_at IS NOT NULL
+           AND native_item_id IS NOT NULL
+           AND COALESCE(client_config_id, '') = {}
+           AND LOWER(TRIM(COALESCE(client_type_snapshot, ''))) = {}
+           AND native_item_id = {}
+         ORDER BY ended_at DESC, download_id
+         LIMIT 1",
+        &[
+            SqlArg::Text(locator.client_id.clone().unwrap_or_default()),
+            SqlArg::Text(locator.client_type.clone()),
+            SqlArg::Text(locator.item_id.clone()),
+        ],
+    )
+    .await?
+    .is_some())
 }
 
 async fn binding_for_download_tx(
@@ -1608,6 +1652,95 @@ mod tests {
         assert!(newly_foreign);
         assert!(!attached);
         assert!(store.load_download(&download_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn no_token_with_matching_ended_binding_skips_without_writes() {
+        let store = store().await;
+        let id = DownloadId::parse(FIRST_ID).unwrap();
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        store.end_binding(&id).await.unwrap();
+        let before = raw_identity_snapshot(&store, FIRST_ID).await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    None,
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::BindingAlreadyEnded
+        );
+        assert_eq!(raw_identity_snapshot(&store, FIRST_ID).await, before);
+        assert!(
+            store
+                .find_active_binding_by_locator(&ClientJobLocator::new(
+                    Some("client-1"),
+                    "qBittorrent",
+                    "job-1",
+                ))
+                .await
+                .unwrap()
+                .is_none(),
+            "a skipped observation must not mint a second canonical download"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_token_with_an_ended_binding_still_attaches_a_newer_submission() {
+        let store = store().await;
+        let ended = DownloadId::parse(FIRST_ID).unwrap();
+        let regrab = DownloadId::parse(SECOND_ID).unwrap();
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        store.end_binding(&ended).await.unwrap();
+        insert_download(&store, SECOND_ID, "scryer_submission", None).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), None, None).await;
+        insert_ambiguous_submission(&store, SECOND_ID, "Paper Lantern").await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    None,
+                    Some("paper lantern"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::Resolved {
+                download_id: regrab,
+                newly_foreign: false,
+                attached: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn no_token_ignores_an_ended_binding_of_another_client() {
+        let store = store().await;
+        let id = DownloadId::parse(FIRST_ID).unwrap();
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-2"), Some("job-1"), None).await;
+        store.end_binding(&id).await.unwrap();
+
+        let ObservationResolution::Resolved { newly_foreign, .. } = store
+            .resolve_observation(&observation(
+                "job-1",
+                None,
+                Some("release"),
+                "2026-08-24T13:00:00Z",
+            ))
+            .await
+            .unwrap()
+        else {
+            panic!("another client's ended binding must not block adoption");
+        };
+        assert!(newly_foreign);
     }
 
     #[tokio::test]
