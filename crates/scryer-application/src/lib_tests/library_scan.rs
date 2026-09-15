@@ -8153,6 +8153,266 @@ async fn resolve_pending_import_attaches_series_to_existing_title_in_same_librar
 }
 
 #[tokio::test]
+async fn resolve_pending_import_attaches_series_folder_to_existing_title() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let series_root = tempdir.path().join("series");
+    let series_folder = series_root.join("Fixture Drama (2026)");
+    std::fs::create_dir_all(&series_folder).expect("create series folder");
+    let matched_path = series_folder.join("Fixture Drama - S01E01 - Opening WEBDL-1080p.mkv");
+    let stray_path = series_folder.join("Fixture Drama - Behind The Scenes.mkv");
+    std::fs::write(&matched_path, vec![0_u8; 128]).expect("write matched episode file");
+    std::fs::write(&stray_path, vec![0_u8; 128]).expect("write stray file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "series.path",
+            series_root.to_string_lossy().as_ref(),
+        )
+        .await;
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(build_test_library_files(&[
+            matched_path.as_path(),
+            stray_path.as_path(),
+        ]))
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, titles) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
+        settings,
+        library_scanner,
+        unmatched_items.clone(),
+        Arc::new(EmptySearchMetadataGateway),
+    );
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile series root");
+
+    let existing_title = app
+        .create_title_without_hydration(
+            &user,
+            NewTitle {
+                name: "Fixture Drama".to_string(),
+                facet: MediaFacet::Series,
+                monitored: true,
+                year: Some(2026),
+                external_ids: vec![ExternalId {
+                    source: "tvdb".to_string(),
+                    value: "778899".to_string(),
+                }],
+                ..NewTitle::default()
+            },
+        )
+        .await
+        .expect("seed existing series title")
+        .title;
+    {
+        // The title already carries its metadata, so attaching a folder scans
+        // instead of re-hydrating it through the metadata gateway.
+        let mut store = titles.store.lock().await;
+        let stored = store
+            .iter_mut()
+            .find(|candidate| candidate.id == existing_title.id)
+            .expect("stored title");
+        stored.metadata_fetched_at = Some(Utc::now());
+        stored.metadata_language = Some("eng".to_string());
+    }
+    let season = app
+        .services
+        .catalog
+        .shows
+        .create_collection(Collection {
+            id: Id::new().0,
+            title_id: existing_title.id.clone(),
+            collection_type: CollectionType::Season,
+            collection_index: "1".to_string(),
+            label: Some("Season 1".to_string()),
+            ordered_path: None,
+            narrative_order: Some("1".to_string()),
+            first_episode_number: Some("1".to_string()),
+            last_episode_number: Some("1".to_string()),
+            monitored: true,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create season");
+    app.services
+        .catalog
+        .shows
+        .create_episode(Episode {
+            id: Id::new().0,
+            title_id: existing_title.id.clone(),
+            collection_id: Some(season.id.clone()),
+            episode_type: scryer_domain::EpisodeType::Standard,
+            episode_number: Some("1".to_string()),
+            season_number: Some("1".to_string()),
+            episode_label: Some("S01E01".to_string()),
+            title: Some("Opening".to_string()),
+            air_date: Some("2026-01-01".to_string()),
+            duration_seconds: Some(420),
+            has_multi_audio: false,
+            has_subtitle: false,
+            is_filler: false,
+            is_recap: false,
+            absolute_number: None,
+            overview: None,
+            tvdb_id: None,
+            image_url: None,
+            monitored: true,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create episode");
+
+    let item = build_test_unmatched_item(
+        "series-folder-attach-1",
+        MediaFacet::Series,
+        series_root.to_string_lossy().as_ref(),
+        series_folder.to_string_lossy().as_ref(),
+        "Fixture Drama (2026)",
+        "Fixture Drama",
+        Some(2026),
+    );
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&item)
+        .await
+        .expect("seed folder-level pending import");
+
+    let result = app
+        .resolve_pending_import(
+            &user,
+            &item.id,
+            pending_import_title_request(
+                MediaFacet::Series,
+                "Fixture Drama",
+                Some("778899"),
+                Some(2026),
+            ),
+            true,
+        )
+        .await
+        .expect("attach the series folder to the existing title");
+
+    assert!(!result.created);
+    assert_eq!(result.title.id, existing_title.id);
+    assert_eq!(
+        result.title.folder_path.as_deref(),
+        Some(series_folder.to_string_lossy().as_ref()),
+        "attaching a folder must claim it for the title"
+    );
+    let summary = result
+        .library_scan
+        .expect("a folder attach reports the scan it ran");
+    assert_eq!(summary.scanned, 2);
+    assert_eq!(summary.matched, 1);
+    assert_eq!(summary.unmatched, 1);
+
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&existing_title.id)
+        .await
+        .expect("list attached media files");
+    assert_eq!(media_files.len(), 1);
+    assert_eq!(media_files[0].file_path, matched_path.to_string_lossy());
+
+    let remaining = unmatched_items.items().await;
+    assert!(
+        remaining
+            .iter()
+            .all(|pending| pending.item_path != series_folder.to_string_lossy()),
+        "the folder-level pending row must be gone once the folder is attached"
+    );
+    let stray_item = remaining
+        .iter()
+        .find(|pending| pending.item_path == stray_path.to_string_lossy())
+        .expect("a file the scan could not place becomes its own pending row");
+    assert_eq!(
+        stray_item.title_id.as_deref(),
+        Some(existing_title.id.as_str()),
+        "leftover files stay bound to the title so they can be bound per file"
+    );
+    assert_eq!(stray_item.status, PendingImportStatus::Pending);
+}
+
+#[tokio::test]
+async fn title_bound_directory_pending_import_releases_its_stale_title_link() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let series_folder = tempdir.path().join("Fixture Drama (2026)");
+    std::fs::create_dir_all(&series_folder).expect("create series folder");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_tracking(
+        settings,
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched_items.clone(),
+    );
+    let title = app
+        .create_title_without_hydration(
+            &user,
+            NewTitle {
+                name: "Fixture Drama".to_string(),
+                facet: MediaFacet::Series,
+                monitored: true,
+                ..NewTitle::default()
+            },
+        )
+        .await
+        .expect("seed existing series title")
+        .title;
+
+    // A row attached before folder binding existed: title-bound, but its path
+    // is the series directory, so no file can be bound to an episode.
+    let mut legacy = build_test_unmatched_item(
+        "series-legacy-folder-bind-1",
+        MediaFacet::Series,
+        tempdir.path().to_string_lossy().as_ref(),
+        series_folder.to_string_lossy().as_ref(),
+        "Fixture Drama (2026)",
+        "Fixture Drama",
+        None,
+    );
+    legacy.title_id = Some(title.id.clone());
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&legacy)
+        .await
+        .expect("seed legacy title-bound folder row");
+
+    let preview_error = app
+        .preview_title_bound_pending_import(&user, &legacy.id)
+        .await
+        .expect_err("a directory cannot be previewed for episode binding");
+    assert!(
+        preview_error.to_string().contains("folder, not a file"),
+        "unexpected error: {preview_error}"
+    );
+    let released = unmatched_items.items().await;
+    assert_eq!(released.len(), 1);
+    assert_eq!(
+        released[0].title_id, None,
+        "the stale title link must be released so the folder can be attached again"
+    );
+
+    // The same repair happens for API clients that call the bind mutation.
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&legacy)
+        .await
+        .expect("restore legacy title-bound folder row");
+    let bind_error = app
+        .bind_title_bound_pending_import(&user, &legacy.id, None, &["episode-1".to_string()])
+        .await
+        .expect_err("a directory cannot be bound to episodes");
+    assert!(
+        bind_error.to_string().contains("folder, not a file"),
+        "unexpected error: {bind_error}"
+    );
+    assert_eq!(unmatched_items.items().await[0].title_id, None);
+}
+
+#[tokio::test]
 async fn resolve_pending_movie_attach_keeps_item_when_title_owns_another_folder() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let movie_path = tempdir.path().join("Missing.Movie.2020.mkv");
