@@ -642,6 +642,7 @@ const SERIES_SIDE_PANEL_TITLE_FIELDS = `
     inheritsUseSeasonFolders
     fillerPolicy
     recapPolicy
+    releaseNumbering
     effectiveFillerPolicy
     effectiveRecapPolicy
     createdAt

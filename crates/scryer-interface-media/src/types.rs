@@ -82,6 +82,9 @@ pub struct TitlePayload {
     pub filler_policy: Option<FillerPolicyValue>,
     /// Policy for recap episodes, or null when unset.
     pub recap_policy: Option<RecapPolicyValue>,
+    /// Which episode numbering this title's releases are read in, or null when
+    /// the title follows the default (`AUTO`).
+    pub release_numbering: Option<ReleaseNumberingValue>,
 }
 
 #[derive(SimpleObject, Clone)]

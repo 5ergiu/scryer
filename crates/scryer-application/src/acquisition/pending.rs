@@ -933,21 +933,18 @@ impl AppUseCase {
             &pr.release_title,
             &pending_parse_context,
         );
-        // A parked anime release is very often the reason it was parked: it was
-        // numbered per cour, matched nothing, and sat here. Translate it into
-        // the catalog's numbering before coverage and the numbering veto read
-        // it, exactly as the search and RSS lanes do. Inert for every title
-        // without a stored bridge.
-        let pending_numbering_bridge = if title.facet == MediaFacet::Anime {
-            self.services
-                .catalog
-                .shows
-                .get_anime_numbering_bridge(&title.id)
-                .await
-                .unwrap_or_default()
-        } else {
-            None
-        };
+        // A parked release is very often parked for exactly this reason: it was
+        // numbered by an order the catalog does not follow, matched nothing,
+        // and sat here. Translate it into the catalog's numbering before
+        // coverage and the numbering veto read it, exactly as the search and
+        // RSS lanes do. Inert for every title without a stored bridge.
+        let pending_numbering_bridge = self
+            .services
+            .catalog
+            .shows
+            .get_anime_numbering_bridge(&title.id)
+            .await
+            .unwrap_or_default();
         let pending_numbering = crate::anime_numbering::translate_release_numbering(
             pending_numbering_bridge.as_ref(),
             &title,

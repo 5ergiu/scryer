@@ -6000,12 +6000,17 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
         .filter(|(query_season, query_episode, _)| {
             (*query_season, *query_episode) != (season, episode)
         });
-    // Anime numbering forms all ask for the same episode under a different
+    // Alternate numbering forms all ask for the same episode under a different
     // numbering. Labelling them apart is what keeps automatic search from
-    // collapsing them into one text query. Bounded to anime on purpose.
-    let anime_numbering_label = if query_facet != "anime" || is_alias_query {
+    // collapsing them into one text query. The absolute/dashed forms stay
+    // bounded to anime, which is the only facet that asks for them; the
+    // cour-coordinate form also serves a series numbered by a TVDB alternate
+    // order, which `community_coordinates` above already admits.
+    let anime_numbering_label = if is_alias_query {
         None
-    } else if dashed_anime_episode || query_ends_with_absolute_number(query) {
+    } else if query_facet == "anime"
+        && (dashed_anime_episode || query_ends_with_absolute_number(query))
+    {
         Some(ANIME_ABSOLUTE_TEXT_LABEL)
     } else if community_coordinates.is_some() {
         Some(ANIME_COUR_TEXT_LABEL)
@@ -13699,6 +13704,7 @@ mod tests {
             })
             .collect();
         let bridge = scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
             generated_on: "2026-09-07".to_string(),
             corroborating_order: None,
             seasons,

@@ -5696,6 +5696,7 @@ async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
         .expect("create anime title");
 
     let bridge = scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
         generated_on: "2026-01-01".into(),
         corroborating_order: None,
         seasons: vec![scryer_domain::AnimeCommunitySeason {

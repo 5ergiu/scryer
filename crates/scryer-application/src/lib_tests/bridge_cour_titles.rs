@@ -7,6 +7,7 @@ use super::*;
 
 fn fma_final_cour_bridge() -> scryer_domain::AnimeNumberingBridge {
     scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
         generated_on: "2026-01-01".into(),
         corroborating_order: None,
         seasons: vec![scryer_domain::AnimeCommunitySeason {

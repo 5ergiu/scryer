@@ -2882,13 +2882,13 @@ async fn queued_manual_import_rejects_observed_targets_before_consuming_or_queue
     for mapping in [
         crate::ManualImportCandidateMapping {
             candidate_id: "candidate-1".to_string(),
-            episode_id: Some(observed_episode.id),
+            episode_ids: vec![observed_episode.id],
             disc_selection: None,
             series_movie_link_id: None,
         },
         crate::ManualImportCandidateMapping {
             candidate_id: "candidate-1".to_string(),
-            episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: Some(observed_series_movie.id),
             disc_selection: None,
         },
@@ -7157,6 +7157,7 @@ async fn manual_disc_import_for_filesystem(udf_metadata_partition: Option<bool>)
         vec![ManualImportFileMapping {
             file_path: source.to_string_lossy().into_owned(),
             episode_id: Some(fixture.episode.id.clone()),
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
             disc_selection: None,
         }],
@@ -7206,6 +7207,7 @@ async fn manual_disc_import_for_filesystem(udf_metadata_partition: Option<bool>)
         vec![ManualImportFileMapping {
             file_path: source.to_string_lossy().into_owned(),
             episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
             disc_selection: Some(selection.clone()),
         }],
@@ -7278,6 +7280,7 @@ async fn manual_import_still_accepts_file_whose_name_matches_no_episode() {
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: Some(episode.id.clone()),
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -7352,6 +7355,7 @@ async fn assert_manual_import_lands_extensionless_episode(fixture: &str, extensi
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: Some(episode.id.clone()),
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -7448,6 +7452,7 @@ async fn manual_import_lands_content_qualified_extensionless_movie() {
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -7544,6 +7549,7 @@ async fn manual_import_of_a_file_already_in_place_is_satisfied_not_failed() {
         disc_selection: None,
         file_path: source_file.to_string_lossy().into_owned(),
         episode_id: Some(episode.id.clone()),
+        episode_ids: Vec::new(),
         series_movie_link_id: None,
     }];
     let source_root =
@@ -7604,6 +7610,257 @@ async fn manual_import_of_a_file_already_in_place_is_satisfied_not_failed() {
         "the re-run must not duplicate the catalog row: {media_files:?}"
     );
 }
+/// Add another episode to the season the fixture already created, so a
+/// multi-episode file has real siblings to resolve against.
+async fn create_pack_episode_in_fixture_season(
+    app: &AppUseCase,
+    user: &User,
+    title_id: &str,
+    episode_number: u32,
+) -> Episode {
+    let collection = app
+        .services
+        .catalog
+        .shows
+        .list_collections_for_title(title_id)
+        .await
+        .expect("list fixture collections")
+        .into_iter()
+        .find(|collection| collection.collection_index == "1")
+        .expect("fixture season 1 collection");
+    app.create_episode(
+        user,
+        title_id.to_string(),
+        Some(collection.id),
+        "standard".into(),
+        Some(episode_number.to_string()),
+        Some("1".into()),
+        Some(format!("S01E{episode_number:02}")),
+        Some(format!("Season 1 Episode {episode_number}")),
+        None,
+        Some(1_500),
+        false,
+        false,
+    )
+    .await
+    .expect("create fixture season episode")
+}
+
+#[tokio::test]
+async fn manual_import_preview_suggests_every_episode_a_two_episode_file_covers() {
+    // A well-named double episode used to offer the operator one target at a
+    // time, so the sibling stayed wanted and was grabbed again. The preview
+    // now names the whole set it resolved.
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode,
+            ..
+        },
+        download_submissions,
+    ) = fail_closed_pack_fixture_with_submissions().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+
+    let release_title = "Fail.Closed.Pack.S01E01E02.1080p.WEB-DL.x264";
+    let item_id = "manual-preview-two-episode-file";
+    record_pack_identity_submission(
+        &download_submissions,
+        &title.id,
+        item_id,
+        release_title,
+        SubmissionScope::EpisodeSet {
+            episode_ids: vec![episode.id.clone(), second_episode.id.clone()],
+        },
+    )
+    .await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let completed =
+        series_pack_completed_download(item_id, &title.id, release_title, source_dir.path());
+    let release_evidence =
+        crate::import::workflow::resolve_release_evidence_for_completed_download(
+            &app, &completed, None,
+        )
+        .await
+        .expect("resolve durable release evidence");
+
+    let suggestions =
+        crate::import::workflow::preview_manual_import_suggested_episode_id_sets_for_tests(
+            &app,
+            source_dir.path(),
+            &title,
+            &release_evidence,
+            &[episode.clone(), second_episode.clone()],
+        )
+        .await
+        .expect("preview manual import");
+
+    assert_eq!(suggestions.len(), 1, "{suggestions:?}");
+    assert_eq!(
+        suggestions[0].0,
+        vec![episode.id.clone(), second_episode.id.clone()],
+        "both parsed episodes must be suggested: {suggestions:?}"
+    );
+    let label = suggestions[0].1.as_deref().unwrap_or_default();
+    assert!(
+        label.starts_with("S01E01-E02"),
+        "the label must name the whole span: {suggestions:?}"
+    );
+}
+
+#[tokio::test]
+async fn manual_import_assigns_one_file_to_every_mapped_episode() {
+    // The executor carried a single episode id, so a double episode imported
+    // against one of its two episodes and left the other wanted.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        import_artifacts,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let release_title = "Fail.Closed.Pack.S01E01E02.1080p.WEB-DL";
+    let source_file = write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let completed = series_pack_completed_download(
+        "manual-import-two-episode-file",
+        &title.id,
+        release_title,
+        source_dir.path(),
+    );
+
+    let results = crate::import_workflow::execute_manual_import(
+        &app,
+        &user,
+        "manual-import-two-episode-file",
+        &title.id,
+        Some(&completed),
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: None,
+            episode_ids: vec![episode.id.clone(), second_episode.id.clone()],
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+    )
+    .await
+    .expect("execute multi-episode manual import");
+
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].success, "{results:?}");
+    assert_eq!(
+        results[0].episode_ids,
+        vec![episode.id.clone(), second_episode.id.clone()],
+        "{results:?}"
+    );
+
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(
+        media_files.len(),
+        1,
+        "one file must land once, not once per episode: {media_files:?}"
+    );
+
+    let artifacts = import_artifacts
+        .artifacts_for_file(&format!("{release_title}.mkv"))
+        .await;
+    let imported = artifacts
+        .iter()
+        .filter(|artifact| artifact.result == "imported")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        imported
+            .iter()
+            .filter_map(|artifact| artifact.episode_id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([episode.id.clone(), second_episode.id.clone()]),
+        "both episodes must be recorded against the imported file: {artifacts:?}"
+    );
+    assert_eq!(
+        imported
+            .iter()
+            .filter_map(|artifact| artifact.imported_media_file_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1,
+        "both episodes must point at the same media file: {artifacts:?}"
+    );
+}
+
+#[tokio::test]
+async fn manual_import_rejects_a_mapping_that_spans_two_seasons() {
+    // One file lands under one season folder with one name, so a mapping
+    // across seasons is an operator mistake rather than a double episode.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let other_season_episode =
+        create_pack_episode_in_season(&app, &user, &title.id, 2, 1, None, "standard").await;
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let release_title = "Fail.Closed.Pack.S01E01E02.1080p.WEB-DL";
+    let source_file = write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let completed = series_pack_completed_download(
+        "manual-import-mixed-season-mapping",
+        &title.id,
+        release_title,
+        source_dir.path(),
+    );
+
+    let results = crate::import_workflow::execute_manual_import(
+        &app,
+        &user,
+        "manual-import-mixed-season-mapping",
+        &title.id,
+        Some(&completed),
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: None,
+            episode_ids: vec![episode.id.clone(), other_season_episode.id.clone()],
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+    )
+    .await
+    .expect("execute mixed-season manual import");
+
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(!results[0].success, "{results:?}");
+    assert!(
+        results[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("different seasons")),
+        "{results:?}"
+    );
+    assert!(
+        app.services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .expect("list media files")
+            .is_empty(),
+        "a rejected mapping must not land a file"
+    );
+}
 
 #[tokio::test]
 async fn manual_import_upgrade_reports_transfer_progress_on_its_record() {
@@ -7648,6 +7905,7 @@ async fn manual_import_upgrade_reports_transfer_progress_on_its_record() {
                 disc_selection: None,
                 file_path: source_file.to_string_lossy().into_owned(),
                 episode_id: Some(episode.id.clone()),
+                episode_ids: Vec::new(),
                 series_movie_link_id: None,
             }],
         )
@@ -7804,6 +8062,7 @@ async fn scryer_manual_import_defaults_to_grabbed_scope_but_accepts_same_title_o
         vec![ManualImportFileMapping {
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: Some(selected_episode.id.clone()),
+            episode_ids: Vec::new(),
             disc_selection: None,
             series_movie_link_id: None,
         }],
@@ -9018,6 +9277,7 @@ async fn automatic_single_file_import_uses_its_filename_title_evidence_for_anime
     }
     let official_41 = official_41.expect("official episode 41");
     let bridge = scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
         generated_on: "2026-08-30".to_string(),
         corroborating_order: None,
         seasons: vec![
@@ -10272,6 +10532,7 @@ async fn path_manual_import_can_target_series_movie_link() {
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: Some(link.id.clone()),
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -10378,6 +10639,7 @@ async fn path_manual_import_rejects_another_title_folder_before_source_mutation(
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: None,
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -13051,6 +13313,7 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
             disc_selection: None,
             file_path: source_file.to_string_lossy().into_owned(),
             episode_id: None,
+            episode_ids: Vec::new(),
             series_movie_link_id: Some(link.id.clone()),
         }],
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
@@ -14874,5 +15137,122 @@ async fn proxy_deletion_serializes_against_download_client_proxy_assignment() {
             .expect("seeded client remains")
             .proxy_config_id,
         None
+    );
+}
+
+/// WP2: a non-anime series pinned to TVDB's alternate order imports a grabbed
+/// double episode onto the official numbers the bridge maps it to, not onto the
+/// literal numbers in the release name.
+#[tokio::test]
+async fn automatic_import_maps_a_double_episode_through_an_alternate_order_bridge() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            library_dir,
+            ..
+        },
+        _submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        series_root_at_library_dir: true,
+        ..Default::default()
+    })
+    .await;
+    let mut official = Vec::new();
+    for number in 2..=30 {
+        official.push(create_pack_episode_in_fixture_season(&app, &user, &title.id, number).await);
+    }
+    let official_26 = official
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("26"))
+        .expect("official episode 26")
+        .clone();
+    let official_27 = official
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("27"))
+        .expect("official episode 27")
+        .clone();
+
+    app.services
+        .catalog
+        .titles
+        .update_metadata(
+            &title.id,
+            None,
+            None,
+            Some(vec![format!(
+                "{}alternate",
+                scryer_domain::RELEASE_NUMBERING_TAG_PREFIX
+            )]),
+            None,
+        )
+        .await
+        .expect("pin the title to the alternate order");
+
+    // TVDB's alternate order runs one ahead of the official one from the very
+    // first episode, so alternate E27E28 is official E26E27.
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        source: scryer_domain::NumberingBridgeSource::TvdbAlternate,
+        generated_on: "alternate".to_string(),
+        corroborating_order: Some("alternate".to_string()),
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 1,
+            anidb_id: None,
+            anilist_id: None,
+            mal_id: None,
+            titles: Vec::new(),
+            ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                community_episode_start: 2,
+                community_episode_end: Some(30),
+                tvdb_season: 1,
+                tvdb_episode_start: 1,
+                tvdb_episode_end: Some(29),
+            }],
+            absolute_start: None,
+            episode_count: None,
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store the alternate order bridge");
+
+    let release_title = "Fail.Closed.Pack.S01E27E28.1080p.WEB-DL.x264";
+    let item_id = "alternate-order-double-episode";
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let mut completed =
+        series_pack_completed_download(item_id, &title.id, release_title, source_dir.path());
+    completed.parameters = vec![
+        ("*scryer_title_id".to_string(), title.id.clone()),
+        ("*scryer_facet".to_string(), "series".to_string()),
+    ];
+
+    let result = {
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        crate::import::import::import_completed_download(&app, &user, &completed)
+            .await
+            .expect("alternate-numbered import should run")
+    };
+
+    assert_eq!(result.decision, scryer_domain::ImportDecision::Imported);
+    let mut imported = result.episode_ids.clone();
+    imported.sort();
+    let mut expected = vec![official_26.id.clone(), official_27.id.clone()];
+    expected.sort();
+    assert_eq!(imported, expected, "{result:?}");
+    let library_files = library_video_file_names(library_dir.path());
+    assert!(
+        library_files.iter().any(|name| name.contains("S01E26")),
+        "official numbering must drive the destination: {library_files:?}"
+    );
+    assert!(
+        !library_files
+            .iter()
+            .any(|name| name.contains("S01E27") || name.contains("S01E28") || name.contains("E28")),
+        "the literal alternate numbering must not reach the library: {library_files:?}"
     );
 }

@@ -1428,19 +1428,17 @@ impl AppUseCase {
             .filter(|collection| collection.monitored)
             .map(|collection| collection.id.clone())
             .collect::<HashSet<_>>();
-        // Community-numbered anime has to be translated before it is routed:
-        // a feed item named `S04E20` belongs to the episode the bridge says it
-        // is, not to the season-4 slot the catalog does not have.
-        let anime_numbering_bridge = if title.facet == MediaFacet::Anime {
-            self.services
-                .catalog
-                .shows
-                .get_anime_numbering_bridge(&title.id)
-                .await
-                .unwrap_or_default()
-        } else {
-            None
-        };
+        // A bridged title has to be translated before it is routed: a feed
+        // item named `S04E20` belongs to the episode the bridge says it is, not
+        // to the season-4 slot the catalog does not have. Loaded once per
+        // title; `None` for every title with no stored bridge.
+        let anime_numbering_bridge = self
+            .services
+            .catalog
+            .shows
+            .get_anime_numbering_bridge(&title.id)
+            .await
+            .unwrap_or_default();
 
         // Route single-episode postings per episode; keep pack items (absolute
         // ranges and season packs) whole so each pack is evaluated once.
@@ -3609,6 +3607,7 @@ mod tests {
         title.facet = MediaFacet::Anime;
         title.metadata_language = Some("eng".into());
         let bridge = scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
             generated_on: "2026-01-01".into(),
             corroborating_order: None,
             seasons: vec![scryer_domain::AnimeCommunitySeason {
