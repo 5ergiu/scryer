@@ -2688,34 +2688,30 @@ mod tests {
             "prefer-web-dl should match canonical WEB-DL input"
         );
 
-        let x265_result = evaluate_template("prefer-x265", synthetic_test_input(), "movie");
+        let hevc_result = evaluate_template("prefer-hevc", synthetic_test_input(), "movie");
         assert!(
-            x265_result
+            hevc_result
                 .entries
                 .iter()
-                .any(|entry| entry.code == "x265_bonus" && entry.delta == 100),
-            "prefer-x265 should match canonical H.265 input"
+                .any(|entry| entry.code == "hevc_bonus" && entry.delta == 100),
+            "prefer-hevc should match canonical H.265 input"
         );
 
         let mut x264_input = synthetic_test_input();
         x264_input.release.video_codec = Some("H.264".to_string());
-        let x264_result = evaluate_template("penalize-x264-4k", x264_input, "movie");
+        let x264_result = evaluate_template("prefer-hevc", x264_input, "movie");
         assert!(
             x264_result
                 .entries
                 .iter()
                 .any(|entry| entry.code == "x264_4k_penalty" && entry.delta == -200),
-            "penalize-x264-4k should match canonical 2160P H.264 input"
+            "prefer-hevc should penalize canonical 2160P H.264 input"
         );
     }
 
     #[test]
     fn group_templates_noop_when_release_group_is_missing() {
-        for template_id in [
-            "anime-group-preference",
-            "block-mini-encodes",
-            "block-low-quality-groups",
-        ] {
+        for template_id in ["release-group-scores"] {
             let mut input = synthetic_test_input();
             input.release.release_group = None;
             let result = evaluate_template(template_id, input, "anime");
@@ -2728,6 +2724,46 @@ mod tests {
                 "{template_id} should no-op when release_group is null"
             );
         }
+    }
+
+    #[test]
+    fn release_group_template_matches_listed_group_case_insensitively() {
+        let mut input = synthetic_test_input();
+        input.release.release_group = Some("SampleSubs".to_string());
+        let result = evaluate_template("release-group-scores", input, "movie");
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| entry.code == "preferred_release_group" && entry.delta == 400),
+            "release-group-scores should boost a listed group"
+        );
+    }
+
+    #[test]
+    fn exe_torrent_template_matches_only_torrent_extension_tokens() {
+        let score = |protocol: &str, raw_title: &str| {
+            let mut input = synthetic_test_input();
+            input.release.raw_title = raw_title.to_string();
+            input
+                .release
+                .extra
+                .insert("protocol".to_string(), serde_json::json!(protocol));
+            let result = evaluate_template("block-exe-torrents", input, "movie");
+            assert!(result.errors.is_empty(), "{raw_title}: {:?}", result.errors);
+            result
+                .entries
+                .iter()
+                .any(|entry| entry.code == "blocked_file_extension")
+        };
+
+        assert!(score("torrent", "Sample.Movie.2024.1080p.WEB-DL.x264.exe"));
+        assert!(score("torrent", "Sample.Movie.2024.1080p.mkv.lnk"));
+        assert!(!score("usenet", "Sample.Movie.2024.1080p.WEB-DL.x264.exe"));
+        assert!(!score(
+            "torrent",
+            "Sample.Batch.Movie.2024.1080p.WEB-DL.x264"
+        ));
     }
 
     #[test]
