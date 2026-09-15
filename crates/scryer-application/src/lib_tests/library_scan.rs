@@ -8451,3 +8451,340 @@ async fn ownership_conflict_pending_import_cannot_be_bound_or_adopted() {
     }
     assert_eq!(unmatched_items.items().await, vec![conflict]);
 }
+
+// ── #224: a scan assigns and heals the root it actually walked ────────────
+
+async fn library_root_id_for_path(
+    app: &AppUseCase,
+    facet: &MediaFacet,
+    path: &std::path::Path,
+) -> String {
+    let library_id = scryer_domain::default_library_id_for_facet(facet);
+    let library = app
+        .services
+        .catalog
+        .libraries
+        .get_by_id(&library_id)
+        .await
+        .expect("load library")
+        .expect("library exists");
+    let wanted = crate::catalog_workflow::normalize_library_root_path(&path.to_string_lossy());
+    library
+        .roots
+        .iter()
+        .find(|root| crate::catalog_workflow::normalize_library_root_path(&root.path) == wanted)
+        .map(|root| root.id.clone())
+        .unwrap_or_else(|| panic!("root {} should be configured", path.display()))
+}
+
+/// A movie found under the library's *second* root belongs to that root. It
+/// used to land on the library default, which then made every rename of it
+/// propose a cross-root move (#224).
+#[tokio::test]
+async fn movie_full_scan_assigns_the_root_the_candidate_was_found_under() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let default_root = tempdir.path().join("movies-default");
+    let second_root = tempdir.path().join("movies-second");
+    std::fs::create_dir_all(&default_root).expect("create default root");
+    let movie_folder = second_root.join("Harbor Kestrels (2020)");
+    std::fs::create_dir_all(&movie_folder).expect("create movie folder");
+    let movie_file = movie_folder.join("Harbor.Kestrels.2020.mkv");
+    std::fs::write(&movie_file, b"movie").expect("write movie file");
+    let movie_path = movie_file.to_string_lossy().to_string();
+
+    let mut scan_hints = LibraryScanHintSet::new();
+    scan_hints.push(LibraryScanHint {
+        source: LibraryScanHintSource::ExternalImportRadarr,
+        facet: LibraryScanHintFacet::Movie,
+        path_key: crate::library_scan_file_leaf_key(&movie_path).expect("file leaf path key"),
+        full_path_key: crate::library_scan_file_full_path_key(&movie_path),
+        ids: vec![
+            ExternalIdHint::normalized(ExternalIdProvider::Tmdb, "7777")
+                .expect("normalized tmdb id"),
+        ],
+    });
+
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(vec![build_test_library_file(&movie_path)])
+        .await;
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        library_scanner,
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+    );
+
+    app.update_media_settings(
+        &user,
+        MediaFacet::Movie,
+        empty_update_media_settings_with_roots(vec![
+            build_root_folder_entry(&default_root, true),
+            build_root_folder_entry(&second_root, false),
+        ]),
+    )
+    .await
+    .expect("store movie roots");
+
+    let session = app
+        .trigger_library_scan_by_id_with_hints(
+            &user,
+            &scryer_domain::default_library_id_for_facet(&MediaFacet::Movie),
+            Some(scan_hints),
+        )
+        .await
+        .expect("trigger hinted movie scan");
+    wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
+        matches!(
+            session.status,
+            LibraryScanStatus::Completed | LibraryScanStatus::Warning
+        )
+    })
+    .await;
+
+    let titles = app
+        .list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
+        .await
+        .expect("list movie titles");
+    assert_eq!(titles.len(), 1);
+    let second_root_id = library_root_id_for_path(&app, &MediaFacet::Movie, &second_root).await;
+    assert_ne!(
+        second_root_id,
+        library_root_id_for_path(&app, &MediaFacet::Movie, &default_root).await
+    );
+    assert_eq!(
+        titles[0].root_folder_id, second_root_id,
+        "a movie discovered under the second root belongs to that root"
+    );
+}
+
+/// The series side of the same rule.
+#[tokio::test]
+async fn series_full_scan_assigns_the_root_the_candidate_was_found_under() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let default_root = tempdir.path().join("series-default");
+    let second_root = tempdir.path().join("series-second");
+    std::fs::create_dir_all(&default_root).expect("create default root");
+    let folder = second_root.join("Tidewater Signals (1999)");
+    std::fs::create_dir_all(&folder).expect("create show folder");
+    let folder_path = folder.to_string_lossy().to_string();
+
+    let mut scan_hints = LibraryScanHintSet::new();
+    scan_hints.push(LibraryScanHint {
+        source: LibraryScanHintSource::ExternalImportSonarr,
+        facet: LibraryScanHintFacet::Series,
+        path_key: crate::library_scan_folder_leaf_key(&folder_path).expect("folder leaf path key"),
+        full_path_key: crate::library_scan_folder_full_path_key(&folder_path),
+        ids: vec![
+            ExternalIdHint::normalized(ExternalIdProvider::Tvdb, "900001")
+                .expect("normalized tvdb id"),
+        ],
+    });
+
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        Arc::new(RecordingExactIdMetadataGateway::default().with_rich_external_ids()),
+    );
+
+    app.update_media_settings(
+        &user,
+        MediaFacet::Series,
+        empty_update_media_settings_with_roots(vec![
+            build_root_folder_entry(&default_root, true),
+            build_root_folder_entry(&second_root, false),
+        ]),
+    )
+    .await
+    .expect("store series roots");
+
+    let session = app
+        .trigger_library_scan_by_id_with_hints(
+            &user,
+            &scryer_domain::default_library_id_for_facet(&MediaFacet::Series),
+            Some(scan_hints),
+        )
+        .await
+        .expect("trigger hinted series scan");
+    wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
+        matches!(
+            session.status,
+            LibraryScanStatus::Completed | LibraryScanStatus::Warning
+        )
+    })
+    .await;
+
+    let titles = app
+        .list_titles_unpaged(&user, Some(MediaFacet::Series), None, None)
+        .await
+        .expect("list series titles");
+    assert_eq!(titles.len(), 1);
+    let second_root_id = library_root_id_for_path(&app, &MediaFacet::Series, &second_root).await;
+    assert_ne!(
+        second_root_id,
+        library_root_id_for_path(&app, &MediaFacet::Series, &default_root).await
+    );
+    assert_eq!(
+        titles[0].root_folder_id, second_root_id,
+        "a show discovered under the second root belongs to that root"
+    );
+}
+
+/// An existing title whose recorded root disagrees with where the scan finds
+/// its files is healed to the containing root — the "remove title, keep files,
+/// rescan" repro in #224.
+#[tokio::test]
+async fn movie_full_scan_heals_an_existing_title_onto_the_root_holding_its_files() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let default_root = tempdir.path().join("movies-default");
+    let second_root = tempdir.path().join("movies-second");
+    std::fs::create_dir_all(&default_root).expect("create default root");
+    let movie_folder = second_root.join("Lantern Drift (2021)");
+    std::fs::create_dir_all(&movie_folder).expect("create movie folder");
+    let movie_file = movie_folder.join("Lantern.Drift.2021.mkv");
+    std::fs::write(&movie_file, b"movie").expect("write movie file");
+    let movie_path = movie_file.to_string_lossy().to_string();
+
+    let mut scan_hints = LibraryScanHintSet::new();
+    scan_hints.push(LibraryScanHint {
+        source: LibraryScanHintSource::ExternalImportRadarr,
+        facet: LibraryScanHintFacet::Movie,
+        path_key: crate::library_scan_file_leaf_key(&movie_path).expect("file leaf path key"),
+        full_path_key: crate::library_scan_file_full_path_key(&movie_path),
+        ids: vec![
+            ExternalIdHint::normalized(ExternalIdProvider::Tmdb, "7777")
+                .expect("normalized tmdb id"),
+        ],
+    });
+
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(vec![build_test_library_file(&movie_path)])
+        .await;
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        library_scanner,
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+    );
+
+    app.update_media_settings(
+        &user,
+        MediaFacet::Movie,
+        empty_update_media_settings_with_roots(vec![
+            build_root_folder_entry(&default_root, true),
+            build_root_folder_entry(&second_root, false),
+        ]),
+    )
+    .await
+    .expect("store movie roots");
+
+    let default_root_id = library_root_id_for_path(&app, &MediaFacet::Movie, &default_root).await;
+    let existing = app
+        .create_title_without_hydration(
+            &user,
+            NewTitle {
+                name: "Lantern Drift".to_string(),
+                facet: MediaFacet::Movie,
+                monitored: false,
+                tags: vec![],
+                external_ids: vec![ExternalId {
+                    source: "tmdb".to_string(),
+                    value: "7777".to_string(),
+                }],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create existing title");
+    assert_eq!(existing.title.root_folder_id, default_root_id);
+
+    let session = app
+        .trigger_library_scan_by_id_with_hints(
+            &user,
+            &scryer_domain::default_library_id_for_facet(&MediaFacet::Movie),
+            Some(scan_hints),
+        )
+        .await
+        .expect("trigger hinted movie scan");
+    wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
+        matches!(
+            session.status,
+            LibraryScanStatus::Completed | LibraryScanStatus::Warning
+        )
+    })
+    .await;
+
+    let healed = app
+        .services
+        .catalog
+        .titles
+        .get_by_id(&existing.title.id)
+        .await
+        .expect("load healed title")
+        .expect("title exists");
+    assert_eq!(
+        healed.root_folder_id,
+        library_root_id_for_path(&app, &MediaFacet::Movie, &second_root).await,
+        "the scan heals the recorded root to the one holding the files"
+    );
+}
+
+/// A folder under no configured root is not evidence for any root, so the
+/// title keeps the id it has.
+#[tokio::test]
+async fn title_root_folder_id_is_untouched_when_the_folder_is_under_no_root() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let default_root = tempdir.path().join("movies-default");
+    let outside = tempdir
+        .path()
+        .join("elsewhere")
+        .join("Cobalt Meridian (2019)");
+    std::fs::create_dir_all(&default_root).expect("create default root");
+    std::fs::create_dir_all(&outside).expect("create outside folder");
+
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        Arc::new(RecordingExactIdMetadataGateway::default()),
+    );
+    app.update_media_settings(
+        &user,
+        MediaFacet::Movie,
+        empty_update_media_settings_with_roots(vec![build_root_folder_entry(&default_root, true)]),
+    )
+    .await
+    .expect("store movie root");
+
+    let created = app
+        .create_title_without_hydration(
+            &user,
+            NewTitle {
+                name: "Cobalt Meridian".to_string(),
+                facet: MediaFacet::Movie,
+                monitored: false,
+                tags: vec![],
+                external_ids: vec![],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    let original_root_folder_id = created.title.root_folder_id.clone();
+    let mut title = created.title;
+    title.folder_path = Some(outside.to_string_lossy().to_string());
+
+    let healed = app
+        .heal_title_root_folder_id_for_owned_folder(
+            &crate::location::ownership_guard::LIBRARY_SCAN_ENTRY,
+            &mut title,
+        )
+        .await
+        .expect("heal attempt");
+    assert!(!healed, "a folder under no root is no evidence of a root");
+    assert_eq!(title.root_folder_id, original_root_folder_id);
+}
