@@ -33,17 +33,17 @@ use crate::postgres::{
 use crate::queries::sql_runtime::StoreDatastore;
 use crate::{
     AcquisitionStore, BlocklistStore, DomainEventStore, DownloadClientConfigStore,
-    DownloadQueueCommandStore, DownloadRegistryStore, DownloadSubmissionStore,
-    ExternalImportMonitorStore, ExternalImportSetupSecretDraftStore, FileSystemStagedNzbStore,
-    HousekeepingStore, ImportStore, InMemoryIndexerStatsTracker, IndexerConfigStore,
-    IndexerErrorStore, IndexerSearchLearningStore, LibraryProbeStore, LibraryScanUnmatchedStore,
-    LifecycleClaimStore, LocationOperationStore, MaintenanceEvaluationStore,
-    MaintenanceRuleSetStore, MediaFileStore, MediaRequestStore, MediaServerConnectionStore,
-    MediaServerSignalStore, MetadataGatewayClient, MigrationMode, NotificationStore, OAuthStore,
-    PendingReleaseStore, PluginStore, PostProcessingScriptStore, ProxyConfigStore,
-    QualityProfileStore, ReleaseStore, RequestRuleDecisionStore, RequestRuleSetStore, RuleSetStore,
-    SeedingProfileStore, SettingsStore, ShowStore, SmgEnrollmentConfig,
-    SqliteLogicalBackupExporter, SqliteServices, SubtitleDownloadStore,
+    DownloadClientStatusStore, DownloadQueueCommandStore, DownloadRegistryStore,
+    DownloadSubmissionStore, ExternalImportMonitorStore, ExternalImportSetupSecretDraftStore,
+    FileSystemStagedNzbStore, HousekeepingStore, ImportStore, InMemoryIndexerStatsTracker,
+    IndexerConfigStore, IndexerErrorStore, IndexerSearchLearningStore, LibraryProbeStore,
+    LibraryScanUnmatchedStore, LifecycleClaimStore, LocationOperationStore,
+    MaintenanceEvaluationStore, MaintenanceRuleSetStore, MediaFileStore, MediaRequestStore,
+    MediaServerConnectionStore, MediaServerSignalStore, MetadataGatewayClient, MigrationMode,
+    NotificationStore, OAuthStore, PendingReleaseStore, PluginStore, PostProcessingScriptStore,
+    ProxyConfigStore, QualityProfileStore, ReleaseStore, RequestRuleDecisionStore,
+    RequestRuleSetStore, RuleSetStore, SeedingProfileStore, SettingsStore, ShowStore,
+    SmgEnrollmentConfig, SqliteLogicalBackupExporter, SqliteServices, SubtitleDownloadStore,
     SubtitleProviderConfigStore, TitleImageStore, TitleMergeStore, TitleStore, TotpStore,
     WantedStore, WebauthnStore, WorkflowOperationStore,
 };
@@ -1617,6 +1617,11 @@ impl DatastoreAssembly {
                 .with_acquisition_state(acquisition_store.clone())
                 .with_domain_events(domain_event_store.clone())
                 .with_download_registry(download_registry_store.clone())
+                // Constructed here rather than carried in both store variants:
+                // nothing else in the assembly holds it.
+                .with_download_client_status(Arc::new(DownloadClientStatusStore::new(
+                    self.datastore(),
+                )))
                 .with_download_submissions(download_submission_store.clone())
                 .with_download_queue_commands(download_queue_command_store.clone())
                 .with_external_import_monitor_snapshots(external_import_monitor_store.clone())
@@ -1742,6 +1747,11 @@ impl DatastoreAssembly {
                 .with_acquisition_state(acquisition_store.clone())
                 .with_domain_events(domain_event_store.clone())
                 .with_download_registry(download_registry_store.clone())
+                // Constructed here rather than carried in both store variants:
+                // nothing else in the assembly holds it.
+                .with_download_client_status(Arc::new(DownloadClientStatusStore::new(
+                    self.datastore(),
+                )))
                 .with_download_submissions(download_submission_store.clone())
                 .with_download_queue_commands(download_queue_command_store.clone())
                 .with_external_import_monitor_snapshots(external_import_monitor_store.clone())

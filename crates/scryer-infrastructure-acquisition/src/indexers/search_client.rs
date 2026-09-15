@@ -24,7 +24,8 @@ use scryer_application::{
     SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome, SchedulerIntent,
     SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
     SearchLearningContext, SearchMode, UpstreamScheduler, blake3_identity_hex,
-    indexer_search_eligibility, indexer_search_identity,
+    escalation_backoff::INDEXER_BACKOFF_LADDER, indexer_search_eligibility,
+    indexer_search_identity,
 };
 use scryer_domain::{
     IndexerCapsSearchNode, IndexerCapsSnapshot, IndexerConfig, IndexerProviderCapabilities,
@@ -2101,17 +2102,6 @@ impl IndexerRateLimiter {
     }
 }
 
-/// Short escalating system backoff periods. Provider `Retry-After` handling can
-/// choose longer when explicitly supplied, but generic storm containment caps at
-/// one hour to avoid stranding every indexer after one transient burst.
-const BACKOFF_PERIODS_SECS: &[u64] = &[
-    5 * 60,  // 5 minutes
-    10 * 60, // 10 minutes
-    15 * 60, // 15 minutes
-    30 * 60, // 30 minutes
-    60 * 60, // 1 hour
-];
-
 #[derive(Clone, Debug, Default)]
 struct IndexerBackoffState {
     escalation_level: usize,
@@ -2221,27 +2211,15 @@ impl IndexerBackoffTracker {
             };
         }
 
-        let max_period_index = BACKOFF_PERIODS_SECS.len() - 1;
-        let mut period_index = state.escalation_level.min(max_period_index);
-        // Sonarr's rule (`ProviderStatusServiceBase.RecordFailure`): `Retry-After`
-        // never becomes the backoff itself. It escalates the ladder until a step
-        // covers the provider's delay — capped at the top step — and that step is
-        // the backoff. Quantizing keeps every backoff on the ladder an operator can
-        // reason about, and no delay, however long or unrepresentable, is honored
-        // literally. The level it climbs to is kept, so the next failure starts
-        // from there instead of sliding back down.
-        if let Some(retry_after) = retry_after {
-            while period_index < max_period_index
-                && std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]) < retry_after
-            {
-                period_index += 1;
-            }
-        }
-        let ladder = std::time::Duration::from_secs(BACKOFF_PERIODS_SECS[period_index]);
+        // The ladder quantizes any `Retry-After` onto one of its steps; the level
+        // it climbs to is kept, so the next failure starts from there instead of
+        // sliding back down.
+        let period_index = INDEXER_BACKOFF_LADDER
+            .level_covering(state.escalation_level, retry_after.unwrap_or_default());
         let now = chrono::Utc::now();
-        let until = now + chrono::Duration::from_std(ladder).expect("ladder steps fit chrono");
+        let until = INDEXER_BACKOFF_LADDER.disabled_until(period_index, now);
 
-        state.escalation_level = (period_index + 1).min(BACKOFF_PERIODS_SECS.len());
+        state.escalation_level = period_index + 1;
         state.disabled_until = Some(until);
         set_indexer_backoff_gauges(&state.indexer_name, Some(until), state.escalation_level);
 
@@ -11602,7 +11580,7 @@ mod tests {
             .await;
         assert_eq!(
             unrepresentable.escalation_level,
-            BACKOFF_PERIODS_SECS.len(),
+            INDEXER_BACKOFF_LADDER.max_level() + 1,
             "a delay beyond every ladder step must pin the top level"
         );
         assert!(

@@ -630,6 +630,12 @@ pub struct DownloadClientConfigPayload {
     pub last_error: Option<String>,
     /// UTC time the client was last observed, or null before the first observation.
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// UTC time this client's failure backoff expires, or null when the client
+    /// is not backed off. Grabs skip a client until this time passes.
+    pub disabled_until: Option<DateTime<Utc>>,
+    /// Which rung of the failure backoff ladder the client is on: 0 when it is
+    /// healthy, rising to 5 for a client that has been failing for an hour.
+    pub escalation_level: i32,
     /// Proxy carrying this client's traffic, or null when none is assigned.
     /// Any proxy kind may be assigned. A challenge solver has no effect on a
     /// native client, whose requests are not made by a plugin guest.
