@@ -65,11 +65,11 @@ mod scan_title_finalize;
 mod scan_title_scan;
 
 use scan_candidates::{
-    process_movie_full_scan_candidate, process_movie_refresh_candidate,
-    process_resolved_movie_full_scan_candidate, process_resolved_movie_refresh_candidate,
-    process_resolved_series_full_scan_candidate, process_resolved_series_refresh_candidate,
-    process_series_full_scan_candidate, process_series_refresh_candidate,
-    scan_episodic_title_directory_for_progress_metrics,
+    heal_scanned_title_root_folder_id, process_movie_full_scan_candidate,
+    process_movie_refresh_candidate, process_resolved_movie_full_scan_candidate,
+    process_resolved_movie_refresh_candidate, process_resolved_series_full_scan_candidate,
+    process_resolved_series_refresh_candidate, process_series_full_scan_candidate,
+    process_series_refresh_candidate, scan_episodic_title_directory_for_progress_metrics,
 };
 use scan_full::{scan_library_movies, scan_library_series};
 use scan_pipeline::{

@@ -3495,11 +3495,14 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
     let success_count = results.iter().filter(|r| r.success).count();
     let (terminal_status, _, _) = manual_import_terminal_status_and_error(&results);
     if success_count > 0 && terminal_status == ImportStatus::Completed {
-        let episode_ids = results
-            .iter()
-            .filter(|result| result.success)
-            .filter_map(|result| result.episode_id.clone())
-            .collect::<Vec<_>>();
+        let mut episode_ids = Vec::new();
+        for result in results.iter().filter(|result| result.success) {
+            for episode_id in &result.episode_ids {
+                if !episode_ids.contains(episode_id) {
+                    episode_ids.push(episode_id.clone());
+                }
+            }
+        }
         app.append_domain_event(new_title_domain_event(
             actor,
             &title,

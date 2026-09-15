@@ -294,6 +294,7 @@ pub(super) async fn background_refresh_series(
             .and_then(|key| existing_titles_by_folder_path.get(&key).copied());
         if let Some(index) = owner_index {
             let title = &mut existing_titles[index];
+            heal_scanned_title_root_folder_id(app, library.as_ref(), title).await?;
             maybe_probe_existing_series_title_for_background_refresh(
                 app,
                 title,
@@ -471,7 +472,9 @@ pub(super) async fn background_refresh_movies(
             crate::stored_paths::folder_path_identity_key(&path_to_stored_string(&entry.path))
                 .and_then(|key| existing_titles_by_probe_path.get(&key).copied());
         if let Some(index) = owner_index {
-            let title = &existing_titles[index];
+            let title = &mut existing_titles[index];
+            heal_scanned_title_root_folder_id(app, library.as_ref(), title).await?;
+            let title = &*title;
             let collections = collections_by_title
                 .get(&title.id)
                 .cloned()

@@ -9121,6 +9121,82 @@ async fn movie_full_scan_heals_an_existing_title_onto_the_root_holding_its_files
     );
 }
 
+/// The background refresh finds an already indexed title through its folder
+/// and probes it directly, so the heal has to run on that path too; otherwise
+/// a stale root id survives every scheduled refresh.
+#[tokio::test]
+async fn series_background_refresh_heals_an_indexed_title_onto_the_root_holding_its_folder() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let default_root = tempdir.path().join("series-default");
+    let second_root = tempdir.path().join("series-second");
+    std::fs::create_dir_all(&default_root).expect("create default root");
+    let show_folder = second_root.join("Quarry Lanterns (2018)");
+    std::fs::create_dir_all(&show_folder).expect("create show folder");
+
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        Arc::new(RecordingExactIdMetadataGateway::default()),
+    );
+    app.update_media_settings(
+        &user,
+        MediaFacet::Series,
+        empty_update_media_settings_with_roots(vec![
+            build_root_folder_entry(&default_root, true),
+            build_root_folder_entry(&second_root, false),
+        ]),
+    )
+    .await
+    .expect("store series roots");
+
+    let default_root_id = library_root_id_for_path(&app, &MediaFacet::Series, &default_root).await;
+    let existing = app
+        .create_title_without_hydration(
+            &user,
+            NewTitle {
+                name: "Quarry Lanterns".to_string(),
+                facet: MediaFacet::Series,
+                monitored: false,
+                tags: vec![],
+                external_ids: vec![],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create existing title");
+    assert_eq!(existing.title.root_folder_id, default_root_id);
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&existing.title.id, &show_folder.to_string_lossy())
+        .await
+        .expect("record the title folder under the second root");
+
+    app.background_library_refresh_with_tracking(
+        &user,
+        MediaFacet::Series,
+        "series-indexed-root-heal",
+    )
+    .await
+    .expect("series background refresh");
+
+    let healed = app
+        .services
+        .catalog
+        .titles
+        .get_by_id(&existing.title.id)
+        .await
+        .expect("load healed title")
+        .expect("title exists");
+    assert_eq!(
+        healed.root_folder_id,
+        library_root_id_for_path(&app, &MediaFacet::Series, &second_root).await,
+        "the refresh heals the recorded root to the one holding the folder"
+    );
+}
+
 /// A folder under no configured root is not evidence for any root, so the
 /// title keeps the id it has.
 #[tokio::test]

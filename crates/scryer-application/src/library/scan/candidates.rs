@@ -122,7 +122,7 @@ async fn prepare_series_title_for_candidate(
 
 /// Keep a scanned title's root id pointing at the root its folder is actually
 /// under (#224). Evidence, not reassignment: the files are there.
-async fn heal_scanned_title_root_folder_id(
+pub(super) async fn heal_scanned_title_root_folder_id(
     app: &AppUseCase,
     library: Option<&Library>,
     title: &mut Title,
