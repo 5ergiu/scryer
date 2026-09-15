@@ -23378,6 +23378,10 @@ type RulePackTemplatePayload {
 	Facets to which the template applies.
 	"""
 	appliedFacets: [String!]!
+	"""
+	Whether the pack recommends enabling the template.
+	"""
+	defaultEnabled: Boolean!
 }
 
 """

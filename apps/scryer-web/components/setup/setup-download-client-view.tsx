@@ -197,6 +197,7 @@ export function SetupDownloadClientView({
             <Input
               id="setup-download-client-api-key"
               type="password"
+              ignorePasswordManagers
               value={draft.apiKey}
               onChange={(e) => onDraftChange({ apiKey: e.target.value })}
             />
@@ -245,6 +246,7 @@ export function SetupDownloadClientView({
               <Input
                 id="setup-download-client-password"
                 type="password"
+                ignorePasswordManagers
                 value={draft.password}
                 onChange={(e) => onDraftChange({ password: e.target.value })}
               />
