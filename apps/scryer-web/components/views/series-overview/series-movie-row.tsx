@@ -111,6 +111,7 @@ function SeriesMovieTimelineContent({
               subtitleSearchIdPrefix="series-overview-series-movie-search-subtitles"
               deleteFileIdPrefix="series-overview-series-movie-delete-file"
               makePrimaryFileIdPrefix="series-overview-series-movie-make-primary-file"
+              mediaInfoIdPrefix="series-overview-series-movie-file-info"
             />
           </TitleFilesOnDiskRail>
         }
