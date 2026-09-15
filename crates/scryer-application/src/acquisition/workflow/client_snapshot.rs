@@ -1810,20 +1810,38 @@ pub(crate) async fn try_saved_candidates(
                 outcome @ (super::pending::PendingGrabOutcome::Deferred
                 | super::pending::PendingGrabOutcome::SubmitRefused(_)),
             ) => {
-                info!(
-                    release = standby.release_title.as_str(),
-                    "standby reacquisition: download client unavailable, keeping release pending"
-                );
+                let refused = match outcome {
+                    super::pending::PendingGrabOutcome::SubmitRefused(refused) => Some(refused),
+                    _ => None,
+                };
+                // A lifecycle deferral is not a downloader outage — the client
+                // answered. Say what is actually holding the scope instead of
+                // blaming a client that is up.
+                match refused
+                    .as_ref()
+                    .and_then(|refused| refused.lifecycle_deferral.as_deref())
+                {
+                    Some(deferral) => info!(
+                        release = standby.release_title.as_str(),
+                        blocking_download_id = %deferral.download_id,
+                        blocking_state = %deferral.tracked_state,
+                        blocking_client_type = %deferral.client_type,
+                        blocking_binding_age_seconds = deferral.binding_age_seconds,
+                        blocking_last_seen_age_seconds = ?deferral.last_seen_age_seconds,
+                        blocking_release = ?deferral.source_title,
+                        "acquisition deferred: lifecycle reconciliation pending"
+                    ),
+                    None => info!(
+                        release = standby.release_title.as_str(),
+                        "standby reacquisition: download client unavailable, keeping release pending"
+                    ),
+                }
                 let _ = app
                     .services
                     .workflow
                     .pending_releases
                     .update_pending_release_status(&standby.id, PendingReleaseStatus::Standby, None)
                     .await;
-                let refused = match outcome {
-                    super::pending::PendingGrabOutcome::SubmitRefused(refused) => Some(refused),
-                    _ => None,
-                };
                 return StandbyRecoveryOutcome::Deferred {
                     scope: Some(standby_scope),
                     refused,

@@ -1583,6 +1583,27 @@ pub enum TrackedDownloadCommand {
         identity: ClientJobLocator,
         reply: oneshot::Sender<Option<CompletedDownload>>,
     },
+    /// Reconcile-on-discovery. The canonical-submission guard found this job
+    /// absent from its client while the registry still held an active
+    /// binding, which is the same evidence class the tracker's
+    /// snapshot-missing path acts on. Rediscovery is otherwise wasted: RSS,
+    /// background search, standby recovery and interactive grabs each pay for
+    /// the observation and none of them connects it to reconciliation.
+    ///
+    /// Fire-and-forget by design — there is no reply channel, because an
+    /// acquisition must never wait on (or fail because of) reconciliation.
+    /// The loop owns the disposition rules; this command only says "look at
+    /// this locator now instead of at the next eligible sweep".
+    ReconcileAbsentSource {
+        locator: ClientJobLocator,
+        /// The canonical download the guard saw bound to `locator`. Carried
+        /// for logging and skew detection only; the reconciler resolves the
+        /// binding by locator, exactly as every other absent-source path does.
+        download_id: DownloadId,
+        /// The title whose guard caches must be dropped if the reconciliation
+        /// ends the binding. Known only because the guard is the discoverer.
+        title_id: Option<String>,
+    },
     Snapshot {
         ids: Vec<String>,
         reply: oneshot::Sender<HashMap<String, TrackedDownloadQueueMetadata>>,
@@ -1696,6 +1717,28 @@ impl TrackedDownloadHandle {
         reply_rx.await.map_err(|_| {
             crate::AppError::Repository("tracked download service dropped reply".into())
         })
+    }
+
+    /// Ask the poller loop to reconcile an authoritatively absent job now.
+    ///
+    /// Best effort on purpose: a full or closed command channel must never
+    /// fail the acquisition that discovered the absence, and there is nothing
+    /// to wait for. Returns whether the command was accepted so the caller can
+    /// log the drop at debug level. The periodic fallback pass still covers
+    /// every binding this drops.
+    pub fn try_reconcile_absent_source(
+        &self,
+        locator: ClientJobLocator,
+        download_id: DownloadId,
+        title_id: Option<String>,
+    ) -> bool {
+        self.tx
+            .try_send(TrackedDownloadCommand::ReconcileAbsentSource {
+                locator,
+                download_id,
+                title_id,
+            })
+            .is_ok()
     }
 
     pub async fn ignore(&self, id: String) -> AppResult<()> {
@@ -2289,6 +2332,28 @@ mod tests {
                 ));
             }
             Ok(None)
+        }
+
+        async fn list_active_bindings_for_native_item_ids(
+            &self,
+            native_item_ids: &[String],
+        ) -> AppResult<Vec<crate::DownloadClientBindingRecord>> {
+            Ok(native_item_ids
+                .iter()
+                .filter_map(|item_id| {
+                    let download_id = *self.fallback_download_ids.get(item_id)?;
+                    Some(crate::DownloadClientBindingRecord {
+                        download_id,
+                        client_config_id: None,
+                        client_type_snapshot: None,
+                        client_name_snapshot: None,
+                        native_item_id: Some(item_id.clone()),
+                        created_at: Utc::now(),
+                        last_seen_at: None,
+                        ended_at: None,
+                    })
+                })
+                .collect())
         }
 
         async fn end_binding(&self, _: &DownloadId) -> AppResult<()> {

@@ -6,7 +6,7 @@ type DownloadBindingTimes = HashMap<
 >;
 
 #[derive(Default)]
-struct RecordingDownloadRegistry {
+pub(super) struct RecordingDownloadRegistry {
     rows: Arc<Mutex<HashMap<ClientJobLocator, scryer_domain::download_identity::DownloadId>>>,
     binding_times: Arc<Mutex<DownloadBindingTimes>>,
     ended: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
@@ -14,6 +14,12 @@ struct RecordingDownloadRegistry {
     reconcile_candidates: Arc<Mutex<Vec<DownloadClientBindingRecord>>>,
     failing_bindings: Arc<Mutex<HashSet<ClientJobLocator>>>,
     failing_ends: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
+    /// `(client id, client type)` of every configured download client, as the
+    /// store would read them from `download_clients`. Only the legacy
+    /// (client-less) attribution rule consults them.
+    configured_clients: Arc<Mutex<Vec<(String, String)>>>,
+    /// Every `attribute_legacy_binding_client` call, in order.
+    attributed_clients: Arc<Mutex<Vec<(scryer_domain::download_identity::DownloadId, String)>>>,
     strict_conflicts: bool,
 }
 
@@ -28,7 +34,7 @@ impl RecordingDownloadRegistry {
         self.rows.lock().await.contains_key(locator)
     }
 
-    async fn bind(
+    pub(super) async fn bind(
         &self,
         locator: ClientJobLocator,
         download_id: scryer_domain::download_identity::DownloadId,
@@ -36,7 +42,7 @@ impl RecordingDownloadRegistry {
         self.rows.lock().await.insert(locator, download_id);
     }
 
-    async fn bind_at(
+    pub(super) async fn bind_at(
         &self,
         locator: ClientJobLocator,
         download_id: scryer_domain::download_identity::DownloadId,
@@ -60,6 +66,30 @@ impl RecordingDownloadRegistry {
 
     async fn mark_terminal(&self, download_id: scryer_domain::download_identity::DownloadId) {
         self.terminal.lock().await.insert(download_id);
+    }
+
+    /// Mirror the install's configured download clients, which is what the
+    /// store reads to decide whether a client-less binding can be attributed.
+    pub(super) async fn set_configured_clients(
+        &self,
+        clients: impl IntoIterator<Item = (String, String)>,
+    ) {
+        *self.configured_clients.lock().await = clients.into_iter().collect();
+    }
+
+    /// The single configured client of `client_type`, or `None` when the
+    /// attribution is ambiguous. Mirrors the store's SQL arm exactly.
+    async fn legacy_client_for_type(&self, client_type: &str) -> Option<String> {
+        let wanted = client_type.trim().to_ascii_lowercase();
+        let configured = self.configured_clients.lock().await;
+        let mut matches = configured
+            .iter()
+            .filter(|(_, candidate)| candidate.trim().to_ascii_lowercase() == wanted);
+        let only = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(only.0.clone())
     }
 }
 
@@ -163,8 +193,31 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
                 "injected registry binding lookup failure".to_string(),
             ));
         }
-        let Some(download_id) = self.rows.lock().await.get(locator).copied() else {
-            return Ok(None);
+        let exact = self.rows.lock().await.get(locator).copied();
+        // Mirrors the store: a locator that names a client also resolves a
+        // legacy row whose own client is blank, but only when that client is
+        // the single configured client of the type. Exact matches win.
+        let (matched_locator, download_id) = match exact {
+            Some(download_id) => (locator.clone(), download_id),
+            None => {
+                let Some(client_id) = locator.client_id.as_deref() else {
+                    return Ok(None);
+                };
+                if self
+                    .legacy_client_for_type(&locator.client_type)
+                    .await
+                    .as_deref()
+                    != Some(client_id)
+                {
+                    return Ok(None);
+                }
+                let legacy_locator =
+                    ClientJobLocator::new(None, &locator.client_type, &locator.item_id);
+                let Some(download_id) = self.rows.lock().await.get(&legacy_locator).copied() else {
+                    return Ok(None);
+                };
+                (legacy_locator, download_id)
+            }
         };
         if self.ended.lock().await.contains(&download_id) {
             return Ok(None);
@@ -178,14 +231,111 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
             .unwrap_or_else(|| (Utc::now(), None));
         Ok(Some(DownloadClientBindingRecord {
             download_id,
-            client_config_id: locator.client_id.clone(),
-            client_type_snapshot: Some(locator.client_type.clone()),
+            client_config_id: matched_locator.client_id.clone(),
+            client_type_snapshot: Some(matched_locator.client_type.clone()),
             client_name_snapshot: None,
-            native_item_id: Some(locator.item_id.clone()),
+            native_item_id: Some(matched_locator.item_id.clone()),
             created_at,
             last_seen_at,
             ended_at: None,
         }))
+    }
+
+    async fn list_active_legacy_client_bindings_before(
+        &self,
+        observed_before: chrono::DateTime<Utc>,
+        after: Option<(
+            chrono::DateTime<Utc>,
+            scryer_domain::download_identity::DownloadId,
+        )>,
+        limit: usize,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        let ended = self.ended.lock().await;
+        let mut candidates: Vec<DownloadClientBindingRecord> = self
+            .reconcile_candidates
+            .lock()
+            .await
+            .iter()
+            .filter(|binding| {
+                binding.ended_at.is_none()
+                    && binding
+                        .client_config_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                    && binding.created_at <= observed_before
+                    && binding
+                        .last_seen_at
+                        .is_none_or(|last_seen| last_seen <= observed_before)
+                    && !ended.contains(&binding.download_id)
+            })
+            .cloned()
+            .collect();
+        candidates.sort_by(|left, right| {
+            left.created_at.cmp(&right.created_at).then_with(|| {
+                left.download_id
+                    .to_string()
+                    .cmp(&right.download_id.to_string())
+            })
+        });
+        Ok(candidates
+            .into_iter()
+            .filter(|binding| match after {
+                Some((created_at, download_id)) => {
+                    (binding.created_at, binding.download_id.to_string())
+                        > (created_at, download_id.to_string())
+                }
+                None => true,
+            })
+            .take(limit)
+            .collect())
+    }
+
+    async fn attribute_legacy_binding_client(
+        &self,
+        id: &scryer_domain::download_identity::DownloadId,
+        client_config_id: &str,
+    ) -> AppResult<()> {
+        self.attributed_clients
+            .lock()
+            .await
+            .push((*id, client_config_id.to_string()));
+        Ok(())
+    }
+
+    async fn list_active_bindings_for_native_item_ids(
+        &self,
+        native_item_ids: &[String],
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        let wanted: HashSet<&str> = native_item_ids.iter().map(String::as_str).collect();
+        let ended = self.ended.lock().await.clone();
+        let binding_times = self.binding_times.lock().await.clone();
+        Ok(self
+            .rows
+            .lock()
+            .await
+            .iter()
+            .filter(|(locator, download_id)| {
+                wanted.contains(locator.item_id.as_str()) && !ended.contains(download_id)
+            })
+            .map(|(locator, download_id)| {
+                let (created_at, last_seen_at) = binding_times
+                    .get(download_id)
+                    .copied()
+                    .unwrap_or_else(|| (Utc::now(), None));
+                DownloadClientBindingRecord {
+                    download_id: *download_id,
+                    client_config_id: locator.client_id.clone(),
+                    client_type_snapshot: Some(locator.client_type.clone()),
+                    client_name_snapshot: None,
+                    native_item_id: Some(locator.item_id.clone()),
+                    created_at,
+                    last_seen_at,
+                    ended_at: None,
+                }
+            })
+            .collect())
     }
 
     async fn list_active_binding_clients(&self) -> AppResult<Vec<(String, String)>> {
@@ -213,10 +363,17 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         client_config_id: &str,
         client_type: &str,
         observed_before: chrono::DateTime<Utc>,
+        after: Option<(
+            chrono::DateTime<Utc>,
+            scryer_domain::download_identity::DownloadId,
+        )>,
         limit: usize,
     ) -> AppResult<Vec<DownloadClientBindingRecord>> {
         let ended = self.ended.lock().await;
-        Ok(self
+        // Mirrors the store: `(created_at, download_id)` order, with the keyset
+        // cursor applied before the limit. `download_id` is compared as text
+        // because that is what the SQL column holds.
+        let mut candidates: Vec<DownloadClientBindingRecord> = self
             .reconcile_candidates
             .lock()
             .await
@@ -234,8 +391,25 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
                         .is_none_or(|last_seen| last_seen <= observed_before)
                     && !ended.contains(&binding.download_id)
             })
-            .take(limit)
             .cloned()
+            .collect();
+        candidates.sort_by(|left, right| {
+            left.created_at.cmp(&right.created_at).then_with(|| {
+                left.download_id
+                    .to_string()
+                    .cmp(&right.download_id.to_string())
+            })
+        });
+        Ok(candidates
+            .into_iter()
+            .filter(|binding| match after {
+                Some((created_at, download_id)) => {
+                    (binding.created_at, binding.download_id.to_string())
+                        > (created_at, download_id.to_string())
+                }
+                None => true,
+            })
+            .take(limit)
             .collect())
     }
 
@@ -1349,6 +1523,701 @@ async fn full_snapshot_reconciles_a_restart_ghost_binding_but_respects_the_recen
     fresh_poller
         .await
         .expect("fresh-binding poller should stop cleanly");
+}
+
+/// A bridged client (Weaver) is excluded from the global poll and prunes by
+/// scope, so the global ghost pass never visited its bindings. Its own
+/// authoritative snapshot must reconcile them — for that client only, and only
+/// beyond the recency floor.
+#[tokio::test]
+async fn authoritative_client_snapshot_reconciles_that_clients_stale_ghost_binding() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions,
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let bridged =
+        create_enabled_download_client_config(&app, &user, "Primary Weaver", "weaver").await;
+    let other =
+        create_enabled_download_client_config(&app, &user, "Secondary Weaver", "weaver").await;
+    // Both clients answer observations (empty listings => authoritatively
+    // absent); without this the fixture reports every client unavailable.
+    download_client
+        .set_snapshot_authoritative_client_ids([bridged.id.clone(), other.id.clone()])
+        .await;
+
+    let stale_download_id = scryer_domain::download_identity::DownloadId::new();
+    let fresh_download_id = scryer_domain::download_identity::DownloadId::new();
+    let other_download_id = scryer_domain::download_identity::DownloadId::new();
+    registry
+        .bind(
+            ClientJobLocator::new(Some(bridged.id.as_str()), "weaver", "bridged-ghost-stale-1"),
+            stale_download_id,
+        )
+        .await;
+    registry
+        .bind(
+            ClientJobLocator::new(Some(bridged.id.as_str()), "weaver", "bridged-ghost-fresh-1"),
+            fresh_download_id,
+        )
+        .await;
+    registry
+        .bind(
+            ClientJobLocator::new(Some(other.id.as_str()), "weaver", "bridged-ghost-other-1"),
+            other_download_id,
+        )
+        .await;
+    let stale = Utc::now() - chrono::Duration::minutes(11);
+    registry
+        .set_reconcile_candidates(vec![
+            DownloadClientBindingRecord {
+                download_id: stale_download_id,
+                client_config_id: Some(bridged.id.clone()),
+                client_type_snapshot: Some("weaver".to_string()),
+                client_name_snapshot: Some(bridged.name.clone()),
+                native_item_id: Some("bridged-ghost-stale-1".to_string()),
+                created_at: stale,
+                last_seen_at: Some(stale),
+                ended_at: None,
+            },
+            DownloadClientBindingRecord {
+                download_id: fresh_download_id,
+                client_config_id: Some(bridged.id.clone()),
+                client_type_snapshot: Some("weaver".to_string()),
+                client_name_snapshot: Some(bridged.name.clone()),
+                native_item_id: Some("bridged-ghost-fresh-1".to_string()),
+                created_at: Utc::now(),
+                last_seen_at: None,
+                ended_at: None,
+            },
+            DownloadClientBindingRecord {
+                download_id: other_download_id,
+                client_config_id: Some(other.id.clone()),
+                client_type_snapshot: Some("weaver".to_string()),
+                client_name_snapshot: Some(other.name.clone()),
+                native_item_id: Some("bridged-ghost-other-1".to_string()),
+                created_at: stale,
+                last_seen_at: Some(stale),
+                ended_at: None,
+            },
+        ])
+        .await;
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(8);
+    let ingest = crate::tracked_downloads::TrackedDownloadSnapshotIngestHandle::new(snapshot_tx);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_secs(60),
+                excluded_client_types: vec!["weaver".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+
+    let mut live = queue_history_fixture_item(
+        "bridged-ghost-live-1",
+        DownloadQueueState::Downloading,
+        1_700_000_000,
+    );
+    live.client_id = bridged.id.clone();
+    live.client_name = bridged.name.clone();
+    live.client_type = "weaver".to_string();
+    ingest
+        .publish(crate::tracked_downloads::TrackedDownloadSnapshotUpdate {
+            scope: crate::tracked_downloads::TrackedDownloadSnapshotScope::AuthoritativeForClient {
+                client_id: Some(bridged.id.clone()),
+                client_type: "weaver".to_string(),
+            },
+            items: vec![live],
+            completed_downloads: Vec::new(),
+            actor_id: None,
+        })
+        .await
+        .expect("publish authoritative bridged snapshot");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if registry.ended.lock().await.contains(&stale_download_id) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("an authoritative bridged snapshot should end that client's stale ghost binding");
+
+    let ended = registry.ended.lock().await.clone();
+    assert!(
+        !ended.contains(&fresh_download_id),
+        "a binding younger than the recency floor must survive the scoped pass"
+    );
+    assert!(
+        !ended.contains(&other_download_id),
+        "a scoped snapshot must not reconcile another client's bindings"
+    );
+
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+}
+
+/// Bridged snapshots arrive on every push, far more often than the 10s global
+/// poll. The scoped pass must cost one reconciliation per client per minute, not
+/// one per snapshot.
+#[tokio::test]
+async fn scoped_ghost_reconciliation_is_throttled_per_bridged_client() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let bridged =
+        create_enabled_download_client_config(&app, &user, "Primary Weaver", "weaver").await;
+    download_client
+        .set_snapshot_authoritative_client_ids([bridged.id.clone()])
+        .await;
+
+    // `import_blocked` is preserved by the disposition rules, so the binding
+    // stays a candidate: the only thing that can make the second snapshot free
+    // is the throttle itself, not an already-ended binding.
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let locator = ClientJobLocator::new(Some(bridged.id.as_str()), "weaver", "bridged-throttle-1");
+    registry.bind(locator.clone(), download_id).await;
+    download_submissions
+        .record_identity_tracked_state(
+            &DownloadSubmissionIdentity {
+                download_id: Some(download_id.to_wire()),
+            },
+            Some(&locator),
+            TrackedDownloadState::ImportBlocked.as_str(),
+            None,
+            None,
+        )
+        .await
+        .expect("seed preserved durable state");
+    let stale = Utc::now() - chrono::Duration::minutes(11);
+    registry
+        .set_reconcile_candidates(vec![DownloadClientBindingRecord {
+            download_id,
+            client_config_id: Some(bridged.id.clone()),
+            client_type_snapshot: Some("weaver".to_string()),
+            client_name_snapshot: Some(bridged.name.clone()),
+            native_item_id: Some("bridged-throttle-1".to_string()),
+            created_at: stale,
+            last_seen_at: Some(stale),
+            ended_at: None,
+        }])
+        .await;
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(8);
+    let ingest = crate::tracked_downloads::TrackedDownloadSnapshotIngestHandle::new(snapshot_tx);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_secs(60),
+                excluded_client_types: vec!["weaver".to_string()],
+                ..Default::default()
+            },
+        ),
+    );
+
+    let bridged_snapshot =
+        |item: DownloadQueueItem| crate::tracked_downloads::TrackedDownloadSnapshotUpdate {
+            scope: crate::tracked_downloads::TrackedDownloadSnapshotScope::AuthoritativeForClient {
+                client_id: Some(bridged.id.clone()),
+                client_type: "weaver".to_string(),
+            },
+            items: vec![item],
+            completed_downloads: Vec::new(),
+            actor_id: None,
+        };
+    let live_item = |item_id: &str| {
+        let mut item =
+            queue_history_fixture_item(item_id, DownloadQueueState::Downloading, 1_700_000_000);
+        item.client_id = bridged.id.clone();
+        item.client_name = bridged.name.clone();
+        item.client_type = "weaver".to_string();
+        item
+    };
+    let observations = || async {
+        download_client
+            .observed_locators
+            .lock()
+            .await
+            .iter()
+            .filter(|observed| observed.item_id == "bridged-throttle-1")
+            .count()
+    };
+
+    ingest
+        .publish(bridged_snapshot(live_item("bridged-throttle-live-1")))
+        .await
+        .expect("publish first authoritative bridged snapshot");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if observations().await >= 1 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the first bridged snapshot should reconcile the stale binding once");
+    assert!(
+        !registry.ended.lock().await.contains(&download_id),
+        "an import-blocked binding must be preserved, not ended"
+    );
+
+    let second = live_item("bridged-throttle-live-2");
+    let second_tracked_id = crate::tracked_downloads::tracked_download_id_for_item(&second);
+    ingest
+        .publish(bridged_snapshot(second))
+        .await
+        .expect("publish second authoritative bridged snapshot");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if app
+                .runtime
+                .acquisition
+                .tracked_download_snapshot
+                .read()
+                .await
+                .contains_key(&second_tracked_id)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the second bridged snapshot should be processed");
+
+    assert_eq!(
+        observations().await,
+        1,
+        "two bridged snapshots inside the throttle window must cost one reconciliation"
+    );
+
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+}
+
+/// Bindings the reconciler preserves (import-blocked here) stay eligible for the
+/// next pass, so a bounded listing that always starts at the oldest row re-reads
+/// the same prefix forever and never reaches newer bindings. The rotation cursor
+/// must carry the next pass past them, and wrap once the client's eligible rows
+/// are exhausted.
+#[tokio::test]
+async fn ghost_reconciliation_rotates_past_preserved_bindings_and_wraps() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let config =
+        create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
+    download_client
+        .set_snapshot_authoritative_client_ids([config.id.clone()])
+        .await;
+
+    // One batch's worth of preserved bindings, then the rows a cursor-less pass
+    // could never see.
+    const PRESERVED: usize = 200;
+    const TOTAL: usize = 250;
+    let base = Utc::now() - chrono::Duration::minutes(30);
+    let mut candidates = Vec::with_capacity(TOTAL);
+    let mut item_ids = Vec::with_capacity(TOTAL);
+    for index in 0..TOTAL {
+        let item_id = format!("rotation-ghost-{index:03}");
+        let download_id = scryer_domain::download_identity::DownloadId::new();
+        let locator = ClientJobLocator::new(Some(config.id.as_str()), "nzbget", item_id.as_str());
+        registry.bind(locator.clone(), download_id).await;
+        if index < PRESERVED {
+            download_submissions
+                .record_identity_tracked_state(
+                    &DownloadSubmissionIdentity {
+                        download_id: Some(download_id.to_wire()),
+                    },
+                    Some(&locator),
+                    TrackedDownloadState::ImportBlocked.as_str(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seed preserved durable state");
+        }
+        let created_at = base + chrono::Duration::seconds(index as i64);
+        candidates.push(DownloadClientBindingRecord {
+            download_id,
+            client_config_id: Some(config.id.clone()),
+            client_type_snapshot: Some("nzbget".to_string()),
+            client_name_snapshot: Some(config.name.clone()),
+            native_item_id: Some(item_id.clone()),
+            created_at,
+            last_seen_at: Some(created_at),
+            ended_at: None,
+        });
+        item_ids.push(item_id);
+    }
+    registry.set_reconcile_candidates(candidates).await;
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        ),
+    );
+
+    // Three passes' worth of observations: the preserved batch, the rows only a
+    // cursor can reach, and the first row of the wrapped rotation.
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if download_client.observed_locators.lock().await.len() > TOTAL {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("later passes must rotate past the preserved prefix and then wrap");
+
+    let observed: Vec<String> = download_client
+        .observed_locators
+        .lock()
+        .await
+        .iter()
+        .map(|locator| locator.item_id.clone())
+        .collect();
+    assert_eq!(
+        observed[..PRESERVED],
+        item_ids[..PRESERVED],
+        "the first pass must visit the oldest batch, in (created_at, download_id) order"
+    );
+    assert_eq!(
+        observed[PRESERVED..TOTAL],
+        item_ids[PRESERVED..TOTAL],
+        "the second pass must resume at the cursor and cover the remaining rows"
+    );
+    assert_eq!(
+        observed.get(TOTAL),
+        item_ids.first(),
+        "a short page must clear the cursor so the next pass wraps to the oldest binding"
+    );
+
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+}
+
+/// The batch budget is shared, so a client with a long backlog used to spend
+/// almost all of it before the next client was visited. It must be split evenly
+/// across the clients the pass still has to visit, in priority order.
+#[tokio::test]
+async fn ghost_reconciliation_budget_is_shared_evenly_across_clients() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let first =
+        create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
+    let second =
+        create_enabled_download_client_config(&app, &user, "Secondary NZBGet", "nzbget").await;
+    download_client
+        .set_snapshot_authoritative_client_ids([first.id.clone(), second.id.clone()])
+        .await;
+
+    const PER_CLIENT: usize = 150;
+    let base = Utc::now() - chrono::Duration::minutes(30);
+    let mut candidates = Vec::with_capacity(PER_CLIENT * 2);
+    for (client_index, client) in [&first, &second].into_iter().enumerate() {
+        for index in 0..PER_CLIENT {
+            let item_id = format!("fair-share-ghost-{client_index}-{index:03}");
+            let download_id = scryer_domain::download_identity::DownloadId::new();
+            let locator =
+                ClientJobLocator::new(Some(client.id.as_str()), "nzbget", item_id.as_str());
+            registry.bind(locator.clone(), download_id).await;
+            // Every row is preserved, so the split the pass chose stays
+            // observable instead of being erased by ended bindings.
+            download_submissions
+                .record_identity_tracked_state(
+                    &DownloadSubmissionIdentity {
+                        download_id: Some(download_id.to_wire()),
+                    },
+                    Some(&locator),
+                    TrackedDownloadState::ImportBlocked.as_str(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seed preserved durable state");
+            let created_at = base + chrono::Duration::seconds(index as i64);
+            candidates.push(DownloadClientBindingRecord {
+                download_id,
+                client_config_id: Some(client.id.clone()),
+                client_type_snapshot: Some("nzbget".to_string()),
+                client_name_snapshot: Some(client.name.clone()),
+                native_item_id: Some(item_id),
+                created_at,
+                last_seen_at: Some(created_at),
+                ended_at: None,
+            });
+        }
+    }
+    registry.set_reconcile_candidates(candidates).await;
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                // One pass only: the split is a property of a single pass.
+                interval: Duration::from_secs(600),
+                ..Default::default()
+            },
+        ),
+    );
+
+    let observations = |client_id: String| {
+        let download_client = download_client.clone();
+        async move {
+            download_client
+                .observed_locators
+                .lock()
+                .await
+                .iter()
+                .filter(|observed| observed.client_id.as_deref() == Some(client_id.as_str()))
+                .count()
+        }
+    };
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if observations(first.id.clone()).await + observations(second.id.clone()).await
+                >= crate::integration::workflow::ABSENT_BINDING_RECONCILE_BATCH_SIZE
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("one pass should spend the whole batch budget");
+    sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        observations(first.id.clone()).await,
+        crate::integration::workflow::ABSENT_BINDING_RECONCILE_BATCH_SIZE / 2,
+        "the highest-priority client may only spend its share of the batch"
+    );
+    assert_eq!(
+        observations(second.id.clone()).await,
+        crate::integration::workflow::ABSENT_BINDING_RECONCILE_BATCH_SIZE / 2,
+        "the remaining budget must carry to the next client in the same pass"
+    );
+
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+}
+
+/// A binding the snapshot still lists is skipped without a client round-trip, so
+/// it must not spend any of the pass's budget: a client full of healthy live jobs
+/// used to debit the whole batch and starve the clients behind it.
+#[tokio::test]
+async fn observed_bindings_do_not_spend_the_ghost_batch_budget() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let live = create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
+    let stale =
+        create_enabled_download_client_config(&app, &user, "Secondary NZBGet", "nzbget").await;
+    download_client
+        .set_snapshot_authoritative_client_ids([live.id.clone(), stale.id.clone()])
+        .await;
+
+    // 60 live rows on the first client and 150 stale rows on the second: with
+    // the budget debited by rows *returned*, the second client could only reach
+    // 140 of its rows in this pass.
+    const LIVE_ROWS: usize = 60;
+    const STALE_ROWS: usize = 150;
+    let base = Utc::now() - chrono::Duration::minutes(30);
+    let mut candidates = Vec::with_capacity(LIVE_ROWS + STALE_ROWS);
+    let mut live_items = Vec::with_capacity(LIVE_ROWS);
+    for index in 0..LIVE_ROWS {
+        let item_id = format!("budget-live-{index:03}");
+        let download_id = scryer_domain::download_identity::DownloadId::new();
+        let locator = ClientJobLocator::new(Some(live.id.as_str()), "nzbget", item_id.as_str());
+        registry.bind(locator, download_id).await;
+        let created_at = base + chrono::Duration::seconds(index as i64);
+        candidates.push(DownloadClientBindingRecord {
+            download_id,
+            client_config_id: Some(live.id.clone()),
+            client_type_snapshot: Some("nzbget".to_string()),
+            client_name_snapshot: Some(live.name.clone()),
+            native_item_id: Some(item_id.clone()),
+            created_at,
+            last_seen_at: Some(created_at),
+            ended_at: None,
+        });
+        let mut item = queue_history_fixture_item(
+            item_id.as_str(),
+            DownloadQueueState::Downloading,
+            1_700_000_000,
+        );
+        item.client_id = live.id.clone();
+        item.client_name = live.name.clone();
+        item.client_type = "nzbget".to_string();
+        live_items.push(item);
+    }
+    for index in 0..STALE_ROWS {
+        let item_id = format!("budget-stale-{index:03}");
+        let download_id = scryer_domain::download_identity::DownloadId::new();
+        let locator = ClientJobLocator::new(Some(stale.id.as_str()), "nzbget", item_id.as_str());
+        registry.bind(locator.clone(), download_id).await;
+        download_submissions
+            .record_identity_tracked_state(
+                &DownloadSubmissionIdentity {
+                    download_id: Some(download_id.to_wire()),
+                },
+                Some(&locator),
+                TrackedDownloadState::ImportBlocked.as_str(),
+                None,
+                None,
+            )
+            .await
+            .expect("seed preserved durable state");
+        let created_at = base + chrono::Duration::seconds(index as i64);
+        candidates.push(DownloadClientBindingRecord {
+            download_id,
+            client_config_id: Some(stale.id.clone()),
+            client_type_snapshot: Some("nzbget".to_string()),
+            client_name_snapshot: Some(stale.name.clone()),
+            native_item_id: Some(item_id),
+            created_at,
+            last_seen_at: Some(created_at),
+            ended_at: None,
+        });
+    }
+    *download_client.queue_items.lock().await = live_items;
+    registry.set_reconcile_candidates(candidates).await;
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                // One pass only: the budget split is a per-pass property.
+                interval: Duration::from_secs(600),
+                ..Default::default()
+            },
+        ),
+    );
+
+    let stale_observations = || {
+        let download_client = download_client.clone();
+        let stale_id = stale.id.clone();
+        async move {
+            download_client
+                .observed_locators
+                .lock()
+                .await
+                .iter()
+                .filter(|observed| observed.client_id.as_deref() == Some(stale_id.as_str()))
+                .count()
+        }
+    };
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if stale_observations().await >= STALE_ROWS {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("observed rows must leave the whole budget for the client that needs it");
+    sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        stale_observations().await,
+        STALE_ROWS,
+        "one pass should reach every stale binding on the second client"
+    );
+    let live_observations = download_client
+        .observed_locators
+        .lock()
+        .await
+        .iter()
+        .filter(|observed| observed.client_id.as_deref() == Some(live.id.as_str()))
+        .count();
+    assert_eq!(
+        live_observations, 0,
+        "a binding the snapshot still lists must cost no client round-trip"
+    );
+
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
 }
 
 #[tokio::test]
@@ -14874,5 +15743,823 @@ async fn proxy_deletion_serializes_against_download_client_proxy_assignment() {
             .expect("seeded client remains")
             .proxy_config_id,
         None
+    );
+}
+
+fn guard_fixture_submission(
+    title_id: &str,
+    download_id: scryer_domain::download_identity::DownloadId,
+    client_id: &str,
+    item_id: &str,
+) -> DownloadSubmission {
+    DownloadSubmission {
+        download_id,
+        title_id: title_id.to_string(),
+        facet: "movie".to_string(),
+        download_client_id: Some(client_id.to_string()),
+        download_client_type: "nzbget".to_string(),
+        download_client_item_id: item_id.to_string(),
+        source_hint: None,
+        source_provider_id: None,
+        source_provider_name: None,
+        source_kind: Some(DownloadSourceKind::NzbUrl),
+        source_title: Some(format!("Fixture.Release.{item_id}.2026.1080p")),
+        info_hash: None,
+        release_size_bytes: None,
+        request_signature: None,
+        purpose: crate::DownloadSubmissionPurpose::Standard,
+        scope: SubmissionScope::Title,
+    }
+}
+
+/// The guard's per-submission client round-trip is the expensive part of an
+/// acquisition attempt, and only a submission whose client binding is still
+/// active can defer one. A long grab history whose bindings the reconciler
+/// already ended must therefore cost no client calls at all.
+#[tokio::test]
+async fn canonical_submission_guard_observes_only_submissions_with_an_active_binding() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Bounded Guard Fixture".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    for index in 0..8 {
+        let item_id = format!("ended-binding-job-{index}");
+        let download_id = scryer_domain::download_identity::DownloadId::new();
+        download_submissions
+            .record_submission(guard_fixture_submission(
+                &title.id,
+                download_id,
+                "primary",
+                &item_id,
+            ))
+            .await
+            .expect("record an older overlapping submission");
+        registry
+            .bind(
+                ClientJobLocator::new(Some("primary"), "nzbget", &item_id),
+                download_id,
+            )
+            .await;
+        registry
+            .end_binding(&download_id)
+            .await
+            .expect("the lifecycle reconciler already ended this binding");
+    }
+
+    let live_item_id = "active-binding-job";
+    let live_download_id = scryer_domain::download_identity::DownloadId::new();
+    download_submissions
+        .record_submission(guard_fixture_submission(
+            &title.id,
+            live_download_id,
+            "primary",
+            live_item_id,
+        ))
+        .await
+        .expect("record the still-bound submission");
+    registry
+        .bind(
+            ClientJobLocator::new(Some("primary"), "nzbget", live_item_id),
+            live_download_id,
+        )
+        .await;
+    let live_item = queue_history_fixture_item(live_item_id, DownloadQueueState::Completed, 0);
+    download_client.history_items.lock().await.push(live_item);
+
+    let outcome = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/bounded.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Bounded.Guard.Fixture.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("ended bindings must not block a fresh grab");
+    assert!(
+        matches!(outcome, QueueDownloadOutcome::Queued(_)),
+        "the new grab should be admitted"
+    );
+
+    let observed = download_client.observed_locators.lock().await;
+    assert_eq!(
+        observed
+            .iter()
+            .map(|locator| locator.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![live_item_id],
+        "only the submission with an active binding may cost a client round-trip"
+    );
+}
+
+/// The Absent-with-an-active-binding deferral is the guard's only blocking
+/// outcome on that branch. It must stay fail-closed, carry the structured
+/// payload naming the blocking download, and still classify as a retryable
+/// deferral so no release is burned for it.
+#[tokio::test]
+async fn canonical_submission_guard_defers_when_an_active_binding_is_absent_from_the_client() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let client = app
+        .create_download_client_config(
+            &user,
+            NewDownloadClientConfig {
+                name: "Fixture Client".to_string(),
+                client_type: "nzbget".to_string(),
+                config_json: "{}".to_string(),
+                client_priority: 1,
+                is_enabled: true,
+                proxy_config_id: None,
+            },
+        )
+        .await
+        .expect("create download client config");
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Unreconciled Guard Fixture".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let item_id = "unreconciled-job";
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    download_submissions
+        .record_submission(guard_fixture_submission(
+            &title.id,
+            download_id,
+            &client.id,
+            item_id,
+        ))
+        .await
+        .expect("record the still-bound submission");
+    registry
+        .bind(
+            ClientJobLocator::new(Some(client.id.as_str()), "nzbget", item_id),
+            download_id,
+        )
+        .await;
+
+    let error = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/unreconciled.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Unreconciled.Guard.Fixture.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect_err("an absent job with a live binding must defer the acquisition");
+    let Some(deferral) = error.download_lifecycle_deferral() else {
+        panic!("expected a structured lifecycle deferral, got {error:?}");
+    };
+    assert_eq!(deferral.download_id, download_id.to_string());
+    assert_eq!(deferral.client_id.as_deref(), Some(client.id.as_str()));
+    assert_eq!(deferral.client_type, "nzbget");
+    assert_eq!(deferral.native_item_id, item_id);
+    assert_eq!(
+        deferral.tracked_state, "unknown",
+        "the fixture records no durable tracked state"
+    );
+    assert_eq!(
+        deferral.source_title.as_deref(),
+        Some(format!("Fixture.Release.{item_id}.2026.1080p").as_str())
+    );
+    assert_eq!(deferral.scope, "title");
+    assert!(
+        deferral.binding_age_seconds >= 0,
+        "binding age must never be negative: {}",
+        deferral.binding_age_seconds
+    );
+    assert_eq!(
+        deferral.last_seen_age_seconds, None,
+        "a binding the client never re-confirmed reports no last-seen age"
+    );
+    // The refusal stays retryable everywhere that schedules a retry, so no
+    // pending release can be blocklisted or failed because of the new variant.
+    assert!(
+        error.is_retryable_download_submit_failure(),
+        "the lifecycle deferral must classify as a retryable submit failure"
+    );
+    assert!(
+        crate::acquisition_decision_helpers::is_download_submit_unavailable_error(&error),
+        "the lifecycle deferral must defer rather than burn the release"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("awaiting lifecycle reconciliation")
+            && message.contains("acquisition deferred")
+            && message.contains("nzbget")
+            && message.contains(&format!("Fixture.Release.{item_id}.2026.1080p")),
+        "unexpected deferral message: {message}"
+    );
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .is_empty(),
+        "a deferred acquisition must never reach the client"
+    );
+}
+
+/// Everything a reconcile-on-discovery test needs: a bootstrap whose registry
+/// records bindings, whose client answers `Absent` for anything it was not
+/// given, and whose tracked-download command channel is a plain receiver the
+/// test reads directly.
+struct ReconcileOnDiscoveryFixture {
+    app: AppUseCase,
+    user: User,
+    download_client: Arc<StubDownloadClient>,
+    download_submissions: Arc<TrackingDownloadSubmissionRepo>,
+    registry: Arc<RecordingDownloadRegistry>,
+    client: DownloadClientConfig,
+    commands: tokio::sync::mpsc::Receiver<crate::tracked_downloads::TrackedDownloadCommand>,
+}
+
+async fn reconcile_on_discovery_fixture(command_capacity: usize) -> ReconcileOnDiscoveryFixture {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let (command_tx, commands) = tokio::sync::mpsc::channel(command_capacity);
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_tracked_download_handle(crate::tracked_downloads::TrackedDownloadHandle::new(
+                command_tx,
+            ))
+    });
+    let client =
+        create_enabled_download_client_config(&app, &user, "Discovery Fixture Client", "nzbget")
+            .await;
+    // The client answers; it simply no longer lists the job. Without this the
+    // conflict pass fails closed on client unavailability and never reaches
+    // the lifecycle question these tests are about.
+    download_client
+        .set_snapshot_authoritative_client_ids([client.id.clone()])
+        .await;
+    ReconcileOnDiscoveryFixture {
+        app,
+        user,
+        download_client,
+        download_submissions,
+        registry,
+        client,
+        commands,
+    }
+}
+
+impl ReconcileOnDiscoveryFixture {
+    /// Seed a title holding one overlapping submission that is bound to a job
+    /// the client does not list — the exact state the guard defers on.
+    async fn blocked_title(
+        &self,
+        name: &str,
+        item_id: &str,
+    ) -> (
+        Title,
+        scryer_domain::download_identity::DownloadId,
+        ClientJobLocator,
+    ) {
+        let title = self
+            .app
+            .add_title(
+                &self.user,
+                NewTitle {
+                    name: name.into(),
+                    facet: MediaFacet::Movie,
+                    monitored: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create title");
+        let download_id = scryer_domain::download_identity::DownloadId::new();
+        self.download_submissions
+            .record_submission(guard_fixture_submission(
+                &title.id,
+                download_id,
+                &self.client.id,
+                item_id,
+            ))
+            .await
+            .expect("record the blocking submission");
+        let locator = ClientJobLocator::new(Some(self.client.id.as_str()), "nzbget", item_id);
+        self.registry.bind(locator.clone(), download_id).await;
+        (title, download_id, locator)
+    }
+
+    /// Write the durable tracked state the reconciler's disposition rules read
+    /// (the canonical download-id key, as production does).
+    async fn seed_tracked_state(
+        &self,
+        download_id: scryer_domain::download_identity::DownloadId,
+        locator: &ClientJobLocator,
+        state: scryer_domain::TrackedDownloadState,
+    ) {
+        self.download_submissions
+            .record_identity_tracked_state(
+                &DownloadSubmissionIdentity {
+                    download_id: Some(download_id.to_wire()),
+                },
+                Some(locator),
+                state.as_str(),
+                None,
+                None,
+            )
+            .await
+            .expect("seed the durable tracked state");
+    }
+
+    async fn attempt_grab(&self, title_id: &str) -> AppResult<QueueDownloadOutcome> {
+        self.app
+            .queue_existing_title_download(
+                &self.user,
+                title_id,
+                QueuedReleaseSelection {
+                    source_hint: Some("https://example.invalid/discovery.nzb".to_string()),
+                    source_kind: Some(DownloadSourceKind::NzbUrl),
+                    source_title: Some(format!("Discovery.Fixture.{title_id}.2026.1080p.WEB-DL")),
+                    ..Default::default()
+                },
+                SubmissionScope::Title,
+                SubmissionConflictPolicy::Abort,
+            )
+            .await
+    }
+
+    fn drain_scheduled_reconciliations(
+        &mut self,
+    ) -> Vec<(
+        ClientJobLocator,
+        scryer_domain::download_identity::DownloadId,
+        Option<String>,
+    )> {
+        let mut scheduled = Vec::new();
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                crate::tracked_downloads::TrackedDownloadCommand::ReconcileAbsentSource {
+                    locator,
+                    download_id,
+                    title_id,
+                } => scheduled.push((locator, download_id, title_id)),
+                _ => panic!("unexpected tracked-download command"),
+            }
+        }
+        scheduled
+    }
+}
+
+/// Every rediscovery of a blocked scope is real — RSS, background search,
+/// standby recovery and an operator's grab all find the same absent job — but
+/// they describe one binding. The guard must schedule exactly one
+/// reconciliation per job per window, and never suppress a different job.
+#[tokio::test]
+async fn a_deferred_acquisition_schedules_one_reconciliation_per_blocked_job() {
+    let mut fixture = reconcile_on_discovery_fixture(8).await;
+    let (blocked_title, blocked_download_id, blocked_locator) = fixture
+        .blocked_title("Discovery Dedupe Fixture", "discovery-dedupe-job")
+        .await;
+
+    for attempt in 0..3 {
+        let error = fixture
+            .attempt_grab(&blocked_title.id)
+            .await
+            .expect_err("an absent job with a live binding must defer the acquisition");
+        assert!(
+            error.download_lifecycle_deferral().is_some(),
+            "attempt {attempt} should defer on the lifecycle guard, got {error:?}"
+        );
+    }
+
+    let (other_title, other_download_id, other_locator) = fixture
+        .blocked_title("Discovery Dedupe Neighbour", "discovery-dedupe-neighbour")
+        .await;
+    fixture
+        .attempt_grab(&other_title.id)
+        .await
+        .expect_err("the neighbouring scope defers on its own blocked job");
+
+    let scheduled = fixture.drain_scheduled_reconciliations();
+    assert_eq!(
+        scheduled
+            .iter()
+            .map(|(locator, _, _)| locator.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            blocked_locator.item_id.as_str(),
+            other_locator.item_id.as_str()
+        ],
+        "three attempts against one job schedule one reconciliation; a different job gets its own"
+    );
+    assert_eq!(
+        scheduled
+            .iter()
+            .map(|(_, download_id, title_id)| (*download_id, title_id.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (blocked_download_id, Some(blocked_title.id.clone())),
+            (other_download_id, Some(other_title.id.clone())),
+        ],
+        "each command names the blocking download and the title whose caches must be dropped"
+    );
+}
+
+/// The command path is the whole point of WP3: a discovered absence must end
+/// the binding it found, so the very next attempt for that scope is admitted
+/// instead of deferring again until a sweep gets around to it.
+#[tokio::test]
+async fn a_scheduled_reconciliation_releases_a_downloading_binding() {
+    let mut fixture = reconcile_on_discovery_fixture(8).await;
+    let (title, download_id, locator) = fixture
+        .blocked_title("Discovery Release Fixture", "discovery-release-job")
+        .await;
+    fixture
+        .seed_tracked_state(
+            download_id,
+            &locator,
+            scryer_domain::TrackedDownloadState::Downloading,
+        )
+        .await;
+
+    fixture
+        .attempt_grab(&title.id)
+        .await
+        .expect_err("the first attempt defers and schedules the reconciliation");
+    let scheduled = fixture.drain_scheduled_reconciliations();
+    assert_eq!(scheduled.len(), 1);
+
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    crate::app_usecase_integration::reconcile_absent_source_on_discovery(
+        &fixture.app,
+        &mut tracker,
+        &scheduled[0].0,
+        scheduled[0].1,
+        scheduled[0].2.as_deref(),
+    )
+    .await;
+
+    assert!(
+        fixture.registry.ended.lock().await.contains(&download_id),
+        "a downloading job the client no longer lists must have its binding ended"
+    );
+    let outcome = fixture
+        .attempt_grab(&title.id)
+        .await
+        .expect("the released scope must admit the next grab");
+    assert!(
+        matches!(outcome, QueueDownloadOutcome::Queued(_)),
+        "expected the replacement grab to be queued, got {outcome:?}"
+    );
+}
+
+/// The command must not become a second, weaker authority on disposition. A
+/// job whose import is blocked is preserved by the existing reconciler rules,
+/// and the scope stays deferred — reconciliation is not a way to clear a
+/// download an operator still has to settle.
+#[tokio::test]
+async fn a_scheduled_reconciliation_preserves_an_import_blocked_binding() {
+    let mut fixture = reconcile_on_discovery_fixture(8).await;
+    let (title, download_id, locator) = fixture
+        .blocked_title("Discovery Preserve Fixture", "discovery-preserve-job")
+        .await;
+    fixture
+        .seed_tracked_state(
+            download_id,
+            &locator,
+            scryer_domain::TrackedDownloadState::ImportBlocked,
+        )
+        .await;
+
+    fixture
+        .attempt_grab(&title.id)
+        .await
+        .expect_err("the first attempt defers and schedules the reconciliation");
+    let scheduled = fixture.drain_scheduled_reconciliations();
+    assert_eq!(scheduled.len(), 1);
+
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    crate::app_usecase_integration::reconcile_absent_source_on_discovery(
+        &fixture.app,
+        &mut tracker,
+        &scheduled[0].0,
+        scheduled[0].1,
+        scheduled[0].2.as_deref(),
+    )
+    .await;
+
+    assert!(
+        !fixture.registry.ended.lock().await.contains(&download_id),
+        "an import-blocked download must keep its binding"
+    );
+    let error = fixture
+        .attempt_grab(&title.id)
+        .await
+        .expect_err("a preserved binding must still defer the scope");
+    assert!(
+        error.download_lifecycle_deferral().is_some(),
+        "expected the scope to stay deferred, got {error:?}"
+    );
+}
+
+/// The loop-side window is the authority the guard's per-process dedupe cannot
+/// be: two commands for one job inside it cost exactly one client observation.
+#[tokio::test]
+async fn scheduled_reconciliations_for_one_job_observe_the_client_once() {
+    let fixture = reconcile_on_discovery_fixture(8).await;
+    let (_title, download_id, locator) = fixture
+        .blocked_title("Discovery Idempotence Fixture", "discovery-idempotence-job")
+        .await;
+    // Import-blocked, so the reconciler preserves the binding: the only
+    // reason the second command can cost nothing is the window itself.
+    fixture
+        .seed_tracked_state(
+            download_id,
+            &locator,
+            scryer_domain::TrackedDownloadState::ImportBlocked,
+        )
+        .await;
+    fixture
+        .download_client
+        .observed_locators
+        .lock()
+        .await
+        .clear();
+
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    for _ in 0..2 {
+        crate::app_usecase_integration::reconcile_absent_source_on_discovery(
+            &fixture.app,
+            &mut tracker,
+            &locator,
+            download_id,
+            None,
+        )
+        .await;
+    }
+
+    assert!(
+        !fixture.registry.ended.lock().await.contains(&download_id),
+        "the preserved binding must survive both commands"
+    );
+    let observed = fixture.download_client.observed_locators.lock().await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|seen| seen.item_id == locator.item_id)
+            .count(),
+        1,
+        "the second command inside the window must not re-observe the client"
+    );
+}
+
+/// Migration 0179 backfilled bindings from submissions that predate per-client
+/// attribution, so an upgraded install holds active bindings that name no
+/// client at all. No client-keyed pass can see them, so such a row held its
+/// scope forever. The global pass must attribute it to the install's single
+/// configured client of its type, reconcile it like any other ghost, and
+/// persist the attribution it derived.
+#[tokio::test]
+async fn legacy_client_less_ghost_binding_is_attributed_to_the_only_configured_client_and_failed() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let config =
+        create_enabled_download_client_config(&app, &user, "Primary Usenet", "sabnzbd").await;
+    registry
+        .set_configured_clients([(config.id.clone(), "sabnzbd".to_string())])
+        .await;
+    download_client
+        .set_snapshot_authoritative_client_ids([config.id.clone()])
+        .await;
+
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    // The binding as 0179 left it: a client type and a native item id, but no
+    // `client_config_id`.
+    let legacy_source = ClientJobLocator::new(None, "sabnzbd", "legacy-ghost-1");
+    registry.bind(legacy_source.clone(), download_id).await;
+    registry
+        .set_reconcile_candidates(vec![DownloadClientBindingRecord {
+            download_id,
+            client_config_id: None,
+            client_type_snapshot: Some("sabnzbd".to_string()),
+            client_name_snapshot: None,
+            native_item_id: Some("legacy-ghost-1".to_string()),
+            created_at: Utc::now() - chrono::Duration::minutes(11),
+            last_seen_at: Some(Utc::now() - chrono::Duration::minutes(11)),
+            ended_at: None,
+        }])
+        .await;
+    download_submissions
+        .record_identity_tracked_state(
+            &DownloadSubmissionIdentity {
+                download_id: Some(download_id.to_wire()),
+            },
+            Some(&legacy_source),
+            TrackedDownloadState::Downloading.as_str(),
+            None,
+            None,
+        )
+        .await
+        .expect("seed the durable downloading state");
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        ),
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if registry.ended.lock().await.contains(&download_id) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a client-less binding must be attributed and reconciled, not held forever");
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+
+    assert!(
+        download_client
+            .observed_locators
+            .lock()
+            .await
+            .iter()
+            .any(
+                |locator| locator.client_id.as_deref() == Some(config.id.as_str())
+                    && locator.item_id == "legacy-ghost-1"
+            ),
+        "the job must be observed against the client it was attributed to"
+    );
+    assert_eq!(
+        registry.attributed_clients.lock().await.clone(),
+        vec![(download_id, config.id.clone())],
+        "the derived attribution must be persisted once the client has answered"
+    );
+}
+
+/// Two configured clients of the type make the original owner ambiguous, so
+/// the row cannot be attributed. It is kept and counted — never ended on a
+/// guess, and never observed against a client that may not own it.
+#[tokio::test]
+async fn ambiguous_legacy_client_less_ghost_binding_is_preserved() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let primary =
+        create_enabled_download_client_config(&app, &user, "Primary Usenet", "sabnzbd").await;
+    let secondary =
+        create_enabled_download_client_config(&app, &user, "Secondary Usenet", "sabnzbd").await;
+    registry
+        .set_configured_clients([
+            (primary.id.clone(), "sabnzbd".to_string()),
+            (secondary.id.clone(), "sabnzbd".to_string()),
+        ])
+        .await;
+    download_client
+        .set_snapshot_authoritative_client_ids([primary.id.clone(), secondary.id.clone()])
+        .await;
+
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let legacy_source = ClientJobLocator::new(None, "sabnzbd", "legacy-ghost-ambiguous-1");
+    registry.bind(legacy_source.clone(), download_id).await;
+    registry
+        .set_reconcile_candidates(vec![DownloadClientBindingRecord {
+            download_id,
+            client_config_id: None,
+            client_type_snapshot: Some("sabnzbd".to_string()),
+            client_name_snapshot: None,
+            native_item_id: Some("legacy-ghost-ambiguous-1".to_string()),
+            created_at: Utc::now() - chrono::Duration::minutes(11),
+            last_seen_at: Some(Utc::now() - chrono::Duration::minutes(11)),
+            ended_at: None,
+        }])
+        .await;
+    download_submissions
+        .record_identity_tracked_state(
+            &DownloadSubmissionIdentity {
+                download_id: Some(download_id.to_wire()),
+            },
+            Some(&legacy_source),
+            TrackedDownloadState::Downloading.as_str(),
+            None,
+            None,
+        )
+        .await
+        .expect("seed the durable downloading state");
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app.clone(),
+            token.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        ),
+    );
+    sleep(Duration::from_millis(300)).await;
+    token.cancel();
+    poller.await.expect("poller should stop cleanly");
+
+    assert!(
+        !registry.ended.lock().await.contains(&download_id),
+        "an unattributable binding must be kept, not ended on a guess"
+    );
+    assert!(
+        registry.attributed_clients.lock().await.is_empty(),
+        "an unattributable binding must never be written a client id"
+    );
+    assert!(
+        !download_client
+            .observed_locators
+            .lock()
+            .await
+            .iter()
+            .any(|locator| locator.item_id == "legacy-ghost-ambiguous-1"),
+        "an unattributable binding must not be observed against a client that may not own it"
     );
 }
