@@ -340,9 +340,9 @@ function InstanceCard({
         <Input
           id={fieldId("api-key")}
           type="password"
+          ignorePasswordManagers
           value={inst.apiKey}
           spellCheck={false}
-          autoComplete="off"
           placeholder={t("setup.apiKeyHelpHint")}
           onChange={(e) => onField("apiKey", e.target.value)}
           onBlur={onVerifyBlur}
