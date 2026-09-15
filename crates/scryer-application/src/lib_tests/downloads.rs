@@ -6802,6 +6802,33 @@ async fn manual_import_assigns_one_file_to_every_mapped_episode() {
         1,
         "both episodes must point at the same media file: {artifacts:?}"
     );
+
+    let events = app
+        .services
+        .events
+        .domain_events
+        .list(&DomainEventFilter {
+            event_types: Some(vec![DomainEventType::ImportCompleted]),
+            title_id: Some(title.id.clone()),
+            facet: None,
+            after_sequence: Some(0),
+            before_sequence: None,
+            limit: 100,
+        })
+        .await
+        .expect("list import completed events");
+    assert_eq!(events.len(), 1, "{events:?}");
+    let DomainEventPayload::ImportCompleted(data) = &events[0].payload else {
+        panic!(
+            "expected an import_completed event, got {:?}",
+            events[0].payload
+        );
+    };
+    assert_eq!(
+        data.episode_ids,
+        vec![episode.id.clone(), second_episode.id.clone()],
+        "history and media-server refresh read every mapped episode from the event"
+    );
 }
 
 #[tokio::test]
