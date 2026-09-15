@@ -3,6 +3,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use scryer_infrastructure_datastore::migrations::MigrationProgress;
 use tokio::sync::watch;
 use tower::ServiceExt;
 use tower_http::compression::CompressionLayer;
@@ -20,6 +21,16 @@ pub(crate) enum BootstrapStatus {
 #[derive(Clone)]
 pub(crate) struct SplashState {
     pub(crate) status_rx: watch::Receiver<BootstrapStatus>,
+    pub(crate) migration_progress: MigrationProgress,
+}
+
+/// The `migrations` object the health check adds while bootstrapping, once the
+/// migration run knows how many migrations it will apply.
+fn migration_progress_json(progress: &MigrationProgress) -> serde_json::Value {
+    match progress.snapshot() {
+        Some((completed, total)) => serde_json::json!({"completed": completed, "total": total}),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// `GET /health` — the health check for every orchestrator probe (liveness,
@@ -32,7 +43,9 @@ pub(crate) struct SplashState {
 /// window either: the splash fallback serves the "Upgrading database…" page on
 /// every route and it reloads into the app the moment bootstrap finishes, so a
 /// readiness probe here is correct too. The JSON body carries the bootstrap
-/// phase (`"migrating"` / `"ok"`) plus a `ready` flag, and every in-tree poller
+/// phase (`"migrating"` / `"ok"`) plus a `ready` flag — and, while migrating,
+/// `migrations: {completed, total}` once the migration run has counted what it
+/// will apply (`null` before that or when nothing is pending) — and every in-tree poller
 /// (splash page, web client restart overlay, xtask, seed) keys on
 /// `status == "ok"`, not on the HTTP status. Only a failed bootstrap returns a
 /// non-2xx code, because a process that will never become ready *should* be
@@ -43,9 +56,12 @@ pub(crate) struct SplashState {
 pub(crate) async fn splash_health_handler(State(state): State<SplashState>) -> Response {
     let status = state.status_rx.borrow().clone();
     match status {
-        BootstrapStatus::Migrating => {
-            Json(serde_json::json!({"status": "migrating", "ready": false})).into_response()
-        }
+        BootstrapStatus::Migrating => Json(serde_json::json!({
+            "status": "migrating",
+            "ready": false,
+            "migrations": migration_progress_json(&state.migration_progress),
+        }))
+        .into_response(),
         BootstrapStatus::Ready(_) => {
             Json(serde_json::json!({"status": "ok", "ready": true})).into_response()
         }
@@ -133,7 +149,9 @@ pub(crate) async fn splash_fallback_handler(
             .oneshot(request)
             .await
             .unwrap_or_else(|err| match err {}),
-        BootstrapStatus::Migrating => Html(splash_html()).into_response(),
+        BootstrapStatus::Migrating => {
+            Html(splash_html(state.migration_progress.snapshot())).into_response()
+        }
         BootstrapStatus::Failed(message) => Html(error_html(&message)).into_response(),
     }
 }
@@ -170,19 +188,33 @@ pub(crate) fn build_splash_router(
     mount_router(router, &base_path)
 }
 
-fn splash_html() -> String {
+/// The page shown on every route while bootstrapping. It says "Upgrading
+/// database…" with a bar and a count while migrations are being applied, and
+/// "Starting up…" otherwise, then keeps both current from the health check.
+fn splash_html(migration_progress: Option<(usize, usize)>) -> String {
     let base_path = BasePath::from_env();
     let health_url = base_path.join("/health");
     let loading_mark_url = base_path.join(SPLASH_LOADING_MARK_PATH);
     let loading_mark_still_url = base_path.join(SPLASH_LOADING_MARK_STILL_PATH);
     let wordmark_url = base_path.join(SPLASH_WORDMARK_PATH);
+    let (status_text, progress_hidden, completed, total) = match migration_progress {
+        Some((completed, total)) if completed < total => {
+            ("Upgrading database&hellip;", "", completed, total)
+        }
+        _ => ("Starting up&hellip;", " hidden", 0, 0),
+    };
+    let percent = if total == 0 {
+        0.0
+    } else {
+        completed as f64 * 100.0 / total as f64
+    };
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>scryer — upgrading</title>
+<title>scryer — starting</title>
 <style>{SPLASH_STYLE}</style>
 </head>
 <body>
@@ -192,32 +224,53 @@ fn splash_html() -> String {
     <img src="{loading_mark_url}" width="531" height="522" alt=""/>
   </picture>
   <h1><img class="wordmark" src="{wordmark_url}" width="1200" height="400" alt="Scryer"/></h1>
-  <div class="status">Upgrading database&hellip;</div>
+  <div class="status" role="status">{status_text}</div>
+  <div class="progress"{progress_hidden}>
+    <div class="progress-track" role="progressbar" aria-label="Database upgrade" aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{completed}">
+      <div class="progress-fill" style="width: {percent:.1}%"></div>
+    </div>
+    <div class="progress-count">{completed} of {total} migrations applied</div>
+  </div>
 </main>
 <script>
 (function() {{
-  var delay = 200;
+  var status = document.querySelector(".status");
+  var progress = document.querySelector(".progress");
+  var track = document.querySelector(".progress-track");
+  var fill = document.querySelector(".progress-fill");
+  var count = document.querySelector(".progress-count");
+  function showProgress(m) {{
+    var upgrading = !!m && m.completed < m.total;
+    status.textContent = upgrading ? "Upgrading database…" : "Starting up…";
+    progress.hidden = !upgrading;
+    if (!upgrading) return;
+    fill.style.width = (m.completed * 100 / m.total) + "%";
+    track.setAttribute("aria-valuemax", m.total);
+    track.setAttribute("aria-valuenow", m.completed);
+    count.textContent = m.completed + " of " + m.total + " migrations applied";
+  }}
   function poll() {{
     fetch("{health_url}")
       .then(function(r) {{ return r.json(); }})
       .then(function(d) {{
-        if (d.status === "ok") location.reload();
-        else if (d.status === "error") {{
+        if (d.status === "ok") {{ location.reload(); return; }}
+        if (d.status === "error") {{
           document.querySelector(".loading-mark").style.display = "none";
-          var s = document.querySelector(".status");
-          s.textContent = "Startup failed";
-          s.classList.add("error");
+          progress.hidden = true;
+          status.textContent = "Startup failed";
+          status.classList.add("error");
           var p = document.createElement("p");
           p.className = "detail";
           p.textContent = d.message || "Unknown error";
           document.querySelector("main").appendChild(p);
           return;
         }}
+        showProgress(d.migrations);
+        setTimeout(poll, 500);
       }})
-      .catch(function() {{}})
-      .finally(function() {{ delay = 1000; setTimeout(poll, delay); }});
+      .catch(function() {{ setTimeout(poll, 1000); }});
   }}
-  setTimeout(poll, delay);
+  setTimeout(poll, 200);
 }})();
 </script>
 </body>
@@ -286,6 +339,34 @@ main {
   color: #8b96b9;
   margin-bottom: 0.5rem;
 }
+.progress {
+  width: 224px;
+  max-width: 70vw;
+  margin: 1rem auto 0;
+}
+.progress[hidden] {
+  display: none;
+}
+.progress-track {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 2px rgba(2, 6, 23, 0.6);
+}
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5b64ff, #38bdf8);
+  box-shadow: 0 0 12px rgba(91, 100, 255, 0.55);
+  transition: width 0.4s ease;
+}
+.progress-count {
+  font-size: 0.8rem;
+  color: #8b96b9;
+  margin-top: 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
 .status.error {
   color: #ef4444;
   font-weight: 600;
@@ -309,13 +390,14 @@ main {
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapStatus, SplashState, build_splash_router};
+    use super::{BootstrapStatus, SplashState, build_splash_router, splash_html};
     use crate::base_path::BasePath;
     use crate::middleware::CorsConfig;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
+    use scryer_infrastructure_datastore::migrations::MigrationProgress;
     use tokio::sync::watch;
     use tower::ServiceExt;
 
@@ -324,10 +406,20 @@ mod tests {
     }
 
     fn splash_router_for(status: BootstrapStatus) -> Router {
+        splash_router_with_progress(status, MigrationProgress::default())
+    }
+
+    fn splash_router_with_progress(
+        status: BootstrapStatus,
+        migration_progress: MigrationProgress,
+    ) -> Router {
         // Dropping the sender is fine: `borrow()` keeps returning the last value.
         let (_status_tx, status_rx) = watch::channel(status);
         build_splash_router(
-            SplashState { status_rx },
+            SplashState {
+                status_rx,
+                migration_progress,
+            },
             CorsConfig {
                 allow_all: false,
                 allowed_origins: vec![],
@@ -366,6 +458,53 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["status"], "migrating");
         assert_eq!(payload["ready"], false);
+    }
+
+    #[tokio::test]
+    async fn liveness_reports_migration_progress_once_counted() {
+        let progress = MigrationProgress::default();
+        let (_, payload) = get_json(
+            splash_router_with_progress(BootstrapStatus::Migrating, progress.clone()),
+            "/scryer/health",
+        )
+        .await;
+        assert!(payload["migrations"].is_null(), "{payload}");
+
+        progress.begin(30);
+        for _ in 0..12 {
+            progress.complete_one();
+        }
+        let (_, payload) = get_json(
+            splash_router_with_progress(BootstrapStatus::Migrating, progress),
+            "/scryer/health",
+        )
+        .await;
+        assert_eq!(payload["migrations"]["completed"], 12);
+        assert_eq!(payload["migrations"]["total"], 30);
+    }
+
+    #[test]
+    fn splash_page_shows_the_count_only_while_migrations_are_applying() {
+        let applying = splash_html(Some((12, 30)));
+        assert!(
+            applying
+                .contains(r#"<div class="status" role="status">Upgrading database&hellip;</div>"#)
+        );
+        assert!(applying.contains(r#"<div class="progress">"#));
+        assert!(applying.contains("12 of 30 migrations applied"));
+        assert!(applying.contains("width: 40.0%"));
+
+        for progress in [None, Some((30, 30))] {
+            let page = splash_html(progress);
+            assert!(
+                page.contains(r#"<div class="status" role="status">Starting up&hellip;</div>"#),
+                "{progress:?}"
+            );
+            assert!(
+                page.contains(r#"<div class="progress" hidden>"#),
+                "{progress:?}"
+            );
+        }
     }
 
     #[tokio::test]

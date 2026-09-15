@@ -767,7 +767,11 @@ async fn run_application() {
 
     // Create the watch channel for bootstrap status communication.
     let (status_tx, status_rx) = watch::channel(BootstrapStatus::Migrating);
-    let splash_state = SplashState { status_rx };
+    let migration_progress = datastore_config.migration_progress.clone();
+    let splash_state = SplashState {
+        status_rx,
+        migration_progress,
+    };
     let cors = CorsConfig::from_env();
     let splash_app = build_splash_router(splash_state, cors.clone(), base_path.clone());
 
