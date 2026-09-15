@@ -1130,8 +1130,8 @@ export function SettingsProxiesSection({
                     ) : null}
                   </div>
                 ) : null}
-                {showProxyDetails ? (
-                  <div className="flex items-end gap-2">
+                <div className="flex items-end gap-2">
+                  {showProxyDetails ? (
                     <Button
                       id="settings-indexer-proxy-save"
                       type="submit"
@@ -1144,20 +1144,18 @@ export function SettingsProxiesSection({
                           ? t("settings.proxyUpdate")
                           : t("settings.proxyCreate")}
                     </Button>
-                    {editingProxyId ? (
-                      <Button
-                        id="settings-indexer-proxy-cancel"
-                        type="button"
-                        variant="outline"
-                        className="w-36"
-                        onClick={resetProxyDraft}
-                        disabled={mutatingProxyId !== null}
-                      >
-                        {t("label.cancel")}
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
+                  ) : null}
+                  <Button
+                    id="settings-indexer-proxy-cancel"
+                    type="button"
+                    variant="outline"
+                    className="w-36"
+                    onClick={resetProxyDraft}
+                    disabled={mutatingProxyId !== null}
+                  >
+                    {t("label.cancel")}
+                  </Button>
+                </div>
               </form>
             </CardContent>
           </Card>
