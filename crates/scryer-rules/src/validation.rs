@@ -2711,19 +2711,18 @@ mod tests {
 
     #[test]
     fn group_templates_noop_when_release_group_is_missing() {
-        for template_id in ["release-group-scores"] {
-            let mut input = synthetic_test_input();
-            input.release.release_group = None;
-            let result = evaluate_template(template_id, input, "anime");
-            assert!(
-                result.errors.is_empty(),
-                "{template_id} should not raise runtime errors when release_group is null"
-            );
-            assert!(
-                result.entries.is_empty(),
-                "{template_id} should no-op when release_group is null"
-            );
-        }
+        let template_id = "release-group-scores";
+        let mut input = synthetic_test_input();
+        input.release.release_group = None;
+        let result = evaluate_template(template_id, input, "anime");
+        assert!(
+            result.errors.is_empty(),
+            "{template_id} should not raise runtime errors when release_group is null"
+        );
+        assert!(
+            result.entries.is_empty(),
+            "{template_id} should no-op when release_group is null"
+        );
     }
 
     #[test]
