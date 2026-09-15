@@ -5,6 +5,7 @@ import { useClient } from "urql";
 
 import {
   browsePathQuery,
+  libraryPathsQuery,
   qualityProfilesInitQuery,
   setupStatusQuery,
   setupWizardProviderTypesInitQuery,
@@ -27,6 +28,7 @@ import {
   runAdvisorySetupMediaPathSave,
   type InvalidSetupMediaPathFields,
   type SetupMediaPathField,
+  type SetupMediaPathsInput,
 } from "@/lib/utils/setup-media-paths";
 import {
   qualityProfileSettingsToEntries,
@@ -206,6 +208,37 @@ export function SetupWizardContainer({
     useState<InvalidSetupMediaPathFields>({});
   const [mediaPathValidationUnavailable, setMediaPathValidationUnavailable] =
     useState(false);
+  // What the libraries hold now, so a re-run shows the real roots and saves
+  // only what was changed. Null until read, or if it can't be.
+  const [savedMediaPaths, setSavedMediaPaths] =
+    useState<SetupMediaPathsInput | null>(null);
+  const mediaPathsEdited = useRef(false);
+
+  useEffect(() => {
+    if (wizardPath !== "fresh") return;
+    let cancelled = false;
+    client
+      .query(libraryPathsQuery, {}, { requestPolicy: "network-only" })
+      .toPromise()
+      .then(({ data }) => {
+        const paths = data?.libraryPaths;
+        if (cancelled || !paths) return;
+        const saved: SetupMediaPathsInput = {
+          moviePath: paths.moviePath ?? "",
+          seriesPath: paths.seriesPath ?? "",
+          animePath: paths.animePath ?? null,
+        };
+        setSavedMediaPaths(saved);
+        if (mediaPathsEdited.current) return;
+        setMoviesPath(saved.moviePath);
+        setSeriesPath(saved.seriesPath);
+        setAnimePath(saved.animePath ?? "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, wizardPath]);
 
   // ── Step 4 (fresh): Download Client ─────────────────────────────────
   const {
@@ -422,6 +455,7 @@ export function SetupWizardContainer({
 
   const handleMoviesPathChange = useCallback(
     (value: string) => {
+      mediaPathsEdited.current = true;
       setMoviesPath(value);
       clearInvalidMediaPathField("movies");
     },
@@ -430,6 +464,7 @@ export function SetupWizardContainer({
 
   const handleSeriesPathChange = useCallback(
     (value: string) => {
+      mediaPathsEdited.current = true;
       setSeriesPath(value);
       clearInvalidMediaPathField("series");
     },
@@ -438,6 +473,7 @@ export function SetupWizardContainer({
 
   const handleAnimePathChange = useCallback(
     (value: string) => {
+      mediaPathsEdited.current = true;
       setAnimePath(value);
       clearInvalidMediaPathField("anime");
     },
@@ -463,6 +499,7 @@ export function SetupWizardContainer({
           seriesPath: trimmedSeries,
           animePath: trimmedAnime.length > 0 ? trimmedAnime : null,
         },
+        saved: savedMediaPaths,
         validatePath: async (path) => {
           const { error } = await client
             .query(
@@ -478,10 +515,18 @@ export function SetupWizardContainer({
           setMediaPathValidationUnavailable(unavailable);
         },
         savePaths: async (input) => {
-          const { error } = await client
+          const { data, error } = await client
             .mutation(updateLibraryPathsMutation, { input })
             .toPromise();
           if (error) throw error;
+          const paths = data?.updateLibraryPaths;
+          if (paths) {
+            setSavedMediaPaths({
+              moviePath: paths.moviePath ?? "",
+              seriesPath: paths.seriesPath ?? "",
+              animePath: paths.animePath ?? null,
+            });
+          }
         },
         onSaved: ({ invalidPathFields, unavailable }) => {
           if (Object.values(invalidPathFields).some(Boolean)) {
@@ -502,6 +547,7 @@ export function SetupWizardContainer({
     client,
     goToStep,
     moviesPath,
+    savedMediaPaths,
     seriesPath,
     t,
   ]);
