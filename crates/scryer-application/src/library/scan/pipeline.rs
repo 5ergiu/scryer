@@ -834,6 +834,7 @@ pub(super) async fn run_library_scan_pipeline(
                 }
             }
             reconcile_library_scan_unmatched_items(app, facet, library_path, &seen_paths).await?;
+            reconcile_title_scan_unmatched_items(app, facet, library_id, library_path).await?;
             coordinator.publish_progress().await;
         }
 

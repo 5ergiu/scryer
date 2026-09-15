@@ -9253,3 +9253,217 @@ async fn title_root_folder_id_is_untouched_when_the_folder_is_under_no_root() {
     assert!(!healed, "a folder under no root is no evidence of a root");
     assert_eq!(title.root_folder_id, original_root_folder_id);
 }
+
+// ── Title-scan pending imports left behind by a deleted or moved title ────
+
+fn title_scan_unmatched_row(
+    title_id: &str,
+    scan_root: &std::path::Path,
+    file_name: &str,
+) -> LibraryScanUnmatchedItem {
+    let item_path = scan_root.join(file_name);
+    let mut item = build_test_unmatched_item(
+        &format!("unmatched-{title_id}-{file_name}"),
+        MediaFacet::Series,
+        &scan_root.to_string_lossy(),
+        &item_path.to_string_lossy(),
+        file_name,
+        file_name,
+        None,
+    );
+    item.title_id = Some(title_id.to_string());
+    item.reason_code = "episode_identity_missing".to_string();
+    item
+}
+
+async fn create_series_title_owning(
+    app: &AppUseCase,
+    user: &User,
+    name: &str,
+    folder: &std::path::Path,
+) -> Title {
+    let created = app
+        .create_title_without_hydration(
+            user,
+            NewTitle {
+                name: name.to_string(),
+                facet: MediaFacet::Series,
+                monitored: false,
+                tags: vec![],
+                external_ids: vec![],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&created.title.id, &folder.to_string_lossy())
+        .await
+        .expect("record title folder");
+    app.services
+        .catalog
+        .titles
+        .get_by_id(&created.title.id)
+        .await
+        .expect("load title")
+        .expect("title exists")
+}
+
+#[tokio::test]
+async fn deleting_a_title_removes_its_pending_imports() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("series");
+    let folder = root.join("Copper Tidewalk");
+    std::fs::create_dir_all(&folder).expect("create show folder");
+
+    let unmatched = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched.clone(),
+        Arc::new(RecordingExactIdMetadataGateway::default()),
+    );
+    let title = create_series_title_owning(&app, &user, "Copper Tidewalk", &folder).await;
+    let bystander = title_scan_unmatched_row("another-title", &folder, "Bystander.avi");
+    unmatched
+        .upsert_library_scan_unmatched_item(&title_scan_unmatched_row(
+            &title.id,
+            &folder,
+            "Copper Tidewalk Season 1 Episode 15.avi",
+        ))
+        .await
+        .expect("seed title row");
+    unmatched
+        .upsert_library_scan_unmatched_item(&bystander)
+        .await
+        .expect("seed bystander row");
+
+    app.delete_title(&user, &title.id, false, None)
+        .await
+        .expect("delete title");
+
+    assert_eq!(
+        unmatched.items().await,
+        vec![bystander],
+        "only the deleted title's pending imports go"
+    );
+}
+
+/// The user report: a show folder renamed, the title deleted and rescanned,
+/// and the files the old title scan could not place still listed under the
+/// old folder name. A full scan now drops them.
+#[tokio::test]
+async fn full_scan_drops_pending_imports_of_a_deleted_or_moved_title() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("series");
+    let old_folder = root.join("Copper Tidewalk");
+    let new_folder = root.join("Copper - Tidewalk");
+    std::fs::create_dir_all(&new_folder).expect("create renamed show folder");
+
+    let unmatched = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched.clone(),
+        Arc::new(RecordingExactIdMetadataGateway::default()),
+    );
+    app.update_media_settings(
+        &user,
+        MediaFacet::Series,
+        empty_update_media_settings_with_roots(vec![build_root_folder_entry(&root, true)]),
+    )
+    .await
+    .expect("store series root");
+    let moved = create_series_title_owning(&app, &user, "Copper - Tidewalk", &new_folder).await;
+
+    for row in [
+        title_scan_unmatched_row("deleted-title", &old_folder, "Copper Tidewalk S03E26.avi"),
+        title_scan_unmatched_row(&moved.id, &old_folder, "Copper Tidewalk S04E01.avi"),
+    ] {
+        unmatched
+            .upsert_library_scan_unmatched_item(&row)
+            .await
+            .expect("seed stale row");
+    }
+
+    let session = app
+        .trigger_library_scan_by_id_with_hints(
+            &user,
+            &scryer_domain::default_library_id_for_facet(&MediaFacet::Series),
+            None,
+        )
+        .await
+        .expect("trigger series scan");
+    wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
+        matches!(
+            session.status,
+            LibraryScanStatus::Completed | LibraryScanStatus::Warning
+        )
+    })
+    .await;
+
+    let remaining = unmatched.items().await;
+    assert!(
+        remaining
+            .iter()
+            .all(|item| !item.scan_root.ends_with("Copper Tidewalk")),
+        "rows under the old folder name must be gone: {remaining:?}"
+    );
+}
+
+/// The cleanup only reads the title's recorded folder: a row under the folder
+/// the title still owns, a row for another library, and a library-level row
+/// are all left for their own reconcile.
+#[tokio::test]
+async fn title_scan_unmatched_reconcile_keeps_rows_a_title_still_owns() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("series");
+    let folder = root.join("Copper Tidewalk");
+    std::fs::create_dir_all(&folder).expect("create show folder");
+
+    let unmatched = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched.clone(),
+        Arc::new(RecordingExactIdMetadataGateway::default()),
+    );
+    let title = create_series_title_owning(&app, &user, "Copper Tidewalk", &folder).await;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+
+    let owned = title_scan_unmatched_row(&title.id, &folder, "Copper Tidewalk Extras.avi");
+    let mut other_library = title_scan_unmatched_row("deleted-title", &folder, "Elsewhere.avi");
+    other_library.library_id = "another-library".to_string();
+    let mut conflict = title_scan_unmatched_row("deleted-title", &root, "Loose Folder");
+    conflict.scan_root = root.to_string_lossy().to_string();
+    let stale = title_scan_unmatched_row("deleted-title", &folder, "Gone.avi");
+    for row in [&owned, &other_library, &conflict, &stale] {
+        unmatched
+            .upsert_library_scan_unmatched_item(row)
+            .await
+            .expect("seed row");
+    }
+
+    crate::library_scan_unmatched::reconcile_title_scan_unmatched_items(
+        &app,
+        &MediaFacet::Series,
+        &library_id,
+        &root.to_string_lossy(),
+    )
+    .await
+    .expect("reconcile");
+
+    let mut remaining = unmatched
+        .items()
+        .await
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    remaining.sort();
+    let mut expected = vec![owned.id, other_library.id, conflict.id];
+    expected.sort();
+    assert_eq!(remaining, expected);
+}
