@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -85,6 +85,36 @@ pub(crate) async fn splash_ready_handler(State(state): State<SplashState>) -> Re
     }
 }
 
+/// Where the splash page loads the turning Scryer mark from. The splash router
+/// answers every other path with the splash page itself, so the artwork needs a
+/// route of its own, and the web UI's assets are not being served yet.
+const SPLASH_LOADING_MARK_PATH: &str = "/splash/scryer-loading.webp";
+const SPLASH_LOADING_MARK_STILL_PATH: &str = "/splash/scryer-loading-still.webp";
+
+/// The full-size animated mark and its first frame, for reduced motion.
+static SPLASH_LOADING_MARK: &[u8] = include_bytes!("../resources/splash/scryer-loading.webp");
+static SPLASH_LOADING_MARK_STILL: &[u8] =
+    include_bytes!("../resources/splash/scryer-loading-still.webp");
+
+fn webp_response(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/webp"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+async fn splash_loading_mark_handler() -> Response {
+    webp_response(SPLASH_LOADING_MARK)
+}
+
+async fn splash_loading_mark_still_handler() -> Response {
+    webp_response(SPLASH_LOADING_MARK_STILL)
+}
+
 pub(crate) async fn splash_fallback_handler(
     State(state): State<SplashState>,
     request: axum::extract::Request,
@@ -116,6 +146,11 @@ pub(crate) fn build_splash_router(
             "/health/ready",
             get(splash_ready_handler).with_state(state.clone()),
         )
+        .route(SPLASH_LOADING_MARK_PATH, get(splash_loading_mark_handler))
+        .route(
+            SPLASH_LOADING_MARK_STILL_PATH,
+            get(splash_loading_mark_still_handler),
+        )
         .fallback(splash_fallback_handler)
         .with_state(state)
         .layer(CompressionLayer::new().zstd(true).br(true).gzip(true))
@@ -127,7 +162,10 @@ pub(crate) fn build_splash_router(
 }
 
 fn splash_html() -> String {
-    let health_url = BasePath::from_env().join("/health");
+    let base_path = BasePath::from_env();
+    let health_url = base_path.join("/health");
+    let loading_mark_url = base_path.join(SPLASH_LOADING_MARK_PATH);
+    let loading_mark_still_url = base_path.join(SPLASH_LOADING_MARK_STILL_PATH);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -140,7 +178,10 @@ fn splash_html() -> String {
 <body>
 <main>
   <h1>scryer</h1>
-  <div class="spinner"></div>
+  <picture class="loading-mark">
+    <source media="(prefers-reduced-motion: reduce)" srcset="{loading_mark_still_url}"/>
+    <img src="{loading_mark_url}" width="531" height="522" alt=""/>
+  </picture>
   <div class="status">Upgrading database&hellip;</div>
 </main>
 <script>
@@ -152,7 +193,7 @@ fn splash_html() -> String {
       .then(function(d) {{
         if (d.status === "ok") location.reload();
         else if (d.status === "error") {{
-          document.querySelector(".spinner").style.display = "none";
+          document.querySelector(".loading-mark").style.display = "none";
           var s = document.querySelector(".status");
           s.textContent = "Startup failed";
           s.classList.add("error");
@@ -239,14 +280,11 @@ h1 {
   margin: 1rem auto 0;
   word-break: break-word;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
-.spinner {
-  width: 28px;
-  height: 28px;
-  border: 3px solid #273255;
-  border-top-color: #5b64ff;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+.loading-mark img {
+  display: block;
+  width: 160px;
+  max-width: 50vw;
+  height: auto;
   margin: 0 auto 1.5rem;
 }
 "#;
@@ -353,6 +391,39 @@ mod tests {
             assert_eq!(payload["status"], "error", "{path}");
             assert_eq!(payload["ready"], false, "{path}");
             assert_eq!(payload["message"], "boom", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn splash_serves_the_loading_mark_while_migrating() {
+        // Every other path answers with the splash page, so the page's artwork
+        // needs its own route, under the base path like the page's health poll.
+        for (path, expected) in [
+            (
+                "/scryer/splash/scryer-loading.webp",
+                super::SPLASH_LOADING_MARK,
+            ),
+            (
+                "/scryer/splash/scryer-loading-still.webp",
+                super::SPLASH_LOADING_MARK_STILL,
+            ),
+        ] {
+            let response = splash_router_for(BootstrapStatus::Migrating)
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("accept-encoding", "br, gzip")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()["content-type"], "image/webp", "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("body");
+            assert_eq!(&bytes[..], expected, "{path}");
         }
     }
 
