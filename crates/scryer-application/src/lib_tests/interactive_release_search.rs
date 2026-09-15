@@ -1141,12 +1141,7 @@ async fn an_unlinked_grab_reaches_an_import_offer_once_the_client_completes_it()
 
     // The client reports the job the way nzbget did in the failing run: first
     // in the queue, downloading, then completed in history.
-    let source_title = done
-        .results
-        .first()
-        .expect("one result")
-        .title
-        .clone();
+    let source_title = done.results.first().expect("one result").title.clone();
     let mut client_item =
         queue_history_fixture_item(&outcome.download_id, DownloadQueueState::Downloading, 40);
     client_item.client_id = client_config.id.clone();
@@ -1227,10 +1222,16 @@ async fn an_unlinked_grab_reaches_an_import_offer_once_the_client_completes_it()
             // ranks Pending and Blocked alike); a title-less grab has nothing
             // to import into, so Blocked is the honest one. The failure this
             // reproduces is neither: no tracked state at all.
-            if submissions.tracked_states.lock().await.values().any(|state| {
-                state == TrackedDownloadState::ImportPending.as_str()
-                    || state == TrackedDownloadState::ImportBlocked.as_str()
-            }) {
+            if submissions
+                .tracked_states
+                .lock()
+                .await
+                .values()
+                .any(|state| {
+                    state == TrackedDownloadState::ImportPending.as_str()
+                        || state == TrackedDownloadState::ImportBlocked.as_str()
+                })
+            {
                 return true;
             }
             sleep(Duration::from_millis(20)).await;
@@ -1249,7 +1250,11 @@ async fn an_unlinked_grab_reaches_an_import_offer_once_the_client_completes_it()
 
     assert!(
         *download_client.history_calls.lock().await > 0
-            || !download_client.recent_activity_calls.lock().await.is_empty(),
+            || !download_client
+                .recent_activity_calls
+                .lock()
+                .await
+                .is_empty(),
         "the fixture must actually be observed for this assertion to mean anything"
     );
     assert!(

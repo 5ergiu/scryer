@@ -1409,11 +1409,7 @@ impl AppUseCase {
             .services
             .workflow
             .download_submissions
-            .record_submission_with_identity(
-                submission.clone(),
-                identity,
-                grab.seed_goals.clone(),
-            )
+            .record_submission_with_identity(submission.clone(), identity, grab.seed_goals.clone())
             .await
         {
             Ok(disposition) => disposition,
