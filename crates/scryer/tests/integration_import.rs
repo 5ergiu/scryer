@@ -7,22 +7,28 @@ mod persistence_tests;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use common::TestContext;
+#[cfg(unix)]
+use scryer_application::DownloadClientConfigRepository;
 use scryer_application::testing::AppUseCaseTestExt;
 use scryer_application::{
-    AcquisitionScopeStateRepository, BlocklistRepository, ClientJobLocator,
-    DownloadClientConfigRepository, DownloadSubmission, DownloadSubmissionPurpose,
-    DownloadSubmissionRepository, ImportArtifactRepository, ImportRepository, LibraryRepository,
-    LibraryRootDraft, MediaFileRepository, ReleaseAttemptRepository, SaveQualityProfileSettings,
-    ShowRepository, SubmissionScope, TitleRepository, import_completed_download,
+    AcquisitionScopeStateRepository, BlocklistRepository, ClientJobLocator, DownloadSubmission,
+    DownloadSubmissionPurpose, DownloadSubmissionRepository, ImportArtifactRepository,
+    ImportRepository, LibraryRepository, LibraryRootDraft, MediaFileRepository,
+    ReleaseAttemptRepository, SaveQualityProfileSettings, ShowRepository, SubmissionScope,
+    TitleRepository, import_completed_download,
 };
 use scryer_domain::{
-    Collection, CompletedDownload, DownloadClientConfig, DownloadClientStatus, Episode, Id,
-    ImportDecision, ImportSkipReason, MediaFacet, Title,
+    Collection, CompletedDownload, Episode, Id, ImportDecision, ImportSkipReason, MediaFacet, Title,
 };
+#[cfg(unix)]
+use scryer_domain::{DownloadClientConfig, DownloadClientStatus};
+#[cfg(unix)]
 use scryer_infrastructure_acquisition::downloads::config_store::DownloadClientConfigStore;
 use scryer_infrastructure_sql::types::SettingDefinitionSeed;
 use scryer_infrastructure_workflow::workflow::{
