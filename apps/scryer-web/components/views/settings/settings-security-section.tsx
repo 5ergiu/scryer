@@ -17,6 +17,10 @@ const SECURITY_PANEL_TITLE_CLASS =
   "text-[15px] font-semibold text-[var(--scry-ink2)]";
 const SECURITY_INSET_CLASS =
   "rounded-[12px] border border-[var(--scry-line2)] bg-[var(--scry-card2)]";
+const SECURITY_INSET_HEADER_CLASS =
+  "-mx-4 -mt-4 mb-4 border-b border-[var(--scry-line2)] px-4 py-3";
+const SECURITY_INSET_TITLE_CLASS =
+  "text-sm font-semibold text-[var(--scry-ink)]";
 
 type SettingsSecuritySectionProps = {
   sessionDurationDraft: string;
@@ -111,7 +115,7 @@ export function SettingsSecuritySection({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
                 <h3 className={SECURITY_PANEL_TITLE_CLASS}>
-                  {t("settings.securityEnableFormLogin")}
+                  {t("settings.securityLoginSettings")}
                 </h3>
               </div>
               <Button
@@ -130,8 +134,8 @@ export function SettingsSecuritySection({
           </div>
           <div className="grid gap-4 p-4 lg:grid-cols-2">
             <section className={`${SECURITY_INSET_CLASS} p-4 lg:col-span-2`}>
-              <div className="mb-3">
-                <h4 className="text-sm font-semibold text-[var(--scry-ink2)]">
+              <div className={SECURITY_INSET_HEADER_CLASS}>
+                <h4 className={SECURITY_INSET_TITLE_CLASS}>
                   {t("settings.securityAccessControl")}
                 </h4>
               </div>
@@ -229,8 +233,8 @@ export function SettingsSecuritySection({
             </section>
 
             <section className={`${SECURITY_INSET_CLASS} p-4 lg:col-span-2`}>
-              <div className="mb-3 space-y-1">
-                <h4 className="text-sm font-semibold text-[var(--scry-ink2)]">
+              <div className={`${SECURITY_INSET_HEADER_CLASS} space-y-1`}>
+                <h4 className={SECURITY_INSET_TITLE_CLASS}>
                   Multi-factor authentication
                 </h4>
                 <p className="text-xs text-[var(--scry-muted3)]">

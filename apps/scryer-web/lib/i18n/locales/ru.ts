@@ -198,7 +198,7 @@ const ru: LocaleDictionary = {
     "settings.general": "Общие",
     "settings.backups": "Резервные копии",
     "settings.security": "Безопасность",
-    "settings.securityEnableFormLogin": "Вход через форму",
+    "settings.securityLoginSettings": "Настройки входа",
     "settings.securityEnableFormLoginHelp":
         "Если параметр включён, Scryer требует аутентифицированный сеанс пользователя. Если параметр отключён, запросы выполняются от имени администратора по умолчанию.",
     "settings.securityPasswordMinLength": "Минимальная длина пароля",
