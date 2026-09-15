@@ -21,6 +21,7 @@ import {
   type SetupIndexerProviderOption,
 } from "@/lib/hooks/use-indexer-setup";
 import { usePluginManagement } from "@/lib/hooks/use-plugin-management";
+import { useSetupRulePacks } from "@/lib/hooks/use-setup-rule-packs";
 import { localPathStyleFromRuntimeValue } from "@/lib/utils/local-path-style";
 import {
   runAdvisorySetupMediaPathSave,
@@ -305,6 +306,11 @@ export function SetupWizardContainer({
     installPlugin,
     uninstallPlugin,
   } = usePluginManagement({ client, t, refreshProviderOptions });
+  const { rulePacks, rulePacksLoading, setRulePackEnabled } = useSetupRulePacks({
+    client,
+    active: wizardPath === "fresh" && currentStep === 3,
+    t,
+  });
 
   // ── Step labels per path ────────────────────────────────────────────
   const stepLabels =
@@ -654,9 +660,14 @@ export function SetupWizardContainer({
           pluginProgress={pluginProgress}
           pluginErrors={pluginErrors}
           error={pluginsError}
+          rulePacks={rulePacks}
+          rulePacksLoading={rulePacksLoading}
           onRefreshRegistry={refreshPluginsRegistry}
           onInstallPlugin={installPlugin}
           onUninstallPlugin={uninstallPlugin}
+          onSetRulePackEnabled={(packId, enabled) =>
+            void setRulePackEnabled(packId, enabled)
+          }
           onNext={() => goToStep(4)}
           onBack={() => goToStep(2)}
         />
