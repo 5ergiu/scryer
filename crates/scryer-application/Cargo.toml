@@ -65,7 +65,7 @@ sha2 = { version = "0.11", optional = true }
 brotli = { version = "8", optional = true }
 tar = "0.4"
 flate2 = "1"
-zstd = { version = "0.13", default-features = false, optional = true }
+zstd = { version = "0.14", default-features = false, optional = true }
 tempfile = "3"
 chardetng = { version = "1", optional = true }
 encoding_rs = { version = "0.8", optional = true }
