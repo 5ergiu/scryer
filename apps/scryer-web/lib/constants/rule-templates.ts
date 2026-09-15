@@ -167,17 +167,6 @@ score_entry["too_old"] := scryer.block_score() if {
 }`,
   },
   {
-    id: "block-password-protected",
-    title: "Penalize password-protected releases",
-    description: "Strongly penalize releases flagged as password protected",
-    category: "Penalties",
-    regoSource: `import rego.v1
-
-score_entry["password_protected"] := scryer.block_score() if {
-    input.release.is_password_protected == true
-}`,
-  },
-  {
     id: "block-obfuscated-retagged",
     title: "Penalize obfuscated or retagged releases",
     description: "Strongly penalize releases with normalized obfuscation or retagging signals",

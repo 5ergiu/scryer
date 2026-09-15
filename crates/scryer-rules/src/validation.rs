@@ -1862,12 +1862,25 @@ mod tests {
         input: UserRuleInput,
         facet: &str,
     ) -> crate::EvalResult {
-        let policy_id = format!("builtin_{}", template_id.replace('-', "_"));
-        let rego_source =
-            crate::rewrite_package_declaration(&built_in_template_source(template_id), &policy_id);
+        evaluate_policy_source(
+            template_id,
+            &built_in_template_source(template_id),
+            input,
+            facet,
+        )
+    }
+
+    fn evaluate_policy_source(
+        name: &str,
+        source: &str,
+        input: UserRuleInput,
+        facet: &str,
+    ) -> crate::EvalResult {
+        let policy_id = format!("builtin_{}", name.replace('-', "_"));
+        let rego_source = crate::rewrite_package_declaration(source, &policy_id);
         let engine = crate::UserRulesEngine::build(&[crate::UserPolicy {
             id: policy_id,
-            name: template_id.to_string(),
+            name: name.to_string(),
             rego_source,
             origin: crate::PolicyOrigin::User,
             applied_facets: Vec::new(),
@@ -2766,16 +2779,21 @@ mod tests {
     }
 
     #[test]
-    fn password_protected_template_matches_injected_signal() {
+    fn password_protected_rule_matches_injected_signal() {
         let mut input = synthetic_test_input();
         input.release.is_password_protected = Some(true);
-        let result = evaluate_template("block-password-protected", input, "movie");
+        let result = evaluate_policy_source(
+            "password-protected",
+            "import rego.v1\n\nscore_entry[\"password_protected\"] := scryer.block_score() if {\n    input.release.is_password_protected == true\n}\n",
+            input,
+            "movie",
+        );
         assert!(
             result
                 .entries
                 .iter()
                 .any(|entry| entry.code == "password_protected"),
-            "password-protected template should block when the signal is injected"
+            "password-protected rule should block when the signal is injected"
         );
     }
 
