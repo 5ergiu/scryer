@@ -201,8 +201,8 @@ const ru: LocaleDictionary = {
     "settings.securityEnableFormLogin": "Вход через форму",
     "settings.securityEnableFormLoginHelp":
         "Если параметр включён, Scryer требует аутентифицированный сеанс пользователя. Если параметр отключён, запросы выполняются от имени администратора по умолчанию.",
-    "settings.securityPasswordMinLength": "Минимальная длина локального пароля",
-    "settings.securitySessionDuration": "Длительность сеанса (дни)",
+    "settings.securityPasswordMinLength": "Минимальная длина пароля",
+    "settings.securitySessionDuration": "Вход действителен",
     "settings.securitySessionDurationHelp": "Применяется к новым входам всех пользователей этого экземпляра. Если включено сохранение входа, сеансы сохраняются после перезапуска браузера до истечения срока. Срок существующих сеансов не меняется.",
     "settings.securitySessionDurationInvalid": "Длительность сеанса должна быть целым числом от 1 до 365 дней.",
     "settings.securityPasswordMinLengthHelp":
@@ -1033,6 +1033,7 @@ const ru: LocaleDictionary = {
     "settings.keepHistoryForever": "Хранить историю бессрочно",
     "settings.historyRetentionDaysHeader": "Хранить историю",
     "settings.historyRetentionDaysSuffix": "дней",
+    "settings.securitySessionDurationSuffix": "дней",
     "settings.historyRetentionDaysLabel": "Хранить историю в течение N дней",
     "settings.historyRetentionSaved": "Настройки хранения истории сохранены.",
     "settings.generalSaved": "Общие настройки сохранены.",

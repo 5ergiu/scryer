@@ -3,7 +3,7 @@ import { InfoHelp } from "@/components/common/info-help";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { CheckboxField } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
+import { Input, integerInputProps, sanitizeDigits } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -35,7 +35,6 @@ type SettingsSecuritySectionProps = {
   confirmPassword: string;
   confirmError: string | null;
   passwordMinLengthDraft: string;
-  minPasswordLength: number;
   onToggle: (enabled: boolean) => void;
   onConfirmPasswordChange: (value: string) => void;
   onConfirmEnable: () => Promise<void> | void;
@@ -76,7 +75,6 @@ export function SettingsSecuritySection({
   confirmPassword,
   confirmError,
   passwordMinLengthDraft,
-  minPasswordLength,
   onToggle,
   onConfirmPasswordChange,
   onConfirmEnable,
@@ -138,24 +136,23 @@ export function SettingsSecuritySection({
                 </h4>
               </div>
               <div className="grid gap-6 lg:grid-cols-2">
-                <div className="space-y-4">
+                <div className="flex flex-wrap items-start gap-4">
                   <div className="space-y-1.5">
-                    <Label className="text-sm font-medium" htmlFor="security-password-min-length">
+                    <Label className="whitespace-nowrap" htmlFor="security-password-min-length">
                       {t("settings.securityPasswordMinLength")}
                     </Label>
                     <Input
+                      {...integerInputProps}
                       id="security-password-min-length"
-                      type="number"
-                      inputMode="numeric"
-                      min={minPasswordLength}
-                      step={1}
+                      className="w-28"
                       value={passwordMinLengthDraft}
                       disabled={busy}
                       onBlur={(event) =>
                         void onPasswordMinLengthSubmit(event.currentTarget.value)
                       }
-                      onChange={(event) => onPasswordMinLengthDraftChange(event.target.value)}
-                      onWheel={(event) => event.currentTarget.blur()}
+                      onChange={(event) =>
+                        onPasswordMinLengthDraftChange(sanitizeDigits(event.target.value))
+                      }
                       onKeyDown={(event) => {
                         if (event.key === "Enter") {
                           event.preventDefault();
@@ -165,27 +162,31 @@ export function SettingsSecuritySection({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor="security-session-duration-days">
+                    <Label className="whitespace-nowrap" htmlFor="security-session-duration-days">
                       {t("settings.securitySessionDuration")}
                     </Label>
-                    <Input
-                      id="security-session-duration-days"
-                      type="number"
-                      inputMode="numeric"
-                      min={1}
-                      max={365}
-                      step={1}
-                      value={sessionDurationDraft}
-                      disabled={busy}
-                      onChange={(event) => onSessionDurationDraftChange(event.target.value)}
-                      onBlur={(event) => void onSessionDurationSubmit(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void onSessionDurationSubmit(event.currentTarget.value);
+                    <div className="relative w-32">
+                      <Input
+                        {...integerInputProps}
+                        id="security-session-duration-days"
+                        className="pr-12"
+                        value={sessionDurationDraft}
+                        disabled={busy}
+                        onChange={(event) =>
+                          onSessionDurationDraftChange(sanitizeDigits(event.target.value))
                         }
-                      }}
-                    />
+                        onBlur={(event) => void onSessionDurationSubmit(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void onSessionDurationSubmit(event.currentTarget.value);
+                          }
+                        }}
+                      />
+                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                        {t("settings.securitySessionDurationSuffix")}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="divide-y divide-[var(--scry-line2)]">

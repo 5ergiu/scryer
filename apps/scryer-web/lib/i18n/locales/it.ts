@@ -701,6 +701,7 @@ const it: LocaleDictionary = {
   "settings.keepHistoryForever": "Conserva la cronologia per sempre",
   "settings.historyRetentionDaysHeader": "Conserva la cronologia per",
   "settings.historyRetentionDaysSuffix": "giorni",
+  "settings.securitySessionDurationSuffix": "giorni",
   "settings.historyRetentionValidation":
     "I giorni di conservazione della cronologia devono essere almeno 1, a meno che la cronologia non venga conservata per sempre.",
   "settings.languageChangeTitle": "Cambia lingua",

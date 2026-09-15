@@ -223,7 +223,7 @@ const nl: LocaleDictionary = {
   "settings.securityEnableFormLogin": "Formulierlogin",
   "settings.securityEnableFormLoginHelp":
     "Wanneer ingeschakeld, vereist Scryer een geauthenticeerde gebruikerssessie. Wanneer uitgeschakeld, worden verzoeken afgehandeld als de standaardbeheerder.",
-  "settings.securityPasswordMinLength": "Minimale lengte lokaal wachtwoord",
+  "settings.securityPasswordMinLength": "Minimale wachtwoordlengte",
   "settings.securityPasswordMinLengthHelp":
     "Geldt alleen voor nieuwe of gewijzigde Scryer-wachtwoorden. Bestaande kortere wachtwoorden blijven werken. Minimum: {{min}}.",
   "settings.securityPasswordMinLengthInvalid":
@@ -959,6 +959,7 @@ const nl: LocaleDictionary = {
   "settings.keepHistoryForever": "Geschiedenis altijd bewaren",
   "settings.historyRetentionDaysHeader": "Geschiedenis bewaren gedurende",
   "settings.historyRetentionDaysSuffix": "dagen",
+  "settings.securitySessionDurationSuffix": "dagen",
   "settings.generalSaved": "Algemene instellingen opgeslagen.",
   "settings.uiSaved": "Weergave-instellingen opgeslagen.",
   "settings.historyRetentionValidation":

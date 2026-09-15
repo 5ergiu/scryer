@@ -685,6 +685,7 @@ const ko: LocaleDictionary = {
   "settings.keepHistoryForever": "기록을 영구히 보존",
   "settings.historyRetentionDaysHeader": "기록 보존 기간",
   "settings.historyRetentionDaysSuffix": "일",
+  "settings.securitySessionDurationSuffix": "일",
   "settings.historyRetentionValidation":
     "기록을 영구히 보존하지 않는 경우 기록 보존 일수는 최소 1이어야 합니다.",
   "settings.languageChangeTitle": "언어 변경",
