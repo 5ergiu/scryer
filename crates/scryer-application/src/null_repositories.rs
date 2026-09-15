@@ -77,34 +77,6 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct NullDownloadClientStatusRepository;
-
-#[async_trait]
-impl crate::ports::DownloadClientStatusRepository for NullDownloadClientStatusRepository {
-    async fn list(
-        &self,
-    ) -> AppResult<std::collections::HashMap<String, crate::ports::DownloadClientStatus>> {
-        Ok(std::collections::HashMap::new())
-    }
-
-    async fn record_failure(
-        &self,
-        _client_config_id: &str,
-        _now: chrono::DateTime<chrono::Utc>,
-    ) -> AppResult<crate::ports::DownloadClientStatus> {
-        Ok(crate::ports::DownloadClientStatus::default())
-    }
-
-    async fn record_success(&self, _client_config_id: &str) -> AppResult<()> {
-        Ok(())
-    }
-
-    async fn clear(&self, _client_config_id: &str) -> AppResult<()> {
-        Ok(())
-    }
-}
-
-#[derive(Default)]
 pub struct NullSeedingProfileRepository;
 
 #[async_trait]
@@ -2584,6 +2556,35 @@ pub struct NullDownloadSubmissionRepository;
 
 #[derive(Default)]
 pub struct NullDownloadRegistryRepository;
+
+/// No status is ever recorded, so every client reads as healthy and nothing is
+/// ever routed around — the same answer an assembly with no status table would
+/// give.
+#[derive(Default)]
+pub struct NullDownloadClientStatusRepository;
+
+#[async_trait]
+impl crate::ports::DownloadClientStatusRepository for NullDownloadClientStatusRepository {
+    async fn list(
+        &self,
+    ) -> AppResult<std::collections::HashMap<String, crate::escalation_backoff::DownloadClientStatus>>
+    {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn record_failure(
+        &self,
+        _: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::escalation_backoff::DownloadClientStatus> {
+        Ok(crate::escalation_backoff::DownloadClientStatus::default().after_failure(now))
+    }
+    async fn record_success(&self, _: &str) -> AppResult<()> {
+        Ok(())
+    }
+    async fn clear(&self, _: &str) -> AppResult<()> {
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 pub struct NullAcquisitionStateRepository;

@@ -2,7 +2,7 @@
 import * as React from "react";
 import { ManualDiscSelectionControl } from "./manual-disc-selection";
 import type { ManualDiscSelection } from "@/lib/utils/manual-import-video-facts";
-import { Check, ChevronsUpDown, FileVideo, Loader2, Search } from "lucide-react";
+import { Check, ChevronsUpDown, FileVideo, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -40,6 +40,7 @@ import { type ManualImportVideoFacts } from "@/lib/utils/manual-import-video-fac
 import { buildViewPath } from "@/lib/utils/routing";
 import { useNavigate } from "react-router";
 import { useClient } from "urql";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 const ARCHIVE_EXTRACTION_PLUGIN_REQUIRED_CODE = "ARCHIVE_EXTRACTION_PLUGIN_REQUIRED";
 const ARCHIVE_EXTRACTION_PLUGIN_REQUIRED_MESSAGE = [
@@ -688,7 +689,7 @@ export function ManualImportDialog({
             id="activity-manual-import-loading"
             className="flex items-center justify-center gap-3 py-12"
           >
-            <Loader2 className="h-5 w-5 animate-spin text-[var(--scry-accent-text)]" />
+            <LoadingMark className="h-5 w-5 text-[var(--scry-accent-text)]" />
             <span className="text-sm text-muted-foreground">
               {extractingArchives
                 ? "Extracting archives. This can take a while..."
@@ -874,7 +875,7 @@ export function ManualImportDialog({
           >
             {importing ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <LoadingMark className="mr-2 h-4 w-4" />
                 Queueing...
               </>
             ) : (

@@ -3,6 +3,7 @@ use crate::contracts::{
     ClientJobLocator, DownloadClientBindingRecord, DownloadRecord, ObservationResolution,
     ObservedClientJob, TerminalDownloadHistoryRow,
 };
+use crate::escalation_backoff::DownloadClientStatus as DownloadClientBackoffStatus;
 use crate::location::model::{
     FileVerificationRecord, LocationOperation, LocationOperationCounters, LocationOperationState,
     LocationReasonCode, TitleCheckpoint,
@@ -3695,6 +3696,37 @@ pub struct IndexerSystemBackoff {
     pub escalation_level: usize,
 }
 
+/// The download-client half of the provider status Sonarr keeps for both
+/// families (`DownloadClientStatusService`), stored in `download_client_status`
+/// (migration 0241).
+///
+/// Only failing clients have rows: [`Self::record_success`] deletes, so `list`
+/// returns exactly the clients currently in a failure run and everything absent
+/// is healthy. [`Self::record_failure`] owns the policy — it applies
+/// [`DownloadClientBackoffStatus::after_failure`] to whatever is stored and
+/// persists the result — so no caller has to know the ladder to record an outage.
+///
+/// The status type is aliased here only because `DownloadClientStatus` is
+/// already taken in this crate by the client's live capability probe
+/// (`contracts.rs`); it is the same `escalation_backoff::DownloadClientStatus`
+/// every caller names.
+#[async_trait]
+pub trait DownloadClientStatusRepository: Send + Sync {
+    async fn list(
+        &self,
+    ) -> AppResult<std::collections::HashMap<String, DownloadClientBackoffStatus>>;
+    /// Record one failure and return the status the client is now in.
+    async fn record_failure(
+        &self,
+        client_config_id: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<DownloadClientBackoffStatus>;
+    /// Clear the failure run: the client answered.
+    async fn record_success(&self, client_config_id: &str) -> AppResult<()>;
+    /// Forget the client entirely, e.g. because its configuration was deleted.
+    async fn clear(&self, client_config_id: &str) -> AppResult<()>;
+}
+
 #[async_trait]
 pub trait IndexerConfigRepository: Send + Sync {
     async fn list(&self, provider_type: Option<String>) -> AppResult<Vec<IndexerConfig>>;
@@ -3891,36 +3923,6 @@ pub trait ScopeIndexerCoverageRepository: Send + Sync {
         &self,
         scope_keys: &[String],
     ) -> AppResult<Vec<ScopeCoverageRow>>;
-}
-
-/// One download client's failure record, mirroring Sonarr's
-/// `DownloadClientStatus` / `ProviderStatusBase`. A client whose
-/// `disabled_until` is still in the future is blocked: the refresh tick does
-/// not ask it and grabs route past it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DownloadClientStatus {
-    pub initial_failure_at: Option<DateTime<Utc>>,
-    pub most_recent_failure_at: Option<DateTime<Utc>>,
-    pub escalation_level: usize,
-    pub disabled_until: Option<DateTime<Utc>>,
-}
-
-impl DownloadClientStatus {
-    pub fn is_blocked(&self, now: DateTime<Utc>) -> bool {
-        self.disabled_until.is_some_and(|until| until > now)
-    }
-}
-
-#[async_trait]
-pub trait DownloadClientStatusRepository: Send + Sync {
-    async fn list(&self) -> AppResult<std::collections::HashMap<String, DownloadClientStatus>>;
-    async fn record_failure(
-        &self,
-        client_config_id: &str,
-        now: DateTime<Utc>,
-    ) -> AppResult<DownloadClientStatus>;
-    async fn record_success(&self, client_config_id: &str) -> AppResult<()>;
-    async fn clear(&self, client_config_id: &str) -> AppResult<()>;
 }
 
 #[async_trait]

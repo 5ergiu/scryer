@@ -479,6 +479,11 @@ impl AppServicesBuilder {
         workflow.download_registry,
         Arc<dyn DownloadRegistryRepository>
     );
+    app_services_builder_setter!(
+        with_download_client_status,
+        integrations.download_client_status,
+        Arc<dyn crate::ports::DownloadClientStatusRepository>
+    );
     app_services_builder_required_setter!(
         with_acquisition_state,
         workflow.acquisition_state,
@@ -630,11 +635,6 @@ impl AppServicesBuilder {
         with_download_client_plugin_provider,
         integrations.download_client_plugin_provider,
         Arc<dyn DownloadClientPluginProvider>
-    );
-    app_services_builder_setter!(
-        with_download_client_status,
-        integrations.download_client_status,
-        Arc<dyn crate::ports::DownloadClientStatusRepository>
     );
     app_services_builder_setter!(
         with_seeding_profiles,

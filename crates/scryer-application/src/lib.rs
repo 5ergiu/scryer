@@ -28,6 +28,7 @@ pub use download_identity::{
     accepted_download_submission_identity, download_id_from_info_hash,
     download_submission_identity_is_empty, normalize_torrent_info_hash, observed_download_identity,
 };
+pub mod escalation_backoff;
 mod events;
 pub mod external_import;
 pub mod file_source_signature;
@@ -517,42 +518,42 @@ pub use null_repositories::{
 // ── Maintenance safety probes (RFC 137 §9.10, WP-G) ─────────────────────────
 pub use null_repositories::NullMediaServerPlaybackProbe;
 // ── Media-server watch signals (RFC 137 §7.3, WP-M) ─────────────────────────
-pub use null_repositories::{NullMediaServerSignalRepository, NullMediaServerSignalSource};
 /// Per-client failure record and its repository port.
 ///
 /// The struct is re-exported under a distinct name because
 /// `contracts::DownloadClientStatus` (the live health-probe result) already
 /// owns `DownloadClientStatus` at the crate root.
-pub use ports::DownloadClientStatus as DownloadClientBackoffStatus;
-pub use ports::DownloadClientStatusRepository;
+pub use escalation_backoff::DownloadClientStatus as DownloadClientBackoffStatus;
+pub use null_repositories::{NullMediaServerSignalRepository, NullMediaServerSignalSource};
 pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, BlocklistRepository, BuiltinDownloadClientConnectionTester,
     DatastoreInfo, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
     DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
-    DownloadClientSnapshotOutcome, DownloadQueueCommandRepository, DownloadRegistryRepository,
-    DownloadSubmissionRepository, EmbyApiKeyExchange, EmbyApiKeyExchangeCleanup, EmbyAvatar,
-    EmbyConnectAddressStatus, EmbyConnectIdentityVerification, EmbyConnectServer,
-    EmbyConnectUserType, EmbyServerIdentity, EmbyServerUser, ExternalIdentityVerifier,
-    ExternalImportMonitorSnapshotRepository, ExternalImportSetupInstanceApiKeyDraft,
-    ExternalImportSetupSecretDraft, ExternalImportSetupSecretDraftInput,
-    ExternalImportSetupSecretDraftRepository, ExternalImportSetupSecretDraftSaveResult,
-    ExternalImportSetupSecretDraftStatus, ExternalImportSetupSecretInstanceKind,
-    ExternalImportSetupSecretOverrideDraft, ExternalPluginWasm, FileImporter,
-    HousekeepingMediaFileRootRow, HousekeepingRepository, IdentityTrackedStateTarget,
-    ImageProxyCacheControl, ImageProxyCacheEntryRecord, ImageProxyCacheUsage, ImageProxyKind,
-    ImageProxyRegistration, ImageProxyRepository, ImageProxySourceRecord, ImportArtifactRepository,
-    ImportFileExecutionContext, ImportFilePermissions, ImportFileTransferProgress,
-    ImportFileTransferProgressSender, ImportRepository, IndexerAccountingContext,
-    IndexerArtifactResolver, IndexerCapsSnapshotRefresher, IndexerClient, IndexerConfigRepository,
-    IndexerDispatchGate, IndexerManagementClient, IndexerPluginProvider,
-    IndexerSearchCandidateWrite, IndexerSearchLearningContext, IndexerSearchLearningKey,
-    IndexerSearchLearningRecord, IndexerSearchLearningRepository, IndexerSearchRunWrite,
-    IndexerStatsTracker, IndexerSystemBackoff, JellyfinServerUser, JobRunRepository,
-    LibraryProbeRepository, LibraryRepository, LibraryScanUnmatchedItemRepository,
-    LifecycleActionRunRepository, LifecycleClaimRepository, LocationOperationProgress,
-    LocationOperationRepository, LocationOwnershipClaim, LocationOwnershipOutcome,
-    LogicalBackupExporter, MaintenanceActionJobReceiptClaim, MaintenanceActionJobReceiptTransition,
+    DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
+    DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,
+    EmbyApiKeyExchangeCleanup, EmbyAvatar, EmbyConnectAddressStatus,
+    EmbyConnectIdentityVerification, EmbyConnectServer, EmbyConnectUserType, EmbyServerIdentity,
+    EmbyServerUser, ExternalIdentityVerifier, ExternalImportMonitorSnapshotRepository,
+    ExternalImportSetupInstanceApiKeyDraft, ExternalImportSetupSecretDraft,
+    ExternalImportSetupSecretDraftInput, ExternalImportSetupSecretDraftRepository,
+    ExternalImportSetupSecretDraftSaveResult, ExternalImportSetupSecretDraftStatus,
+    ExternalImportSetupSecretInstanceKind, ExternalImportSetupSecretOverrideDraft,
+    ExternalPluginWasm, FileImporter, HousekeepingMediaFileRootRow, HousekeepingRepository,
+    IdentityTrackedStateTarget, ImageProxyCacheControl, ImageProxyCacheEntryRecord,
+    ImageProxyCacheUsage, ImageProxyKind, ImageProxyRegistration, ImageProxyRepository,
+    ImageProxySourceRecord, ImportArtifactRepository, ImportFileExecutionContext,
+    ImportFilePermissions, ImportFileTransferProgress, ImportFileTransferProgressSender,
+    ImportRepository, IndexerAccountingContext, IndexerArtifactResolver,
+    IndexerCapsSnapshotRefresher, IndexerClient, IndexerConfigRepository, IndexerDispatchGate,
+    IndexerManagementClient, IndexerPluginProvider, IndexerSearchCandidateWrite,
+    IndexerSearchLearningContext, IndexerSearchLearningKey, IndexerSearchLearningRecord,
+    IndexerSearchLearningRepository, IndexerSearchRunWrite, IndexerStatsTracker,
+    IndexerSystemBackoff, JellyfinServerUser, JobRunRepository, LibraryProbeRepository,
+    LibraryRepository, LibraryScanUnmatchedItemRepository, LifecycleActionRunRepository,
+    LifecycleClaimRepository, LocationOperationProgress, LocationOperationRepository,
+    LocationOwnershipClaim, LocationOwnershipOutcome, LogicalBackupExporter,
+    MaintenanceActionJobReceiptClaim, MaintenanceActionJobReceiptTransition,
     MaintenanceActionStepCandidateKey, MaintenanceActionStepClaim, MaintenanceActionStepRepository,
     MaintenanceCandidateQuery, MaintenanceCandidateRepository, MaintenanceEvaluationRepository,
     MaintenanceEvaluationRunRepository, MaintenanceExclusionRepository,

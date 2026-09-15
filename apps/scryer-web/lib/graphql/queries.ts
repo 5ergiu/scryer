@@ -3994,6 +3994,7 @@ export const rulePackTemplatesQuery = `query RulePackTemplates($packId: String!)
     description
     category
     appliedFacets
+    defaultEnabled
   }
 }`;
 

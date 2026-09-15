@@ -111,6 +111,34 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// The per-client backoff status of every client currently in a failure run,
+    /// keyed by client configuration id. Clients without a row are healthy.
+    pub async fn list_download_client_statuses(
+        &self,
+        actor: &User,
+    ) -> AppResult<std::collections::HashMap<String, crate::escalation_backoff::DownloadClientStatus>>
+    {
+        let settings_permissions = scryer_domain::AppPermissionMask::from_permissions([
+            scryer_domain::AppPermission::ManageSystemSettings,
+            scryer_domain::AppPermission::ManageCatalogSettings,
+        ]);
+        if !self
+            .has_any_app_permission(actor, settings_permissions)
+            .await?
+        {
+            return Err(AppError::Unauthorized(
+                "You do not have permission to perform this action".to_string(),
+            ));
+        }
+
+        self.services
+            .integrations
+            .download_client_status
+            .list()
+            .await
+    }
+}
+impl AppUseCase {
     async fn enabled_download_clients_by_priority(&self) -> AppResult<Vec<DownloadClientConfig>> {
         let mut enabled_clients = self
             .services

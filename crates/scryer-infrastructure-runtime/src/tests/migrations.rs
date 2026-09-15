@@ -5498,14 +5498,13 @@ async fn migration_0221_creates_the_tag_registry_and_adopts_the_labels_already_i
     assert!(duplicate.is_err(), "labels must be unique");
 }
 
-/// Migration 0241 (renumbered to 0242 at merge if the download-client status
-/// migration lands first) resolves the legacy client-less rows migration 0179 left
+/// Migration 0242 resolves the legacy client-less rows migration 0179 left
 /// behind, because the runtime rule that used to resolve them at read time
 /// ("the single configured client of this type") is gone. A row whose type has
 /// exactly one configured client is attributed to it; anything ambiguous is
 /// ended, so it can never hold a scope again.
 #[tokio::test]
-async fn migration_0241_attributes_single_client_bindings_and_ends_the_rest() {
+async fn migration_0242_attributes_single_client_bindings_and_ends_the_rest() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -5550,11 +5549,11 @@ async fn migration_0241_attributes_single_client_bindings_and_ends_the_rest() {
     .expect("legacy fixture should initialize");
 
     sqlx::raw_sql(include_str!(
-        "../../../scryer/src/db/migrations/0241_end_client_less_download_bindings.sql"
+        "../../../scryer/src/db/migrations/0242_end_client_less_download_bindings.sql"
     ))
     .execute(&pool)
     .await
-    .expect("migration 0241 should apply");
+    .expect("migration 0242 should apply");
 
     let bindings: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT download_id, client_config_id, ended_at FROM download_client_bindings ORDER BY download_id",

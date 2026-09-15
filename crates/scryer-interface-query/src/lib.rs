@@ -3977,6 +3977,7 @@ impl AcquisitionQueries {
                 category: t.category,
                 rego_source: t.rego_source,
                 applied_facets: t.applied_facets,
+                default_enabled: t.default_enabled,
             })
             .collect())
     }

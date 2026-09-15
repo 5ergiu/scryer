@@ -15,7 +15,6 @@ import {
   ChevronsUpDown,
   Eye,
   EyeOff,
-  Loader2,
   Search,
   Trash2,
   Zap,
@@ -78,6 +77,7 @@ import {
   VirtualizedTitleTableBody,
   type VirtualizedTitleTableBodyHandle,
 } from "./title-table-shared";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 type TitleTableProps = {
   view: string;
@@ -790,12 +790,7 @@ export const TitleTable = React.memo(function TitleTable({
                   className={TITLE_TABLE_ACTION_BUTTON_CLASS}
                 >
                   {autoQueueLoading ? (
-                    <Loader2
-                      className={cn(
-                        posterActionIconClassName,
-                        "animate-spin text-[var(--scry-accent-text)]",
-                      )}
-                    />
+                    <LoadingMark className={posterActionIconClassName} />
                   ) : (
                     <Zap className={posterActionIconClassName} />
                   )}
@@ -824,12 +819,7 @@ export const TitleTable = React.memo(function TitleTable({
                     className={TITLE_TABLE_ACTION_BUTTON_CLASS}
                   >
                     {monitorToggleLoading ? (
-                      <Loader2
-                        className={cn(
-                          posterActionIconClassName,
-                          "animate-spin",
-                        )}
-                      />
+                      <LoadingMark className={posterActionIconClassName} />
                     ) : item.monitored ? (
                       <EyeOff className={posterActionIconClassName} />
                     ) : (
@@ -846,9 +836,7 @@ export const TitleTable = React.memo(function TitleTable({
                   className={TITLE_TABLE_ACTION_BUTTON_CLASS}
                 >
                   {deleteLoading ? (
-                    <Loader2
-                      className={cn(posterActionIconClassName, "animate-spin")}
-                    />
+                    <LoadingMark className={posterActionIconClassName} />
                   ) : (
                     <Trash2 className={posterActionIconClassName} />
                   )}
@@ -889,7 +877,7 @@ export const TitleTable = React.memo(function TitleTable({
                 </div>
                 {interactiveSearchLoading ? (
                   <div className="flex items-center gap-3 py-3">
-                    <Loader2 className="h-5 w-5 animate-spin text-[var(--scry-accent-text)]" />
+                    <LoadingMark className="h-5 w-5 text-[var(--scry-accent-text)]" />
                     <p className="text-sm text-muted-foreground">
                       {t("label.searching")}
                     </p>

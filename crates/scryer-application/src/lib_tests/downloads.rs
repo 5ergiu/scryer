@@ -14432,11 +14432,14 @@ impl RecordingDownloadClientStatusRepo {
 }
 
 #[async_trait::async_trait]
-impl crate::ports::DownloadClientStatusRepository for RecordingDownloadClientStatusRepo {
+impl crate::ports::DownloadClientStatusRepository
+    for RecordingDownloadClientStatusRepo
+{
     async fn list(
         &self,
-    ) -> crate::AppResult<std::collections::HashMap<String, crate::ports::DownloadClientStatus>>
-    {
+    ) -> crate::AppResult<
+        std::collections::HashMap<String, crate::escalation_backoff::DownloadClientStatus>,
+    > {
         Ok(self
             .blocked
             .lock()
@@ -14445,7 +14448,7 @@ impl crate::ports::DownloadClientStatusRepository for RecordingDownloadClientSta
             .map(|(client_id, until)| {
                 (
                     client_id.clone(),
-                    crate::ports::DownloadClientStatus {
+                    crate::escalation_backoff::DownloadClientStatus {
                         disabled_until: Some(*until),
                         escalation_level: 3,
                         ..Default::default()
@@ -14459,12 +14462,12 @@ impl crate::ports::DownloadClientStatusRepository for RecordingDownloadClientSta
         &self,
         client_config_id: &str,
         _now: chrono::DateTime<Utc>,
-    ) -> crate::AppResult<crate::ports::DownloadClientStatus> {
+    ) -> crate::AppResult<crate::escalation_backoff::DownloadClientStatus> {
         self.failures
             .lock()
             .expect("failures mutex")
             .push(client_config_id.to_string());
-        Ok(crate::ports::DownloadClientStatus::default())
+        Ok(crate::escalation_backoff::DownloadClientStatus::default())
     }
 
     async fn record_success(&self, client_config_id: &str) -> crate::AppResult<()> {

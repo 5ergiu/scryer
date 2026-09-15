@@ -166,7 +166,7 @@ const es: LocaleDictionary = {
   "settings.profile": "Perfil",
   "settings.general": "General",
   "settings.security": "Security",
-  "settings.securityEnableFormLogin": "Form login",
+  "settings.securityLoginSettings": "Login settings",
   "settings.securityEnableFormLoginHelp":
     "When enabled, Scryer requires an authenticated user session. When disabled, requests resolve as the default admin user.",
   "settings.securitySkipLocalIps": "Skip for local IPs",

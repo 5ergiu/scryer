@@ -231,7 +231,7 @@ const en: LocaleDictionary = {
   "settings.backups": "Backups",
   "settings.security": "Security",
   "settings.enableFormLogin": "Enable login",
-  "settings.securityEnableFormLogin": "Form login",
+  "settings.securityLoginSettings": "Login settings",
   "settings.securityEnableFormLoginHelp":
     "When enabled, Scryer requires an authenticated user session. When disabled, requests resolve as the default admin user.",
   "settings.securityPasswordMinLength": "Minimum password length",
@@ -3304,6 +3304,33 @@ const en: LocaleDictionary = {
     "Install the official plugins you plan to use on this host. You can still change them later in Settings.",
   "setup.pluginsNoneFound":
     "No plugins were found. Refresh the registry or continue with built-in providers.",
+  "setup.recommendedHeading": "Recommended",
+  "setup.recommendedHint":
+    "The plugins most setups need. Install the ones that match how you use Scryer.",
+  "setup.recommendedArchiveTitle": "Archive Extraction",
+  "setup.recommendedArchiveReason":
+    "Install if you use torrents or download subtitles. Both often arrive packed in RAR or ZIP archives.",
+  "setup.recommendedQbittorrentTitle": "qBittorrent",
+  "setup.recommendedSubtitlesTitle": "Subtitles",
+  "setup.recommendedSubtitlesReason":
+    "Install if Scryer manages your subtitles. Enhanced Sync lines subtitles up with your video, OpenSubtitles covers movies and TV, and Jimaku and AnimeTosho cover anime.",
+  "setup.recommendedAdvancedIndexersTitle": "Advanced indexers",
+  "setup.recommendedAdvancedIndexersReason":
+    "Install if you use Prowlarr's more complex indexers, the ones built on its Cardigann engine.",
+  "setup.recommendedMediaServerTitle": "Media server",
+  "setup.recommendedMediaServerReason":
+    "Refreshes your media server when Scryer imports something. Pick the one you use.",
+  "setup.rulePacksHeading": "Rule packs",
+  "setup.rulePacksHint":
+    "Community scoring rules that help Scryer pick the best release. You can adjust them later in Settings → Rules.",
+  "setup.rulePackTrashTitle": "TRaSH Guides",
+  "setup.rulePackTrashReason":
+    "Scores releases by the TRaSH Guides' recommendations for release groups, audio, HDR, size and unwanted releases.",
+  "setup.rulePackSeadexTitle": "SeaDex",
+  "setup.rulePackSeadexReason":
+    "Turn on if you collect anime. Prefers the releases SeaDex lists as the best available.",
+  "setup.rulePackUnavailable": "Not available right now. Refresh the registry to try again.",
+  "setup.otherPluginsHeading": "More plugins",
 
   "setup.mediaPathsTitle": "Where is your media stored?",
   "setup.mediaPathsDescription":
