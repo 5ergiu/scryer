@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  changedSetupMediaPaths,
   runAdvisorySetupMediaPathSave,
   type SetupMediaPathsInput,
 } from "./setup-media-paths.ts";
@@ -92,4 +93,30 @@ test("a setup path save failure prevents advancement", async () => {
   );
 
   assert.equal(advanced, false);
+});
+
+test("re-running setup writes only the paths that changed", async () => {
+  const saves: SetupMediaPathsInput[] = [];
+  const saved = { moviePath: "/media/films", seriesPath: "/data/series", animePath: null };
+  const run = (input: SetupMediaPathsInput) =>
+    runAdvisorySetupMediaPathSave({
+      input,
+      saved,
+      validatePath: async () => null,
+      onValidation: () => {},
+      savePaths: async (changed) => {
+        saves.push(changed);
+      },
+      onSaved: () => {},
+    });
+
+  await run({ moviePath: "/media/films ", seriesPath: "/data/series", animePath: null });
+  assert.deepEqual(saves, []);
+
+  await run({ moviePath: "/media/films", seriesPath: "/tv", animePath: "/anime" });
+  assert.deepEqual(saves, [{ moviePath: "", seriesPath: "/tv", animePath: "/anime" }]);
+});
+
+test("paths that could not be read are all written", () => {
+  assert.deepEqual(changedSetupMediaPaths(defaultInput, null), defaultInput);
 });
