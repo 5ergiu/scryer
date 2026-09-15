@@ -5,7 +5,6 @@ import {
   CircleCheckBig,
   ExternalLink,
   KeyRound,
-  Loader2,
   Pencil,
   Plus,
   X,
@@ -24,6 +23,7 @@ import type {
   ImportInstanceKind,
   UseExternalImportSetupReturn,
 } from "@/lib/hooks/use-external-import-setup";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 interface SetupImportConnectViewProps {
   wizard: UseExternalImportSetupReturn;
@@ -386,7 +386,7 @@ function StatusRow({
           className="flex items-center gap-1.5"
           style={{ color: "var(--scry-accent-text)" }}
         >
-          <Loader2 className="animate-spin" style={{ width: 15, height: 15 }} />
+          <LoadingMark className="size-[15px]" />
           {t("setup.testing")}
         </span>
       ) : inst.status === "error" ? (

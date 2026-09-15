@@ -5,9 +5,9 @@ import { Button } from "@/components/ui/button";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { Input, integerInputProps, sanitizeDigits } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2 } from "lucide-react";
 import { useTranslate } from "@/lib/context/translate-context";
 import type { SecuritySettings } from "@/lib/types/settings";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 const SECURITY_PANEL_CLASS =
   "overflow-hidden rounded-[14px] border border-[var(--scry-border)] bg-[var(--scry-surf)] shadow-[0_10px_24px_rgba(0,0,0,0.16)]";
@@ -127,7 +127,7 @@ export function SettingsSecuritySection({
                 className="shrink-0 self-start sm:self-auto"
                 onClick={() => onToggle(!settings.formLoginEnabled)}
               >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {busy ? <LoadingMark className="h-4 w-4" /> : null}
                 {settings.formLoginEnabled ? t("label.disable") : t("label.enable")}
               </Button>
             </div>

@@ -68,8 +68,8 @@ import type {
   ProxyRecord,
 } from "@/lib/types";
 import { selectorId } from "@/lib/utils/dom-ids";
-import { cn } from "@/lib/utils";
 import type { BoxedActionButtonTone } from "@/lib/utils/action-button-styles";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 export type SettingsProxiesSectionProps = {
   proxyConfigs: ProxyRecord[];
@@ -336,12 +336,11 @@ export function SettingsProxiesSection({
                               }
                               label={t("settings.proxyTest")}
                             >
-                              <RefreshCw
-                                className={cn(
-                                  "h-4 w-4",
-                                  testingProxyId === proxy.id && "animate-spin",
-                                )}
-                              />
+                              {testingProxyId === proxy.id ? (
+                                <LoadingMark className="h-4 w-4" />
+                              ) : (
+                                <RefreshCw className="h-4 w-4" />
+                              )}
                             </ProxyActionButton>
                             <ProxyActionButton
                               id={selectorId("settings-indexer-proxy-edit", proxy.name)}

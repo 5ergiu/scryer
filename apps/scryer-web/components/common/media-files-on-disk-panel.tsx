@@ -2,7 +2,6 @@ import * as React from "react";
 import {
   File as FileIcon,
   HardDrive,
-  Loader2,
   Search,
   Star,
   Trash2,
@@ -29,6 +28,7 @@ import { formatUiDate } from "@/lib/utils/date-format";
 import { selectorId } from "@/lib/utils/dom-ids";
 import { audioFormatPills, hdrFormatPills } from "@/lib/utils/media-format-pills";
 import { cn } from "@/lib/utils";
+import { LoadingMark } from "@/components/common/loading-mark";
 
 export type MediaFileOnDisk = MediaInfoFile & {
   id: string;
@@ -411,7 +411,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                               aria-label={t("mediaFile.makePrimary")}
                               leadingIcon={
                                 isPromotingFile ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  <LoadingMark className="h-3.5 w-3.5" />
                                 ) : (
                                   <Star className="h-3.5 w-3.5" />
                                 )
@@ -444,7 +444,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                             className={selectedTitlePresentation ? "h-8 w-8" : undefined}
                           >
                             {isDeletingFile ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <LoadingMark className="h-4 w-4" />
                             ) : (
                               <Trash2 className="h-4 w-4" />
                             )}
