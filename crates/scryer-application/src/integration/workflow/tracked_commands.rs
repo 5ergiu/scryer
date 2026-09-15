@@ -1154,11 +1154,16 @@ async fn process_tracked_download_snapshot(
 /// on `DownloadClientStatusService` once per client per refresh, and the
 /// escalation ladder in the repository turns repeated failures into a disabled
 /// window. A client that answered both of its reads this tick is in
-/// `authoritative_client_ids`; anything else failed. Clients excluded by type
-/// (bridged realtime clients) were never asked, so they are not judged.
+/// `authoritative_client_ids`; one that was asked and errored is in
+/// `failed_client_ids`. A client in neither set was not consulted this tick —
+/// excluded by type (bridged realtime clients) or skipped by the router's
+/// feedback backoff — so it is not judged: without this, a client in the
+/// router's short backoff would climb the escalation ladder once per tick
+/// without a single new observation of it.
 pub(crate) async fn record_download_client_refresh_outcomes(
     app: &AppUseCase,
     authoritative_client_ids: &std::collections::HashSet<String>,
+    failed_client_ids: &std::collections::HashSet<String>,
     excluded_client_types: &[&str],
 ) {
     let configs = match app
@@ -1190,8 +1195,10 @@ pub(crate) async fn record_download_client_refresh_outcomes(
 
         let outcome = if authoritative_client_ids.contains(&config.id) {
             status.record_success(&config.id).await
-        } else {
+        } else if failed_client_ids.contains(&config.id) {
             status.record_failure(&config.id, now).await.map(|_| ())
+        } else {
+            continue;
         };
         if let Err(error) = outcome {
             tracing::warn!(
@@ -1574,11 +1581,13 @@ pub async fn start_download_queue_poller_with_options(
                 let crate::ports::DownloadClientSnapshotOutcome {
                     items,
                     authoritative_client_ids,
+                    failed_client_ids,
                     ..
                 } = snapshot;
                 record_download_client_refresh_outcomes(
                     &app,
                     &authoritative_client_ids,
+                    &failed_client_ids,
                     &excluded_client_type_refs,
                 )
                 .await;

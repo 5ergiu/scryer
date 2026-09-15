@@ -3005,6 +3005,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
 
         let mut queue_items = Vec::new();
         let mut queue_successes = HashSet::new();
+        let mut failed_client_ids = HashSet::new();
         let mut any_client_read_succeeded = false;
         let queue_reads = self
             .poll_feedback_clients(
@@ -3036,6 +3037,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                         DownloadFeedbackReadKind::Queue,
                         elapsed,
                     );
+                    failed_client_ids.insert(config.id.clone());
                     tracing::warn!(client_id = %config.id, error = %error, "failed to list queue for download snapshot");
                 }
             }
@@ -3091,6 +3093,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                             DownloadFeedbackReadKind::RecentActivity,
                             elapsed,
                         );
+                        failed_client_ids.insert(config.id.clone());
                         tracing::warn!(client_id = %config.id, error = %error, "failed to list recent activity for download snapshot");
                     }
                 }
@@ -3109,6 +3112,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                 .intersection(&activity_successes)
                 .cloned()
                 .collect(),
+            failed_client_ids,
             any_client_read_succeeded,
         })
     }
@@ -8632,6 +8636,65 @@ mod tests {
         );
         assert_eq!(
             outcome.authoritative_client_ids,
+            HashSet::from(["healthy".to_string()])
+        );
+    }
+
+    /// A client that errors is reported as failed once, when it was actually
+    /// asked. On the next snapshot the router's feedback backoff skips it, and
+    /// a skipped client is in neither the failed nor the authoritative set —
+    /// per-client status must not see a failure it never observed.
+    #[tokio::test]
+    async fn snapshot_outcome_reports_failure_only_for_clients_it_asked() {
+        let healthy_client = Arc::new(MockDownloadClient::default());
+        let failing_client = Arc::new(FailingQueueDownloadClient::default());
+        let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
+            Arc::new(MockDownloadClientPluginProvider {
+                accepted_inputs: vec!["nzb_url".to_string()],
+                clients: vec![
+                    ("healthy".to_string(), healthy_client),
+                    ("failing".to_string(), failing_client.clone()),
+                ],
+            });
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![
+                    test_config("healthy", "Healthy", "qbittorrent", 0),
+                    test_config("failing", "Failing", "qbittorrent", 1),
+                ],
+            }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            Some(plugin_provider),
+        );
+
+        let first = router
+            .list_snapshot_outcome_excluding_client_types(300, &[])
+            .await
+            .expect("first snapshot");
+        assert_eq!(
+            first.failed_client_ids,
+            HashSet::from(["failing".to_string()]),
+            "the client that was asked and errored is reported as failed"
+        );
+        assert_eq!(failing_client.list_queue_call_count(), 1);
+
+        let second = router
+            .list_snapshot_outcome_excluding_client_types(300, &[])
+            .await
+            .expect("second snapshot");
+        assert_eq!(
+            failing_client.list_queue_call_count(),
+            1,
+            "the failing client is skipped by feedback backoff on the second snapshot"
+        );
+        assert!(
+            second.failed_client_ids.is_empty(),
+            "a client skipped by backoff was not asked, so it is not reported as failed"
+        );
+        assert_eq!(
+            second.authoritative_client_ids,
             HashSet::from(["healthy".to_string()])
         );
     }

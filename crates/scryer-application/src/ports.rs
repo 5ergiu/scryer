@@ -8884,6 +8884,11 @@ pub enum DownloadCleanupClaim {
 pub struct DownloadClientSnapshotOutcome {
     pub items: Vec<DownloadQueueItem>,
     pub authoritative_client_ids: std::collections::HashSet<String>,
+    /// Clients that were asked this cycle and errored on at least one read.
+    /// A client skipped during feedback backoff was never asked, so it is in
+    /// neither this set nor `authoritative_client_ids`; per-client status
+    /// judges only clients that were actually consulted.
+    pub failed_client_ids: std::collections::HashSet<String>,
     pub any_client_read_succeeded: bool,
 }
 

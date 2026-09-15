@@ -2143,6 +2143,7 @@ impl DownloadClient for StubDownloadClient {
                     items: queue_items,
                     authoritative_client_ids,
                     any_client_read_succeeded: true,
+                    ..Default::default()
                 })
             }
             (Ok(items), Err(_)) | (Err(_), Ok(items)) => {

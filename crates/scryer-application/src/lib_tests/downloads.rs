@@ -14432,9 +14432,7 @@ impl RecordingDownloadClientStatusRepo {
 }
 
 #[async_trait::async_trait]
-impl crate::ports::DownloadClientStatusRepository
-    for RecordingDownloadClientStatusRepo
-{
+impl crate::ports::DownloadClientStatusRepository for RecordingDownloadClientStatusRepo {
     async fn list(
         &self,
     ) -> crate::AppResult<
@@ -14489,8 +14487,10 @@ impl crate::ports::DownloadClientStatusRepository
 
 /// Sonarr records one refresh outcome per client per tick. A client that
 /// answered both of its reads is authoritative and records a success; a client
-/// that did not answer records a failure, which is what escalates it towards a
-/// disabled window.
+/// that was asked and errored records a failure, which is what escalates it
+/// towards a disabled window. A client that was not consulted this tick — the
+/// router skipped it during feedback backoff — records nothing, so a short
+/// router backoff cannot walk the escalation ladder on its own.
 #[tokio::test]
 async fn each_refresh_records_success_for_answering_clients_and_failure_for_silent_ones() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -14507,11 +14507,15 @@ async fn each_refresh_records_success_for_answering_clients_and_failure_for_sile
         create_enabled_download_client_config(&app, &user, "Fixture Silent", "sabnzbd").await;
     let bridged =
         create_enabled_download_client_config(&app, &user, "Fixture Bridged", "weaver").await;
+    let skipped =
+        create_enabled_download_client_config(&app, &user, "Fixture Skipped", "nzbget").await;
 
     let authoritative = std::collections::HashSet::from([answering.id.clone()]);
+    let failed = std::collections::HashSet::from([silent.id.clone()]);
     crate::app_usecase_integration::record_download_client_refresh_outcomes(
         &app,
         &authoritative,
+        &failed,
         &["weaver"],
     )
     .await;
@@ -14524,7 +14528,7 @@ async fn each_refresh_records_success_for_answering_clients_and_failure_for_sile
     assert_eq!(
         status.failures.lock().expect("failures mutex").as_slice(),
         std::slice::from_ref(&silent.id),
-        "a client that did not answer records a failure"
+        "a client that was asked and errored records a failure"
     );
     assert!(
         !status
@@ -14533,6 +14537,19 @@ async fn each_refresh_records_success_for_answering_clients_and_failure_for_sile
             .expect("failures mutex")
             .contains(&bridged.id),
         "a client excluded by type was never asked, so it is never judged"
+    );
+    assert!(
+        !status
+            .failures
+            .lock()
+            .expect("failures mutex")
+            .contains(&skipped.id)
+            && !status
+                .successes
+                .lock()
+                .expect("successes mutex")
+                .contains(&skipped.id),
+        "a client the router skipped during feedback backoff was not consulted, so it is never judged"
     );
 }
 
