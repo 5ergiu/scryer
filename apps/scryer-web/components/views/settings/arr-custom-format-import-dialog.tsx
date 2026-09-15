@@ -1,5 +1,6 @@
 import * as React from "react";
 import { AlertCircle, Loader2 } from "lucide-react";
+import { productLogoUrl } from "@/components/setup/import/import-instance-pill";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -226,6 +227,12 @@ export default function ArrCustomFormatImportDialog({
                   disabled={reviewing || translating}
                   onClick={() => resetReview(undefined, option)}
                 >
+                  <img
+                    src={productLogoUrl(option === "sonarr" ? "SONARR" : "RADARR") ?? undefined}
+                    alt=""
+                    aria-hidden
+                    className="h-4 w-4 shrink-0 object-contain"
+                  />
                   {option === "sonarr" ? "Sonarr" : "Radarr"}
                 </Button>
               ))}
