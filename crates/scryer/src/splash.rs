@@ -90,16 +90,20 @@ pub(crate) async fn splash_ready_handler(State(state): State<SplashState>) -> Re
 /// route of its own, and the web UI's assets are not being served yet.
 const SPLASH_LOADING_MARK_PATH: &str = "/splash/scryer-loading.webp";
 const SPLASH_LOADING_MARK_STILL_PATH: &str = "/splash/scryer-loading-still.webp";
+const SPLASH_WORDMARK_PATH: &str = "/splash/scryer-wordmark.svg";
 
 /// The full-size animated mark and its first frame, for reduced motion.
 static SPLASH_LOADING_MARK: &[u8] = include_bytes!("../resources/splash/scryer-loading.webp");
 static SPLASH_LOADING_MARK_STILL: &[u8] =
     include_bytes!("../resources/splash/scryer-loading-still.webp");
 
-fn webp_response(bytes: &'static [u8]) -> Response {
+/// The official Scryer wordmark, the same artwork the login page shows.
+static SPLASH_WORDMARK: &[u8] = include_bytes!("../resources/splash/scryer-wordmark.svg");
+
+fn image_response(content_type: &'static str, bytes: &'static [u8]) -> Response {
     (
         [
-            (header::CONTENT_TYPE, "image/webp"),
+            (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         bytes,
@@ -108,11 +112,15 @@ fn webp_response(bytes: &'static [u8]) -> Response {
 }
 
 async fn splash_loading_mark_handler() -> Response {
-    webp_response(SPLASH_LOADING_MARK)
+    image_response("image/webp", SPLASH_LOADING_MARK)
 }
 
 async fn splash_loading_mark_still_handler() -> Response {
-    webp_response(SPLASH_LOADING_MARK_STILL)
+    image_response("image/webp", SPLASH_LOADING_MARK_STILL)
+}
+
+async fn splash_wordmark_handler() -> Response {
+    image_response("image/svg+xml", SPLASH_WORDMARK)
 }
 
 pub(crate) async fn splash_fallback_handler(
@@ -151,6 +159,7 @@ pub(crate) fn build_splash_router(
             SPLASH_LOADING_MARK_STILL_PATH,
             get(splash_loading_mark_still_handler),
         )
+        .route(SPLASH_WORDMARK_PATH, get(splash_wordmark_handler))
         .fallback(splash_fallback_handler)
         .with_state(state)
         .layer(CompressionLayer::new().zstd(true).br(true).gzip(true))
@@ -166,6 +175,7 @@ fn splash_html() -> String {
     let health_url = base_path.join("/health");
     let loading_mark_url = base_path.join(SPLASH_LOADING_MARK_PATH);
     let loading_mark_still_url = base_path.join(SPLASH_LOADING_MARK_STILL_PATH);
+    let wordmark_url = base_path.join(SPLASH_WORDMARK_PATH);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -177,11 +187,11 @@ fn splash_html() -> String {
 </head>
 <body>
 <main>
-  <h1>scryer</h1>
   <picture class="loading-mark">
     <source media="(prefers-reduced-motion: reduce)" srcset="{loading_mark_still_url}"/>
     <img src="{loading_mark_url}" width="531" height="522" alt=""/>
   </picture>
+  <h1><img class="wordmark" src="{wordmark_url}" width="1200" height="400" alt="Scryer"/></h1>
   <div class="status">Upgrading database&hellip;</div>
 </main>
 <script>
@@ -221,6 +231,7 @@ fn error_html(message: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;");
+    let wordmark_url = BasePath::from_env().join(SPLASH_WORDMARK_PATH);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -232,7 +243,7 @@ fn error_html(message: &str) -> String {
 </head>
 <body>
 <main>
-  <h1>scryer</h1>
+  <h1><img class="wordmark" src="{wordmark_url}" width="1200" height="400" alt="Scryer"/></h1>
   <div class="status error">Startup failed</div>
   <p class="detail">{escaped}</p>
 </main>
@@ -256,13 +267,12 @@ main {
   text-align: center;
   padding: 2rem;
 }
-h1 {
-  font-family: "Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif;
-  font-size: 2rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin-bottom: 2rem;
-  color: #dbe5ff;
+.wordmark {
+  display: block;
+  width: 224px;
+  max-width: 70vw;
+  height: auto;
+  margin: 0 auto 1.5rem;
 }
 .status {
   font-size: 0.95rem;
@@ -285,7 +295,7 @@ h1 {
   width: 160px;
   max-width: 50vw;
   height: auto;
-  margin: 0 auto 1.5rem;
+  margin: 0 auto 0.75rem;
 }
 "#;
 
@@ -395,31 +405,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn splash_serves_the_loading_mark_while_migrating() {
+    async fn splash_serves_its_artwork_while_migrating() {
         // Every other path answers with the splash page, so the page's artwork
         // needs its own route, under the base path like the page's health poll.
-        for (path, expected) in [
+        for (path, content_type, expected) in [
             (
                 "/scryer/splash/scryer-loading.webp",
+                "image/webp",
                 super::SPLASH_LOADING_MARK,
             ),
             (
                 "/scryer/splash/scryer-loading-still.webp",
+                "image/webp",
                 super::SPLASH_LOADING_MARK_STILL,
+            ),
+            (
+                "/scryer/splash/scryer-wordmark.svg",
+                "image/svg+xml",
+                super::SPLASH_WORDMARK,
             ),
         ] {
             let response = splash_router_for(BootstrapStatus::Migrating)
                 .oneshot(
                     Request::builder()
                         .uri(path)
-                        .header("accept-encoding", "br, gzip")
                         .body(Body::empty())
                         .expect("request"),
                 )
                 .await
                 .expect("response");
             assert_eq!(response.status(), StatusCode::OK, "{path}");
-            assert_eq!(response.headers()["content-type"], "image/webp", "{path}");
+            assert_eq!(response.headers()["content-type"], content_type, "{path}");
             let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
                 .await
                 .expect("body");
