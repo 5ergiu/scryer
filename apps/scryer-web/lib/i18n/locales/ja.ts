@@ -694,6 +694,7 @@ const ja: LocaleDictionary = {
   "settings.keepHistoryForever": "履歴を無期限に保持",
   "settings.historyRetentionDaysHeader": "履歴を保持する期間",
   "settings.historyRetentionDaysSuffix": "日",
+  "settings.securitySessionDurationSuffix": "日",
   "settings.historyRetentionValidation":
     "履歴保持日数は、履歴を無期限に保持する場合を除き、1 以上である必要があります。",
   "settings.languageChangeTitle": "言語を変更する",

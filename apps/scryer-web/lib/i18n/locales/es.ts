@@ -709,6 +709,7 @@ const es: LocaleDictionary = {
   "settings.keepHistoryForever": "Conservar historial para siempre",
   "settings.historyRetentionDaysHeader": "Conservar historial durante",
   "settings.historyRetentionDaysSuffix": "días",
+  "settings.securitySessionDurationSuffix": "días",
   "settings.historyRetentionValidation":
     "Los días de retención del historial deben ser al menos 1, salvo que el historial se conserve para siempre.",
   "settings.languageChangeTitle": "Cambiar idioma",

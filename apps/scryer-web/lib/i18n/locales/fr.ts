@@ -712,6 +712,7 @@ const fr: LocaleDictionary = {
   "settings.keepHistoryForever": "Conserver l’historique indéfiniment",
   "settings.historyRetentionDaysHeader": "Conserver l’historique pendant",
   "settings.historyRetentionDaysSuffix": "jours",
+  "settings.securitySessionDurationSuffix": "jours",
   "settings.historyRetentionValidation":
     "Le nombre de jours de rétention de l’historique doit être au moins de 1, sauf si l’historique est conservé indéfiniment.",
   "settings.languageChangeTitle": "Changer de langue",

@@ -702,6 +702,7 @@ const de: LocaleDictionary = {
   "settings.keepHistoryForever": "Verlauf dauerhaft aufbewahren",
   "settings.historyRetentionDaysHeader": "Verlauf aufbewahren für",
   "settings.historyRetentionDaysSuffix": "Tage",
+  "settings.securitySessionDurationSuffix": "Tage",
   "settings.historyRetentionValidation":
     "Die Anzahl der Tage für die Verlaufsaufbewahrung muss mindestens 1 sein, sofern der Verlauf nicht dauerhaft aufbewahrt wird.",
   "settings.languageChangeTitle": "Sprache ändern",

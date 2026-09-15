@@ -234,8 +234,8 @@ const en: LocaleDictionary = {
   "settings.securityEnableFormLogin": "Form login",
   "settings.securityEnableFormLoginHelp":
     "When enabled, Scryer requires an authenticated user session. When disabled, requests resolve as the default admin user.",
-  "settings.securityPasswordMinLength": "Minimum local password length",
-  "settings.securitySessionDuration": "Session duration (days)",
+  "settings.securityPasswordMinLength": "Minimum password length",
+  "settings.securitySessionDuration": "Login valid for",
   "settings.securitySessionDurationHelp": "Applies to new sign-ins for everyone on this instance. With Keep me signed in enabled, sessions survive browser restarts until they expire. Existing sessions keep their original expiry.",
   "settings.securitySessionDurationInvalid": "Session duration must be a whole number from 1 to 365 days.",
   "settings.securityPasswordMinLengthHelp":
@@ -1109,6 +1109,7 @@ const en: LocaleDictionary = {
   "settings.keepHistoryForever": "Keep history forever",
   "settings.historyRetentionDaysHeader": "Retain history for",
   "settings.historyRetentionDaysSuffix": "days",
+  "settings.securitySessionDurationSuffix": "days",
   "settings.generalSaved": "General settings saved.",
   "settings.verificationDepthTitle": "Import copy verification",
   "settings.verificationDepthHelp": "How thoroughly Scryer proves a copied file before it touches the source.",

@@ -672,6 +672,7 @@ const zh_CN: LocaleDictionary = {
   "settings.keepHistoryForever": "永久保留历史记录",
   "settings.historyRetentionDaysHeader": "历史记录保留时长",
   "settings.historyRetentionDaysSuffix": "天",
+  "settings.securitySessionDurationSuffix": "天",
   "settings.historyRetentionValidation":
     "除非永久保留历史记录，否则历史保留天数必须至少为 1。",
   "settings.languageChangeTitle": "更改语言",
