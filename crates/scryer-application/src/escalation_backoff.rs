@@ -74,6 +74,79 @@ pub const INDEXER_BACKOFF_LADDER: EscalationLadder = EscalationLadder::new(&[
     60 * 60, // 1 hour
 ]);
 
+/// Replaces the rungs of [`INDEXER_BACKOFF_LADDER`] with a comma-separated list
+/// of seconds, ascending (for example `15,30,45,90,180`). The rungs are the
+/// product's own operational backoff, so a test harness that has to watch an
+/// indexer fail, be disabled, and then recover has no other way to do it than to
+/// wait out five real minutes.
+const INDEXER_BACKOFF_LADDER_ENV: &str = "SCRYER_INDEXER_BACKOFF_LADDER_SECS";
+
+/// A floor, not a suggestion: a typo like `0` would turn the backoff off
+/// entirely and let a failing indexer be retried in a hot loop.
+const MINIMUM_INDEXER_BACKOFF_RUNG: u64 = 5;
+
+/// The indexer ladder in force, the shipped table unless overridden.
+///
+/// Read once: the backoff tracker consults it on every failed dispatch, and a
+/// ladder that could change under a running install would make an indexer's
+/// disabled window unreproducible.
+static INDEXER_BACKOFF_LADDER_IN_FORCE: std::sync::LazyLock<EscalationLadder> =
+    std::sync::LazyLock::new(|| {
+        parse_indexer_backoff_ladder(std::env::var(INDEXER_BACKOFF_LADDER_ENV).ok().as_deref())
+            .unwrap_or(INDEXER_BACKOFF_LADDER)
+    });
+
+/// The configured indexer backoff ladder. Every indexer backoff decision must
+/// go through this rather than [`INDEXER_BACKOFF_LADDER`] directly, or the
+/// override would not take.
+pub fn indexer_backoff_ladder() -> EscalationLadder {
+    *INDEXER_BACKOFF_LADDER_IN_FORCE
+}
+
+/// Absent, blank, and malformed all fall back to the shipped ladder; a rung
+/// shorter than [`MINIMUM_INDEXER_BACKOFF_RUNG`] is clamped up to it.
+///
+/// The rungs must ascend, because [`EscalationLadder::level_covering`] climbs
+/// until a rung covers a `Retry-After` and stops at the first one that does: a
+/// ladder that dips would quantize a delay onto a shorter window than the rung
+/// below it. A list that does not ascend is a typo, so it is refused whole
+/// rather than sorted into something the operator did not write.
+fn parse_indexer_backoff_ladder(raw: Option<&str>) -> Option<EscalationLadder> {
+    let raw = raw.map(str::trim).filter(|value| !value.is_empty())?;
+
+    let mut periods_secs: Vec<u64> = Vec::new();
+    for field in raw.split(',') {
+        let Ok(seconds) = field.trim().parse::<u64>() else {
+            tracing::warn!(
+                env = INDEXER_BACKOFF_LADDER_ENV,
+                value = raw,
+                "indexer backoff ladder override is not a comma-separated list of seconds; \
+                 keeping the shipped ladder"
+            );
+            return None;
+        };
+        periods_secs.push(seconds.max(MINIMUM_INDEXER_BACKOFF_RUNG));
+    }
+
+    if periods_secs.windows(2).any(|pair| pair[0] >= pair[1]) {
+        tracing::warn!(
+            env = INDEXER_BACKOFF_LADDER_ENV,
+            value = raw,
+            "indexer backoff ladder override does not ascend; keeping the shipped ladder"
+        );
+        return None;
+    }
+
+    tracing::info!(
+        env = INDEXER_BACKOFF_LADDER_ENV,
+        rungs_secs = ?periods_secs,
+        "indexer backoff ladder overridden"
+    );
+    Some(EscalationLadder::new(Box::leak(
+        periods_secs.into_boxed_slice(),
+    )))
+}
+
 /// Sonarr's download-client ladder (`DownloadClientStatusService`), indexed by
 /// the level the client is *on*: level 0 is healthy and disables nothing, so the
 /// first failure disables for a minute and only a persistent outage climbs.
@@ -246,6 +319,79 @@ mod tests {
             INDEXER_BACKOFF_LADDER.period(99),
             Duration::minutes(60),
             "levels above the table clamp to the top rung"
+        );
+    }
+
+    #[test]
+    fn an_unset_or_blank_override_leaves_the_shipped_ladder_alone() {
+        assert!(parse_indexer_backoff_ladder(None).is_none());
+        assert!(parse_indexer_backoff_ladder(Some("   ")).is_none());
+        assert_eq!(
+            std::env::var(INDEXER_BACKOFF_LADDER_ENV).ok(),
+            None,
+            "this test asserts the unset default; the suite must not set the override"
+        );
+        assert_eq!(
+            indexer_backoff_ladder().period(0),
+            INDEXER_BACKOFF_LADDER.period(0)
+        );
+    }
+
+    #[test]
+    fn a_valid_override_replaces_every_rung() {
+        let ladder =
+            parse_indexer_backoff_ladder(Some(" 15, 30 ,45,90,180 ")).expect("the list is valid");
+
+        assert_eq!(ladder.max_level(), 4);
+        assert_eq!(ladder.period(0), Duration::seconds(15));
+        assert_eq!(ladder.period(3), Duration::seconds(90));
+        assert_eq!(
+            ladder.period(99),
+            Duration::seconds(180),
+            "levels above the override clamp to its top rung"
+        );
+    }
+
+    #[test]
+    fn a_malformed_override_falls_back_to_the_shipped_ladder() {
+        for raw in ["15,thirty,45", "15;30;45", "15,-30", "15,30,"] {
+            assert!(
+                parse_indexer_backoff_ladder(Some(raw)).is_none(),
+                "{raw:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_that_does_not_ascend_is_refused_whole() {
+        assert!(parse_indexer_backoff_ladder(Some("30,15")).is_none());
+        assert!(parse_indexer_backoff_ladder(Some("15,15")).is_none());
+    }
+
+    #[test]
+    fn an_override_rung_below_the_floor_is_clamped_up_to_it() {
+        let ladder = parse_indexer_backoff_ladder(Some("0,10")).expect("the list is valid");
+
+        assert_eq!(
+            ladder.period(0),
+            Duration::seconds(MINIMUM_INDEXER_BACKOFF_RUNG as i64),
+            "a zero rung would let a failing indexer be retried in a hot loop"
+        );
+        assert_eq!(ladder.period(1), Duration::seconds(10));
+    }
+
+    #[test]
+    fn a_retry_after_rounds_up_onto_the_overridden_ladder() {
+        let ladder =
+            parse_indexer_backoff_ladder(Some("15,30,45,90,180")).expect("the list is valid");
+
+        let covering = ladder.level_covering(0, std::time::Duration::from_secs(25));
+
+        assert_eq!(covering, 1, "30 s is the first overridden rung over 25 s");
+        assert_eq!(
+            ladder.disabled_until(covering, at(0)),
+            at(0) + Duration::seconds(30),
+            "the overridden rung, not the raw header and not the shipped 10 minutes"
         );
     }
 

@@ -24,7 +24,7 @@ use scryer_application::{
     SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome, SchedulerIntent,
     SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
     SearchLearningContext, SearchMode, UpstreamScheduler, blake3_identity_hex,
-    escalation_backoff::INDEXER_BACKOFF_LADDER, indexer_search_eligibility,
+    escalation_backoff::indexer_backoff_ladder, indexer_search_eligibility,
     indexer_search_identity,
 };
 use scryer_domain::{
@@ -2214,10 +2214,11 @@ impl IndexerBackoffTracker {
         // The ladder quantizes any `Retry-After` onto one of its steps; the level
         // it climbs to is kept, so the next failure starts from there instead of
         // sliding back down.
-        let period_index = INDEXER_BACKOFF_LADDER
-            .level_covering(state.escalation_level, retry_after.unwrap_or_default());
+        let ladder = indexer_backoff_ladder();
+        let period_index =
+            ladder.level_covering(state.escalation_level, retry_after.unwrap_or_default());
         let now = chrono::Utc::now();
-        let until = INDEXER_BACKOFF_LADDER.disabled_until(period_index, now);
+        let until = ladder.disabled_until(period_index, now);
 
         state.escalation_level = period_index + 1;
         state.disabled_until = Some(until);
@@ -11580,7 +11581,7 @@ mod tests {
             .await;
         assert_eq!(
             unrepresentable.escalation_level,
-            INDEXER_BACKOFF_LADDER.max_level() + 1,
+            indexer_backoff_ladder().max_level() + 1,
             "a delay beyond every ladder step must pin the top level"
         );
         assert!(
