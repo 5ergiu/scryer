@@ -849,10 +849,6 @@ body {
     "Source Code Pro", Menlo, Consolas, monospace;
 }
 
-* {
-  border-color: var(--color-border);
-}
-
 h1,
 h2,
 h3,
