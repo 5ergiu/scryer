@@ -3340,6 +3340,10 @@ const en: LocaleDictionary = {
   "setup.animePath": "Anime path",
   "setup.optional": "(optional)",
   "setup.browse": "Browse",
+  "setup.addMediaFolder": "Add folder",
+  "setup.removeMediaFolder": "Remove folder",
+  "setup.mediaPathsNoneChosen":
+    "No folders chosen, so this library keeps the folders it has.",
   "setup.mediaPathNotReachable": "Not reachable yet",
   "setup.mediaPathsNotReachableWarning":
     "Some media paths are not reachable yet. They were saved and can be changed later in Settings.",
