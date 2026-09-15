@@ -5,13 +5,15 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { IconButton } from "@/components/ui/icon-button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useTranslate } from "@/lib/context/translate-context";
+
+const PROMPT_PREVIEW_MAX_LINES = 30;
 
 type RegoAiPromptDialogProps = {
   id: string;
@@ -65,6 +67,13 @@ export function RegoAiPromptDialog({
       }),
     [desiredOutcome, inputContract, outputContract, ruleKind],
   );
+  const promptPreview = React.useMemo(() => {
+    const lines = prompt.split("\n");
+    if (lines.length <= PROMPT_PREVIEW_MAX_LINES) {
+      return prompt;
+    }
+    return `${lines.slice(0, PROMPT_PREVIEW_MAX_LINES).join("\n")}\n…`;
+  }, [prompt]);
 
   React.useEffect(
     () => () => {
@@ -119,26 +128,33 @@ export function RegoAiPromptDialog({
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor={`${id}-prompt`}>{t("settings.ruleAiPrompt")}</Label>
-          <Textarea
-            id={`${id}-prompt`}
-            readOnly
-            value={prompt}
-            className="min-h-80 font-mono text-xs leading-5"
-          />
+          <Label id={`${id}-prompt-label`}>{t("settings.ruleAiPrompt")}</Label>
+          <div className="relative">
+            <pre
+              id={`${id}-prompt`}
+              aria-labelledby={`${id}-prompt-label`}
+              className="border-input bg-input w-full overflow-hidden rounded-md border py-2 pr-14 pl-3 font-mono text-xs leading-5 break-words whitespace-pre-wrap"
+            >
+              {promptPreview}
+            </pre>
+            <IconButton
+              id={`${id}-copy`}
+              label={
+                copied
+                  ? t("settings.ruleAiPromptCopied")
+                  : t("settings.ruleAiPromptCopy")
+              }
+              className="absolute top-2 right-2"
+              onClick={() => void copyPrompt()}
+            >
+              {copied ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+            </IconButton>
+          </div>
         </div>
-        <DialogFooter>
-          <Button type="button" onClick={() => void copyPrompt()}>
-            {copied ? (
-              <Check className="mr-2 h-4 w-4" />
-            ) : (
-              <Copy className="mr-2 h-4 w-4" />
-            )}
-            {copied
-              ? t("settings.ruleAiPromptCopied")
-              : t("settings.ruleAiPromptCopy")}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
