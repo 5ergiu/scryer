@@ -337,59 +337,6 @@ impl ClientJobLocator {
     pub fn client_id_or_empty(&self) -> &str {
         self.client_id.as_deref().unwrap_or("")
     }
-
-    /// Stable in-memory map key for this job. `new` already normalizes every
-    /// component, so equal locators always produce equal keys.
-    pub(crate) fn dedupe_key(&self) -> String {
-        format!(
-            "{}|{}|{}",
-            self.client_id_or_empty(),
-            self.client_type,
-            self.item_id
-        )
-    }
-
-    /// The same job, attributed to a configured download client.
-    ///
-    /// Used to resolve a legacy client-less locator (see
-    /// [`resolve_legacy_client_for_type`]) into one the router, the reconciler
-    /// and the registry can act on.
-    pub(crate) fn attributed_to_client(&self, client_id: &str) -> Self {
-        Self::new(Some(client_id), &self.client_type, &self.item_id)
-    }
-}
-
-/// The configured download client a legacy, client-less row belongs to.
-///
-/// Migration 0179 backfilled `download_client_bindings` from submissions that
-/// predate per-client attribution, so those rows can carry a NULL/empty
-/// `client_config_id`. Nothing downstream — the router, the ghost pass, the
-/// deleted-client sweep — can act on a locator without a client id, so such a
-/// row blocks its scope forever.
-///
-/// The rule mirrors `resolve_legacy_cleanup_client_tx` in the cleanup store
-/// exactly: when the install has **exactly one** configured client of that
-/// type the row can only have come from it, so it is attributed there.
-/// Disabled clients still count — a second configured instance makes the
-/// original owner ambiguous even when only one of them is reachable — and
-/// anything ambiguous (zero or two or more) stays unresolved rather than
-/// guessing.
-pub(crate) fn resolve_legacy_client_for_type(
-    configs: &[scryer_domain::DownloadClientConfig],
-    client_type: &str,
-) -> Option<String> {
-    let wanted = client_type.trim().to_ascii_lowercase();
-    if wanted.is_empty() {
-        return None;
-    }
-    let mut matches = configs
-        .iter()
-        .filter(|config| config.client_type.trim().to_ascii_lowercase() == wanted);
-    let only = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(only.id.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

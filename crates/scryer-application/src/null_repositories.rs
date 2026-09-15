@@ -2622,13 +2622,6 @@ impl DownloadRegistryRepository for NullDownloadRegistryRepository {
         Ok(None)
     }
 
-    async fn list_active_bindings_for_native_item_ids(
-        &self,
-        _: &[String],
-    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
-        Ok(Vec::new())
-    }
-
     async fn end_binding(&self, _: &scryer_domain::download_identity::DownloadId) -> AppResult<()> {
         Ok(())
     }

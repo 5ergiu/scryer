@@ -41,14 +41,6 @@ const ERROR_PATTERNS: RegExp[] = [
 ];
 
 const WARNING_PATTERNS: RegExp[] = [
-  // An acquisition the canonical-submission guard deferred: an earlier download
-  // on the same scope is still awaiting lifecycle reconciliation. The request
-  // is retried on its own, and no download client is down, so this is a
-  // transient hold rather than a failure — amber, not red. Listed here because
-  // warnings are matched before errors and the surrounding sentence a caller
-  // wraps it in ("failed to queue: …") would otherwise read as an error.
-  /\bawaiting lifecycle reconciliation\b/i,
-  /\bacquisition deferred\b/i,
   /\bskipped\b/i,
   /\bblocked by quality profile\b/i,
   /\bblocked by policy\b/i,

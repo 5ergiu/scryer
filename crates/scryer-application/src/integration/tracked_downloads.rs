@@ -736,15 +736,15 @@ impl TrackedDownloadService {
         unavailable_sources
     }
 
-    /// Mark downloads no longer visible in non-excluded clients as untrackable.
-    /// How long a download may stay missing from pruning snapshots before it is
-    /// actually pruned.
+    /// How long a job may stay missing from a *partial* snapshot before it is
+    /// pruned.
     ///
-    /// Must OUTLAST the router's maximum feedback backoff (120s): while a
-    /// client is backing off, its reads are skipped and its items are absent
-    /// from every snapshot, so any smaller grace re-creates the erase-on-blip
-    /// bug this exists to fix. The cost of the debounce is that a download
-    /// removed in the client's own UI lingers in Activity for up to this long.
+    /// Only bridged `AuthoritativeForClient` scopes debounce. A bridge pushes
+    /// what it knows when it knows it, so one scoped update is not proof that
+    /// the client stopped listing a job. A full authoritative listing is
+    /// proof — its clients answered both reads, and a client in feedback
+    /// backoff is not in `authoritative_client_ids` at all — so it prunes on
+    /// the first tick, the way Sonarr's `UpdateTrackable` does.
     pub(crate) const SNAPSHOT_ABSENCE_PRUNE_GRACE_SECS: i64 = 150;
 
     pub fn update_trackable_excluding_client_types(
@@ -760,15 +760,16 @@ impl TrackedDownloadService {
     }
 
     /// Mark jobs absent only when their client completed both sides of the
-    /// snapshot read. A non-authoritative client is treated as seen so a
-    /// previous absence debounce cannot mature during an outage.
+    /// snapshot read. A non-authoritative client is treated as seen, so an
+    /// outage never erases a queue; a client that did answer is believed at
+    /// once, because a complete listing that omits a job is the client saying
+    /// the job is gone.
     pub fn update_trackable_excluding_client_types_for_authoritative_clients(
         &mut self,
         seen_ids: &HashSet<String>,
         excluded_client_types: &[&str],
         authoritative_client_ids: Option<&HashSet<String>>,
     ) -> Vec<ClientJobLocator> {
-        let now = Utc::now();
         let mut unavailable_sources = Vec::new();
         for td in self.cache.values_mut() {
             if tracked_client_type_is_excluded(&td.client_type, excluded_client_types) {
@@ -788,7 +789,8 @@ impl TrackedDownloadService {
                 td.snapshot_missing_since = None;
                 continue;
             }
-            if td.is_trackable && snapshot_absence_exceeds_grace(td, now) {
+            if td.is_trackable {
+                td.snapshot_missing_since = None;
                 td.is_trackable = false;
                 unavailable_sources.push(ClientJobLocator::new(
                     Some(&td.client_id),
@@ -1583,27 +1585,6 @@ pub enum TrackedDownloadCommand {
         identity: ClientJobLocator,
         reply: oneshot::Sender<Option<CompletedDownload>>,
     },
-    /// Reconcile-on-discovery. The canonical-submission guard found this job
-    /// absent from its client while the registry still held an active
-    /// binding, which is the same evidence class the tracker's
-    /// snapshot-missing path acts on. Rediscovery is otherwise wasted: RSS,
-    /// background search, standby recovery and interactive grabs each pay for
-    /// the observation and none of them connects it to reconciliation.
-    ///
-    /// Fire-and-forget by design — there is no reply channel, because an
-    /// acquisition must never wait on (or fail because of) reconciliation.
-    /// The loop owns the disposition rules; this command only says "look at
-    /// this locator now instead of at the next eligible sweep".
-    ReconcileAbsentSource {
-        locator: ClientJobLocator,
-        /// The canonical download the guard saw bound to `locator`. Carried
-        /// for logging and skew detection only; the reconciler resolves the
-        /// binding by locator, exactly as every other absent-source path does.
-        download_id: DownloadId,
-        /// The title whose guard caches must be dropped if the reconciliation
-        /// ends the binding. Known only because the guard is the discoverer.
-        title_id: Option<String>,
-    },
     Snapshot {
         ids: Vec<String>,
         reply: oneshot::Sender<HashMap<String, TrackedDownloadQueueMetadata>>,
@@ -1717,28 +1698,6 @@ impl TrackedDownloadHandle {
         reply_rx.await.map_err(|_| {
             crate::AppError::Repository("tracked download service dropped reply".into())
         })
-    }
-
-    /// Ask the poller loop to reconcile an authoritatively absent job now.
-    ///
-    /// Best effort on purpose: a full or closed command channel must never
-    /// fail the acquisition that discovered the absence, and there is nothing
-    /// to wait for. Returns whether the command was accepted so the caller can
-    /// log the drop at debug level. The periodic fallback pass still covers
-    /// every binding this drops.
-    pub fn try_reconcile_absent_source(
-        &self,
-        locator: ClientJobLocator,
-        download_id: DownloadId,
-        title_id: Option<String>,
-    ) -> bool {
-        self.tx
-            .try_send(TrackedDownloadCommand::ReconcileAbsentSource {
-                locator,
-                download_id,
-                title_id,
-            })
-            .is_ok()
     }
 
     pub async fn ignore(&self, id: String) -> AppResult<()> {
@@ -2332,28 +2291,6 @@ mod tests {
                 ));
             }
             Ok(None)
-        }
-
-        async fn list_active_bindings_for_native_item_ids(
-            &self,
-            native_item_ids: &[String],
-        ) -> AppResult<Vec<crate::DownloadClientBindingRecord>> {
-            Ok(native_item_ids
-                .iter()
-                .filter_map(|item_id| {
-                    let download_id = *self.fallback_download_ids.get(item_id)?;
-                    Some(crate::DownloadClientBindingRecord {
-                        download_id,
-                        client_config_id: None,
-                        client_type_snapshot: None,
-                        client_name_snapshot: None,
-                        native_item_id: Some(item_id.clone()),
-                        created_at: Utc::now(),
-                        last_seen_at: None,
-                        ended_at: None,
-                    })
-                })
-                .collect())
         }
 
         async fn end_binding(&self, _: &DownloadId) -> AppResult<()> {
@@ -5425,7 +5362,7 @@ mod tests {
     }
 
     #[test]
-    fn global_snapshot_pruning_reports_queue_resident_state_after_grace() {
+    fn global_snapshot_pruning_reports_queue_resident_state_at_once() {
         let mut tracker = TrackedDownloadService::new();
         let queue_resident = build_tracked_download("queue-resident");
         let queue_resident_id = queue_resident.id.clone();
@@ -5433,8 +5370,8 @@ mod tests {
             .cache
             .insert(queue_resident.download_id, queue_resident);
 
-        tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
-        expire_snapshot_absence(&mut tracker, &queue_resident_id);
+        // A full listing that omits the job is the client saying it is gone,
+        // so the very first pass prunes — Sonarr's `UpdateTrackable`.
         let unavailable_sources =
             tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
 
@@ -5554,13 +5491,8 @@ mod tests {
         tracker.cache.insert(weaver.download_id, weaver);
         tracker.cache.insert(nzb.download_id, nzb);
 
-        // First absence only STAMPS (absence debounce); prune happens once the
-        // absence outlives the grace window.
-        tracker.update_trackable_excluding_client_types(&HashSet::new(), &["weaver"]);
-        assert!(tracker.find(&weaver_id).is_some_and(|td| td.is_trackable));
-        assert!(tracker.find(&nzb_id).is_some_and(|td| td.is_trackable));
-
-        expire_snapshot_absence(&mut tracker, &nzb_id);
+        // An excluded client type is never visited by the global pass, however
+        // many listings omit it; the nzbget row prunes on the first one.
         tracker.update_trackable_excluding_client_types(&HashSet::new(), &["weaver"]);
         assert!(tracker.find(&weaver_id).is_some_and(|td| td.is_trackable));
         if let Some(td) = tracker.find(&nzb_id) {
@@ -5568,14 +5500,13 @@ mod tests {
         }
 
         tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
-        expire_snapshot_absence(&mut tracker, &weaver_id);
-        tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
         if let Some(td) = tracker.find(&weaver_id) {
             assert!(!td.is_trackable);
         }
     }
 
-    /// Backdate a tracked download's absence stamp past the prune grace window.
+    /// Backdate a tracked download's absence stamp past the prune grace window
+    /// that scoped (bridged) snapshots still honour.
     fn expire_snapshot_absence(tracker: &mut TrackedDownloadService, id: &str) {
         if let Some(td) = tracker.find_mut(id) {
             td.snapshot_missing_since = Some(
@@ -5588,23 +5519,81 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_absence_debounce_survives_transient_client_blackouts() {
+    fn client_blackouts_never_prune_because_a_skipped_client_is_not_authoritative() {
         // The router degrades per client: a feedback timeout starts an
-        // exponential backoff during which that client's reads are silently
-        // skipped, so its items are absent from otherwise-successful
-        // snapshots. Pruning on first absence erased live downloads during
-        // such blackouts — anything that completed inside one was never
-        // imported. Absence must persist beyond the grace window to prune,
-        // and one sighting must fully reset the clock.
+        // exponential backoff during which that client's reads are skipped, so
+        // its items are absent from otherwise-successful snapshots. Pruning on
+        // first absence erased live downloads during such blackouts — anything
+        // that completed inside one was never imported. What makes immediate
+        // pruning safe is authority, not a timer: a client that was skipped or
+        // failed never reaches `authoritative_client_ids`, so its rows are
+        // treated as seen for as long as the outage lasts.
         let mut tracker = TrackedDownloadService::new();
         let td = build_tracked_download("blip-item");
         let id = td.id.clone();
         tracker.cache.insert(td.download_id, td);
 
-        // Several consecutive absent snapshots inside the grace window: the
-        // item survives every one of them.
+        let no_authoritative_clients = HashSet::new();
         for _ in 0..3 {
-            tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
+            let unavailable = tracker
+                .update_trackable_excluding_client_types_for_authoritative_clients(
+                    &HashSet::new(),
+                    &[],
+                    Some(&no_authoritative_clients),
+                );
+            assert!(unavailable.is_empty(), "an outage must report nothing");
+            assert!(tracker.find(&id).is_some_and(|t| t.is_trackable));
+            assert!(
+                tracker
+                    .find(&id)
+                    .is_some_and(|t| t.snapshot_missing_since.is_none()),
+                "a client nobody could read has not said the job is gone"
+            );
+        }
+
+        // The client answers again and still does not list the job: that is
+        // the client saying it is gone, and it prunes on that first listing.
+        let authoritative = HashSet::from(["client-1".to_string()]);
+        let unavailable = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::new(),
+                &[],
+                Some(&authoritative),
+            );
+        assert_eq!(
+            unavailable,
+            vec![ClientJobLocator::new(
+                Some("client-1"),
+                "nzbget",
+                "blip-item"
+            )]
+        );
+        if let Some(t) = tracker.find(&id) {
+            assert!(!t.is_trackable);
+        }
+    }
+
+    #[test]
+    fn a_bridged_scope_still_debounces_absence_and_a_sighting_resets_the_clock() {
+        // A bridge pushes what it knows when it knows it, so one scoped update
+        // that omits a job is not proof the client stopped listing it. Scoped
+        // prunes keep the grace window a full authoritative listing no longer
+        // needs.
+        let mut tracker = TrackedDownloadService::new();
+        let td = build_tracked_download("bridged-item");
+        let id = td.id.clone();
+        tracker.cache.insert(td.download_id, td);
+        let scope = TrackedDownloadSnapshotScope::AuthoritativeForClient {
+            client_id: Some("client-1".to_string()),
+            client_type: "nzbget".to_string(),
+        };
+
+        for _ in 0..3 {
+            assert!(
+                tracker
+                    .update_trackable_for_scope(&HashSet::new(), &scope)
+                    .is_empty()
+            );
             assert!(tracker.find(&id).is_some_and(|t| t.is_trackable));
         }
         assert!(
@@ -5614,10 +5603,8 @@ mod tests {
             "absence must be stamped"
         );
 
-        // A sighting clears the stamp entirely.
-        let mut seen = HashSet::new();
-        seen.insert(id.clone());
-        tracker.update_trackable_excluding_client_types(&seen, &[]);
+        let seen = HashSet::from([id.clone()]);
+        tracker.update_trackable_for_scope(&seen, &scope);
         assert!(
             tracker
                 .find(&id)
@@ -5625,13 +5612,16 @@ mod tests {
             "a sighting must reset the absence clock"
         );
 
-        // Absence that outlives the grace window prunes.
-        tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
+        tracker.update_trackable_for_scope(&HashSet::new(), &scope);
         expire_snapshot_absence(&mut tracker, &id);
-        tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
-        if let Some(t) = tracker.find(&id) {
-            assert!(!t.is_trackable);
-        }
+        assert_eq!(
+            tracker.update_trackable_for_scope(&HashSet::new(), &scope),
+            vec![ClientJobLocator::new(
+                Some("client-1"),
+                "nzbget",
+                "bridged-item"
+            )]
+        );
     }
 
     #[test]

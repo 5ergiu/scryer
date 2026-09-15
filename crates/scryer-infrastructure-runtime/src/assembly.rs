@@ -1292,6 +1292,14 @@ impl DatastoreAssembly {
         }
     }
 
+    /// Per-client failure status (migration 0241). Shared by the app services
+    /// and the download-client router so both see the same backoff rows.
+    pub fn download_client_status(
+        &self,
+    ) -> Arc<dyn scryer_application::DownloadClientStatusRepository> {
+        Arc::new(DownloadClientStatusStore::new(self.datastore()))
+    }
+
     pub fn download_registry(&self) -> Arc<dyn scryer_application::DownloadRegistryRepository> {
         match &self.stores {
             DatastoreStores::Sqlite {
@@ -1617,11 +1625,7 @@ impl DatastoreAssembly {
                 .with_acquisition_state(acquisition_store.clone())
                 .with_domain_events(domain_event_store.clone())
                 .with_download_registry(download_registry_store.clone())
-                // Constructed here rather than carried in both store variants:
-                // nothing else in the assembly holds it.
-                .with_download_client_status(Arc::new(DownloadClientStatusStore::new(
-                    self.datastore(),
-                )))
+                .with_download_client_status(self.download_client_status())
                 .with_download_submissions(download_submission_store.clone())
                 .with_download_queue_commands(download_queue_command_store.clone())
                 .with_external_import_monitor_snapshots(external_import_monitor_store.clone())
@@ -1747,11 +1751,7 @@ impl DatastoreAssembly {
                 .with_acquisition_state(acquisition_store.clone())
                 .with_domain_events(domain_event_store.clone())
                 .with_download_registry(download_registry_store.clone())
-                // Constructed here rather than carried in both store variants:
-                // nothing else in the assembly holds it.
-                .with_download_client_status(Arc::new(DownloadClientStatusStore::new(
-                    self.datastore(),
-                )))
+                .with_download_client_status(self.download_client_status())
                 .with_download_submissions(download_submission_store.clone())
                 .with_download_queue_commands(download_queue_command_store.clone())
                 .with_external_import_monitor_snapshots(external_import_monitor_store.clone())

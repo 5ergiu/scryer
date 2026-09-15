@@ -1,29 +1,11 @@
 use super::*;
 
-use crate::DownloadLifecycleDeferral;
 use crate::acquisition_decision_helpers::is_download_submit_unavailable_error;
 use crate::catalog::workflow::queue_item_matches_submission;
 use crate::download_identity::{
     AcceptedDownloadIdentityInput, accepted_download_submission_identity,
 };
 use crate::services::{CanonicalSubmissionTitleState, UncertainDownloadSubmissionClaim};
-
-/// A short, operator-readable name for the scope an acquisition asked for.
-/// Used only to describe a refusal; nothing routes on it.
-fn describe_submission_scope(scope: &SubmissionScope) -> String {
-    match scope {
-        SubmissionScope::Episode { episode_id } => format!("episode {episode_id}"),
-        SubmissionScope::EpisodeSet { episode_ids } => {
-            format!("episode set of {}", episode_ids.len())
-        }
-        SubmissionScope::SeriesMovie {
-            series_movie_link_id,
-        } => format!("series movie {series_movie_link_id}"),
-        SubmissionScope::Collection { collection_id } => format!("collection {collection_id}"),
-        SubmissionScope::Title => "title".to_string(),
-        SubmissionScope::Orphan => "orphan".to_string(),
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct CanonicalDownloadSubmissionIntent {
@@ -116,37 +98,24 @@ fn submission_client_state_is_authoritative(
         .is_some_and(|client_id| snapshot.authoritative_client_ids.contains(client_id))
 }
 
-/// Whether a bulk-read binding is the one `find_active_binding_by_locator`
-/// would resolve for `locator`.
+/// The client a submission runs on, when that client is currently in failure
+/// backoff, together with the moment it comes back.
 ///
-/// Mirrors that query's predicate exactly — non-ended, a present native item
-/// id, and the same normalized client id / client type / item id — so the
-/// bulk pre-filter never skips a row the authoritative per-locator lookup
-/// would have found.
-///
-/// `legacy_attributed` says `locator` is a client-less submission's locator
-/// that was resolved to the single configured client of its type. That is
-/// precisely the case in which the per-locator lookup also accepts a binding
-/// row whose own `client_config_id` is still blank, so the pre-filter accepts
-/// one too; otherwise the client id must match exactly.
-fn active_binding_matches_locator(
-    binding: &DownloadClientBindingRecord,
-    locator: &ClientJobLocator,
-    legacy_attributed: bool,
-) -> bool {
-    let binding_client_id = binding.client_config_id.as_deref().unwrap_or_default();
-    let binding_client_type = binding
-        .client_type_snapshot
+/// A submission that names no client (a row written before per-client
+/// attribution) can never be blocked: migration 0242 attributed or ended those,
+/// and one that survives names nothing to wait for.
+fn blocked_download_client_for_submission<'a>(
+    blocked_clients: &'a std::collections::HashMap<String, DateTime<Utc>>,
+    submission: &'a DownloadSubmission,
+) -> Option<(&'a str, DateTime<Utc>)> {
+    let client_id = submission
+        .download_client_id
         .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let client_matches = binding_client_id == locator.client_id.as_deref().unwrap_or_default()
-        || (legacy_attributed && binding_client_id.trim().is_empty());
-    binding.ended_at.is_none()
-        && binding.native_item_id.as_deref() == Some(locator.item_id.as_str())
-        && client_matches
-        && binding_client_type == locator.client_type
+        .map(str::trim)
+        .filter(|client_id| !client_id.is_empty())?;
+    blocked_clients
+        .get(client_id)
+        .map(|until| (client_id, *until))
 }
 
 fn submission_matches_intent(
@@ -177,66 +146,40 @@ enum ObservationStubAdoption {
 }
 
 impl AppUseCase {
-    /// Schedule bounded lifecycle reconciliation for a job the guard just
-    /// proved absent while its binding was still active.
+    /// Download clients whose failure backoff is still open, mapped to the
+    /// moment each comes back.
     ///
-    /// Three ways this declines, all silent to the acquisition:
-    /// no tracked-download loop is running (tests, partial assemblies), a
-    /// reconciliation for this job was already scheduled inside the dedupe
-    /// window, or the command channel is full/closed. The periodic fallback
-    /// pass still covers every one of them.
-    fn schedule_absent_source_reconciliation(
-        &self,
-        locator: &ClientJobLocator,
-        download_id: scryer_domain::download_identity::DownloadId,
-        title_id: &str,
-    ) {
-        let Some(handle) = self.runtime.acquisition.tracked_download_handle.as_ref() else {
-            tracing::debug!(
-                download_id = %download_id,
-                "no tracked download loop; leaving the absent binding to the periodic reconciliation pass"
-            );
-            return;
-        };
-        let schedule_key = locator.dedupe_key();
-        if !self
-            .runtime
-            .acquisition
-            .download_submission_guards
-            .claim_absent_source_reconcile_schedule(&schedule_key)
+    /// Sonarr consults `DownloadClientStatus` and nothing else to decide that a
+    /// client's silence is not evidence. A status read that fails leaves the
+    /// map empty: the client listing stays the authority, which is the
+    /// pre-status behaviour.
+    async fn blocked_download_clients(&self) -> std::collections::HashMap<String, DateTime<Utc>> {
+        let statuses = match self
+            .services
+            .integrations
+            .download_client_status
+            .list()
+            .await
         {
-            tracing::debug!(
-                download_id = %download_id,
-                client_type = %locator.client_type,
-                native_item_id = %locator.item_id,
-                "lifecycle reconciliation for this job is already scheduled"
-            );
-            return;
-        }
-        if handle.try_reconcile_absent_source(
-            locator.clone(),
-            download_id,
-            Some(title_id.to_string()),
-        ) {
-            tracing::debug!(
-                title_id = %title_id,
-                download_id = %download_id,
-                client_type = %locator.client_type,
-                native_item_id = %locator.item_id,
-                "scheduled lifecycle reconciliation for an absent download binding"
-            );
-        } else {
-            self.runtime
-                .acquisition
-                .download_submission_guards
-                .release_absent_source_reconcile_schedule(&schedule_key);
-            tracing::debug!(
-                download_id = %download_id,
-                "tracked download loop is not accepting commands; leaving the absent binding to the periodic reconciliation pass"
-            );
-        }
+            Ok(statuses) => statuses,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "download client status could not be read; treating every client as available"
+                );
+                return std::collections::HashMap::new();
+            }
+        };
+        let now = Utc::now();
+        statuses
+            .into_iter()
+            .filter(|(_, status)| status.is_blocked(now))
+            .filter_map(|(client_id, status)| status.disabled_until.map(|until| (client_id, until)))
+            .collect()
     }
+}
 
+impl AppUseCase {
     async fn adopt_canonical_download(
         &self,
         intent: &CanonicalDownloadSubmissionIntent,
@@ -508,7 +451,7 @@ impl AppUseCase {
                 })
             })
             .cloned();
-        let mut snapshot = if state.submissions.is_empty() {
+        let snapshot = if state.submissions.is_empty() {
             None
         } else {
             let guards = &self.runtime.acquisition.download_submission_guards;
@@ -547,331 +490,34 @@ impl AppUseCase {
             }
         };
 
-        // A cached positive sighting can protect a claim, but absence from
-        // queue + recent history cannot release one. Recheck the exact job
-        // before either the same-request retry or conflict admission forgets it.
-        // Every client-less submission the guard pass below could attribute.
-        // The conflict pass reads it for its authority check: a submission that
-        // names no client can never be covered by a client's snapshot authority
-        // on its own, so without this an upgraded install refuses every
-        // overlapping acquisition outright.
-        let mut legacy_client_ids: std::collections::HashMap<
-            scryer_domain::download_identity::DownloadId,
-            String,
-        > = std::collections::HashMap::new();
-        if let Some(snapshot) = snapshot.as_mut() {
-            let guard_pass_started = std::time::Instant::now();
-            let overlapping: Vec<(&DownloadSubmission, ClientJobLocator)> = state
-                .submissions
-                .iter()
-                .filter(|submission| {
-                    crate::catalog_workflow::submission_scopes_overlap(
-                        &title_id,
-                        &submission.scope,
-                        &intent.scope,
-                        &state.episodes,
-                    ) && !state
-                        .accepted_download_ids
-                        .contains(&submission.download_id)
-                })
-                .map(|submission| (submission, ClientJobLocator::from_submission(submission)))
-                .collect();
-            // Only a row whose client binding is still active can reach the
-            // deferral below, so the whole title's bindings are resolved in one
-            // read and the live client round-trip is spent only on those rows.
-            let active_bindings = if overlapping.is_empty() {
-                Vec::new()
-            } else {
-                let native_item_ids: Vec<String> = overlapping
-                    .iter()
-                    .map(|(_, locator)| locator.item_id.clone())
-                    .collect();
-                self.services
-                    .workflow
-                    .download_registry
-                    .list_active_bindings_for_native_item_ids(&native_item_ids)
-                    .await
-                    .map_err(|error| AppError::DownloadSubmitUnavailable(error.to_string()))?
-            };
-            let overlapping_count = overlapping.len();
-            let mut skipped_no_binding = 0usize;
-            let mut skipped_settled = 0usize;
-            let mut observed = 0usize;
-            // Read once per pass, and only if some overlapping submission
-            // predates per-client attribution.
-            let mut client_configs: Option<Vec<scryer_domain::DownloadClientConfig>> = None;
-            for (submission, locator) in overlapping {
-                // A submission written before per-client attribution (migration
-                // 0179's population) carries no client id, and nothing
-                // downstream — the router, the reconciler — can act on such a
-                // locator. Attribute it to the single configured client of its
-                // type when there is exactly one, so this scope is reconcilable
-                // instead of deferred forever.
-                let legacy_client_id = if locator.client_id.is_none() {
-                    if client_configs.is_none() {
-                        client_configs = Some(
-                            self.services
-                                .integrations
-                                .download_client_configs
-                                .list(None)
-                                .await
-                                .map_err(|error| {
-                                    AppError::DownloadSubmitUnavailable(error.to_string())
-                                })?,
-                        );
-                    }
-                    crate::contracts::resolve_legacy_client_for_type(
-                        client_configs.as_deref().unwrap_or_default(),
-                        &locator.client_type,
-                    )
-                } else {
-                    None
-                };
-                if let Some(client_id) = legacy_client_id.as_ref() {
-                    legacy_client_ids.insert(submission.download_id, client_id.clone());
-                }
-                let legacy_attributed = legacy_client_id.is_some();
-                let observed_locator = match legacy_client_id.as_deref() {
-                    Some(client_id) => locator.attributed_to_client(client_id),
-                    None => locator.clone(),
-                };
-                // A submission whose binding already ended cannot produce the
-                // deferral below: the Absent branch only blocks while
-                // `find_active_binding_by_locator` still resolves. Checked
-                // first so an unbound historical row costs no store reads at
-                // all beyond the one bulk binding query above. Leave the
-                // snapshot exactly as the client listing reported it so the
-                // same-request retry and the conflict pass keep deciding from
-                // the same evidence they would have without this fast path.
-                let Some(bulk_binding) = active_bindings.iter().find(|binding| {
-                    active_binding_matches_locator(binding, &observed_locator, legacy_attributed)
-                }) else {
-                    skipped_no_binding += 1;
-                    continue;
-                };
-                let durable_state = self
-                    .services
-                    .workflow
-                    .download_submissions
-                    .get_identity_tracked_state_for_download(
-                        Some(&submission.download_id),
-                        &DownloadSubmissionIdentity::default(),
-                        Some(&locator),
-                    )
-                    .await
-                    .map_err(|error| AppError::DownloadSubmitUnavailable(error.to_string()))?;
-                let imported = matches!(
-                    durable_state.as_deref(),
-                    Some("imported" | "imported_seeding")
-                );
-                let cleanup_pending = if imported {
-                    self.services
-                        .workflow
-                        .download_submissions
-                        .has_pending_download_cleanup(&submission.download_id)
-                        .await
-                        .map_err(|error| AppError::DownloadSubmitUnavailable(error.to_string()))?
-                } else {
-                    false
-                };
-                if matches!(durable_state.as_deref(), Some("failed" | "ignored"))
-                    || (imported && !cleanup_pending)
-                {
-                    skipped_settled += 1;
-                    continue;
-                }
-                observed += 1;
-                match self
-                    .services
-                    .integrations
-                    .download_client
-                    .observe_download(&observed_locator, 0)
-                    .await
-                {
-                    Ok(crate::DownloadClientObservation::Present(item)) => {
-                        snapshot
-                            .items
-                            .retain(|cached| !queue_item_matches_submission(cached, submission));
-                        snapshot.items.push(*item);
-                        if let Some(client_id) = observed_locator.client_id.as_ref() {
-                            snapshot.authoritative_client_ids.insert(client_id.clone());
-                        }
-                    }
-                    Ok(crate::DownloadClientObservation::Absent) => {
-                        let binding = self
-                            .services
-                            .workflow
-                            .download_registry
-                            .find_active_binding_by_locator(&observed_locator)
-                            .await
-                            .map_err(|error| {
-                                AppError::DownloadSubmitUnavailable(error.to_string())
-                            })?;
-                        if let Some(binding) = binding.as_ref() {
-                            // The lifecycle reconciler only visits configured
-                            // clients; a binding on a deleted client would
-                            // otherwise defer this scope forever.
-                            let client_exists = match observed_locator.client_id.as_deref() {
-                                Some(client_id) => self
-                                    .services
-                                    .integrations
-                                    .download_client_configs
-                                    .get_by_id(client_id)
-                                    .await
-                                    .map_err(|error| {
-                                        AppError::DownloadSubmitUnavailable(error.to_string())
-                                    })?
-                                    .is_some(),
-                                None => true,
-                            };
-                            if client_exists {
-                                // Not a downloader outage: the client answered
-                                // and simply no longer lists a job the registry
-                                // still binds. Name the blocking download so the
-                                // operator settles that instead of hunting a
-                                // client problem that is not happening.
-                                let deferral = DownloadLifecycleDeferral {
-                                    download_id: submission.download_id.to_string(),
-                                    client_id: observed_locator.client_id.clone(),
-                                    client_type: observed_locator.client_type.clone(),
-                                    native_item_id: observed_locator.item_id.clone(),
-                                    tracked_state: durable_state
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    binding_age_seconds: (Utc::now() - binding.created_at)
-                                        .num_seconds()
-                                        .max(0),
-                                    last_seen_age_seconds: binding.last_seen_at.map(|last_seen| {
-                                        (Utc::now() - last_seen).num_seconds().max(0)
-                                    }),
-                                    source_title: submission.source_title.clone(),
-                                    scope: describe_submission_scope(&intent.scope),
-                                };
-                                tracing::info!(
-                                    title_id = %title_id,
-                                    download_id = %deferral.download_id,
-                                    client_id = ?deferral.client_id,
-                                    client_type = %deferral.client_type,
-                                    native_item_id = %deferral.native_item_id,
-                                    tracked_state = %deferral.tracked_state,
-                                    binding_age_seconds = deferral.binding_age_seconds,
-                                    last_seen_age_seconds = ?deferral.last_seen_age_seconds,
-                                    release = ?deferral.source_title,
-                                    scope = %deferral.scope,
-                                    "acquisition deferred: lifecycle reconciliation pending"
-                                );
-                                // The observation that produced this deferral
-                                // is exactly the evidence the lifecycle
-                                // reconciler needs. Hand it over instead of
-                                // waiting for a sweep that may be ten minutes
-                                // and a budget window away, so this scope
-                                // unblocks on the next attempt rather than
-                                // paying for the same discovery again.
-                                self.schedule_absent_source_reconciliation(
-                                    &observed_locator,
-                                    submission.download_id,
-                                    &title_id,
-                                );
-                                return Err(AppError::download_lifecycle_deferred(deferral));
-                            }
-                            tracing::warn!(
-                                download_id = %submission.download_id,
-                                client_id = ?observed_locator.client_id,
-                                "download client was deleted with an active binding; treating the job as absent"
-                            );
-                        }
-                        snapshot
-                            .items
-                            .retain(|cached| !queue_item_matches_submission(cached, submission));
-                        if let Some(client_id) = observed_locator.client_id.as_ref() {
-                            snapshot.authoritative_client_ids.insert(client_id.clone());
-                        }
-                    }
-                    Ok(crate::DownloadClientObservation::Unknown { reason, .. }) => {
-                        // A locator with no client id reaches no client: the
-                        // router cannot attribute it, and the rule above found
-                        // no single configured client of its type to attribute
-                        // it to. Stay fail-closed, but report it as the
-                        // lifecycle deferral it is so the operator can see
-                        // which legacy row is holding the scope instead of
-                        // hunting a downloader outage that is not happening.
-                        if observed_locator.client_id.is_none() {
-                            let deferral = DownloadLifecycleDeferral {
-                                download_id: submission.download_id.to_string(),
-                                client_id: None,
-                                client_type: observed_locator.client_type.clone(),
-                                native_item_id: observed_locator.item_id.clone(),
-                                tracked_state: durable_state
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string()),
-                                binding_age_seconds: (Utc::now() - bulk_binding.created_at)
-                                    .num_seconds()
-                                    .max(0),
-                                last_seen_age_seconds: bulk_binding
-                                    .last_seen_at
-                                    .map(|last_seen| (Utc::now() - last_seen).num_seconds().max(0)),
-                                source_title: submission.source_title.clone(),
-                                scope: describe_submission_scope(&intent.scope),
-                            };
-                            tracing::info!(
-                                title_id = %title_id,
-                                download_id = %deferral.download_id,
-                                client_type = %deferral.client_type,
-                                native_item_id = %deferral.native_item_id,
-                                tracked_state = %deferral.tracked_state,
-                                binding_age_seconds = deferral.binding_age_seconds,
-                                release = ?deferral.source_title,
-                                scope = %deferral.scope,
-                                reason,
-                                "acquisition deferred: a download binding that names no client holds this scope, and its client type has no single configured client to attribute it to"
-                            );
-                            return Err(AppError::download_lifecycle_deferred(deferral));
-                        }
-                        return Err(AppError::DownloadSubmitUnavailable(format!(
-                            "client state unknown; acquisition deferred for {}: {reason}",
-                            submission.download_id
-                        )));
-                    }
-                    Err(error) => {
-                        return Err(AppError::DownloadSubmitUnavailable(format!(
-                            "client state unknown; acquisition deferred for {}: {error}",
-                            submission.download_id
-                        )));
-                    }
-                }
-            }
-            tracing::debug!(
-                title_id = %title_id,
-                overlapping = overlapping_count,
-                skipped_no_binding,
-                skipped_settled,
-                observed,
-                elapsed_ms = guard_pass_started.elapsed().as_millis() as u64,
-                "canonical submission guard finished its client observation pass"
-            );
-        }
+        // Clients in failure backoff, with the moment each comes back. A
+        // client that is answering is the authority on what it is running: a
+        // submission with no queue row is simply gone. Only while a client is
+        // blocked is its silence uninformative, and only then does an
+        // overlapping row hold the scope.
+        let blocked_clients = self.blocked_download_clients().await;
 
         if let Some(existing) = existing {
             let snapshot = snapshot
                 .as_ref()
                 .expect("persisted submission has a snapshot");
-            if let Some(item) = snapshot
+            let item = snapshot
                 .items
                 .iter()
-                .find(|item| queue_item_matches_submission(item, &existing))
+                .find(|item| queue_item_matches_submission(item, &existing));
+            if let Some(item) = item
+                && item.state != DownloadQueueState::Failed
             {
-                if item.state != DownloadQueueState::Failed {
-                    return Ok(accepted_existing(existing));
-                }
-                if !submission_client_state_is_authoritative(snapshot, &existing) {
-                    return Err(AppError::DownloadSubmitUnavailable(format!(
-                        "download client state is unavailable for submission {} on title {title_id}",
-                        existing.download_id
-                    )));
-                }
-            } else if !submission_client_state_is_authoritative(snapshot, &existing) {
+                return Ok(accepted_existing(existing));
+            }
+            // The row is gone, or the client reported it Failed: either way this
+            // retry replaces it. Only a client that is in failure backoff can
+            // stop that, because only then is its listing not evidence.
+            if let Some((client_id, until)) =
+                blocked_download_client_for_submission(&blocked_clients, &existing)
+            {
                 return Err(AppError::DownloadSubmitUnavailable(format!(
-                    "download client state is unavailable for submission {} on title {title_id}",
+                    "download client {client_id} is in failure backoff until {until}; submission {} on title {title_id} cannot be resolved yet",
                     existing.download_id
                 )));
             }
@@ -897,7 +543,7 @@ impl AppUseCase {
                 snapshot,
                 &state.episodes,
                 &state.accepted_download_ids,
-                &legacy_client_ids,
+                &blocked_clients,
             )?
         } else {
             Vec::new()

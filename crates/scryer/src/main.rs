@@ -1277,7 +1277,8 @@ async fn bootstrap_application(
         .with_download_client_category_snapshot_store(
             download_client_category_snapshot_store.clone(),
         )
-        .with_seed_goal_resolution(datastore.seeding_profiles()),
+        .with_seed_goal_resolution(datastore.seeding_profiles())
+        .with_download_client_status(datastore.download_client_status()),
     );
     let upstream_scheduler = datastore
         .upstream_scheduler()

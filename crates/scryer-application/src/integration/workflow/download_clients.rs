@@ -518,6 +518,21 @@ impl AppUseCase {
             .download_client_configs
             .delete_with_cleared_indexer_mapping_count(client_id)
             .await?;
+        // The failure record is about a client that no longer exists. Leaving
+        // it would block a client re-added under the same id.
+        if let Err(error) = self
+            .services
+            .integrations
+            .download_client_status
+            .clear(client_id)
+            .await
+        {
+            tracing::warn!(
+                client_id,
+                error = %error,
+                "failed to clear the deleted download client's status row"
+            );
+        }
         self.refresh_download_client_category_admission_best_effort()
             .await;
         for indexer_id in mapped_indexer_ids {
