@@ -269,6 +269,12 @@ pub(super) async fn background_refresh_series(
     let mut executor = LibraryScanMediaAnalysisPool::for_policy(app, actor, pool_policy).await?;
     let metadata_language = app.metadata_language().await;
 
+    // Loaded once per refresh run so the per-title root heal (#224) costs no
+    // query when a title's root id is already correct.
+    let library = app
+        .library_by_id_for_scan_root_heal(library_id)
+        .await
+        .unwrap_or(None);
     let library_ids = vec![library_id.to_string()];
     let mut existing_titles =
         load_titles_for_background_refresh(app, facet.clone(), &library_ids).await?;
@@ -311,6 +317,7 @@ pub(super) async fn background_refresh_series(
         for candidate in prepared_candidates {
             let candidate = process_series_refresh_candidate(
                 app,
+                library.as_ref(),
                 facet,
                 library_id,
                 library_path,
@@ -351,6 +358,7 @@ pub(super) async fn background_refresh_series(
             for candidate in ready_candidates {
                 process_resolved_series_refresh_candidate(
                     app,
+                    library.as_ref(),
                     actor,
                     facet,
                     library_id,
@@ -424,6 +432,12 @@ pub(super) async fn background_refresh_movies(
     let pool_policy =
         LibraryScanMediaAnalysisPolicy::background_refresh(app, session_id, None).await;
     let mut executor = LibraryScanMediaAnalysisPool::for_policy(app, actor, pool_policy).await?;
+    // Loaded once per refresh run so the per-title root heal (#224) costs no
+    // query when a title's root id is already correct.
+    let library = app
+        .library_by_id_for_scan_root_heal(library_id)
+        .await
+        .unwrap_or(None);
     let library_ids = vec![library_id.to_string()];
     let mut existing_titles =
         load_titles_for_background_refresh(app, MediaFacet::Movie, &library_ids).await?;
@@ -491,6 +505,7 @@ pub(super) async fn background_refresh_movies(
         for candidate in prepared_entries {
             let candidate = process_movie_refresh_candidate(
                 app,
+                library.as_ref(),
                 actor,
                 library_id,
                 candidate,
@@ -530,6 +545,7 @@ pub(super) async fn background_refresh_movies(
             for candidate in ready_candidates {
                 process_resolved_movie_refresh_candidate(
                     app,
+                    library.as_ref(),
                     actor,
                     library_id,
                     candidate,
