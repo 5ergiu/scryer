@@ -108,7 +108,7 @@ export function RegoAiPromptDialog({
         <Sparkles className="mr-2 h-4 w-4" />
         {t("settings.ruleAiPrompt")}
       </Button>
-      <DialogContent className="max-h-[calc(100vh-2rem)] max-w-[min(96vw,64rem)] overflow-y-auto">
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-[48rem]">
         <DialogHeader>
           <DialogTitle>{t("settings.ruleAiPromptTitle")}</DialogTitle>
           <DialogDescription>
