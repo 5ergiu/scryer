@@ -50,7 +50,7 @@ import { SetupSummaryView } from "./setup-summary-view";
 import SetupImportWizard from "./setup-import-wizard";
 import { SetupPluginsView } from "./setup-plugins-view";
 import { SetupRestoreView } from "./setup-restore-view";
-import { SetupIntroMark, prefersReducedMotion } from "./setup-intro";
+import { SetupIntroMark, setupIntroFlies } from "./setup-intro";
 
 const FALLBACK_PROVIDER_OPTIONS: SetupIndexerProviderOption[] = [];
 
@@ -108,10 +108,14 @@ export function SetupWizardContainer({
   // The welcome plays once, when setup first opens — not when it is reopened
   // from Settings, and not on moving between steps.
   const [intro, setIntro] = useState<"waiting" | "playing" | null>(() =>
-    isReentry || prefersReducedMotion() ? null : "waiting",
+    !isReentry && setupIntroFlies() ? "waiting" : null,
   );
+  const [introFlightDelayMs, setIntroFlightDelayMs] = useState(0);
   const headerLogoRef = useRef<HTMLDivElement>(null);
-  const startIntro = useCallback(() => setIntro("playing"), []);
+  const startIntro = useCallback((flightDelayMs: number) => {
+    setIntroFlightDelayMs(flightDelayMs);
+    setIntro("playing");
+  }, []);
   const finishIntro = useCallback(() => setIntro(null), []);
   const [restoreAvailabilityChecked, setRestoreAvailabilityChecked] =
     useState(false);
@@ -553,6 +557,11 @@ export function SetupWizardContainer({
         intro && "setup-intro",
         intro === "playing" && "setup-intro-playing",
       )}
+      style={
+        intro === "playing"
+          ? ({ "--setup-intro-flight-delay": `${introFlightDelayMs}ms` } as React.CSSProperties)
+          : undefined
+      }
     >
       <div className="setup-intro-header mb-8 flex items-center gap-2.5">
         {wizardPath !== "import" ? (
