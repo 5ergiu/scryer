@@ -1723,6 +1723,13 @@ impl AppUseCase {
             .library_probe_signatures
             .delete_probe_signatures_for_title_ids(&[title_id.to_string()])
             .await?;
+        // Pending imports bound to the title: their files are rediscovered by
+        // the next scan if they are still there.
+        self.services
+            .library
+            .library_scan_unmatched_items
+            .delete_for_title(title_id)
+            .await?;
 
         Ok(())
     }

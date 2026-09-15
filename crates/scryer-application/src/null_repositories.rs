@@ -3105,6 +3105,10 @@ impl LibraryScanUnmatchedItemRepository for NullLibraryScanUnmatchedItemReposito
         Ok(0)
     }
 
+    async fn delete_for_title(&self, _title_id: &str) -> AppResult<u32> {
+        Ok(0)
+    }
+
     async fn list_library_scan_unmatched_items(
         &self,
         _facet: Option<scryer_domain::MediaFacet>,

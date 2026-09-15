@@ -5067,6 +5067,8 @@ pub trait LibraryScanUnmatchedItemRepository: Send + Sync {
         item_path: &str,
     ) -> AppResult<()>;
     async fn delete_for_library(&self, library_id: &str) -> AppResult<u32>;
+    /// Remove every row bound to `title_id`; the title they point at is gone.
+    async fn delete_for_title(&self, title_id: &str) -> AppResult<u32>;
 
     async fn list_library_scan_unmatched_items(
         &self,
