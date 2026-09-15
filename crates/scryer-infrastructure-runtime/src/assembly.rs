@@ -16,6 +16,7 @@ use scryer_application::{
     TotpRepository, UpstreamScheduler, UserExternalAccountRepository, UserRepository,
     UserUiSettingsRepository, WebauthnRepository,
 };
+use scryer_infrastructure_datastore::migrations::MigrationProgress;
 
 #[cfg(feature = "image-processing")]
 use crate::HttpTitleImageProcessor;
@@ -98,6 +99,8 @@ pub struct DatastoreConfig {
     pub source: DatastoreConfigSource,
     pub data_dir: PathBuf,
     pub migration_mode: MigrationMode,
+    /// Counts the migrations applied while connecting, for the upgrade screen.
+    pub migration_progress: MigrationProgress,
 }
 
 impl DatastoreConfig {
@@ -128,6 +131,7 @@ impl DatastoreConfig {
             source,
             data_dir: data_dir.into(),
             migration_mode,
+            migration_progress: MigrationProgress::default(),
         }
     }
 
@@ -145,6 +149,7 @@ impl DatastoreConfig {
             source,
             data_dir: data_dir.into(),
             migration_mode,
+            migration_progress: MigrationProgress::default(),
         }
     }
 
@@ -798,10 +803,11 @@ impl DatastoreAssembly {
     }
 
     async fn connect_sqlite(config: DatastoreConfig) -> Result<Self, AppError> {
-        let db = SqliteServices::new_with_mode_and_data_dir(
+        let db = SqliteServices::new_with_migration_progress(
             config.database_url.clone(),
             config.migration_mode,
             Some(config.data_dir.clone()),
+            config.migration_progress.clone(),
         )
         .await?;
         let datastore = db.datastore();
@@ -937,10 +943,11 @@ impl DatastoreAssembly {
     }
 
     async fn connect_postgres(config: DatastoreConfig) -> Result<Self, AppError> {
-        let db = PostgresServices::new_with_mode_and_data_dir(
+        let db = PostgresServices::new_with_migration_progress(
             config.database_url.clone(),
             config.migration_mode,
             Some(config.data_dir.clone()),
+            config.migration_progress.clone(),
         )
         .await?;
         let datastore = db.datastore();
