@@ -95,6 +95,22 @@ export function setupIntroFlies() {
 }
 
 /**
+ * How far the big centred logo has to travel and shrink to land exactly on
+ * `target`. The offsets ignore the logo's own animations, so this holds
+ * whether it is still appearing or already flying.
+ */
+function aimAt(flying: HTMLImageElement, target: HTMLElement) {
+  const landing = target.getBoundingClientRect();
+  const startX = flying.offsetLeft + flying.offsetWidth / 2;
+  const startY = flying.offsetTop + flying.offsetHeight / 2;
+  return {
+    "--setup-intro-x": `${landing.left + landing.width / 2 - startX}px`,
+    "--setup-intro-y": `${landing.top + landing.height / 2 - startY}px`,
+    "--setup-intro-scale": String(landing.height / flying.offsetHeight),
+  };
+}
+
+/**
  * The welcome's logo inside the wizard. It holds in the middle until `ready`
  * and the artwork has decoded, then flies onto the header logo at `targetRef`.
  *
@@ -126,6 +142,7 @@ export function SetupIntroMark({
       return;
     }
     let cancelled = false;
+    let frame = 0;
     void flying
       .decode()
       .catch(() => undefined)
@@ -136,23 +153,31 @@ export function SetupIntroMark({
           onDone();
           return;
         }
-        // How far the big centred logo has to travel and shrink to land
-        // exactly on the header logo. The offsets ignore the appearing
-        // animation's scale, which has settled by the time the flight starts.
-        const landing = target.getBoundingClientRect();
-        const startX = flying.offsetLeft + flying.offsetWidth / 2;
-        const startY = flying.offsetTop + flying.offsetHeight / 2;
         const delayMs = Math.max(0, APPEAR_AND_HOLD_MS - msSinceAppeared());
         setFlight({
-          "--setup-intro-x": `${landing.left + landing.width / 2 - startX}px`,
-          "--setup-intro-y": `${landing.top + landing.height / 2 - startY}px`,
-          "--setup-intro-scale": String(landing.height / flying.offsetHeight),
+          ...aimAt(flying, target),
           animationDelay: `${delayMs}ms`,
         } as CSSProperties);
         onStart(delayMs);
+
+        // The header can still move while the logo flies: a step opened by
+        // a refresh fills in as its data loads, and a taller page pushes the
+        // centred header up. Re-aim every frame so it lands where the header
+        // logo is when it arrives.
+        const track = () => {
+          const current = targetRef.current;
+          if (current) {
+            for (const [name, value] of Object.entries(aimAt(flying, current))) {
+              flying.style.setProperty(name, value);
+            }
+          }
+          frame = requestAnimationFrame(track);
+        };
+        frame = requestAnimationFrame(track);
       });
     return () => {
       cancelled = true;
+      cancelAnimationFrame(frame);
     };
   }, [ready, targetRef, onStart, onDone]);
 
