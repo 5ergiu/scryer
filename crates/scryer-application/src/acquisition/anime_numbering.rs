@@ -1447,6 +1447,16 @@ pub(crate) fn title_forces_alternate_numbering(title: &Title) -> bool {
         .is_some()
 }
 
+/// Whether the title's current `release_numbering` setting may read a stored
+/// bridge. The row is rebuilt when the setting changes, but a reader must never
+/// trust a bridge from another order in the meantime: a title switched to `dvd`
+/// would otherwise read its old alternate bridge as though it were the DVD one,
+/// and a title switched to `official` would still translate releases.
+pub(crate) fn title_admits_bridge(title: &Title, bridge: &AnimeNumberingBridge) -> bool {
+    scryer_domain::ReleaseNumbering::from_title_tags(&title.tags)
+        .admits_bridge_source(bridge.source)
+}
+
 /// Rewrite a parsed release into the catalog's own numbering, in place.
 ///
 /// This is the single door every lane goes through. It answers `Unchanged` for
@@ -1468,7 +1478,7 @@ pub(crate) fn translate_release_numbering(
     parsed: &mut crate::ParsedReleaseMetadata,
     reference_date: Option<NaiveDate>,
 ) -> NumberingResolution {
-    let Some(bridge) = bridge else {
+    let Some(bridge) = bridge.filter(|bridge| title_admits_bridge(title, bridge)) else {
         return NumberingResolution::Unchanged;
     };
     if parsed
@@ -1528,6 +1538,9 @@ pub(crate) fn translate_parsed_episode_numbering(
     parsed_title_variants: &[String],
     reference_date: Option<NaiveDate>,
 ) -> NumberingResolution {
+    if !title_admits_bridge(title, bridge) {
+        return NumberingResolution::Unchanged;
+    }
     let resolution = resolve_numbering(&NumberingInput {
         bridge,
         title,

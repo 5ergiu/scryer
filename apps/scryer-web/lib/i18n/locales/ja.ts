@@ -1042,6 +1042,9 @@ const ja: LocaleDictionary = {
   "queue.transfer.finalizing": "Finalizing",
   "queue.manualImportQueued": "手動インポートがキューに追加されました。",
   "queue.manualImportFailed": "手動インポートに失敗しました。",
+  "queue.manualImportMultipleEpisodes": "このファイルに複数のエピソード",
+  "queue.manualImportMultipleEpisodesLabel": "このファイルに複数のエピソードを割り当てる",
+  "queue.manualImportApplySuggestions": "すべてに候補を適用",
   "queue.removeFailed": "削除に失敗しました",
   "queue.manualImportTooltip":
     "手動インポートは対応が必要なキューアイテムで利用できます。",

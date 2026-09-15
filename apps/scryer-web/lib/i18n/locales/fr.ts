@@ -1069,6 +1069,9 @@ const fr: LocaleDictionary = {
   "queue.transfer.finalizing": "Finalizing",
   "queue.manualImportQueued": "Importation manuelle mise en file d'attente.",
   "queue.manualImportFailed": "Échec de l'importation manuelle.",
+  "queue.manualImportMultipleEpisodes": "Plusieurs épisodes dans ce fichier",
+  "queue.manualImportMultipleEpisodesLabel": "Attribuer plusieurs épisodes à ce fichier",
+  "queue.manualImportApplySuggestions": "Appliquer les suggestions à tous",
   "queue.removeFailed": "Échec de la suppression",
   "queue.manualImportTooltip":
     "L'importation manuelle est disponible pour les éléments de file d'attente nécessitant une attention.",

@@ -285,6 +285,7 @@ function ManualImportTargetPickerContent({
   onMultipleChange: (multiple: boolean) => void;
   onSelect: (value: string) => void;
 }) {
+  const t = useTranslate();
   const [query, setQuery] = React.useState("");
   const selectedEpisodeIds = React.useMemo(() => new Set(episodeTargetIds(value)), [value]);
   const isSelected = (rowValue: string) => {
@@ -324,9 +325,9 @@ function ManualImportTargetPickerContent({
           type="checkbox"
           checked={multiple}
           onChange={(event) => onMultipleChange(event.target.checked)}
-          aria-label="Assign several episodes to this file"
+          aria-label={t("queue.manualImportMultipleEpisodesLabel")}
         />
-        <span>Several episodes in this file</span>
+        <span>{t("queue.manualImportMultipleEpisodes")}</span>
       </label>
       <div className="relative mb-2">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -855,7 +856,7 @@ export function ManualImportDialog({
               onClick={applySuggestionsToAll}
               disabled={importing || loading}
             >
-              Apply suggestions to all
+              {t("queue.manualImportApplySuggestions")}
             </Button>
           ) : null}
           <Button

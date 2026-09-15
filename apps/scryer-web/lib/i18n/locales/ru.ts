@@ -1673,6 +1673,9 @@ const ru: LocaleDictionary = {
     "queue.transfer.finalizing": "Завершение",
     "queue.manualImportQueued": "Ручной импорт добавлен в очередь.",
     "queue.manualImportFailed": "Ошибка ручного импорта.",
+    "queue.manualImportMultipleEpisodes": "Несколько эпизодов в этом файле",
+    "queue.manualImportMultipleEpisodesLabel": "Назначить этому файлу несколько эпизодов",
+    "queue.manualImportApplySuggestions": "Применить предложения ко всем",
     "queue.removeFailed": "Удалить ошибочные",
     "queue.manualImportTooltip":
         "Ручной импорт доступен для элементов очереди, требующих внимания.",

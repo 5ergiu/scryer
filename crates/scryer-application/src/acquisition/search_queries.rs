@@ -200,7 +200,9 @@ fn community_numbering_scope(
     if title.name.trim().is_empty() {
         return None;
     }
-    let bridge = bridge.filter(|bridge| !bridge.is_empty())?;
+    let bridge = bridge.filter(|bridge| {
+        !bridge.is_empty() && crate::anime_numbering::title_admits_bridge(title, bridge)
+    })?;
     // A TVDB alternate/DVD order widens the search only for a title the
     // operator pinned to it. Release groups numbering by a published alternate
     // order is the exception for an ordinary series, while a differing dvd

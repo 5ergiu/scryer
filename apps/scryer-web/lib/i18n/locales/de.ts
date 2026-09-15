@@ -1057,6 +1057,9 @@ const de: LocaleDictionary = {
   "queue.transfer.finalizing": "Finalizing",
   "queue.manualImportQueued": "Manueller Import eingereiht.",
   "queue.manualImportFailed": "Manueller Import fehlgeschlagen.",
+  "queue.manualImportMultipleEpisodes": "Mehrere Episoden in dieser Datei",
+  "queue.manualImportMultipleEpisodesLabel": "Dieser Datei mehrere Episoden zuweisen",
+  "queue.manualImportApplySuggestions": "Vorschläge auf alle anwenden",
   "queue.removeFailed": "Entfernen fehlgeschlagen",
   "queue.manualImportTooltip":
     "Manueller Import ist für Warteschlangenelemente verfügbar, die Aufmerksamkeit erfordern.",

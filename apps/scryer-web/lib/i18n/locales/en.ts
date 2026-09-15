@@ -1667,6 +1667,9 @@ const en: LocaleDictionary = {
   "queue.transfer.finalizing": "Finalizing",
   "queue.manualImportQueued": "Manual import queued.",
   "queue.manualImportFailed": "Manual import failed.",
+  "queue.manualImportMultipleEpisodes": "Several episodes in this file",
+  "queue.manualImportMultipleEpisodesLabel": "Assign several episodes to this file",
+  "queue.manualImportApplySuggestions": "Apply suggestions to all",
   "queue.removeFailed": "Remove Failed",
   "queue.manualImportTooltip":
     "Manual import is available for attention-required queue items.",
