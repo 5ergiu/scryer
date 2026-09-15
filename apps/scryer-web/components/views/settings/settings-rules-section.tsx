@@ -1028,7 +1028,7 @@ export function SettingsRulesSection({
             />
             <TextActionButton
               id="settings-rules-arr-custom-format-import"
-              tone="accent"
+              tone="accentBright"
               size="default"
               onClick={() => setIsArrImportOpen(true)}
               disabled={mutatingRuleSetId !== null}
