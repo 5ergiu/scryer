@@ -136,9 +136,9 @@ export function SettingsSecuritySection({
                 </h4>
               </div>
               <div className="grid gap-6 lg:grid-cols-2">
-                <div className="flex flex-wrap items-start gap-4">
-                  <div className="space-y-1.5">
-                    <Label className="whitespace-nowrap" htmlFor="security-password-min-length">
+                <div className="flex items-stretch self-start divide-x divide-[var(--scry-line2)]">
+                  <div className="flex flex-col justify-between gap-1.5 pr-6">
+                    <Label htmlFor="security-password-min-length">
                       {t("settings.securityPasswordMinLength")}
                     </Label>
                     <Input
@@ -161,8 +161,8 @@ export function SettingsSecuritySection({
                       }}
                     />
                   </div>
-                  <div className="space-y-1.5">
-                    <Label className="whitespace-nowrap" htmlFor="security-session-duration-days">
+                  <div className="flex flex-col justify-between gap-1.5 pl-6">
+                    <Label htmlFor="security-session-duration-days">
                       {t("settings.securitySessionDuration")}
                     </Label>
                     <div className="relative w-32">
