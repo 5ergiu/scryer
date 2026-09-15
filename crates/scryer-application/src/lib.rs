@@ -518,6 +518,13 @@ pub use null_repositories::{
 // ── Maintenance safety probes (RFC 137 §9.10, WP-G) ─────────────────────────
 pub use null_repositories::NullMediaServerPlaybackProbe;
 // ── Media-server watch signals (RFC 137 §7.3, WP-M) ─────────────────────────
+/// The RSS cadence knob lives beside the RSS lane it governs, but the upstream
+/// scheduler in the acquisition infrastructure crate has to honour the very same
+/// value — so it is resolved once, here, rather than parsed on both sides.
+pub use acquisition::rss::{
+    DEFAULT_RSS_TARGET_INTERVAL, MINIMUM_RSS_TARGET_INTERVAL, RSS_TARGET_INTERVAL_ENV,
+    parse_rss_target_interval, rss_sync_tick_period, rss_target_interval,
+};
 /// Per-client failure record and its repository port.
 ///
 /// The struct is re-exported under a distinct name because

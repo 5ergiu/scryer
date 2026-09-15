@@ -41,6 +41,9 @@ These notes cover what's changed since **0.20.0**.
   - Downloads you start from interactive search in the browser now count toward the indexer's grab limits.
   - Archive extraction never writes through a symbolic link found in the output folder.
   - A failure while reading anime numbering data no longer leaves an incomplete episode matcher in use.
+  - **Activity → History now lists ignored downloads.** Choosing Ignore on a queue item records a history entry, but the page's default view left it out, so the only lasting record of a download that left the queue without importing was invisible. Ignored downloads now appear with the other events and have their own filter.
+  - Operators that need different indexer backoff periods can now set `SCRYER_INDEXER_BACKOFF_LADDER_SECS` to a comma-separated, ascending list of seconds, for example `15,30,45,90,180`. Unset or unusable values keep the shipped 5/10/15/30/60-minute backoff, so the existing default behavior is unchanged.
+  - `SCRYER_RSS_TARGET_INTERVAL_SECS` now also sets how often the RSS sync worker wakes, so a cadence shorter than a minute takes effect instead of being rounded up to the worker's next wake. A cadence of a minute or longer, and leaving the variable unset, keep the existing once-a-minute wake.
 - **Login settings:**
   - If you set the login lifetime with the `SCRYER_JWT_ACCESS_TTL_SECONDS` environment variable, it's honored again. It's rounded to the nearest whole day, from 1 to 365. A value you've set in **Settings → Security** takes precedence.
   - The Security page's form login panel is now called **Login settings**. **Minimum password length** and **Login valid for** sit side by side, with the lifetime entered in days.

@@ -5028,7 +5028,12 @@ pub async fn start_background_acquisition_poller(
     let mut prowlarr_sync_interval = tokio::time::interval(std::time::Duration::from_mins(5));
     let mut direct_indexer_caps_interval =
         tokio::time::interval(std::time::Duration::from_hours(24));
-    let mut rss_sync_interval = tokio::time::interval(std::time::Duration::from_mins(1));
+    // Not a fixed minute: the worker only *considers* RSS on a tick, so a
+    // cadence shorter than its tick could never take effect. The cadence knob
+    // therefore pulls the tick down with it, and leaves it at a minute
+    // otherwise.
+    let mut rss_sync_interval =
+        tokio::time::interval(crate::acquisition::rss::rss_sync_tick_period());
     let mut pending_release_interval = tokio::time::interval(std::time::Duration::from_mins(1));
     let mut maintenance_evaluation_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + maintenance_evaluation_offset,
