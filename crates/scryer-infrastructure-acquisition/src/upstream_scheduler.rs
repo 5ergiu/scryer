@@ -20,7 +20,6 @@ use crate::queries::sql_runtime::{SqlArg, SqlRow, SqlRuntime, StoreDatastore};
 
 const LOW_VALUE_BACKGROUND_THRESHOLD: f64 = 0.25;
 const LOW_VALUE_SUBTITLE_THRESHOLD: f64 = 0.15;
-const RSS_FRESHNESS_ESCALATION_THRESHOLD: f64 = 0.85;
 const LOW_ACCOUNT_QUOTA_REMAINING_FRACTION: f64 = 0.20;
 /// Below this remaining-account-quota fraction, background
 /// acquisition is "under pressure" and yields shared quota. It is set above
@@ -34,6 +33,9 @@ const BACKGROUND_QUOTA_PRESSURE_REMAINING_FRACTION: f64 = 0.35;
 /// still admits. The convergence lane values (hot 1.0 / cold 0.25) straddle it,
 /// so pressure sheds cold work first and keeps hot work converging.
 const BACKGROUND_QUOTA_PRESSURE_VALUE_THRESHOLD: f64 = 0.5;
+/// Same reasoning for the RSS due-check: the worker skips a cycle on exactly
+/// the rule this scheduler defers a candidate on, so both read one predicate.
+pub(crate) use scryer_application::rss_poll_is_due;
 /// The RSS cadence knob is resolved once, in `scryer-application`, beside the
 /// RSS lane it governs and beside the sync worker whose tick it also drives.
 /// The scheduler honours that one value rather than parsing the env a second
@@ -1331,8 +1333,11 @@ fn should_defer(
                 && account_quota_under_pressure(quota_entry, now)
         }
         SchedulerIntent::BackgroundRss => candidate.freshness.as_ref().is_some_and(|freshness| {
-            now < freshness.latest_safe_poll_at
-                && freshness.freshness_risk < RSS_FRESHNESS_ESCALATION_THRESHOLD
+            !rss_poll_is_due(
+                Some(freshness.latest_safe_poll_at),
+                Some(freshness.freshness_risk),
+                now,
+            )
         }),
         SchedulerIntent::SubtitleSearch | SchedulerIntent::SubtitleDownload => {
             candidate.expected_value.score < LOW_VALUE_SUBTITLE_THRESHOLD

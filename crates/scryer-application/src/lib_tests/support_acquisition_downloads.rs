@@ -1195,6 +1195,33 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             .collect())
     }
 
+    async fn list_client_ids_with_live_downloads(&self) -> AppResult<Vec<String>> {
+        let tracked_states = self.tracked_states.lock().await;
+        let mut client_ids = Vec::new();
+        for entry in self.store.lock().await.iter() {
+            let Some(client_id) = entry
+                .download_client_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|client_id| !client_id.is_empty())
+            else {
+                continue;
+            };
+            let key = download_source_identity_key(&ClientJobLocator::new(
+                entry.download_client_id.as_deref(),
+                entry.download_client_type.as_str(),
+                entry.download_client_item_id.as_str(),
+            ));
+            let is_terminal = tracked_states
+                .get(&key)
+                .is_some_and(|state| matches!(state.as_str(), "imported" | "failed" | "ignored"));
+            if !is_terminal && !client_ids.iter().any(|existing| existing == client_id) {
+                client_ids.push(client_id.to_string());
+            }
+        }
+        Ok(client_ids)
+    }
+
     async fn get_tracked_state(&self, identity: &ClientJobLocator) -> AppResult<Option<String>> {
         Ok(self
             .tracked_states

@@ -1484,6 +1484,22 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn list_client_ids_with_live_downloads(&self) -> AppResult<Vec<String>> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT DISTINCT client_config_id
+             FROM download_client_bindings
+             WHERE ended_at IS NULL
+               AND client_config_id IS NOT NULL
+               AND TRIM(client_config_id) <> ''",
+            &[],
+        )
+        .await?;
+        rows.iter()
+            .map(|row| row.text("client_config_id"))
+            .collect::<AppResult<Vec<_>>>()
+    }
+
     async fn list_active_unbound_for_title(
         &self,
         title_id: &str,
@@ -2071,6 +2087,43 @@ mod seed_goal_tests {
             resolution_source: SeedGoalResolutionSource::Indexer,
             info_hash: info_hash.map(str::to_string),
         }
+    }
+
+    #[tokio::test]
+    async fn live_download_clients_are_listed_until_their_binding_ends() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(download_id, "job-1", "title-1"),
+                submission_identity(download_id),
+                None,
+            )
+            .await
+            .expect("submission should persist");
+
+        assert_eq!(
+            store
+                .list_client_ids_with_live_downloads()
+                .await
+                .expect("live client ids should read"),
+            vec!["primary".to_string()],
+            "a live binding means the client still has a download in flight"
+        );
+
+        store
+            .delete_by_client_item_id(&identity())
+            .await
+            .expect("submission should delete");
+
+        assert!(
+            store
+                .list_client_ids_with_live_downloads()
+                .await
+                .expect("live client ids should read")
+                .is_empty(),
+            "an ended binding leaves no live download behind"
+        );
     }
 
     #[tokio::test]

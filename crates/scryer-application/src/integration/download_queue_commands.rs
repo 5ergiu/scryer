@@ -178,7 +178,13 @@ pub async fn start_background_download_delete_poller(
                 .delete_by_client_item_id(&source_identity)
                 .await
             {
-                Ok(()) => true,
+                Ok(()) => {
+                    // The delete ends this item's binding inside the store.
+                    app.runtime
+                        .acquisition
+                        .invalidate_download_registry_observations();
+                    true
+                }
                 Err(error) => {
                     worker.warn_error("delete_download_submission", &error);
                     false
@@ -216,15 +222,20 @@ pub async fn start_background_download_delete_poller(
             {
                 worker.warn_error("mark_delete_command_completed", &error);
             }
-            if let Some(canonical_download_id) = canonical_download_id.as_ref()
-                && let Err(error) = app
+            if let Some(canonical_download_id) = canonical_download_id.as_ref() {
+                match app
                     .services
                     .workflow
                     .download_registry
                     .end_binding(canonical_download_id)
                     .await
-            {
-                worker.warn_error("end_delete_command_download_binding", &error);
+                {
+                    Ok(()) => app
+                        .runtime
+                        .acquisition
+                        .invalidate_download_registry_observations(),
+                    Err(error) => worker.warn_error("end_delete_command_download_binding", &error),
+                }
             }
         }
     }

@@ -954,91 +954,39 @@ impl NzbgetDownloadClient {
     }
 
     async fn list_history_for_client(&self) -> AppResult<Vec<DownloadQueueItem>> {
-        let result = self.rpc_call("history", vec![json!(false)]).await?;
-        let entries = extract_result_array(result, "History")
-            .ok_or_else(|| AppError::Repository("invalid NZBGet history response".into()))?;
+        let entries = self.history_entries_newest_first(None).await?;
         validate_nzbget_job_ids(&entries)?;
 
         Ok(entries
-            .into_iter()
-            .filter_map(|entry| {
-                let entry = entry.as_object()?;
-                let nzb_id = extract_i64_value(entry.get("NZBID"))
-                    .or_else(|| extract_i64_value(entry.get("nzbId")))
-                    .or_else(|| extract_i64_value(entry.get("ID")))
-                    .filter(|value| *value > 0)?;
-                let status = entry
-                    .get("Status")
-                    .or_else(|| entry.get("status"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let status_upper = status.to_ascii_uppercase();
-
-                if status_upper.starts_with("DELETED") {
-                    return None;
-                }
-
-                let (state, attention_reason) = map_history_state(&status_upper, entry);
-                let history_ts =
-                    extract_i64_value(entry.get("HistoryTime").or_else(|| entry.get("time")));
-                let title_name = entry
-                    .get("Name")
-                    .or_else(|| entry.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unnamed download")
-                    .to_string();
-                let category = extract_nzbget_category(entry);
-                let size_mb =
-                    extract_f64_value(entry.get("FileSizeMB").or_else(|| entry.get("fileSizeMB")))
-                        .unwrap_or(0.0);
-
-                let scryer_parameters = extract_nzbget_parameters(entry);
-
-                Some(DownloadQueueItem {
-                    id: nzb_id.to_string(),
-                    title_id: scryer_parameters.title_id,
-                    episode_id: None,
-                    title_name,
-                    facet: scryer_parameters.facet,
-                    category,
-                    client_id: String::new(),
-                    client_name: String::new(),
-                    client_type: "nzbget".to_string(),
-                    state,
-                    progress_percent: if state == DownloadQueueState::Completed {
-                        100
-                    } else {
-                        0
-                    },
-                    import_transfer_phase: None,
-                    import_transfer_bytes: None,
-                    import_transfer_total_bytes: None,
-                    import_transfer_started_at: None,
-                    import_transfer_updated_at: None,
-                    size_bytes: size_to_bytes(size_mb),
-                    remaining_seconds: None,
-                    queued_at: None,
-                    last_updated_at: history_ts.map(|value| value.to_string()),
-                    attention_required: matches!(state, DownloadQueueState::Failed),
-                    attention_reason,
-                    download_client_item_id: nzb_id.to_string(),
-                    download_id: scryer_parameters.download_id,
-                    import_status: None,
-                    import_error_code: None,
-                    import_error_message: None,
-                    imported_at: None,
-                    delete_status: None,
-                    delete_error_message: None,
-                    source_provider: None,
-                    is_scryer_origin: scryer_parameters.is_scryer,
-                    tracked_state: None,
-                    tracked_status: None,
-                    tracked_status_messages: Vec::new(),
-                    tracked_match_type: None,
-                    seeding: None,
-                })
-            })
+            .iter()
+            .filter_map(history_queue_item_from_nzbget_entry)
             .collect())
+    }
+
+    /// The whole history, newest first, optionally capped to the newest `limit`.
+    ///
+    /// NZBGet's RPC has no paging — `history` always returns everything — so the
+    /// page is taken here, after ordering by `HistoryTime`, which is what Sonarr
+    /// does with its own newest-N take.
+    async fn history_entries_newest_first(&self, limit: Option<usize>) -> AppResult<Vec<Value>> {
+        let result = self.rpc_call("history", vec![json!(false)]).await?;
+        let mut entries = extract_result_array(result, "History")
+            .ok_or_else(|| AppError::Repository("invalid NZBGet history response".into()))?;
+        order_nzbget_history_entries(&mut entries, limit);
+        Ok(entries)
+    }
+
+    /// Same read, but a response whose shape cannot be parsed contributes no
+    /// entries instead of failing. The completed-download reads have always
+    /// degraded that way; only the history projection treats it as an error.
+    async fn history_entries_newest_first_lenient(
+        &self,
+        limit: Option<usize>,
+    ) -> AppResult<Vec<Value>> {
+        let result = self.rpc_call("history", vec![json!(false)]).await?;
+        let mut entries = extract_result_array(result, "History").unwrap_or_default();
+        order_nzbget_history_entries(&mut entries, limit);
+        Ok(entries)
     }
 
     fn scope_key(&self) -> String {
@@ -1055,6 +1003,107 @@ impl NzbgetDownloadClient {
         RequestPolicy::no_retry(self.scope_key(), request_label)
             .with_backoff(Duration::from_secs(1), Duration::from_secs(15))
     }
+}
+
+/// Order NZBGet history entries newest first and take the newest `limit`.
+///
+/// NZBGet's `history` RPC has no paging — it always returns the whole history —
+/// so the page is taken here, after ordering by `HistoryTime`, exactly as Sonarr
+/// takes its own newest-N.
+fn order_nzbget_history_entries(entries: &mut Vec<Value>, limit: Option<usize>) {
+    entries.sort_by_key(|entry| {
+        std::cmp::Reverse(
+            entry
+                .as_object()
+                .and_then(|entry| {
+                    extract_i64_value(entry.get("HistoryTime").or_else(|| entry.get("time")))
+                })
+                .unwrap_or(i64::MIN),
+        )
+    });
+    if let Some(limit) = limit {
+        entries.truncate(limit);
+    }
+}
+
+/// One NZBGet history entry as a queue/history projection row.
+///
+/// Shared by the dedicated history read and by the single-RPC tick read, so
+/// both projections of the same page cannot drift.
+fn history_queue_item_from_nzbget_entry(entry: &Value) -> Option<DownloadQueueItem> {
+    let entry = entry.as_object()?;
+    let nzb_id = extract_i64_value(entry.get("NZBID"))
+        .or_else(|| extract_i64_value(entry.get("nzbId")))
+        .or_else(|| extract_i64_value(entry.get("ID")))
+        .filter(|value| *value > 0)?;
+    let status = entry
+        .get("Status")
+        .or_else(|| entry.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let status_upper = status.to_ascii_uppercase();
+
+    if status_upper.starts_with("DELETED") {
+        return None;
+    }
+
+    let (state, attention_reason) = map_history_state(&status_upper, entry);
+    let history_ts = extract_i64_value(entry.get("HistoryTime").or_else(|| entry.get("time")));
+    let title_name = entry
+        .get("Name")
+        .or_else(|| entry.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("Unnamed download")
+        .to_string();
+    let category = extract_nzbget_category(entry);
+    let size_mb = extract_f64_value(entry.get("FileSizeMB").or_else(|| entry.get("fileSizeMB")))
+        .unwrap_or(0.0);
+
+    let scryer_parameters = extract_nzbget_parameters(entry);
+
+    Some(DownloadQueueItem {
+        id: nzb_id.to_string(),
+        title_id: scryer_parameters.title_id,
+        episode_id: None,
+        title_name,
+        facet: scryer_parameters.facet,
+        category,
+        client_id: String::new(),
+        client_name: String::new(),
+        client_type: "nzbget".to_string(),
+        state,
+        progress_percent: if state == DownloadQueueState::Completed {
+            100
+        } else {
+            0
+        },
+        import_transfer_phase: None,
+        import_transfer_bytes: None,
+        import_transfer_total_bytes: None,
+        import_transfer_started_at: None,
+        import_transfer_updated_at: None,
+        size_bytes: size_to_bytes(size_mb),
+        remaining_seconds: None,
+        queued_at: None,
+        last_updated_at: history_ts.map(|value| value.to_string()),
+        attention_required: matches!(state, DownloadQueueState::Failed),
+        attention_reason,
+        download_client_item_id: nzb_id.to_string(),
+        download_id: scryer_parameters.download_id,
+        import_status: None,
+        import_error_code: None,
+        import_error_message: None,
+        imported_at: None,
+        delete_status: None,
+        delete_error_message: None,
+        source_provider: None,
+        is_scryer_origin: scryer_parameters.is_scryer,
+        tracked_state: None,
+        tracked_status: None,
+        tracked_status_messages: Vec::new(),
+        tracked_match_type: None,
+        seeding: None,
+    })
 }
 
 fn map_nzbget_outbound_error(operation: &str, error: OutboundHttpError) -> AppError {
@@ -1396,20 +1445,52 @@ impl DownloadClient for NzbgetDownloadClient {
         )))
     }
 
+    /// One `history` RPC serving both projections of the tick.
+    ///
+    /// NZBGet used to answer the tick with two full history downloads — one for
+    /// the activity view, one for the completed lookup — off an RPC that has no
+    /// paging and always returns the entire history. Both projections are built
+    /// from the same entries here, and the newest-`limit` page is taken client
+    /// side, so a long history costs one read instead of two.
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        _scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<(
+        Vec<DownloadQueueItem>,
+        Option<Vec<scryer_domain::CompletedDownload>>,
+    )> {
+        if limit == 0 {
+            return Ok((Vec::new(), Some(Vec::new())));
+        }
+        let entries = self.history_entries_newest_first(Some(limit)).await?;
+        let items = entries
+            .iter()
+            .filter_map(history_queue_item_from_nzbget_entry)
+            .collect();
+        let cutoff_ts = Utc::now().timestamp() - (7 * 24 * 60 * 60);
+        let completed = entries
+            .iter()
+            .filter_map(|entry| {
+                completed_download_from_nzbget_history_entry(entry, Some(cutoff_ts))
+            })
+            .collect();
+        Ok((items, Some(completed)))
+    }
+
     async fn list_completed_downloads(&self) -> AppResult<Vec<scryer_domain::CompletedDownload>> {
-        let result = self.rpc_call("history", vec![json!(false)]).await?;
-        let entries = extract_result_array(result, "History").unwrap_or_default();
+        let entries = self.history_entries_newest_first_lenient(None).await?;
         let cutoff_ts = Utc::now().timestamp() - (7 * 24 * 60 * 60);
 
-        info!(
+        debug!(
             total_history_entries = entries.len(),
             "nzbget: fetched history for completed downloads"
         );
 
         Ok(entries
-            .into_iter()
+            .iter()
             .filter_map(|entry| {
-                completed_download_from_nzbget_history_entry(&entry, Some(cutoff_ts))
+                completed_download_from_nzbget_history_entry(entry, Some(cutoff_ts))
             })
             .collect())
     }
@@ -1423,9 +1504,9 @@ impl DownloadClient for NzbgetDownloadClient {
         let Ok(nzb_id) = download_client_item_id.trim().parse::<i64>() else {
             return Ok(None);
         };
-        let result = self.rpc_call("history", vec![json!(false)]).await?;
-        let entry = extract_result_array(result, "History")
-            .unwrap_or_default()
+        let entry = self
+            .history_entries_newest_first_lenient(None)
+            .await?
             .into_iter()
             .find(|entry| {
                 entry.as_object().is_some_and(|entry| {
@@ -2304,6 +2385,58 @@ mod tests {
             error.to_string().contains("matched no items"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn recent_activity_and_completed_come_from_one_history_rpc_newest_first() {
+        let server = MockServer::start().await;
+        let now = Utc::now().timestamp();
+        Mock::given(method("POST"))
+            .and(path("/jsonrpc"))
+            .and(body_partial_json(json!({ "method": "history" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "version": "2.0",
+                "id": "scryer-rpc",
+                "result": [
+                    {
+                        "NZBID": 7,
+                        "Name": "Tin.Whistle.2019.1080p",
+                        "Status": "SUCCESS/ALL",
+                        "HistoryTime": now - 600,
+                        "FinalDir": "/downloads/complete/tin-whistle",
+                        "FileSizeMB": 1,
+                    },
+                    {
+                        "NZBID": 9,
+                        "Name": "Paper.Lantern.2012.1080p",
+                        "Status": "SUCCESS/ALL",
+                        "HistoryTime": now,
+                        "FinalDir": "/downloads/complete/paper-lantern",
+                        "FileSizeMB": 1,
+                    },
+                ],
+            })))
+            // One RPC for both projections; the tick used to issue two.
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = NzbgetDownloadClient::new(server.uri(), None, None, "SCORE".to_string());
+
+        let (items, completed) = client
+            .list_recent_activity_with_completed_with_feedback_scope(
+                1,
+                &scryer_application::DownloadClientFeedbackScope::default(),
+            )
+            .await
+            .expect("one history rpc should answer both projections");
+
+        // The RPC has no paging, so the newest-`limit` page is taken here: the
+        // older entry must be the one dropped.
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].download_client_item_id, "9");
+        let completed = completed.expect("nzbget derives completed rows from the same page");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].download_client_item_id, "9");
     }
 
     #[test]

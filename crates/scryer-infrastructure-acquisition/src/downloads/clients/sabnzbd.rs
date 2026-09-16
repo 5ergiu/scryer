@@ -25,6 +25,14 @@ use super::{
     extract_f64_value, extract_i64_value, parse_duration_seconds, resolve_staged_nzb_for_request,
 };
 
+/// Rows requested when this adapter reads history on its own account.
+///
+/// The poller reads one history page per tick and both projections (the queue
+/// view's rows and the recent-completed lookup's rows) come out of it, so the
+/// page size is the whole recent window Scryer sees between direct per-item
+/// lookups. Sonarr's equivalent bound is 60.
+const SABNZBD_HISTORY_PAGE_SIZE: usize = 100;
+
 #[derive(Clone)]
 pub struct SabnzbdDownloadClient {
     base_url: String,
@@ -137,6 +145,39 @@ struct SabAddfileRequest<'a> {
     upload_mime: &'a str,
     cat: Option<&'a str>,
     password: Option<&'a str>,
+}
+
+/// The one category SABnzbd can be asked to filter on for this client, if any.
+///
+/// Sonarr — the compatibility oracle for SAB and its work-alikes — sends
+/// `category=<TvCategory>` on `mode=queue` and `mode=history`, and only when
+/// that single setting is non-blank. Scryer's categories are per routing scope
+/// rather than per client, so a client can be responsible for several at once.
+/// One request per category would undo the one-history-request-per-tick this
+/// poller just gained, and filtering on a single category would blind the
+/// poller to the client's other categories, so a multi-category client sends no
+/// filter and reads the whole page exactly as it did before. An empty entry is
+/// the scope's "a category this instance cannot name is in play" marker (a live
+/// download predating the current routing), and disables the filter outright.
+fn sole_feedback_category(
+    scope: &scryer_application::DownloadClientFeedbackScope,
+) -> Option<String> {
+    let mut sole: Option<&str> = None;
+    for category in &scope.categories {
+        let category = category.trim();
+        if category.is_empty() {
+            // An unnameable category is in play on this client (a live
+            // download whose grab-time category was never recorded). Filtering
+            // would hide it, so the whole page is read.
+            return None;
+        }
+        match sole {
+            None => sole = Some(category),
+            Some(existing) if existing.eq_ignore_ascii_case(category) => {}
+            Some(_) => return None,
+        }
+    }
+    sole.map(str::to_string)
 }
 
 impl SabnzbdDownloadClient {
@@ -373,16 +414,262 @@ impl SabnzbdDownloadClient {
         }))
     }
 
+    /// The queue page, optionally narrowed to one SABnzbd category.
+    ///
+    /// `category` is the Sonarr-compatible `mode=queue&category=<cat>` filter.
+    /// A real SABnzbd answers with just that category's slots; a SAB-compatible
+    /// backend that does not know the parameter returns the ordinary full page,
+    /// which is exactly what this client read before. Either way the rows are
+    /// filtered again upstream, so the parameter is bandwidth, never contract.
+    async fn queue_items(&self, category: Option<&str>) -> AppResult<Vec<DownloadQueueItem>> {
+        let mut params = vec![("mode", "queue")];
+        if let Some(category) = category {
+            params.push(("category", category));
+        }
+        let json = self.api_get(&params).await?;
+
+        let slots = json
+            .get("queue")
+            .and_then(slots_from_api_section)
+            .or_else(|| json.get("slots").and_then(Value::as_array));
+
+        let slots = match slots {
+            Some(s) => s,
+            None => {
+                return Err(AppError::Repository(
+                    "invalid SABnzbd queue response".into(),
+                ));
+            }
+        };
+        // A filtered read legitimately returns fewer slots than the queue
+        // holds, and a backend that reports the unfiltered total alongside a
+        // filtered page would otherwise look truncated, so the shortfall check
+        // only applies to the unfiltered read.
+        let shortfall_is_truncation = category.is_none()
+            && json
+                .get("queue")
+                .and_then(|queue| extract_i64_value(queue.get("noofslots_total")))
+                .is_some_and(|total| total > slots.len() as i64);
+        if slots.iter().any(|slot| {
+            slot.get("nzo_id")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        }) || shortfall_is_truncation
+        {
+            return Err(AppError::Repository(
+                "incomplete SABnzbd queue response".into(),
+            ));
+        }
+
+        Ok(slots
+            .iter()
+            .filter_map(|slot| {
+                let slot = slot.as_object()?;
+
+                let nzo_id = slot.get("nzo_id").and_then(Value::as_str)?.to_string();
+
+                let raw_filename = slot
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unnamed download");
+                let (title_name, is_encrypted) =
+                    if let Some(stripped) = raw_filename.strip_prefix("ENCRYPTED / ") {
+                        (stripped.to_string(), true)
+                    } else {
+                        (raw_filename.to_string(), false)
+                    };
+
+                let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
+                let state = sabnzbd_queue_state(status)?;
+
+                let percentage = slot
+                    .get("percentage")
+                    .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")))
+                    .and_then(|s| {
+                        if s.is_empty() {
+                            slot.get("percentage")
+                                .and_then(Value::as_u64)
+                                .map(|v| v as u8)
+                        } else {
+                            s.parse::<u8>().ok()
+                        }
+                    })
+                    .unwrap_or(0);
+
+                let size_bytes = extract_f64_value(slot.get("mb")).map(|mb| {
+                    if !mb.is_finite() || mb <= 0.0 {
+                        0
+                    } else {
+                        (mb * 1_048_576f64).round() as i64
+                    }
+                });
+
+                let remaining_seconds = slot
+                    .get("timeleft")
+                    .and_then(Value::as_str)
+                    .and_then(parse_duration_seconds);
+
+                let pp_status = if state == DownloadQueueState::Downloading {
+                    sabnzbd_postprocessing_stage(status)
+                } else {
+                    None
+                };
+
+                let attention_required = is_encrypted;
+                let attention_reason = if is_encrypted {
+                    Some("ENCRYPTED".to_string())
+                } else {
+                    pp_status
+                };
+                let category = extract_sabnzbd_category(slot);
+
+                Some(DownloadQueueItem {
+                    id: nzo_id.clone(),
+                    title_id: None,
+                    episode_id: None,
+                    title_name,
+                    facet: None,
+                    category,
+                    client_id: String::new(),
+                    client_name: String::new(),
+                    client_type: "sabnzbd".to_string(),
+                    state,
+                    progress_percent: percentage,
+                    import_transfer_phase: None,
+                    import_transfer_bytes: None,
+                    import_transfer_total_bytes: None,
+                    import_transfer_started_at: None,
+                    import_transfer_updated_at: None,
+                    size_bytes,
+                    remaining_seconds,
+                    queued_at: None,
+                    last_updated_at: None,
+                    attention_required,
+                    attention_reason,
+                    download_client_item_id: nzo_id.clone(),
+                    download_id: Some(nzo_id),
+                    import_status: None,
+                    import_error_code: None,
+                    import_error_message: None,
+                    imported_at: None,
+                    delete_status: None,
+                    delete_error_message: None,
+                    source_provider: None,
+                    is_scryer_origin: false,
+                    tracked_state: None,
+                    tracked_status: None,
+                    tracked_status_messages: Vec::new(),
+                    tracked_match_type: None,
+                    seeding: None,
+                })
+            })
+            .collect())
+    }
+
+    /// The recent-history projection, optionally narrowed to one category.
+    async fn history_items(&self, category: Option<&str>) -> AppResult<Vec<DownloadQueueItem>> {
+        let slots = self.history_slots_page_in_category(0, 50, category).await?;
+        let cutoff_ts = Utc::now().timestamp() - (7 * 24 * 60 * 60);
+
+        Ok(slots
+            .iter()
+            .filter_map(|slot| {
+                let slot = slot.as_object()?;
+
+                let nzo_id = slot.get("nzo_id").and_then(Value::as_str)?.to_string();
+
+                let completed_ts = extract_i64_value(slot.get("completed"));
+                if let Some(ts) = completed_ts
+                    && ts < cutoff_ts
+                {
+                    return None;
+                }
+
+                let title_name = slot
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unnamed download")
+                    .to_string();
+
+                let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
+                let fail_message = slot.get("fail_message").and_then(Value::as_str);
+                let (state, attention_reason) = sabnzbd_history_state(status, fail_message)?;
+                let category = extract_sabnzbd_category(slot);
+
+                Some(DownloadQueueItem {
+                    id: nzo_id.clone(),
+                    title_id: None,
+                    episode_id: None,
+                    title_name,
+                    facet: None,
+                    category,
+                    client_id: String::new(),
+                    client_name: String::new(),
+                    client_type: "sabnzbd".to_string(),
+                    state,
+                    progress_percent: if state == DownloadQueueState::Completed {
+                        100
+                    } else {
+                        0
+                    },
+                    import_transfer_phase: None,
+                    import_transfer_bytes: None,
+                    import_transfer_total_bytes: None,
+                    import_transfer_started_at: None,
+                    import_transfer_updated_at: None,
+                    size_bytes: extract_i64_value(slot.get("bytes")),
+                    remaining_seconds: None,
+                    queued_at: extract_i64_value(slot.get("time_added")).map(|v| v.to_string()),
+                    last_updated_at: completed_ts.map(|v| v.to_string()),
+                    attention_required: matches!(state, DownloadQueueState::Failed),
+                    attention_reason,
+                    download_client_item_id: nzo_id.clone(),
+                    download_id: Some(nzo_id),
+                    import_status: None,
+                    import_error_code: None,
+                    import_error_message: None,
+                    imported_at: None,
+                    delete_status: None,
+                    delete_error_message: None,
+                    source_provider: None,
+                    is_scryer_origin: false,
+                    tracked_state: None,
+                    tracked_status: None,
+                    tracked_status_messages: Vec::new(),
+                    tracked_match_type: None,
+                    seeding: None,
+                })
+            })
+            .collect())
+    }
+
     async fn history_slots_page(&self, start: usize, limit: usize) -> AppResult<Vec<Value>> {
+        self.history_slots_page_in_category(start, limit, None)
+            .await
+    }
+
+    /// A history page, optionally narrowed to one SABnzbd category.
+    ///
+    /// Same contract as the queue read: `category` is Sonarr's
+    /// `mode=history&category=<cat>` filter, an optimization a backend is free
+    /// to ignore, and the rows are filtered again upstream regardless.
+    async fn history_slots_page_in_category(
+        &self,
+        start: usize,
+        limit: usize,
+        category: Option<&str>,
+    ) -> AppResult<Vec<Value>> {
         let start_param = start.to_string();
         let limit_param = limit.to_string();
-        let json = self
-            .api_get(&[
-                ("mode", "history"),
-                ("start", start_param.as_str()),
-                ("limit", limit_param.as_str()),
-            ])
-            .await?;
+        let mut params = vec![
+            ("mode", "history"),
+            ("start", start_param.as_str()),
+            ("limit", limit_param.as_str()),
+        ];
+        if let Some(category) = category {
+            params.push(("category", category));
+        }
+        let json = self.api_get(&params).await?;
 
         Self::history_slots_from_response(&json)
     }
@@ -407,11 +694,21 @@ impl SabnzbdDownloadClient {
     }
 
     async fn completed_downloads_page(&self, limit: usize) -> AppResult<Vec<CompletedDownload>> {
+        self.completed_downloads_page_in_category(limit, None).await
+    }
+
+    async fn completed_downloads_page_in_category(
+        &self,
+        limit: usize,
+        category: Option<&str>,
+    ) -> AppResult<Vec<CompletedDownload>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let slots = self.history_slots_page(0, limit).await?;
+        let slots = self
+            .history_slots_page_in_category(0, limit, category)
+            .await?;
         Ok(completed_downloads_from_sab_slots(
             &slots,
             Some(Utc::now().timestamp() - (7 * 24 * 60 * 60)),
@@ -986,213 +1283,41 @@ impl DownloadClient for SabnzbdDownloadClient {
     }
 
     async fn list_queue(&self) -> AppResult<Vec<DownloadQueueItem>> {
-        let json = self.api_get(&[("mode", "queue")]).await?;
+        self.queue_items(None).await
+    }
 
-        let slots = json
-            .get("queue")
-            .and_then(slots_from_api_section)
-            .or_else(|| json.get("slots").and_then(Value::as_array));
-
-        let slots = match slots {
-            Some(s) => s,
-            None => {
-                return Err(AppError::Repository(
-                    "invalid SABnzbd queue response".into(),
-                ));
-            }
-        };
-        if slots.iter().any(|slot| {
-            slot.get("nzo_id")
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty)
-        }) || json
-            .get("queue")
-            .and_then(|queue| extract_i64_value(queue.get("noofslots_total")))
-            .is_some_and(|total| total > slots.len() as i64)
-        {
-            return Err(AppError::Repository(
-                "incomplete SABnzbd queue response".into(),
-            ));
-        }
-
-        Ok(slots
-            .iter()
-            .filter_map(|slot| {
-                let slot = slot.as_object()?;
-
-                let nzo_id = slot.get("nzo_id").and_then(Value::as_str)?.to_string();
-
-                let raw_filename = slot
-                    .get("filename")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unnamed download");
-                let (title_name, is_encrypted) =
-                    if let Some(stripped) = raw_filename.strip_prefix("ENCRYPTED / ") {
-                        (stripped.to_string(), true)
-                    } else {
-                        (raw_filename.to_string(), false)
-                    };
-
-                let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
-                let state = sabnzbd_queue_state(status)?;
-
-                let percentage = slot
-                    .get("percentage")
-                    .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")))
-                    .and_then(|s| {
-                        if s.is_empty() {
-                            slot.get("percentage")
-                                .and_then(Value::as_u64)
-                                .map(|v| v as u8)
-                        } else {
-                            s.parse::<u8>().ok()
-                        }
-                    })
-                    .unwrap_or(0);
-
-                let size_bytes = extract_f64_value(slot.get("mb")).map(|mb| {
-                    if !mb.is_finite() || mb <= 0.0 {
-                        0
-                    } else {
-                        (mb * 1_048_576f64).round() as i64
-                    }
-                });
-
-                let remaining_seconds = slot
-                    .get("timeleft")
-                    .and_then(Value::as_str)
-                    .and_then(parse_duration_seconds);
-
-                let pp_status = if state == DownloadQueueState::Downloading {
-                    sabnzbd_postprocessing_stage(status)
-                } else {
-                    None
-                };
-
-                let attention_required = is_encrypted;
-                let attention_reason = if is_encrypted {
-                    Some("ENCRYPTED".to_string())
-                } else {
-                    pp_status
-                };
-                let category = extract_sabnzbd_category(slot);
-
-                Some(DownloadQueueItem {
-                    id: nzo_id.clone(),
-                    title_id: None,
-                    episode_id: None,
-                    title_name,
-                    facet: None,
-                    category,
-                    client_id: String::new(),
-                    client_name: String::new(),
-                    client_type: "sabnzbd".to_string(),
-                    state,
-                    progress_percent: percentage,
-                    import_transfer_phase: None,
-                    import_transfer_bytes: None,
-                    import_transfer_total_bytes: None,
-                    import_transfer_started_at: None,
-                    import_transfer_updated_at: None,
-                    size_bytes,
-                    remaining_seconds,
-                    queued_at: None,
-                    last_updated_at: None,
-                    attention_required,
-                    attention_reason,
-                    download_client_item_id: nzo_id.clone(),
-                    download_id: Some(nzo_id),
-                    import_status: None,
-                    import_error_code: None,
-                    import_error_message: None,
-                    imported_at: None,
-                    delete_status: None,
-                    delete_error_message: None,
-                    source_provider: None,
-                    is_scryer_origin: false,
-                    tracked_state: None,
-                    tracked_status: None,
-                    tracked_status_messages: Vec::new(),
-                    tracked_match_type: None,
-                    seeding: None,
-                })
-            })
-            .collect())
+    async fn list_queue_with_feedback_scope(
+        &self,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<Vec<DownloadQueueItem>> {
+        self.queue_items(sole_feedback_category(scope).as_deref())
+            .await
     }
 
     async fn list_history(&self) -> AppResult<Vec<DownloadQueueItem>> {
-        let slots = self.history_slots_page(0, 50).await?;
-        let cutoff_ts = Utc::now().timestamp() - (7 * 24 * 60 * 60);
+        self.history_items(None).await
+    }
 
+    async fn list_history_with_feedback_scope(
+        &self,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<Vec<DownloadQueueItem>> {
+        self.history_items(sole_feedback_category(scope).as_deref())
+            .await
+    }
+
+    async fn list_history_page_with_feedback_scope(
+        &self,
+        offset: usize,
+        limit: usize,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<Vec<DownloadQueueItem>> {
+        let slots = self
+            .history_slots_page_in_category(offset, limit, sole_feedback_category(scope).as_deref())
+            .await?;
         Ok(slots
             .iter()
-            .filter_map(|slot| {
-                let slot = slot.as_object()?;
-
-                let nzo_id = slot.get("nzo_id").and_then(Value::as_str)?.to_string();
-
-                let completed_ts = extract_i64_value(slot.get("completed"));
-                if let Some(ts) = completed_ts
-                    && ts < cutoff_ts
-                {
-                    return None;
-                }
-
-                let title_name = slot
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unnamed download")
-                    .to_string();
-
-                let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
-                let fail_message = slot.get("fail_message").and_then(Value::as_str);
-                let (state, attention_reason) = sabnzbd_history_state(status, fail_message)?;
-                let category = extract_sabnzbd_category(slot);
-
-                Some(DownloadQueueItem {
-                    id: nzo_id.clone(),
-                    title_id: None,
-                    episode_id: None,
-                    title_name,
-                    facet: None,
-                    category,
-                    client_id: String::new(),
-                    client_name: String::new(),
-                    client_type: "sabnzbd".to_string(),
-                    state,
-                    progress_percent: if state == DownloadQueueState::Completed {
-                        100
-                    } else {
-                        0
-                    },
-                    import_transfer_phase: None,
-                    import_transfer_bytes: None,
-                    import_transfer_total_bytes: None,
-                    import_transfer_started_at: None,
-                    import_transfer_updated_at: None,
-                    size_bytes: extract_i64_value(slot.get("bytes")),
-                    remaining_seconds: None,
-                    queued_at: extract_i64_value(slot.get("time_added")).map(|v| v.to_string()),
-                    last_updated_at: completed_ts.map(|v| v.to_string()),
-                    attention_required: matches!(state, DownloadQueueState::Failed),
-                    attention_reason,
-                    download_client_item_id: nzo_id.clone(),
-                    download_id: Some(nzo_id),
-                    import_status: None,
-                    import_error_code: None,
-                    import_error_message: None,
-                    imported_at: None,
-                    delete_status: None,
-                    delete_error_message: None,
-                    source_provider: None,
-                    is_scryer_origin: false,
-                    tracked_state: None,
-                    tracked_status: None,
-                    tracked_status_messages: Vec::new(),
-                    tracked_match_type: None,
-                    seeding: None,
-                })
-            })
+            .filter_map(history_queue_item_from_sab_slot)
             .collect())
     }
 
@@ -1208,8 +1333,56 @@ impl DownloadClient for SabnzbdDownloadClient {
             .collect())
     }
 
+    /// One `mode=history` page serving both projections.
+    ///
+    /// The poller used to read history twice a tick: once for the queue view
+    /// and once for the recent-completed lookup. Both are built from the same
+    /// slots, so this hands back the pair and the second request disappears.
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<(Vec<DownloadQueueItem>, Option<Vec<CompletedDownload>>)> {
+        if limit == 0 {
+            return Ok((Vec::new(), Some(Vec::new())));
+        }
+        let slots = self
+            .history_slots_page_in_category(0, limit, sole_feedback_category(scope).as_deref())
+            .await?;
+        let items = slots
+            .iter()
+            .filter_map(history_queue_item_from_sab_slot)
+            .collect();
+        let completed = completed_downloads_from_sab_slots(
+            &slots,
+            Some(Utc::now().timestamp() - (7 * 24 * 60 * 60)),
+        );
+        Ok((items, Some(completed)))
+    }
+
     async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
-        self.completed_downloads_page(50).await
+        self.completed_downloads_page(SABNZBD_HISTORY_PAGE_SIZE)
+            .await
+    }
+
+    async fn list_completed_downloads_with_feedback_scope(
+        &self,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<Vec<CompletedDownload>> {
+        self.completed_downloads_page_in_category(
+            SABNZBD_HISTORY_PAGE_SIZE,
+            sole_feedback_category(scope).as_deref(),
+        )
+        .await
+    }
+
+    async fn list_recent_completed_downloads_with_feedback_scope(
+        &self,
+        limit: usize,
+        scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<Vec<CompletedDownload>> {
+        self.completed_downloads_page_in_category(limit, sole_feedback_category(scope).as_deref())
+            .await
     }
 
     async fn list_recent_completed_downloads(
@@ -3202,6 +3375,172 @@ mod tests {
                 .unwrap(),
             DownloadClientObservation::Absent
         ));
+    }
+
+    #[tokio::test]
+    async fn recent_activity_and_completed_come_from_one_history_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("mode", "history"))
+            .and(query_param("start", "0"))
+            .and(query_param("limit", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history":{"slots":[{
+                    "nzo_id":"sab-job-1","name":"Paper.Lantern.2012.1080p",
+                    "nzb_name":"Paper.Lantern.2012.1080p.nzb","status":"Completed",
+                    "storage":"/downloads/paper-lantern","completed":Utc::now().timestamp(),
+                    "bytes":42,"category":"movies"
+                }]}
+            })))
+            // One request for both projections; a second would fail the test.
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SabnzbdDownloadClient::new(server.uri(), "key".into());
+
+        let (items, completed) = client
+            .list_recent_activity_with_completed_with_feedback_scope(
+                100,
+                &scryer_application::DownloadClientFeedbackScope::default(),
+            )
+            .await
+            .expect("history page should answer both projections");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].download_client_item_id, "sab-job-1");
+        let completed = completed.expect("sabnzbd derives completed rows from the same page");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].download_client_item_id, "sab-job-1");
+        assert_eq!(
+            completed[0].release_name.as_deref(),
+            Some("Paper.Lantern.2012.1080p")
+        );
+    }
+
+    #[test]
+    fn a_single_configured_category_is_the_only_one_sabnzbd_is_asked_to_filter_on() {
+        use scryer_application::DownloadClientFeedbackScope;
+
+        let sole = |categories: &[&str]| {
+            super::sole_feedback_category(&DownloadClientFeedbackScope {
+                categories: categories.iter().map(|c| c.to_string()).collect(),
+            })
+        };
+
+        assert_eq!(sole(&[]), None);
+        assert_eq!(sole(&["  "]), None);
+        assert_eq!(sole(&[" tv "]), Some("tv".to_string()));
+        // The same category reached by two routing scopes is still one filter.
+        assert_eq!(sole(&["tv", "TV"]), Some("tv".to_string()));
+        // Several categories on one client: filtering on one would hide the
+        // others, so nothing is sent and the whole page is read.
+        assert_eq!(sole(&["tv", "movies"]), None);
+        // An empty entry is the scope's "a live download carries a category
+        // this instance cannot name" marker: the filter must come off even
+        // though routing names exactly one category.
+        assert_eq!(sole(&["tv", ""]), None);
+        assert_eq!(sole(&["", "tv"]), None);
+    }
+
+    #[tokio::test]
+    async fn feedback_reads_send_the_single_configured_category() {
+        use scryer_application::DownloadClientFeedbackScope;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("mode", "queue"))
+            .and(query_param("category", "tv"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "queue":{"slots":[{
+                    "nzo_id":"sab-queued-1","filename":"Tin.Whistle.2019.1080p",
+                    "status":"Downloading","percentage":"10","mb":"10","category":"tv"
+                }]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(query_param("mode", "history"))
+            .and(query_param("start", "0"))
+            .and(query_param("limit", "100"))
+            .and(query_param("category", "tv"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history":{"slots":[{
+                    "nzo_id":"sab-job-1","name":"Tin.Whistle.2019.1080p",
+                    "nzb_name":"Tin.Whistle.2019.1080p.nzb","status":"Completed",
+                    "storage":"/downloads/tin-whistle","completed":Utc::now().timestamp(),
+                    "bytes":42,"category":"tv"
+                }]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SabnzbdDownloadClient::new(server.uri(), "key".into());
+        let scope = DownloadClientFeedbackScope {
+            categories: vec!["tv".to_string()],
+        };
+
+        let queued = client
+            .list_queue_with_feedback_scope(&scope)
+            .await
+            .expect("queue read should answer");
+        assert_eq!(queued.len(), 1);
+
+        let (items, completed) = client
+            .list_recent_activity_with_completed_with_feedback_scope(100, &scope)
+            .await
+            .expect("history read should answer");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            completed
+                .expect("sabnzbd derives completed rows from the same page")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_reads_omit_the_category_when_the_client_is_unfiltered_or_serves_several() {
+        use scryer_application::DownloadClientFeedbackScope;
+
+        for categories in [
+            Vec::new(),
+            vec!["tv".to_string(), "movies".to_string()],
+            // Routing names one category, but a live download on the client
+            // carries an unnameable one.
+            vec![String::new(), "tv".to_string()],
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(query_param("mode", "queue"))
+                .and(query_param_is_missing("category"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"queue":{"slots":[]}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(query_param("mode", "history"))
+                .and(query_param_is_missing("category"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"history":{"slots":[]}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = SabnzbdDownloadClient::new(server.uri(), "key".into());
+            let scope = DownloadClientFeedbackScope { categories };
+
+            client
+                .list_queue_with_feedback_scope(&scope)
+                .await
+                .expect("queue read should answer");
+            client
+                .list_recent_activity_with_completed_with_feedback_scope(100, &scope)
+                .await
+                .expect("history read should answer");
+        }
     }
 
     #[tokio::test]

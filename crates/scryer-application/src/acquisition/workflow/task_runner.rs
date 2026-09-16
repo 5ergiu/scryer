@@ -4344,6 +4344,14 @@ async fn propose_covered_episode_evidence(
     Ok(())
 }
 
+/// The next-run time advertised for the RSS job.
+///
+/// The worker wakes on its tick, so the scheduled time it publishes has to be
+/// that same tick rather than a period of its own.
+fn rss_sync_next_run_delta(tick: std::time::Duration) -> chrono::Duration {
+    chrono::Duration::from_std(tick).unwrap_or_else(|_| chrono::Duration::minutes(5))
+}
+
 /// Walk an episode scope's eligible candidates, best-first, and submit the
 /// first one the download client accepts.
 ///
@@ -4962,7 +4970,11 @@ pub async fn start_background_acquisition_poller(
         Utc::now() + chrono::Duration::minutes(5),
     )
     .await;
-    app.set_job_next_run_at(JobKey::RssSync, Utc::now() + chrono::Duration::minutes(1))
+    // The advertised next run has to follow the worker tick: a fixed minute
+    // here made the jobs view promise a sweep four minutes before the worker
+    // would actually wake for it.
+    let rss_sync_tick = crate::acquisition::rss::rss_sync_tick_period();
+    app.set_job_next_run_at(JobKey::RssSync, Utc::now() + rss_sync_next_run_delta(rss_sync_tick))
         .await;
     app.set_job_next_run_at(
         JobKey::PendingReleaseProcessing,
@@ -5056,12 +5068,11 @@ pub async fn start_background_acquisition_poller(
     let mut prowlarr_sync_interval = tokio::time::interval(std::time::Duration::from_mins(5));
     let mut direct_indexer_caps_interval =
         tokio::time::interval(std::time::Duration::from_hours(24));
-    // Not a fixed minute: the worker only *considers* RSS on a tick, so a
+    // Not a fixed period: the worker only *considers* RSS on a tick, so a
     // cadence shorter than its tick could never take effect. The cadence knob
-    // therefore pulls the tick down with it, and leaves it at a minute
-    // otherwise.
-    let mut rss_sync_interval =
-        tokio::time::interval(crate::acquisition::rss::rss_sync_tick_period());
+    // therefore pulls the tick down with it, and the tick knob moves it
+    // directly.
+    let mut rss_sync_interval = tokio::time::interval(rss_sync_tick);
     let mut pending_release_interval = tokio::time::interval(std::time::Duration::from_mins(1));
     let mut maintenance_evaluation_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + maintenance_evaluation_offset,
@@ -5346,7 +5357,7 @@ pub async fn start_background_acquisition_poller(
                 run_task("rss_sync", async move {
                     app.set_job_next_run_at(
                         JobKey::RssSync,
-                        Utc::now() + chrono::Duration::minutes(1),
+                        Utc::now() + rss_sync_next_run_delta(rss_sync_tick),
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::RssSync, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "periodic RSS sync failed");

@@ -44,7 +44,8 @@ pub(crate) use execute::{import_with_lookup_and_preparation_permit, mark_importi
 #[cfg(test)]
 pub(crate) use lookup::load_completed_download_lookup_for_items;
 pub(crate) use lookup::{
-    CompletedDownloadLookup, load_completed_download_lookup_for_items_excluding_client_types,
+    CompletedDownloadLookup, CompletedDownloadLookupCycle, CompletedDownloadResolutionCache,
+    load_completed_download_lookup_for_items_excluding_client_types,
     load_completed_download_lookup_for_tracked_client_items_excluding_client_types,
 };
 pub use verification::{verify_import, verify_manual_import};
@@ -130,37 +131,4 @@ pub(crate) async fn load_completed_download_lookup(
     app: &AppUseCase,
 ) -> AppResult<CompletedDownloadLookup> {
     lookup::load_completed_download_lookup(app).await
-}
-
-/// Durable tracked-state marker recorded for a queue item's download
-/// identity, if any. Reconciliation sweeps use this to skip items whose
-/// identity already reached a terminal or operator-blocked outcome.
-pub(crate) async fn queue_item_identity_tracked_state(
-    app: &AppUseCase,
-    item: &DownloadQueueItem,
-) -> Option<TrackedDownloadState> {
-    let identity = lookup::observed_queue_item_identity(item);
-    let source_identity = lookup::queue_item_source_identity(item);
-    let canonical_download_id = match crate::download_identity::resolve_observed_client_job(
-        app,
-        crate::download_identity::observed_queue_item_job(item),
-    )
-    .await
-    {
-        crate::download_identity::ObservedClientJobResolution::Resolved(download_id) => {
-            Some(download_id)
-        }
-        crate::download_identity::ObservedClientJobResolution::Conflict
-        | crate::download_identity::ObservedClientJobResolution::BindingAlreadyEnded => {
-            return None;
-        }
-        crate::download_identity::ObservedClientJobResolution::Unavailable => None,
-    };
-    lookup::download_id_tracked_state(
-        app,
-        canonical_download_id.as_ref(),
-        &identity,
-        Some(&source_identity),
-    )
-    .await
 }

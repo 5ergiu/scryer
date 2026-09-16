@@ -6866,6 +6866,101 @@ impl IndexerClient for PendingStatusAssertingIndexerClient {
     }
 }
 
+/// Answers the worker's due-check with "every indexer is holding", and counts
+/// searches so a cycle that runs anyway is visible.
+struct DeferredRssIndexerClient {
+    searches: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for DeferredRssIndexerClient {
+    async fn rss_due_indexers(&self) -> AppResult<crate::RssDueIndexers> {
+        Ok(crate::RssDueIndexers {
+            due: Vec::new(),
+            deferred: vec!["indexer-holding".to_string()],
+        })
+    }
+
+    async fn search(
+        &self,
+        query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        self.searches.lock().await.push(query);
+        Ok(IndexerSearchResponse {
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_cycle_with_nothing_due_and_nothing_pending_does_no_work() {
+    let searches = Arc::new(Mutex::new(Vec::new()));
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases.clone(),
+        wanted_items.clone(),
+        Arc::new(DeferredRssIndexerClient {
+            searches: searches.clone(),
+        }),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Quiet Cadence", 2024).await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(
+        searches.lock().await.is_empty(),
+        "a tick where every indexer is inside its cadence must not poll"
+    );
+
+    // A pending release is the second, independent reason to run: this cycle is
+    // the only thing that re-evaluates one, so a quiet feed must not strand it.
+    let mut pending = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Quiet.Cadence.2024.1080p.WEB-DL-GRP",
+        PendingReleaseStatus::Waiting,
+    );
+    pending.indexer_source = Some("nzbgeek".to_string());
+    pending_releases
+        .insert_pending_release(&pending)
+        .await
+        .expect("seed pending release");
+
+    app.run_scheduled_rss_sync()
+        .await
+        .expect("run RSS sync with a pending release");
+    assert_eq!(
+        searches.lock().await.len(),
+        1,
+        "a held release must still be re-evaluated against a fresh feed"
+    );
+}
+
 #[tokio::test]
 async fn scheduled_rss_fetches_before_deciding_due_pending_releases() {
     let pending_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";

@@ -963,6 +963,11 @@ pub(crate) async fn run_claimed_download_cleanup(
                             Some(&record.download_id), &crate::DownloadSubmissionIdentity::default(),
                             Some(&locator), "imported", Some("seeding_complete"), None,
                         ).await?;
+                        // A completion event, not a per-tick write: the store
+                        // may have rebound this download.
+                        app.runtime
+                            .acquisition
+                            .invalidate_download_registry_observations();
                     }
                     let outcome = if payload_removed { "payload_removed_entry_absent" }
                         else if native_requested { "native_removal_recovered" } else { "entry_absent" };
