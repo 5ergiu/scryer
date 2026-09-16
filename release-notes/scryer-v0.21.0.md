@@ -1,4 +1,4 @@
-# Scryer 0.20.2 release notes
+# Scryer 0.21.0 release notes
 
 These notes cover what's changed since **0.20.1**.
 
@@ -31,6 +31,18 @@ These notes cover what's changed since **0.20.1**.
 - **Permissions:** users who can only view a library no longer see **Delete file** or **Make primary** on a movie's files. Scryer already refused both actions for them; the buttons are now hidden too.
 - **Keyboard:** Escape closes an open movie overview, as it already did for series and anime.
 - **Notifications:** warning and info notifications have a solid background like success and error notifications, so the page behind them no longer shows through.
+
+## API changes
+
+These affect scripts and tools that call Scryer's GraphQL API. The Scryer web app is already updated.
+
+- **Breaking:** the `searchSubtitles` mutation now returns a `SubtitleSearchPayload` object instead of a list of results. The matches are in its `results` field. The payload also carries:
+  - `status`: `READY`, `NO_PROVIDERS`, `PROVIDER_UNAVAILABLE` or `DISABLED`. It says why the search returned what it did.
+  - `language`: the language that was actually searched.
+  - `availableLanguages`: the subtitle languages an administrator configured.
+
+  Change a query that selected result fields directly on `searchSubtitles` so it selects them under `results { ... }`.
+- **Added:** the library permission enum `LibraryPermissionValue` has a new value, `MANAGE_SUBTITLES`. Clients that match every enum value should handle it.
 
 ## Upgrading
 
