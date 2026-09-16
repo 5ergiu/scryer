@@ -1400,8 +1400,8 @@ const ko: LocaleDictionary = {
   "subtitle.machineTranslated": "기계 번역",
   "subtitle.external": "외부",
   "subtitle.manualSearch": "수동 검색",
-  "subtitle.apiKeyRequiredTitle": "자막 서비스를 사용할 수 없음",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "자막 서비스를 사용할 수 없음",
+  "subtitle.providerUnavailableBody":
     "이 파일에서는 현재 자막 서비스를 사용할 수 없습니다.",
   "subtitle.blocklist": "차단 목록",
   "subtitle.blocklisted": "자막이 차단 목록에 추가되었습니다.",

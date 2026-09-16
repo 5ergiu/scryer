@@ -1460,8 +1460,8 @@ const es: LocaleDictionary = {
   "subtitle.machineTranslated": "Traducido automáticamente",
   "subtitle.external": "Externo",
   "subtitle.manualSearch": "Búsqueda manual",
-  "subtitle.apiKeyRequiredTitle": "Servicio de subtítulos no disponible",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Servicio de subtítulos no disponible",
+  "subtitle.providerUnavailableBody":
     "El servicio de subtítulos no está disponible para este archivo en este momento.",
   "subtitle.blocklist": "Lista de bloqueo",
   "subtitle.blocklisted": "Subtítulo añadido a la lista de bloqueo",

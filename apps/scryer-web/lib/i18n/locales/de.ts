@@ -1459,8 +1459,8 @@ const de: LocaleDictionary = {
   "subtitle.machineTranslated": "Maschinell übersetzt",
   "subtitle.external": "Extern",
   "subtitle.manualSearch": "Manuelle Suche",
-  "subtitle.apiKeyRequiredTitle": "Untertitel-Dienst nicht verfügbar",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Untertitel-Dienst nicht verfügbar",
+  "subtitle.providerUnavailableBody":
     "Der Untertitel-Dienst ist für diese Datei derzeit nicht verfügbar.",
   "subtitle.blocklist": "Sperrliste",
   "subtitle.blocklisted": "Untertitel zur Sperrliste hinzugefügt",

@@ -424,8 +424,8 @@ pub use settings::settings::{
     UpdateSecuritySettings, UpdateServiceSettings, UpdateSubtitleSettings,
 };
 pub use subtitles::orchestration::{
-    DownloadSubtitleForMediaFileRequest, spawn_subtitle_search_for_file,
-    start_background_subtitle_poller,
+    DownloadSubtitleForMediaFileRequest, SubtitleSearchOutcome, SubtitleSearchStatus,
+    spawn_subtitle_search_for_file, start_background_subtitle_poller,
 };
 
 pub(crate) const LIBRARY_SCAN_GLOBAL_TITLE_WALK_CONCURRENCY: usize = 4;

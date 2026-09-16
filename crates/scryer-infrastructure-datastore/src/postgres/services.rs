@@ -1115,6 +1115,7 @@ mod tests {
                 LibraryPermission::ManageLibrary,
                 LibraryPermission::Request,
                 LibraryPermission::AutoApproveRequests,
+                LibraryPermission::ManageSubtitles,
             ]);
 
             let mut tasks = JoinSet::new();

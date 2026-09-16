@@ -20,14 +20,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  type SubtitleSearchPayload,
   type SubtitleSearchResult,
+  type SubtitleSearchStatus,
   downloadSubtitleMutation,
   searchSubtitlesMutation,
 } from "@/lib/graphql/mutations";
-import {
-  externalSubtitleBlocklistEntriesQuery,
-  subtitleSettingsInitQuery,
-} from "@/lib/graphql/queries";
+import { externalSubtitleBlocklistEntriesQuery } from "@/lib/graphql/queries";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
@@ -37,6 +36,9 @@ import type {
   ExternalSubtitleBlocklistEntryRecord,
   ExternalSubtitleRecord,
 } from "@/lib/types/subtitles";
+import { SUBTITLE_LANGUAGES, type SubtitleLanguage } from "@/lib/constants/subtitle-languages";
+import { useAuth } from "@/lib/hooks/use-auth";
+import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import { selectorId } from "@/lib/utils/dom-ids";
 import { LoadingMark } from "@/components/common/loading-mark";
@@ -45,6 +47,7 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mediaFileId: string;
+  libraryId: string | null;
   filePath: string;
   downloads: ExternalSubtitleRecord[];
   onChanged: () => void | Promise<void>;
@@ -54,6 +57,7 @@ export function SubtitleSearchModal({
   open,
   onOpenChange,
   mediaFileId,
+  libraryId,
   filePath,
   downloads,
   onChanged,
@@ -62,20 +66,23 @@ export function SubtitleSearchModal({
   const dateTimeFormat = useUiDateTimeFormat();
   const setGlobalStatus = useGlobalStatus();
   const client = useClient();
-  const [language, setLanguage] = React.useState("eng");
+  const { user } = useAuth();
+  const [language, setLanguage] = React.useState("");
+  const [availableLanguages, setAvailableLanguages] = React.useState<string[]>([]);
+  const [status, setStatus] = React.useState<SubtitleSearchStatus | null>(null);
   const [results, setResults] = React.useState<SubtitleSearchResult[]>([]);
   const [hasSearched, setHasSearched] = React.useState(false);
   const [searching, setSearching] = React.useState(false);
-  const [hasEnabledProviders, setHasEnabledProviders] = React.useState<boolean | null>(null);
-  const [hasEnabledOpenSubtitlesProvider, setHasEnabledOpenSubtitlesProvider] =
-    React.useState<boolean | null>(null);
-  const [hasEnabledNonOpenSubtitlesProvider, setHasEnabledNonOpenSubtitlesProvider] =
-    React.useState<boolean | null>(null);
-  const [hasOpenSubtitlesApiKey, setHasOpenSubtitlesApiKey] = React.useState<boolean | null>(null);
   const [downloadingId, setDownloadingId] = React.useState<string | null>(null);
   const [blocklistEntries, setBlacklistEntries] = React.useState<
     ExternalSubtitleBlocklistEntryRecord[]
   >([]);
+  // Read inside `runSearch` without making it depend on the state, which would
+  // re-fire the open effect every time a search lands.
+  const availableLanguagesRef = React.useRef<string[]>([]);
+  React.useEffect(() => {
+    availableLanguagesRef.current = availableLanguages;
+  }, [availableLanguages]);
 
   const loadBlocklistEntries = React.useCallback(async () => {
     const { data, error } = await client
@@ -95,7 +102,7 @@ export function SubtitleSearchModal({
 
   const runSearch = React.useCallback(
     async (
-      nextLanguage: string,
+      nextLanguage: string | null,
       options?: {
         announceNoResults?: boolean;
       },
@@ -104,20 +111,44 @@ export function SubtitleSearchModal({
       setHasSearched(true);
       setResults([]);
       try {
+        const trimmed = nextLanguage?.trim() ?? "";
         const { data, error } = await client
           .mutation(searchSubtitlesMutation, {
-            input: { mediaFileId, language: nextLanguage.trim() },
+            input: {
+              mediaFileId,
+              ...(trimmed ? { language: trimmed } : {}),
+            },
           })
           .toPromise();
         if (error) throw error;
-        const sorted = [...(data?.searchSubtitles ?? [])].sort(
+        const payload = data?.searchSubtitles as SubtitleSearchPayload | undefined;
+        if (!payload) {
+          throw new Error(t("status.apiError"));
+        }
+        // The server is the single source of truth for what was searched and
+        // what can be searched next; the modal does no provider probing.
+        setStatus(payload.status);
+        setLanguage(payload.language);
+        setAvailableLanguages(payload.availableLanguages);
+        const sorted = [...payload.results].sort(
           (a: SubtitleSearchResult, b: SubtitleSearchResult) => b.score - a.score,
         );
         setResults(sorted);
-        if ((options?.announceNoResults ?? true) && sorted.length === 0) {
+        if (
+          (options?.announceNoResults ?? true) &&
+          payload.status === "READY" &&
+          sorted.length === 0
+        ) {
           setGlobalStatus(t("subtitle.noResults"));
         }
       } catch (error) {
+        // A failed search (a provider error surfaces as a GraphQL error, not a
+        // status) must leave the controls usable so the user can retry without
+        // reopening the modal: reaching the provider stage means the server
+        // considered this file searchable, so treat it as READY and make sure
+        // the picker holds something to search with.
+        setStatus((current) => current ?? "READY");
+        setLanguage((current) => current || availableLanguagesRef.current[0] || "eng");
         setGlobalStatus(
           error instanceof Error ? error.message : t("status.apiError"),
         );
@@ -135,79 +166,24 @@ export function SubtitleSearchModal({
     let cancelled = false;
     setResults([]);
     setHasSearched(false);
-    setHasEnabledProviders(null);
-    setHasEnabledOpenSubtitlesProvider(null);
-    setHasEnabledNonOpenSubtitlesProvider(null);
-    setHasOpenSubtitlesApiKey(null);
-    void Promise.all([
-      client.query(subtitleSettingsInitQuery, {}, { requestPolicy: "network-only" }).toPromise(),
-      client
-        .query(
-          externalSubtitleBlocklistEntriesQuery,
-          { mediaFileId },
-          { requestPolicy: "network-only" },
-        )
-        .toPromise(),
-    ])
-      .then(([settingsResult, blocklistResult]) => {
-        if (cancelled) {
-          return;
-        }
-        if (settingsResult.error) {
-          throw settingsResult.error;
-        }
-        if (blocklistResult.error) {
-          throw blocklistResult.error;
-        }
-        const preferredLanguage =
-          settingsResult.data?.subtitleSettings?.languages?.[0]?.code ?? "eng";
-        const enabledProviders = (
-          settingsResult.data?.subtitleProviderConfigs ?? []
-        ).filter((provider: { isEnabled: boolean }) => provider.isEnabled);
-        const availableHostBindings = new Set<string>(
-          (settingsResult.data?.subtitleProviderTypes ?? []).flatMap(
-            (providerType: { availableHostBindings?: string[] | null }) =>
-              providerType.availableHostBindings ?? [],
-          ),
+    setStatus(null);
+    setAvailableLanguages([]);
+    availableLanguagesRef.current = [];
+    // One search on open, with no language: the server answers with the
+    // language it searched and the languages it can serve next.
+    void runSearch(null, { announceNoResults: false });
+    void loadBlocklistEntries().catch((error: unknown) => {
+      if (!cancelled) {
+        setGlobalStatus(
+          error instanceof Error ? error.message : t("status.apiError"),
         );
-        const hasOpenSubtitlesProvider = enabledProviders.some(
-          (provider: { providerType: string }) =>
-            provider.providerType.trim().toLowerCase() === "opensubtitles",
-        );
-        const hasNonOpenSubtitlesProvider = enabledProviders.some(
-          (provider: { providerType: string }) =>
-            provider.providerType.trim().toLowerCase() !== "opensubtitles",
-        );
-        setHasEnabledProviders(enabledProviders.length > 0);
-        setHasEnabledOpenSubtitlesProvider(hasOpenSubtitlesProvider);
-        setHasEnabledNonOpenSubtitlesProvider(hasNonOpenSubtitlesProvider);
-        setHasOpenSubtitlesApiKey(
-          availableHostBindings.has("smg.opensubtitles_api_key"),
-        );
-        setLanguage(preferredLanguage);
-        setBlacklistEntries(
-          (blocklistResult.data?.externalSubtitleBlocklistEntries ?? []) as ExternalSubtitleBlocklistEntryRecord[],
-        );
-        const hasApiKey = availableHostBindings.has("smg.opensubtitles_api_key");
-        const canAutoSearch =
-          enabledProviders.length > 0 &&
-          (hasNonOpenSubtitlesProvider || !hasOpenSubtitlesProvider || hasApiKey);
-        if (canAutoSearch) {
-          void runSearch(preferredLanguage, { announceNoResults: false });
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setGlobalStatus(
-            error instanceof Error ? error.message : t("status.apiError"),
-          );
-        }
-      });
+      }
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [client, mediaFileId, open, runSearch, setGlobalStatus, t]);
+  }, [loadBlocklistEntries, open, runSearch, setGlobalStatus, t]);
 
   const handleSearch = React.useCallback(async () => {
     await runSearch(language);
@@ -248,11 +224,44 @@ export function SubtitleSearchModal({
     [client, mediaFileId, onChanged, setGlobalStatus, t],
   );
 
-  const canSearchSubtitles =
-    hasEnabledProviders === true &&
-    (hasEnabledNonOpenSubtitlesProvider === true ||
-      hasEnabledOpenSubtitlesProvider !== true ||
-      hasOpenSubtitlesApiKey === true);
+  // Only READY means the server will answer a search; every other status is a
+  // message with the controls disabled.
+  const canSearchSubtitles = status === "READY";
+  const canOpenSubtitleSettings = hasAppPermission(
+    user,
+    APP_PERMISSIONS.manageCatalogSettings,
+  );
+
+  // Every language stays selectable — the configured ones simply sort first.
+  const languageOptions = React.useMemo<SubtitleLanguage[]>(() => {
+    if (availableLanguages.length === 0) {
+      return SUBTITLE_LANGUAGES;
+    }
+    const rank = new Map(availableLanguages.map((code, index) => [code, index]));
+    return [...SUBTITLE_LANGUAGES].sort((a, b) => {
+      const left = rank.get(a.code) ?? Number.MAX_SAFE_INTEGER;
+      const right = rank.get(b.code) ?? Number.MAX_SAFE_INTEGER;
+      return left - right;
+    });
+  }, [availableLanguages]);
+
+  const statusMessage =
+    status === "NO_PROVIDERS"
+      ? {
+          title: t("subtitle.providersRequiredTitle"),
+          body: t("subtitle.providersRequiredBody"),
+        }
+      : status === "PROVIDER_UNAVAILABLE"
+        ? {
+            title: t("subtitle.providerUnavailableTitle"),
+            body: t("subtitle.providerUnavailableBody"),
+          }
+        : status === "DISABLED"
+          ? {
+              title: t("subtitle.subtitlesDisabledTitle"),
+              body: t("subtitle.subtitlesDisabledBody"),
+            }
+          : null;
 
   return (
     <>
@@ -272,49 +281,33 @@ export function SubtitleSearchModal({
           </DialogHeader>
 
           <div className="flex flex-col gap-3">
-            {hasEnabledProviders === false ? (
+            {statusMessage ? (
               <div
                 role="alert"
                 className="flex items-start gap-3 rounded-lg border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-3 py-2 text-sm text-[var(--scry-warning-text)]"
               >
                 <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--scry-warning-text)]" />
                 <div className="space-y-1">
-                  <p className="font-medium">
-                    {t("subtitle.providersRequiredTitle")}
-                  </p>
+                  <p className="font-medium">{statusMessage.title}</p>
                   <p className="text-xs text-[var(--scry-warning-text)] opacity-80">
-                    {t("subtitle.providersRequiredBody")}
+                    {statusMessage.body}
                   </p>
-                  <Button
-                    id="subtitle-search-open-settings"
-                    asChild
-                    size="sm"
-                    variant="outline"
-                    className="border-[var(--scry-warning-border)] bg-background/80"
-                  >
-                    <Link
-                      to="/settings/subtitles"
-                      onClick={() => onOpenChange(false)}
+                  {canOpenSubtitleSettings ? (
+                    <Button
+                      id="subtitle-search-open-settings"
+                      asChild
+                      size="sm"
+                      variant="outline"
+                      className="border-[var(--scry-warning-border)] bg-background/80"
                     >
-                      {t("subtitle.providersRequiredAction")}
-                    </Link>
-                  </Button>
-                </div>
-              </div>
-            ) : hasEnabledOpenSubtitlesProvider === true &&
-              hasOpenSubtitlesApiKey === false ? (
-              <div
-                role="alert"
-                className="flex items-start gap-3 rounded-lg border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-3 py-2 text-sm text-[var(--scry-warning-text)]"
-              >
-                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--scry-warning-text)]" />
-                <div className="space-y-1">
-                  <p className="font-medium">
-                    {t("subtitle.apiKeyRequiredTitle")}
-                  </p>
-                  <p className="text-xs text-[var(--scry-warning-text)] opacity-80">
-                    {t("subtitle.apiKeyRequiredBody")}
-                  </p>
+                      <Link
+                        to="/settings/subtitles"
+                        onClick={() => onOpenChange(false)}
+                      >
+                        {t("subtitle.providersRequiredAction")}
+                      </Link>
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -322,6 +315,7 @@ export function SubtitleSearchModal({
               <div id="subtitle-search-language-picker" className="min-w-0 flex-1">
                 <SubtitleLanguagePicker
                   value={language ? [language] : []}
+                  languageOptions={languageOptions}
                   onChange={(codes) => setLanguage(codes[0] ?? "")}
                   singleSelect
                   compact
@@ -348,6 +342,7 @@ export function SubtitleSearchModal({
             <div className="grid gap-4 lg:grid-cols-2">
               <ExternalSubtitleSection
                 downloads={downloads}
+                libraryId={libraryId}
                 allowBlocklist
                 onChanged={async () => {
                   await Promise.all([onChanged(), loadBlocklistEntries()]);
@@ -487,7 +482,7 @@ export function SubtitleSearchModal({
                   ))}
                 </TableBody>
               </Table>
-            ) : hasSearched && !searching ? (
+            ) : hasSearched && !searching && status === "READY" ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
                 {t("subtitle.noResults")}
               </p>

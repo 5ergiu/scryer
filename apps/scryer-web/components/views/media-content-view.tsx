@@ -1743,6 +1743,7 @@ function TitleContextPanel({
               emptyMessage={t("title.noFilesTracked")}
               emptyHint={t("title.noFilesTrackedHint")}
               mediaFiles={titleMediaFiles}
+              libraryId={title?.libraryId ?? null}
               subtitleDownloads={externalSubtitles}
               onRefreshSubtitles={onRefreshSubtitles}
               onDeleteFile={(fileId) => onDeleteMediaFile(title, fileId)}

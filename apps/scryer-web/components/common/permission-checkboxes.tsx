@@ -49,6 +49,7 @@ export const LIBRARY_PERMISSION_OPTIONS: Array<{ value: LibraryPermission; label
   { value: LIBRARY_PERMISSIONS.manageLibrary, label: "Manage Library" },
   { value: LIBRARY_PERMISSIONS.request, label: "Request" },
   { value: LIBRARY_PERMISSIONS.autoApproveRequests, label: "Auto-Approve Requests" },
+  { value: LIBRARY_PERMISSIONS.manageSubtitles, label: "Manage Subtitles" },
 ];
 
 const FACET_OPTIONS: Array<{ value: LibraryRecord["facet"]; label: string }> = [

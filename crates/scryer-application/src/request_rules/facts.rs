@@ -596,6 +596,7 @@ impl AppUseCase {
             LibraryPermission::ManageLibrary,
             LibraryPermission::Request,
             LibraryPermission::AutoApproveRequests,
+            LibraryPermission::ManageSubtitles,
         ] {
             if self
                 .has_library_permission(actor, library_id, permission)

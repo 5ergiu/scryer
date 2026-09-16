@@ -547,6 +547,151 @@ fn user_with_password_hash_has_full_permission_masks() {
     assert_eq!(user.password_hash.as_deref(), Some("hashed_pw"));
 }
 
+#[test]
+fn manage_subtitles_permission_round_trips_through_mask_and_string() {
+    assert_eq!(
+        LibraryPermission::ManageSubtitles.as_str(),
+        "manage_subtitles"
+    );
+    assert_eq!(
+        LibraryPermission::parse("manage_subtitles"),
+        Some(LibraryPermission::ManageSubtitles)
+    );
+    assert_eq!(
+        LibraryPermission::parse("Manage-Subtitle"),
+        Some(LibraryPermission::ManageSubtitles)
+    );
+
+    let mask = LibraryPermissionMask::from_permissions([
+        LibraryPermission::View,
+        LibraryPermission::ManageSubtitles,
+    ]);
+    assert_eq!(mask.bits(), 1 | (1 << 6));
+    assert!(mask.contains(LibraryPermissionMask::MANAGE_SUBTITLES));
+    assert_eq!(
+        mask.to_permissions(),
+        vec![LibraryPermission::View, LibraryPermission::ManageSubtitles]
+    );
+}
+
+#[test]
+fn manage_subtitles_bit_does_not_collide_with_existing_bits() {
+    for (mask, bit) in [
+        (LibraryPermissionMask::VIEW, 1u64 << 0),
+        (LibraryPermissionMask::MANAGE_TITLES, 1 << 1),
+        (LibraryPermissionMask::RESOLVE_IMPORTS, 1 << 2),
+        (LibraryPermissionMask::MANAGE_LIBRARY, 1 << 3),
+        (LibraryPermissionMask::REQUEST, 1 << 4),
+        (LibraryPermissionMask::AUTO_APPROVE_REQUESTS, 1 << 5),
+        (LibraryPermissionMask::MANAGE_SUBTITLES, 1 << 6),
+    ] {
+        assert_eq!(mask.bits(), bit);
+    }
+}
+
+#[test]
+fn manage_titles_shadows_manage_subtitles() {
+    let manage_titles = LibraryPermissionMask::from_permissions([
+        LibraryPermission::View,
+        LibraryPermission::ManageTitles,
+    ]);
+    assert!(
+        manage_titles
+            .with_request_shadowing()
+            .contains(LibraryPermissionMask::MANAGE_SUBTITLES)
+    );
+    // The broader grant owns the bit; storage never duplicates it.
+    assert!(
+        !manage_titles
+            .normalized_for_storage()
+            .contains(LibraryPermissionMask::MANAGE_SUBTITLES)
+    );
+    let stored = LibraryPermissionMask::from_permissions([
+        LibraryPermission::View,
+        LibraryPermission::ManageTitles,
+        LibraryPermission::ManageSubtitles,
+    ])
+    .normalized_for_storage();
+    assert!(!stored.contains(LibraryPermissionMask::MANAGE_SUBTITLES));
+    assert!(stored.contains(LibraryPermissionMask::MANAGE_TITLES));
+
+    // An explicit grant without Manage Titles survives normalization.
+    let explicit = LibraryPermissionMask::from_permissions([
+        LibraryPermission::View,
+        LibraryPermission::ManageSubtitles,
+    ]);
+    assert_eq!(explicit.normalized_for_storage(), explicit);
+    assert!(
+        explicit
+            .with_request_shadowing()
+            .contains(LibraryPermissionMask::MANAGE_SUBTITLES)
+    );
+
+    // A bare viewer never gains it.
+    let viewer = LibraryPermissionMask::from_permissions([LibraryPermission::View]);
+    assert!(
+        !viewer
+            .with_request_shadowing()
+            .contains(LibraryPermissionMask::MANAGE_SUBTITLES)
+    );
+}
+
+#[test]
+fn has_library_permission_honours_manage_subtitles_shadowing() {
+    let authorization = UserAuthorization {
+        libraries: std::collections::HashMap::from([
+            (
+                "library-a".to_string(),
+                LibraryPermissionMask::from_permissions([
+                    LibraryPermission::View,
+                    LibraryPermission::ManageSubtitles,
+                ]),
+            ),
+            (
+                "library-b".to_string(),
+                LibraryPermissionMask::from_permissions([LibraryPermission::View]),
+            ),
+            (
+                "library-c".to_string(),
+                LibraryPermissionMask::from_permissions([
+                    LibraryPermission::View,
+                    LibraryPermission::ManageTitles,
+                ]),
+            ),
+        ]),
+        loaded: true,
+        ..Default::default()
+    };
+
+    assert!(authorization.has_library_permission("library-a", LibraryPermission::ManageSubtitles));
+    assert!(!authorization.has_library_permission("library-b", LibraryPermission::ManageSubtitles));
+    assert!(authorization.has_library_permission("library-c", LibraryPermission::ManageSubtitles));
+    assert!(authorization.has_any_library_permission(LibraryPermission::ManageSubtitles));
+
+    let viewer_only = UserAuthorization {
+        libraries: std::collections::HashMap::from([(
+            "library-b".to_string(),
+            LibraryPermissionMask::from_permissions([LibraryPermission::View]),
+        )]),
+        loaded: true,
+        ..Default::default()
+    };
+    assert!(!viewer_only.has_any_library_permission(LibraryPermission::ManageSubtitles));
+}
+
+#[test]
+fn full_admin_holds_manage_subtitles() {
+    assert!(
+        UserAuthorization::full_admin()
+            .has_library_permission("any-library", LibraryPermission::ManageSubtitles)
+    );
+    assert!(
+        User::new_admin("root")
+            .authorization
+            .has_library_permission("any-library", LibraryPermission::ManageSubtitles)
+    );
+}
+
 // ── ImportStatus / ImportDecision as_str ───────────────────────────────────
 
 #[test]

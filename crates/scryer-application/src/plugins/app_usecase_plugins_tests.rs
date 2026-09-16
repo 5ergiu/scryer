@@ -869,6 +869,7 @@ fn admin() -> User {
             scryer_domain::LibraryPermission::ManageLibrary,
             scryer_domain::LibraryPermission::Request,
             scryer_domain::LibraryPermission::AutoApproveRequests,
+            scryer_domain::LibraryPermission::ManageSubtitles,
         ]),
         actor_capabilities: scryer_domain::ActorCapabilityMask::MANAGE_OWN_ACCOUNT,
         loaded: true,

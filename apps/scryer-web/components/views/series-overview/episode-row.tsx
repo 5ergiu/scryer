@@ -152,6 +152,8 @@ export type EpisodeRowProps = {
   searchBlocked: boolean;
   searchLoading: boolean;
   subtitleDownloads: ExternalSubtitleRecord[];
+  /** Library the episode's media files belong to; gates subtitle controls. */
+  libraryId: string | null;
   primaryMovieFileUpdatingId?: string | null;
 };
 
@@ -187,6 +189,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   searchBlocked,
   searchLoading,
   subtitleDownloads,
+  libraryId,
   primaryMovieFileUpdatingId = null,
 }: EpisodeRowProps) {
   const t = useTranslate();
@@ -317,6 +320,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       releaseBlocklistEntries={releaseBlocklistEntries}
       searchBlocked={searchBlocked}
       subtitleDownloads={subtitleDownloads}
+      libraryId={libraryId}
       primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
     />
   ) : null;
