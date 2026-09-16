@@ -49,6 +49,8 @@ export type EpisodePanelContentProps = {
   releaseBlocklistEntries: TitleReleaseBlocklistEntry[];
   searchBlocked: boolean;
   subtitleDownloads: ExternalSubtitleRecord[];
+  /** Library the episode's media files belong to; gates subtitle controls. */
+  libraryId: string | null;
   primaryMovieFileUpdatingId?: string | null;
 };
 
@@ -77,6 +79,7 @@ export const EpisodePanelContent = React.memo(function EpisodePanelContent({
   releaseBlocklistEntries,
   searchBlocked,
   subtitleDownloads,
+  libraryId,
   primaryMovieFileUpdatingId = null,
 }: EpisodePanelContentProps) {
   const t = useTranslate();
@@ -166,6 +169,7 @@ export const EpisodePanelContent = React.memo(function EpisodePanelContent({
           facet={facet}
           mediaFiles={episodeFiles}
           subtitleDownloads={subtitleDownloads}
+          libraryId={libraryId}
           onRefreshSubtitles={onRefreshSubtitles}
           onDeleteFile={onDeleteFile}
           onMakePrimaryFile={onMakePrimaryFile}

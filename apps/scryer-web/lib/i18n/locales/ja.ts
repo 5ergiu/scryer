@@ -1432,8 +1432,8 @@ const ja: LocaleDictionary = {
   "subtitle.machineTranslated": "機械翻訳",
   "subtitle.external": "外部",
   "subtitle.manualSearch": "手動検索",
-  "subtitle.apiKeyRequiredTitle": "字幕サービスを利用できません",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "字幕サービスを利用できません",
+  "subtitle.providerUnavailableBody":
     "このファイルでは現在字幕サービスを利用できません。",
   "subtitle.blocklist": "ブロックリスト",
   "subtitle.blocklisted": "字幕をブロックリストに追加しました",

@@ -20,6 +20,8 @@ import {
 import { MediaInfoButton } from "@/components/common/media-info-dialog";
 import { audioStreamsForFile, formatMediaFileSize } from "@/lib/utils/media-info-format";
 import { SubtitleSearchModal } from "@/components/views/subtitle-search-modal";
+import { useAuth } from "@/lib/hooks/use-auth";
+import { canManageLibrarySubtitles } from "@/lib/utils/permissions";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import type { ExternalSubtitleRecord } from "@/lib/types/subtitles";
@@ -67,6 +69,8 @@ type MediaFilesOnDiskPanelProps<TFile extends MediaFileOnDisk> = {
   emptyHint?: string;
   emptyAction?: React.ReactNode;
   mediaFiles: TFile[];
+  /** Library the media files belong to; gates the subtitle controls. */
+  libraryId: string | null;
   subtitleDownloads?: ExternalSubtitleRecord[];
   onRefreshSubtitles?: () => Promise<void> | void;
   onDeleteFile?: (fileId: string) => void;
@@ -92,6 +96,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
   emptyHint,
   emptyAction,
   mediaFiles,
+  libraryId,
   subtitleDownloads = [],
   onRefreshSubtitles,
   onDeleteFile,
@@ -112,6 +117,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
 }: MediaFilesOnDiskPanelProps<TFile>) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
+  const { user } = useAuth();
   const [subtitleSearchTarget, setSubtitleSearchTarget] = React.useState<{
     mediaFileId: string;
     filePath: string;
@@ -127,7 +133,14 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
       ),
     [subtitleDownloads],
   );
-  const canSearchSubtitles = showSubtitleSearch && Boolean(onRefreshSubtitles);
+  // Searching for a subtitle writes to the library, so the button only exists
+  // for a holder of Manage Subtitles (which Manage Titles shadows, and which
+  // the catalog-settings app permission overrides), matching the server guard
+  // on `searchSubtitles`.
+  const canSearchSubtitles =
+    showSubtitleSearch &&
+    Boolean(onRefreshSubtitles) &&
+    canManageLibrarySubtitles(user, libraryId);
   const selectedTitlePresentation = presentation === "selected-title";
   const orderedMediaFiles = React.useMemo(
     () =>
@@ -340,6 +353,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                     )}
                     <ExternalSubtitleSection
                       downloads={downloads}
+                      libraryId={libraryId}
                       onChanged={onRefreshSubtitles}
                     />
                   </div>
@@ -476,6 +490,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
             }
           }}
           mediaFileId={subtitleSearchTarget.mediaFileId}
+          libraryId={libraryId}
           filePath={subtitleSearchTarget.filePath}
           downloads={subtitleDownloadsByMediaFile[subtitleSearchTarget.mediaFileId] ?? []}
           onChanged={() => {

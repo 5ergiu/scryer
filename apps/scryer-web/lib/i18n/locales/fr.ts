@@ -1464,8 +1464,8 @@ const fr: LocaleDictionary = {
   "subtitle.machineTranslated": "Traduit automatiquement",
   "subtitle.external": "Externe",
   "subtitle.manualSearch": "Recherche manuelle",
-  "subtitle.apiKeyRequiredTitle": "Service de sous-titres indisponible",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Service de sous-titres indisponible",
+  "subtitle.providerUnavailableBody":
     "Le service de sous-titres est actuellement indisponible pour ce fichier.",
   "subtitle.blocklist": "Liste de blocage",
   "subtitle.blocklisted": "Sous-titre ajouté à la liste de blocage",

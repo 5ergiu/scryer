@@ -857,10 +857,19 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // an additive field on `TitleOptionsInput` and `TitlePayload`, both of which
     // already existed: ENUM 157->158, public types 849->850, and no change to
     // OBJECT or INPUT_OBJECT.
-    assert_eq!(public_types.len(), 850);
-    assert_eq!(kind_count("OBJECT"), 459);
+    // The library-scoped Manage Subtitles permission restructures the subtitle
+    // search reply: `searchSubtitles` now returns `SubtitleSearchPayload`
+    // (status, resolved language, available languages, results) instead of a
+    // bare result list, so provider readiness is the server's answer rather
+    // than something the client sniffs. That adds the payload object and the
+    // `SubtitleSearchStatus` enum: OBJECT 459->460, ENUM 158->159, public types
+    // 850->852. Root-field and INPUT_OBJECT counts are unchanged - the mutation
+    // already existed, `SearchSubtitlesInput` only made `language` optional, and
+    // MANAGE_SUBTITLES is a value on the existing `LibraryPermissionValue`.
+    assert_eq!(public_types.len(), 852);
+    assert_eq!(kind_count("OBJECT"), 460);
     assert_eq!(kind_count("INPUT_OBJECT"), 221);
-    assert_eq!(kind_count("ENUM"), 158);
+    assert_eq!(kind_count("ENUM"), 159);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
@@ -4136,8 +4145,15 @@ async fn graphql_introspection_subtitle_actions_use_payload_results() {
           searchInput: __type(name: "SearchSubtitlesInput") {
             inputFields { name type { kind name ofType { kind name } } }
           }
-          searchPayload: __type(name: "SubtitleSearchResult") {
+          searchPayload: __type(name: "SubtitleSearchPayload") {
             fields { name type { kind name ofType { kind name } } }
+          }
+          searchResult: __type(name: "SubtitleSearchResult") {
+            fields { name type { kind name ofType { kind name } } }
+          }
+          searchStatus: __type(name: "SubtitleSearchStatus") {
+            kind
+            enumValues { name }
           }
           downloadInput: __type(name: "DownloadSubtitleInput") {
             inputFields { name type { kind name ofType { kind name } } }
@@ -4246,9 +4262,45 @@ async fn graphql_introspection_subtitle_actions_use_payload_results() {
     };
 
     assert_input_non_null("searchInput", "mediaFileId", "ID");
-    assert_input_non_null("searchInput", "language", "String");
-    assert_payload_non_null("searchPayload", "score", "Int");
-    assert_payload_non_null("searchPayload", "scorePercent", "Int");
+    // Optional: the server resolves the administrator's preferred language when
+    // the caller does not name one, so the modal opens with a single call.
+    assert_input_optional("searchInput", "language", "String");
+    assert_payload_non_null("searchResult", "score", "Int");
+    assert_payload_non_null("searchResult", "scorePercent", "Int");
+
+    // `searchSubtitles` answers with a status-bearing payload, not a bare list.
+    assert_eq!(
+        mutation("searchSubtitles")["type"]["ofType"]["name"],
+        "SubtitleSearchPayload"
+    );
+    let search_payload_fields: Vec<&str> = body["data"]["searchPayload"]["fields"]
+        .as_array()
+        .expect("SubtitleSearchPayload should expose fields")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect();
+    assert_eq!(
+        search_payload_fields,
+        vec!["status", "language", "availableLanguages", "results"]
+    );
+    assert_payload_non_null("searchPayload", "language", "String");
+    let search_status = payload_field("searchPayload", "status");
+    assert_eq!(search_status["type"]["kind"], "NON_NULL");
+    assert_eq!(
+        search_status["type"]["ofType"]["name"],
+        "SubtitleSearchStatus"
+    );
+    assert_eq!(body["data"]["searchStatus"]["kind"], "ENUM");
+    let status_values: Vec<&str> = body["data"]["searchStatus"]["enumValues"]
+        .as_array()
+        .expect("SubtitleSearchStatus should expose values")
+        .iter()
+        .filter_map(|value| value["name"].as_str())
+        .collect();
+    assert_eq!(
+        status_values,
+        vec!["READY", "NO_PROVIDERS", "PROVIDER_UNAVAILABLE", "DISABLED"]
+    );
     assert_input_non_null("downloadInput", "mediaFileId", "ID");
     assert_input_non_null("downloadInput", "providerFileId", "String");
     assert_input_non_null("downloadInput", "language", "String");

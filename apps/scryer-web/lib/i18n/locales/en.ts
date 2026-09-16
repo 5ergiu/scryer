@@ -2669,9 +2669,12 @@ const en: LocaleDictionary = {
   "subtitle.providersRequiredBody":
     "Add and enable at least one subtitle provider before searching for subtitles.",
   "subtitle.providersRequiredAction": "Open subtitle providers",
-  "subtitle.apiKeyRequiredTitle": "Subtitle service unavailable",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Subtitle service unavailable",
+  "subtitle.providerUnavailableBody":
     "Subtitle service is unavailable for this file right now.",
+  "subtitle.subtitlesDisabledTitle": "Subtitle downloads are off",
+  "subtitle.subtitlesDisabledBody":
+    "Turn subtitle downloads on in the subtitle settings before searching for subtitles.",
   "subtitle.blocklist": "Blocklist",
   "subtitle.blocklisted": "Subtitle added to blocklist",
   "subtitle.deleted": "Subtitle deleted",

@@ -2318,8 +2318,8 @@ const nl: LocaleDictionary = {
   "subtitle.providersRequiredBody":
     "Voeg minstens één ondertitelprovider toe en schakel die in voordat je naar ondertitels zoekt.",
   "subtitle.providersRequiredAction": "Ondertitelproviders openen",
-  "subtitle.apiKeyRequiredTitle": "Ondertitelservice niet beschikbaar",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Ondertitelservice niet beschikbaar",
+  "subtitle.providerUnavailableBody":
     "Ondertitelservice is momenteel niet beschikbaar voor dit bestand.",
   "subtitle.blocklist": "Blokkeerlijst",
   "subtitle.blocklisted": "Ondertitel toegevoegd aan blocklist",

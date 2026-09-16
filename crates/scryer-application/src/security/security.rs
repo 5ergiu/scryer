@@ -64,6 +64,7 @@ impl AppUseCase {
             scryer_domain::LibraryPermission::ManageLibrary => "manageLibrary",
             scryer_domain::LibraryPermission::Request => "request",
             scryer_domain::LibraryPermission::AutoApproveRequests => "autoApproveRequests",
+            scryer_domain::LibraryPermission::ManageSubtitles => "manageSubtitles",
         }
     }
 

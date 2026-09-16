@@ -461,6 +461,7 @@ pub enum LibraryPermission {
     ManageLibrary,
     Request,
     AutoApproveRequests,
+    ManageSubtitles,
 }
 
 impl LibraryPermission {
@@ -472,6 +473,7 @@ impl LibraryPermission {
             Self::ManageLibrary => "manage_library",
             Self::Request => "request",
             Self::AutoApproveRequests => "auto_approve_requests",
+            Self::ManageSubtitles => "manage_subtitles",
         }
     }
 
@@ -484,6 +486,7 @@ impl LibraryPermission {
             "manage_library" => Some(Self::ManageLibrary),
             "request" | "request_title" => Some(Self::Request),
             "auto_approve_requests" | "auto_approve_request" => Some(Self::AutoApproveRequests),
+            "manage_subtitles" | "manage_subtitle" => Some(Self::ManageSubtitles),
             _ => None,
         }
     }
@@ -624,6 +627,7 @@ impl LibraryPermissionMask {
     pub const MANAGE_LIBRARY: Self = Self(1 << 3);
     pub const REQUEST: Self = Self(1 << 4);
     pub const AUTO_APPROVE_REQUESTS: Self = Self(1 << 5);
+    pub const MANAGE_SUBTITLES: Self = Self(1 << 6);
 
     pub fn bits(self) -> u64 {
         self.0
@@ -641,6 +645,7 @@ impl LibraryPermissionMask {
             LibraryPermission::ManageLibrary => Self::MANAGE_LIBRARY,
             LibraryPermission::Request => Self::REQUEST,
             LibraryPermission::AutoApproveRequests => Self::AUTO_APPROVE_REQUESTS,
+            LibraryPermission::ManageSubtitles => Self::MANAGE_SUBTITLES,
         }
     }
 
@@ -664,17 +669,25 @@ impl LibraryPermissionMask {
                 Self::AUTO_APPROVE_REQUESTS,
                 LibraryPermission::AutoApproveRequests,
             ),
+            (Self::MANAGE_SUBTITLES, LibraryPermission::ManageSubtitles),
         ]
         .into_iter()
         .filter_map(|(mask, permission)| self.contains(mask).then_some(permission))
         .collect()
     }
 
+    /// Expand the grants that a stored mask implies.
+    ///
+    /// Manage Titles implies Auto-Approve Requests implies Request, and
+    /// Manage Titles also implies Manage Subtitles: a title manager has always
+    /// been able to delete and blocklist a title's external subtitles, so the
+    /// narrower permission must never take that away from an existing grant.
     pub fn with_request_shadowing(self) -> Self {
         let mut mask = self;
         if mask.contains(Self::MANAGE_TITLES) {
             mask.insert(Self::AUTO_APPROVE_REQUESTS);
             mask.insert(Self::REQUEST);
+            mask.insert(Self::MANAGE_SUBTITLES);
         } else if mask.contains(Self::AUTO_APPROVE_REQUESTS) {
             mask.insert(Self::REQUEST);
         }
@@ -683,7 +696,12 @@ impl LibraryPermissionMask {
 
     pub fn normalized_for_storage(self) -> Self {
         if self.contains(Self::MANAGE_TITLES) {
-            Self(self.0 & !Self::AUTO_APPROVE_REQUESTS.0 & !Self::REQUEST.0)
+            Self(
+                self.0
+                    & !Self::AUTO_APPROVE_REQUESTS.0
+                    & !Self::REQUEST.0
+                    & !Self::MANAGE_SUBTITLES.0,
+            )
         } else if self.contains(Self::AUTO_APPROVE_REQUESTS) {
             Self(self.0 & !Self::REQUEST.0)
         } else {
@@ -770,6 +788,7 @@ impl UserAuthorization {
                 LibraryPermission::ManageLibrary,
                 LibraryPermission::Request,
                 LibraryPermission::AutoApproveRequests,
+                LibraryPermission::ManageSubtitles,
             ]),
             actor_capabilities: ActorCapabilityMask::MANAGE_OWN_ACCOUNT,
             login_status: UserLoginStatus::Enabled,
@@ -801,6 +820,12 @@ impl UserAuthorization {
             LibraryPermission::AutoApproveRequests => self
                 .library_permissions(library_id)
                 .can_auto_approve_requests(),
+            // Manage Titles shadows Manage Subtitles, so the stored mask is
+            // expanded before the check; storage keeps only the broader bit.
+            LibraryPermission::ManageSubtitles => self
+                .library_permissions(library_id)
+                .with_request_shadowing()
+                .contains(LibraryPermissionMask::MANAGE_SUBTITLES),
             _ => self
                 .library_permissions(library_id)
                 .contains(LibraryPermissionMask::from_permission(permission)),
@@ -822,6 +847,14 @@ impl UserAuthorization {
                         .libraries
                         .values()
                         .any(|permissions| permissions.can_auto_approve_requests())
+            }
+            LibraryPermission::ManageSubtitles => {
+                let shadowed = |permissions: &LibraryPermissionMask| {
+                    permissions
+                        .with_request_shadowing()
+                        .contains(LibraryPermissionMask::MANAGE_SUBTITLES)
+                };
+                shadowed(&self.default_library) || self.libraries.values().any(shadowed)
             }
             _ => {
                 let required = LibraryPermissionMask::from_permission(permission);

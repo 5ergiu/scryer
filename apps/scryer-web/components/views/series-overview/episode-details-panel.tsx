@@ -18,6 +18,7 @@ export function EpisodeDetailsPanel({
   facet,
   mediaFiles,
   subtitleDownloads = [],
+  libraryId,
   onRefreshSubtitles,
   onDeleteFile,
   onMakePrimaryFile,
@@ -27,6 +28,8 @@ export function EpisodeDetailsPanel({
   facet: string;
   mediaFiles: EpisodeMediaFile[];
   subtitleDownloads?: ExternalSubtitleRecord[];
+  /** Library the episode's media files belong to; gates subtitle controls. */
+  libraryId: string | null;
   onRefreshSubtitles?: () => Promise<void> | void;
   onDeleteFile?: (fileId: string) => void;
   onMakePrimaryFile?: (fileId: string) => Promise<void> | void;
@@ -85,6 +88,7 @@ export function EpisodeDetailsPanel({
           emptyHint={t("title.noFilesTrackedHint")}
           mediaFiles={mediaFiles}
           subtitleDownloads={subtitleDownloads}
+          libraryId={libraryId}
           onRefreshSubtitles={onRefreshSubtitles}
           onDeleteFile={onDeleteFile}
           onMakePrimaryFile={onMakePrimaryFile}

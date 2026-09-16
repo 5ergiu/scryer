@@ -2907,19 +2907,24 @@ export type SaveExternalImportSetupSecretDraftInput = {
 
 export const searchSubtitlesMutation = `mutation SearchSubtitles($input: SearchSubtitlesInput!) {
   searchSubtitles(input: $input) {
-    provider
-    providerFileId
+    status
     language
-    releaseInfo
-    score
-    scorePercent
-    hearingImpaired
-    forced
-    aiTranslated
-    machineTranslated
-    uploader
-    downloadCount
-    hashMatched
+    availableLanguages
+    results {
+      provider
+      providerFileId
+      language
+      releaseInfo
+      score
+      scorePercent
+      hearingImpaired
+      forced
+      aiTranslated
+      machineTranslated
+      uploader
+      downloadCount
+      hashMatched
+    }
   }
 }`;
 
@@ -3032,6 +3037,23 @@ export const assignTrackedDownloadTitleMutation = `mutation AssignTrackedDownloa
     }
   }
 }`;
+
+/**
+ * Why a subtitle search returned what it did. The server owns provider
+ * readiness; the modal only renders the answer.
+ */
+export type SubtitleSearchStatus =
+  | "READY"
+  | "NO_PROVIDERS"
+  | "PROVIDER_UNAVAILABLE"
+  | "DISABLED";
+
+export type SubtitleSearchPayload = {
+  status: SubtitleSearchStatus;
+  language: string;
+  availableLanguages: string[];
+  results: SubtitleSearchResult[];
+};
 
 export type SubtitleSearchResult = {
   provider: string;

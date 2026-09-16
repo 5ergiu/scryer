@@ -12,6 +12,7 @@ export const LIBRARY_PERMISSIONS = {
   manageLibrary: "MANAGE_LIBRARY",
   request: "REQUEST",
   autoApproveRequests: "AUTO_APPROVE_REQUESTS",
+  manageSubtitles: "MANAGE_SUBTITLES",
 } as const;
 
 /**
@@ -174,6 +175,25 @@ export function hasLibraryPermission(
   );
 }
 
+/**
+ * Mirror the server's `effective_library_permission` for Manage Subtitles: the
+ * catalog-settings app permission overrides the library grant, so a catalog
+ * administrator manages subtitles in every library even with no grant, or with
+ * a View-only one. `hasLibraryPermission` deliberately stays narrow (it only
+ * knows the MANAGE_PERMISSIONS administrator fallback); this helper adds the
+ * one documented app-library override, exactly as
+ * `permission_allows_app_library_override` does on the server.
+ */
+export function canManageLibrarySubtitles(
+  user: PermissionUser | null | undefined,
+  libraryId: string | null | undefined,
+): boolean {
+  return (
+    hasLibraryPermission(user, libraryId, LIBRARY_PERMISSIONS.manageSubtitles) ||
+    hasAppPermission(user, APP_PERMISSIONS.manageCatalogSettings)
+  );
+}
+
 export function hasAnyLibraryPermission(
   user: PermissionUser | null | undefined,
   permission: LibraryPermission,
@@ -187,22 +207,30 @@ export function hasAnyLibraryPermission(
   );
 }
 
+/**
+ * Expand a grant the way the server's `with_request_shadowing` does: Manage
+ * Titles implies Auto-Approve Requests, Request, and Manage Subtitles, and
+ * Auto-Approve Requests implies Request.
+ */
 export function libraryPermissionsWithRequestShadowing(values: string[]): string[] {
   const next = new Set(values);
   if (next.has(LIBRARY_PERMISSIONS.manageTitles)) {
     next.add(LIBRARY_PERMISSIONS.autoApproveRequests);
     next.add(LIBRARY_PERMISSIONS.request);
+    next.add(LIBRARY_PERMISSIONS.manageSubtitles);
   } else if (next.has(LIBRARY_PERMISSIONS.autoApproveRequests)) {
     next.add(LIBRARY_PERMISSIONS.request);
   }
   return Array.from(next);
 }
 
+/** Strip shadowed bits before writing, mirroring `normalized_for_storage`. */
 export function normalizeLibraryPermissionsForStorage(values: string[]): string[] {
   const next = new Set(values);
   if (next.has(LIBRARY_PERMISSIONS.manageTitles)) {
     next.delete(LIBRARY_PERMISSIONS.autoApproveRequests);
     next.delete(LIBRARY_PERMISSIONS.request);
+    next.delete(LIBRARY_PERMISSIONS.manageSubtitles);
   } else if (next.has(LIBRARY_PERMISSIONS.autoApproveRequests)) {
     next.delete(LIBRARY_PERMISSIONS.request);
   }
@@ -216,7 +244,8 @@ export function libraryPermissionShadowSource(
   const explicit = new Set(explicitValues);
   if (
     (permission === LIBRARY_PERMISSIONS.request ||
-      permission === LIBRARY_PERMISSIONS.autoApproveRequests) &&
+      permission === LIBRARY_PERMISSIONS.autoApproveRequests ||
+      permission === LIBRARY_PERMISSIONS.manageSubtitles) &&
     explicit.has(LIBRARY_PERMISSIONS.manageTitles)
   ) {
     return "Manage Titles";
@@ -246,6 +275,12 @@ function libraryPermissionMatches(
         !explicit.has(LIBRARY_PERMISSIONS.manageTitles) &&
         libraryPermissionsWithRequestShadowing(values).includes(permission)
       );
+    // Unlike the request pair, Manage Subtitles is genuinely held by a Manage
+    // Titles holder: the server answers `has_library_permission` for it through
+    // the same shadow, so the UI must agree or a title manager sees no button
+    // for something the server would let them do.
+    case LIBRARY_PERMISSIONS.manageSubtitles:
+      return libraryPermissionsWithRequestShadowing(values).includes(permission);
     default:
       return explicit.has(permission);
   }

@@ -1448,8 +1448,8 @@ const pt_BR: LocaleDictionary = {
   "subtitle.machineTranslated": "Traduzida automaticamente",
   "subtitle.external": "Externa",
   "subtitle.manualSearch": "Pesquisa manual",
-  "subtitle.apiKeyRequiredTitle": "Serviço de legendas indisponível",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Serviço de legendas indisponível",
+  "subtitle.providerUnavailableBody":
     "O serviço de legendas está indisponível para este arquivo no momento.",
   "subtitle.blocklist": "Lista de bloqueio",
   "subtitle.blocklisted": "Legenda adicionada à lista de bloqueio",

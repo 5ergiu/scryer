@@ -2922,13 +2922,10 @@ const ru: LocaleDictionary = {
     "subtitle.providersRequiredAction":
         "Открыть настройки провайдеров субтитров",
 
-    "subtitle.apiKeyRequiredTitle":
+    "subtitle.providerUnavailableTitle":
         "Сервис субтитров недоступен",
-    "subtitle.apiKeyRequiredBody":
+    "subtitle.providerUnavailableBody":
         "Сервис субтитров в данный момент недоступен для этого файла.",
-    "subtitle.apiKeyRequiredAction":
-        "Открыть настройки субтитров",
-
     "subtitle.credentialsRequiredTitle":
         "Требуются учётные данные",
     "subtitle.credentialsRequiredBody":
