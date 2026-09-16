@@ -17,6 +17,7 @@ These notes cover what's changed since **0.20.1**.
   - The subtitle search window now says why it cannot search — no provider configured, the provider unavailable, or subtitle downloading turned off — instead of leaving the search button dead.
   - Subtitle providers and their credentials stay administrator-only: granting Manage Subtitles never exposes provider settings, and the link to them appears only for administrators who can open catalog settings.
   - Administrators of the whole catalog keep managing subtitles in every library.
+- **Pages scroll again on Android phones.** The catalog list, title overviews and the settings side menu no longer trap a swipe on Android Chrome, so the page moves with your finger as it already did on iOS.
 
 ## Upgrading
 
