@@ -19,13 +19,14 @@ test("catalog activity cards retain the standard success border above global CSS
   assert.ok(card.includes("!border-0"), "the outer Sonner frame stays borderless");
 });
 
-test("the warning toast paints an opaque surface, like success and error", () => {
+test("every toast variant paints an opaque surface", () => {
   // `!bg-[var(--card)]` is the mechanism: Sonner's richColors sets a translucent
-  // `--warning-bg`, and only an important utility beats it. Warning used to
-  // reach for `bg-[linear-gradient(...),var(--scry-bg)]`, which Tailwind emits
-  // as `background-image` — a bare colour is not a valid layer there, so the
-  // browser dropped the whole declaration and the translucent default showed.
-  for (const variant of ["success", "error", "warning"]) {
+  // background per variant, and only an important utility beats it. Warning and
+  // info used to reach for `bg-[linear-gradient(...),var(--scry-bg)]`, which
+  // Tailwind emits as `background-image` — a bare colour is not a valid layer
+  // there, so the browser dropped the whole declaration and the translucent
+  // default showed.
+  for (const variant of ["success", "error", "warning", "info"]) {
     assert.ok(
       new RegExp(`${variant}:\\s*\\n?\\s*"[^"]*!bg-\\[var\\(--card\\)\\]`).test(
         toaster,
@@ -34,7 +35,9 @@ test("the warning toast paints an opaque surface, like success and error", () =>
     );
   }
   assert.ok(
-    !toaster.includes("var(--scry-warning-bg)),var(--scry-bg)"),
+    // The prose above deliberately names the broken shape, so match the literal
+    // `0deg` the real utility carried rather than the comment's ellipsis.
+    !toaster.includes("bg-[linear-gradient(0deg,"),
     "the invalid background-image layering must not come back",
   );
 });
