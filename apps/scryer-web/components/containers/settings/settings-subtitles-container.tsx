@@ -32,7 +32,10 @@ import { providerConfigRecordToValues } from "@/lib/utils/provider-config";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { wsClient } from "@/lib/graphql/ws-client";
-import { runConnectionFeedback } from "@/lib/utils/connection-feedback";
+import {
+  isReportedConnectionFeedbackError,
+  runConnectionFeedback,
+} from "@/lib/utils/connection-feedback";
 import type {
   ConfigFieldDef,
   SubtitleProviderConfigRecord,
@@ -389,10 +392,16 @@ export function SettingsSubtitlesContainer({
         return previous;
       }
 
+      // Picking the type here must match picking it by hand, which also takes
+      // the type's recommended facets; a provider saved with none never searches.
+      const typeChanged = nextProviderType !== previous.providerType;
       return {
         ...previous,
         providerType: nextProviderType,
         name: nextName,
+        enabledFacets: typeChanged
+          ? [...(nextProvider.recommendedFacets ?? [])]
+          : previous.enabledFacets,
       };
     });
   }, [editingProviderId, providerTypes]);
@@ -685,6 +694,46 @@ export function SettingsSubtitlesContainer({
       .finally(() => setSaving(false));
   }, [client, setGlobalStatus, settings, t]);
 
+  // Throws when the provider rejects the values, so saving and the Test button
+  // share one definition of "working".
+  const probeProviderConnection = React.useCallback(
+    async (
+      providerType: string,
+      config: ReturnType<typeof serializeProviderConfigValues>,
+    ) => {
+      const { data, error } = await client
+        .mutation(testSubtitleProviderConnectionMutation, {
+          input: {
+            id: editingProviderId ?? undefined,
+            providerType,
+            config,
+          },
+        })
+        .toPromise();
+      if (error) {
+        throw error;
+      }
+
+      const validation = data?.testSubtitleProviderConnection as
+        | SubtitleProviderValidationResult
+        | undefined;
+      const success =
+        validation?.status === "valid" || validation?.status === "ok";
+      if (!success) {
+        throw new Error(
+          validation?.message ||
+            t("status.subtitleProviderConnectionTestFailed"),
+        );
+      }
+
+      return (
+        validation?.message ||
+        t("status.subtitleProviderConnectionTestPassed")
+      );
+    },
+    [client, editingProviderId, t],
+  );
+
   const submitProvider = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -714,9 +763,22 @@ export function SettingsSubtitlesContainer({
         setGlobalStatus(t("form.subtitleProviderValidation"));
         return;
       }
+      if (payload.enabledFacets.length === 0) {
+        setGlobalStatus(t("form.subtitleProviderFacetsRequired"));
+        return;
+      }
 
       setMutatingProviderId(editingProviderId || "new");
       try {
+        await runConnectionFeedback({
+          setGlobalStatus,
+          startMessage: t("status.testingSubtitleProviderConnection"),
+          successMessage: t("status.subtitleProviderConnectionTestPassed"),
+          failureFallbackMessage: t("status.subtitleProviderConnectionTestFailed"),
+          announceSuccess: false,
+          run: () => probeProviderConnection(payload.providerType, config),
+        });
+
         if (editingProviderId) {
           const { error } = await client
             .mutation(updateSubtitleProviderConfigMutation, {
@@ -757,9 +819,11 @@ export function SettingsSubtitlesContainer({
         setAwaitingProviderBaselineSync(true);
         await refreshProviderConfigs();
       } catch (error) {
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToUpdate"),
-        );
+        if (!isReportedConnectionFeedbackError(error)) {
+          setGlobalStatus(
+            error instanceof Error ? error.message : t("status.failedToUpdate"),
+          );
+        }
       } finally {
         setMutatingProviderId(null);
       }
@@ -767,6 +831,7 @@ export function SettingsSubtitlesContainer({
     [
       client,
       editingProviderId,
+      probeProviderConnection,
       providerDraft,
       providerTypes,
       refreshProviderConfigs,
@@ -992,48 +1057,22 @@ export function SettingsSubtitlesContainer({
         startMessage: t("status.testingSubtitleProviderConnection"),
         successMessage: t("status.subtitleProviderConnectionTestPassed"),
         failureFallbackMessage: t("status.subtitleProviderConnectionTestFailed"),
-        run: async () => {
-          const { data, error } = await client
-            .mutation(testSubtitleProviderConnectionMutation, {
-              input: {
-                id: editingProviderId ?? undefined,
-                providerType: normalizedProviderType,
-                config: serializeProviderConfigValues(
-                  selectedProvider?.configFields ?? [],
-                  providerDraft.configValues,
-                  persistedConfigValues,
-                ),
-              },
-            })
-            .toPromise();
-          if (error) {
-            throw error;
-          }
-
-          const validation = data?.testSubtitleProviderConnection as
-            | SubtitleProviderValidationResult
-            | undefined;
-          const success =
-            validation?.status === "valid" || validation?.status === "ok";
-          if (!success) {
-            throw new Error(
-              validation?.message ||
-                t("status.subtitleProviderConnectionTestFailed"),
-            );
-          }
-
-          return (
-            validation?.message ||
-            t("status.subtitleProviderConnectionTestPassed")
-          );
-        },
+        run: () =>
+          probeProviderConnection(
+            normalizedProviderType,
+            serializeProviderConfigValues(
+              selectedProvider?.configFields ?? [],
+              providerDraft.configValues,
+              persistedConfigValues,
+            ),
+          ),
       });
     } catch {
       // Connection feedback is already surfaced through the shared helper.
     } finally {
       setIsTestingProviderConnection(false);
     }
-  }, [client, editingProviderId, providerDraft, providerTypes, setGlobalStatus, t]);
+  }, [probeProviderConnection, providerDraft, providerTypes, setGlobalStatus, t]);
 
   return (
     <>

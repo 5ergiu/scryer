@@ -2413,6 +2413,8 @@ const en: LocaleDictionary = {
   "form.indexerNamePlaceholder": "My Newznab Indexer",
   "form.providerTypePlaceholder": "Provider Type",
   "form.subtitleProviderValidation": "Name and provider type are required.",
+  "form.subtitleProviderFacetsRequired":
+    "Select at least one content type. Scryer never searches a provider that has none.",
   "form.apiKeyInputPlaceholder": "api key",
   "form.apiKeyStoredPlaceholder": "stored (leave blank to keep)",
   "form.usernamePlaceholder": "username",
