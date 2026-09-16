@@ -1,6 +1,5 @@
-
-import { useEffect, type ComponentProps, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useRef, type ComponentProps, type ReactNode } from "react";
+import { Dialog as DialogPrimitive } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +22,9 @@ type ConfirmDialogProps = {
   onCancel: () => void;
 };
 
+// Built on the Radix dialog so a confirmation opened from inside another dialog
+// joins its layer stack: it renders above it, receives pointer input and focus,
+// and Escape closes only the confirmation.
 export function ConfirmDialog({
   open,
   title,
@@ -41,67 +43,89 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onCancel();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [onCancel, open]);
+  const contentRef = useRef<HTMLElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   if (!open) {
     return null;
   }
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <section
-        id={contentId}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className={cn(
-          "w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-lg",
-          contentClassName,
-        )}
-      >
-        <h2 className="mb-2 text-sm font-semibold">{title}</h2>
-        {description ? (
-          <p className="mb-3 text-xs text-muted-foreground">{description}</p>
-        ) : null}
-        {children ? <div className="mb-4">{children}</div> : null}
-        <div className="flex justify-end gap-2">
-          <Button
-            id={cancelButtonId}
-            type="button"
-            variant="secondary"
-            onClick={onCancel}
-            disabled={isBusy}
+  return (
+    <DialogPrimitive.Root
+      open
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onCancel();
+        }
+      }}
+    >
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 px-4">
+          <DialogPrimitive.Content
+            asChild
+            onOpenAutoFocus={(event) => {
+              // Keep focus off the confirm button so a stray Enter cannot confirm.
+              event.preventDefault();
+              restoreFocusRef.current =
+                document.activeElement instanceof HTMLElement ? document.activeElement : null;
+              contentRef.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const restoreTarget = restoreFocusRef.current;
+              restoreFocusRef.current = null;
+              if (restoreTarget?.isConnected) {
+                restoreTarget.focus();
+              }
+            }}
+            onPointerDownOutside={(event) => event.preventDefault()}
+            onInteractOutside={(event) => event.preventDefault()}
           >
-            {cancelLabel}
-          </Button>
-          <Button
-            id={confirmButtonId}
-            type="button"
-            variant={confirmButtonVariant}
-            className={confirmButtonClassName}
-            onClick={onConfirm}
-            disabled={isBusy || confirmDisabled}
-          >
-            {confirmLabel}
-          </Button>
-        </div>
-      </section>
-    </div>,
-    document.body,
+            <section
+              ref={contentRef}
+              id={contentId}
+              aria-modal="true"
+              aria-label={title}
+              {...(description ? {} : { "aria-describedby": undefined })}
+              className={cn(
+                "w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-lg outline-none",
+                contentClassName,
+              )}
+            >
+              <DialogPrimitive.Title className="mb-2 text-sm font-semibold">
+                {title}
+              </DialogPrimitive.Title>
+              {description ? (
+                <DialogPrimitive.Description className="mb-3 text-xs text-muted-foreground">
+                  {description}
+                </DialogPrimitive.Description>
+              ) : null}
+              {children ? <div className="mb-4">{children}</div> : null}
+              <div className="flex justify-end gap-2">
+                <Button
+                  id={cancelButtonId}
+                  type="button"
+                  variant="secondary"
+                  onClick={onCancel}
+                  disabled={isBusy}
+                >
+                  {cancelLabel}
+                </Button>
+                <Button
+                  id={confirmButtonId}
+                  type="button"
+                  variant={confirmButtonVariant}
+                  className={confirmButtonClassName}
+                  onClick={onConfirm}
+                  disabled={isBusy || confirmDisabled}
+                >
+                  {confirmLabel}
+                </Button>
+              </div>
+            </section>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Overlay>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
