@@ -25,6 +25,12 @@ These notes cover what's changed since **0.20.1**.
   - Administrators of the whole catalog keep managing subtitles in every library.
 - **Pages scroll again on Android phones.** The catalog list, title overviews and the settings side menu no longer trap a swipe on Android Chrome, so the page moves with your finger as it already did on iOS.
 
+## Included fixes
+
+- **Rename:** external subtitles now follow their video file in Scryer as well as on disk. A rename moved the subtitle files, but the title kept listing them at their old location. Downloaded subtitles keep their provider, score and sync details after the move. The title page still doesn't refresh on its own after a rename; reopen the title to see the new paths. This addresses issue #226.
+- **Keyboard:** Escape closes an open movie overview, as it already did for series and anime.
+- **Notifications:** warning and info notifications have a solid background like success and error notifications, so the page behind them no longer shows through.
+
 ## Upgrading
 
 No database or configuration changes are required.
