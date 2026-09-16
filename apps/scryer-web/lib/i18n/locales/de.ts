@@ -1488,7 +1488,7 @@ const de: LocaleDictionary = {
   "settings.sidecarFilesTitle": "Sidecar-Dateien",
   "settings.nfoWriteOnImportLabel": "NFO beim Import schreiben",
   "settings.nfoWriteOnImportDescription":
-    "Kodi/Jellyfin/Emby-kompatible .nfo-Metadaten-Dateien neben importierten Medien schreiben",
+    "Kodi/Jellyfin/Emby-kompatible .nfo-Metadaten-Dateien neben importierten Medien schreiben; eine vorhandene .nfo-Datei wird nie überschrieben",
   "settings.plexmatchWriteOnImportLabel": ".plexmatch beim Import schreiben",
   "settings.plexmatchWriteOnImportDescription":
     "Plex-Hinweisdateien für genaue Serienzuordnung ohne Namensraten schreiben",

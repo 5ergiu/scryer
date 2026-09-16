@@ -2730,7 +2730,7 @@ const en: LocaleDictionary = {
   "settings.libraryUnsavedChanges": "Unsaved changes",
   "settings.nfoWriteOnImportLabel": "Write NFO on Import",
   "settings.nfoWriteOnImportDescription":
-    "Write Kodi/Jellyfin/Emby-compatible .nfo metadata files alongside imported media",
+    "Write Kodi/Jellyfin/Emby-compatible .nfo metadata files alongside imported media; an existing .nfo file is never overwritten",
   "settings.plexmatchWriteOnImportLabel": "Write .plexmatch on Import",
   "settings.plexmatchWriteOnImportDescription":
     "Write Plex hint files for accurate series matching without name guessing",

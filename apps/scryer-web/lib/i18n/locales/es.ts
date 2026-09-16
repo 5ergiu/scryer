@@ -1489,7 +1489,7 @@ const es: LocaleDictionary = {
   "settings.sidecarFilesTitle": "Archivos sidecar",
   "settings.nfoWriteOnImportLabel": "Escribir NFO al importar",
   "settings.nfoWriteOnImportDescription":
-    "Escribir archivos de metadatos .nfo compatibles con Kodi/Jellyfin/Emby junto al medio importado",
+    "Escribir archivos de metadatos .nfo compatibles con Kodi/Jellyfin/Emby junto al medio importado; nunca se sobrescribe un archivo .nfo existente",
   "settings.plexmatchWriteOnImportLabel": "Escribir .plexmatch al importar",
   "settings.plexmatchWriteOnImportDescription":
     "Escribir archivos de pistas de Plex para coincidencia precisa de series sin adivinar nombres",

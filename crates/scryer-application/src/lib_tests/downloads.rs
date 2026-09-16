@@ -14605,3 +14605,306 @@ async fn deleting_a_download_client_clears_its_status_row() {
         "deleting a client clears its status row"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NFO sidecars on import
+// ---------------------------------------------------------------------------
+
+/// Import one well-named episode file through the manual path and hand back the
+/// destination the file landed at, so the caller can look for its sidecar.
+async fn manual_import_pack_episode(
+    app: &AppUseCase,
+    user: &User,
+    title_id: &str,
+    episode_ids: Vec<String>,
+    release_name: &str,
+    source_dir: &Path,
+) -> std::path::PathBuf {
+    let source_file = write_pack_video(source_dir, &format!("{release_name}.mkv"));
+    let results = crate::import_workflow::execute_manual_import(
+        app,
+        user,
+        "manual-import-nfo-sidecar",
+        title_id,
+        None,
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: episode_ids.first().cloned(),
+            episode_ids,
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir).expect("canonical source root")),
+    )
+    .await
+    .expect("execute manual import");
+    assert!(results.iter().all(|result| result.success), "{results:?}");
+    assert_eq!(results.len(), 1, "{results:?}");
+
+    crate::stored_paths::stored_path_to_path_buf(
+        results[0]
+            .dest_path
+            .as_deref()
+            .expect("a successful import reports where the file landed"),
+    )
+}
+
+async fn set_nfo_write_on_import(app: &AppUseCase, user: &User, facet: MediaFacet, enabled: bool) {
+    app.update_media_settings(
+        user,
+        facet,
+        UpdateMediaSettings {
+            nfo_write_on_import: Some(enabled),
+            ..empty_update_media_settings()
+        },
+    )
+    .await
+    .expect("media settings should update");
+}
+
+async fn override_nfo_write_on_import(
+    app: &AppUseCase,
+    user: &User,
+    library_id: &str,
+    enabled: bool,
+) {
+    app.update_library_settings(
+        user,
+        library_id,
+        LibrarySettingsOverrideDraft {
+            nfo_write_on_import: Some(enabled),
+            ..empty_library_settings_override()
+        },
+    )
+    .await
+    .expect("library override should save");
+}
+
+#[tokio::test]
+async fn an_import_writes_no_sidecar_while_the_setting_stays_off() {
+    // Off is the seeded default, and an operator who never opted in must not
+    // find Scryer's files appearing next to their own.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert!(destination.exists(), "the episode file must still land");
+    assert!(
+        !destination.with_extension("nfo").exists(),
+        "no sidecar may be written while the setting is off"
+    );
+}
+
+#[tokio::test]
+async fn a_library_override_can_turn_the_sidecar_off_for_one_library() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    override_nfo_write_on_import(&app, &user, &title.library_id, false).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert!(
+        !destination.with_extension("nfo").exists(),
+        "the library override is the last word over the facet setting"
+    );
+}
+
+#[tokio::test]
+async fn a_library_override_can_turn_the_sidecar_on_for_one_library() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    // Facet off, library on: the cascade has to read the override even when
+    // the global answer is the seeded default.
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, false).await;
+    override_nfo_write_on_import(&app, &user, &title.library_id, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let sidecar = destination.with_extension("nfo");
+    assert!(
+        sidecar.exists(),
+        "the library override must enable the write"
+    );
+    let content = std::fs::read_to_string(&sidecar).expect("read sidecar");
+    assert!(content.starts_with("<?xml version=\"1.0\""), "{content}");
+    assert!(content.contains("<episodedetails>"), "{content}");
+    assert!(
+        content.contains("<showtitle>Fail Closed Pack</showtitle>"),
+        "{content}"
+    );
+    assert!(content.contains("<season>1</season>"), "{content}");
+    assert!(content.contains("<episode>1</episode>"), "{content}");
+    assert!(!content.contains('\r'), "sidecars are never written CRLF");
+    assert!(content.ends_with('\n'), "{content}");
+}
+
+#[tokio::test]
+async fn a_manual_import_writes_the_episode_sidecar() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let sidecar = destination.with_extension("nfo");
+    assert!(
+        sidecar.exists(),
+        "the manual path used to import the file and write nothing beside it"
+    );
+    let content = std::fs::read_to_string(&sidecar).expect("read sidecar");
+    assert_eq!(content.matches("<episodedetails>").count(), 1, "{content}");
+    // The sidecar describes the bytes that landed, so it can only be written
+    // after the media file exists.
+    assert!(content.contains("<streamdetails>"), "{content}");
+}
+
+#[tokio::test]
+async fn a_multi_episode_manual_import_writes_one_root_per_episode() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone(), second_episode.id.clone()],
+        "Fail.Closed.Pack.S01E01E02.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let content = std::fs::read_to_string(destination.with_extension("nfo")).expect("read sidecar");
+    // One file covering two episodes carries both roots: Jellyfin splits the
+    // document on `</episodedetails>` and reads each block as its own episode.
+    assert_eq!(content.matches("<episodedetails>").count(), 2, "{content}");
+    assert_eq!(content.matches("<?xml").count(), 1, "{content}");
+    assert!(content.contains("<episode>1</episode>"), "{content}");
+    assert!(content.contains("<episode>2</episode>"), "{content}");
+}
+
+#[tokio::test]
+async fn an_existing_sidecar_survives_the_import_that_lands_beside_it() {
+    // Operators curate these files by hand, and other tools write them too.
+    // Whatever is already on disk wins, at any size and any content.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    // One pass with the setting off, purely to learn the shape of the names
+    // this library gives imported files.
+    let first_destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+    assert!(!first_destination.with_extension("nfo").exists());
+    let first_name = first_destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("imported file name");
+    assert!(first_name.contains("S01E01"), "{first_name}");
+
+    // Put the operator's own sidecar where the next episode is about to land.
+    let second_destination =
+        first_destination.with_file_name(first_name.replace("S01E01", "S01E02"));
+    let sidecar = second_destination.with_extension("nfo");
+    let curated = "<episodedetails>\n  <title>Written by the operator</title>\n</episodedetails>\n";
+    std::fs::write(&sidecar, curated).expect("seed the operator's sidecar");
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+
+    let landed = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![second_episode.id.clone()],
+        "Fail.Closed.Pack.S01E02.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert_eq!(
+        landed, second_destination,
+        "the sidecar was seeded beside the wrong destination"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sidecar).expect("read sidecar"),
+        curated,
+        "an existing sidecar is never replaced"
+    );
+}

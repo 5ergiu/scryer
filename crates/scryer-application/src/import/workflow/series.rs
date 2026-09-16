@@ -1806,20 +1806,15 @@ async fn import_single_episode_file(
 
             if imported_media_file_id.is_some() && reason_code.as_deref() != Some("additional_file")
             {
-                if nfo_enabled {
-                    let nfo_path = std::path::Path::new(dest_path).with_extension("nfo");
-                    if let Some(episode) = target_episodes.first() {
-                        let nfo_content = render_episode_nfo(title, episode);
-                        if let Err(err) = tokio::fs::write(&nfo_path, nfo_content.as_bytes()).await
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                path = %nfo_path.display(),
-                                "failed to write episode NFO sidecar"
-                            );
-                        }
-                    }
-                }
+                write_imported_media_nfo(
+                    app,
+                    title,
+                    &crate::stored_paths::stored_path_to_path_buf(dest_path),
+                    imported_media_file_id.as_deref(),
+                    ImportedSidecar::Episodes(&target_episodes),
+                    Some(nfo_enabled),
+                )
+                .await;
 
                 spawn_post_processing(PostProcessingContext {
                     app: app.clone(),
@@ -2539,18 +2534,32 @@ async fn write_series_sidecars(
 ) {
     if nfo_enabled {
         let tvshow_nfo_path = title_folder_path.join("tvshow.nfo");
-        if !tvshow_nfo_path.exists() {
-            if let Some(parent) = tvshow_nfo_path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let nfo_content = render_tvshow_nfo(title);
-            if let Err(err) = tokio::fs::write(&tvshow_nfo_path, nfo_content.as_bytes()).await {
-                tracing::warn!(
-                    error = %err,
-                    path = %tvshow_nfo_path.display(),
-                    "failed to write tvshow NFO sidecar"
-                );
-            }
+        if !tokio::fs::try_exists(&tvshow_nfo_path).await.unwrap_or(false) {
+            let ratings = app
+                .services
+                .catalog
+                .titles
+                .get_title_ratings(&title.id)
+                .await
+                .unwrap_or_default();
+            let credits = app
+                .services
+                .catalog
+                .titles
+                .get_title_credits(&title.id)
+                .await
+                .unwrap_or_default();
+            let nfo_content = render_tvshow_nfo(
+                title,
+                &crate::nfo::NfoContext {
+                    ratings: &ratings.external_ratings,
+                    credits: &credits,
+                    // The series document describes the show, not any one file.
+                    media_file: None,
+                    date_added: Some(Utc::now()),
+                },
+            );
+            crate::nfo::write_nfo_if_absent(&tvshow_nfo_path, &nfo_content).await;
         }
     }
 

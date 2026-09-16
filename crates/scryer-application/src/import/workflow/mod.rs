@@ -16,7 +16,7 @@ use crate::{
     effective_title_folder_path,
     helpers::{has_usable_release_title_signal, normalize_release_title_signal},
     import_parameters::{extract_parameter, submission_has_scryer_origin},
-    nfo::{render_episode_nfo, render_movie_nfo, render_plexmatch, render_tvshow_nfo},
+    nfo::{render_plexmatch, render_tvshow_nfo},
     parse_download_client_remote_path_mappings, parse_release_metadata,
     polling_worker::PollingWorker,
     render_rename_template, sanitize_filesystem_component,
