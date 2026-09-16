@@ -36,6 +36,7 @@ const QUEUE_SNAPSHOTS_QUERY: &str = r#"
             items {
                 id
                 name
+                originalTitle
                 state
                 error
                 progressPercent
@@ -64,6 +65,7 @@ const QUEUE_EVENTS_QUERY: &str = r#"
             item {
                 id
                 name
+                originalTitle
                 state
                 error
                 progressPercent
@@ -986,6 +988,42 @@ mod tests {
             "ITEM_COMPLETED",
             &queue_item(42, WeaverQueueState::Completed),
         ));
+    }
+
+    /// Weaver's `name` is its parsed title, with the group, resolution and
+    /// source dropped. The subscription is the bridge's only live source, so it
+    /// must carry the release name or every queue row shows the parsed title.
+    #[test]
+    fn subscription_items_carry_the_release_name() {
+        assert!(QUEUE_SNAPSHOTS_QUERY.contains("originalTitle"));
+        assert!(QUEUE_EVENTS_QUERY.contains("originalTitle"));
+
+        let parsed: QueueSnapshotsPayload = serde_json::from_value(json!({
+            "queueSnapshots": {
+                "items": [{
+                    "id": 7,
+                    "name": "Synthetic Show Case2",
+                    "originalTitle": "Synthetic.Show.Case2.720p.WEB-DL.AV1-GRP",
+                    "state": "DOWNLOADING",
+                    "error": null,
+                    "progressPercent": 10.0,
+                    "totalBytes": 100_u64,
+                    "category": "anime",
+                    "attributes": [],
+                    "clientRequestId": null,
+                    "outputDir": null,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "completedAt": null,
+                    "attention": null
+                }],
+                "latestCursor": "1"
+            }
+        }))
+        .expect("snapshot payload should parse");
+        let bridge = WeaverSubscriptionBridgeClient::from_config(&test_config())
+            .expect("bridge client should parse");
+        let item = bridge.map_queue_item(&parsed.queue_snapshots.items[0]);
+        assert_eq!(item.title_name, "Synthetic.Show.Case2.720p.WEB-DL.AV1-GRP");
     }
 
     #[tokio::test]
