@@ -28,6 +28,7 @@ These notes cover what's changed since **0.20.1**.
 ## Included fixes
 
 - **Rename:** external subtitles now follow their video file in Scryer as well as on disk. A rename moved the subtitle files, but the title kept listing them at their old location. Downloaded subtitles keep their provider, score and sync details after the move. The title page still doesn't refresh on its own after a rename; reopen the title to see the new paths. This addresses issue #226.
+- **Permissions:** users who can only view a library no longer see **Delete file** or **Make primary** on a movie's files. Scryer already refused both actions for them; the buttons are now hidden too.
 - **Keyboard:** Escape closes an open movie overview, as it already did for series and anime.
 - **Notifications:** warning and info notifications have a solid background like success and error notifications, so the page behind them no longer shows through.
 
