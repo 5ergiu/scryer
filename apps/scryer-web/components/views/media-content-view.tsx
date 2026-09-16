@@ -174,7 +174,10 @@ import type {
   ScoringPersonaId,
 } from "@/lib/types/quality-profiles";
 import { buildViewPath } from "@/lib/utils/routing";
-import { selectedSeriesSidePanelTitleId } from "@/lib/utils/selected-overview-policy";
+import {
+  selectedOverviewEscapeClosesOverview,
+  selectedSeriesSidePanelTitleId,
+} from "@/lib/utils/selected-overview-policy";
 import { selectPosterVariantUrl } from "@/lib/utils/poster-images";
 import { discoveryItemFacet } from "@/lib/utils/discovery-actions";
 import { discoveryItemDisplayTitle } from "@/lib/utils/discovery-display";
@@ -3261,7 +3264,12 @@ export function MediaContentView({
   }, [onCloseOverview, refreshTitles, titleFilterInputValue]);
 
   React.useEffect(() => {
-    if (!selectedTitleLayoutActive || seriesSidePanelTitleId === null) {
+    if (
+      !selectedOverviewEscapeClosesOverview(
+        selectedTitleLayoutActive,
+        activeOverviewTitleId,
+      )
+    ) {
       return;
     }
 
@@ -3300,10 +3308,10 @@ export function MediaContentView({
     window.addEventListener("keydown", handleSelectedOverviewEscape);
     return () => window.removeEventListener("keydown", handleSelectedOverviewEscape);
   }, [
+    activeOverviewTitleId,
     handleSelectedOverviewBackToList,
     selectedTitleLayoutActive,
     selectedTitleListDrawerModeActive,
-    seriesSidePanelTitleId,
   ]);
 
   const handleLibraryScan = React.useCallback(
