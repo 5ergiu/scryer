@@ -1746,10 +1746,14 @@ function TitleContextPanel({
               libraryId={title?.libraryId ?? null}
               subtitleDownloads={externalSubtitles}
               onRefreshSubtitles={onRefreshSubtitles}
-              onDeleteFile={(fileId) => onDeleteMediaFile(title, fileId)}
+              onDeleteFile={
+                canManageThisTitle
+                  ? (fileId) => onDeleteMediaFile(title, fileId)
+                  : undefined
+              }
               deletingFileIds={deletingMediaFileIds}
               onMakePrimaryFile={
-                title.facet === "MOVIE"
+                canManageThisTitle && title.facet === "MOVIE"
                   ? (fileId) => onMakePrimaryMediaFile(title, fileId)
                   : undefined
               }
