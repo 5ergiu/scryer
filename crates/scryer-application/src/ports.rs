@@ -4890,6 +4890,21 @@ pub trait DownloadSubmissionRepository: Send + Sync {
 
     async fn list_for_title(&self, title_id: &str) -> AppResult<Vec<DownloadSubmission>>;
 
+    /// Configured client ids that still hold at least one live (non-ended)
+    /// client binding — that is, a download this instance is still tracking on
+    /// that client.
+    ///
+    /// Category-filtered client reads (SABnzbd's `category=` parameter) are
+    /// safe only while every live download on the client is guaranteed to be
+    /// inside the filtered category. The grab-time category is not persisted
+    /// anywhere, so a live download's category cannot be proved to be in the
+    /// current routing set; a client that has any live download is therefore
+    /// read unfiltered. Defaults to empty so a store without the query simply
+    /// contributes nothing, which leaves the filter decision to routing alone.
+    async fn list_client_ids_with_live_downloads(&self) -> AppResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// List Scryer submissions for a title whose canonical client binding is
     /// still active but has not acquired a native client item identifier.
     async fn list_active_unbound_for_title(
@@ -7807,6 +7822,17 @@ pub trait IndexerClient: Send + Sync {
         Ok(())
     }
 
+    /// Which RSS-capable indexers are due for a background RSS poll now.
+    ///
+    /// The RSS worker asks before doing any of the work a cycle needs, so a
+    /// tick in which every indexer is still inside its cadence costs one cheap
+    /// question instead of a full catalog read. An implementation that cannot
+    /// answer returns [`RssDueIndexers::unknown`], which always warrants a
+    /// poll: silence must never suppress one.
+    async fn rss_due_indexers(&self) -> AppResult<crate::RssDueIndexers> {
+        Ok(crate::RssDueIndexers::unknown())
+    }
+
     /// Forget any in-memory backoff held for one indexer. Saving an indexer
     /// with new credentials or a new endpoint is the operator's "try again":
     /// the caller clears the persisted backoff row and this drops its mirror,
@@ -8836,6 +8862,14 @@ pub trait BuiltinDownloadClientConnectionTester: Send + Sync {
     ) -> AppResult<()>;
 }
 
+/// The categories one download client answers for this instance.
+///
+/// An adapter may use this to narrow a server-side read (SABnzbd's
+/// `category=`), never to decide what a row means: rows are filtered again on
+/// this side regardless. An **empty-string entry means "a category this
+/// instance cannot name is in play on this client"** — a live download whose
+/// grab-time category is not recorded — and any adapter reading this must then
+/// leave its server-side filter off and read the whole page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DownloadClientFeedbackScope {
     pub categories: Vec<String>,
@@ -8882,6 +8916,14 @@ pub enum DownloadCleanupClaim {
 #[derive(Clone, Debug, Default)]
 pub struct DownloadClientSnapshotOutcome {
     pub items: Vec<DownloadQueueItem>,
+    /// Completed-download rows derived from this same snapshot read, for the
+    /// clients that produce both projections from one response.
+    ///
+    /// The poller's recent-completed lookup consumes these instead of asking
+    /// the clients for their history a second time in the same tick. `None`
+    /// (or a client missing from `client_ids`) simply means the lookup issues
+    /// the read it always did.
+    pub completed_downloads: Option<PrefetchedCompletedDownloads>,
     pub authoritative_client_ids: std::collections::HashSet<String>,
     /// Clients that were asked this cycle and errored on at least one read.
     /// A client skipped during feedback backoff was never asked, so it is in
@@ -8889,6 +8931,53 @@ pub struct DownloadClientSnapshotOutcome {
     /// judges only clients that were actually consulted.
     pub failed_client_ids: std::collections::HashSet<String>,
     pub any_client_read_succeeded: bool,
+}
+
+/// Completed-download rows already read this cycle, with the configured
+/// clients they cover.
+#[derive(Clone, Debug, Default)]
+pub struct PrefetchedCompletedDownloads {
+    pub rows: Vec<CompletedDownload>,
+    /// Configured client ids whose completed history is fully represented by
+    /// `rows`. A client outside this set is not covered, and a caller scoped
+    /// to it must read from the client itself.
+    pub client_ids: std::collections::HashSet<String>,
+}
+
+/// Whether a completed-download row belongs to the requested client scope.
+///
+/// Shared by the port's own scoped listing and by callers filtering rows they
+/// already hold, so both agree on what "in scope" means.
+pub fn completed_download_matches_client_scope(
+    item: &CompletedDownload,
+    client_ids: &[String],
+    client_types: &[String],
+    excluded_client_types: &[&str],
+) -> bool {
+    let item_type = item.client_type.trim();
+    if excluded_client_types
+        .iter()
+        .any(|client_type| item_type.eq_ignore_ascii_case(client_type.trim()))
+    {
+        return false;
+    }
+
+    let has_scope = !client_ids.is_empty() || !client_types.is_empty();
+    if !has_scope {
+        return true;
+    }
+
+    let item_client_id = item.client_id.trim();
+    let id_matches = !item_client_id.is_empty()
+        && client_ids
+            .iter()
+            .any(|client_id| item_client_id == client_id.trim());
+    let type_matches = !item_type.is_empty()
+        && client_types
+            .iter()
+            .any(|client_type| item_type.eq_ignore_ascii_case(client_type.trim()));
+
+    id_matches || type_matches
 }
 
 /// A queue or history listing together with the clients whose view could not
@@ -9116,6 +9205,26 @@ pub trait DownloadClient: Send + Sync {
         self.list_recent_activity(limit).await
     }
 
+    /// Recent activity plus, when this client derives both projections from a
+    /// single response, the completed-download rows of that same read.
+    ///
+    /// The default returns `None` for the completed rows, which leaves every
+    /// caller exactly where it was: the recent-completed lookup asks the
+    /// client separately. An adapter whose history response already carries
+    /// everything both projections need (SABnzbd's `mode=history` page)
+    /// overrides this so one tick is one request.
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        scope: &DownloadClientFeedbackScope,
+    ) -> AppResult<(Vec<DownloadQueueItem>, Option<Vec<CompletedDownload>>)> {
+        Ok((
+            self.list_recent_activity_with_feedback_scope(limit, scope)
+                .await?,
+            None,
+        ))
+    }
+
     async fn list_recent_activity_excluding_client_types(
         &self,
         limit: usize,
@@ -9191,28 +9300,6 @@ pub trait DownloadClient: Send + Sync {
         self.list_recent_activity_for_title(title_id, limit).await
     }
 
-    /// Recent activity restricted to the given client types.
-    ///
-    /// Used to reconcile clients that are excluded from generic polling
-    /// because a realtime bridge owns their live queue: the bridge can miss
-    /// terminal events, so history still needs a bounded sweep.
-    async fn list_recent_activity_for_client_types(
-        &self,
-        limit: usize,
-        client_types: &[&str],
-    ) -> AppResult<Vec<DownloadQueueItem>> {
-        if limit == 0 || client_types.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut items = self.list_recent_activity(limit).await?;
-        items.retain(|item| {
-            client_types
-                .iter()
-                .any(|client_type| item.client_type.eq_ignore_ascii_case(client_type.trim()))
-        });
-        Ok(items)
-    }
-
     async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
         Err(AppError::Repository(
             "completed download listing is not supported for this client".to_string(),
@@ -9261,30 +9348,12 @@ pub trait DownloadClient: Send + Sync {
 
         let mut items = self.list_recent_completed_downloads(limit).await?;
         items.retain(|item| {
-            let item_type = item.client_type.trim();
-            if excluded_client_types
-                .iter()
-                .any(|client_type| item_type.eq_ignore_ascii_case(client_type.trim()))
-            {
-                return false;
-            }
-
-            let has_scope = !client_ids.is_empty() || !client_types.is_empty();
-            if !has_scope {
-                return true;
-            }
-
-            let item_client_id = item.client_id.trim();
-            let id_matches = !item_client_id.is_empty()
-                && client_ids
-                    .iter()
-                    .any(|client_id| item_client_id == client_id.trim());
-            let type_matches = !item_type.is_empty()
-                && client_types
-                    .iter()
-                    .any(|client_type| item_type.eq_ignore_ascii_case(client_type.trim()));
-
-            id_matches || type_matches
+            completed_download_matches_client_scope(
+                item,
+                client_ids,
+                client_types,
+                excluded_client_types,
+            )
         });
         Ok(items)
     }

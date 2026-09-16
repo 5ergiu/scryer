@@ -9,7 +9,7 @@
 //! falls back to GraphQL HTTP polling so the UI stays up-to-date. When the
 //! WebSocket reconnects the poller is stopped and real-time push resumes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::{SinkExt, StreamExt};
 use scryer_application::{
@@ -134,12 +134,26 @@ const POLL_FALLBACK_RECENT_ACTIVITY_LIMIT: usize = 100;
 /// it cannot fight the live event stream — it only backfills whatever the
 /// stream lost. Override via `SCRYER_WEAVER_BRIDGE_RECONCILE_INTERVAL_SECS`;
 /// `0` disables it.
-const BRIDGE_RECONCILE_INTERVAL_SECS: u64 = 30;
+///
+/// This loop is the *only* net under a bridged Weaver. The application used to
+/// run a second, tracked-runtime sweep over the same history for the same
+/// reason; two nets over one source cost twice the traffic and healed nothing
+/// extra, so the sweep was removed and this loop inherited the whole job the
+/// 2026-08-01 completion-swallow RCA describes: a completion whose event the
+/// stream dropped is healed here, on the next reconcile, and nowhere else.
+/// A minute is the cadence for that: healing is measured against the import
+/// that follows it, not against the socket.
+const BRIDGE_RECONCILE_INTERVAL_SECS: u64 = 60;
 const BRIDGE_RECONCILE_INTERVAL_ENV: &str = "SCRYER_WEAVER_BRIDGE_RECONCILE_INTERVAL_SECS";
 
 fn bridge_reconcile_interval() -> Option<std::time::Duration> {
-    let secs = std::env::var(BRIDGE_RECONCILE_INTERVAL_ENV)
-        .ok()
+    parse_bridge_reconcile_interval(std::env::var(BRIDGE_RECONCILE_INTERVAL_ENV).ok().as_deref())
+}
+
+/// Absent and unparseable both keep the shipped cadence; `0` disables the loop
+/// outright, which is the only way to run a bridged Weaver with no net at all.
+fn parse_bridge_reconcile_interval(raw: Option<&str>) -> Option<std::time::Duration> {
+    let secs = raw
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(BRIDGE_RECONCILE_INTERVAL_SECS);
     if secs == 0 {
@@ -390,9 +404,15 @@ async fn run_reconcile_loop(
                 return;
             }
             _ = interval.tick() => {
-                match collect_weaver_fallback_items(&bridge_client).await {
-                    Ok(items) => {
-                        publish_weaver_reconcile_delta(&bridge_client, &ingest, items).await;
+                match collect_weaver_reconcile_snapshot(&bridge_client).await {
+                    Ok((items, completed_downloads)) => {
+                        publish_weaver_reconcile_delta(
+                            &bridge_client,
+                            &ingest,
+                            items,
+                            completed_downloads,
+                        )
+                        .await;
                     }
                     Err(error) => {
                         warn!(error = %error, "weaver reconcile poll failed");
@@ -411,11 +431,13 @@ async fn publish_weaver_reconcile_delta(
     bridge_client: &WeaverSubscriptionBridgeClient,
     ingest: &TrackedDownloadSnapshotIngestHandle,
     items: Vec<DownloadQueueItem>,
+    prefetched: Vec<CompletedDownload>,
 ) {
     if items.is_empty() {
         return;
     }
-    let completed_downloads = load_completed_downloads_for_import(bridge_client, &items).await;
+    let completed_downloads =
+        load_completed_downloads_with_prefetch(bridge_client, &items, prefetched).await;
     let update = TrackedDownloadSnapshotUpdate {
         scope: TrackedDownloadSnapshotScope::Delta,
         items,
@@ -440,6 +462,37 @@ async fn collect_weaver_fallback_items(
         bridge_client.stamp_queue_item(item);
     }
     Ok(items)
+}
+
+/// The reconcile loop's read: the queue, plus ONE history page that answers
+/// both projections.
+///
+/// The recent-activity items and the completed rows are two views of the same
+/// `historyItems` page, so asking for them separately — and then asking again,
+/// once per completed row, through `get_completed_download` — spent up to a
+/// hundred extra GraphQL round trips per tick to re-fetch rows Weaver had
+/// already sent. The per-item lookup survives only for a completed observation
+/// that is genuinely off the page.
+async fn collect_weaver_reconcile_snapshot(
+    bridge_client: &WeaverSubscriptionBridgeClient,
+) -> AppResult<(Vec<DownloadQueueItem>, Vec<CompletedDownload>)> {
+    let mut items = bridge_client.download_client.list_queue().await?;
+    let (mut recent_items, completed) = bridge_client
+        .download_client
+        .list_recent_activity_with_completed_with_feedback_scope(
+            POLL_FALLBACK_RECENT_ACTIVITY_LIMIT,
+            &scryer_application::DownloadClientFeedbackScope::default(),
+        )
+        .await?;
+    items.append(&mut recent_items);
+    for item in &mut items {
+        bridge_client.stamp_queue_item(item);
+    }
+    let mut completed = completed.unwrap_or_default();
+    for download in &mut completed {
+        bridge_client.stamp_completed_download(download);
+    }
+    Ok((items, completed))
 }
 
 /// Outcome of a single `run_subscription` attempt. Tells the caller whether
@@ -751,6 +804,31 @@ async fn load_completed_downloads_for_import(
     bridge_client: &WeaverSubscriptionBridgeClient,
     completed_items: &[DownloadQueueItem],
 ) -> Vec<CompletedDownload> {
+    load_completed_downloads_with_prefetch(bridge_client, completed_items, Vec::new()).await
+}
+
+/// Completed rows for the completed observations in `completed_items`.
+///
+/// `prefetched` holds rows already stamped from a history page the caller has
+/// in hand; anything it covers costs no further round trip. Only an
+/// observation the page does not carry falls through to the per-item lookup.
+async fn load_completed_downloads_with_prefetch(
+    bridge_client: &WeaverSubscriptionBridgeClient,
+    completed_items: &[DownloadQueueItem],
+    prefetched: Vec<CompletedDownload>,
+) -> Vec<CompletedDownload> {
+    let mut prefetched = prefetched
+        .into_iter()
+        .map(|download| {
+            (
+                download.download_client_item_id.trim().to_string(),
+                download,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    // The direct lookup is the norm for the stream's own terminal deltas, which
+    // carry no page; only a reconcile tick expects the page to answer.
+    let page_was_read = !prefetched.is_empty();
     let mut seen = HashSet::new();
     let mut downloads = Vec::new();
 
@@ -763,6 +841,18 @@ async fn load_completed_downloads_for_import(
             continue;
         }
 
+        if let Some(completed) = prefetched.remove(source_ref) {
+            downloads.push(completed);
+            continue;
+        }
+
+        if page_was_read {
+            debug!(
+                source_ref,
+                "weaver: completed observation is not on the reconcile history page; \
+                 falling back to a direct lookup"
+            );
+        }
         match bridge_client
             .download_client
             .get_completed_download(source_ref)
@@ -1003,5 +1093,172 @@ mod tests {
         assert_eq!(update.completed_downloads[0].download_client_item_id, "42");
         assert_eq!(update.completed_downloads[0].client_id, "weaver-client");
         assert_eq!(update.completed_downloads[0].client_type, "weaver");
+    }
+
+    #[test]
+    fn the_reconcile_cadence_is_a_minute_and_stays_operator_tunable() {
+        assert_eq!(
+            parse_bridge_reconcile_interval(None),
+            Some(std::time::Duration::from_secs(60)),
+            "the bridge loop is the only net under a bridged Weaver"
+        );
+        assert_eq!(
+            parse_bridge_reconcile_interval(Some(" 15 ")),
+            Some(std::time::Duration::from_secs(15))
+        );
+        assert_eq!(
+            parse_bridge_reconcile_interval(Some("not-a-number")),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_bridge_reconcile_interval(Some("0")),
+            None,
+            "0 still disables the loop outright"
+        );
+    }
+
+    fn history_page_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "historyItems": [
+                    {
+                        "id": 42,
+                        "name": "Weaver Job 42",
+                        "state": "COMPLETE",
+                        "error": null,
+                        "progressPercent": 100.0,
+                        "totalBytes": 123_u64,
+                        "category": "movie",
+                        "attributes": [],
+                        "clientRequestId": null,
+                        "outputDir": "/downloads/Weaver Job 42",
+                        "createdAt": "2024-01-01T00:00:00Z",
+                        "completedAt": "2024-01-01T00:10:00Z",
+                        "attention": null
+                    }
+                ]
+            }
+        }))
+    }
+
+    async fn mount_empty_queue(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("queueItems"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"queueItems": []}})),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_reconcile_tick_reads_the_queue_once_and_history_once() {
+        let server = MockServer::start().await;
+        mount_empty_queue(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("historyItems"))
+            .respond_with(history_page_response())
+            // One history page answers both projections; a second would fail.
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Any per-item history lookup is the regression this WP removes.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("historyItem(id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"historyItem": null}
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let bridge = WeaverSubscriptionBridgeClient::from_config(&test_config_for_server(&server))
+            .expect("bridge client should parse");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let ingest = TrackedDownloadSnapshotIngestHandle::new(tx);
+
+        let (items, completed) = collect_weaver_reconcile_snapshot(&bridge)
+            .await
+            .expect("reconcile snapshot should load");
+        publish_weaver_reconcile_delta(&bridge, &ingest, items, completed).await;
+
+        let update = rx.recv().await.expect("reconcile delta should be sent");
+        assert!(matches!(update.scope, TrackedDownloadSnapshotScope::Delta));
+        assert_eq!(update.items.len(), 1);
+        assert_eq!(update.items[0].state, DownloadQueueState::Completed);
+        assert_eq!(update.completed_downloads.len(), 1);
+        assert_eq!(update.completed_downloads[0].download_client_item_id, "42");
+        assert_eq!(update.completed_downloads[0].client_id, "weaver-client");
+        assert_eq!(update.completed_downloads[0].client_type, "weaver");
+    }
+
+    #[tokio::test]
+    async fn an_off_page_completion_still_falls_back_to_a_direct_lookup() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("historyItem(id"))
+            .and(body_string_contains("\"id\":99"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "historyItem": {
+                        "id": 99,
+                        "name": "Weaver Job 99",
+                        "state": "COMPLETE",
+                        "error": null,
+                        "progressPercent": 100.0,
+                        "totalBytes": 99_u64,
+                        "category": "movie",
+                        "attributes": [],
+                        "clientRequestId": null,
+                        "outputDir": "/downloads/Weaver Job 99",
+                        "createdAt": "2024-01-01T00:00:00Z",
+                        "completedAt": "2024-01-01T00:10:00Z",
+                        "attention": null
+                    }
+                }
+            })))
+            // Exactly one: the on-page completion must not trigger a lookup.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let bridge = WeaverSubscriptionBridgeClient::from_config(&test_config_for_server(&server))
+            .expect("bridge client should parse");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let ingest = TrackedDownloadSnapshotIngestHandle::new(tx);
+
+        let on_page = bridge.map_queue_item(&queue_item(42, WeaverQueueState::Completed));
+        let off_page = bridge.map_queue_item(&queue_item(99, WeaverQueueState::Completed));
+        let mut prefetched = CompletedDownload {
+            client_type: String::new(),
+            client_id: String::new(),
+            download_client_item_id: "42".to_string(),
+            download_id: None,
+            name: "Weaver Job 42".to_string(),
+            release_name: None,
+            dest_dir: "/downloads/Weaver Job 42".to_string(),
+            category: Some("movie".to_string()),
+            size_bytes: Some(123),
+            completed_at: Some(Utc::now()),
+            parameters: Vec::new(),
+        };
+        bridge.stamp_completed_download(&mut prefetched);
+
+        publish_weaver_reconcile_delta(&bridge, &ingest, vec![on_page, off_page], vec![prefetched])
+            .await;
+
+        let update = rx.recv().await.expect("reconcile delta should be sent");
+        let mut ids = update
+            .completed_downloads
+            .iter()
+            .map(|download| download.download_client_item_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["42".to_string(), "99".to_string()]);
     }
 }

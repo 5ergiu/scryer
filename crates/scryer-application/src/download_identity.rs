@@ -162,6 +162,9 @@ async fn heal_binding_after_completed_delete(
     {
         return false;
     }
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
 
     tracing::info!(
         target: "download_identity_resolver",
@@ -223,6 +226,13 @@ pub(crate) async fn resolve_observed_client_job(
                     native_item_id,
                     "unknown valid token adopted as foreign"
                 );
+            }
+            // A binding was created or attached, so every memoized resolution
+            // taken against the previous registry state is retired.
+            if attached || newly_foreign {
+                app.runtime
+                    .acquisition
+                    .invalidate_download_registry_observations();
             }
             if valid_token.is_none() && attached {
                 tracing::debug!(

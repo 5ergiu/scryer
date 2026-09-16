@@ -398,6 +398,59 @@ impl From<scryer_outbound_http::RateLimitRegistrySnapshot> for OutboundRateLimit
     }
 }
 
+/// Freshness risk at or above this bar escalates an RSS poll past its cadence.
+///
+/// The scheduler raises the risk when a feed shows signs of having moved on
+/// without us (a gap between the last release we saw and the oldest one the
+/// feed still carries), which is exactly when waiting out the interval loses
+/// releases.
+pub const RSS_FRESHNESS_ESCALATION_THRESHOLD: f64 = 0.85;
+
+/// The one rule for "is this RSS destination due?".
+///
+/// Lives here because two callers must agree on it: the scheduler, which
+/// defers a candidate that is not due, and the RSS worker, which skips a whole
+/// cycle when nothing is. A destination the scheduler holds no freshness for
+/// has never been polled, so it is due.
+pub fn rss_poll_is_due(
+    latest_safe_poll_at: Option<DateTime<Utc>>,
+    freshness_risk: Option<f64>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(latest_safe_poll_at) = latest_safe_poll_at else {
+        return true;
+    };
+    now >= latest_safe_poll_at
+        || freshness_risk.is_some_and(|risk| risk >= RSS_FRESHNESS_ESCALATION_THRESHOLD)
+}
+
+/// Which RSS-capable indexers are due for a poll right now.
+///
+/// Both lists empty means "not known" — an implementation that cannot answer
+/// says so by staying silent, and the caller polls.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RssDueIndexers {
+    /// Indexer ids whose cadence is due (or that have never been polled).
+    pub due: Vec<String>,
+    /// Indexer ids the cadence is deliberately holding back this tick.
+    pub deferred: Vec<String>,
+}
+
+impl RssDueIndexers {
+    /// No answer available; the caller must poll.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Whether a sync cycle has any indexer work to do.
+    ///
+    /// Deliberately true when nothing is known: silence must never suppress a
+    /// poll, only a positive "every indexer is holding" may.
+    pub fn poll_is_warranted(&self) -> bool {
+        !self.due.is_empty() || self.deferred.is_empty()
+    }
+}
+
 #[async_trait]
 pub trait UpstreamScheduler: Send + Sync {
     async fn admit_batch(
@@ -417,6 +470,68 @@ pub trait UpstreamScheduler: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::SchedulerSnapshotFilter;
+    use super::{RSS_FRESHNESS_ESCALATION_THRESHOLD, RssDueIndexers, rss_poll_is_due};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn a_destination_with_no_freshness_has_never_been_polled_and_is_due() {
+        assert!(rss_poll_is_due(None, None, Utc::now()));
+        assert!(rss_poll_is_due(None, Some(0.0), Utc::now()));
+    }
+
+    #[test]
+    fn a_destination_inside_its_cadence_is_not_due() {
+        let now = Utc::now();
+        assert!(!rss_poll_is_due(
+            Some(now + Duration::seconds(1)),
+            Some(0.0),
+            now
+        ));
+        assert!(rss_poll_is_due(Some(now), Some(0.0), now));
+        assert!(rss_poll_is_due(
+            Some(now - Duration::seconds(1)),
+            Some(0.0),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_feed_at_risk_of_having_moved_on_polls_before_its_cadence() {
+        let now = Utc::now();
+        let later = Some(now + Duration::minutes(10));
+        assert!(!rss_poll_is_due(
+            later,
+            Some(RSS_FRESHNESS_ESCALATION_THRESHOLD - 0.01),
+            now
+        ));
+        assert!(rss_poll_is_due(
+            later,
+            Some(RSS_FRESHNESS_ESCALATION_THRESHOLD),
+            now
+        ));
+    }
+
+    #[test]
+    fn only_a_positive_all_deferred_answer_suppresses_a_cycle() {
+        assert!(
+            RssDueIndexers::unknown().poll_is_warranted(),
+            "silence must never suppress a poll"
+        );
+        assert!(
+            RssDueIndexers {
+                due: vec!["indexer-a".to_string()],
+                deferred: vec!["indexer-b".to_string()],
+            }
+            .poll_is_warranted()
+        );
+        assert!(
+            !RssDueIndexers {
+                due: Vec::new(),
+                deferred: vec!["indexer-b".to_string()],
+            }
+            .poll_is_warranted()
+        );
+    }
 
     #[test]
     fn snapshot_filter_from_raw_keys_normalizes_values() {

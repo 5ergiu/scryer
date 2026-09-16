@@ -5,6 +5,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct CompletedLookupRegistry {
     ids: HashMap<String, scryer_domain::download_identity::DownloadId>,
     failing_item_ids: HashSet<String>,
+    /// Registry transactions this fake was asked to run. The poller's memo is
+    /// only doing its job while this stops growing.
+    resolutions: Arc<AtomicUsize>,
+}
+
+impl CompletedLookupRegistry {
+    fn new(ids: HashMap<String, scryer_domain::download_identity::DownloadId>) -> Self {
+        Self {
+            ids,
+            failing_item_ids: HashSet::new(),
+            resolutions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[async_trait]
@@ -13,6 +26,7 @@ impl crate::DownloadRegistryRepository for CompletedLookupRegistry {
         &self,
         observation: &crate::ObservedClientJob,
     ) -> AppResult<crate::ObservationResolution> {
+        self.resolutions.fetch_add(1, Ordering::SeqCst);
         if self.failing_item_ids.contains(&observation.locator.item_id) {
             return Err(AppError::Repository(
                 "injected completed lookup registry failure".to_string(),
@@ -798,6 +812,7 @@ async fn completed_lookup_indexes_token_locator_and_legacy_identity_observations
             ("legacy-observation".to_string(), canonical_download_id),
         ]),
         failing_item_ids: HashSet::new(),
+        resolutions: Arc::new(AtomicUsize::new(0)),
     });
     let app = build_app(vec![], vec![], vec![], vec![])
         .with_test_overrides(|services| services.with_download_registry(registry));
@@ -871,6 +886,7 @@ async fn completed_lookup_registry_failure_keeps_that_item_available_to_legacy_m
     let registry = Arc::new(CompletedLookupRegistry {
         ids: HashMap::new(),
         failing_item_ids: HashSet::from(["failed-observation".to_string()]),
+        resolutions: Arc::new(AtomicUsize::new(0)),
     });
     let app = build_app(vec![], vec![], vec![], vec![])
         .with_test_overrides(|services| services.with_download_registry(registry));
@@ -928,4 +944,327 @@ fn completed_lookup_divergence_uses_legacy_result_and_warns() {
 
     assert_eq!(found.download_client_item_id, "dl-1");
     assert_eq!(warnings.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn completed_observation_resolution_is_reused_on_an_unchanged_second_tick() {
+    let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    completed.download_client_item_id = "memo-observation".to_string();
+    completed.completed_at = Some(Utc::now());
+    let canonical_download_id = scryer_domain::download_identity::DownloadId::new();
+    let registry = Arc::new(CompletedLookupRegistry::new(HashMap::from([(
+        "memo-observation".to_string(),
+        canonical_download_id,
+    )])));
+    let resolutions_run = registry.resolutions.clone();
+    let app = build_app(vec![], vec![], vec![], vec![])
+        .with_test_overrides(|services| services.with_download_registry(registry));
+    let mut cache = CompletedDownloadResolutionCache::default();
+
+    let first = resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone()],
+        Some(&mut cache),
+    )
+    .await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.len(), 1);
+
+    let second = resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone()],
+        Some(&mut cache),
+    )
+    .await;
+
+    assert_eq!(first, second);
+    // The row is unchanged and the registry has not moved, so the second tick
+    // runs no registry transaction at all.
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 1);
+
+    // A registry change (a binding created, attached or ended) retires the memo.
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
+    let third =
+        resolve_completed_download_observations_with_cache(&app, &[completed], Some(&mut cache))
+            .await;
+    assert_eq!(first, third);
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn completed_observation_memo_re_resolves_entries_past_the_age_backstop() {
+    let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    completed.download_client_item_id = "memo-observation".to_string();
+    completed.completed_at = Some(Utc::now());
+    let registry = Arc::new(CompletedLookupRegistry::new(HashMap::from([(
+        "memo-observation".to_string(),
+        scryer_domain::download_identity::DownloadId::new(),
+    )])));
+    let resolutions_run = registry.resolutions.clone();
+    let app = build_app(vec![], vec![], vec![], vec![])
+        .with_test_overrides(|services| services.with_download_registry(registry));
+    let mut cache = CompletedDownloadResolutionCache::default();
+
+    let first = resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone()],
+        Some(&mut cache),
+    )
+    .await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 1);
+
+    // Bindings are also created and retired inside the workflow stores' own
+    // transactions. The generation covers the call sites we know about; the age
+    // backstop covers any writer we did not, so no entry is trusted forever
+    // even though the registry generation never moved.
+    cache.age_entries_for_test(std::time::Duration::from_secs(601));
+    let second = resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone()],
+        Some(&mut cache),
+    )
+    .await;
+
+    assert_eq!(first, second);
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+    assert_eq!(cache.len(), 1);
+
+    // The refreshed entry is young again, so the next tick is served from the memo.
+    resolve_completed_download_observations_with_cache(&app, &[completed], Some(&mut cache)).await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn completed_observation_memo_re_resolves_changed_and_dropped_rows() {
+    let canonical_download_id = scryer_domain::download_identity::DownloadId::new();
+    let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    completed.download_client_item_id = "memo-observation".to_string();
+    completed.completed_at = Some(Utc::now());
+    let mut other = completed.clone();
+    other.download_client_item_id = "other-observation".to_string();
+    let registry = Arc::new(CompletedLookupRegistry::new(HashMap::from([
+        ("memo-observation".to_string(), canonical_download_id),
+        ("other-observation".to_string(), canonical_download_id),
+    ])));
+    let resolutions_run = registry.resolutions.clone();
+    let app = build_app(vec![], vec![], vec![], vec![])
+        .with_test_overrides(|services| services.with_download_registry(registry));
+    let mut cache = CompletedDownloadResolutionCache::default();
+
+    resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone(), other],
+        Some(&mut cache),
+    )
+    .await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+    assert_eq!(cache.len(), 2);
+
+    // A row the client no longer reports leaves the memo with it.
+    resolve_completed_download_observations_with_cache(
+        &app,
+        &[completed.clone()],
+        Some(&mut cache),
+    )
+    .await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+    assert_eq!(cache.len(), 1);
+
+    // A row whose completion moved is a different sighting and is resolved again.
+    completed.completed_at = Some(Utc::now() + chrono::Duration::seconds(30));
+    resolve_completed_download_observations_with_cache(&app, &[completed], Some(&mut cache)).await;
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 3);
+    assert_eq!(cache.len(), 1);
+}
+
+#[tokio::test]
+async fn completed_observation_memo_retries_unavailable_resolutions() {
+    let mut completed = build_completed_download("Legacy", "/downloads/legacy", None);
+    completed.download_client_item_id = "failed-observation".to_string();
+    let registry = Arc::new(CompletedLookupRegistry {
+        ids: HashMap::new(),
+        failing_item_ids: HashSet::from(["failed-observation".to_string()]),
+        resolutions: Arc::new(AtomicUsize::new(0)),
+    });
+    let resolutions_run = registry.resolutions.clone();
+    let app = build_app(vec![], vec![], vec![], vec![])
+        .with_test_overrides(|services| services.with_download_registry(registry));
+    let mut cache = CompletedDownloadResolutionCache::default();
+
+    for _ in 0..2 {
+        let resolutions = resolve_completed_download_observations_with_cache(
+            &app,
+            &[completed.clone()],
+            Some(&mut cache),
+        )
+        .await;
+        assert_eq!(
+            resolutions,
+            vec![crate::download_identity::ObservedClientJobResolution::Unavailable]
+        );
+    }
+
+    // A read failure is never memoized; the next tick asks again.
+    assert_eq!(resolutions_run.load(Ordering::SeqCst), 2);
+    assert_eq!(cache.len(), 0);
+}
+
+#[tokio::test]
+async fn completed_lookup_reuses_the_rows_the_snapshot_read_already_returned() {
+    let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    completed.client_id = "sab-client".to_string();
+    completed.client_type = "sabnzbd".to_string();
+    let download_client = Arc::new(TestDownloadClient {
+        completed_downloads: Arc::new(Mutex::new(vec![completed.clone()])),
+        completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let app =
+        build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
+    let mut tracked = build_tracked_download("title-1", "movie", "Paper.Lantern.2012.1080p");
+    tracked.client_item.client_id = "sab-client".to_string();
+    tracked.client_item.client_type = "sabnzbd".to_string();
+    let prefetched = crate::ports::PrefetchedCompletedDownloads {
+        rows: vec![completed],
+        client_ids: HashSet::from(["sab-client".to_string()]),
+    };
+
+    let lookup = load_completed_download_lookup_for_items_excluding_client_types(
+        &app,
+        &[tracked.client_item.clone()],
+        100,
+        &[],
+        CompletedDownloadLookupCycle {
+            resolutions: None,
+            prefetched: Some(&prefetched),
+        },
+    )
+    .await
+    .expect("completed lookup should load");
+
+    assert_eq!(lookup.by_source.len(), 1);
+    // The snapshot read already produced these rows, so the tick issues no
+    // second history request.
+    assert_eq!(
+        download_client
+            .recent_completed_download_calls
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn completed_lookup_falls_back_when_the_snapshot_rows_miss_a_client() {
+    let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    completed.client_id = "nzbget-client".to_string();
+    let download_client = Arc::new(TestDownloadClient {
+        completed_downloads: Arc::new(Mutex::new(vec![completed])),
+        completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let app =
+        build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
+    let mut tracked = build_tracked_download("title-1", "movie", "Paper.Lantern.2012.1080p");
+    tracked.client_item.client_id = "nzbget-client".to_string();
+    tracked.client_item.client_type = "nzbget".to_string();
+    // The prefetch covers a different client, so it proves nothing about this
+    // one and the read happens as before.
+    let prefetched = crate::ports::PrefetchedCompletedDownloads {
+        rows: Vec::new(),
+        client_ids: HashSet::from(["sab-client".to_string()]),
+    };
+
+    load_completed_download_lookup_for_items_excluding_client_types(
+        &app,
+        &[tracked.client_item.clone()],
+        100,
+        &[],
+        CompletedDownloadLookupCycle {
+            resolutions: None,
+            prefetched: Some(&prefetched),
+        },
+    )
+    .await
+    .expect("completed lookup should load");
+
+    assert_eq!(
+        download_client
+            .recent_completed_download_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn completed_lookup_reads_only_the_clients_the_snapshot_did_not_cover() {
+    let mut prefetched_row =
+        build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
+    prefetched_row.client_id = "sab-client".to_string();
+    prefetched_row.client_type = "sabnzbd".to_string();
+    prefetched_row.download_client_item_id = "sab-job-1".to_string();
+    prefetched_row.completed_at = Some(Utc::now());
+
+    let mut read_row = build_completed_download("Tin.Whistle.2019.1080p", "/downloads/b", None);
+    read_row.client_id = "nzbget-client".to_string();
+    read_row.client_type = "nzbget".to_string();
+    read_row.download_client_item_id = "nzbget-job-1".to_string();
+    read_row.completed_at = Some(Utc::now());
+
+    let download_client = Arc::new(TestDownloadClient {
+        completed_downloads: Arc::new(Mutex::new(vec![read_row])),
+        completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let app =
+        build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
+
+    let mut sab_tracked = build_tracked_download("title-1", "movie", "Paper.Lantern.2012.1080p");
+    sab_tracked.client_item.client_id = "sab-client".to_string();
+    sab_tracked.client_item.client_type = "sabnzbd".to_string();
+    let mut nzbget_tracked = build_tracked_download("title-2", "movie", "Tin.Whistle.2019.1080p");
+    nzbget_tracked.client_item.client_id = "nzbget-client".to_string();
+    nzbget_tracked.client_item.client_type = "nzbget".to_string();
+
+    // Only one of the two configured clients produced its completed rows from
+    // this tick's own history read.
+    let prefetched = crate::ports::PrefetchedCompletedDownloads {
+        rows: vec![prefetched_row],
+        client_ids: HashSet::from(["sab-client".to_string()]),
+    };
+
+    let lookup = load_completed_download_lookup_for_items_excluding_client_types(
+        &app,
+        &[
+            sab_tracked.client_item.clone(),
+            nzbget_tracked.client_item.clone(),
+        ],
+        100,
+        &[],
+        CompletedDownloadLookupCycle {
+            resolutions: None,
+            prefetched: Some(&prefetched),
+        },
+    )
+    .await
+    .expect("completed lookup should load");
+
+    // Both clients' rows are in the lookup...
+    assert_eq!(lookup.by_source.len(), 2);
+    // ...but the covered client is never asked again; the read is scoped to
+    // the uncovered one alone.
+    assert_eq!(
+        download_client
+            .recent_completed_download_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    let calls = download_client.scoped_recent_completed_calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, vec!["nzbget-client".to_string()]);
+    assert!(calls[0].1.is_empty());
 }

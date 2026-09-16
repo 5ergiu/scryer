@@ -1196,6 +1196,10 @@ impl AppUseCase {
                 &conflict.download_client_item_id,
             ))
             .await?;
+        // The delete ends the conflicting submission's binding in the store.
+        self.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
         self.reset_wanted_items_for_submission_scope(&conflict.title_id, &conflict.scope)
             .await?;
 
@@ -1376,6 +1380,30 @@ impl AppUseCase {
                 &mut feedback_category_sets_by_client,
             )
             .await?;
+        }
+
+        // A client that still holds a live download is read unfiltered. The
+        // grab-time category is not persisted, so a download started before a
+        // routing change cannot be proved to sit inside the current category
+        // set; filtering the client's queue and history server-side would hide
+        // it from the poller, and an absent job is pruned. The empty entry is
+        // the "category in play that this instance cannot name" marker the
+        // feedback scope defines, and it disables the filter for that client.
+        for client_id in self
+            .services
+            .workflow
+            .download_submissions
+            .list_client_ids_with_live_downloads()
+            .await?
+        {
+            let client_id = client_id.trim();
+            if client_id.is_empty() {
+                continue;
+            }
+            feedback_category_sets_by_client
+                .entry(client_id.to_string())
+                .or_default()
+                .insert(String::new());
         }
 
         let feedback_categories_by_client = feedback_category_sets_by_client
@@ -1716,6 +1744,10 @@ impl AppUseCase {
             .download_submissions
             .delete_for_title(title_id)
             .await?;
+        // Deleting a title ends every binding its submissions held.
+        self.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
         self.services
             .workflow
             .blocklist_repo

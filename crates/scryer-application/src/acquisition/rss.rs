@@ -38,11 +38,38 @@ pub const MINIMUM_RSS_TARGET_INTERVAL: std::time::Duration = std::time::Duration
 /// How often the sync worker wakes when the cadence is the shipped default.
 ///
 /// The worker only *considers* RSS on a tick; whether a given indexer is due is
-/// the scheduler's decision. A minute is therefore the resolution of the whole
-/// RSS lane, and no cadence shorter than a minute can take effect unless the
-/// worker wakes at least that often — which is why a shortened cadence pulls
-/// this down with it.
-const DEFAULT_RSS_SYNC_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// the scheduler's decision, and that decision is a quarter of an hour apart by
+/// default. Waking every minute to re-ask it therefore did fourteen rounds of
+/// work out of fifteen for nothing. Five minutes is the resolution of the whole
+/// RSS lane, and no cadence shorter than that can take effect unless the worker
+/// wakes at least that often — which is why a shortened cadence pulls this down
+/// with it.
+pub const DEFAULT_RSS_SYNC_TICK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Shortens (or lengthens) how often the sync worker wakes, independently of
+/// the cadence itself. A harness that shortens the cadence normally wants the
+/// tick to follow it, which happens automatically; this exists for the reverse
+/// case — leaving the cadence alone while sampling more (or less) often.
+pub const RSS_SYNC_TICK_ENV: &str = "SCRYER_RSS_SYNC_TICK_SECS";
+
+/// The configured worker tick for this process, before the cadence is taken
+/// into account. Read once, for the same reason the cadence is.
+static RSS_SYNC_TICK: std::sync::LazyLock<std::time::Duration> = std::sync::LazyLock::new(|| {
+    parse_rss_sync_tick(std::env::var(RSS_SYNC_TICK_ENV).ok().as_deref())
+});
+
+/// Absent, blank, unparseable, and zero all fall back to the shipped default;
+/// anything shorter than [`MINIMUM_RSS_TARGET_INTERVAL`] is clamped up to it.
+pub fn parse_rss_sync_tick(raw: Option<&str>) -> std::time::Duration {
+    let Some(seconds) = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+    else {
+        return DEFAULT_RSS_SYNC_TICK;
+    };
+    std::time::Duration::from_secs(seconds).max(MINIMUM_RSS_TARGET_INTERVAL)
+}
 
 /// The healthy-quota RSS cadence for this process.
 ///
@@ -75,16 +102,19 @@ pub fn parse_rss_target_interval(raw: Option<&str>) -> std::time::Duration {
 
 /// How often the acquisition worker wakes to consider RSS.
 pub fn rss_sync_tick_period() -> std::time::Duration {
-    rss_sync_tick_period_for(rss_target_interval())
+    rss_sync_tick_period_for(rss_target_interval(), *RSS_SYNC_TICK)
 }
 
-/// The tick never slows below the shipped minute — a cadence *longer* than a
-/// minute is the scheduler's business, not the worker's — and never outpaces
+/// The tick never slows below the configured tick — a cadence *longer* than the
+/// tick is the scheduler's business, not the worker's — and never outpaces
 /// [`MINIMUM_RSS_TARGET_INTERVAL`], so the same floor that stops the scheduler
 /// hot-looping an indexer also stops the worker spinning.
-fn rss_sync_tick_period_for(target_interval: std::time::Duration) -> std::time::Duration {
+fn rss_sync_tick_period_for(
+    target_interval: std::time::Duration,
+    configured_tick: std::time::Duration,
+) -> std::time::Duration {
     target_interval
-        .min(DEFAULT_RSS_SYNC_TICK)
+        .min(configured_tick)
         .max(MINIMUM_RSS_TARGET_INTERVAL)
 }
 
@@ -474,11 +504,52 @@ impl std::ops::Deref for TitleContextBank {
     }
 }
 
+/// Whether a routing plan leaves any indexer able to answer an RSS poll for
+/// its scope.
+///
+/// Mirrors `merge_rss_indexer_routing`: a missing plan, and a plan with no
+/// entry for an indexer, inherit the facet defaults and therefore still poll.
+/// A scope is only out of RSS when every indexer that could poll it carries an
+/// explicit exclusion — which is knowable only against the live indexer set, so
+/// an unknown or empty set always keeps the scope in.
+fn scope_polls_any_rss_indexer(
+    plan: Option<&IndexerRoutingPlan>,
+    known_indexers: &[String],
+) -> bool {
+    let Some(plan) = plan else {
+        return true;
+    };
+    if plan.entries.is_empty() || known_indexers.is_empty() {
+        return true;
+    }
+    known_indexers.iter().any(|indexer_id| {
+        plan.entries
+            .get(indexer_id)
+            .is_none_or(|entry| entry.enabled)
+    })
+}
+
+/// The unscoped bank: every monitored title is a candidate.
+#[cfg(test)]
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
+    build_scoped_title_context_bank(titles, |_| true)
+}
+
+/// The bank, with its candidate set restricted to titles `in_scope` accepts.
+///
+/// Only the candidates narrow. The spelling index and the collision guard are
+/// built over every title given, because ambiguity is a property of the whole
+/// catalog: a title that RSS will never grab still makes another title's name
+/// ambiguous, and dropping it would silently turn an ambiguous match into a
+/// confident one.
+fn build_scoped_title_context_bank(
+    titles: &[Title],
+    in_scope: impl Fn(&Title) -> bool,
+) -> TitleContextBank {
     let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
     let mut candidates = titles
         .iter()
-        .filter(|title| title.monitored)
+        .filter(|title| title.monitored && in_scope(title))
         .map(|title| TitleContextCandidate {
             info: TitleMatchInfo {
                 title_id: title.id.clone(),
@@ -816,9 +887,77 @@ impl AppUseCase {
         self.run_scheduled_rss_sync().await
     }
 
+    /// Whether this tick has anything to do.
+    ///
+    /// Two independent reasons to run: an indexer whose RSS cadence is due, or
+    /// a pending release still waiting on re-evaluation (this cycle is the only
+    /// thing that re-evaluates them, so a held release must never be stranded
+    /// by a quiet feed). Either question is a single cheap read; the cycle they
+    /// guard is not. Anything that fails to answer is treated as "run", so a
+    /// broken due-check degrades to the old always-poll behaviour.
+    /// The indexers that could answer this cycle, or `None` when the cycle has
+    /// nothing to ask and nothing held back to re-evaluate.
+    async fn rss_cycle_due_indexers(&self) -> Option<crate::RssDueIndexers> {
+        let due = match self
+            .services
+            .integrations
+            .indexer_client
+            .rss_due_indexers()
+            .await
+        {
+            Ok(due) => due,
+            Err(error) => {
+                warn!(error = %error, "RSS sync: due check failed; polling anyway");
+                return Some(crate::RssDueIndexers::unknown());
+            }
+        };
+        if due.poll_is_warranted() {
+            return Some(due);
+        }
+
+        let pending_waiting = self
+            .services
+            .workflow
+            .pending_releases
+            .list_waiting_pending_releases()
+            .await
+            .map(|pending| !pending.is_empty())
+            .unwrap_or(true);
+        if pending_waiting {
+            return Some(due);
+        }
+        let age_unknown_pending = self
+            .services
+            .workflow
+            .pending_releases
+            .list_active_release_age_unknown_pending_releases()
+            .await
+            .map(|pending| !pending.is_empty())
+            .unwrap_or(true);
+        age_unknown_pending.then_some(due)
+    }
+
     pub(crate) async fn run_scheduled_rss_sync(&self) -> AppResult<RssSyncReport> {
         let now = Utc::now();
         let sync_start = std::time::Instant::now();
+
+        // Nothing to ask an indexer and nothing held back to re-evaluate means
+        // this whole cycle — every monitored title, every anime numbering
+        // bridge, the context bank built over them — would be assembled only to
+        // be thrown away. The worker's tick is deliberately faster than the
+        // cadence, so most ticks land here.
+        let Some(due_indexers) = self.rss_cycle_due_indexers().await else {
+            debug!("RSS sync: no indexer is due and nothing is pending, skipping");
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "not_due").increment(1);
+            metrics::histogram!("scryer_rss_sync_duration_seconds")
+                .record(sync_start.elapsed().as_secs_f64());
+            return Ok(RssSyncReport::default());
+        };
+        // The scopes below are narrowed against the indexers this cycle can
+        // actually reach; an unknown set narrows nothing.
+        let mut known_indexers = due_indexers.due;
+        known_indexers.extend(due_indexers.deferred);
+
         debug!("starting RSS sync cycle");
 
         // Load all monitored titles for matching
@@ -828,13 +967,53 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
+        if !super::acquisition_workflow::has_enabled_download_clients(self).await {
+            warn!("RSS sync: no enabled download clients configured, skipping indexer search");
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_clients").increment(1);
+            metrics::histogram!("scryer_rss_sync_duration_seconds")
+                .record(sync_start.elapsed().as_secs_f64());
+            return Ok(RssSyncReport::default());
+        }
+
+        // Union each monitored library's effective routing. Its overrides have
+        // already replaced facet defaults and must not be re-enabled by them.
+        //
+        // Resolved before the bank is built, because a scope whose routing
+        // enables no indexer contributes no feed for its titles to match
+        // against: carrying them through the bank (and, for anime, querying a
+        // numbering bridge per title per cycle) is work with no possible
+        // outcome.
+        let mut rss_plans = Vec::new();
+        let mut rss_covered_scopes: HashSet<(&str, &str)> = HashSet::new();
+        let library_scopes: std::collections::BTreeSet<_> = titles
+            .iter()
+            .filter(|title| title.monitored)
+            .map(|title| (title.library_id.as_str(), title.facet.as_str()))
+            .collect();
+        for (library_id, scope) in library_scopes {
+            let plan = self
+                .resolve_indexer_routing(Some(library_id), Some(scope))
+                .await;
+            if scope_polls_any_rss_indexer(plan.as_ref(), &known_indexers) {
+                rss_covered_scopes.insert((library_id, scope));
+            }
+            rss_plans.push((scope, plan));
+        }
+        let rss_routing = merge_rss_indexer_routing(rss_plans);
+        let title_is_rss_covered = |title: &Title| {
+            rss_covered_scopes.contains(&(title.library_id.as_str(), title.facet.as_str()))
+        };
+
         // A feed item named after an anime cour carries a name the catalog
         // keeps only in the numbering bridge, so the bank is built over titles
         // whose bridge names have been folded in. `titles` itself stays as the
         // catalog gave it: routing and scoping below are about the title rows.
         let mut bridged_titles = Vec::with_capacity(titles.len());
         for title in &titles {
-            let bridge = if title.monitored && title.facet == MediaFacet::Anime {
+            let bridge = if title.monitored
+                && title.facet == MediaFacet::Anime
+                && title_is_rss_covered(title)
+            {
                 self.services
                     .catalog
                     .shows
@@ -846,40 +1025,19 @@ impl AppUseCase {
             };
             bridged_titles.push(title_with_bridge_cour_titles(title, bridge.as_ref()));
         }
-        let title_context_bank = build_title_context_bank(&bridged_titles);
+        // Candidates are scoped; the collision guard and the spelling index
+        // stay global, because an out-of-scope title is still a collider and
+        // still a near-spelling of an in-scope one.
+        let title_context_bank =
+            build_scoped_title_context_bank(&bridged_titles, title_is_rss_covered);
 
         if title_context_bank.is_empty() {
-            debug!("RSS sync: no monitored titles, skipping");
+            debug!("RSS sync: no monitored titles in an RSS-routed scope, skipping");
             metrics::counter!("scryer_rss_sync_total", "outcome" => "no_titles").increment(1);
             metrics::histogram!("scryer_rss_sync_duration_seconds")
                 .record(sync_start.elapsed().as_secs_f64());
             return Ok(RssSyncReport::default());
         }
-
-        if !super::acquisition_workflow::has_enabled_download_clients(self).await {
-            warn!("RSS sync: no enabled download clients configured, skipping indexer search");
-            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_clients").increment(1);
-            metrics::histogram!("scryer_rss_sync_duration_seconds")
-                .record(sync_start.elapsed().as_secs_f64());
-            return Ok(RssSyncReport::default());
-        }
-
-        // Union each monitored library's effective routing. Its overrides have
-        // already replaced facet defaults and must not be re-enabled by them.
-        let mut rss_plans = Vec::new();
-        let library_scopes: std::collections::BTreeSet<_> = titles
-            .iter()
-            .filter(|title| title.monitored)
-            .map(|title| (title.library_id.as_str(), title.facet.as_str()))
-            .collect();
-        for (library_id, scope) in library_scopes {
-            rss_plans.push((
-                scope,
-                self.resolve_indexer_routing(Some(library_id), Some(scope))
-                    .await,
-            ));
-        }
-        let rss_routing = merge_rss_indexer_routing(rss_plans);
 
         // Fetch RSS feed (empty query = latest releases) from all indexers
         let rss_results = self
@@ -3034,37 +3192,43 @@ mod tests {
     use scryer_domain::{MediaFacet, Title};
 
     #[test]
-    fn the_sync_worker_keeps_its_minute_tick_without_an_override() {
+    fn the_sync_worker_keeps_its_shipped_tick_without_an_override() {
         assert_eq!(
             std::env::var(RSS_TARGET_INTERVAL_ENV).ok().as_deref(),
             None,
             "this test asserts the unset default; the suite must not set the override"
         );
+        assert_eq!(
+            std::env::var(RSS_SYNC_TICK_ENV).ok().as_deref(),
+            None,
+            "this test asserts the unset default; the suite must not set the override"
+        );
+        assert_eq!(DEFAULT_RSS_SYNC_TICK, std::time::Duration::from_secs(300));
         assert_eq!(rss_sync_tick_period(), DEFAULT_RSS_SYNC_TICK);
         assert_eq!(
-            rss_sync_tick_period_for(DEFAULT_RSS_TARGET_INTERVAL),
+            rss_sync_tick_period_for(DEFAULT_RSS_TARGET_INTERVAL, DEFAULT_RSS_SYNC_TICK),
             DEFAULT_RSS_SYNC_TICK
         );
     }
 
     #[test]
-    fn a_cadence_longer_than_a_minute_never_slows_the_worker_down() {
+    fn a_cadence_longer_than_the_tick_never_slows_the_worker_down() {
         assert_eq!(
-            rss_sync_tick_period_for(std::time::Duration::from_secs(3600)),
+            rss_sync_tick_period_for(std::time::Duration::from_secs(3600), DEFAULT_RSS_SYNC_TICK),
             DEFAULT_RSS_SYNC_TICK,
             "how often an indexer is due is the scheduler's decision, not the worker's"
         );
     }
 
     #[test]
-    fn a_cadence_shorter_than_a_minute_pulls_the_worker_tick_down_with_it() {
+    fn a_cadence_shorter_than_the_tick_pulls_the_worker_tick_down_with_it() {
         assert_eq!(
-            rss_sync_tick_period_for(std::time::Duration::from_secs(5)),
+            rss_sync_tick_period_for(std::time::Duration::from_secs(5), DEFAULT_RSS_SYNC_TICK),
             std::time::Duration::from_secs(5),
             "a cadence the worker never wakes to honour is not a cadence"
         );
         assert_eq!(
-            rss_sync_tick_period_for(std::time::Duration::from_secs(30)),
+            rss_sync_tick_period_for(std::time::Duration::from_secs(30), DEFAULT_RSS_SYNC_TICK),
             std::time::Duration::from_secs(30)
         );
     }
@@ -3072,13 +3236,70 @@ mod tests {
     #[test]
     fn the_worker_tick_keeps_the_cadence_floor() {
         assert_eq!(
-            rss_sync_tick_period_for(std::time::Duration::from_secs(1)),
+            rss_sync_tick_period_for(std::time::Duration::from_secs(1), DEFAULT_RSS_SYNC_TICK),
             MINIMUM_RSS_TARGET_INTERVAL,
             "the floor that stops the scheduler hot-looping must stop the worker spinning too"
         );
         assert_eq!(
-            rss_sync_tick_period_for(std::time::Duration::ZERO),
+            rss_sync_tick_period_for(std::time::Duration::ZERO, DEFAULT_RSS_SYNC_TICK),
             MINIMUM_RSS_TARGET_INTERVAL
+        );
+        assert_eq!(
+            rss_sync_tick_period_for(
+                DEFAULT_RSS_TARGET_INTERVAL,
+                std::time::Duration::from_secs(1)
+            ),
+            MINIMUM_RSS_TARGET_INTERVAL,
+            "an over-eager tick override is floored like the cadence itself"
+        );
+    }
+
+    #[test]
+    fn the_tick_override_is_honoured_and_never_outruns_the_cadence() {
+        assert_eq!(
+            rss_sync_tick_period_for(
+                DEFAULT_RSS_TARGET_INTERVAL,
+                std::time::Duration::from_secs(15)
+            ),
+            std::time::Duration::from_secs(15),
+            "a shortened tick samples the scheduler more often without changing the cadence"
+        );
+        assert_eq!(
+            rss_sync_tick_period_for(
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(900)
+            ),
+            std::time::Duration::from_secs(30),
+            "a cadence shorter than the tick still pulls the tick down"
+        );
+    }
+
+    #[test]
+    fn an_absent_or_unusable_tick_override_falls_back_to_the_shipped_default() {
+        assert_eq!(parse_rss_sync_tick(None), DEFAULT_RSS_SYNC_TICK);
+        assert_eq!(parse_rss_sync_tick(Some("   ")), DEFAULT_RSS_SYNC_TICK);
+        assert_eq!(
+            parse_rss_sync_tick(Some("not-a-number")),
+            DEFAULT_RSS_SYNC_TICK
+        );
+        assert_eq!(parse_rss_sync_tick(Some("-30")), DEFAULT_RSS_SYNC_TICK);
+        assert_eq!(parse_rss_sync_tick(Some("0")), DEFAULT_RSS_SYNC_TICK);
+    }
+
+    #[test]
+    fn a_usable_tick_override_is_parsed_and_floored() {
+        assert_eq!(
+            parse_rss_sync_tick(Some(" 15 ")),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            parse_rss_sync_tick(Some("1")),
+            MINIMUM_RSS_TARGET_INTERVAL,
+            "the floor that stops the scheduler hot-looping must stop the worker spinning too"
+        );
+        assert_eq!(
+            parse_rss_sync_tick(Some("7200")),
+            std::time::Duration::from_secs(7200)
         );
     }
 
@@ -3568,6 +3789,65 @@ mod tests {
                 .lookup_keys
                 .iter()
                 .any(|key| key == "neon cipher")
+        );
+    }
+
+    #[test]
+    fn a_scope_only_leaves_rss_when_every_indexer_is_explicitly_excluded() {
+        let known = |ids: &[&str]| ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>();
+        assert!(
+            scope_polls_any_rss_indexer(None, &known(&["a"])),
+            "no routing override means the facet defaults still poll"
+        );
+        let all_excluded = rss_routing_plan(&[("a", false, &["2000"], 1)]);
+        assert!(!scope_polls_any_rss_indexer(
+            all_excluded.as_ref(),
+            &known(&["a"])
+        ));
+        assert!(
+            scope_polls_any_rss_indexer(all_excluded.as_ref(), &known(&["a", "unnamed"])),
+            "an indexer the plan never names inherits the facet defaults and still polls"
+        );
+        assert!(
+            scope_polls_any_rss_indexer(all_excluded.as_ref(), &[]),
+            "an unknown indexer set can never rule a scope out"
+        );
+        let one_enabled = rss_routing_plan(&[("a", false, &["2000"], 1), ("b", true, &[], 1)]);
+        assert!(scope_polls_any_rss_indexer(
+            one_enabled.as_ref(),
+            &known(&["a", "b"])
+        ));
+    }
+
+    #[test]
+    fn the_bank_narrows_to_scoped_titles_but_ambiguity_stays_global() {
+        let covered = make_title("t1", "Tide Chart", Some(2023));
+        let mut out_of_scope = make_title("t2", "Tide Chart", Some(1999));
+        out_of_scope.library_id = "library-out-of-scope".to_string();
+
+        let titles = vec![covered.clone(), out_of_scope.clone()];
+        let bank = build_scoped_title_context_bank(&titles, |title| title.id == "t1");
+
+        assert_eq!(bank.len(), 1, "an unrouted scope contributes no candidate");
+        assert_eq!(bank[0].info.title_id, "t1");
+        assert!(
+            !bank[0].evidence.ambiguity.shared_lookup_keys.is_empty(),
+            "an out-of-scope title is still a collider: dropping it would turn an \
+             ambiguous match into a confident one"
+        );
+
+        let unscoped = build_title_context_bank(&titles);
+        assert_eq!(unscoped.len(), 2);
+        assert_eq!(
+            unscoped
+                .iter()
+                .find(|candidate| candidate.info.title_id == "t1")
+                .expect("covered title should be a candidate")
+                .evidence
+                .ambiguity
+                .shared_lookup_keys,
+            bank[0].evidence.ambiguity.shared_lookup_keys,
+            "scoping must not change what the guard sees"
         );
     }
 

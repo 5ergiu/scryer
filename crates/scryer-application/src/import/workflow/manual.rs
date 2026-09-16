@@ -450,6 +450,11 @@ pub(crate) async fn maybe_remove_completed_manual_import_download(
                     None,
                 )
                 .await?;
+            // A completion event, not a per-tick write: the store may have
+            // rebound this download, so memoized resolutions are retired.
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
             if let crate::DownloadCleanupClaim::Claimed(record) = app
                 .services
                 .workflow

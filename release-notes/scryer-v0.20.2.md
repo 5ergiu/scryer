@@ -11,6 +11,12 @@ These notes cover what's changed since **0.20.1**.
   - **An existing `.nfo` file is never replaced**, whatever its size or contents. Files you curate by hand, or that another tool wrote, are left exactly as they are, and Scryer records that it skipped them.
   - A sidecar that can't be written never fails the import; the media file still lands.
 
+- **Scryer asks your download clients and indexers for far less.** Polling was the single largest source of steady background load, and every lane has been cut down.
+  - Each poll of a download client now reads its queue once and its history once, whatever the size of either. SABnzbd, NZBGet, qBittorrent and Weaver all behave the same way, reading the most recent 100 completed items per poll and resolving what they belong to from what it already has instead of asking again per item. Large or long-lived queues no longer cost more every tick.
+  - Weaver is reconciled in one place instead of two. There is a single background reconciliation for a Weaver connection, it runs every 60 seconds by default, and it no longer makes a separate request per completed download.
+  - RSS now runs on its own five-minute rhythm, and each cycle first asks which indexers are actually due for a poll. A cycle with nothing due and nothing waiting to be re-checked does no work at all, so most cycles cost nothing. Feeds are still polled on the cadence you configured, and a feed at risk of moving on before its next poll is still brought forward.
+  - Two environment variables let you tune this: `SCRYER_RSS_SYNC_TICK_SECS` sets how often the RSS cycle runs (default 300, minimum 5; a value below your configured RSS cadence does not poll a feed more often than the cadence allows), and `SCRYER_WEAVER_BRIDGE_RECONCILE_INTERVAL_SECS` sets the Weaver reconciliation interval (default 60, and 0 turns it off).
+
 - **Subtitle searching is now a permission you grant per library.** Libraries have a new **Manage Subtitles** permission that covers searching for a subtitle, downloading one, deleting one, and adding one to the blocklist.
   - **Manage Titles includes it**, so anyone who already manages a library's titles keeps doing everything they did before, and the permission is shown as included rather than as a separate box to tick.
   - Users who can only view a library can no longer search for or download subtitles. They still see which subtitles a file has; the buttons that change them are gone.
@@ -21,3 +27,5 @@ These notes cover what's changed since **0.20.1**.
 ## Upgrading
 
 No database or configuration changes are required.
+
+`SCRYER_DOWNLOAD_QUEUE_RECONCILE_MAX_AGE_HOURS` is no longer read. If you set it, you can remove it; leaving it in place has no effect.

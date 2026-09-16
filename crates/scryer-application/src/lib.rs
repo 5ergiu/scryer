@@ -10,7 +10,14 @@ mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
 
-pub(crate) const DOWNLOAD_QUEUE_RECENT_COMPLETED_LIMIT: usize = 300;
+/// Completed-history rows the poller considers each cycle.
+///
+/// Matched to the snapshot's own history page so a tick reads one page and
+/// both projections come out of it. A download that has aged past this window
+/// is recovered by the direct per-item history lookup
+/// ([`DOWNLOAD_QUEUE_STUCK_COMPLETED_LOOKUP_LIMIT`]), which is what that path
+/// exists for.
+pub(crate) const DOWNLOAD_QUEUE_RECENT_COMPLETED_LIMIT: usize = 100;
 
 /// Widened completed-history bound used when a stuck download misses the recent
 /// window.
@@ -213,11 +220,12 @@ pub use types::canonicalize_jellyfin_user_id;
 pub use upstream_scheduler::{
     AccountQuotaKey, AdmissionReason, DeferralReason, EstimatedCost, ExpectedValueHint,
     OutboundDestinationCooldownSnapshotEntry, OutboundHostRpsSnapshotEntry,
-    OutboundRateLimitSnapshot, RateLimitCooldownAction, RssFreshnessContext, SchedulerAdmission,
-    SchedulerBatchDecision, SchedulerBatchRequest, SchedulerCandidate, SchedulerCandidateId,
-    SchedulerFeedback, SchedulerFeedbackOutcome, SchedulerIntent, SchedulerLease,
-    SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot, SchedulerSnapshotEntry,
-    SchedulerSnapshotFilter, SearchLearningContext, SkipReason, UpstreamScheduler,
+    OutboundRateLimitSnapshot, RSS_FRESHNESS_ESCALATION_THRESHOLD, RateLimitCooldownAction,
+    RssDueIndexers, RssFreshnessContext, SchedulerAdmission, SchedulerBatchDecision,
+    SchedulerBatchRequest, SchedulerCandidate, SchedulerCandidateId, SchedulerFeedback,
+    SchedulerFeedbackOutcome, SchedulerIntent, SchedulerLease, SchedulerOperation,
+    SchedulerPluginKind, SchedulerSnapshot, SchedulerSnapshotEntry, SchedulerSnapshotFilter,
+    SearchLearningContext, SkipReason, UpstreamScheduler, rss_poll_is_due,
 };
 pub const SCRYER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LIBRARY_SCAN_MAX_RECURSIVE_DEPTH: usize =
@@ -522,8 +530,9 @@ pub use null_repositories::NullMediaServerPlaybackProbe;
 /// scheduler in the acquisition infrastructure crate has to honour the very same
 /// value — so it is resolved once, here, rather than parsed on both sides.
 pub use acquisition::rss::{
-    DEFAULT_RSS_TARGET_INTERVAL, MINIMUM_RSS_TARGET_INTERVAL, RSS_TARGET_INTERVAL_ENV,
-    parse_rss_target_interval, rss_sync_tick_period, rss_target_interval,
+    DEFAULT_RSS_SYNC_TICK, DEFAULT_RSS_TARGET_INTERVAL, MINIMUM_RSS_TARGET_INTERVAL,
+    RSS_SYNC_TICK_ENV, RSS_TARGET_INTERVAL_ENV, parse_rss_sync_tick, parse_rss_target_interval,
+    rss_sync_tick_period, rss_target_interval,
 };
 /// Per-client failure record and its repository port.
 ///
@@ -579,15 +588,16 @@ pub use ports::{
     NotificationSubscriptionRepository, NotificationTitlePayload, OAuthRepository,
     PendingReleaseRepository, PlexServerDiscovery, PlexServerUser, PluginDescriptorLoader,
     PluginHttpTrustConfigRuntime, PluginInstallationRepository, PostProcessingScriptRepository,
-    ProxyConfigRepository, QualityProfileRepository, ReleaseAttemptRepository,
-    RequestRuleDecisionRepository, RequestRuleSetRepository, ReusableIndexerSearchCandidate,
-    ReusableIndexerSearchStrategy, RuleSetRepository, RuntimePluginLoad, ScopeCoverageRow,
-    ScopeIndexerCoverageRepository, SeedingProfileRepository, SettingsRepository, ShowRepository,
-    SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore, SubtitleDownloadRepository,
-    SubtitlePluginProvider, SubtitleProviderClient, SubtitleProviderConfigRepository,
-    SystemInfoProvider, TitleImageProcessor, TitleImageRepository, TitleRepository, TotpRepository,
-    UserExternalAccountRepository, UserRepository, VerifiedExternalIdentity, WebauthnRepository,
-    WorkflowOperationInfo, WorkflowOperationRepository,
+    PrefetchedCompletedDownloads, ProxyConfigRepository, QualityProfileRepository,
+    ReleaseAttemptRepository, RequestRuleDecisionRepository, RequestRuleSetRepository,
+    ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy, RuleSetRepository,
+    RuntimePluginLoad, ScopeCoverageRow, ScopeIndexerCoverageRepository, SeedingProfileRepository,
+    SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
+    SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
+    SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
+    TitleImageRepository, TitleRepository, TotpRepository, UserExternalAccountRepository,
+    UserRepository, VerifiedExternalIdentity, WebauthnRepository, WorkflowOperationInfo,
+    WorkflowOperationRepository,
 };
 pub use ports::{
     ConnectionPlaybackActivity, MediaServerPlaybackProbe, PlaybackActivitySnapshot,

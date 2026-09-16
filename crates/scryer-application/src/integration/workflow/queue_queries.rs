@@ -1,4 +1,11 @@
-const DOWNLOAD_QUEUE_RECENT_ACTIVITY_LIMIT: usize = 300;
+/// Rows of client history read per snapshot cycle.
+///
+/// One page per tick serves both the queue view and the recent-completed
+/// lookup (see [`crate::DOWNLOAD_QUEUE_RECENT_COMPLETED_LIMIT`]), so this is
+/// the whole recent window; a download that has sunk below it is recovered by
+/// the direct per-item history lookup, not by widening this page. Sonarr's
+/// equivalent bound is 60.
+const DOWNLOAD_QUEUE_RECENT_ACTIVITY_LIMIT: usize = 100;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrackedDownloadBackgroundWorkKind {
     Import,
@@ -1020,6 +1027,7 @@ impl AppUseCase {
             .await;
         Ok(crate::ports::DownloadClientSnapshotOutcome {
             items: self.filter_ineligible_download_queue_items(items).await,
+            completed_downloads: snapshot.completed_downloads,
             authoritative_client_ids: snapshot.authoritative_client_ids,
             failed_client_ids: snapshot.failed_client_ids,
             any_client_read_succeeded: snapshot.any_client_read_succeeded,
