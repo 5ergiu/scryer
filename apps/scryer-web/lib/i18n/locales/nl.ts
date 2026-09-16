@@ -2374,7 +2374,7 @@ const nl: LocaleDictionary = {
   "settings.libraryUnsavedChanges": "Niet-opgeslagen wijzigingen",
   "settings.nfoWriteOnImportLabel": "NFO schrijven bij import",
   "settings.nfoWriteOnImportDescription":
-    "Schrijf Kodi/Jellyfin/Emby-compatibele .nfo-metadatabestanden naast geïmporteerde media",
+    "Schrijf Kodi/Jellyfin/Emby-compatibele .nfo-metadatabestanden naast geïmporteerde media; een bestaand .nfo-bestand wordt nooit overschreven",
   "settings.plexmatchWriteOnImportLabel": ".plexmatch schrijven bij import",
   "settings.plexmatchWriteOnImportDescription":
     "Schrijf Plex hintbestanden voor nauwkeurige seriesmatching zonder naam te raden",

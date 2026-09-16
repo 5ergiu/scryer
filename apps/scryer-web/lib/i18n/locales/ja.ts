@@ -1461,7 +1461,7 @@ const ja: LocaleDictionary = {
   "settings.sidecarFilesTitle": "サイドカーファイル",
   "settings.nfoWriteOnImportLabel": "インポート時にNFOを書き込み",
   "settings.nfoWriteOnImportDescription":
-    "インポートされたメディアと一緒にKodi/Jellyfin/Emby互換の.nfoメタデータファイルを書き込みます",
+    "インポートされたメディアと一緒にKodi/Jellyfin/Emby互換の.nfoメタデータファイルを書き込みます。既存の.nfoファイルが上書きされることはありません",
   "settings.plexmatchWriteOnImportLabel": "インポート時に.plexmatchを書き込み",
   "settings.plexmatchWriteOnImportDescription":
     "名前推測なしで正確なシリーズマッチングのためのPlexヒントファイルを書き込みます",

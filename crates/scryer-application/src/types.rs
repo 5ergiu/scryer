@@ -681,7 +681,7 @@ pub struct MediaFileAssociations {
     pub series_movie_link_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TitleMediaFile {
     pub analysis_details: scryer_media_types::AnalysisDetails,
     pub analysis_attempt: Option<scryer_media_types::AnalysisAttempt>,

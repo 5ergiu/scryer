@@ -3038,7 +3038,7 @@ const ru: LocaleDictionary = {
         "Создавать NFO-файлы при импорте",
 
     "settings.nfoWriteOnImportDescription":
-        "Создавать файлы метаданных .nfo, совместимые с Kodi, Jellyfin и Emby, рядом с импортированными медиафайлами",
+        "Создавать файлы метаданных .nfo, совместимые с Kodi, Jellyfin и Emby, рядом с импортированными медиафайлами; существующий файл .nfo никогда не перезаписывается",
 
     "settings.plexmatchWriteOnImportLabel":
         "Создавать .plexmatch при импорте",

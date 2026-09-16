@@ -1375,7 +1375,7 @@ const zh_CN: LocaleDictionary = {
   "settings.sidecarFilesTitle": "Sidecar 文件",
   "settings.nfoWriteOnImportLabel": "导入时写入 NFO",
   "settings.nfoWriteOnImportDescription":
-    "在导入的媒体旁写入 Kodi/Jellyfin/Emby 兼容的 .nfo 元数据文件",
+    "在导入的媒体旁写入 Kodi/Jellyfin/Emby 兼容的 .nfo 元数据文件；已存在的 .nfo 文件绝不会被覆盖",
   "settings.plexmatchWriteOnImportLabel": "导入时写入 .plexmatch",
   "settings.plexmatchWriteOnImportDescription":
     "写入 Plex 提示文件以实现精确的剧集匹配",
