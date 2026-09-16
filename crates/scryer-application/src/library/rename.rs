@@ -749,6 +749,7 @@ impl AppUseCase {
             items: item_results,
         };
 
+        self.repoint_rename_external_subtitles(&result.items).await;
         self.emit_rename_notifications(actor, &result.items).await;
         self.remove_emptied_rename_source_folders(&result.items, &planned_title_folders)
             .await;
@@ -985,6 +986,81 @@ impl AppUseCase {
             .ok()
             .flatten()
             .map(|title| title.library_id)
+    }
+
+    /// Re-point external subtitle records at the files a rename just moved.
+    ///
+    /// Sidecars move as companion items, which carry no database identity, so
+    /// `persist_rename_item_paths` never touches them: their rows kept the old
+    /// path and the title listed subtitles under names that no longer existed.
+    /// No refresh could fix that, because the stale value was in the database
+    /// rather than any cache (#226).
+    ///
+    /// Each row is rewritten in place rather than rediscovered. Rediscovery
+    /// would drop a downloaded subtitle's provider, score and sync state, and
+    /// would skip a sidecar whose name carries no language tag outright. The
+    /// plan already says exactly where every file went; this only records it.
+    /// It runs once the whole plan is persisted, and only applied items count,
+    /// so a companion rolled back with its media file keeps its old row.
+    async fn repoint_rename_external_subtitles(&self, items: &[RenameApplyItemResult]) {
+        let moved = items
+            .iter()
+            .filter(|item| matches!(item.status, RenameApplyStatus::Applied))
+            .filter_map(|item| Some((item.current_path.as_str(), item.final_path.as_deref()?)))
+            .filter(|(from, to)| !crate::stored_paths::paths_match(from, to))
+            .collect::<Vec<_>>();
+        if moved.is_empty() {
+            return;
+        }
+
+        let media_file_ids = items
+            .iter()
+            .filter(|item| matches!(item.status, RenameApplyStatus::Applied))
+            .filter_map(|item| item.media_file_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        for media_file_id in media_file_ids {
+            let subtitles = match self
+                .services
+                .workflow
+                .subtitle_downloads
+                .list_for_media_file(media_file_id)
+                .await
+            {
+                Ok(subtitles) => subtitles,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        file_id = media_file_id,
+                        "failed to list external subtitles for a renamed media file"
+                    );
+                    continue;
+                }
+            };
+            for mut subtitle in subtitles {
+                let Some((_, final_path)) = moved
+                    .iter()
+                    .find(|(from, _)| crate::stored_paths::paths_match(from, &subtitle.file_path))
+                else {
+                    continue;
+                };
+                subtitle.file_path = (*final_path).to_string();
+                if let Err(error) = self
+                    .services
+                    .workflow
+                    .subtitle_downloads
+                    .insert(&subtitle)
+                    .await
+                {
+                    warn!(
+                        error = %error,
+                        subtitle_id = subtitle.id.as_str(),
+                        file_id = media_file_id,
+                        final_path = *final_path,
+                        "failed to re-point an external subtitle after rename"
+                    );
+                }
+            }
+        }
     }
 
     async fn emit_rename_notifications(&self, actor: &User, items: &[RenameApplyItemResult]) {

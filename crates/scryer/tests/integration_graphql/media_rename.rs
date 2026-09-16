@@ -2588,6 +2588,121 @@ async fn apply_media_rename_moves_companions_and_removes_the_emptied_folder() {
     );
 }
 
+/// A rename that moves a sidecar has to move its row with it. The companion
+/// item carries no database identity, so before #226 the file landed under
+/// its new name while `subtitle_downloads` kept the old path: the title listed
+/// a subtitle that no longer existed, and no refresh could correct it.
+///
+/// The row is a *downloaded* subtitle on purpose. It must be re-pointed in
+/// place — same id, provider, score and sync state — not deleted and
+/// rediscovered as an anonymous sidecar.
+#[tokio::test]
+async fn apply_media_rename_repoints_external_subtitle_rows_at_the_moved_sidecar() {
+    use scryer_application::SubtitleDownloadRepository;
+    use scryer_domain::{ExternalSubtitleSourceKind, SubtitleDownload};
+
+    let mut ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    set_folder_template(&ctx, "MOVIE", "{title} ({year})").await;
+    ctx.app = ctx.app.with_test_overrides(|builder| {
+        builder.with_library_renamer(std::sync::Arc::new(FileSystemLibraryRenamer::new()))
+    });
+    let media_root = tempfile::tempdir().expect("media root tempdir");
+    configure_default_library_root(&ctx, MediaFacet::Movie, media_root.path()).await;
+
+    let title = create_catalog_title(
+        &ctx,
+        "Lanternfall Harbor",
+        MediaFacet::Movie,
+        vec![ExternalId {
+            source: "tvdb".to_string(),
+            value: "94117".to_string(),
+        }],
+        vec![],
+        true,
+    )
+    .await;
+
+    let old_dir = media_root.path().join("Lanternfall Harbor");
+    std::fs::create_dir_all(&old_dir).expect("create old movie dir");
+    set_title_folder_path(&ctx, &title.id, &old_dir).await;
+    let source_stem = "Lanternfall.Harbor.2024.1080p.WEB-DL";
+    let source_path = old_dir.join(format!("{source_stem}.mkv"));
+    let old_subtitle = old_dir.join(format!("{source_stem}.hi.srt"));
+    std::fs::write(&source_path, b"lanternfall-harbor").expect("write movie file");
+    std::fs::write(&old_subtitle, b"subs").expect("write srt");
+    let media_file_id = seed_movie_file(&ctx, &title, &source_path).await;
+
+    ctx.library_state
+        .subtitle_downloads
+        .insert(&SubtitleDownload {
+            id: "subtitle-lanternfall".to_string(),
+            media_file_id: media_file_id.clone(),
+            title_id: title.id.clone(),
+            episode_id: None,
+            source_kind: ExternalSubtitleSourceKind::Downloaded,
+            language: "eng".to_string(),
+            provider: Some("synthetic-provider".to_string()),
+            provider_file_id: Some("synthetic-file-1".to_string()),
+            file_path: old_subtitle.to_string_lossy().to_string(),
+            score: Some(97),
+            hearing_impaired: true,
+            forced: false,
+            ai_translated: false,
+            machine_translated: false,
+            uploader: None,
+            release_info: Some(format!("{source_stem}.hi")),
+            synced: true,
+            downloaded_at: "2026-09-01T00:00:00Z".to_string(),
+        })
+        .await
+        .expect("seed downloaded subtitle");
+
+    let actor = ctx
+        .app
+        .find_or_create_default_user()
+        .await
+        .expect("default user");
+    let preview = ctx
+        .app
+        .preview_rename_for_title(&actor, &title.id, MediaFacet::Movie)
+        .await
+        .expect("preview rename plan");
+    let result = ctx
+        .app
+        .apply_rename_for_title(&actor, &title.id, MediaFacet::Movie, &preview.fingerprint)
+        .await
+        .expect("apply rename");
+    assert_eq!(result.failed, 0);
+
+    let new_subtitle = media_root
+        .path()
+        .join("Lanternfall Harbor (2024)")
+        .join("Lanternfall Harbor (2024) - 1080p.hi.srt");
+    assert!(new_subtitle.is_file(), "the sidecar moved on disk");
+    assert!(!old_subtitle.exists());
+
+    let rows = ctx
+        .library_state
+        .subtitle_downloads
+        .list_for_title(&title.id)
+        .await
+        .expect("list subtitles");
+    assert_eq!(rows.len(), 1, "re-pointed, never duplicated: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.id, "subtitle-lanternfall", "rewritten in place");
+    assert_eq!(
+        std::path::PathBuf::from(&row.file_path),
+        new_subtitle,
+        "the row follows the file"
+    );
+    assert_eq!(row.source_kind, ExternalSubtitleSourceKind::Downloaded);
+    assert_eq!(row.provider.as_deref(), Some("synthetic-provider"));
+    assert_eq!(row.score, Some(97));
+    assert!(row.synced, "sync state survives the rename");
+    assert!(row.hearing_impaired);
+}
+
 /// Extras that are not stem-matched companions are a folder move, not a
 /// rename: they stay put, and the folder that still holds them survives.
 #[tokio::test]
