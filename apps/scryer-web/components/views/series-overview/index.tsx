@@ -1263,7 +1263,7 @@ function SeriesOverviewViewImpl({
                       onLoadSeriesMovieDetail={onLoadSeriesMovieDetail}
                       subtitleDownloads={subtitleDownloads}
                       libraryId={title?.libraryId ?? null}
-                      onRefreshSubtitles={canManageTitle ? onRefreshSubtitles : undefined}
+                      onRefreshSubtitles={onRefreshSubtitles}
                       seriesMovieSearchResultsByLink={seriesMovieSearchResultsByLink}
                       seriesMovieSearchLoadingByLink={seriesMovieSearchLoadingByLink}
                       seriesMovieSearchAttemptedByLink={seriesMovieSearchAttemptedByLink}
@@ -1309,7 +1309,7 @@ function SeriesOverviewViewImpl({
                     downloadQueueItemByEpisodeId={primaryQueueItemByEpisodeId}
                     subtitleDownloads={subtitleDownloads}
                     libraryId={title?.libraryId ?? null}
-                    onRefreshSubtitles={canManageTitle ? onRefreshSubtitles : undefined}
+                    onRefreshSubtitles={onRefreshSubtitles}
                     onMakePrimaryFile={canManageTitle ? onMakePrimaryFile : undefined}
                     primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
                     releaseBlocklistEntries={releaseBlocklistEntries}
