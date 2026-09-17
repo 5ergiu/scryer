@@ -54,7 +54,8 @@ export function useManualImportLauncher({
 }: {
   /** The title being viewed, when the download belongs to it. */
   title?: { id: string; name: string; facet: string } | null;
-  onImportQueued: (item: DownloadQueueItem) => void;
+  /** Refreshes the page once an import is queued. */
+  onImportQueued: (item: DownloadQueueItem) => Promise<void> | void;
 }): ManualImportLauncher {
   const client = useClient();
   const t = useTranslate();
@@ -65,6 +66,15 @@ export function useManualImportLauncher({
   React.useEffect(() => {
     onImportQueuedRef.current = onImportQueued;
   });
+  const notifyImportQueued = React.useCallback((item: DownloadQueueItem) => {
+    // The import is queued either way; a failed reload only leaves the page
+    // stale until its next refresh.
+    void Promise.resolve()
+      .then(() => onImportQueuedRef.current(item))
+      .catch((error: unknown) => {
+        console.error("[manual-import] refresh after import failed:", error);
+      });
+  }, []);
 
   const beginSelection = React.useCallback(
     async (
@@ -139,7 +149,7 @@ export function useManualImportLauncher({
           throw error;
         }
         setGlobalStatus(t("queue.manualImportQueued"));
-        onImportQueuedRef.current(item);
+        notifyImportQueued(item);
       } catch (error: unknown) {
         setGlobalStatus(
           userFacingGraphQlErrorMessage(error, t("queue.manualImportFailed")),
@@ -149,7 +159,16 @@ export function useManualImportLauncher({
         setBusyItemId((current) => (current === item.id ? null : current));
       }
     },
-    [beginSelection, client, setGlobalStatus, t, title?.facet, title?.id, title?.name],
+    [
+      beginSelection,
+      client,
+      notifyImportQueued,
+      setGlobalStatus,
+      t,
+      title?.facet,
+      title?.id,
+      title?.name,
+    ],
   );
 
   const dialog = dialogTarget ? (
@@ -166,7 +185,7 @@ export function useManualImportLauncher({
       clientId={dialogTarget.item.clientId}
       clientType={dialogTarget.item.clientType}
       downloadClientItemId={dialogTarget.item.downloadClientItemId}
-      onImportQueued={() => onImportQueuedRef.current(dialogTarget.item)}
+      onImportQueued={() => notifyImportQueued(dialogTarget.item)}
     />
   ) : null;
 

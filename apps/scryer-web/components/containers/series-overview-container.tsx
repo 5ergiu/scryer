@@ -90,10 +90,7 @@ import {
 import { useTitleMoreLikeThisActions } from "@/lib/hooks/use-title-more-like-this-actions";
 import { useTitleOverviewReactiveRefresh } from "@/lib/hooks/use-title-overview-reactive-refresh";
 import { useCanManageOverviewTitle } from "@/lib/hooks/use-title-overview-access";
-import {
-  useDownloadClientsConfigured,
-  useTitleDownloadFeedback,
-} from "@/lib/hooks/use-title-download-feedback";
+import { useTitleDownloadFeedback } from "@/lib/hooks/use-title-download-feedback";
 import { useTitleRefreshAndScan } from "@/lib/hooks/use-title-refresh-and-scan";
 import { useTitleReleaseBlocklistClear } from "@/lib/hooks/use-title-release-blocklist-clear";
 import { useTitleRename } from "@/lib/hooks/use-title-rename";
@@ -493,7 +490,16 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     currentTitleIdRef.current = titleId ?? null;
   }, [titleId]);
   const seriesMovieDetailLoadingRef = React.useRef<Set<string>>(new Set());
-  const hasDownloadClients = useDownloadClientsConfigured(titleId ?? null);
+  // The page's own overview query reports this, so a download client added
+  // while the page is open is picked up by its next refresh.
+  const [downloadClientsAnswer, setDownloadClientsAnswer] = React.useState<{
+    titleId: string;
+    configured: boolean;
+  } | null>(null);
+  const hasDownloadClients =
+    titleId && downloadClientsAnswer?.titleId === titleId
+      ? downloadClientsAnswer.configured
+      : null;
   const {
     queueItems: downloadQueueItems,
     completedDownloads,
@@ -771,6 +777,16 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         ExternalSubtitleRecord
       >,
     ) => {
+      // Callers apply a snapshot only while its title is still the one shown.
+      const snapshotTitleId = currentTitleIdRef.current;
+      if (snapshotTitleId) {
+        setDownloadClientsAnswer((current) =>
+          current?.titleId === snapshotTitleId &&
+          current.configured === snapshot.hasDownloadClients
+            ? current
+            : { titleId: snapshotTitleId, configured: snapshot.hasDownloadClients },
+        );
+      }
       const nextTitle = snapshot.title;
       const nextCollections = nextTitle?.collections ?? [];
       const nextSeriesMovieLinks = nextTitle?.seriesMovieLinks ?? [];
@@ -1852,9 +1868,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
   );
   const manualImport = useManualImportLauncher({
     title: manualImportTitle,
-    onImportQueued: () => {
-      void reloadTitleAndDownloads();
-    },
+    onImportQueued: reloadTitleAndDownloads,
   });
   const handleOpenFixMatch = React.useCallback(() => {
     setFixMatchOpen(true);

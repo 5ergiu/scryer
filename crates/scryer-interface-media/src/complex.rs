@@ -516,7 +516,7 @@ impl TitlePayload {
     async fn rename_enabled(&self, ctx: &Context<'_>) -> GqlResult<bool> {
         Box::pin(async move {
             app_from_ctx(ctx)?
-                .title_rename_enabled(&self.facet.into_domain())
+                .resolve_rename_enabled(&self.facet.into_domain())
                 .await
                 .map_err(to_gql_error)
         })

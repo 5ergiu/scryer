@@ -23,7 +23,6 @@ export type TitleOverviewReactiveRefreshPlan =
   | { type: "hydrationFailed" }
   | {
       type: "refresh";
-      downloadFeedback: boolean;
       mode: "immediate" | "bulk";
     };
 
@@ -97,12 +96,12 @@ export function titleOverviewReactiveRefreshPlan(
     case TITLE_OVERVIEW_HYDRATION_FAILED_KIND:
       return { type: "hydrationFailed" };
     case TITLE_OVERVIEW_FILE_ANALYZED_KIND:
-      return { type: "refresh", downloadFeedback: false, mode: "bulk" };
+      return { type: "refresh", mode: "bulk" };
     case TITLE_OVERVIEW_SUBTITLE_DOWNLOADED_KIND:
-      return { type: "refresh", downloadFeedback: false, mode: "immediate" };
+      return { type: "refresh", mode: "immediate" };
     default:
       if (importKinds.has(activityKind)) {
-        return { type: "refresh", downloadFeedback: true, mode: "immediate" };
+        return { type: "refresh", mode: "immediate" };
       }
       return { type: "none" };
   }

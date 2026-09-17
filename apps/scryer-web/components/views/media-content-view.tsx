@@ -1211,9 +1211,7 @@ function TitleContextPanel({
   );
   const manualImport = useManualImportLauncher({
     title: manualImportTitle,
-    onImportQueued: () => {
-      void reloadTitleAndDownloads();
-    },
+    onImportQueued: reloadTitleAndDownloads,
   });
   const panelClassName = cn(
     "min-h-0 w-full min-w-0 flex-col overflow-visible min-[981px]:overflow-hidden rounded-[16px] border border-[var(--scry-border2)] bg-[var(--scry-surfD)]",

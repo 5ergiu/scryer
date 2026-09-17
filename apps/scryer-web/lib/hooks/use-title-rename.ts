@@ -130,13 +130,20 @@ export function useTitleRename<
       if ((data?.renameTitles?.acceptedTitleIds?.length ?? 0) === 0) {
         throw new Error(t("status.bulkRenameFailed"));
       }
+      // The rename is queued either way; a failed reload only leaves the page
+      // showing the old paths until its next refresh.
+      const refreshRenamedTitle = () => {
+        void Promise.resolve()
+          .then(() => onAppliedRef.current?.(renamedTitle))
+          .catch((refreshError: unknown) => {
+            console.error("[title-rename] refresh after rename failed:", refreshError);
+          });
+      };
       const run = normalizeJobRun(data?.renameTitles?.jobRun);
       if (run) {
-        trackJobRun(run, () => {
-          void onAppliedRef.current?.(renamedTitle);
-        });
+        trackJobRun(run, refreshRenamedTitle);
       } else {
-        void onAppliedRef.current?.(renamedTitle);
+        refreshRenamedTitle();
       }
       setGlobalStatus(t("status.renameQueued"));
       setPlanState((current) =>

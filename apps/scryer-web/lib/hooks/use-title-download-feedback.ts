@@ -21,7 +21,9 @@ import {
 
 /**
  * Whether any download client is configured, or `null` until that is known.
- * Read again whenever the overview moves to another title.
+ * Read again whenever the overview moves to another title. For an overview
+ * whose own query does not report it; the series and anime overview reads it
+ * from its overview query instead.
  */
 export function useDownloadClientsConfigured(titleId: string | null): boolean | null {
   const client = useClient();

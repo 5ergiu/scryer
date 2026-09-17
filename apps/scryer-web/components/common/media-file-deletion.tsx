@@ -124,17 +124,20 @@ export function useMediaFileDeletion<TFile extends DeletableMediaFile, TContext>
           next.delete(file.id);
           return next;
         });
-        void Promise.resolve(
-          handlersRef.current.onFinished(terminalRun, file, context),
-        ).finally(() => {
-          setGlobalStatus(
-            terminalRun.status === "COMPLETED"
-              ? t("status.mediaFileDeleted")
-              : (terminalRun.errorText ??
-                  terminalRun.summaryText ??
-                  t("status.apiError")),
-          );
-        });
+        void Promise.resolve()
+          .then(() => handlersRef.current.onFinished(terminalRun, file, context))
+          .catch((refreshError: unknown) => {
+            console.error("[media-file-deletion] refresh after deletion failed:", refreshError);
+          })
+          .finally(() => {
+            setGlobalStatus(
+              terminalRun.status === "COMPLETED"
+                ? t("status.mediaFileDeleted")
+                : (terminalRun.errorText ??
+                    terminalRun.summaryText ??
+                    t("status.apiError")),
+            );
+          });
       });
       setGlobalStatus(t("status.mediaFileDeleteQueued"));
       setTarget(null);
