@@ -13218,6 +13218,62 @@ async fn a_burst_of_queue_snapshots_costs_one_attention_recount() {
     token.cancel();
 }
 
+/// Snapshots keep landing for as long as anything downloads, so the durable
+/// half has to run on its own clock. A timer re-armed by every snapshot wake-up
+/// would never reach its interval and the durable numbers would freeze for the
+/// length of the download.
+#[tokio::test(start_paused = true)]
+async fn constant_queue_snapshots_do_not_starve_the_durable_badge_facts() {
+    let (app, user, failing) = app_with_one_pending_import().await;
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    let token = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(crate::start_navigation_badge_facts_refresh(
+        app.clone(),
+        token.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        0,
+        "the start-up pass could not read the pending imports"
+    );
+
+    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+    let churn_step = Duration::from_secs(5);
+    let mut elapsed = Duration::ZERO;
+    let mut index = 0;
+    while elapsed < crate::app_usecase_integration::NAVIGATION_BADGE_FACTS_REFRESH_INTERVAL * 2 {
+        index += 1;
+        publish_test_download_queue_snapshot(
+            &app,
+            vec![queue_history_fixture_item(
+                &format!("churn-{index}"),
+                DownloadQueueState::Downloading,
+                20,
+            )],
+        )
+        .await;
+        tokio::time::sleep(churn_step).await;
+        elapsed += churn_step;
+    }
+
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        1,
+        "the durable refresh keeps its own interval under snapshot churn"
+    );
+    token.cancel();
+}
+
 /// A store that refuses one section may not blank the badge or hold up the
 /// sections that answered: the badge keeps that section's last number and goes
 /// on serving the rest.

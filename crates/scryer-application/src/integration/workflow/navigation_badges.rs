@@ -342,12 +342,17 @@ pub async fn start_navigation_badge_facts_refresh(
             tracing::warn!("navigation badge attention count is unavailable: {error}");
         }
     };
-    refresh_everything(app.clone()).await;
+    // An interval rather than a per-iteration sleep: queue snapshots land every
+    // few seconds while anything downloads, and a sleep re-armed on each of
+    // those wake-ups would never reach 30 seconds, starving the durable half.
+    let mut durable_refresh = tokio::time::interval(NAVIGATION_BADGE_FACTS_REFRESH_INTERVAL);
+    durable_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = token.cancelled() => return,
-            _ = tokio::time::sleep(NAVIGATION_BADGE_FACTS_REFRESH_INTERVAL) => {
+            // The first tick completes immediately and is the start-up pass.
+            _ = durable_refresh.tick() => {
                 refresh_everything(app.clone()).await;
             }
             changed = queue_sync.changed() => {
