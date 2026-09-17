@@ -1741,6 +1741,11 @@ ManifestVersion: {WINGET_MANIFEST_VERSION}\n"
     )
 }
 
+/// `UpgradeBehavior: install` is load-bearing. A Scryer uninstall now removes
+/// the user's desktop profile — database included — so `uninstallPrevious`
+/// would make every `winget upgrade` wipe the user's library data. The MSI
+/// declares a major upgrade, so installing over the previous version is both
+/// supported and what keeps settings and history.
 fn winget_installer_manifest(
     version: &Version,
     release_date: &str,
@@ -1764,7 +1769,7 @@ fn winget_installer_manifest(
 PackageIdentifier: {WINGET_PACKAGE_IDENTIFIER}\n\
 PackageVersion: {version}\n\
 InstallerType: msi\n\
-UpgradeBehavior: uninstallPrevious\n\
+UpgradeBehavior: install\n\
 ReleaseDate: {release_date}\n\
 Installers:\n\
 {installers}\n\
@@ -5390,7 +5395,7 @@ mod tests {
         assert!(manifest.contains("winget-manifest.installer.1.10.0.schema.json"));
         assert!(manifest.contains("ManifestVersion: 1.10.0"));
         assert!(manifest.contains("InstallerType: msi"));
-        assert!(manifest.contains("UpgradeBehavior: uninstallPrevious"));
+        assert!(manifest.contains("UpgradeBehavior: install"));
         assert!(manifest.contains("ProductCode: '{12345678-1234-1234-1234-1234567890AB}'"));
         assert!(manifest.contains("Architecture: x64"));
         assert!(manifest.contains("Architecture: arm64"));

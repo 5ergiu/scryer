@@ -1,0 +1,37 @@
+//! The private window class and messages the Windows tray listens on.
+//!
+//! Compiled into both `scryer.exe` and `scryer-tray.exe`, which must agree on
+//! every value here or the server cannot reach its own supervisor. Each binary
+//! uses a different subset of the contract.
+#![allow(
+    dead_code,
+    reason = "scryer.exe and scryer-tray.exe each use a subset of this shared contract"
+)]
+
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_APP;
+
+/// Registered by the tray, and the only handle another process has on it.
+/// `FindWindowW` is session-local, so a lookup by this name finds the tray
+/// belonging to the same signed-in user and no other.
+///
+/// This value shipped in earlier Scryer desktop builds and is kept verbatim so
+/// an in-place upgrade can still find the running tray.
+pub(crate) const CLASS_NAME: &str = "ScryerMedia.Scryer.Desktop.v1.Tray";
+
+/// Shell notification-icon callback.
+pub(crate) const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 1;
+/// A second tray invocation asking the owning instance to open the UI.
+pub(crate) const OPEN_WINDOW_MESSAGE: u32 = WM_APP + 2;
+/// `--shutdown` asking the owning instance to exit.
+pub(crate) const SHUTDOWN_MESSAGE: u32 = WM_APP + 3;
+/// Posted by the server once its own graceful teardown is complete. The tray
+/// owns the relaunch because it owns the server process as a child; a server
+/// that started its own replacement would leave the tray supervising a
+/// process it did not start.
+pub(crate) const RESTART_MESSAGE: u32 = WM_APP + 4;
+/// Posted by the tray to itself when WebView2 could not be started, so the
+/// failure is handled from the message loop rather than from inside a WebView2
+/// callback that has no access to the tray's state. `scryer.exe` never posts
+/// it; it lives here so every `WM_APP` offset the tray answers on is assigned
+/// in one place and cannot be reused by accident.
+pub(crate) const WEBVIEW_FAILED_MESSAGE: u32 = WM_APP + 5;

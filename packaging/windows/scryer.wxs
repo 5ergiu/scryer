@@ -71,10 +71,10 @@
               Condition="NOT Installed AND UILevel &gt;= 4" />
     </InstallExecuteSequence>
 
-    <!-- The tray owns only a per-user Run value and its child server. User profile data and
-         Credential Manager entries intentionally remain after uninstall. A major upgrade
-         removes the old product as part of installing the new one; UPGRADINGPRODUCTCODE is
-         set only in that removal, so the startup preference survives an upgrade and is
+    <!-- These commands affect only the uninstalling user: their HKCU Run entry, the tray
+         process they own, and their Scryer desktop profile. A major upgrade removes the old
+         product as part of installing the new one; UPGRADINGPRODUCTCODE is set only in that
+         removal, so the startup preference and the profile both survive an upgrade and are
          cleared only by a real uninstall. -->
     <CustomAction
         Id="StopTrayBeforeRemoval"
@@ -90,9 +90,20 @@
         Execute="immediate"
         Return="ignore"
         Impersonate="yes" />
+    <!-- An uninstall also removes the user's database, logs, WebView2 profile and Credential
+         Manager key. Backup folders inside the profile survive unless they are empty; media
+         libraries and download folders live outside the profile and are never touched. -->
+    <CustomAction
+        Id="RemoveProfileOnUninstall"
+        FileRef="ScryerTrayExe"
+        ExeCommand="--uninstall-cleanup"
+        Execute="immediate"
+        Return="ignore"
+        Impersonate="yes" />
     <InstallExecuteSequence>
       <Custom Action="StopTrayBeforeRemoval" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RemoveTrayStartupBeforeRemoval" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveProfileOnUninstall" After="StopTrayBeforeRemoval" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for Scryer.app. `@VERSION@` is substituted by build-app.sh. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>media.scryer.app</string>
+    <key>CFBundleName</key>
+    <string>Scryer</string>
+    <key>CFBundleDisplayName</key>
+    <string>Scryer</string>
+    <key>CFBundleExecutable</key>
+    <string>scryer-tray</string>
+    <key>CFBundleIconFile</key>
+    <string>scryer.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- The app window loads the Scryer UI from the server this bundle starts,
+         which listens on plain HTTP on the loopback interface. App Transport
+         Security has to be told that is deliberate; nothing else in the bundle
+         is allowed to reach the network in the clear. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
