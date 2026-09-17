@@ -220,9 +220,23 @@ export function resolveSourceType(source: string): string | null {
   return source;
 }
 
+/** The language to show for an audio track, and whether it was inferred from
+ * the track name because the container has no language field. */
+export function resolveAudioLanguage(stream: AudioStreamDetail): {
+  label: string;
+  inferred: boolean;
+} {
+  const inferred = !stream.language && Boolean(stream.inferredLanguage);
+  return {
+    label: formatLanguage(inferred ? (stream.inferredLanguage ?? null) : stream.language),
+    inferred,
+  };
+}
+
 export function formatSingleAudioTrack(stream: AudioStreamDetail): string {
+  const language = resolveAudioLanguage(stream);
   const parts = [
-    formatLanguage(stream.language),
+    language.inferred ? `${language.label}*` : language.label,
     resolveAudioCodec(stream.codec),
     stream.profile,
     resolveAudioChannels(stream.channels, stream.metadata?.channelLayout),
@@ -506,11 +520,11 @@ export function audioTrackRows(file: MediaInfoFile): MediaInfoAudioTrackRow[] {
     if (disposition?.commentary) roleKeys.push("mediaFile.commentary");
     if (disposition?.visualImpaired) roleKeys.push("mediaFile.audioDescription");
     if (disposition?.hearingImpaired) roleKeys.push("mediaFile.hearingImpaired");
-    const languageInferred = !stream.language && Boolean(stream.inferredLanguage);
+    const language = resolveAudioLanguage(stream);
     return {
       index: index + 1,
-      language: formatLanguage(languageInferred ? (stream.inferredLanguage ?? null) : stream.language),
-      languageInferred,
+      language: language.label,
+      languageInferred: language.inferred,
       codec: resolveAudioCodec(stream.codec),
       profile: stream.profile ?? null,
       channels: resolveAudioChannels(stream.channels, stream.metadata?.channelLayout),
