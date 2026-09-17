@@ -43,9 +43,20 @@ pub(crate) struct RecordingJobRunRepo {
     pub(super) list_job_runs_calls: AtomicUsize,
     pub(super) list_job_runs_for_actor_calls: AtomicUsize,
     pub(super) list_active_job_runs_calls: AtomicUsize,
+    /// Stands in for the sqlite writer gate: set it and every job-run write
+    /// takes the same process-wide mutex a real sqlite write would.
+    writer_gate: Option<Arc<Mutex<()>>>,
 }
 
 impl RecordingJobRunRepo {
+    /// A repository whose writes take the given modeled writer gate.
+    pub(super) fn gated_on(writer_gate: Arc<Mutex<()>>) -> Self {
+        Self {
+            writer_gate: Some(writer_gate),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn with_maintenance_action_job_receipts(
         maintenance_action_job_receipts: MaintenanceActionJobReceipts,
     ) -> Self {
@@ -126,6 +137,10 @@ impl JobRunRepository for RecordingJobRunRepo {
     }
 
     async fn update_job_run(&self, run: &JobRunRecord) -> AppResult<JobRunRecord> {
+        let _writer = match &self.writer_gate {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
         let mut runs = self.runs.lock().await;
         if let Some(existing) = runs.iter_mut().find(|candidate| candidate.id == run.id) {
             *existing = run.clone();
