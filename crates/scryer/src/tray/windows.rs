@@ -196,8 +196,8 @@ enum LaunchMode {
 
 pub(super) fn run() -> Result<(), String> {
     match launch_mode()? {
-        LaunchMode::UnregisterStartup => return unregister_startup(),
-        LaunchMode::Shutdown => return shutdown_existing_instance(),
+        LaunchMode::UnregisterStartup => return unattended(unregister_startup()),
+        LaunchMode::Shutdown => return unattended(shutdown_existing_instance()),
         LaunchMode::UninstallCleanup => {
             uninstall_cleanup();
             return Ok(());
@@ -306,6 +306,18 @@ pub(super) fn run() -> Result<(), String> {
     // SAFETY: The state is no longer reachable once the window was destroyed.
     unsafe { drop(Box::from_raw(state)) };
     drop(instance);
+    Ok(())
+}
+
+/// Finish a mode the installer runs. `main` reports an error in a dialog, and
+/// a dialog nobody is there to dismiss would hang a silent install or
+/// uninstall on this process, so these modes report to stderr and leave the
+/// exit code to say the rest.
+fn unattended(result: Result<(), String>) -> Result<(), String> {
+    if let Err(error) = result {
+        eprintln!("Scryer: {error}");
+        std::process::exit(1);
+    }
     Ok(())
 }
 
