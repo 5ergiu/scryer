@@ -14787,6 +14787,80 @@ async fn a_manual_import_writes_the_episode_sidecar() {
     assert!(content.contains("<streamdetails>"), "{content}");
 }
 
+/// The series folder holds the show-level sidecar; the episode itself lands a
+/// season folder below it.
+fn series_folder_of(destination: &std::path::Path) -> &std::path::Path {
+    destination
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("an imported episode lands in a season folder inside the series folder")
+}
+
+#[tokio::test]
+async fn a_manual_import_writes_the_series_sidecar() {
+    // A series whose first file arrives by hand used to get the episode
+    // document and never the show one, because only the automatic path wrote
+    // the folder-level sidecars.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let tvshow_nfo = series_folder_of(&destination).join("tvshow.nfo");
+    assert!(
+        tvshow_nfo.exists(),
+        "the manual path imported the episode without the series document"
+    );
+    let content = std::fs::read_to_string(&tvshow_nfo).expect("read series sidecar");
+    assert!(content.contains("<tvshow>"), "{content}");
+    assert!(
+        content.contains("<title>Fail Closed Pack</title>"),
+        "{content}"
+    );
+}
+
+#[tokio::test]
+async fn a_manual_import_writes_no_series_sidecar_while_the_setting_is_off() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert!(
+        !series_folder_of(&destination).join("tvshow.nfo").exists(),
+        "the setting is off, so no series document may appear either"
+    );
+}
+
 #[tokio::test]
 async fn a_multi_episode_manual_import_writes_one_root_per_episode() {
     let FailClosedPackFixture {

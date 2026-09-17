@@ -1156,6 +1156,86 @@ async fn completed_lookup_reuses_the_rows_the_snapshot_read_already_returned() {
     );
 }
 
+/// The snapshot holds up to `limit` rows for each covered client, so trimming
+/// the merged rows to `limit` would drop a quiet client's completions whenever
+/// a busier one had newer timestamps — while coverage still claimed the whole
+/// scope, so no fallback read would make up for it.
+#[tokio::test]
+async fn completed_lookup_applies_the_snapshot_limit_per_client() {
+    const LIMIT: usize = 3;
+
+    let newest = Utc::now();
+    let mut rows = Vec::new();
+    for index in 0..LIMIT {
+        let mut row = build_completed_download(
+            &format!("Paper.Lantern.2012.1080p.PART{index}"),
+            "/downloads/a",
+            None,
+        );
+        row.client_id = "sab-client".to_string();
+        row.client_type = "sabnzbd".to_string();
+        row.download_client_item_id = format!("sab-job-{index}");
+        row.completed_at = Some(newest - chrono::Duration::seconds(index as i64));
+        rows.push(row);
+    }
+    // Older than every one of the busy client's rows, and therefore the first
+    // casualty of a merged truncation.
+    let mut quiet = build_completed_download("Harbor.Pals.S01E01.1080p", "/downloads/b", None);
+    quiet.client_id = "nzbget-client".to_string();
+    quiet.client_type = "nzbget".to_string();
+    quiet.download_client_item_id = "nzbget-job-1".to_string();
+    quiet.completed_at = Some(newest - chrono::Duration::hours(1));
+    rows.push(quiet);
+
+    let download_client = Arc::new(TestDownloadClient {
+        completed_downloads: Arc::new(Mutex::new(Vec::new())),
+        completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
+        scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let app =
+        build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
+    let mut busy = build_tracked_download("title-1", "movie", "Paper.Lantern.2012.1080p.PART0");
+    busy.client_item.client_id = "sab-client".to_string();
+    busy.client_item.client_type = "sabnzbd".to_string();
+    busy.client_item.download_client_item_id = "sab-job-0".to_string();
+    let mut tracked_quiet = build_tracked_download("title-2", "series", "Harbor.Pals.S01E01.1080p");
+    tracked_quiet.client_item.client_id = "nzbget-client".to_string();
+    tracked_quiet.client_item.client_type = "nzbget".to_string();
+    tracked_quiet.client_item.download_client_item_id = "nzbget-job-1".to_string();
+
+    let prefetched = crate::ports::PrefetchedCompletedDownloads {
+        rows,
+        client_ids: HashSet::from(["sab-client".to_string(), "nzbget-client".to_string()]),
+    };
+
+    let lookup = load_completed_download_lookup_for_items_excluding_client_types(
+        &app,
+        &[busy.client_item.clone(), tracked_quiet.client_item.clone()],
+        LIMIT,
+        &[],
+        CompletedDownloadLookupCycle {
+            resolutions: None,
+            prefetched: Some(&prefetched),
+        },
+    )
+    .await
+    .expect("completed lookup should load");
+
+    assert!(
+        lookup.matches_tracked_download(&tracked_quiet),
+        "the quiet client's completion was truncated away by the busy client's rows"
+    );
+    assert!(lookup.matches_tracked_download(&busy));
+    // Coverage was full, so nothing re-read the history to paper over the loss.
+    assert_eq!(
+        download_client
+            .recent_completed_download_calls
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
 #[tokio::test]
 async fn completed_lookup_falls_back_when_the_snapshot_rows_miss_a_client() {
     let mut completed = build_completed_download("Paper.Lantern.2012.1080p", "/downloads/a", None);
