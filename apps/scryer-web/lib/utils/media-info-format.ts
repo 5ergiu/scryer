@@ -492,35 +492,6 @@ export function mediaInfoReleaseSection(
   ]);
 }
 
-export function mediaInfoAnalysisSection(
-  file: MediaInfoFileDetails,
-  labels: MediaInfoLabels,
-): MediaInfoSection | null {
-  const analysis = file.analysis;
-  if (!analysis) return null;
-  const report = analysis.report;
-  return section("media-info-analysis", "mediaInfo.sectionAnalysis", [
-    row("mediaInfo.revision", String(analysis.revision)),
-    row("mediaInfo.probeStatus", report.status),
-    row("mediaInfo.bytesRead", Number(report.bytesRead).toLocaleString()),
-    row("mediaInfo.seeks", Number(report.seeks).toLocaleString()),
-    row("mediaInfo.elapsed", `${Number(report.elapsedMs).toLocaleString()} ms`),
-    row("mediaInfo.budgetExhausted", report.budgetExhausted ? labels.yes : labels.no),
-    row("mediaInfo.overallBitrate", formatBitrateBps(analysis.overallBitrateBps)),
-    ...analysis.programs.map((program) =>
-      row(
-        "mediaInfo.program",
-        [String(program.id), program.name, program.streamIds.join(", ")]
-          .filter((part): part is string => Boolean(part))
-          .join(" · "),
-      ),
-    ),
-    ...report.warnings.map((warning) =>
-      row("mediaInfo.warning", `${warning.code}: ${warning.message}`),
-    ),
-  ]);
-}
-
 export function audioTrackRows(file: MediaInfoFile): MediaInfoAudioTrackRow[] {
   return audioStreamsForFile(file).map((stream, index) => {
     const disposition = stream.metadata?.disposition;
@@ -603,7 +574,6 @@ export function mediaInfoSections(
     mediaInfoFileSection(file, labels),
     mediaInfoVideoSection(file, labels),
     mediaInfoReleaseSection(file, labels),
-    mediaInfoAnalysisSection(file, labels),
   ].filter((entry): entry is MediaInfoSection => entry != null);
 }
 
