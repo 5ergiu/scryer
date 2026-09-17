@@ -20,6 +20,11 @@ mod settings_bootstrap;
 mod splash;
 mod startup_auth;
 mod startup_migrations;
+/// The window class and messages `scryer-tray.exe` listens on. Both binaries
+/// compile this file so they cannot drift apart.
+#[cfg(windows)]
+#[path = "tray_ipc.rs"]
+mod tray_ipc;
 mod ui_assets;
 #[cfg(windows)]
 mod windows_startup;
@@ -324,8 +329,22 @@ fn application_upgrade_boot_time() -> Option<std::time::SystemTime> {
     None
 }
 
+/// Windows has no `exec`. Either the desktop tray supervises this process and
+/// owns the relaunch, or nothing does and the process starts its own
+/// replacement.
+///
+/// Handing the relaunch to the tray matters for more than tidiness: a
+/// replacement this process spawned would be a grandchild of the tray, so the
+/// tray would go on supervising a process that had already exited — its Stop,
+/// Restart and quit-time teardown would all miss the server the user can see.
 #[cfg(not(unix))]
 fn restart_current_process(spec: &RestartSpec) -> io::Result<()> {
+    #[cfg(windows)]
+    if post_tray_restart() {
+        tracing::info!("handed the restart to the Scryer tray");
+        std::process::exit(0);
+    }
+
     let mut command = Command::new(&spec.executable);
     command.current_dir(&spec.current_dir);
     command.args(&spec.args);
@@ -335,6 +354,46 @@ fn restart_current_process(spec: &RestartSpec) -> io::Result<()> {
     }
     let _child = command.spawn()?;
     std::process::exit(0);
+}
+
+/// Ask the tray to restart the server it owns. False when no tray is running
+/// in this session, or when the message could not be delivered — either way
+/// the caller falls back to starting the replacement itself.
+///
+/// Both halves are required. `SCRYER_TRAY_SUPERVISED` says the tray started
+/// this process; the window says the tray is still there to act. A portable
+/// server the user runs beside the desktop tray has the window in its session
+/// but not the variable, and must not hand its restart to a tray that would
+/// relaunch its own server instead.
+#[cfg(windows)]
+fn post_tray_restart() -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+
+    let tray_supervised = std::env::var("SCRYER_TRAY_SUPERVISED")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if !tray_supervised {
+        return false;
+    }
+
+    let class_name: Vec<u16> = std::ffi::OsStr::new(tray_ipc::CLASS_NAME)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: The class name is a valid nul-terminated UTF-16 string.
+    let window = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
+    if window.is_null() {
+        return false;
+    }
+    // SAFETY: The target is a same-session Scryer tray window identified by its private class.
+    if unsafe { PostMessageW(window, tray_ipc::RESTART_MESSAGE, 0, 0) } == 0 {
+        tracing::error!(
+            error = %std::io::Error::last_os_error(),
+            "failed to ask the Scryer tray to restart the server"
+        );
+        return false;
+    }
+    true
 }
 
 #[derive(Clone)]

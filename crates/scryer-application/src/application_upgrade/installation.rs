@@ -175,6 +175,19 @@ pub fn classify_installation(evidence: &InstallationEvidence) -> InstallationAss
         );
     }
 
+    // A macOS .app is a signed, self-contained bundle: replacing the binaries
+    // inside it in place breaks the bundle's signature and, for an ad-hoc
+    // signature, leaves an app Gatekeeper will refuse to launch. /Applications
+    // is writable by an admin user, so without this the bundle would classify
+    // as Portable and the in-app upgrade would happily corrupt it. The user is
+    // pointed at the download page instead.
+    if evidence.os == InstallationOs::Macos && is_macos_app_bundle(evidence) {
+        return operator_assessment(
+            InstallationKind::Unsupported,
+            EligibilityReason::UnsupportedLayout,
+        );
+    }
+
     if evidence.executable_dir_writable {
         return in_app_assessment(InstallationKind::Portable, evidence.tray_supervised);
     }
@@ -193,6 +206,31 @@ fn env_marker_enabled(value: Option<&str>) -> bool {
 
 fn package_is(value: Option<&str>, expected: &str) -> bool {
     value.is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+}
+
+/// Whether the executable sits in `…/<Something>.app/Contents/MacOS/`, which is
+/// the only layout the Scryer DMG produces.
+fn is_macos_app_bundle(evidence: &InstallationEvidence) -> bool {
+    let Some(executable) = evidence.executable_path.as_deref() else {
+        return false;
+    };
+    let Some(macos_dir) = executable.parent() else {
+        return false;
+    };
+    if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
+        return false;
+    }
+    let Some(contents_dir) = macos_dir.parent() else {
+        return false;
+    };
+    if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return false;
+    }
+    contents_dir
+        .parent()
+        .and_then(|bundle| bundle.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".app"))
 }
 
 fn is_homebrew_layout(evidence: &InstallationEvidence) -> bool {
@@ -265,6 +303,37 @@ mod tests {
                 reason,
                 tray_supervised: evidence.tray_supervised && eligible,
             }
+        );
+    }
+
+    /// The DMG's bundle is writable by an admin user, so the only thing that
+    /// keeps the in-app upgrade from replacing binaries inside a signed bundle
+    /// is the layout itself being recognized. A macOS install outside a bundle
+    /// is still an ordinary portable install.
+    #[test]
+    fn a_macos_app_bundle_is_upgraded_by_download_not_in_place() {
+        let mut bundled = evidence();
+        bundled.os = InstallationOs::Macos;
+        bundled.executable_path = Some(PathBuf::from(
+            "/Applications/Scryer.app/Contents/MacOS/scryer",
+        ));
+        assert_assessment(
+            bundled,
+            InstallationKind::Unsupported,
+            ManagementOwner::Operator,
+            false,
+            EligibilityReason::UnsupportedLayout,
+        );
+
+        let mut loose = evidence();
+        loose.os = InstallationOs::Macos;
+        loose.executable_path = Some(PathBuf::from("/Users/example/scryer/scryer"));
+        assert_assessment(
+            loose,
+            InstallationKind::Portable,
+            ManagementOwner::InApp,
+            true,
+            EligibilityReason::Eligible,
         );
     }
 
