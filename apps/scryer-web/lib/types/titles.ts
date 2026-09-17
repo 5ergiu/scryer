@@ -230,6 +230,8 @@ export type TitleRecord = {
   qualityProfileId?: string | null;
   rootFolderId?: string;
   rootFolderPath?: string;
+  /** Whether renaming is turned on for this title's media type. */
+  renameEnabled?: boolean;
   monitorType?: string | null;
   useSeasonFolders?: boolean | null;
   useSeasonFoldersOverride?: boolean | null;

@@ -450,6 +450,11 @@ pub(crate) async fn maybe_remove_completed_manual_import_download(
                     None,
                 )
                 .await?;
+            // A completion event, not a per-tick write: the store may have
+            // rebound this download, so memoized resolutions are retired.
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
             if let crate::DownloadCleanupClaim::Claimed(record) = app
                 .services
                 .workflow
@@ -2875,24 +2880,19 @@ async fn execute_manual_series_movie_import(
         ));
     }
 
-    let nfo_enabled = app
-        .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
-        .await?;
-    if nfo_enabled {
-        let nfo_path = dest_path.with_extension("nfo");
-        let nfo_content = crate::nfo::render_series_movie_episode_nfo(
-            &link.movie,
-            season_episode.as_deref().unwrap_or_default(),
-            link.after_season,
-        );
-        if let Err(error) = tokio::fs::write(&nfo_path, nfo_content.as_bytes()).await {
-            tracing::warn!(
-                error = %error,
-                path = %nfo_path.display(),
-                "failed to write manual series movie NFO sidecar"
-            );
-        }
-    }
+    write_imported_media_nfo(
+        app,
+        title,
+        &dest_path,
+        Some(imported_media_file_id.as_str()),
+        ImportedSidecar::SeriesMovie {
+            movie: &link.movie,
+            season_episode: season_episode.as_deref().unwrap_or_default(),
+            after_season: link.after_season,
+        },
+        None,
+    )
+    .await;
 
     mark_wanted_completed_for_series_movie_link(app, &title.id, series_movie_link_id, false).await;
     spawn_post_processing(PostProcessingContext {
@@ -3392,6 +3392,21 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     completed,
                 )
                 .await?;
+                // An operator's manual import lands the same file the
+                // automatic path would have, so it earns the same sidecar.
+                // Additional files (samples, extras) are not the episode and
+                // never get one, matching the automatic path.
+                if reason_code.as_deref() != Some("additional_file") {
+                    write_imported_media_nfo(
+                        app,
+                        &title,
+                        &crate::stored_paths::stored_path_to_path_buf(&dest_path),
+                        imported_media_file_id.as_deref(),
+                        ImportedSidecar::Episodes(&target_episodes),
+                        None,
+                    )
+                    .await;
+                }
                 if let Some(size_bytes) = size_bytes {
                     imported_size_bytes =
                         Some(imported_size_bytes.unwrap_or(0).saturating_add(size_bytes));

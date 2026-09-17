@@ -5,16 +5,13 @@ import {
   drainDeferredCollectionEpisodeRefresh,
   planCollectionEpisodeRefresh,
   shouldHandleTitleOverviewActivity,
+  TITLE_OVERVIEW_IMPORT_REFRESH_KINDS,
   titleOverviewReactiveRefreshKinds,
   titleOverviewReactiveRefreshPlan,
 } from "./title-overview-refresh-policy.ts";
 
-const importKinds = new Set([
-  "movie_downloaded",
-  "series_episode_imported",
-  "file_upgraded",
-  "import_rejected",
-]);
+// The kinds both title overviews refresh on, for the title and its downloads.
+const importKinds = TITLE_OVERVIEW_IMPORT_REFRESH_KINDS;
 
 test("title overview activity gate ignores other and missing title ids", () => {
   assert.equal(shouldHandleTitleOverviewActivity("current", "other"), false);
@@ -36,26 +33,24 @@ test("title overview refresh kinds include policy-managed activity", () => {
   assert.equal(kinds.has("metadata_hydration_failed"), true);
 });
 
-test("file analyzed activity is debounced native-only refresh", () => {
+test("file analyzed activity is a debounced refresh", () => {
   assert.deepEqual(titleOverviewReactiveRefreshPlan("file_analyzed", importKinds), {
     type: "refresh",
-    downloadFeedback: false,
     mode: "bulk",
   });
 });
 
-test("subtitle activity is immediate native-only refresh", () => {
+test("subtitle activity is an immediate refresh", () => {
   assert.deepEqual(
     titleOverviewReactiveRefreshPlan("subtitle_downloaded", importKinds),
     {
       type: "refresh",
-      downloadFeedback: false,
       mode: "immediate",
     },
   );
 });
 
-test("import lifecycle activity refreshes native and download feedback", () => {
+test("import lifecycle activity is an immediate refresh", () => {
   for (const kind of [
     "movie_downloaded",
     "series_episode_imported",
@@ -64,7 +59,6 @@ test("import lifecycle activity refreshes native and download feedback", () => {
   ]) {
     assert.deepEqual(titleOverviewReactiveRefreshPlan(kind, importKinds), {
       type: "refresh",
-      downloadFeedback: true,
       mode: "immediate",
     });
   }

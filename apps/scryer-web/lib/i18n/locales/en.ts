@@ -2413,6 +2413,8 @@ const en: LocaleDictionary = {
   "form.indexerNamePlaceholder": "My Newznab Indexer",
   "form.providerTypePlaceholder": "Provider Type",
   "form.subtitleProviderValidation": "Name and provider type are required.",
+  "form.subtitleProviderFacetsRequired":
+    "Select at least one content type. Scryer never searches a provider that has none.",
   "form.apiKeyInputPlaceholder": "api key",
   "form.apiKeyStoredPlaceholder": "stored (leave blank to keep)",
   "form.usernamePlaceholder": "username",
@@ -2669,9 +2671,12 @@ const en: LocaleDictionary = {
   "subtitle.providersRequiredBody":
     "Add and enable at least one subtitle provider before searching for subtitles.",
   "subtitle.providersRequiredAction": "Open subtitle providers",
-  "subtitle.apiKeyRequiredTitle": "Subtitle service unavailable",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Subtitle service unavailable",
+  "subtitle.providerUnavailableBody":
     "Subtitle service is unavailable for this file right now.",
+  "subtitle.subtitlesDisabledTitle": "Subtitle downloads are off",
+  "subtitle.subtitlesDisabledBody":
+    "Turn subtitle downloads on in the subtitle settings before searching for subtitles.",
   "subtitle.blocklist": "Blocklist",
   "subtitle.blocklisted": "Subtitle added to blocklist",
   "subtitle.deleted": "Subtitle deleted",
@@ -2730,7 +2735,7 @@ const en: LocaleDictionary = {
   "settings.libraryUnsavedChanges": "Unsaved changes",
   "settings.nfoWriteOnImportLabel": "Write NFO on Import",
   "settings.nfoWriteOnImportDescription":
-    "Write Kodi/Jellyfin/Emby-compatible .nfo metadata files alongside imported media",
+    "Write Kodi/Jellyfin/Emby-compatible .nfo metadata files alongside imported media; an existing .nfo file is never overwritten",
   "settings.plexmatchWriteOnImportLabel": "Write .plexmatch on Import",
   "settings.plexmatchWriteOnImportDescription":
     "Write Plex hint files for accurate series matching without name guessing",
@@ -5221,7 +5226,6 @@ const en: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -5262,15 +5266,6 @@ const en: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

@@ -50,6 +50,61 @@ enum SubtitleAdmissionFailureMode {
     ReturnTemporaryError,
 }
 
+/// Why an interactive subtitle search returned no results.
+///
+/// The interactive search is driven by a library user who holds Manage
+/// Subtitles and never sees provider configuration, so provider readiness is
+/// reported as a status rather than as an error naming the administrator's
+/// setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubtitleSearchStatus {
+    /// Providers were searched; `results` carries what they returned.
+    Ready,
+    /// The administrator has configured no searchable subtitle provider.
+    NoProviders,
+    /// Providers are configured but none is usable right now.
+    ProviderUnavailable,
+    /// Subtitle handling is switched off for the whole instance.
+    Disabled,
+}
+
+impl SubtitleSearchStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NoProviders => "no_providers",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Everything the interactive subtitle search modal needs, from one call.
+#[derive(Clone, Debug)]
+pub struct SubtitleSearchOutcome {
+    pub status: SubtitleSearchStatus,
+    /// The language actually searched: the requested one, else the
+    /// administrator's preferred language.
+    pub language: String,
+    /// The administrator's configured wanted languages, for the picker.
+    pub available_languages: Vec<String>,
+    /// Empty unless `status` is [`SubtitleSearchStatus::Ready`].
+    pub results: Vec<SubtitleMatch>,
+}
+
+/// The wanted languages an administrator configured, in configured order.
+fn configured_wanted_languages(settings: &AppSubtitleSettings) -> Vec<String> {
+    let mut languages = Vec::with_capacity(settings.languages.len());
+    for language in &settings.languages {
+        let code = language.code.trim();
+        if code.is_empty() || languages.iter().any(|seen| seen == code) {
+            continue;
+        }
+        languages.push(code.to_string());
+    }
+    languages
+}
+
 pub struct DownloadSubtitleForMediaFileRequest {
     pub media_file_id: String,
     pub provider_name: String,
@@ -270,19 +325,34 @@ fn subtitle_rate_limit_signal_from_error(error: &AppError) -> Option<RateLimitSi
     RateLimitSignal::from_error(error)
 }
 
-async fn configured_runtime_subtitle_providers(
+/// What the runtime could assemble when asked for searchable subtitle providers.
+///
+/// Background paths (on-import search, the periodic cycle) want a hard error
+/// they can log and skip on; the interactive search a library user drives wants
+/// to tell that user *why* nothing is searchable without leaking provider
+/// configuration, so it needs the reason separated from the failure.
+enum RuntimeSubtitleProviders {
+    Ready(Vec<PluginSubtitleProviderAdapter>),
+    /// The administrator has configured no subtitle provider the runtime can
+    /// search with.
+    NoProviders(AppError),
+    /// Providers are configured, but none could be instantiated right now
+    /// (missing credential, plugin unavailable, host failure).
+    Unavailable(AppError),
+}
+
+async fn resolve_runtime_subtitle_providers(
     app: &AppUseCase,
-    _settings: &AppSubtitleSettings,
-) -> AppResult<Vec<PluginSubtitleProviderAdapter>> {
+) -> AppResult<RuntimeSubtitleProviders> {
     let Some(plugin_provider) = app
         .services
         .integrations
         .subtitle_plugin_provider
         .available()
     else {
-        return Err(AppError::Repository(
+        return Ok(RuntimeSubtitleProviders::NoProviders(AppError::Repository(
             "subtitle plugin provider is not configured".to_string(),
-        ));
+        )));
     };
     let Some(repo) = app
         .services
@@ -290,9 +360,9 @@ async fn configured_runtime_subtitle_providers(
         .subtitle_provider_configs
         .available()
     else {
-        return Err(AppError::Repository(
+        return Ok(RuntimeSubtitleProviders::NoProviders(AppError::Repository(
             "subtitle provider config repository is not configured".to_string(),
-        ));
+        )));
     };
 
     let now = Utc::now();
@@ -307,9 +377,9 @@ async fn configured_runtime_subtitle_providers(
         .collect::<Vec<_>>();
 
     if enabled_configs.is_empty() {
-        return Err(AppError::Validation(
+        return Ok(RuntimeSubtitleProviders::NoProviders(AppError::Validation(
             "no enabled subtitle providers are configured".to_string(),
-        ));
+        )));
     }
 
     let mut providers = Vec::new();
@@ -342,15 +412,28 @@ async fn configured_runtime_subtitle_providers(
     }
 
     if providers.is_empty() {
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        return Err(AppError::Repository(
-            "no enabled subtitle providers could be instantiated".to_string(),
+        return Ok(RuntimeSubtitleProviders::Unavailable(
+            first_error.unwrap_or_else(|| {
+                AppError::Repository(
+                    "no enabled subtitle providers could be instantiated".to_string(),
+                )
+            }),
         ));
     }
 
-    Ok(providers)
+    Ok(RuntimeSubtitleProviders::Ready(providers))
+}
+
+/// Provider set or a hard error, for the background paths that only log and skip.
+async fn configured_runtime_subtitle_providers(
+    app: &AppUseCase,
+    _settings: &AppSubtitleSettings,
+) -> AppResult<Vec<PluginSubtitleProviderAdapter>> {
+    match resolve_runtime_subtitle_providers(app).await? {
+        RuntimeSubtitleProviders::Ready(providers) => Ok(providers),
+        RuntimeSubtitleProviders::NoProviders(error)
+        | RuntimeSubtitleProviders::Unavailable(error) => Err(error),
+    }
 }
 
 async fn runtime_subtitle_provider_for_download(
@@ -696,12 +779,19 @@ impl AppUseCase {
             .await
     }
 
+    /// Interactive subtitle search for one media file.
+    ///
+    /// Self-contained by design: holding Manage Subtitles on the file's library
+    /// is the only entitlement, and the server resolves settings, provider
+    /// readiness, the preferred language, and the blocklist itself so the
+    /// caller never needs a settings or provider query. `language = None` means
+    /// "use the administrator's preferred language".
     pub async fn search_subtitles_for_media_file(
         &self,
         actor: &User,
         media_file_id: &str,
-        language: &str,
-    ) -> AppResult<Vec<crate::subtitles::SubtitleMatch>> {
+        language: Option<&str>,
+    ) -> AppResult<SubtitleSearchOutcome> {
         let media_file = self
             .services
             .library
@@ -719,20 +809,55 @@ impl AppUseCase {
         self.require_library_permission(
             actor,
             &title.library_id,
-            scryer_domain::LibraryPermission::View,
+            scryer_domain::LibraryPermission::ManageSubtitles,
         )
         .await?;
-        let title = self
-            .services
-            .catalog
-            .titles
-            .get_by_id(&media_file.title_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("title not found".to_string()))?;
         let settings = self.subtitle_settings().await?;
-        let providers = configured_runtime_subtitle_providers(self, &settings).await?;
 
-        let languages = vec![language.trim().to_string()];
+        let available_languages = configured_wanted_languages(&settings);
+        let language = language
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                available_languages
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "eng".to_string())
+            });
+
+        if !settings.enabled {
+            return Ok(SubtitleSearchOutcome {
+                status: SubtitleSearchStatus::Disabled,
+                language,
+                available_languages,
+                results: Vec::new(),
+            });
+        }
+
+        let providers = match resolve_runtime_subtitle_providers(self).await? {
+            RuntimeSubtitleProviders::Ready(providers) => providers,
+            RuntimeSubtitleProviders::NoProviders(error) => {
+                debug!(error = %error, media_file_id, "no subtitle provider to search");
+                return Ok(SubtitleSearchOutcome {
+                    status: SubtitleSearchStatus::NoProviders,
+                    language,
+                    available_languages,
+                    results: Vec::new(),
+                });
+            }
+            RuntimeSubtitleProviders::Unavailable(error) => {
+                warn!(error = %error, media_file_id, "no subtitle provider is usable right now");
+                return Ok(SubtitleSearchOutcome {
+                    status: SubtitleSearchStatus::ProviderUnavailable,
+                    language,
+                    available_languages,
+                    results: Vec::new(),
+                });
+            }
+        };
+
+        let languages = vec![language.clone()];
         let episode_context = media_file_episode_context(self, &media_file).await;
         let query = build_subtitle_query(
             &title,
@@ -767,7 +892,12 @@ impl AppUseCase {
             }
         }
 
-        Ok(filtered)
+        Ok(SubtitleSearchOutcome {
+            status: SubtitleSearchStatus::Ready,
+            language,
+            available_languages,
+            results: filtered,
+        })
     }
 
     pub async fn download_subtitle_for_media_file(
@@ -775,8 +905,6 @@ impl AppUseCase {
         actor: &User,
         request: DownloadSubtitleForMediaFileRequest,
     ) -> AppResult<()> {
-        self.require_app_permission(actor, scryer_domain::AppPermission::ManageCatalogSettings)
-            .await?;
         let DownloadSubtitleForMediaFileRequest {
             media_file_id,
             provider_name,
@@ -805,6 +933,15 @@ impl AppUseCase {
             .get_by_id(&media_file.title_id)
             .await?
             .ok_or_else(|| AppError::NotFound("title not found".to_string()))?;
+        // Downloading a subtitle is a library action, not an instance-settings
+        // action: catalog administrators still pass through the app-permission
+        // override in `effective_library_permission`.
+        self.require_library_permission(
+            actor,
+            &title.library_id,
+            scryer_domain::LibraryPermission::ManageSubtitles,
+        )
+        .await?;
         let settings = self.subtitle_settings().await?;
         let provider =
             runtime_subtitle_provider_for_download(self, &settings, &provider_name).await?;

@@ -1440,7 +1440,25 @@ impl<'a> LocationOperationRunner<'a> {
             tokio::select! {
                 result = &mut move_file => return result,
                 () = tokio::time::sleep(self.pulse_interval) => {
-                    self.pulse(operation, title, copied, progress, plan).await;
+                    // The pulse is a database write, and on sqlite a write holds
+                    // the process-wide writer gate for its whole transaction. So
+                    // is the tail of a file move (it persists the content hashes
+                    // it just proved): a pulse awaited while the file is not
+                    // polled would wait on a gate the stranded file holds, and
+                    // neither would ever finish. Keep the file polled for as
+                    // long as the pulse runs.
+                    let pulse = self.pulse(operation, title, copied, progress, plan);
+                    tokio::pin!(pulse);
+                    let mut finished: Option<AppResult<VerifiedFile>> = None;
+                    loop {
+                        tokio::select! {
+                            result = &mut move_file, if finished.is_none() => finished = Some(result),
+                            () = &mut pulse => break,
+                        }
+                    }
+                    if let Some(result) = finished {
+                        return result;
+                    }
                 }
             }
         }

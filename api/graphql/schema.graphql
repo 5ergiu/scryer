@@ -8857,6 +8857,11 @@ enum LibraryPermissionValue {
 	Allows automatically approving requests for the library.
 	"""
 	AUTO_APPROVE_REQUESTS
+	"""
+	Allows searching, downloading, and removing external subtitles for
+	titles in the library, using the providers an administrator configured.
+	"""
+	MANAGE_SUBTITLES
 }
 
 """
@@ -17956,14 +17961,15 @@ type MutationRoot {
 		inlineShellAcknowledged: Boolean
 	): PostProcessingScriptPayload!
 	"""
-	Search configured providers for subtitles matching a media file and language.
+	Search configured providers for subtitles matching a media file, and
+	report why the search returned what it did.
 	"""
 	searchSubtitles(
 		"""
-		Media file ID and requested subtitle language.
+		Media file ID and, optionally, the subtitle language to search for.
 		"""
 		input: SearchSubtitlesInput!
-	): [SubtitleSearchResult!]!
+	): SubtitleSearchPayload!
 	"""
 	Download a provider subtitle and save it beside the selected media file.
 	"""
@@ -23943,9 +23949,10 @@ input SearchSubtitlesInput {
 	"""
 	mediaFileId: ID!
 	"""
-	Requested subtitle language code.
+	Requested subtitle language code; null or blank searches the
+	administrator's preferred subtitle language.
 	"""
-	language: String!
+	language: String
 }
 
 """
@@ -25136,6 +25143,32 @@ type SubtitleProviderConfigPayload {
 }
 
 """
+Reports one subtitle search: what was searched, what the caller may search
+next, and the provider matches found.
+"""
+type SubtitleSearchPayload {
+	"""
+	Why the search returned these results.
+	"""
+	status: SubtitleSearchStatus!
+	"""
+	Language code that was actually searched; the requested language when
+	one was given, otherwise the administrator's preferred language.
+	"""
+	language: String!
+	"""
+	Subtitle languages an administrator configured, in configured order,
+	for the language picker.
+	"""
+	availableLanguages: [String!]!
+	"""
+	Provider matches found for the searched language; empty unless the
+	status is READY.
+	"""
+	results: [SubtitleSearchResult!]!
+}
+
+"""
 Describes a subtitle provider result and its match characteristics.
 """
 type SubtitleSearchResult {
@@ -25191,6 +25224,29 @@ type SubtitleSearchResult {
 	Whether the subtitle matched the media file hash.
 	"""
 	hashMatched: Boolean!
+}
+
+"""
+Why a subtitle search returned the results it did.
+"""
+enum SubtitleSearchStatus {
+	"""
+	Providers were queried and the results are the matches they returned.
+	"""
+	READY
+	"""
+	No subtitle provider is configured and enabled, so nothing was queried.
+	"""
+	NO_PROVIDERS
+	"""
+	A provider is configured but could not be used for this search, most
+	often because its credentials or plugin are missing.
+	"""
+	PROVIDER_UNAVAILABLE
+	"""
+	Subtitle handling is switched off in catalog settings.
+	"""
+	DISABLED
 }
 
 """
@@ -26781,6 +26837,11 @@ type TitlePayload {
 	Absolute root-folder path for this title; requires view permission on its library.
 	"""
 	rootFolderPath: String!
+	"""
+	Whether renaming is turned on for this title's media type. Rename preview
+	and rename requests for the title are refused while this is false.
+	"""
+	renameEnabled: Boolean!
 	"""
 	Explicit metadata-language override, or null when the global default is inherited.
 	"""

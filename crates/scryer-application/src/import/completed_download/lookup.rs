@@ -48,21 +48,6 @@ impl CompletedDownloadLookup {
         self.coverage = coverage;
     }
 
-    /// Completion timestamp for a client queue item, when this lookup holds a
-    /// matching row keyed by its client-scoped source reference.
-    pub(crate) fn completed_at_for_item(
-        &self,
-        item: &DownloadQueueItem,
-    ) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.by_source
-            .get(&completed_download_lookup_key(
-                Some(&item.client_id),
-                &item.client_type,
-                &item.download_client_item_id,
-            ))
-            .and_then(|completed| completed.completed_at)
-    }
-
     #[cfg(test)]
     pub(super) fn empty_full() -> Self {
         Self {
@@ -73,6 +58,121 @@ impl CompletedDownloadLookup {
 
     pub(super) fn is_exhaustive(&self) -> bool {
         self.coverage == CompletedDownloadLookupCoverage::Full
+    }
+}
+
+/// The inputs a completed-history row contributes to its identity
+/// resolution, plus the freshness fields that prove the row is the same
+/// sighting: configured client, client type, native item id, wire token, and
+/// completion timestamp.
+type CompletedObservationKey = (String, String, String, Option<String>, Option<i64>);
+
+fn completed_observation_key(completed: &CompletedDownload) -> CompletedObservationKey {
+    let (client_id, client_type, item_id) = completed_download_lookup_key(
+        Some(&completed.client_id),
+        &completed.client_type,
+        &completed.download_client_item_id,
+    );
+    (
+        client_id,
+        client_type,
+        item_id,
+        completed
+            .download_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        completed.completed_at.map(|at| at.timestamp()),
+    )
+}
+
+/// Per-poller memo of completed-history identity resolutions.
+///
+/// The download-queue poller re-reads the same completed history six times a
+/// minute, and `resolve_observed_client_job` is a registry transaction per
+/// row. The answer for an unchanged row can only change when the registry
+/// itself changes, so entries are held against
+/// [`AppRuntimeAcquisitionState::download_registry_generation`] and the whole
+/// memo is dropped the moment a binding is created, attached or ended. Rows
+/// that fall out of the client's history drop out of the memo with them, and
+/// a resolution that was merely *unavailable* (a registry read error) or in
+/// `Conflict` (which a later tick may heal) is never memoized.
+///
+/// Bindings are also created and retired inside the workflow stores' own
+/// transactions (a re-add that retires a stale terminal binding and mints its
+/// replacement, a title delete, a queue-item delete). The app-layer call sites
+/// of those paths bump the generation, but the generation is only as good as
+/// that enumeration, so [`COMPLETED_OBSERVATION_MEMO_TTL`] is the backstop: no
+/// entry is reused past it, whatever the generation says. At a 10 s tick that
+/// is one re-resolution per row per 10 minutes instead of six per minute.
+#[derive(Default)]
+pub(crate) struct CompletedDownloadResolutionCache {
+    generation: u64,
+    entries: HashMap<CompletedObservationKey, MemoizedObservationResolution>,
+}
+
+#[derive(Clone)]
+struct MemoizedObservationResolution {
+    resolution: crate::download_identity::ObservedClientJobResolution,
+    /// When this row was actually resolved. Carried across ticks unchanged, so
+    /// reuse cannot slide the expiry forward indefinitely.
+    resolved_at: std::time::Instant,
+}
+
+/// Longest a memoized resolution is trusted, regardless of registry generation.
+const COMPLETED_OBSERVATION_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl CompletedDownloadResolutionCache {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Backdates every entry, so a test can reach the age backstop without
+    /// sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_entries_for_test(&mut self, by: std::time::Duration) {
+        for entry in self.entries.values_mut() {
+            if let Some(resolved_at) = entry.resolved_at.checked_sub(by) {
+                entry.resolved_at = resolved_at;
+            }
+        }
+    }
+}
+
+/// Per-tick reuse handed to the completed-download lookup loader.
+///
+/// `uncached` is the behaviour every caller had before: resolve every row
+/// against the registry, and fetch the completed history from the client.
+pub(crate) struct CompletedDownloadLookupCycle<'a> {
+    pub(crate) resolutions: Option<&'a mut CompletedDownloadResolutionCache>,
+    /// Completed rows already read from the clients this tick, when the
+    /// snapshot read produced them from the same response.
+    pub(crate) prefetched: Option<&'a crate::ports::PrefetchedCompletedDownloads>,
+}
+
+impl CompletedDownloadLookupCycle<'_> {
+    pub(crate) fn uncached() -> Self {
+        Self {
+            resolutions: None,
+            prefetched: None,
+        }
+    }
+}
+
+fn observation_resolution_is_memoizable(
+    resolution: &crate::download_identity::ObservedClientJobResolution,
+) -> bool {
+    match resolution {
+        // A resolved binding and an ended binding are both facts about the
+        // registry's current generation; a bump retires them.
+        crate::download_identity::ObservedClientJobResolution::Resolved(_)
+        | crate::download_identity::ObservedClientJobResolution::BindingAlreadyEnded => true,
+        // A conflict may be healed by a later tick, and an unavailable
+        // resolution is a read failure that must be retried.
+        crate::download_identity::ObservedClientJobResolution::Conflict
+        | crate::download_identity::ObservedClientJobResolution::Unavailable => false,
     }
 }
 
@@ -99,6 +199,7 @@ async fn load_recent_completed_download_lookup_for_items_or_default_excluding_cl
     items: &[DownloadQueueItem],
     limit: usize,
     excluded_client_types: &[&str],
+    cycle: CompletedDownloadLookupCycle<'_>,
 ) -> CompletedDownloadLookup {
     let (client_ids, client_types) = completed_download_client_scope(items, true);
     load_recent_completed_download_lookup_for_client_scope_or_default_excluding_client_types(
@@ -107,8 +208,69 @@ async fn load_recent_completed_download_lookup_for_items_or_default_excluding_cl
         &client_ids,
         &client_types,
         excluded_client_types,
+        cycle,
     )
     .await
+}
+
+/// How much of the requested scope this cycle's own snapshot read already
+/// covers, split per client id.
+///
+/// Coverage is per client, not all-or-nothing: on a mixed fleet the clients
+/// that produced their completed rows from this tick's history read are served
+/// from those rows, and only the clients that did not are asked again. The
+/// split is by client id alone, so the two halves can never both answer for
+/// the same client. A scope that falls back on client *types* (rows that
+/// arrived without a configured client id) cannot be split that way — a type
+/// can name a covered client — so it issues the read it always did.
+struct PrefetchedScopeCoverage {
+    rows: Vec<CompletedDownload>,
+    /// Scope the client still has to be asked about. Empty means this cycle
+    /// answers the whole scope and no client read happens at all.
+    uncovered_client_ids: Vec<String>,
+}
+
+fn prefetched_scope_coverage(
+    cycle: &CompletedDownloadLookupCycle<'_>,
+    limit: usize,
+    client_ids: &[String],
+    client_types: &[String],
+    excluded_client_types: &[&str],
+) -> Option<PrefetchedScopeCoverage> {
+    let prefetched = cycle.prefetched?;
+    if limit == 0 || !client_types.is_empty() || client_ids.is_empty() {
+        return None;
+    }
+
+    let (covered_client_ids, uncovered_client_ids): (Vec<String>, Vec<String>) = client_ids
+        .iter()
+        .cloned()
+        .partition(|client_id| prefetched.client_ids.contains(client_id.trim()));
+    if covered_client_ids.is_empty() {
+        return None;
+    }
+
+    let mut rows = prefetched
+        .rows
+        .iter()
+        .filter(|completed| {
+            crate::ports::completed_download_matches_client_scope(
+                completed,
+                &covered_client_ids,
+                &[],
+                excluded_client_types,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    // Stable, so rows keep the order the snapshot read put them in within a
+    // completion timestamp.
+    rows.sort_by_key(|completed| std::cmp::Reverse(completed.completed_at));
+    rows.truncate(limit);
+    Some(PrefetchedScopeCoverage {
+        rows,
+        uncovered_client_ids,
+    })
 }
 
 async fn load_recent_completed_download_lookup_for_client_scope_or_default_excluding_client_types(
@@ -117,26 +279,68 @@ async fn load_recent_completed_download_lookup_for_client_scope_or_default_exclu
     client_ids: &[String],
     client_types: &[String],
     excluded_client_types: &[&str],
+    mut cycle: CompletedDownloadLookupCycle<'_>,
 ) -> CompletedDownloadLookup {
     if client_ids.is_empty() && client_types.is_empty() {
         return CompletedDownloadLookup::empty_recent();
     }
 
-    match app
-        .services
-        .integrations
-        .download_client
-        .list_recent_completed_downloads_for_client_scope(
-            limit,
-            client_ids,
-            client_types,
-            excluded_client_types,
-        )
-        .await
-    {
+    let coverage = prefetched_scope_coverage(
+        &cycle,
+        limit,
+        client_ids,
+        client_types,
+        excluded_client_types,
+    );
+    let completed_downloads = match coverage {
+        // This cycle's own read answers every client in the scope.
+        Some(coverage) if coverage.uncovered_client_ids.is_empty() => Ok(coverage.rows),
+        // Part of the fleet produced its rows with the snapshot; the rest is
+        // read as before and the two halves are merged.
+        Some(coverage) => {
+            match app
+                .services
+                .integrations
+                .download_client
+                .list_recent_completed_downloads_for_client_scope(
+                    limit,
+                    &coverage.uncovered_client_ids,
+                    client_types,
+                    excluded_client_types,
+                )
+                .await
+            {
+                Ok(mut rows) => {
+                    rows.extend(coverage.rows);
+                    rows.sort_by_key(|completed| std::cmp::Reverse(completed.completed_at));
+                    rows.truncate(limit);
+                    Ok(rows)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        None => {
+            app.services
+                .integrations
+                .download_client
+                .list_recent_completed_downloads_for_client_scope(
+                    limit,
+                    client_ids,
+                    client_types,
+                    excluded_client_types,
+                )
+                .await
+        }
+    };
+
+    match completed_downloads {
         Ok(completed_downloads) => {
-            let canonical_download_ids =
-                resolve_completed_download_observations(app, &completed_downloads).await;
+            let canonical_download_ids = resolve_completed_download_observations_with_cache(
+                app,
+                &completed_downloads,
+                cycle.resolutions.as_deref_mut(),
+            )
+            .await;
             index_completed_download_observations(
                 completed_downloads,
                 canonical_download_ids,
@@ -159,7 +363,14 @@ pub(crate) async fn load_completed_download_lookup_for_items(
     items: &[DownloadQueueItem],
     limit: usize,
 ) -> Option<CompletedDownloadLookup> {
-    load_completed_download_lookup_for_items_excluding_client_types(app, items, limit, &[]).await
+    load_completed_download_lookup_for_items_excluding_client_types(
+        app,
+        items,
+        limit,
+        &[],
+        CompletedDownloadLookupCycle::uncached(),
+    )
+    .await
 }
 
 pub(crate) async fn load_completed_download_lookup_for_items_excluding_client_types(
@@ -167,6 +378,7 @@ pub(crate) async fn load_completed_download_lookup_for_items_excluding_client_ty
     items: &[DownloadQueueItem],
     limit: usize,
     excluded_client_types: &[&str],
+    cycle: CompletedDownloadLookupCycle<'_>,
 ) -> Option<CompletedDownloadLookup> {
     if !items.iter().any(download_queue_item_needs_completed_lookup) {
         return None;
@@ -178,6 +390,7 @@ pub(crate) async fn load_completed_download_lookup_for_items_excluding_client_ty
             items,
             limit,
             excluded_client_types,
+            cycle,
         )
         .await,
     )
@@ -189,6 +402,7 @@ pub(crate) async fn load_completed_download_lookup_for_tracked_client_items_excl
     limit: usize,
     excluded_client_types: &[&str],
 ) -> Option<CompletedDownloadLookup> {
+    let cycle = CompletedDownloadLookupCycle::uncached();
     if items.is_empty() {
         return None;
     }
@@ -205,9 +419,76 @@ pub(crate) async fn load_completed_download_lookup_for_tracked_client_items_excl
             &client_ids,
             &client_types,
             excluded_client_types,
+            cycle,
         )
         .await,
     )
+}
+
+/// Resolve every row, reusing memoized answers for rows this poller already
+/// resolved against the current registry generation.
+///
+/// Without a cache this is exactly [`resolve_completed_download_observations`].
+pub(super) async fn resolve_completed_download_observations_with_cache(
+    app: &AppUseCase,
+    completed_downloads: &[CompletedDownload],
+    cache: Option<&mut CompletedDownloadResolutionCache>,
+) -> Vec<crate::download_identity::ObservedClientJobResolution> {
+    let Some(cache) = cache else {
+        return resolve_completed_download_observations(app, completed_downloads).await;
+    };
+
+    let generation = app.runtime.acquisition.download_registry_generation();
+    if cache.generation != generation {
+        cache.entries.clear();
+        cache.generation = generation;
+    }
+
+    let mut resolutions = Vec::with_capacity(completed_downloads.len());
+    // Rebuilt from this listing so a row the client no longer reports drops
+    // out of the memo with it.
+    let mut retained = HashMap::with_capacity(completed_downloads.len());
+    for completed in completed_downloads {
+        let key = completed_observation_key(completed);
+        if let Some(memoized) = cache
+            .entries
+            .get(&key)
+            .filter(|memoized| memoized.resolved_at.elapsed() < COMPLETED_OBSERVATION_MEMO_TTL)
+        {
+            // The entry keeps its original `resolved_at`, so reuse cannot push
+            // the age backstop out forever.
+            retained.insert(key, memoized.clone());
+            resolutions.push(memoized.resolution.clone());
+            continue;
+        }
+
+        let resolution = crate::download_identity::resolve_observed_client_job(
+            app,
+            crate::download_identity::observed_completed_job(completed),
+        )
+        .await;
+        if observation_resolution_is_memoizable(&resolution) {
+            retained.insert(
+                key,
+                MemoizedObservationResolution {
+                    resolution: resolution.clone(),
+                    resolved_at: std::time::Instant::now(),
+                },
+            );
+        }
+        resolutions.push(resolution);
+    }
+
+    // A live resolution can itself have mutated the registry (it attaches or
+    // mints bindings). Anything decided against the older generation is
+    // retired rather than carried forward.
+    if app.runtime.acquisition.download_registry_generation() == generation {
+        cache.entries = retained;
+    } else {
+        cache.entries.clear();
+        cache.generation = app.runtime.acquisition.download_registry_generation();
+    }
+    resolutions
 }
 
 pub(super) async fn resolve_completed_download_observations(

@@ -252,6 +252,12 @@ impl AppUseCase {
                     )));
                 }
             };
+            // The store may have retired a stale terminal binding and minted a
+            // new one inside its own transaction, so every memoized observation
+            // resolution taken against the old registry state is retired.
+            self.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
             if let CanonicalDownloadIdentityDisposition::AdoptedExisting { download_id } =
                 disposition
                 && download_id != effective_download_id
@@ -325,6 +331,11 @@ impl AppUseCase {
                             .await
                             .is_ok()
                     {
+                        // The store inserts an active binding for the ambiguous
+                        // submission, so memoized resolutions are retired.
+                        self.runtime
+                            .acquisition
+                            .invalidate_download_registry_observations();
                         self.runtime
                             .acquisition
                             .download_submission_guards
@@ -364,6 +375,10 @@ impl AppUseCase {
                             )));
                         }
                     };
+                    // A binding was created or re-bound inside the store.
+                    self.runtime
+                        .acquisition
+                        .invalidate_download_registry_observations();
                     self.runtime
                         .acquisition
                         .download_submission_guards
@@ -526,6 +541,10 @@ impl AppUseCase {
                 .download_submissions
                 .delete_by_client_item_id(&ClientJobLocator::from_submission(&existing))
                 .await?;
+            // The delete ends the submission's binding inside the store.
+            self.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
             state.forget(existing.download_id);
             self.runtime
                 .acquisition
@@ -632,6 +651,12 @@ impl AppUseCase {
                     } else {
                         false
                     };
+                    if persisted {
+                        // The store inserted an active binding for it.
+                        self.runtime
+                            .acquisition
+                            .invalidate_download_registry_observations();
+                    }
                     if !persisted {
                         self.runtime
                             .acquisition
@@ -683,6 +708,11 @@ impl AppUseCase {
                         &title_id,
                         UncertainDownloadSubmissionClaim::ambiguous(download_id, Some(ambiguous)),
                     );
+            } else {
+                // The store inserted an active binding for it.
+                self.runtime
+                    .acquisition
+                    .invalidate_download_registry_observations();
             }
             return Err(AppError::DownloadSubmitAmbiguous(format!(
                 "download client returned a different canonical identity for title {title_id}"
@@ -729,6 +759,11 @@ impl AppUseCase {
                 ));
             }
         };
+        // A grab's binding was created (or a stale terminal one retired and
+        // replaced) inside the store's own transaction.
+        self.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
         if let CanonicalDownloadIdentityDisposition::AdoptedExisting {
             download_id: effective_download_id,
         } = identity_disposition

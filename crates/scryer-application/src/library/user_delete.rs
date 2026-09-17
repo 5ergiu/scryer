@@ -950,10 +950,22 @@ impl AppUseCase {
         actor: &User,
         context: &UserDeleteContext,
     ) -> AppResult<()> {
-        let title_id = match context {
-            UserDeleteContext::Title(context) => &context.title_id,
-            UserDeleteContext::MediaFile(context) => &context.title_id,
-            UserDeleteContext::Subtitle(context) => &context.title_id,
+        // Removing an external subtitle is subtitle management, not title
+        // management; Manage Titles still passes because it shadows Manage
+        // Subtitles. Deleting a title or a media file stays on Manage Titles.
+        let (title_id, permission) = match context {
+            UserDeleteContext::Title(context) => (
+                &context.title_id,
+                scryer_domain::LibraryPermission::ManageTitles,
+            ),
+            UserDeleteContext::MediaFile(context) => (
+                &context.title_id,
+                scryer_domain::LibraryPermission::ManageTitles,
+            ),
+            UserDeleteContext::Subtitle(context) => (
+                &context.title_id,
+                scryer_domain::LibraryPermission::ManageSubtitles,
+            ),
         };
         let title = self
             .services
@@ -962,12 +974,8 @@ impl AppUseCase {
             .get_by_id(title_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("title {title_id}")))?;
-        self.require_library_permission(
-            actor,
-            &title.library_id,
-            scryer_domain::LibraryPermission::ManageTitles,
-        )
-        .await
+        self.require_library_permission(actor, &title.library_id, permission)
+            .await
     }
 
     async fn resolve_title_delete_context(&self, title_id: &str) -> AppResult<UserDeleteContext> {

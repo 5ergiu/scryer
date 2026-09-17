@@ -151,6 +151,83 @@ async fn category_admission_snapshot_keeps_current_legacy_shadowed_and_moved_rou
 }
 
 #[tokio::test]
+async fn feedback_scope_narrows_to_the_routing_category_until_a_live_download_appears() {
+    // The feedback scope is what a client adapter may narrow a server-side
+    // read with. With routing as the only source it names one category; once a
+    // download is live on that client the scope carries the empty "cannot be
+    // named" marker, because that download's grab-time category is not
+    // recorded and may predate the current routing.
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_scoped_value(
+            SETTINGS_SCOPE_SYSTEM,
+            DOWNLOAD_CLIENT_ROUTING_SETTINGS_KEY,
+            "movie",
+            &serde_json::json!({ "sab-client": { "enabled": true, "category": "tv" } }).to_string(),
+        )
+        .await;
+
+    let (app, _) =
+        bootstrap_with_search_settings_and_indexer(settings, Arc::new(MockIndexerClient));
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let app =
+        app.with_test_overrides(|builder| builder.with_download_submissions(submissions.clone()));
+    app.refresh_download_client_category_admission()
+        .await
+        .expect("load category admission snapshot");
+    let snapshot = app
+        .download_client_category_admission_snapshot()
+        .await
+        .expect("category admission snapshot");
+    assert_eq!(
+        snapshot.feedback_scope_for_client("sab-client").categories,
+        vec!["tv".to_string()],
+        "routing alone should name exactly the configured category"
+    );
+
+    submissions
+        .update_tracked_state(
+            &ClientJobLocator::new(Some("sab-client"), "sabnzbd", "sab-job-1"),
+            "downloading",
+        )
+        .await
+        .expect("record a live download on the client");
+    app.refresh_download_client_category_admission()
+        .await
+        .expect("reload category admission snapshot");
+    let snapshot = app
+        .download_client_category_admission_snapshot()
+        .await
+        .expect("category admission snapshot");
+    let categories = snapshot.feedback_scope_for_client("sab-client").categories;
+    assert!(
+        categories.iter().any(|category| category.trim().is_empty()),
+        "a live download must disable server-side category filtering, got {categories:?}"
+    );
+
+    // A terminal download is no longer in flight, so the filter comes back.
+    submissions
+        .update_tracked_state(
+            &ClientJobLocator::new(Some("sab-client"), "sabnzbd", "sab-job-1"),
+            "imported",
+        )
+        .await
+        .expect("terminalize the download");
+    app.refresh_download_client_category_admission()
+        .await
+        .expect("reload category admission snapshot");
+    let snapshot = app
+        .download_client_category_admission_snapshot()
+        .await
+        .expect("category admission snapshot");
+    assert_eq!(
+        snapshot.feedback_scope_for_client("sab-client").categories,
+        vec!["tv".to_string()],
+        "a settled download should not keep the filter off"
+    );
+}
+
+#[tokio::test]
 async fn library_settings_download_client_routing_override_normalizes_current_clients_and_hydrates_new_ones()
  {
     let settings = Arc::new(StoredSettingsRepo::default());

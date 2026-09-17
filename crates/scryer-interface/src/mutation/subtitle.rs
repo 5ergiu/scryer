@@ -1,5 +1,7 @@
-use async_graphql::{Context, ID, InputObject, Object, SimpleObject};
-use scryer_application::{AppError, DownloadSubtitleForMediaFileRequest};
+use async_graphql::{Context, Enum, ID, InputObject, Object, SimpleObject};
+use scryer_application::{
+    AppError, DownloadSubtitleForMediaFileRequest, SubtitleSearchStatus as AppSubtitleSearchStatus,
+};
 
 use crate::context::{actor_from_ctx, app_from_ctx, to_gql_error};
 
@@ -37,8 +39,9 @@ pub struct SubtitleMutations;
 pub struct SearchSubtitlesInput {
     /// Media file ID whose release metadata is used for matching.
     pub media_file_id: ID,
-    /// Requested subtitle language code.
-    pub language: String,
+    /// Requested subtitle language code; null or blank searches the
+    /// administrator's preferred subtitle language.
+    pub language: Option<String>,
 }
 
 #[derive(InputObject)]
@@ -128,6 +131,49 @@ pub struct SubtitleSearchResult {
     pub hash_matched: bool,
 }
 
+/// Why a subtitle search returned the results it did.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum SubtitleSearchStatus {
+    /// Providers were queried and the results are the matches they returned.
+    Ready,
+    /// No subtitle provider is configured and enabled, so nothing was queried.
+    NoProviders,
+    /// A provider is configured but could not be used for this search, most
+    /// often because its credentials or plugin are missing.
+    ProviderUnavailable,
+    /// Subtitle handling is switched off in catalog settings.
+    Disabled,
+}
+
+impl From<AppSubtitleSearchStatus> for SubtitleSearchStatus {
+    fn from(status: AppSubtitleSearchStatus) -> Self {
+        match status {
+            AppSubtitleSearchStatus::Ready => Self::Ready,
+            AppSubtitleSearchStatus::NoProviders => Self::NoProviders,
+            AppSubtitleSearchStatus::ProviderUnavailable => Self::ProviderUnavailable,
+            AppSubtitleSearchStatus::Disabled => Self::Disabled,
+        }
+    }
+}
+
+#[derive(SimpleObject)]
+/// Reports one subtitle search: what was searched, what the caller may search
+/// next, and the provider matches found.
+pub struct SubtitleSearchPayload {
+    /// Why the search returned these results.
+    pub status: SubtitleSearchStatus,
+    /// Language code that was actually searched; the requested language when
+    /// one was given, otherwise the administrator's preferred language.
+    pub language: String,
+    /// Subtitle languages an administrator configured, in configured order,
+    /// for the language picker.
+    pub available_languages: Vec<String>,
+    /// Provider matches found for the searched language; empty unless the
+    /// status is READY.
+    pub results: Vec<SubtitleSearchResult>,
+}
+
 fn from_subtitle_match(
     result: scryer_application::subtitles::SubtitleMatch,
 ) -> SubtitleSearchResult {
@@ -150,21 +196,32 @@ fn from_subtitle_match(
 
 #[Object]
 impl SubtitleMutations {
-    /// Search configured providers for subtitles matching a media file and language.
+    /// Search configured providers for subtitles matching a media file, and
+    /// report why the search returned what it did.
     async fn search_subtitles(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Media file ID and requested subtitle language.")]
+        #[graphql(desc = "Media file ID and, optionally, the subtitle language to search for.")]
         input: SearchSubtitlesInput,
-    ) -> GqlResult<Vec<SubtitleSearchResult>> {
+    ) -> GqlResult<SubtitleSearchPayload> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
         let media_file_id = input.media_file_id.to_string();
-        let results = app
-            .search_subtitles_for_media_file(&actor, &media_file_id, &input.language)
+        let requested_language = input.language.as_deref();
+        let outcome = app
+            .search_subtitles_for_media_file(&actor, &media_file_id, requested_language)
             .await
             .map_err(to_gql_error)?;
-        Ok(results.into_iter().map(from_subtitle_match).collect())
+        Ok(SubtitleSearchPayload {
+            status: outcome.status.into(),
+            language: outcome.language,
+            available_languages: outcome.available_languages,
+            results: outcome
+                .results
+                .into_iter()
+                .map(from_subtitle_match)
+                .collect(),
+        })
     }
 
     /// Download a provider subtitle and save it beside the selected media file.

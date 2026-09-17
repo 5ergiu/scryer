@@ -1786,21 +1786,6 @@ async fn import_movie_download(
     )
     .await?;
 
-    let nfo_enabled = app
-        .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
-        .await?;
-    if nfo_enabled {
-        let nfo_path = dest_path.with_extension("nfo");
-        let nfo_content = render_movie_nfo(title);
-        if let Err(err) = tokio::fs::write(&nfo_path, nfo_content.as_bytes()).await {
-            tracing::warn!(
-                error = %err,
-                path = %nfo_path.display(),
-                "failed to write movie NFO sidecar"
-            );
-        }
-    }
-
     // The persisted bar must be the score of the bytes that actually landed
     // (I7), and the transfer can change the size. Same context, same pipeline,
     // one number different — no second profile resolution.
@@ -1878,6 +1863,19 @@ async fn import_movie_download(
             None
         }
     };
+
+    // Written after the media file exists so the sidecar can carry the
+    // analysis of the bytes that actually landed, rather than describing a
+    // file nothing has looked at yet.
+    write_imported_media_nfo(
+        app,
+        title,
+        &dest_path,
+        imported_media_file_id.as_deref(),
+        ImportedSidecar::Movie,
+        None,
+    )
+    .await;
 
     persist_file_import_artifact(
         app,
@@ -2737,25 +2735,20 @@ async fn import_series_movie_download(
         );
     }
 
-    // Write Jellyfin-compatible NFO with airsbefore_season
-    let nfo_enabled = app
-        .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
-        .await?;
-    if nfo_enabled {
-        let nfo_path = dest_path.with_extension("nfo");
-        let nfo_content = crate::nfo::render_series_movie_episode_nfo(
+    // Write the Jellyfin/Kodi-compatible season 0 special sidecar.
+    write_imported_media_nfo(
+        app,
+        title,
+        &dest_path,
+        imported_media_file_id.as_deref(),
+        ImportedSidecar::SeriesMovie {
             movie,
-            season_episode.as_deref().unwrap_or_default(),
-            link.after_season,
-        );
-        if let Err(err) = tokio::fs::write(&nfo_path, nfo_content.as_bytes()).await {
-            tracing::warn!(
-                error = %err,
-                path = %nfo_path.display(),
-                "failed to write series movie NFO sidecar"
-            );
-        }
-    }
+            season_episode: season_episode.as_deref().unwrap_or_default(),
+            after_season: link.after_season,
+        },
+        None,
+    )
+    .await;
 
     mark_wanted_completed_for_series_movie_link(app, &title.id, series_movie_link_id, true).await;
 

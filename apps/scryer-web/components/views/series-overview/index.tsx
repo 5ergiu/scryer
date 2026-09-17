@@ -1,5 +1,5 @@
 import * as React from "react";
-import { FileInput, FolderOpen, Trash2, X } from "lucide-react";
+import { FolderOpen, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,6 +43,16 @@ import type {
 import type { DownloadQueueItem } from "@/lib/types/download-queue";
 import { TitleHistoryModal } from "@/components/common/title-history-modal";
 import { TitleSearchDownloadClientNotice } from "@/components/common/title-search-download-client-notice";
+import { TitleBlockedReleasesSection } from "@/components/common/title-blocked-releases-section";
+import {
+  TitleManualImportButton,
+  type ManualImportLauncher,
+} from "@/components/common/manual-import-launcher";
+import {
+  TitleRenamePlan,
+  TitleRenamePreviewButton,
+} from "@/components/common/title-rename-controls";
+import type { TitleRenameController } from "@/lib/hooks/use-title-rename";
 import {
   episodePanelReducer,
   initialEpisodePanelState,
@@ -56,7 +66,7 @@ import {
   formatDate,
   formatFileSize,
 } from "./helpers";
-import { OverviewControlPanel } from "../overview-control-panel";
+import { TitleOverviewActions } from "../title-overview-actions";
 import { OverviewBackLink } from "../overview-back-link";
 import {
   TitleMoreLikeThisStrip,
@@ -66,10 +76,10 @@ import { TitleCastStrip } from "../title-cast-strip";
 import { TitleDubCastStrip } from "../title-dub-cast-strip";
 import { titleCastOriginalCredits } from "@/lib/utils/title-cast";
 import { TitleRatingsStrip } from "../title-ratings-strip";
-import { TitleSettingsPanel } from "./title-settings-panel";
+import { TitleSettingsPanel } from "../title-settings-panel";
 import { SeasonSection, SeriesMovieTimelineSection } from "./season-section";
 import type { TitleOptionUpdates } from "@/lib/types/title-options";
-import type { LibraryRecord, LibraryRootRecord } from "@/lib/types/titles";
+import type { LibraryRecord } from "@/lib/types/titles";
 import { localizedTitleStatus } from "../overview-localization";
 import type { ExternalSubtitleRecord } from "@/lib/types/subtitles";
 import {
@@ -150,10 +160,7 @@ type Props = {
   onRefreshAndScan?: () => Promise<void> | void;
   onAutoSearchEpisode?: (episode: CollectionEpisode) => Promise<void> | void;
   onAutoSearchSeriesMovie?: (link: SeriesMovieLink) => Promise<void> | void;
-  qualityProfiles?: { id: string; name: string }[];
-  defaultRootFolder?: string;
-  renameEnabled?: boolean;
-  rootFolders?: LibraryRootRecord[];
+  rename?: TitleRenameController;
   /**
    * Every library the settings panel's move workflow may offer as a
    * destination. Empty falls back to the title's own library and its roots,
@@ -162,7 +169,7 @@ type Props = {
   libraries?: LibraryRecord[];
   onUpdateTitleOptions?: (options: TitleOptionUpdates) => Promise<void>;
   completedDownloads?: DownloadQueueItem[];
-  onOpenManualImport?: (item: DownloadQueueItem) => void;
+  manualImport?: ManualImportLauncher;
   initialEpisodeId?: string | null;
   seasonSearchResultsByCollection?: Record<string, Release[]>;
   seasonSearchLoadingByCollection?: Record<string, boolean>;
@@ -230,14 +237,11 @@ function SeriesOverviewViewImpl({
   onRefreshAndScan,
   onAutoSearchEpisode,
   onAutoSearchSeriesMovie,
-  qualityProfiles,
-  defaultRootFolder,
-  renameEnabled,
-  rootFolders,
+  rename,
   libraries,
   onUpdateTitleOptions,
   completedDownloads,
-  onOpenManualImport,
+  manualImport,
   initialEpisodeId,
   seasonSearchResultsByCollection,
   seasonSearchLoadingByCollection,
@@ -1167,35 +1171,57 @@ function SeriesOverviewViewImpl({
       </Card>
 
       {canManageTitle ? (
-        <OverviewControlPanel
-          monitored={title.monitored}
-          monitoredUpdating={monitoredUpdating}
-          searchMonitoredLoading={searchMonitoredLoading}
-          refreshAndScanLoading={refreshAndScanLoading}
-          deleteLoading={deleteLoading}
-          onToggleMonitoring={onSetTitleMonitored ? () => void onSetTitleMonitored(!title.monitored) : undefined}
-          onSearchMonitored={onSearchMonitored ? () => void onSearchMonitored() : undefined}
-          onRefreshAndScan={onRefreshAndScan ? () => void onRefreshAndScan() : undefined}
-          onRequestDelete={onRequestDeleteTitle}
-          onHistory={handleOpenTitleHistory}
-          searchNotice={searchPrerequisiteNotice}
-          settingsPanel={
-            onUpdateTitleOptions && qualityProfiles && defaultRootFolder ? (
-              <TitleSettingsPanel
-                title={title}
-                qualityProfiles={qualityProfiles}
-                defaultRootFolder={defaultRootFolder}
-                renameEnabled={renameEnabled !== false}
-                rootFolders={rootFolders ?? []}
-                libraries={libraries ?? []}
-                onUpdateTitleOptions={onUpdateTitleOptions}
-                onTitleChanged={onTitleChanged}
-                onOpenFixMatch={onOpenFixMatch}
-                experimentalFeaturesEnabled={experimentalFeaturesEnabled}
-              />
-            ) : undefined
-          }
-        />
+        <div>
+          <TitleOverviewActions
+            key={title.id}
+            monitored={title.monitored}
+            monitoredUpdating={monitoredUpdating}
+            onToggleMonitoring={
+              onSetTitleMonitored
+                ? () => void onSetTitleMonitored(!title.monitored)
+                : undefined
+            }
+            searchLoading={searchMonitoredLoading}
+            onSearch={() => void onSearchMonitored?.()}
+            searchNotice={searchPrerequisiteNotice}
+            refreshLoading={refreshAndScanLoading}
+            onRefresh={() => void onRefreshAndScan?.()}
+            onHistory={handleOpenTitleHistory}
+            settingsPanel={
+              onUpdateTitleOptions ? (
+                <TitleSettingsPanel
+                  id="series-overview-title-settings"
+                  idPrefix="series-overview-settings"
+                  title={title}
+                  libraries={libraries ?? []}
+                  onUpdateTitleOptions={onUpdateTitleOptions}
+                  onTitleChanged={onTitleChanged}
+                  onOpenFixMatch={onOpenFixMatch}
+                  experimentalFeaturesEnabled={experimentalFeaturesEnabled}
+                  footerActions={
+                    rename ? (
+                      <TitleRenamePreviewButton
+                        rename={rename}
+                        id="series-overview-rename-preview"
+                        dataUi="series-overview-rename-preview"
+                      />
+                    ) : null
+                  }
+                  footerContent={
+                    rename?.plan ? (
+                      <TitleRenamePlan
+                        rename={rename}
+                        applyButtonId="series-overview-rename-apply"
+                      />
+                    ) : null
+                  }
+                />
+              ) : undefined
+            }
+            deleteLoading={deleteLoading}
+            onDelete={onRequestDeleteTitle}
+          />
+        </div>
       ) : null}
 
       <div>
@@ -1234,15 +1260,12 @@ function SeriesOverviewViewImpl({
                     </Button>
                   </>
                 ) : null}
-                {canManageTitle && onOpenManualImport && completedDownloads && completedDownloads.length > 0 ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onOpenManualImport(completedDownloads[0])}
-                  >
-                    <FileInput className="mr-1.5 h-4 w-4" />
-                    {t("queue.manualImport")}
-                  </Button>
+                {manualImport ? (
+                  <TitleManualImportButton
+                    launcher={manualImport}
+                    completedDownloads={completedDownloads ?? []}
+                    canManageTitle={canManageTitle}
+                  />
                 ) : null}
               </div>
             </div>
@@ -1262,7 +1285,8 @@ function SeriesOverviewViewImpl({
                       mediaFilesBySeriesMovieLink={mediaFilesBySeriesMovieLink}
                       onLoadSeriesMovieDetail={onLoadSeriesMovieDetail}
                       subtitleDownloads={subtitleDownloads}
-                      onRefreshSubtitles={canManageTitle ? onRefreshSubtitles : undefined}
+                      libraryId={title?.libraryId ?? null}
+                      onRefreshSubtitles={onRefreshSubtitles}
                       seriesMovieSearchResultsByLink={seriesMovieSearchResultsByLink}
                       seriesMovieSearchLoadingByLink={seriesMovieSearchLoadingByLink}
                       seriesMovieSearchAttemptedByLink={seriesMovieSearchAttemptedByLink}
@@ -1307,7 +1331,8 @@ function SeriesOverviewViewImpl({
                     activeDownloadEpisodeIds={activeDownloadEpisodeIds}
                     downloadQueueItemByEpisodeId={primaryQueueItemByEpisodeId}
                     subtitleDownloads={subtitleDownloads}
-                    onRefreshSubtitles={canManageTitle ? onRefreshSubtitles : undefined}
+                    libraryId={title?.libraryId ?? null}
+                    onRefreshSubtitles={onRefreshSubtitles}
                     onMakePrimaryFile={canManageTitle ? onMakePrimaryFile : undefined}
                     primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
                     releaseBlocklistEntries={releaseBlocklistEntries}
@@ -1374,65 +1399,13 @@ function SeriesOverviewViewImpl({
 
       <TitleDubCastStrip credits={title.credits} />
 
-      <details className="rounded-xl border border-border bg-card text-card-foreground overflow-hidden">
-        <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-card-foreground">
-          <span className="inline-flex items-center gap-2">
-            {t("title.blockedReleases")}
-            <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-              {releaseBlocklistEntries.length}
-            </span>
-          </span>
-        </summary>
-        <div className="border-t border-border p-4">
-          {releaseBlocklistEntries.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              {t("title.noBlockedReleases")}
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {releaseBlocklistEntries.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="rounded-lg border border-border bg-background/35 p-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="break-words text-sm text-card-foreground">
-                        {entry.releaseName || t("episode.untitledRelease")}
-                      </p>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                        <span className="text-muted-foreground/60">
-                          {formatDate(entry.attemptedAt, dateTimeFormat)}
-                        </span>
-                        {entry.errorMessage ? (
-                          <span className="rounded bg-[var(--scry-danger-bg)] px-2 py-0.5 text-[var(--scry-danger-text)]">
-                            {entry.errorMessage}
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                    {canManageTitle && onClearReleaseBlocklistEntry ? (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        className="h-8 shrink-0 px-3"
-                        disabled={clearingReleaseBlocklistEntryId === entry.id}
-                        onClick={() => onClearReleaseBlocklistEntry(entry.id)}
-                      >
-                        {clearingReleaseBlocklistEntryId === entry.id ? (
-                          <LoadingMark className="size-3.5" />
-                        ) : null}
-                        <span>{t("label.clear")}</span>
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </details>
+      <TitleBlockedReleasesSection
+        key={title.id}
+        entries={releaseBlocklistEntries}
+        canManageTitle={canManageTitle && Boolean(onClearReleaseBlocklistEntry)}
+        clearingEntryId={clearingReleaseBlocklistEntryId ?? null}
+        onClear={(entryId) => onClearReleaseBlocklistEntry?.(entryId)}
+      />
 
       {title ? (
         <TitleHistoryModal

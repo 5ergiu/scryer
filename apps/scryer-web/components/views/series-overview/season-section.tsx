@@ -74,6 +74,8 @@ type SeasonSectionProps = {
   activeDownloadEpisodeIds?: ReadonlySet<string>;
   downloadQueueItemByEpisodeId?: Record<string, DownloadQueueItem | undefined>;
   subtitleDownloads?: ExternalSubtitleRecord[];
+  /** Library the series' media files belong to; gates subtitle controls. */
+  libraryId: string | null;
   onRefreshSubtitles?: () => Promise<void> | void;
   releaseBlocklistEntries: TitleReleaseBlocklistEntry[];
   clearingReleaseBlocklistEntryId?: string | null;
@@ -187,6 +189,7 @@ function SeasonSectionImpl({
   releaseBlocklistEntries,
   clearingReleaseBlocklistEntryId,
   subtitleDownloads,
+  libraryId,
   onRefreshSubtitles,
   searchResultsByEpisode,
   searchIndexerProgressByEpisode,
@@ -574,6 +577,7 @@ function SeasonSectionImpl({
                       searchBlocked={searchBlockedByEpisode[episode.id] === true}
                       searchLoading={searchLoadingByEpisode[episode.id] === true}
                       subtitleDownloads={stableSubtitleDownloads}
+                      libraryId={libraryId}
                       primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
                     />
                   ))}
@@ -634,6 +638,7 @@ function SeasonSectionImpl({
                         searchBlocked={searchBlockedByEpisode[episode.id] === true}
                         searchLoading={searchLoadingByEpisode[episode.id] === true}
                         subtitleDownloads={stableSubtitleDownloads}
+                        libraryId={libraryId}
                         primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
                       />
                     ))}

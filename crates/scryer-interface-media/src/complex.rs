@@ -511,6 +511,18 @@ impl TitlePayload {
         .await
     }
 
+    /// Whether renaming is turned on for this title's media type. Rename preview
+    /// and rename requests for the title are refused while this is false.
+    async fn rename_enabled(&self, ctx: &Context<'_>) -> GqlResult<bool> {
+        Box::pin(async move {
+            app_from_ctx(ctx)?
+                .resolve_rename_enabled(&self.facet.into_domain())
+                .await
+                .map_err(to_gql_error)
+        })
+        .await
+    }
+
     /// Explicit metadata-language override, or null when the global default is inherited.
     async fn metadata_language_override(&self, ctx: &Context<'_>) -> GqlResult<Option<String>> {
         if let Some(loaders) = loaders_from_ctx(ctx) {

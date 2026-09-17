@@ -196,7 +196,7 @@ function applyReactiveRefreshActionResult(
           unknown,
           unknown
         >["externalSubtitles"],
-        hasDownloadClients: (payload[typedActionPlan.setupStatusAlias] as { hasDownloadClients?: boolean } | null | undefined)?.hasDownloadClients === true,
+        hasDownloadClients: (payload[typedActionPlan.setupStatusAlias] as { hasDownloadClients?: boolean } | null | undefined)?.hasDownloadClients !== false,
       });
       return;
     }

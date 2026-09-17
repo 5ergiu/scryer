@@ -248,7 +248,7 @@ test("mediaInfoSections drops empty rows and empty sections", () => {
   );
 });
 
-test("mediaInfoSections builds the file, video, release and analysis tables", () => {
+test("mediaInfoSections builds the file, video and release tables", () => {
   const file = mediaFile({
     containerFormat: "matroska",
     durationSeconds: 3600,
@@ -286,9 +286,8 @@ test("mediaInfoSections builds the file, video, release and analysis tables", ()
   assert.equal(value("media-info-release", "mediaInfo.sourceType"), "BluRay");
   assert.equal(value("media-info-release", "mediaInfo.releaseGroup"), "SYNTHGRP");
   assert.equal(value("media-info-release", "mediaInfo.acquisitionScore"), "1250");
-  assert.equal(value("media-info-analysis", "mediaInfo.revision"), "4");
-  assert.equal(value("media-info-analysis", "mediaInfo.overallBitrate"), "24,000 kbps");
-  assert.equal(value("media-info-analysis", "mediaInfo.budgetExhausted"), "No");
+  // The probe's own bookkeeping is not shown, even when the file has it.
+  assert.deepEqual([...byId.keys()], ["media-info-file", "media-info-video", "media-info-release"]);
 });
 
 test("audioTrackRows describes each track, roles included", () => {

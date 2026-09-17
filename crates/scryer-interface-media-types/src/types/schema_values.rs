@@ -125,6 +125,9 @@ pub enum LibraryPermissionValue {
     Request,
     /// Allows automatically approving requests for the library.
     AutoApproveRequests,
+    /// Allows searching, downloading, and removing external subtitles for
+    /// titles in the library, using the providers an administrator configured.
+    ManageSubtitles,
 }
 
 /// Application-wide permission independent of a library.
@@ -191,6 +194,7 @@ impl LibraryPermissionValue {
             Self::ManageLibrary => LibraryPermission::ManageLibrary,
             Self::Request => LibraryPermission::Request,
             Self::AutoApproveRequests => LibraryPermission::AutoApproveRequests,
+            Self::ManageSubtitles => LibraryPermission::ManageSubtitles,
         }
     }
 
@@ -202,6 +206,7 @@ impl LibraryPermissionValue {
             LibraryPermission::ManageLibrary => Self::ManageLibrary,
             LibraryPermission::Request => Self::Request,
             LibraryPermission::AutoApproveRequests => Self::AutoApproveRequests,
+            LibraryPermission::ManageSubtitles => Self::ManageSubtitles,
         }
     }
 }

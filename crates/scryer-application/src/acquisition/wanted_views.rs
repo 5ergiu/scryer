@@ -2164,9 +2164,19 @@ impl AppUseCase {
     ///
     /// The walk's progress callback is synchronous — it runs inside the walk,
     /// which cannot await a database write mid-stage — so steps arrive over a
-    /// channel and are written out here, concurrently with the walk. That keeps
-    /// progress at stage-and-scope granularity without the walk having to know
-    /// what a job run is.
+    /// channel and are written out by a task of their own. That keeps progress
+    /// at stage-and-scope granularity without the walk having to know what a
+    /// job run is.
+    ///
+    /// The writer has to be a separate *task*, not another branch of a
+    /// `select!` over the walk: on sqlite every write takes the process-wide
+    /// writer gate and holds it across the whole transaction. A walk that
+    /// yields while holding that gate — the end-of-walk arbitration starts a
+    /// transaction in the very poll that emitted the final progress step —
+    /// would never be polled again if this task were sitting in the progress
+    /// write, and the gate would never be released: every sqlite write in the
+    /// process deadlocks. Spawning the writer keeps the walk polled by the
+    /// runtime no matter how long a progress write waits for the gate.
     async fn run_acquisition_search_title_walk(
         &self,
         run: &mut JobRunRecord,
@@ -2183,7 +2193,37 @@ impl AppUseCase {
             .as_deref()
             .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
             .is_some_and(|value| value["search"]["intent"] == "AUTOMATIC");
-        let walk =
+        // The writer owns its own copy of the run row while it is running; the
+        // record it hands back at the end is what the caller keeps.
+        let writer_app = self.clone();
+        let mut writer_run = run.clone();
+        let initial_total = scope_keys.len();
+        let writer = tokio::spawn(async move {
+            let mut total = initial_total;
+            let mut processed = 0usize;
+            // Ends when the walk drops its sender, after draining the steps it
+            // emitted in its final poll.
+            while let Some(progress) = progress_rx.recv().await {
+                total = progress.total.max(progress.processed);
+                processed = progress.processed;
+                let _ = writer_app
+                    .update_acquisition_search_progress(
+                        &mut writer_run,
+                        AcquisitionSearchProgress {
+                            state: "running".to_string(),
+                            total,
+                            processed,
+                            grabbed_count: 0,
+                            failed_count: 0,
+                            current_title: Some(progress.stage_label),
+                        },
+                    )
+                    .await;
+            }
+            (writer_run, total, processed)
+        });
+
+        let result =
             crate::acquisition_workflow::run_interactive_title_acquisition_walk_with_monitoring(
                 self,
                 title_id,
@@ -2196,37 +2236,17 @@ impl AppUseCase {
                     // the walk itself carries on.
                     let _ = progress_tx.send(progress);
                 },
-            );
-        tokio::pin!(walk);
+            )
+            .await;
 
-        let mut total = scope_keys.len();
+        // The walk has returned, so its callback — and with it the sender — is
+        // dropped: the writer sees the channel close and finishes.
+        let mut total = initial_total;
         let mut processed = 0usize;
-        let result = loop {
-            tokio::select! {
-                Some(progress) = progress_rx.recv() => {
-                    total = progress.total.max(progress.processed);
-                    processed = progress.processed;
-                    let _ = self
-                        .update_acquisition_search_progress(
-                            run,
-                            AcquisitionSearchProgress {
-                                state: "running".to_string(),
-                                total,
-                                processed,
-                                grabbed_count: 0,
-                                failed_count: 0,
-                                current_title: Some(progress.stage_label),
-                            },
-                        )
-                        .await;
-                }
-                result = &mut walk => break result,
-            }
-        };
-        // Steps the walk emitted after the last poll of the channel.
-        while let Ok(progress) = progress_rx.try_recv() {
-            total = progress.total.max(progress.processed);
-            processed = progress.processed;
+        if let Ok((record, writer_total, writer_processed)) = writer.await {
+            *run = record;
+            total = writer_total;
+            processed = writer_processed;
         }
 
         match result {

@@ -2379,6 +2379,285 @@ async fn delete_media_file_honors_custom_library_permissions_after_library_refac
     );
 }
 
+/// An explicit Manage Subtitles grant survives the write path: it is stored as
+/// its own bit (nothing shadows it) and comes back on the user payload.
+#[tokio::test]
+async fn manage_subtitles_grant_round_trips_through_create_user() {
+    let ctx = TestContext::new().await;
+    let admin = ctx.app.find_or_create_default_user().await.unwrap();
+    let library_id = scryer_domain::default_library_id_for_facet(&scryer_domain::MediaFacet::Movie);
+
+    let body = schema_exec(
+        &ctx,
+        &format!(
+            r#"mutation {{
+            createUser(input: {{
+                username: "subtitlegrant",
+                password: "s3cr3t!!",
+                appPermissions: [],
+                libraryPermissions: [{{ libraryId: "{library_id}", permissions: [VIEW, MANAGE_SUBTITLES] }}]
+            }}) {{
+                id
+                libraryPermissions {{ libraryId permissions }}
+            }}
+        }}"#
+        ),
+        Some(admin),
+    )
+    .await;
+    assert_no_errors(&body);
+
+    let grant = &body["data"]["createUser"]["libraryPermissions"][0];
+    assert_eq!(grant["libraryId"], json!(library_id));
+    let permissions = grant["permissions"]
+        .as_array()
+        .expect("permissions should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("permission string"))
+        .collect::<Vec<_>>();
+    assert!(permissions.contains(&"VIEW"), "{body}");
+    assert!(permissions.contains(&"MANAGE_SUBTITLES"), "{body}");
+    assert!(
+        !permissions.contains(&"MANAGE_TITLES"),
+        "Manage Subtitles must not widen into title management: {body}"
+    );
+}
+
+/// Subtitle search and download are gated on Manage Subtitles for the library
+/// the media file belongs to. A viewer may still see subtitles that exist; it
+/// may not ask providers for new ones or pull one down.
+#[tokio::test]
+async fn subtitle_search_and_download_require_manage_subtitles() {
+    let ctx = TestContext::new().await;
+    let media_root = tempfile::tempdir().expect("media root tempdir");
+    let now = Utc::now();
+    let library_id = Id::new().0;
+
+    let library = scryer_application::LibraryRepository::create(
+        &ctx.libraries,
+        Library {
+            id: library_id.clone(),
+            facet: MediaFacet::Movie,
+            name: "Lantern Vault".to_string(),
+            slug: "lantern-vault".to_string(),
+            is_default: false,
+            roots: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        },
+        vec![LibraryRootDraft {
+            path: media_root.path().to_string_lossy().to_string(),
+            is_default: true,
+        }],
+    )
+    .await
+    .expect("create subtitle library");
+    let root_id = library
+        .roots
+        .first()
+        .map(|root| root.id.clone())
+        .expect("subtitle library should expose its root");
+
+    let title = Title {
+        id: Id::new().0,
+        name: "Harbor Lantern".to_string(),
+        library_id: library_id.clone(),
+        facet: MediaFacet::Movie,
+        monitored: true,
+        tags: vec![],
+        canonical_tags: vec![],
+        external_ids: vec![ExternalId {
+            source: "tvdb".to_string(),
+            value: "551166".to_string(),
+        }],
+        root_folder_id: root_id,
+        created_by: None,
+        created_at: now,
+        year: Some(2024),
+        overview: Some("subtitle permission coverage".to_string()),
+        poster_url: None,
+        poster_source_url: None,
+        background_url: None,
+        background_source_url: None,
+        sort_title: Some("Harbor Lantern".to_string()),
+        catalog_sort_key: String::new(),
+        slug: Some("harbor-lantern".to_string()),
+        imdb_id: Some("tt5511663".to_string()),
+        runtime_minutes: Some(96),
+        popularity: None,
+        content_status: Some("released".to_string()),
+        language: Some("eng".to_string()),
+        first_aired: Some("2024-01-01".to_string()),
+        network: None,
+        studio: Some("Lantern Studio".to_string()),
+        country: Some("usa".to_string()),
+        aliases: vec![],
+        tagged_aliases: vec![],
+        metadata_language: Some("eng".to_string()),
+        metadata_fetched_at: Some(now),
+        min_availability: None,
+        digital_release_date: Some("2024-01-01".to_string()),
+        folder_path: None,
+    };
+    let title = ctx
+        .titles
+        .create(title)
+        .await
+        .expect("create subtitle title");
+
+    let file_path = media_root.path().join("Harbor.Lantern.2024.1080p.mkv");
+    std::fs::write(&file_path, b"harbor-lantern").expect("write media file");
+    let file_id = ctx
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: file_path.to_string_lossy().to_string(),
+            size_bytes: 4_096,
+            quality_label: Some("1080p".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("insert media file");
+
+    let actor_with = |username: &str, permission: LibraryPermissionMask| User {
+        id: Id::new().0,
+        username: username.to_string(),
+        password_hash: None,
+        password_change_required: false,
+        account_kind: Default::default(),
+        authorization: UserAuthorization {
+            app: scryer_domain::AppPermissionMask::NONE,
+            libraries: HashMap::from([(library_id.clone(), permission)]),
+            default_library: LibraryPermissionMask::NONE,
+            actor_capabilities: scryer_domain::ActorCapabilityMask::MANAGE_OWN_ACCOUNT,
+            login_status: Default::default(),
+            loaded: true,
+        },
+    };
+    let viewer = actor_with("lantern-viewer", LibraryPermissionMask::VIEW);
+    let subtitle_manager = actor_with("lantern-subtitle-manager", {
+        let mut mask = LibraryPermissionMask::VIEW;
+        mask.insert(LibraryPermissionMask::MANAGE_SUBTITLES);
+        mask
+    });
+    for actor in [&viewer, &subtitle_manager] {
+        UserRepository::create(&ctx.users, actor.clone())
+            .await
+            .expect("create subtitle actor");
+    }
+
+    let search = format!(
+        r#"
+        mutation {{
+          searchSubtitles(input: {{ mediaFileId: "{file_id}" }}) {{
+            status
+            language
+            availableLanguages
+            results {{ providerFileId }}
+          }}
+        }}
+        "#
+    );
+    let download = format!(
+        r#"
+        mutation {{
+          downloadSubtitle(input: {{
+            mediaFileId: "{file_id}",
+            providerFileId: "lantern-1",
+            language: "eng"
+          }}) {{
+            downloaded
+          }}
+        }}
+        "#
+    );
+
+    for (operation, label) in [
+        (&search, "searchSubtitles"),
+        (&download, "downloadSubtitle"),
+    ] {
+        let body = schema_exec(&ctx, operation, Some(viewer.clone())).await;
+        let (message, code) = first_graphql_error_message_and_code(&body);
+        assert_eq!(code, "UNAUTHORIZED", "{label} as a viewer: {body}");
+        // The library guard reports the same message for every permission it
+        // refuses, so assert the shape rather than a permission name.
+        assert!(
+            message.starts_with("unauthorized:"),
+            "{label} should be refused by the library guard: {message}"
+        );
+        assert!(
+            body["data"].is_null() || body["data"][label].is_null(),
+            "{label} must not return data to a viewer: {body}"
+        );
+    }
+
+    // A permitted search always answers with a payload; the status says why the
+    // list looks the way it does. Subtitles are off in a fresh instance.
+    let disabled_body = schema_exec(&ctx, &search, Some(subtitle_manager.clone())).await;
+    assert_no_errors(&disabled_body);
+    assert_eq!(
+        disabled_body["data"]["searchSubtitles"]["status"], "DISABLED",
+        "{disabled_body}"
+    );
+
+    // Turn subtitles on with two configured languages, but configure no
+    // provider: the search now reports NO_PROVIDERS, resolves the preferred
+    // language on the caller's behalf, and hands back the language picker.
+    seed_typed_settings_definitions(&ctx).await;
+    let settings_body = gql(
+        &ctx,
+        r#"
+        mutation UpdateSubtitleSettings($input: UpdateSubtitleSettingsInput!) {
+          updateSubtitleSettings(input: $input) { enabled }
+        }
+        "#,
+        json!({
+          "input": {
+            "enabled": true,
+            "languages": [
+              { "code": "eng", "hearingImpaired": false, "forced": false },
+              { "code": "spa", "hearingImpaired": false, "forced": false }
+            ],
+            "autoDownloadOnImport": false,
+            "minimumScoreSeries": 90,
+            "minimumScoreMovie": 80,
+            "searchIntervalHours": 24,
+            "includeAiTranslated": false,
+            "includeMachineTranslated": false,
+            "syncEnabled": false,
+            "syncThresholdSeries": 90,
+            "syncThresholdMovie": 80,
+            "syncMaxOffsetSeconds": 60
+          }
+        }),
+    )
+    .await;
+    assert_no_errors(&settings_body);
+    assert_eq!(
+        settings_body["data"]["updateSubtitleSettings"]["enabled"],
+        true
+    );
+
+    let search_body = schema_exec(&ctx, &search, Some(subtitle_manager)).await;
+    assert_no_errors(&search_body);
+    let payload = &search_body["data"]["searchSubtitles"];
+    assert_eq!(payload["status"], "NO_PROVIDERS", "{search_body}");
+    assert_eq!(
+        payload["language"], "eng",
+        "an omitted language should resolve to the first configured one: {search_body}"
+    );
+    assert_eq!(
+        payload["availableLanguages"],
+        json!(["eng", "spa"]),
+        "the payload carries the picker's options: {search_body}"
+    );
+    assert_eq!(
+        payload["results"].as_array().map(Vec::len),
+        Some(0),
+        "no provider can return matches: {search_body}"
+    );
+}
+
 /// Most queries require a user in the request context.  Executing one via the
 /// schema directly (without injecting a User) must return an authentication
 /// error rather than leaking data.
@@ -2542,6 +2821,10 @@ async fn token_is_revoked_after_permission_change_until_relogin() {
     assert!(permissions.contains(&"MANAGE_TITLES"));
     assert!(permissions.contains(&"REQUEST"));
     assert!(permissions.contains(&"AUTO_APPROVE_REQUESTS"));
+    // Manage Titles shadows Manage Subtitles: storage strips the bit, and the
+    // identity mapper expands it again on read, so the grant a title manager
+    // gets back names every permission the server will honour for them.
+    assert!(permissions.contains(&"MANAGE_SUBTITLES"));
 
     let old_result = ctx.app.authenticate_token(&old_token).await;
     assert!(

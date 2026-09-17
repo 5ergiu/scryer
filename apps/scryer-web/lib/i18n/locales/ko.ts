@@ -1400,8 +1400,8 @@ const ko: LocaleDictionary = {
   "subtitle.machineTranslated": "기계 번역",
   "subtitle.external": "외부",
   "subtitle.manualSearch": "수동 검색",
-  "subtitle.apiKeyRequiredTitle": "자막 서비스를 사용할 수 없음",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "자막 서비스를 사용할 수 없음",
+  "subtitle.providerUnavailableBody":
     "이 파일에서는 현재 자막 서비스를 사용할 수 없습니다.",
   "subtitle.blocklist": "차단 목록",
   "subtitle.blocklisted": "자막이 차단 목록에 추가되었습니다.",
@@ -1429,7 +1429,7 @@ const ko: LocaleDictionary = {
   "settings.sidecarFilesTitle": "사이드카 파일",
   "settings.nfoWriteOnImportLabel": "가져오기 시 NFO 작성",
   "settings.nfoWriteOnImportDescription":
-    "가져온 미디어와 함께 Kodi/Jellyfin/Emby 호환 .nfo 메타데이터 파일을 작성합니다",
+    "가져온 미디어와 함께 Kodi/Jellyfin/Emby 호환 .nfo 메타데이터 파일을 작성합니다. 기존 .nfo 파일은 절대 덮어쓰지 않습니다",
   "settings.plexmatchWriteOnImportLabel": "가져오기 시 .plexmatch 작성",
   "settings.plexmatchWriteOnImportDescription":
     "이름 추측 없이 정확한 시리즈 매칭을 위한 Plex 힌트 파일을 작성합니다",
@@ -2653,7 +2653,6 @@ const ko: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -2694,15 +2693,6 @@ const ko: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

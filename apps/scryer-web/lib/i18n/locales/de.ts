@@ -1459,8 +1459,8 @@ const de: LocaleDictionary = {
   "subtitle.machineTranslated": "Maschinell übersetzt",
   "subtitle.external": "Extern",
   "subtitle.manualSearch": "Manuelle Suche",
-  "subtitle.apiKeyRequiredTitle": "Untertitel-Dienst nicht verfügbar",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Untertitel-Dienst nicht verfügbar",
+  "subtitle.providerUnavailableBody":
     "Der Untertitel-Dienst ist für diese Datei derzeit nicht verfügbar.",
   "subtitle.blocklist": "Sperrliste",
   "subtitle.blocklisted": "Untertitel zur Sperrliste hinzugefügt",
@@ -1488,7 +1488,7 @@ const de: LocaleDictionary = {
   "settings.sidecarFilesTitle": "Sidecar-Dateien",
   "settings.nfoWriteOnImportLabel": "NFO beim Import schreiben",
   "settings.nfoWriteOnImportDescription":
-    "Kodi/Jellyfin/Emby-kompatible .nfo-Metadaten-Dateien neben importierten Medien schreiben",
+    "Kodi/Jellyfin/Emby-kompatible .nfo-Metadaten-Dateien neben importierten Medien schreiben; eine vorhandene .nfo-Datei wird nie überschrieben",
   "settings.plexmatchWriteOnImportLabel": ".plexmatch beim Import schreiben",
   "settings.plexmatchWriteOnImportDescription":
     "Plex-Hinweisdateien für genaue Serienzuordnung ohne Namensraten schreiben",
@@ -2736,7 +2736,6 @@ const de: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -2777,15 +2776,6 @@ const de: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

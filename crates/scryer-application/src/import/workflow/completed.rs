@@ -16,6 +16,126 @@ fn maybe_trigger_subtitle_search(app: &AppUseCase, title_id: &str, media_file_id
     });
 }
 
+/// Which sidecar one landed video file gets.
+///
+/// One enum rather than one write block per import path: every site that lands
+/// a media file goes through the same gate, the same renderers and the same
+/// never-overwrite write, so the behaviour cannot drift between the automatic,
+/// wanted, and manual paths the way five copies of it did.
+pub(crate) enum ImportedSidecar<'a> {
+    /// A video file carrying one or more episodes of a series.
+    Episodes(&'a [scryer_domain::Episode]),
+    /// A movie file in a movie library.
+    Movie,
+    /// A movie that belongs to a series, landed as a season 0 special.
+    SeriesMovie {
+        movie: &'a scryer_domain::MovieEntity,
+        season_episode: &'a str,
+        after_season: Option<i32>,
+    },
+}
+
+/// Write the `.nfo` sidecar for one imported video file.
+///
+/// Gated by the facet setting with the library's override applied; `enabled`
+/// carries that answer when the caller already resolved it for the run, so a
+/// season pack resolves it once rather than once per file. An existing sidecar
+/// is never replaced, and nothing here can fail the import.
+pub(crate) async fn write_imported_media_nfo(
+    app: &AppUseCase,
+    title: &scryer_domain::Title,
+    dest_path: &Path,
+    media_file_id: Option<&str>,
+    sidecar: ImportedSidecar<'_>,
+    enabled: Option<bool>,
+) {
+    let enabled = match enabled {
+        Some(enabled) => enabled,
+        None => match app
+            .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
+            .await
+        {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id = %title.id,
+                    "failed to resolve the NFO sidecar setting; no sidecar written"
+                );
+                return;
+            }
+        },
+    };
+    if !enabled {
+        return;
+    }
+
+    let nfo_path = dest_path.with_extension("nfo");
+    // Nothing below is worth doing for a sidecar that will not be written, and
+    // the check is a single stat against several repository reads.
+    if tokio::fs::try_exists(&nfo_path).await.unwrap_or(false) {
+        tracing::debug!(
+            path = %nfo_path.display(),
+            "NFO sidecar already exists; leaving it as it is"
+        );
+        return;
+    }
+
+    let ratings = app
+        .services
+        .catalog
+        .titles
+        .get_title_ratings(&title.id)
+        .await
+        .unwrap_or_default();
+    // Credits ship dark, so an empty list is the normal answer and the
+    // renderers omit the actor/director elements entirely.
+    let credits = app
+        .services
+        .catalog
+        .titles
+        .get_title_credits(&title.id)
+        .await
+        .unwrap_or_default();
+    let media_file = match media_file_id {
+        Some(media_file_id) => app
+            .services
+            .library
+            .media_files
+            .get_media_file_by_id(media_file_id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+
+    let context = crate::nfo::NfoContext {
+        ratings: &ratings.external_ratings,
+        credits: &credits,
+        media_file: media_file.as_ref(),
+        date_added: Some(Utc::now()),
+    };
+    let content = match sidecar {
+        ImportedSidecar::Episodes(episodes) => {
+            crate::nfo::render_episodes_nfo(title, episodes, &context)
+        }
+        ImportedSidecar::Movie => crate::nfo::render_movie_nfo(title, &context),
+        ImportedSidecar::SeriesMovie {
+            movie,
+            season_episode,
+            after_season,
+        } => crate::nfo::render_series_movie_episode_nfo(
+            movie,
+            season_episode,
+            after_season,
+            Some(title.name.as_str()),
+            &context,
+        ),
+    };
+
+    crate::nfo::write_nfo_if_absent(&nfo_path, &content).await;
+}
+
 pub(crate) async fn analyze_and_persist_imported_media_file(
     app: &AppUseCase,
     title_id: &str,
@@ -843,6 +963,11 @@ pub(crate) async fn run_claimed_download_cleanup(
                             Some(&record.download_id), &crate::DownloadSubmissionIdentity::default(),
                             Some(&locator), "imported", Some("seeding_complete"), None,
                         ).await?;
+                        // A completion event, not a per-tick write: the store
+                        // may have rebound this download.
+                        app.runtime
+                            .acquisition
+                            .invalidate_download_registry_observations();
                     }
                     let outcome = if payload_removed { "payload_removed_entry_absent" }
                         else if native_requested { "native_removal_recovered" } else { "entry_absent" };

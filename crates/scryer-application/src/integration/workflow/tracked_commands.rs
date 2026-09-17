@@ -35,26 +35,6 @@ fn parse_poll_secs(raw: Option<&str>, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
-/// How far back the bridge-covered history reconciliation sweep will reach.
-///
-/// The sweep heals completions whose realtime event was missed, which is
-/// noticed within minutes; the bound keeps an upgrade from mass-importing a
-/// download client's entire retained history on its first cycle. The
-/// `SCRYER_DOWNLOAD_QUEUE_RECONCILE_MAX_AGE_HOURS` override exists for the e2e
-/// harness and for operators performing a deliberate wider backfill.
-const DOWNLOAD_QUEUE_RECONCILE_MAX_AGE_HOURS: i64 = 24;
-
-fn reconcile_history_max_age() -> chrono::Duration {
-    static CACHED: std::sync::OnceLock<chrono::Duration> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let hours = std::env::var("SCRYER_DOWNLOAD_QUEUE_RECONCILE_MAX_AGE_HOURS")
-            .ok()
-            .and_then(|value| value.trim().parse::<i64>().ok())
-            .filter(|hours| *hours >= 1)
-            .unwrap_or(DOWNLOAD_QUEUE_RECONCILE_MAX_AGE_HOURS);
-        chrono::Duration::hours(hours)
-    })
-}
 
 #[derive(Clone, Debug)]
 pub struct DownloadQueuePollerOptions {
@@ -130,6 +110,10 @@ struct TrackedDownloadRuntimeState {
         HashMap<DownloadQueueProjectionSource, HashMap<String, DownloadQueueItem>>,
     tracked_work_in_flight: HashSet<String>,
     tracked_work_drain: TrackedDownloadWorkDrain,
+    /// Identity resolutions for the completed-history rows this poller keeps
+    /// re-reading. Held across ticks and retired by registry changes.
+    completed_download_resolutions:
+        crate::completed_download_handler::CompletedDownloadResolutionCache,
 }
 
 enum TrackedDownloadBackgroundWorkEvent {
@@ -143,6 +127,7 @@ impl TrackedDownloadRuntimeState {
             previous_items_by_projection: HashMap::new(),
             tracked_work_in_flight: HashSet::new(),
             tracked_work_drain: TrackedDownloadWorkDrain::empty(),
+            completed_download_resolutions: Default::default(),
         }
     }
 }
@@ -572,6 +557,16 @@ pub(crate) async fn finalize_scryer_download_ignored_for_download(
             None,
         )
         .await?;
+    // The store resolves the binding itself and may retire a stale terminal one
+    // and mint its replacement inside that transaction. Only a state that
+    // actually moved can have done so: an upsert that found the identity
+    // already in the state we are writing changed nothing, and bumping there
+    // would retire the poller's memo on every tick that re-ignores a row.
+    if previous.as_deref() != Some(ignored) {
+        app.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
+    }
     let mut identity_already_ignored = false;
     match previous.as_deref() {
         Some(state) if preserved_states.contains(&state) => {
@@ -1281,6 +1276,9 @@ pub(crate) async fn drop_source_removed_from_client(
         );
         return;
     }
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
     tracing::info!(
         download_id = %binding.download_id,
         client_id = ?locator.client_id,
@@ -1580,6 +1578,7 @@ pub async fn start_download_queue_poller_with_options(
                 );
                 let crate::ports::DownloadClientSnapshotOutcome {
                     items,
+                    completed_downloads,
                     authoritative_client_ids,
                     failed_client_ids,
                     ..
@@ -1597,6 +1596,10 @@ pub async fn start_download_queue_poller_with_options(
                         &items,
                         DOWNLOAD_QUEUE_RECENT_COMPLETED_LIMIT,
                         &excluded_client_type_refs,
+                        crate::completed_download_handler::CompletedDownloadLookupCycle {
+                            resolutions: Some(&mut runtime.completed_download_resolutions),
+                            prefetched: completed_downloads.as_ref(),
+                        },
                     )
                     .await;
                 process_tracked_download_snapshot(
@@ -1622,14 +1625,6 @@ pub async fn start_download_queue_poller_with_options(
                 // (`scryer_download_client_refresh_duration_seconds`).
                 metrics::histogram!(crate::services::DOWNLOAD_QUEUE_POLL_CYCLE_DURATION_SECONDS)
                     .record(client_refresh_started_at.elapsed().as_secs_f64());
-                reconcile_excluded_client_recent_history(
-                    &app,
-                    &actor,
-                    &mut runtime,
-                    &tracked_work_result_tx,
-                    &excluded_client_type_refs,
-                )
-                .await;
                 try_dispatch_excluded_completed_history_retry(
                     &app,
                     &actor,
@@ -2289,138 +2284,6 @@ async fn build_excluded_completed_history_retry_drain(
         drain: TrackedDownloadWorkDrain::new(retry_ids, completed_lookup),
         revalidated,
     }
-}
-
-/// Bounded history reconciliation for clients excluded from generic polling
-/// because a realtime bridge owns their live queue.
-///
-/// A bridge can miss terminal events (drops, disconnect gaps, process
-/// restarts), and completed items never appear in queue snapshots, so without
-/// this sweep a missed completion is permanently invisible. Every
-/// recent-history cycle, fetch the client's recent history and feed completed
-/// rows that still need handling through the normal snapshot path.
-async fn reconcile_excluded_client_recent_history(
-    app: &AppUseCase,
-    actor: &User,
-    runtime: &mut TrackedDownloadRuntimeState,
-    result_tx: &tokio::sync::mpsc::UnboundedSender<TrackedDownloadBackgroundWorkEvent>,
-    excluded_client_type_refs: &[&str],
-) {
-    if excluded_client_type_refs.is_empty() {
-        return;
-    }
-
-    let history_items = match app
-        .services
-        .integrations
-        .download_client
-        .list_recent_activity_for_client_types(
-            DOWNLOAD_QUEUE_RECENT_ACTIVITY_LIMIT,
-            excluded_client_type_refs,
-        )
-        .await
-    {
-        Ok(items) => items,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "excluded-client history reconciliation: failed to list recent history"
-            );
-            return;
-        }
-    };
-
-    let mut candidates: Vec<DownloadQueueItem> = Vec::new();
-    for item in history_items {
-        if item.state != scryer_domain::DownloadQueueState::Completed {
-            continue;
-        }
-        let id = tracked_download_id_for_item(&item);
-        if runtime.tracked_work_in_flight.contains(&id) {
-            continue;
-        }
-        if let Some(td) = runtime.tracker.find(&id)
-            && (td.state.is_import_settled()
-                || td.state == TrackedDownloadState::Importing
-                || (td.state == TrackedDownloadState::ImportBlocked && td.import_attempted))
-        {
-            continue;
-        }
-        if let Some(state) =
-            crate::completed_download_handler::queue_item_identity_tracked_state(app, &item).await
-            && (state.is_import_settled() || state == TrackedDownloadState::ImportBlocked)
-        {
-            continue;
-        }
-        candidates.push(item);
-    }
-    if candidates.is_empty() {
-        return;
-    }
-
-    let completed_lookup =
-        crate::completed_download_handler::load_completed_download_lookup_for_tracked_client_items_excluding_client_types(
-            app,
-            &candidates,
-            DOWNLOAD_QUEUE_RECENT_COMPLETED_LIMIT,
-            &[],
-        )
-        .await
-        .unwrap_or_default();
-
-    // This sweep exists to heal completions the bridge missed, not to import a
-    // client's whole retained history. Without an age bound, the first run
-    // after an upgrade would mass-import every completed row the client still
-    // keeps. Anything older than the window needs an explicit backfill.
-    let cutoff = chrono::Utc::now() - reconcile_history_max_age();
-    let mut skipped_as_stale = 0usize;
-    let mut skipped_without_timestamp = 0usize;
-    candidates.retain(|item| match completed_lookup.completed_at_for_item(item) {
-        Some(completed_at) if completed_at >= cutoff => true,
-        Some(_) => {
-            skipped_as_stale += 1;
-            false
-        }
-        // No completion timestamp means the age cannot be established, so
-        // the row is left alone rather than assumed recent. Reported
-        // separately: unlike a stale row, this one would never age in.
-        None => {
-            skipped_without_timestamp += 1;
-            false
-        }
-    });
-    if skipped_as_stale > 0 || skipped_without_timestamp > 0 {
-        tracing::debug!(
-            skipped_as_stale,
-            skipped_without_timestamp,
-            max_age_hours = reconcile_history_max_age().num_hours(),
-            "history reconciliation skipped completions outside the reconcile window"
-        );
-    }
-    if candidates.is_empty() {
-        return;
-    }
-
-    tracing::info!(
-        count = candidates.len(),
-        "reconciling completed history for subscription-covered clients"
-    );
-    process_tracked_download_snapshot(
-        app,
-        actor,
-        runtime,
-        result_tx,
-        candidates,
-        Some(completed_lookup.clone()),
-        TrackedDownloadSnapshotPrune::None,
-        TrackedDownloadSnapshotProjection::UpsertOnly,
-        TrackedDownloadSnapshotDispatch::Seen { completed_lookup },
-        false,
-        excluded_client_type_refs,
-        None,
-        "history-reconcile",
-    )
-    .await;
 }
 
 async fn try_dispatch_excluded_completed_history_retry(

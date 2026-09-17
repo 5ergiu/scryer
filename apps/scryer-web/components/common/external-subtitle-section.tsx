@@ -14,6 +14,8 @@ import {
 } from "@/lib/graphql/mutations";
 import { deleteExternalSubtitlePreviewQuery } from "@/lib/graphql/queries";
 import { useDeletePreview } from "@/lib/hooks/use-delete-preview";
+import { useAuth } from "@/lib/hooks/use-auth";
+import { canManageLibrarySubtitles } from "@/lib/utils/permissions";
 import type { UiDateTimeFormat } from "@/lib/types/settings";
 import type { ExternalSubtitleRecord } from "@/lib/types/subtitles";
 import { formatUiDateTime } from "@/lib/utils/date-format";
@@ -56,14 +58,18 @@ type PendingSubtitleAction =
 
 export function ExternalSubtitleSection({
   downloads,
+  libraryId,
   onChanged,
   allowBlocklist = false,
 }: {
   downloads: ExternalSubtitleRecord[];
+  /** Library the media file belongs to; gates the destructive controls. */
+  libraryId: string | null;
   onChanged?: () => void | Promise<void>;
   allowBlocklist?: boolean;
 }) {
   const t = useTranslate();
+  const { user } = useAuth();
   const dateTimeFormat = useUiDateTimeFormat();
   const setGlobalStatus = useGlobalStatus();
   const client = useClient();
@@ -163,6 +169,11 @@ export function ExternalSubtitleSection({
     typedConfirmation,
   ]);
 
+  // The list itself stays visible to anyone who can view the library; only
+  // delete and blocklist need Manage Subtitles, exactly as the server guards
+  // them.
+  const canManageSubtitles = canManageLibrarySubtitles(user, libraryId);
+
   if (downloads.length === 0) {
     return null;
   }
@@ -173,8 +184,9 @@ export function ExternalSubtitleSection({
         <p className="text-sm font-medium text-muted-foreground">{t("subtitle.external")}</p>
         <div className="space-y-2">
           {downloads.map((download) => {
-            const canBlocklist = allowBlocklist && canBlocklistSubtitle(download);
-            const canDelete = typeof onChanged === "function";
+            const canBlocklist =
+              allowBlocklist && canManageSubtitles && canBlocklistSubtitle(download);
+            const canDelete = canManageSubtitles && typeof onChanged === "function";
             return (
               <div
                 key={download.id}

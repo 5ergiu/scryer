@@ -1027,6 +1027,17 @@ pub struct AppRuntimeAcquisitionState {
     pub download_queue_snapshot: DownloadQueueSnapshotCache,
     pub(crate) download_queue_read_model: DownloadQueueReadModelCache,
     pub(crate) wanted_projection_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Bumped whenever the canonical download registry is structurally
+    /// mutated (a binding created, attached or ended).
+    ///
+    /// The download-queue poller memoizes the identity resolution of the
+    /// completed-history rows it re-reads every tick. Those resolutions are a
+    /// pure function of the observed locator/token and the registry's binding
+    /// state, so a generation bump is the one signal that can make a memoized
+    /// row's answer wrong (a `Resolved` row whose binding has since ended must
+    /// not keep resolving). Bumping invalidates the whole memo; in steady
+    /// state (history unchanged, nothing grabbed or imported) nothing bumps.
+    pub(crate) download_registry_generation: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,
@@ -1051,6 +1062,20 @@ pub struct AppRuntimeAcquisitionState {
 impl AppRuntimeAcquisitionState {
     pub(crate) fn invalidate_wanted_projection_cache(&self) {
         self.wanted_projection_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Current registry generation. Memoized observation resolutions are only
+    /// reusable while this is unchanged.
+    pub(crate) fn download_registry_generation(&self) -> u64 {
+        self.download_registry_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Records a structural registry mutation, retiring every memoized
+    /// observation resolution.
+    pub(crate) fn invalidate_download_registry_observations(&self) {
+        self.download_registry_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
@@ -2166,6 +2191,7 @@ impl AppRuntimeState {
                 download_queue_snapshot: DownloadQueueSnapshotCache::default(),
                 download_queue_read_model: DownloadQueueReadModelCache::default(),
                 wanted_projection_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                download_registry_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 wanted_projection_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 wanted_projection_build_lock: Arc::new(tokio::sync::Mutex::new(())),
                 download_client_category_admission: DownloadClientCategorySnapshotStore::default(),

@@ -1448,8 +1448,8 @@ const pt_BR: LocaleDictionary = {
   "subtitle.machineTranslated": "Traduzida automaticamente",
   "subtitle.external": "Externa",
   "subtitle.manualSearch": "Pesquisa manual",
-  "subtitle.apiKeyRequiredTitle": "Serviço de legendas indisponível",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Serviço de legendas indisponível",
+  "subtitle.providerUnavailableBody":
     "O serviço de legendas está indisponível para este arquivo no momento.",
   "subtitle.blocklist": "Lista de bloqueio",
   "subtitle.blocklisted": "Legenda adicionada à lista de bloqueio",
@@ -1477,7 +1477,7 @@ const pt_BR: LocaleDictionary = {
   "settings.sidecarFilesTitle": "Arquivos sidecar",
   "settings.nfoWriteOnImportLabel": "Gravar NFO ao importar",
   "settings.nfoWriteOnImportDescription":
-    "Gravar arquivos de metadados .nfo compatíveis com Kodi/Jellyfin/Emby junto à mídia importada",
+    "Gravar arquivos de metadados .nfo compatíveis com Kodi/Jellyfin/Emby junto à mídia importada; um arquivo .nfo existente nunca é sobrescrito",
   "settings.plexmatchWriteOnImportLabel": "Gravar .plexmatch ao importar",
   "settings.plexmatchWriteOnImportDescription":
     "Gravar arquivos de dica do Plex para correspondência precisa de séries sem adivinhar nomes",
@@ -2744,7 +2744,6 @@ const pt_BR: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -2785,15 +2784,6 @@ const pt_BR: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

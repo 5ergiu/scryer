@@ -1432,8 +1432,8 @@ const ja: LocaleDictionary = {
   "subtitle.machineTranslated": "機械翻訳",
   "subtitle.external": "外部",
   "subtitle.manualSearch": "手動検索",
-  "subtitle.apiKeyRequiredTitle": "字幕サービスを利用できません",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "字幕サービスを利用できません",
+  "subtitle.providerUnavailableBody":
     "このファイルでは現在字幕サービスを利用できません。",
   "subtitle.blocklist": "ブロックリスト",
   "subtitle.blocklisted": "字幕をブロックリストに追加しました",
@@ -1461,7 +1461,7 @@ const ja: LocaleDictionary = {
   "settings.sidecarFilesTitle": "サイドカーファイル",
   "settings.nfoWriteOnImportLabel": "インポート時にNFOを書き込み",
   "settings.nfoWriteOnImportDescription":
-    "インポートされたメディアと一緒にKodi/Jellyfin/Emby互換の.nfoメタデータファイルを書き込みます",
+    "インポートされたメディアと一緒にKodi/Jellyfin/Emby互換の.nfoメタデータファイルを書き込みます。既存の.nfoファイルが上書きされることはありません",
   "settings.plexmatchWriteOnImportLabel": "インポート時に.plexmatchを書き込み",
   "settings.plexmatchWriteOnImportDescription":
     "名前推測なしで正確なシリーズマッチングのためのPlexヒントファイルを書き込みます",
@@ -2697,7 +2697,6 @@ const ja: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -2738,15 +2737,6 @@ const ja: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

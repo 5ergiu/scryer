@@ -174,6 +174,71 @@ impl WasmDownloadClient {
         }
     }
 
+    /// The plugin's history page as completed-download rows, scoped when the
+    /// plugin supports it and the scope is usable.
+    ///
+    /// Both the history projection and the completed-download projection are
+    /// built from these same rows, so one command answers both.
+    async fn history_completed_items(
+        &self,
+        scope: Option<&DownloadClientFeedbackScope>,
+    ) -> AppResult<Vec<PluginCompletedDownload>> {
+        let scope = scope.filter(|scope| {
+            !feedback_scope_is_empty(scope) && self.supports_category_scoped_feedback()
+        });
+        let Some(scope) = scope else {
+            let result = self
+                .invoke_command(PluginDownloadClientCommand::ListHistory, "list_history")
+                .await?;
+            let PluginDownloadClientCommandResult::ListHistory(result) = result else {
+                return Err(AppError::Repository(
+                    "download-client command returned the wrong result for list_history"
+                        .to_string(),
+                ));
+            };
+            return decode_command_result(result, "download list_history");
+        };
+        let result = self
+            .invoke_command(
+                PluginDownloadClientCommand::ListHistoryScoped(PluginDownloadScopedListRequest {
+                    scope: Self::plugin_feedback_scope(scope),
+                }),
+                "list_history_scoped",
+            )
+            .await?;
+        let PluginDownloadClientCommandResult::ListHistoryScoped(result) = result else {
+            return Err(AppError::Repository(
+                "download-client command returned the wrong result for list_history_scoped"
+                    .to_string(),
+            ));
+        };
+        decode_scoped_command_result(
+            result,
+            "download list_history_scoped",
+            &self.client_id,
+            self.descriptor.provider_type(),
+        )
+    }
+
+    fn history_items_from_completed(
+        &self,
+        items: Vec<PluginCompletedDownload>,
+    ) -> Vec<DownloadQueueItem> {
+        let mut items = items
+            .into_iter()
+            .map(|item| {
+                map_history_item_from_completed(
+                    item,
+                    &self.client_id,
+                    &self.client_name,
+                    self.descriptor.provider_type(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.seeding_observations.apply(&mut items);
+        items
+    }
+
     async fn invoke_command(
         &self,
         command: PluginDownloadClientCommand,
@@ -263,8 +328,19 @@ fn decode_scoped_command_result<T>(
     )))
 }
 
+/// Whether a feedback scope must be ignored, leaving the read unnarrowed.
+///
+/// An empty list is "nothing to narrow by". A blank entry is the scope's
+/// "a category this instance cannot name is in play on this client" marker — a
+/// live download whose grab-time category was never recorded — and narrowing
+/// the read would hide it, so it disables scoping outright. Same convention the
+/// SABnzbd adapter applies to its `category=` parameter.
 fn feedback_scope_is_empty(scope: &DownloadClientFeedbackScope) -> bool {
     scope.categories.is_empty()
+        || scope
+            .categories
+            .iter()
+            .any(|category| category.trim().is_empty())
 }
 
 fn decode_download_add_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
@@ -1136,68 +1212,45 @@ impl DownloadClient for WasmDownloadClient {
     }
 
     async fn list_history(&self) -> AppResult<Vec<DownloadQueueItem>> {
-        let result = self
-            .invoke_command(PluginDownloadClientCommand::ListHistory, "list_history")
-            .await?;
-        let PluginDownloadClientCommandResult::ListHistory(result) = result else {
-            return Err(AppError::Repository(
-                "download-client command returned the wrong result for list_history".to_string(),
-            ));
-        };
-        let mut items = decode_command_result(result, "download list_history")?
-            .into_iter()
-            .map(|item| {
-                map_history_item_from_completed(
-                    item,
-                    &self.client_id,
-                    &self.client_name,
-                    self.descriptor.provider_type(),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.seeding_observations.apply(&mut items);
-        Ok(items)
+        let items = self.history_completed_items(None).await?;
+        Ok(self.history_items_from_completed(items))
     }
 
     async fn list_history_with_feedback_scope(
         &self,
         scope: &DownloadClientFeedbackScope,
     ) -> AppResult<Vec<DownloadQueueItem>> {
-        if feedback_scope_is_empty(scope) || !self.supports_category_scoped_feedback() {
-            return self.list_history().await;
+        let items = self.history_completed_items(Some(scope)).await?;
+        Ok(self.history_items_from_completed(items))
+    }
+
+    /// One plugin list command serving both projections of the tick.
+    ///
+    /// A plugin's history command already answers with completed-download rows
+    /// — the history view is a projection of the same payload — so the tick no
+    /// longer needs a separate `ListRecentCompleted`. For qBittorrent that is
+    /// one `/torrents/info` fetch instead of two (and instead of up to four,
+    /// counting the recent-completed filter cascade).
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        scope: &DownloadClientFeedbackScope,
+    ) -> AppResult<(Vec<DownloadQueueItem>, Option<Vec<CompletedDownload>>)> {
+        if limit == 0 {
+            return Ok((Vec::new(), Some(Vec::new())));
         }
-        let result = self
-            .invoke_command(
-                PluginDownloadClientCommand::ListHistoryScoped(PluginDownloadScopedListRequest {
-                    scope: Self::plugin_feedback_scope(scope),
-                }),
-                "list_history_scoped",
-            )
-            .await?;
-        let PluginDownloadClientCommandResult::ListHistoryScoped(result) = result else {
-            return Err(AppError::Repository(
-                "download-client command returned the wrong result for list_history_scoped"
-                    .to_string(),
-            ));
-        };
-        let mut items = decode_scoped_command_result(
-            result,
-            "download list_history_scoped",
-            &self.client_id,
-            self.descriptor.provider_type(),
-        )?
-        .into_iter()
-        .map(|item| {
-            map_history_item_from_completed(
-                item,
-                &self.client_id,
-                &self.client_name,
-                self.descriptor.provider_type(),
-            )
-        })
-        .collect::<Vec<_>>();
-        self.seeding_observations.apply(&mut items);
-        Ok(items)
+        let items = self.history_completed_items(Some(scope)).await?;
+        let mut completed = items
+            .iter()
+            .cloned()
+            .map(|item| {
+                map_completed_download(item, &self.client_id, self.descriptor.provider_type())
+            })
+            .collect::<Vec<_>>();
+        completed.truncate(limit);
+        let mut activity = self.history_items_from_completed(items);
+        activity.truncate(limit);
+        Ok((activity, Some(completed)))
     }
 
     async fn list_history_page_with_feedback_scope(
@@ -1656,6 +1709,20 @@ mod tests {
         }));
         assert!(!feedback_scope_is_empty(&DownloadClientFeedbackScope {
             categories: vec!["series".to_string()],
+        }));
+    }
+
+    #[test]
+    fn a_blank_scope_entry_forces_the_unfiltered_poll_path() {
+        // The blank entry is the "a live download carries a category this
+        // instance cannot name" marker. Narrowing the read would hide that
+        // download from the poller, so the whole list is read instead — the
+        // same rule the SABnzbd adapter applies to `category=`.
+        assert!(feedback_scope_is_empty(&DownloadClientFeedbackScope {
+            categories: vec![String::new(), "series".to_string()],
+        }));
+        assert!(feedback_scope_is_empty(&DownloadClientFeedbackScope {
+            categories: vec!["   ".to_string()],
         }));
     }
 

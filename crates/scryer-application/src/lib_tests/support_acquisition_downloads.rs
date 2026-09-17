@@ -318,9 +318,32 @@ pub(super) struct TrackingAcquisitionScopeStateRepo {
     pub(super) release_decisions: Arc<Mutex<Vec<ReleaseDecision>>>,
     pub(super) title_facets: Arc<Mutex<HashMap<String, MediaFacet>>>,
     pub(super) status_update_calls: Arc<Mutex<Vec<String>>>,
+    /// Stands in for the sqlite writer gate. On sqlite every write takes one
+    /// process-wide mutex and holds it for the whole transaction, awaits
+    /// included, so a caller that yields mid-transaction owns the gate while it
+    /// is not running. Set this and each of this repository's writes behaves the
+    /// same way.
+    pub(super) writer_gate: Option<Arc<Mutex<()>>>,
 }
 
 impl TrackingAcquisitionScopeStateRepo {
+    /// A repository whose writes take the given modeled writer gate.
+    pub(super) fn gated_on(writer_gate: Arc<Mutex<()>>) -> Self {
+        Self {
+            writer_gate: Some(writer_gate),
+            ..Self::default()
+        }
+    }
+
+    /// Enter a modeled write transaction: take the gate and yield while holding
+    /// it, the way a real transaction awaits sqlite with the gate in hand.
+    async fn writer_transaction(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        let gate = self.writer_gate.as_ref()?;
+        let guard = gate.lock().await;
+        tokio::task::yield_now().await;
+        Some(guard)
+    }
+
     pub(super) async fn remember_title_facet(&self, title_id: &str, facet: MediaFacet) {
         self.title_facets
             .lock()
@@ -350,6 +373,7 @@ impl AcquisitionScopeStateRepository for TrackingAcquisitionScopeStateRepo {
         &self,
         item: &AcquisitionScopeState,
     ) -> AppResult<String> {
+        let _writer = self.writer_transaction().await;
         let mut store = self.store.lock().await;
         if let Some(existing) = store.iter_mut().find(|existing| existing.id == item.id) {
             *existing = item.clone();
@@ -366,6 +390,7 @@ impl AcquisitionScopeStateRepository for TrackingAcquisitionScopeStateRepo {
         last_search_at: Option<&str>,
         grabbed_release: Option<&str>,
     ) -> AppResult<()> {
+        let _writer = self.writer_transaction().await;
         let mut store = self.store.lock().await;
         let item = store
             .iter_mut()
@@ -386,6 +411,7 @@ impl AcquisitionScopeStateRepository for TrackingAcquisitionScopeStateRepo {
         id: &str,
         last_search_at: &str,
     ) -> AppResult<()> {
+        let _writer = self.writer_transaction().await;
         let mut store = self.store.lock().await;
         let item = store
             .iter_mut()
@@ -449,6 +475,7 @@ impl AcquisitionScopeStateRepository for TrackingAcquisitionScopeStateRepo {
     }
 
     async fn insert_release_decision(&self, decision: &ReleaseDecision) -> AppResult<String> {
+        let _writer = self.writer_transaction().await;
         self.release_decisions.lock().await.push(decision.clone());
         Ok(decision.id.clone())
     }
@@ -1193,6 +1220,33 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
                     .map(|state| (identity.clone(), state))
             })
             .collect())
+    }
+
+    async fn list_client_ids_with_live_downloads(&self) -> AppResult<Vec<String>> {
+        let tracked_states = self.tracked_states.lock().await;
+        let mut client_ids = Vec::new();
+        for entry in self.store.lock().await.iter() {
+            let Some(client_id) = entry
+                .download_client_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|client_id| !client_id.is_empty())
+            else {
+                continue;
+            };
+            let key = download_source_identity_key(&ClientJobLocator::new(
+                entry.download_client_id.as_deref(),
+                entry.download_client_type.as_str(),
+                entry.download_client_item_id.as_str(),
+            ));
+            let is_terminal = tracked_states
+                .get(&key)
+                .is_some_and(|state| matches!(state.as_str(), "imported" | "failed" | "ignored"));
+            if !is_terminal && !client_ids.iter().any(|existing| existing == client_id) {
+                client_ids.push(client_id.to_string());
+            }
+        }
+        Ok(client_ids)
     }
 
     async fn get_tracked_state(&self, identity: &ClientJobLocator) -> AppResult<Option<String>> {

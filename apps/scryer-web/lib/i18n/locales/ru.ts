@@ -2922,13 +2922,10 @@ const ru: LocaleDictionary = {
     "subtitle.providersRequiredAction":
         "Открыть настройки провайдеров субтитров",
 
-    "subtitle.apiKeyRequiredTitle":
+    "subtitle.providerUnavailableTitle":
         "Сервис субтитров недоступен",
-    "subtitle.apiKeyRequiredBody":
+    "subtitle.providerUnavailableBody":
         "Сервис субтитров в данный момент недоступен для этого файла.",
-    "subtitle.apiKeyRequiredAction":
-        "Открыть настройки субтитров",
-
     "subtitle.credentialsRequiredTitle":
         "Требуются учётные данные",
     "subtitle.credentialsRequiredBody":
@@ -3038,7 +3035,7 @@ const ru: LocaleDictionary = {
         "Создавать NFO-файлы при импорте",
 
     "settings.nfoWriteOnImportDescription":
-        "Создавать файлы метаданных .nfo, совместимые с Kodi, Jellyfin и Emby, рядом с импортированными медиафайлами",
+        "Создавать файлы метаданных .nfo, совместимые с Kodi, Jellyfin и Emby, рядом с импортированными медиафайлами; существующий файл .nfo никогда не перезаписывается",
 
     "settings.plexmatchWriteOnImportLabel":
         "Создавать .plexmatch при импорте",
@@ -6116,7 +6113,6 @@ const ru: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -6157,15 +6153,6 @@ const ru: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

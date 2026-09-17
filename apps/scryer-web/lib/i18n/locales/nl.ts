@@ -2318,8 +2318,8 @@ const nl: LocaleDictionary = {
   "subtitle.providersRequiredBody":
     "Voeg minstens één ondertitelprovider toe en schakel die in voordat je naar ondertitels zoekt.",
   "subtitle.providersRequiredAction": "Ondertitelproviders openen",
-  "subtitle.apiKeyRequiredTitle": "Ondertitelservice niet beschikbaar",
-  "subtitle.apiKeyRequiredBody":
+  "subtitle.providerUnavailableTitle": "Ondertitelservice niet beschikbaar",
+  "subtitle.providerUnavailableBody":
     "Ondertitelservice is momenteel niet beschikbaar voor dit bestand.",
   "subtitle.blocklist": "Blokkeerlijst",
   "subtitle.blocklisted": "Ondertitel toegevoegd aan blocklist",
@@ -2374,7 +2374,7 @@ const nl: LocaleDictionary = {
   "settings.libraryUnsavedChanges": "Niet-opgeslagen wijzigingen",
   "settings.nfoWriteOnImportLabel": "NFO schrijven bij import",
   "settings.nfoWriteOnImportDescription":
-    "Schrijf Kodi/Jellyfin/Emby-compatibele .nfo-metadatabestanden naast geïmporteerde media",
+    "Schrijf Kodi/Jellyfin/Emby-compatibele .nfo-metadatabestanden naast geïmporteerde media; een bestaand .nfo-bestand wordt nooit overschreven",
   "settings.plexmatchWriteOnImportLabel": ".plexmatch schrijven bij import",
   "settings.plexmatchWriteOnImportDescription":
     "Schrijf Plex hintbestanden voor nauwkeurige seriesmatching zonder naam te raden",
@@ -3452,7 +3452,6 @@ const nl: LocaleDictionary = {
   "mediaInfo.sectionSubtitles": "Subtitle tracks",
   "mediaInfo.sectionCaptions": "Caption services",
   "mediaInfo.sectionRelease": "Release",
-  "mediaInfo.sectionAnalysis": "Analysis",
   "mediaInfo.sectionChapters": "Chapters",
   "mediaInfo.sectionAttachments": "Attachments",
   "mediaInfo.path": "Path",
@@ -3493,15 +3492,6 @@ const nl: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
-  "mediaInfo.revision": "Revision",
-  "mediaInfo.probeStatus": "Probe status",
-  "mediaInfo.bytesRead": "Bytes read",
-  "mediaInfo.seeks": "Seeks",
-  "mediaInfo.elapsed": "Elapsed",
-  "mediaInfo.budgetExhausted": "Budget exhausted",
-  "mediaInfo.overallBitrate": "Overall bitrate",
-  "mediaInfo.program": "Program",
-  "mediaInfo.warning": "Warning",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

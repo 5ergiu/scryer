@@ -447,6 +447,21 @@ impl DownloadClient for FeedbackTimeoutDownloadClient {
         .await
     }
 
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        scope: &DownloadClientFeedbackScope,
+    ) -> AppResult<(
+        Vec<DownloadQueueItem>,
+        Option<Vec<scryer_domain::CompletedDownload>>,
+    )> {
+        self.run_feedback_read(
+            self.inner
+                .list_recent_activity_with_completed_with_feedback_scope(limit, scope),
+        )
+        .await
+    }
+
     async fn list_recent_activity_for_title(
         &self,
         title_id: &str,
@@ -536,18 +551,6 @@ impl DownloadClient for FeedbackTimeoutDownloadClient {
         self.run_feedback_read(
             self.inner
                 .list_recent_activity_excluding_client_types(limit, excluded_client_types),
-        )
-        .await
-    }
-
-    async fn list_recent_activity_for_client_types(
-        &self,
-        limit: usize,
-        client_types: &[&str],
-    ) -> AppResult<Vec<DownloadQueueItem>> {
-        self.run_feedback_read(
-            self.inner
-                .list_recent_activity_for_client_types(limit, client_types),
         )
         .await
     }
@@ -3051,6 +3054,10 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
         let mut activity_items = Vec::new();
         let mut activity_successes = HashSet::new();
         let mut client_priorities = HashMap::new();
+        // Completed rows some clients hand back from the very same history
+        // response, so the recent-completed lookup does not re-read it.
+        let mut completed_rows = Vec::new();
+        let mut completed_client_ids = HashSet::new();
         if recent_activity_limit > 0 {
             let activity_reads = self
                 .poll_feedback_clients(
@@ -3059,7 +3066,10 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                     "download snapshot recent activity listing",
                     |client, scope| async move {
                         client
-                            .list_recent_activity_with_feedback_scope(recent_activity_limit, &scope)
+                            .list_recent_activity_with_completed_with_feedback_scope(
+                                recent_activity_limit,
+                                &scope,
+                            )
                             .await
                     },
                 )
@@ -3073,7 +3083,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                     result.is_ok(),
                 );
                 match result {
-                    Ok(mut items) => {
+                    Ok((mut items, completed)) => {
                         self.record_feedback_read_success(
                             &config.id,
                             DownloadFeedbackReadKind::RecentActivity,
@@ -3086,6 +3096,34 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                             item.client_name = config.name.clone();
                         }
                         activity_items.extend(items);
+                        if let Some(mut completed) = completed {
+                            // Same per-client conditioning the dedicated
+                            // completed-downloads read applies, so a row that
+                            // arrives on the snapshot's page is indistinguishable
+                            // from the one the separate read would have produced.
+                            let mappings = download_client_remote_path_mappings(&config);
+                            let accepts_torrents = Self::config_accepts_source_kind(
+                                &config,
+                                DownloadSourceKind::TorrentFile,
+                                self.plugin_provider.as_ref(),
+                            ) || Self::config_accepts_source_kind(
+                                &config,
+                                DownloadSourceKind::MagnetUri,
+                                self.plugin_provider.as_ref(),
+                            );
+                            completed.truncate(recent_activity_limit);
+                            for row in &mut completed {
+                                row.client_id = config.id.clone();
+                                if let Some(mappings) = mappings.as_deref() {
+                                    apply_remote_path_mappings_to_completed_download(row, mappings);
+                                }
+                                if accepts_torrents {
+                                    normalize_completed_download_import_dir(row);
+                                }
+                            }
+                            completed_rows.extend(completed);
+                            completed_client_ids.insert(config.id.clone());
+                        }
                     }
                     Err(error) => {
                         self.record_feedback_read_failure(
@@ -3100,6 +3138,10 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             }
         }
 
+        // Ordered exactly as the dedicated completed-downloads read orders its
+        // aggregate, so the consumer sees the same page either way.
+        completed_rows.sort_by(compare_completed_downloads_desc);
+
         let mut seen = HashSet::with_capacity(activity_items.len());
         activity_items.retain(|item| seen.insert(download_queue_history_key(item)));
         activity_items
@@ -3108,6 +3150,12 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
 
         Ok(DownloadClientSnapshotOutcome {
             items: queue_items,
+            completed_downloads: (!completed_client_ids.is_empty()).then(|| {
+                scryer_application::PrefetchedCompletedDownloads {
+                    rows: completed_rows,
+                    client_ids: completed_client_ids,
+                }
+            }),
             authoritative_client_ids: queue_successes
                 .intersection(&activity_successes)
                 .cloned()
@@ -3115,84 +3163,6 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             failed_client_ids,
             any_client_read_succeeded,
         })
-    }
-
-    async fn list_recent_activity_for_client_types(
-        &self,
-        limit: usize,
-        client_types: &[&str],
-    ) -> AppResult<Vec<DownloadQueueItem>> {
-        if limit == 0 || client_types.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let clients = self
-            .list_enabled_clients_by_priority()
-            .await?
-            .into_iter()
-            .filter(|config| {
-                client_types.iter().any(|client_type| {
-                    config
-                        .client_type
-                        .trim()
-                        .eq_ignore_ascii_case(client_type.trim())
-                })
-            })
-            .collect::<Vec<_>>();
-        if clients.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut all_items = Vec::new();
-        let mut client_priorities = HashMap::new();
-        let mut read_summary = FeedbackReadSummary::default();
-        let reads = self
-            .poll_feedback_clients(
-                clients,
-                DownloadFeedbackReadKind::RecentActivity,
-                "type-scoped recent activity listing",
-                |client, scope| async move {
-                    client
-                        .list_recent_activity_with_feedback_scope(limit, &scope)
-                        .await
-                },
-            )
-            .await;
-        for (config, elapsed, result) in reads {
-            client_priorities.insert(config.id.clone(), config.client_priority);
-            match result {
-                Ok(mut items) => {
-                    self.record_feedback_read_success(
-                        &config.id,
-                        DownloadFeedbackReadKind::RecentActivity,
-                    );
-                    read_summary.record_success();
-                    items.truncate(limit);
-                    for item in &mut items {
-                        item.client_id = config.id.clone();
-                        item.client_name = config.name.clone();
-                    }
-                    all_items.extend(items);
-                }
-                Err(error) => {
-                    self.record_feedback_read_failure(
-                        &config.id,
-                        DownloadFeedbackReadKind::RecentActivity,
-                        elapsed,
-                    );
-                    read_summary.record_error(&error);
-                    tracing::warn!(client_id = %config.id, error = %error, "failed to list type-scoped recent activity");
-                }
-            }
-        }
-
-        read_summary.finish()?;
-
-        let mut seen = HashSet::with_capacity(all_items.len());
-        all_items.retain(|item| seen.insert(download_queue_history_key(item)));
-        all_items
-            .sort_by(|left, right| compare_history_items_desc(left, right, &client_priorities));
-        Ok(all_items)
     }
 
     async fn list_recent_activity_for_title(
@@ -4152,6 +4122,11 @@ mod tests {
         queue_items: Mutex<Vec<DownloadQueueItem>>,
         history_items: Mutex<Vec<DownloadQueueItem>>,
         completed_downloads: Mutex<Vec<scryer_domain::CompletedDownload>>,
+        /// Completed rows this client hands back from its own recent-activity
+        /// read, as SABnzbd does from a single history page. `None` (the
+        /// default) leaves the client on the trait's default behaviour: the
+        /// snapshot carries no completed rows.
+        prefetched_completed: Mutex<Option<Vec<scryer_domain::CompletedDownload>>>,
         status: Mutex<DownloadClientStatus>,
         paused: Mutex<Vec<String>>,
         resumed: Mutex<Vec<String>>,
@@ -4217,6 +4192,19 @@ mod tests {
             &self,
         ) -> AppResult<Vec<scryer_domain::CompletedDownload>> {
             Ok(self.completed_downloads.lock().unwrap().clone())
+        }
+
+        async fn list_recent_activity_with_completed_with_feedback_scope(
+            &self,
+            limit: usize,
+            _scope: &scryer_application::DownloadClientFeedbackScope,
+        ) -> AppResult<(
+            Vec<DownloadQueueItem>,
+            Option<Vec<scryer_domain::CompletedDownload>>,
+        )> {
+            let mut items = self.history_items.lock().unwrap().clone();
+            items.truncate(limit);
+            Ok((items, self.prefetched_completed.lock().unwrap().clone()))
         }
 
         async fn get_client_status(&self) -> AppResult<DownloadClientStatus> {
@@ -8270,6 +8258,69 @@ mod tests {
 
         assert_eq!(items[0].client_id, "client-a");
         assert_eq!(items[0].dest_dir, "/Volumes/downloads/Remote Download");
+    }
+
+    #[tokio::test]
+    async fn snapshot_completed_rows_are_conditioned_like_the_dedicated_completed_read() {
+        let client = Arc::new(MockDownloadClient::default());
+        // The client derives its completed rows from the same response as its
+        // recent activity, so they arrive on the snapshot, unconditioned.
+        *client.prefetched_completed.lock().unwrap() =
+            Some(vec![scryer_domain::CompletedDownload {
+                client_type: "qbittorrent".to_string(),
+                client_id: String::new(),
+                download_client_item_id: "remote-1".to_string(),
+                download_id: None,
+                name: "Remote Download".to_string(),
+                release_name: None,
+                dest_dir: "D:\\Data\\Completed\\Remote Download".to_string(),
+                category: None,
+                size_bytes: None,
+                completed_at: Some(Utc::now()),
+                parameters: Vec::new(),
+            }]);
+
+        let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
+            Arc::new(MockDownloadClientPluginProvider {
+                accepted_inputs: vec!["torrent_file".to_string()],
+                clients: vec![("client-a".to_string(), client.clone())],
+            });
+
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![DownloadClientConfig {
+                    config_json:
+                        r#"{"remote_path_mappings":"D:\\Data\\Completed => /Volumes/downloads"}"#
+                            .to_string(),
+                    ..test_config("client-a", "Client A", "qbittorrent", 0)
+                }],
+            }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            Some(plugin_provider),
+        );
+
+        let outcome = router
+            .list_snapshot_outcome_excluding_client_types(100, &[])
+            .await
+            .expect("snapshot should succeed");
+
+        let prefetched = outcome
+            .completed_downloads
+            .expect("the client supplied completed rows with its activity read");
+        assert_eq!(
+            prefetched.client_ids,
+            HashSet::from(["client-a".to_string()])
+        );
+        assert_eq!(prefetched.rows.len(), 1);
+        // Same stamping and remote-path mapping the dedicated read applies, so
+        // the import lookup cannot tell the two sources apart.
+        assert_eq!(prefetched.rows[0].client_id, "client-a");
+        assert_eq!(
+            prefetched.rows[0].dest_dir,
+            "/Volumes/downloads/Remote Download"
+        );
     }
 
     #[tokio::test]

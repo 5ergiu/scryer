@@ -4508,10 +4508,27 @@ async fn seed_recent_failed_season_pack_fixture_with_indexer(
     Arc<TrackingIndexerClient>,
     Arc<StubDownloadClient>,
 ) {
+    seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
+        indexer_client,
+        Arc::new(TrackingAcquisitionScopeStateRepo::default()),
+    )
+    .await
+}
+
+/// The same fixture with the scope-state repository supplied by the caller, for
+/// a test that needs a hook inside the scope writes the walk makes.
+async fn seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
+    indexer_client: Arc<TrackingIndexerClient>,
+    wanted_items: Arc<TrackingAcquisitionScopeStateRepo>,
+) -> (
+    AppUseCase,
+    Title,
+    Arc<TrackingIndexerClient>,
+    Arc<StubDownloadClient>,
+) {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
-    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
     let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
         download_client.clone(),
         download_submissions,
@@ -6864,6 +6881,101 @@ impl IndexerClient for PendingStatusAssertingIndexerClient {
             grab_max: None,
         })
     }
+}
+
+/// Answers the worker's due-check with "every indexer is holding", and counts
+/// searches so a cycle that runs anyway is visible.
+struct DeferredRssIndexerClient {
+    searches: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for DeferredRssIndexerClient {
+    async fn rss_due_indexers(&self) -> AppResult<crate::RssDueIndexers> {
+        Ok(crate::RssDueIndexers {
+            due: Vec::new(),
+            deferred: vec!["indexer-holding".to_string()],
+        })
+    }
+
+    async fn search(
+        &self,
+        query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        self.searches.lock().await.push(query);
+        Ok(IndexerSearchResponse {
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_cycle_with_nothing_due_and_nothing_pending_does_no_work() {
+    let searches = Arc::new(Mutex::new(Vec::new()));
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases.clone(),
+        wanted_items.clone(),
+        Arc::new(DeferredRssIndexerClient {
+            searches: searches.clone(),
+        }),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Quiet Cadence", 2024).await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(
+        searches.lock().await.is_empty(),
+        "a tick where every indexer is inside its cadence must not poll"
+    );
+
+    // A pending release is the second, independent reason to run: this cycle is
+    // the only thing that re-evaluates one, so a quiet feed must not strand it.
+    let mut pending = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Quiet.Cadence.2024.1080p.WEB-DL-GRP",
+        PendingReleaseStatus::Waiting,
+    );
+    pending.indexer_source = Some("nzbgeek".to_string());
+    pending_releases
+        .insert_pending_release(&pending)
+        .await
+        .expect("seed pending release");
+
+    app.run_scheduled_rss_sync()
+        .await
+        .expect("run RSS sync with a pending release");
+    assert_eq!(
+        searches.lock().await.len(),
+        1,
+        "a held release must still be re-evaluated against a fresh feed"
+    );
 }
 
 #[tokio::test]
@@ -12907,6 +13019,74 @@ async fn a_title_walk_whose_only_download_client_is_disabled_fails_the_job() {
     assert_eq!(
         view.processed, view.total,
         "the walk ran every work item it announced: {view:?}"
+    );
+}
+
+/// A search job's progress write must never strand the walk it is reporting on.
+///
+/// On sqlite every write takes one process-wide writer gate and holds it for the
+/// whole transaction, awaits included — so a walk that yields mid-write owns the
+/// gate while it is not running. The job used to consume the walk's progress
+/// channel from a `select!` whose progress arm awaited the job-run write inline,
+/// with the walk pinned and unpolled: the final stage's progress step landed in
+/// the channel in the same poll that the walk's end-of-walk arbitration entered
+/// a transaction, so the progress write blocked on the gate the stranded walk
+/// held. The job stuck at N-1/N and every sqlite write in the process deadlocked
+/// until restart.
+///
+/// Here both the scope-state writes the walk makes and the job-run progress
+/// write take one modeled gate, and the scope writes yield while holding it.
+/// With the progress writer on its own task the runtime keeps polling the walk,
+/// the gate is released, and the job terminates.
+#[tokio::test]
+async fn a_title_walk_holding_the_writer_gate_still_finishes_while_progress_is_written() {
+    let writer_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let (app, title, _, _) = seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
+        Arc::new(TrackingIndexerClient::default()),
+        Arc::new(TrackingAcquisitionScopeStateRepo::gated_on(
+            writer_gate.clone(),
+        )),
+    )
+    .await;
+    let job_runs = Arc::new(RecordingJobRunRepo::gated_on(writer_gate.clone()));
+    let app = app.with_test_overrides(|services| services.with_job_runs(job_runs.clone()));
+    attach_default_library_to_scope_states(&app, MediaFacet::Anime).await;
+
+    let actor = test_admin_user();
+    let run = app
+        .start_acquisition_search_job(
+            &actor,
+            AcquisitionSearchRequest {
+                title_id: Some(title.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start the title-scoped acquisition search");
+
+    let view = tokio::time::timeout(
+        Duration::from_secs(20),
+        await_acquisition_search_job(&app, &actor, &run.id),
+    )
+    .await
+    .expect("a progress write must not strand the walk that holds the writer gate");
+    assert!(
+        view.total > 0,
+        "the walk announced its work items: {view:?}"
+    );
+    assert_eq!(
+        view.processed, view.total,
+        "the walk ran every work item it announced: {view:?}"
+    );
+    let persisted = job_runs
+        .get_job_run(&run.id)
+        .await
+        .expect("read the persisted run")
+        .expect("the run exists");
+    assert!(
+        persisted.status.is_terminal(),
+        "the job run reached a terminal status: {:?}",
+        persisted.status
     );
 }
 

@@ -59,10 +59,23 @@ export function manualImportActions({
   const normalizedFacet = facet?.trim().toLowerCase() ?? "";
 
   return {
-    interactive:
-      hasTitle &&
-      actionable &&
-      (normalizedFacet === "series" || normalizedFacet === "anime"),
+    interactive: hasTitle && actionable && manualImportNeedsMapping(facet),
     direct: hasTitle && actionable && normalizedFacet === "movie",
   };
+}
+
+/** Series and anime files have to be matched to episodes in the dialog. */
+export function manualImportNeedsMapping(facet: string | null | undefined): boolean {
+  const normalizedFacet = facet?.trim().toLowerCase() ?? "";
+  return normalizedFacet === "series" || normalizedFacet === "anime";
+}
+
+/**
+ * A disc image holds several titles, so which one to import is a choice for
+ * the dialog rather than the direct movie import.
+ */
+export function manualImportSelectionNeedsDialog(
+  files: ReadonlyArray<{ fileName: string }>,
+): boolean {
+  return files.some((file) => file.fileName.toLowerCase().endsWith(".iso"));
 }

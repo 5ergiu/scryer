@@ -414,12 +414,6 @@ body {
   background: transparent;
 }
 
-[data-slot="settings-subnav-scroll"],
-[data-slot="title-list-scroll"],
-[data-slot="title-context-scroll"] {
-  overscroll-behavior: contain;
-}
-
 [data-slot="root-shell-notice"] {
   position: relative;
   z-index: 40;
@@ -437,7 +431,14 @@ body {
     overscroll-behavior: contain;
   }
 
-  [data-slot="settings-main-scroll"] {
+  /* Only the wide layout turns these panels into inner scrollers. At phone
+     width they size to their content, and a contain rule on a scroller with
+     nothing to scroll makes Chrome on Android swallow the touch instead of
+     chaining it to the document, so the page never moves. */
+  [data-slot="settings-main-scroll"],
+  [data-slot="settings-subnav-scroll"],
+  [data-slot="title-list-scroll"],
+  [data-slot="title-context-scroll"] {
     overscroll-behavior: contain;
   }
 

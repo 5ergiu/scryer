@@ -2015,6 +2015,17 @@ pub(crate) async fn persist_tracked_download_state_marker(
         return false;
     }
 
+    // The store resolves the binding itself and can retire a stale terminal one
+    // and mint its replacement in that transaction. Gated on the state actually
+    // moving: a marker re-persisted at the same state (a row that stays
+    // import-blocked tick after tick) changed no binding, and bumping there
+    // would retire the poller's memo every tick.
+    if td.state != state {
+        app.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
+    }
+
     // Write the canonical state and its typed reason before updating the
     // legacy submission projection. If the second write fails, restart
     // reconstruction still sees the safe canonical reason instead of a stale
@@ -6478,6 +6489,50 @@ mod tests {
         assert_eq!(
             manual_import_recovery_verdict(&downloading, record_completed_at),
             ManualImportRecoveryVerdict::Leave
+        );
+    }
+
+    /// The poller memoizes completed-row identity resolutions against the
+    /// registry generation. Persisting a durable marker can rebind the download
+    /// inside the store's own transaction, so a marker that moves the state has
+    /// to retire the memo — and a marker that repeats the state the download
+    /// already holds (a row that stays import-blocked tick after tick) must
+    /// not, or the memo never survives a tick.
+    #[tokio::test]
+    async fn durable_state_marker_retires_memoized_observations_only_on_a_transition() {
+        let download_submissions = Arc::new(TestDownloadSubmissionRepo::default());
+        let app = build_app(download_submissions, Arc::new(TestImportRepo::default()));
+        let mut item = build_client_item();
+        item.download_client_item_id = "generation-marker-job".to_string();
+        let mut tracker = TrackedDownloadService::new();
+        tracker.track(&app, item.clone()).await;
+        let tracked = tracker
+            .find(&tracked_download_id_for_item(&item))
+            .expect("tracking should cache the download")
+            .clone();
+        assert_eq!(tracked.state, TrackedDownloadState::Downloading);
+
+        let before = app.runtime.acquisition.download_registry_generation();
+        assert!(
+            persist_tracked_download_state_marker(
+                &app,
+                &tracked,
+                TrackedDownloadState::ImportBlocked,
+                None,
+                None,
+            )
+            .await
+        );
+        let after_transition = app.runtime.acquisition.download_registry_generation();
+        assert_ne!(before, after_transition);
+
+        // The same download re-persisting the state it already holds.
+        assert!(
+            persist_tracked_download_state_marker(&app, &tracked, tracked.state, None, None,).await
+        );
+        assert_eq!(
+            after_transition,
+            app.runtime.acquisition.download_registry_generation()
         );
     }
 

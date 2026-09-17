@@ -20,12 +20,12 @@ use scryer_application::{
     NullIndexerErrorRepository, NullIndexerSearchLearningRepository, NullProxyConfigRepository,
     NullUpstreamScheduler, ProxyConfigRepository, RateLimitCooldownAction, RateLimitSignal,
     ReleaseCandidateProvenance, ReleaseSearchSubjectKind, ReusableIndexerSearchCandidate,
-    RssFreshnessContext, SchedulerAdmission, SchedulerBatchRequest, SchedulerCandidate,
-    SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome, SchedulerIntent,
-    SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
-    SearchLearningContext, SearchMode, UpstreamScheduler, blake3_identity_hex,
-    escalation_backoff::indexer_backoff_ladder, indexer_search_eligibility,
-    indexer_search_identity,
+    RssDueIndexers, RssFreshnessContext, SchedulerAdmission, SchedulerBatchRequest,
+    SchedulerCandidate, SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome,
+    SchedulerIntent, SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
+    SchedulerSnapshotFilter, SearchLearningContext, SearchMode, UpstreamScheduler,
+    blake3_identity_hex, escalation_backoff::indexer_backoff_ladder, indexer_search_eligibility,
+    indexer_search_identity, rss_poll_is_due,
 };
 use scryer_domain::{
     IndexerCapsSearchNode, IndexerCapsSnapshot, IndexerConfig, IndexerProviderCapabilities,
@@ -3590,6 +3590,55 @@ impl MultiIndexerSearchClient {
 
 #[async_trait]
 impl IndexerClient for MultiIndexerSearchClient {
+    /// Answer the RSS worker's due-check without running a search.
+    ///
+    /// Only indexers this client would actually poll count: disabled,
+    /// config-disabled and RSS-incapable ones are neither due nor deferred,
+    /// so an install with no RSS indexer at all reports nothing and the worker
+    /// keeps polling (its pending-release work does not depend on this).
+    /// An enabled indexer the scheduler holds no cadence for has never been
+    /// polled and is due, which is what makes a freshly added indexer run on
+    /// the next tick instead of waiting out someone else's interval.
+    async fn rss_due_indexers(&self) -> AppResult<RssDueIndexers> {
+        let configs = self.indexer_configs.list(None).await?;
+        let now = chrono::Utc::now();
+        let candidates = configs
+            .iter()
+            .filter(|config| config.is_enabled)
+            .filter(|config| config.disabled_until.is_none_or(|until| until <= now))
+            .filter(|config| Self::auto_mode_enabled(config, true))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(RssDueIndexers::unknown());
+        }
+
+        let snapshot = self
+            .upstream_scheduler
+            .snapshot(SchedulerSnapshotFilter::default())
+            .await?;
+        let mut due = Vec::new();
+        let mut deferred = Vec::new();
+        for config in candidates {
+            let (_, destination_key) = Self::scheduler_keys_for_indexer(config);
+            let mut entries = snapshot
+                .entries
+                .iter()
+                .filter(|entry| entry.destination_key == destination_key)
+                .peekable();
+            // No cadence for this destination at all: never polled, so due.
+            let is_due = entries.peek().is_none()
+                || entries.any(|entry| {
+                    rss_poll_is_due(entry.rss_latest_safe_poll_at, entry.rss_freshness_risk, now)
+                });
+            if is_due {
+                due.push(config.id.clone());
+            } else {
+                deferred.push(config.id.clone());
+            }
+        }
+        Ok(RssDueIndexers { due, deferred })
+    }
+
     async fn reset_indexer_backoff(&self, indexer_id: &str) {
         if self.backoff_tracker.clear(indexer_id).await {
             tracing::info!(
@@ -7577,6 +7626,74 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[tokio::test]
+    async fn an_indexer_inside_its_cadence_reports_as_deferred() {
+        let config = mock_indexer_config();
+        let (host_key, destination_key) =
+            MultiIndexerSearchClient::scheduler_keys_for_indexer(&config);
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config.clone()],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(MockIndexerPluginProvider {
+                rss: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .with_upstream_scheduler(scheduler.clone());
+
+        let never_polled = multi
+            .rss_due_indexers()
+            .await
+            .expect("due indexers should resolve");
+        assert_eq!(never_polled.due, vec![config.id.clone()]);
+        assert!(never_polled.deferred.is_empty());
+        assert!(never_polled.poll_is_warranted());
+
+        let now = Utc::now();
+        scheduler
+            .record_feedback(SchedulerFeedback {
+                lease: Some(SchedulerLease {
+                    lease_id: uuid::Uuid::new_v4().to_string(),
+                    candidate_id: SchedulerCandidateId::new(),
+                    host_key: host_key.clone(),
+                    destination_key: destination_key.clone(),
+                    account_quota_key: None,
+                    rss_request_key: Some("rss:*".to_string()),
+                    operation: SchedulerOperation::Rss,
+                    intent: SchedulerIntent::BackgroundRss,
+                    issued_at: now,
+                }),
+                host_key,
+                destination_key,
+                account_quota_key: None,
+                outcome: SchedulerFeedbackOutcome::Success,
+                observed_api_current: None,
+                observed_api_max: None,
+                observed_grab_current: None,
+                observed_grab_max: None,
+                retry_after: None,
+                cooldown_action: RateLimitCooldownAction::None,
+                rss_last_seen_release_identity: None,
+                rss_last_seen_release_published_at: None,
+                rss_feed_result_count: Some(0),
+                rss_seen_release_identities: Vec::new(),
+                observed_at: now,
+            })
+            .await
+            .expect("successful RSS feedback should be recorded");
+
+        let inside_cadence = multi
+            .rss_due_indexers()
+            .await
+            .expect("due indexers should resolve");
+        assert!(inside_cadence.due.is_empty());
+        assert_eq!(inside_cadence.deferred, vec![config.id]);
+        assert!(!inside_cadence.poll_is_warranted());
     }
 
     #[test]

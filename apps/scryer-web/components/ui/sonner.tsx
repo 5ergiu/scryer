@@ -71,10 +71,15 @@ const Toaster = ({ style, toastOptions, ...props }: ToasterProps) => {
             "border-[var(--scry-success-border)] !bg-[var(--card)] text-[var(--scry-success-text)]",
           error:
             "border-[var(--scry-danger-border)] !bg-[var(--card)] text-[var(--scry-danger-text)]",
+          // Every variant paints the same opaque surface. The earlier
+          // `bg-[linear-gradient(...),var(--scry-bg)]` compiled to
+          // `background-image`, where a bare colour is not a valid layer, so the
+          // whole declaration was dropped and Sonner's translucent rich colour
+          // showed through. `!` is what beats rich colours.
           warning:
-            "border-[var(--scry-warning-border)] bg-[linear-gradient(0deg,var(--scry-warning-bg),var(--scry-warning-bg)),var(--scry-bg)] text-[var(--scry-warning-text)]",
+            "border-[var(--scry-warning-border)] !bg-[var(--card)] text-[var(--scry-warning-text)]",
           info:
-            "border-[var(--scry-info-border)] bg-[linear-gradient(0deg,var(--scry-info-bg),var(--scry-info-bg)),var(--scry-bg)] text-[var(--scry-info-text)]",
+            "border-[var(--scry-info-border)] !bg-[var(--card)] text-[var(--scry-info-text)]",
         },
         ...toastOptions,
       }}

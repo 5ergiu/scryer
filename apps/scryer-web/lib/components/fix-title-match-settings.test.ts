@@ -19,6 +19,7 @@ const WEB_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const translate: Translate = (key) => key;
 
 type MovieSettingsProps = {
+  idPrefix: string;
   title: TitleRecord;
   libraries: LibraryRecord[];
   onUpdateTitleOptions: () => Promise<void>;
@@ -87,6 +88,7 @@ async function renderWithTranslation(
 
 test("movie settings render the movie Fix Match control", async () => {
   const props: MovieSettingsProps = {
+    idPrefix: "title-overview-settings",
     title: {
       id: "movie-1",
       name: "Wrong Movie",
@@ -102,8 +104,8 @@ test("movie settings render the movie Fix Match control", async () => {
     onOpenFixMatch: () => {},
   };
   const html = await renderWithTranslation(
-    "/components/views/media-content/movie-title-settings-panel.tsx",
-    "MovieTitleSettingsPanel",
+    "/components/views/title-settings-panel.tsx",
+    "TitleSettingsPanel",
     props,
     true,
   );

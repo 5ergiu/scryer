@@ -3569,219 +3569,6 @@ async fn every_poll_tick_reads_recent_history_alongside_the_queue() {
 }
 
 #[tokio::test]
-async fn excluded_client_history_reconciliation_imports_missed_completion() {
-    let download_client = Arc::new(StubDownloadClient::default());
-    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
-    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
-    let (base_app, user) = bootstrap_with_cleanup_tracking(
-        download_client.clone(),
-        download_submissions,
-        pending_releases,
-    );
-    let import_repo = Arc::new(TrackingImportRepo::default());
-    let app = base_app.with_test_overrides(|services| services.with_imports(import_repo.clone()));
-
-    let config =
-        create_enabled_download_client_config(&app, &user, "Primary Weaver", "weaver").await;
-    let title = app
-        .add_title(
-            &user,
-            NewTitle {
-                name: "Reconciled Weaver Import".to_string(),
-                facet: MediaFacet::Movie,
-                monitored: true,
-                tags: vec![],
-                external_ids: vec![],
-                min_availability: None,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("create monitored movie title");
-
-    let item_id = "weaver-swallowed-1";
-    let download_id = "weaver-download-swallowed-1";
-    let mut item = queue_history_fixture_item(item_id, DownloadQueueState::Completed, 40);
-    item.client_id = config.id.clone();
-    item.client_name = config.name.clone();
-    item.client_type = "weaver".to_string();
-    item.download_id = Some(download_id.to_string());
-    item.title_id = Some(title.id.clone());
-    item.title_name = title.name.clone();
-    item.facet = Some("movie".to_string());
-
-    let source_dir = tempfile::tempdir().expect("source tempdir");
-    let mut completed = completed_download_fixture_item(
-        item_id,
-        &title.id,
-        item.title_name.as_str(),
-        source_dir.path().to_string_lossy().as_ref(),
-    );
-    completed.client_id = config.id.clone();
-    completed.client_type = "weaver".to_string();
-    completed.download_id = None;
-
-    // The completion event was never delivered: no bridge delta is published.
-    // Only the client's history knows about the item.
-    *download_client.history_items.lock().await = vec![item.clone()];
-    *download_client.recent_completed_downloads.lock().await = Some(vec![completed]);
-
-    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
-    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(8);
-    let token = tokio_util::sync::CancellationToken::new();
-    let poller = tokio::spawn(
-        crate::integration::start_download_queue_poller_with_options(
-            app.clone(),
-            token.child_token(),
-            tracked_download_rx,
-            snapshot_rx,
-            crate::integration::DownloadQueuePollerOptions {
-                interval: Duration::from_millis(50),
-                excluded_client_types: vec!["weaver".to_string()],
-                ..Default::default()
-            },
-        ),
-    );
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if import_repo
-                .records
-                .lock()
-                .await
-                .iter()
-                .any(|record| record.source_ref == item_id && record.source_system == "weaver")
-            {
-                break;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("history reconciliation should import a completion the bridge never announced");
-
-    assert!(
-        !download_client
-            .recent_activity_calls
-            .lock()
-            .await
-            .is_empty(),
-        "reconciliation should list the excluded client's recent history"
-    );
-
-    token.cancel();
-    poller
-        .await
-        .expect("download queue poller should stop cleanly");
-}
-
-#[tokio::test]
-async fn excluded_client_history_reconciliation_skips_stale_completions() {
-    let download_client = Arc::new(StubDownloadClient::default());
-    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
-    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
-    let (base_app, user) = bootstrap_with_cleanup_tracking(
-        download_client.clone(),
-        download_submissions,
-        pending_releases,
-    );
-    let import_repo = Arc::new(TrackingImportRepo::default());
-    let app = base_app.with_test_overrides(|services| services.with_imports(import_repo.clone()));
-
-    let config =
-        create_enabled_download_client_config(&app, &user, "Primary Weaver", "weaver").await;
-    let title = app
-        .add_title(
-            &user,
-            NewTitle {
-                name: "Stale Weaver Backlog".to_string(),
-                facet: MediaFacet::Movie,
-                monitored: true,
-                tags: vec![],
-                external_ids: vec![],
-                min_availability: None,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("create monitored movie title");
-
-    let item_id = "weaver-stale-backlog-1";
-    let mut item = queue_history_fixture_item(item_id, DownloadQueueState::Completed, 40);
-    item.client_id = config.id.clone();
-    item.client_name = config.name.clone();
-    item.client_type = "weaver".to_string();
-    item.title_id = Some(title.id.clone());
-    item.title_name = title.name.clone();
-    item.facet = Some("movie".to_string());
-
-    let source_dir = tempfile::tempdir().expect("source tempdir");
-    let mut completed = completed_download_fixture_item(
-        item_id,
-        &title.id,
-        item.title_name.as_str(),
-        source_dir.path().to_string_lossy().as_ref(),
-    );
-    completed.client_id = config.id.clone();
-    completed.client_type = "weaver".to_string();
-    completed.download_id = None;
-    // Retained history from long before this Scryer version was deployed: the
-    // sweep must leave it for an explicit backfill instead of importing it.
-    completed.completed_at = Some(Utc::now() - chrono::Duration::days(30));
-
-    *download_client.history_items.lock().await = vec![item];
-    *download_client.recent_completed_downloads.lock().await = Some(vec![completed]);
-
-    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
-    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(8);
-    let token = tokio_util::sync::CancellationToken::new();
-    let poller = tokio::spawn(
-        crate::integration::start_download_queue_poller_with_options(
-            app.clone(),
-            token.child_token(),
-            tracked_download_rx,
-            snapshot_rx,
-            crate::integration::DownloadQueuePollerOptions {
-                interval: Duration::from_millis(50),
-                excluded_client_types: vec!["weaver".to_string()],
-                ..Default::default()
-            },
-        ),
-    );
-
-    // Wait for the sweep to actually read the client's history, then give the
-    // dispatch path time to act on it. The positive-path test shows an eligible
-    // row dispatches within the same cycle, so a still-empty import repo here
-    // means the age filter — not a missed sweep — kept it out.
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if !download_client
-                .recent_activity_calls
-                .lock()
-                .await
-                .is_empty()
-            {
-                break;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("reconciliation should list the excluded client's history");
-    sleep(Duration::from_millis(500)).await;
-
-    assert!(
-        import_repo.records.lock().await.is_empty(),
-        "a completion older than the reconcile window must not be auto-imported"
-    );
-
-    token.cancel();
-    poller
-        .await
-        .expect("download queue poller should stop cleanly");
-}
-
-#[tokio::test]
 async fn blocked_import_outcome_is_persisted_durably() {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
@@ -11096,6 +10883,96 @@ async fn ignore_tracked_download_uses_durable_fallback_idempotently() {
     );
 }
 
+/// The download-queue poller memoizes the identity resolution of completed
+/// history rows against the registry generation. A lifecycle event that can
+/// rebind or retire a binding inside the store's own transaction has to move
+/// that generation, or the memo keeps serving a resolution for a binding that
+/// no longer exists. Equally, an event that changed nothing must not move it,
+/// or the memo never survives a tick and the optimization is undone.
+#[tokio::test]
+async fn ignoring_a_download_retires_memoized_observations_only_when_the_state_moves() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        download_client,
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Durable Ignore Generation".to_string(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                tags: vec![],
+                external_ids: vec![],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    let source_identity = ClientJobLocator::new(None, "nzbget", "generation-job-1");
+    download_submissions
+        .record_submission_with_identity(
+            DownloadSubmission {
+                download_id: scryer_domain::download_identity::DownloadId::new(),
+                title_id: title.id,
+                purpose: crate::DownloadSubmissionPurpose::Standard,
+                facet: "movie".to_string(),
+                download_client_id: None,
+                download_client_type: "nzbget".to_string(),
+                download_client_item_id: "generation-job-1".to_string(),
+                source_hint: None,
+                source_provider_id: None,
+                source_provider_name: None,
+                source_kind: None,
+                source_title: Some("Durable.Ignore.2026.1080p.WEB-DL".to_string()),
+                info_hash: None,
+                release_size_bytes: None,
+                request_signature: None,
+                scope: crate::SubmissionScope::Title,
+            },
+            crate::DownloadSubmissionIdentity {
+                download_id: Some("scryer-download:generation-job-1".to_string()),
+            },
+            None,
+        )
+        .await
+        .expect("record submission identity");
+
+    let before = app.runtime.acquisition.download_registry_generation();
+    crate::integration::workflow::finalize_scryer_download_ignored(
+        &app,
+        crate::domain_events::DomainEventActor::from(&user),
+        source_identity.clone(),
+    )
+    .await
+    .expect("first ignore should finalize");
+    let after_transition = app.runtime.acquisition.download_registry_generation();
+    assert_ne!(
+        before, after_transition,
+        "ignoring a tracked download moves its durable state, so memoized \
+         observation resolutions must be retired"
+    );
+
+    crate::integration::workflow::finalize_scryer_download_ignored(
+        &app,
+        crate::domain_events::DomainEventActor::from(&user),
+        source_identity,
+    )
+    .await
+    .expect("second ignore should be idempotent");
+    assert_eq!(
+        after_transition,
+        app.runtime.acquisition.download_registry_generation(),
+        "an ignore that found the identity already ignored changed no binding; \
+         retiring the memo here would undo it on every tick"
+    );
+}
+
 #[tokio::test]
 async fn finalize_ignore_preserves_an_imported_outcome() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -14603,5 +14480,308 @@ async fn deleting_a_download_client_clears_its_status_row() {
         status.cleared.lock().expect("cleared mutex").as_slice(),
         std::slice::from_ref(&config.id),
         "deleting a client clears its status row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NFO sidecars on import
+// ---------------------------------------------------------------------------
+
+/// Import one well-named episode file through the manual path and hand back the
+/// destination the file landed at, so the caller can look for its sidecar.
+async fn manual_import_pack_episode(
+    app: &AppUseCase,
+    user: &User,
+    title_id: &str,
+    episode_ids: Vec<String>,
+    release_name: &str,
+    source_dir: &Path,
+) -> std::path::PathBuf {
+    let source_file = write_pack_video(source_dir, &format!("{release_name}.mkv"));
+    let results = crate::import_workflow::execute_manual_import(
+        app,
+        user,
+        "manual-import-nfo-sidecar",
+        title_id,
+        None,
+        vec![ManualImportFileMapping {
+            disc_selection: None,
+            file_path: source_file.to_string_lossy().into_owned(),
+            episode_id: episode_ids.first().cloned(),
+            episode_ids,
+            series_movie_link_id: None,
+        }],
+        Some(std::fs::canonicalize(source_dir).expect("canonical source root")),
+    )
+    .await
+    .expect("execute manual import");
+    assert!(results.iter().all(|result| result.success), "{results:?}");
+    assert_eq!(results.len(), 1, "{results:?}");
+
+    crate::stored_paths::stored_path_to_path_buf(
+        results[0]
+            .dest_path
+            .as_deref()
+            .expect("a successful import reports where the file landed"),
+    )
+}
+
+async fn set_nfo_write_on_import(app: &AppUseCase, user: &User, facet: MediaFacet, enabled: bool) {
+    app.update_media_settings(
+        user,
+        facet,
+        UpdateMediaSettings {
+            nfo_write_on_import: Some(enabled),
+            ..empty_update_media_settings()
+        },
+    )
+    .await
+    .expect("media settings should update");
+}
+
+async fn override_nfo_write_on_import(
+    app: &AppUseCase,
+    user: &User,
+    library_id: &str,
+    enabled: bool,
+) {
+    app.update_library_settings(
+        user,
+        library_id,
+        LibrarySettingsOverrideDraft {
+            nfo_write_on_import: Some(enabled),
+            ..empty_library_settings_override()
+        },
+    )
+    .await
+    .expect("library override should save");
+}
+
+#[tokio::test]
+async fn an_import_writes_no_sidecar_while_the_setting_stays_off() {
+    // Off is the seeded default, and an operator who never opted in must not
+    // find Scryer's files appearing next to their own.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert!(destination.exists(), "the episode file must still land");
+    assert!(
+        !destination.with_extension("nfo").exists(),
+        "no sidecar may be written while the setting is off"
+    );
+}
+
+#[tokio::test]
+async fn a_library_override_can_turn_the_sidecar_off_for_one_library() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    override_nfo_write_on_import(&app, &user, &title.library_id, false).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert!(
+        !destination.with_extension("nfo").exists(),
+        "the library override is the last word over the facet setting"
+    );
+}
+
+#[tokio::test]
+async fn a_library_override_can_turn_the_sidecar_on_for_one_library() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    // Facet off, library on: the cascade has to read the override even when
+    // the global answer is the seeded default.
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, false).await;
+    override_nfo_write_on_import(&app, &user, &title.library_id, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let sidecar = destination.with_extension("nfo");
+    assert!(
+        sidecar.exists(),
+        "the library override must enable the write"
+    );
+    let content = std::fs::read_to_string(&sidecar).expect("read sidecar");
+    assert!(content.starts_with("<?xml version=\"1.0\""), "{content}");
+    assert!(content.contains("<episodedetails>"), "{content}");
+    assert!(
+        content.contains("<showtitle>Fail Closed Pack</showtitle>"),
+        "{content}"
+    );
+    assert!(content.contains("<season>1</season>"), "{content}");
+    assert!(content.contains("<episode>1</episode>"), "{content}");
+    assert!(!content.contains('\r'), "sidecars are never written CRLF");
+    assert!(content.ends_with('\n'), "{content}");
+}
+
+#[tokio::test]
+async fn a_manual_import_writes_the_episode_sidecar() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let sidecar = destination.with_extension("nfo");
+    assert!(
+        sidecar.exists(),
+        "the manual path used to import the file and write nothing beside it"
+    );
+    let content = std::fs::read_to_string(&sidecar).expect("read sidecar");
+    assert_eq!(content.matches("<episodedetails>").count(), 1, "{content}");
+    // The sidecar describes the bytes that landed, so it can only be written
+    // after the media file exists.
+    assert!(content.contains("<streamdetails>"), "{content}");
+}
+
+#[tokio::test]
+async fn a_multi_episode_manual_import_writes_one_root_per_episode() {
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    let destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone(), second_episode.id.clone()],
+        "Fail.Closed.Pack.S01E01E02.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    let content = std::fs::read_to_string(destination.with_extension("nfo")).expect("read sidecar");
+    // One file covering two episodes carries both roots: Jellyfin splits the
+    // document on `</episodedetails>` and reads each block as its own episode.
+    assert_eq!(content.matches("<episodedetails>").count(), 2, "{content}");
+    assert_eq!(content.matches("<?xml").count(), 1, "{content}");
+    assert!(content.contains("<episode>1</episode>"), "{content}");
+    assert!(content.contains("<episode>2</episode>"), "{content}");
+}
+
+#[tokio::test]
+async fn an_existing_sidecar_survives_the_import_that_lands_beside_it() {
+    // Operators curate these files by hand, and other tools write them too.
+    // Whatever is already on disk wins, at any size and any content.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let second_episode = create_pack_episode_in_fixture_season(&app, &user, &title.id, 2).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+
+    // One pass with the setting off, purely to learn the shape of the names
+    // this library gives imported files.
+    let first_destination = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![episode.id.clone()],
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+    assert!(!first_destination.with_extension("nfo").exists());
+    let first_name = first_destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("imported file name");
+    assert!(first_name.contains("S01E01"), "{first_name}");
+
+    // Put the operator's own sidecar where the next episode is about to land.
+    let second_destination =
+        first_destination.with_file_name(first_name.replace("S01E01", "S01E02"));
+    let sidecar = second_destination.with_extension("nfo");
+    let curated = "<episodedetails>\n  <title>Written by the operator</title>\n</episodedetails>\n";
+    std::fs::write(&sidecar, curated).expect("seed the operator's sidecar");
+    set_nfo_write_on_import(&app, &user, MediaFacet::Series, true).await;
+
+    let landed = manual_import_pack_episode(
+        &app,
+        &user,
+        &title.id,
+        vec![second_episode.id.clone()],
+        "Fail.Closed.Pack.S01E02.1080p.WEB-DL.x264",
+        source_dir.path(),
+    )
+    .await;
+
+    assert_eq!(
+        landed, second_destination,
+        "the sidecar was seeded beside the wrong destination"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sidecar).expect("read sidecar"),
+        curated,
+        "an existing sidecar is never replaced"
     );
 }

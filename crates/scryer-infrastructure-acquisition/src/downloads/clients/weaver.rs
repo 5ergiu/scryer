@@ -31,6 +31,12 @@ use super::{
 };
 use crate::graphql::weaver as graphql_docs;
 
+/// Newest history rows an unbounded Weaver history read takes.
+///
+/// Matches the poller's recent-activity page: the reads that used to ask for
+/// everything (compat fallback 200) only ever had their newest page consumed.
+const WEAVER_HISTORY_PAGE_SIZE: usize = 100;
+
 #[derive(Clone)]
 pub struct WeaverDownloadClient {
     graphql_url: String,
@@ -905,6 +911,31 @@ impl WeaverDownloadClient {
         Ok(item.as_ref().and_then(weaver_item_to_completed_download))
     }
 
+    /// One bounded `historyItems` page, with the pre-`historyItems` compat
+    /// fallback every history read here shares.
+    ///
+    /// Weaver's history reads used to ask for the whole list (`first: null`,
+    /// compat fallback 200). The poller only ever consumes the newest page, so
+    /// every read is bounded now — the same newest-N page SABnzbd and NZBGet
+    /// take.
+    async fn history_jobs_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> AppResult<Vec<WeaverQueueItem>> {
+        match self
+            .query_history_items(Some(limit), Some(offset), None, false)
+            .await
+        {
+            Ok(items) => Ok(items),
+            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
+                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(limit), Some(offset))
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn query_jobs_compat(
         &self,
         statuses: Option<&[&str]>,
@@ -1574,14 +1605,7 @@ impl DownloadClient for WeaverDownloadClient {
     }
 
     async fn list_history(&self) -> AppResult<Vec<DownloadQueueItem>> {
-        let jobs = match self.query_history_items(None, None, None, false).await {
-            Ok(items) => items,
-            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
-                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(200), Some(0))
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let jobs = self.history_jobs_page(WEAVER_HISTORY_PAGE_SIZE, 0).await?;
         Ok(jobs.iter().map(weaver_item_to_queue_item).collect())
     }
 
@@ -1590,18 +1614,31 @@ impl DownloadClient for WeaverDownloadClient {
             return Ok(Vec::new());
         }
 
-        let jobs = match self
-            .query_history_items(Some(limit), Some(0), None, false)
-            .await
-        {
-            Ok(items) => items,
-            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
-                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(limit), Some(0))
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let jobs = self.history_jobs_page(limit, 0).await?;
         Ok(jobs.iter().map(weaver_item_to_queue_item).collect())
+    }
+
+    /// One `historyItems` page serving both projections of the tick.
+    ///
+    /// Unbridged Weaver is polled like any other client, and the activity view
+    /// and the completed lookup were two separate history queries against the
+    /// same rows.
+    async fn list_recent_activity_with_completed_with_feedback_scope(
+        &self,
+        limit: usize,
+        _scope: &scryer_application::DownloadClientFeedbackScope,
+    ) -> AppResult<(Vec<DownloadQueueItem>, Option<Vec<CompletedDownload>>)> {
+        if limit == 0 {
+            return Ok((Vec::new(), Some(Vec::new())));
+        }
+
+        let jobs = self.history_jobs_page(limit, 0).await?;
+        let items = jobs.iter().map(weaver_item_to_queue_item).collect();
+        let completed = jobs
+            .iter()
+            .filter_map(weaver_item_to_completed_download)
+            .collect();
+        Ok((items, Some(completed)))
     }
 
     async fn list_recent_activity_for_title(
@@ -1635,17 +1672,7 @@ impl DownloadClient for WeaverDownloadClient {
         offset: usize,
         limit: usize,
     ) -> AppResult<Vec<DownloadQueueItem>> {
-        let jobs = match self
-            .query_history_items(Some(limit), Some(offset), None, false)
-            .await
-        {
-            Ok(items) => items,
-            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
-                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(limit), Some(offset))
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let jobs = self.history_jobs_page(limit, offset).await?;
         Ok(jobs.iter().map(weaver_item_to_queue_item).collect())
     }
 
@@ -1657,17 +1684,7 @@ impl DownloadClient for WeaverDownloadClient {
             return Ok(Vec::new());
         }
 
-        let jobs = match self
-            .query_history_items(Some(limit), Some(0), None, false)
-            .await
-        {
-            Ok(items) => items,
-            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
-                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(limit), Some(0))
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let jobs = self.history_jobs_page(limit, 0).await?;
         Ok(jobs
             .iter()
             .filter_map(weaver_item_to_completed_download)
@@ -1675,14 +1692,7 @@ impl DownloadClient for WeaverDownloadClient {
     }
 
     async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
-        let jobs = match self.query_history_items(None, None, None, false).await {
-            Ok(items) => items,
-            Err(error) if is_weaver_schema_error(&error, "Unknown field \"historyItems\"") => {
-                self.query_jobs_compat(Some(&["COMPLETE", "FAILED"]), Some(200), Some(0))
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+        let jobs = self.history_jobs_page(WEAVER_HISTORY_PAGE_SIZE, 0).await?;
         Ok(jobs
             .iter()
             .filter_map(weaver_item_to_completed_download)
@@ -2938,6 +2948,85 @@ mod tests {
             "/data/complete/8f1d2c3b4a59687766554433221100ff.#10000"
         );
         assert!(downloads[0].parameters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recent_activity_and_completed_come_from_one_history_query() {
+        let server = MockServer::start().await;
+        let client = WeaverDownloadClient::new(server.uri(), Some("wvr_test".to_string()));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("authorization", "Bearer wvr_test"))
+            .and(body_string_contains("\"first\":100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "historyItems": [
+                        {
+                            "id": 10005,
+                            "name": "Tin.Whistle.2019.1080p",
+                            "state": "COMPLETE",
+                            "error": null,
+                            "progressPercent": 100.0,
+                            "totalBytes": 123456789_u64,
+                            "category": "2000",
+                            "attributes": [],
+                            "clientRequestId": null,
+                            "outputDir": "/data/complete/Tin.Whistle.2019.1080p.#10005",
+                            "createdAt": "2024-01-01T00:00:00Z",
+                            "completedAt": "2024-01-01T00:10:00Z",
+                            "attention": null
+                        }
+                    ]
+                }
+            })))
+            // One query for both projections; a second would fail the test.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (items, completed) = client
+            .list_recent_activity_with_completed_with_feedback_scope(
+                100,
+                &scryer_application::DownloadClientFeedbackScope::default(),
+            )
+            .await
+            .expect("one history query should answer both projections");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].download_client_item_id, "10005");
+        let completed = completed.expect("weaver derives completed rows from the same page");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].download_client_item_id, "10005");
+    }
+
+    #[tokio::test]
+    async fn unbounded_history_reads_are_capped_to_the_newest_page() {
+        for unbounded_read in ["history", "completed"] {
+            let server = MockServer::start().await;
+            let client = WeaverDownloadClient::new(server.uri(), Some("wvr_test".to_string()));
+
+            Mock::given(method("POST"))
+                .and(path("/graphql"))
+                .and(header("authorization", "Bearer wvr_test"))
+                // These two reads used to ask for the whole history.
+                .and(body_string_contains("\"first\":100"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "historyItems": [] }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            if unbounded_read == "history" {
+                client.list_history().await.expect("history should load");
+            } else {
+                client
+                    .list_completed_downloads()
+                    .await
+                    .expect("completed downloads should load");
+            }
+        }
     }
 
     #[tokio::test]

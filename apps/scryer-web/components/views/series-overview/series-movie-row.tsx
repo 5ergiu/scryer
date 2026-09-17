@@ -41,6 +41,8 @@ export type SeriesMovieTimelineContentProps = {
   mediaFilesByEpisode: Record<string, EpisodeMediaFile[]>;
   mediaFilesBySeriesMovieLink: Record<string, EpisodeMediaFile[]>;
   subtitleDownloads?: ExternalSubtitleRecord[];
+  /** Library the series' media files belong to; gates subtitle controls. */
+  libraryId: string | null;
   onRefreshSubtitles?: () => Promise<void> | void;
   onLoadSeriesMovieDetail?: (link: SeriesMovieLink) => Promise<void> | void;
   seriesMovieSearchResultsByLink: Record<string, Release[]>;
@@ -66,6 +68,7 @@ function SeriesMovieTimelineContent({
   mediaFilesByEpisode,
   mediaFilesBySeriesMovieLink,
   subtitleDownloads,
+  libraryId,
   onRefreshSubtitles,
   seriesMovieSearchResultsByLink,
   seriesMovieSearchLoadingByLink,
@@ -102,6 +105,7 @@ function SeriesMovieTimelineContent({
               emptyMessage={t("title.noFilesTracked")}
               mediaFiles={mediaFiles}
               subtitleDownloads={subtitleDownloads}
+              libraryId={libraryId}
               onRefreshSubtitles={onRefreshSubtitles}
               onDeleteFile={onDeleteFile}
               onMakePrimaryFile={onMakePrimaryFile}
