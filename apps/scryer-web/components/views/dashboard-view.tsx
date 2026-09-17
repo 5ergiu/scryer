@@ -701,6 +701,10 @@ function ImportActivityRow({
   const t = useTranslate();
   // The same derivation Activity → Imports uses, so the dashboard can never
   // disagree with that page about what an import is doing or why it stopped.
+  // Every button below is gated on the server's own action set, so a row here
+  // and the same row on Activity are never offered different things; the
+  // dashboard is a compact strip and renders a subset of them (assigning a
+  // title and ignoring need the Activity page's dialogs).
   const presentation = deriveQueueRowPresentation(item, t);
   const failed =
     item.attentionRequired ||
