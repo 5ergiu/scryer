@@ -15,8 +15,8 @@ use scryer_application::{
     SubtitleProviderConfigRepository, SubtitleProviderConfigUpdate, TitleArtworkUrlUpdate,
     TitleCatalogFilter, TitleCatalogProfileNames, TitleCatalogSort, TitleCatalogSortKey,
     TitleCredit, TitleExternalIdLookup, TitleExternalRating, TitleImageBlob, TitleImageKind,
-    TitleImageRepository, TitleImageSourceResult, TitleImageVariantRecord, TitleMetadataUpdate,
-    TitleRatingSummary, TitleRepository, UserRepository,
+    TitleImageRepository, TitleImageSourceResult, TitleImageVariantRecord, TitleListProjection,
+    TitleMetadataUpdate, TitleRatingSummary, TitleRepository, UserRepository,
     subtitles::{ExternalSubtitleDetectionSource, ExternalSubtitleProbeCacheEntry},
 };
 use scryer_domain::{
