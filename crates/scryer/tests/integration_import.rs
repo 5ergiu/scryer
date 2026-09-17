@@ -2332,6 +2332,7 @@ fn tracked_movie_download(
             download_client_item_id: completed.download_client_item_id.clone(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

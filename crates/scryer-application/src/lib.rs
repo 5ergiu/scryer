@@ -272,6 +272,7 @@ pub use app_usecase_integration::enrich_download_queue_items_from_submissions;
 pub use app_usecase_integration::matches_download_activity_filter;
 pub use app_usecase_integration::matches_download_queue_filter;
 pub use app_usecase_integration::validate_persisted_proxy_config;
+pub use app_usecase_integration::{DownloadImportActions, derive_download_queue_import_actions};
 pub use app_usecase_integration::{
     DownloadQueuePollerOptions, start_download_queue_poller,
     start_download_queue_poller_with_options,
@@ -357,6 +358,7 @@ pub use import_workflow::{
 };
 pub use integration::download_queue_commands::start_background_download_delete_poller;
 pub(crate) use integration::integration::ManualImportSourceResolution;
+pub use integration::workflow::{ImportRecordResultOverlay, import_record_result_overlay};
 pub use jobs::jobs::start_background_library_refresh_loop;
 pub use library::rename::{
     LibraryRenamer, NullLibraryRenamer, RenameApplyItemResult, RenameApplyResult,

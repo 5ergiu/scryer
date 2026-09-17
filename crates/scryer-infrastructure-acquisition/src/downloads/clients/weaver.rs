@@ -1107,6 +1107,7 @@ pub fn weaver_item_to_queue_item(job: &WeaverQueueItem) -> DownloadQueueItem {
         download_client_item_id: job.id.to_string(),
         download_id: scryer_metadata.download_id,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,

@@ -2340,6 +2340,7 @@ async fn graphql_download_import_exposes_background_import_blocked_state_from_ca
         download_client_item_id: item_id.to_string(),
         download_id: Some(download_id.to_string()),
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
