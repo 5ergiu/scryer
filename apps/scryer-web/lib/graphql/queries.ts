@@ -576,6 +576,7 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     inheritsRequiredAudioLanguages
     rootFolderId
     rootFolderPath
+    renameEnabled
     monitorType
     useSeasonFolders
     useSeasonFoldersOverride
@@ -645,6 +646,7 @@ const SERIES_SIDE_PANEL_TITLE_FIELDS = `
     releaseNumbering
     effectiveFillerPolicy
     effectiveRecapPolicy
+    renameEnabled
     createdAt
     collections {${SERIES_SIDE_PANEL_COLLECTION_FIELDS}
     }
@@ -2541,17 +2543,21 @@ export const qualityProfileOptionsQuery = `query QualityProfileOptions {
   }
 }`;
 
-export const movieOverviewSettingsInitQuery = `query MovieOverviewSettingsInit {
-  qualityProfileSettings {${qualityProfileSettingsFieldSelection}
-  }
-  mediaSettings(scope: MOVIE) {${mediaSettingsFieldSelection}
+// A title's settings panel reads these separately: the media settings need
+// settings access that someone who only manages titles does not have, and that
+// must not cost them the quality profile choices.
+export const titleSettingsQualityProfilesQuery = `query TitleSettingsQualityProfiles {
+  qualityProfileSettings {
+    profiles {
+      id
+      name
+    }
   }
 }`;
 
-export const seriesOverviewSettingsInitQuery = `query SeriesOverviewSettingsInit($scope: ContentScopeValue!) {
-  qualityProfileSettings {${qualityProfileSettingsFieldSelection}
-  }
-  mediaSettings(scope: $scope) {${mediaSettingsFieldSelection}
+export const titleSettingsDefaultRootFolderQuery = `query TitleSettingsDefaultRootFolder($scope: ContentScopeValue!) {
+  mediaSettings(scope: $scope) {
+    libraryPath
   }
 }`;
 
@@ -4324,6 +4330,12 @@ export const calendarEpisodesQuery = `query CalendarEpisodes($startDate: Date!, 
 }`;
 
 // ── Setup Wizard ──────────────────────────────────────────────────────
+
+export const titleSearchSetupStatusQuery = `query TitleSearchSetupStatus {
+  setupStatus {
+    hasDownloadClients
+  }
+}`;
 
 export const setupStatusQuery = `query SetupStatus {
   setupStatus {

@@ -5,6 +5,8 @@ import {
   compareManualImportSeasonLabels,
   directMovieManualImportMappings,
   manualImportActions,
+  manualImportNeedsMapping,
+  manualImportSelectionNeedsDialog,
 } from "./manual-import-actions.ts";
 
 test("manual import season labels sort numerically", () => {
@@ -101,5 +103,26 @@ test("manual import actions tolerate legacy lowercase facet values", () => {
       hasTitle: true,
     }),
     { direct: false, interactive: true },
+  );
+});
+
+test("only series and anime imports need episode mapping", () => {
+  assert.equal(manualImportNeedsMapping("SERIES"), true);
+  assert.equal(manualImportNeedsMapping("anime"), true);
+  assert.equal(manualImportNeedsMapping("MOVIE"), false);
+  assert.equal(manualImportNeedsMapping(null), false);
+});
+
+test("a disc image sends a movie import to the dialog", () => {
+  assert.equal(
+    manualImportSelectionNeedsDialog([
+      { fileName: "Example.Movie.2024.mkv" },
+      { fileName: "EXAMPLE_DISC.ISO" },
+    ]),
+    true,
+  );
+  assert.equal(
+    manualImportSelectionNeedsDialog([{ fileName: "Example.Movie.2024.mkv" }]),
+    false,
   );
 });

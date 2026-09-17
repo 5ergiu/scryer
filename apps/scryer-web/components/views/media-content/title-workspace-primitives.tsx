@@ -74,12 +74,25 @@ export function TitleWorkspacePosterFrame({
 }
 
 export function TitleWorkspaceActionGrid({
+  id,
+  columns = 7,
   children,
 }: {
+  id?: string;
+  /** How many actions the grid holds: six sit in two rows of three on phones. */
+  columns?: 6 | 7;
   children: React.ReactNode;
 }) {
   return (
-    <div className="mb-3 grid grid-cols-12 overflow-hidden rounded-[12px] border border-[var(--scry-border)] bg-[var(--scry-border)] [gap:1px] [&>*:nth-child(-n+4)]:col-span-3 [&>*:nth-child(n+5)]:col-span-4 sm:grid-cols-7 sm:[&>*:nth-child(-n+4)]:col-span-1 sm:[&>*:nth-child(n+5)]:col-span-1">
+    <div
+      id={id}
+      className={cn(
+        "mb-3 grid grid-cols-12 overflow-hidden rounded-[12px] border border-[var(--scry-border)] bg-[var(--scry-border)] [gap:1px]",
+        columns === 6
+          ? "[&>*]:col-span-4 sm:grid-cols-6 sm:[&>*]:col-span-1"
+          : "[&>*:nth-child(-n+4)]:col-span-3 [&>*:nth-child(n+5)]:col-span-4 sm:grid-cols-7 sm:[&>*:nth-child(-n+4)]:col-span-1 sm:[&>*:nth-child(n+5)]:col-span-1",
+      )}
+    >
       {children}
     </div>
   );

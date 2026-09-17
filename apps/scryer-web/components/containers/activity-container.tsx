@@ -4,7 +4,7 @@ import { useClient, useMutation } from "urql";
 import { useSearchParams } from "react-router";
 
 import { AssignTrackedDownloadTitleDialog } from "@/components/dialogs/assign-tracked-download-title-dialog";
-import { ManualImportDialog } from "@/components/dialogs/manual-import-dialog";
+import { useManualImportLauncher } from "@/components/common/manual-import-launcher";
 import { ActivityView } from "@/components/views/activity-view";
 import { LocationOperationPanel } from "@/components/views/activity/location-operation-panel";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -15,9 +15,7 @@ import {
   buildIgnoreTrackedDownloadBatchMutation,
   ignoreTrackedDownloadMutation,
   markTrackedDownloadFailedMutation,
-  beginManualImportSelectionMutation,
   cancelActiveImportMutation,
-  queueManualImportMutation,
   pauseDownloadMutation,
   resumeDownloadMutation,
   deleteDownloadMutation,
@@ -44,10 +42,6 @@ import {
   isHistoryQueueState,
   matchesImportStatuses,
 } from "@/lib/utils/download-queue";
-import {
-  type DirectMovieManualImportCandidate,
-  directMovieManualImportMappings,
-} from "@/lib/utils/manual-import-actions";
 
 type ActivityTab = Exclude<ActivitySection, "history">;
 type SortConfigByTab = Record<ActivityTab, SortConfig>;
@@ -128,10 +122,6 @@ export const ActivityContainer = memo(function ActivityContainer({
     next.delete("operation");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
-  const [, executeQueueManualImport] = useMutation(queueManualImportMutation);
-  const [, executeBeginManualImportSelection] = useMutation(
-    beginManualImportSelectionMutation,
-  );
   const [, executeAssignTrackedDownloadTitle] = useMutation(assignTrackedDownloadTitleMutation);
   const [, executeIgnoreTrackedDownload] = useMutation(ignoreTrackedDownloadMutation);
   const [, executeMarkTrackedDownloadFailed] = useMutation(markTrackedDownloadFailedMutation);
@@ -159,7 +149,6 @@ export const ActivityContainer = memo(function ActivityContainer({
   const [configuredClientOptions, setConfiguredClientOptions] = useState<
     DownloadClientFilterOption[]
   >([]);
-  const [manualImportItem, setManualImportItem] = useState<DownloadQueueItem | null>(null);
   const [assignTitleItem, setAssignTitleItem] = useState<DownloadQueueItem | null>(null);
   const [optimisticallyRemovedKeys, setOptimisticallyRemovedKeys] = useState<
     Record<string, true>
@@ -370,94 +359,19 @@ export const ActivityContainer = memo(function ActivityContainer({
     dispatchNavigationBadgesRefresh({ delta: -Math.max(1, count) });
   }, []);
 
-  const requestManualImport = useCallback(
-    async (item: DownloadQueueItem) => {
-      if (!item.titleId) {
-        setGlobalStatus(t("queue.assignTitleBeforeImport"));
-        return;
-      }
-
-      if (item.facet === "SERIES" || item.facet === "ANIME") {
-        setManualImportItem(item);
-        return;
-      }
-
-      // queueManualImport is selection-based: it takes a selectionId plus
-      // per-candidate mappings, not the raw client/title identity. Open a
-      // selection first and map its primary candidate.
-      //
-      // Movies carry no episode or series-movie target, so the mapping is just
-      // a candidateId — both target fields on ManualImportCandidateMappingInput
-      // are optional. A movie import lands exactly one file, so only the
-      // largest candidate is mapped; the server independently picks the primary
-      // among whatever is mapped and skips the rest. Series and anime never
-      // reach here; they open the dialog above so the user can map files to
-      // episodes.
-      const selection = await executeBeginManualImportSelection({
-        input: {
-          clientId: item.clientId,
-          clientType: item.clientType,
-          downloadClientItemId: item.downloadClientItemId,
-          titleId: item.titleId,
+  // Series and anime open the mapper dialog; movies import straight away.
+  const manualImport = useManualImportLauncher({
+    onImportQueued: (item) => {
+      setOptimisticQueueStates((current) => ({
+        ...current,
+        [downloadQueueItemIdentityKey(item)]: {
+          state: item.state,
+          displayState: "IMPORT_PENDING",
         },
-      });
-      if (selection.error) {
-        const message = selection.error.message ?? t("queue.manualImportFailed");
-        setGlobalStatus(message);
-        throw selection.error;
-      }
-
-      let preview = selection.data?.beginManualImportSelection;
-      if (preview?.archiveExtractionNeeded) {
-        const extracted = await executeBeginManualImportSelection({
-          input: {
-            clientId: item.clientId,
-            clientType: item.clientType,
-            downloadClientItemId: item.downloadClientItemId,
-            titleId: item.titleId,
-            extractArchives: true,
-          },
-        });
-        if (extracted.error) {
-          const message = extracted.error.message ?? t("queue.manualImportFailed");
-          setGlobalStatus(message);
-          throw extracted.error;
-        }
-        preview = extracted.data?.beginManualImportSelection;
-      }
-      const candidates: DirectMovieManualImportCandidate[] = preview?.files ?? [];
-      if (preview?.files?.some((file: { fileName: string }) => file.fileName.toLowerCase().endsWith(".iso"))) {
-        setManualImportItem(item);
-        return;
-      }
-      const files = directMovieManualImportMappings(candidates);
-      if (!preview?.selectionId || files.length === 0) {
-        setGlobalStatus(t("queue.manualImportFailed"));
-        return;
-      }
-
-      const result = await executeQueueManualImport({
-        input: {
-          selectionId: preview.selectionId,
-          files,
-        },
-      });
-      if (result.error) {
-        const message = result.error.message ?? t("queue.manualImportFailed");
-        setGlobalStatus(message);
-        throw result.error;
-      }
-      setGlobalStatus(t("queue.manualImportQueued"));
-      await refreshVisibleTab();
+      }));
+      void refreshVisibleTab();
     },
-    [
-      executeBeginManualImportSelection,
-      executeQueueManualImport,
-      refreshVisibleTab,
-      setGlobalStatus,
-      t,
-    ],
-  );
+  });
 
   const requestAssignTitle = useCallback(
     async (item: DownloadQueueItem, titleId: string) => {
@@ -755,7 +669,7 @@ export const ActivityContainer = memo(function ActivityContainer({
           activeImportStreams,
           onVisibleQueueOffsetChange:
             activeTab === "activity" ? setVisibleQueueOffset : undefined,
-          requestManualImport,
+          requestManualImport: manualImport.launch,
           requestAssignTitle: async (item) => {
             setAssignTitleItem(item);
           },
@@ -816,32 +730,7 @@ export const ActivityContainer = memo(function ActivityContainer({
               : loadMoreQueue,
         }}
       />
-      {manualImportItem?.titleId ? (
-        <ManualImportDialog
-          open={manualImportItem !== null}
-          onOpenChange={(open) => {
-            if (!open) {
-              setManualImportItem(null);
-            }
-          }}
-          titleId={manualImportItem.titleId}
-          facet={manualImportItem.facet}
-          titleName={manualImportItem.titleName}
-          clientId={manualImportItem.clientId}
-          clientType={manualImportItem.clientType}
-          downloadClientItemId={manualImportItem.downloadClientItemId}
-          onImportQueued={() => {
-            setOptimisticQueueStates((current) => ({
-              ...current,
-              [downloadQueueItemIdentityKey(manualImportItem)]: {
-                state: manualImportItem.state,
-                displayState: "IMPORT_PENDING",
-              },
-            }));
-            void refreshVisibleTab();
-          }}
-        />
-      ) : null}
+      {manualImport.dialog}
       <AssignTrackedDownloadTitleDialog
         open={assignTitleItem !== null}
         onOpenChange={(open) => {

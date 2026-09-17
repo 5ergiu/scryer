@@ -8,6 +8,14 @@ export const TITLE_OVERVIEW_HYDRATION_FAILED_KIND = "metadata_hydration_failed";
 export const TITLE_OVERVIEW_FILE_ANALYZED_KIND = "file_analyzed";
 export const TITLE_OVERVIEW_SUBTITLE_DOWNLOADED_KIND = "subtitle_downloaded";
 
+/** Activity that changes what a title overview shows about its downloads. */
+export const TITLE_OVERVIEW_IMPORT_REFRESH_KINDS: ReadonlySet<string> = new Set([
+  "movie_downloaded",
+  "series_episode_imported",
+  "file_upgraded",
+  "import_rejected",
+]);
+
 export type TitleOverviewReactiveRefreshPlan =
   | { type: "none" }
   | { type: "hydrationStarted" }
