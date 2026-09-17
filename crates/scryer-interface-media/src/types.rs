@@ -645,6 +645,23 @@ pub struct DownloadQueueItemPayload {
     pub seed_time_goal_seconds: Option<Long>,
     /// Whether the torrent's metainfo carries the private flag; null when the client cannot say.
     pub is_private: Option<bool>,
+    /// Import actions this download currently offers; every client surface renders from this.
+    pub import_actions: DownloadImportActionsPayload,
+}
+
+#[derive(SimpleObject, Clone, Copy)]
+/// The import actions one queue item offers, decided by the server so every client surface agrees.
+pub struct DownloadImportActionsPayload {
+    /// Whether a manual import should open the file-mapping dialog first.
+    pub manual_import_interactive: bool,
+    /// Whether a manual import can run without the mapping dialog.
+    pub manual_import_direct: bool,
+    /// Whether the item can be assigned to a title.
+    pub assign_title: bool,
+    /// Whether the item can be ignored.
+    pub ignore: bool,
+    /// Whether the item can be marked failed.
+    pub mark_failed: bool,
 }
 
 #[derive(SimpleObject, Clone)]

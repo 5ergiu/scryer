@@ -483,6 +483,7 @@ impl DownloadQueueSnapshotCache {
             item.attention_reason = None;
         }
         item.import_status = Some(record.status);
+        item.import_type = Some(record.import_type);
         item.import_error_code = error_code;
         item.import_error_message = error_message.clone();
         if error_message.is_some() {
@@ -719,6 +720,7 @@ mod download_queue_snapshot_cache_tests {
             download_client_item_id: id,
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

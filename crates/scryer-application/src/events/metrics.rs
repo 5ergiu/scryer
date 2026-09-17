@@ -577,6 +577,7 @@ mod tests {
             download_client_item_id: "queue-1".to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

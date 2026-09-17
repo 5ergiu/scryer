@@ -1,14 +1,16 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadQueueBucket, TrackedDownloadBackgroundWorkKind, TrackedDownloadWorkDrain,
-        apply_import_record_to_queue_item, apply_submission_to_queue_item,
-        apply_tracked_download_activity_projection, apply_tracked_download_queue_metadata,
-        build_download_queue_status_detail, canonicalize_download_queue_item_clients,
-        classify_download_queue_item, collect_download_client_filter_options,
-        dedupe_download_queue_items, derive_download_queue_display_state,
+        DownloadImportActions, DownloadQueueBucket, TrackedDownloadBackgroundWorkKind,
+        TrackedDownloadWorkDrain, apply_import_record_to_queue_item,
+        apply_submission_to_queue_item, apply_tracked_download_activity_projection,
+        apply_tracked_download_queue_metadata, build_download_queue_status_detail,
+        canonicalize_download_queue_item_clients, classify_download_queue_item,
+        collect_download_client_filter_options, dedupe_download_queue_items,
+        derive_download_queue_display_state, derive_download_queue_import_actions,
         derive_indexer_base_url_from_config_fields, download_queue_client_filter_key,
-        normalize_indexer_config_json, prepare_next_tracked_download_background_work_dispatch,
+        import_record_result_overlay, normalize_indexer_config_json,
+        prepare_next_tracked_download_background_work_dispatch,
         prepare_tracked_download_background_work_dispatch,
         reconcile_duplicate_terminal_source_states, source_provider_label,
         synthetic_tracked_snapshot_queue_item, tracked_download_queue_snapshot,
@@ -146,6 +148,7 @@ mod tests {
             download_client_item_id: id.to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,
@@ -1138,6 +1141,186 @@ mod tests {
             &queue_item,
             crate::DownloadActivityFilter::All
         ));
+    }
+
+    fn manual_import_record(id: &str, status: ImportStatus, result_json: &str) -> ImportRecord {
+        let now = Utc::now().to_rfc3339();
+        ImportRecord {
+            id: id.to_string(),
+            source_client_id: Some("client-1".to_string()),
+            source_system: "weaver".to_string(),
+            source_ref: id.to_string(),
+            import_type: ImportType::ManualImport,
+            status,
+            payload_json: "{}".to_string(),
+            result_json: Some(result_json.to_string()),
+            download_id: None,
+            import_transfer_phase: None,
+            import_transfer_bytes: None,
+            import_transfer_total_bytes: None,
+            import_transfer_started_at: None,
+            import_transfer_updated_at: None,
+            started_at: Some(now.clone()),
+            finished_at: Some(now.clone()),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// The user-reported failure: a download blocked with `no_video_files`, an
+    /// operator-queued manual import that failed against it, and a row that
+    /// went straight back to the original block with `importStatus: null`.
+    /// The block is still the tracker's state, but the manual failure happened
+    /// after it and is the only record of what went wrong.
+    #[test]
+    fn a_failed_manual_import_survives_the_import_blocked_projection() {
+        let mut queue_item = item("job-manual-failed", DownloadQueueState::Completed);
+        queue_item.title_id = Some("title-1".to_string());
+        queue_item.facet = Some("series".to_string());
+        let record = manual_import_record(
+            "job-manual-failed",
+            ImportStatus::Failed,
+            r#"{"import_id":"import-1","client_type":"weaver","download_client_item_id":"job-manual-failed","title_id":"title-1","status":"failed","error_code":"permission_denied","error_message":"permission denied writing to the library root","file_results":[],"completed_at":"2026-09-17T00:00:00Z"}"#,
+        );
+        apply_import_record_to_queue_item(&mut queue_item, &record);
+        assert_eq!(queue_item.import_type, Some(ImportType::ManualImport));
+
+        let mut tracked = tracked_in_state(&queue_item, TrackedDownloadState::ImportBlocked);
+        tracked.status = TrackedDownloadStatus::Warning;
+        tracked.status_messages =
+            vec!["no_video_files: no importable video found after 3 unchanged checks".to_string()];
+        let metadata = tracked_download_queue_snapshot(&tracked);
+        apply_tracked_download_activity_projection(&mut queue_item, &metadata);
+
+        assert_eq!(queue_item.import_status, Some(ImportStatus::Failed));
+        assert_eq!(
+            queue_item.import_error_message.as_deref(),
+            Some("permission denied writing to the library root")
+        );
+        assert_eq!(
+            derive_download_queue_display_state(&queue_item),
+            DownloadDisplayState::ImportFailed
+        );
+        assert_eq!(
+            classify_download_queue_item(&queue_item).import_filter,
+            Some(crate::DownloadImportFilter::Failed)
+        );
+    }
+
+    /// The reason the projection clears a finished import at all: an automatic
+    /// import that skipped is *why* the tracker blocked the download, so
+    /// letting it through would delete the Import Blocked state entirely.
+    #[test]
+    fn a_stale_automatic_import_result_still_loses_to_the_block() {
+        let mut queue_item = item("job-auto-skipped", DownloadQueueState::Completed);
+        queue_item.import_status = Some(ImportStatus::Skipped);
+        queue_item.import_type = Some(ImportType::SeriesDownload);
+
+        let metadata = tracked_download_queue_snapshot(&tracked_in_state(
+            &queue_item,
+            TrackedDownloadState::ImportBlocked,
+        ));
+        apply_tracked_download_activity_projection(&mut queue_item, &metadata);
+
+        assert_eq!(queue_item.import_status, None);
+        assert_eq!(
+            derive_download_queue_display_state(&queue_item),
+            DownloadDisplayState::ImportBlocked
+        );
+    }
+
+    /// A manual import result carries its reason on the failed mapping when the
+    /// run itself recorded no summary; history and the queue row both read it
+    /// through the same overlay.
+    #[test]
+    fn a_manual_import_overlay_falls_back_to_the_failed_file_result() {
+        let record = manual_import_record(
+            "job-file-failure",
+            ImportStatus::Failed,
+            r#"{"import_id":"import-2","client_type":"weaver","download_client_item_id":"job-file-failure","title_id":"title-1","status":"failed","error_code":null,"error_message":null,"file_results":[{"file_path":"/downloads/Harbor.Pals.S01E02.mkv","success":false,"skipped":false,"dest_path":null,"error_code":"io_failed","error_message":"failed to move the file into the library"}],"completed_at":"2026-09-17T00:00:00Z"}"#,
+        );
+
+        let overlay = import_record_result_overlay(&record);
+
+        assert_eq!(
+            overlay.error_message.as_deref(),
+            Some("failed to move the file into the library")
+        );
+        assert_eq!(
+            overlay.error_code,
+            Some(scryer_domain::ImportErrorCode::IoFailed)
+        );
+        assert_eq!(
+            overlay.source_path.as_deref(),
+            Some("/downloads/Harbor.Pals.S01E02.mkv")
+        );
+        assert_eq!(overlay.title_id.as_deref(), Some("title-1"));
+    }
+
+    #[test]
+    fn import_actions_follow_the_state_the_download_is_actually_in() {
+        // A blocked series download offers the mapping dialog, plus the
+        // tracked-state actions the activity row has always shown.
+        let mut blocked = item("job-actions-blocked", DownloadQueueState::Completed);
+        blocked.title_id = Some("title-1".to_string());
+        blocked.facet = Some("series".to_string());
+        blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+        let actions = derive_download_queue_import_actions(&blocked);
+        assert!(actions.manual_import_interactive);
+        assert!(!actions.manual_import_direct);
+        assert!(actions.assign_title);
+        assert!(actions.ignore);
+        assert!(actions.mark_failed);
+
+        // A movie imports without the dialog.
+        let mut movie = blocked.clone();
+        movie.facet = Some("MOVIE".to_string());
+        let actions = derive_download_queue_import_actions(&movie);
+        assert!(actions.manual_import_direct);
+        assert!(!actions.manual_import_interactive);
+
+        // Without a title there is nothing to import into; assigning one is
+        // still offered.
+        let mut unassigned = blocked.clone();
+        unassigned.title_id = None;
+        let actions = derive_download_queue_import_actions(&unassigned);
+        assert!(!actions.manual_import_interactive);
+        assert!(!actions.manual_import_direct);
+        assert!(actions.assign_title);
+
+        // A manual import that is already running owns the row.
+        let mut importing = blocked.clone();
+        importing.import_status = Some(ImportStatus::Running);
+        importing.tracked_state = Some(TrackedDownloadState::Importing);
+        let actions = derive_download_queue_import_actions(&importing);
+        assert_eq!(actions, DownloadImportActions::default());
+
+        // A pending import is not something to start another import against.
+        let mut pending = blocked.clone();
+        pending.import_status = Some(ImportStatus::Pending);
+        let actions = derive_download_queue_import_actions(&pending);
+        assert!(!actions.manual_import_interactive);
+        assert!(!actions.manual_import_direct);
+
+        // A finished download nothing ever imported is what a title overview
+        // offers its Manual Import button for.
+        let mut never_imported = item("job-actions-completed", DownloadQueueState::Completed);
+        never_imported.title_id = Some("title-1".to_string());
+        never_imported.facet = Some("movie".to_string());
+        assert!(derive_download_queue_import_actions(&never_imported).manual_import_direct);
+
+        // One that imported successfully is not.
+        let mut imported = never_imported.clone();
+        imported.import_status = Some(ImportStatus::Completed);
+        assert!(!derive_download_queue_import_actions(&imported).manual_import_direct);
+
+        // A download still running offers nothing.
+        let mut downloading = never_imported.clone();
+        downloading.state = DownloadQueueState::Downloading;
+        assert_eq!(
+            derive_download_queue_import_actions(&downloading),
+            DownloadImportActions::default()
+        );
     }
 
     #[test]

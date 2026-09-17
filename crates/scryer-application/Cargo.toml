@@ -28,7 +28,9 @@ runtime-plugin-trust = [
 
 [dependencies]
 application-updater = { git = "https://github.com/scryer-media/application-updater.git", tag = "v0.1.0" }
-artifact-trust = { git = "https://github.com/scryer-media/artifact-trust.git", tag = "v0.1.1", default-features = false }
+# `application-updater` always builds the Sigstore verifier; `runtime-plugin-trust`
+# adds the plugin paths that use it.
+artifact-trust = { git = "https://github.com/scryer-media/artifact-trust.git", tag = "v0.1.2", default-features = false }
 scryer-media-types = { path = "../scryer-media-types" }
 scryer-domain = { path = "../scryer-domain" }
 scryer-plugin-sdk = { path = "../scryer-plugin-sdk" }

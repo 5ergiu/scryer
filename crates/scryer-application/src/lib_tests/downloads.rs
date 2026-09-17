@@ -629,6 +629,7 @@ async fn list_download_queue_reads_cached_observed_items_without_client_calls() 
         download_client_item_id: "observed-stub".to_string(),
         download_id: None,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -715,6 +716,7 @@ async fn list_download_queue_uses_live_queue_only_for_all_activity() {
         download_client_item_id: "history-1".to_string(),
         download_id: None,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -825,6 +827,7 @@ async fn list_download_queue_for_title_filters_the_shared_cache() {
         download_client_item_id: "job-1".to_string(),
         download_id: None,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -1226,6 +1229,96 @@ async fn download_import_blocked_includes_snapshot_only_item_when_history_is_emp
     assert_eq!(
         crate::integration::derive_download_queue_display_state(&page.items[0]),
         DownloadDisplayState::ImportBlocked
+    );
+}
+
+/// The user-reported failure, seen from the page the operator actually reads:
+/// a download the tracker blocked for having no video files, and a manual
+/// import the operator then ran against it that failed. The row has to report
+/// the manual failure and its reason, not replay the stale block with no
+/// import status. The manual result shape is `ManualImportExecutionResult`,
+/// which the queue overlay used to be unable to read at all.
+#[tokio::test]
+async fn download_import_page_reports_a_failed_manual_import_over_the_stale_block() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) =
+        bootstrap_with_cleanup_tracking(download_client, download_submissions, pending_releases);
+    let import_repo = Arc::new(TrackingImportRepo::default());
+    let app = base_app.with_test_overrides(|services| services.with_imports(import_repo.clone()));
+
+    create_enabled_download_client_config(&app, &user, "NZBGet", "nzbget").await;
+
+    let mut blocked =
+        queue_history_fixture_item("blocked-manual-1", DownloadQueueState::Completed, 20);
+    blocked.facet = Some("series".to_string());
+    insert_tracked_download_snapshot(
+        &app,
+        "blocked-manual-1",
+        TrackedDownloadState::ImportBlocked,
+        blocked.clone(),
+    )
+    .await;
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    blocked.tracked_status = Some(scryer_domain::TrackedDownloadStatus::Warning);
+    blocked.tracked_status_messages =
+        vec!["no_video_files: no importable video found after 3 unchanged checks".to_string()];
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+
+    let now = Utc::now().to_rfc3339();
+    import_repo.records.lock().await.push(ImportRecord {
+        id: "import-manual-1".to_string(),
+        source_client_id: Some("primary".to_string()),
+        source_system: "nzbget".to_string(),
+        source_ref: "blocked-manual-1".to_string(),
+        import_type: scryer_domain::ImportType::ManualImport,
+        status: ImportStatus::Failed,
+        payload_json: "{}".to_string(),
+        result_json: Some(
+            r#"{"import_id":"import-manual-1","client_type":"nzbget","download_client_item_id":"blocked-manual-1","title_id":"title-1","status":"failed","error_code":"permission_denied","error_message":"permission denied writing to the library root","file_results":[],"completed_at":"2026-09-17T00:00:00Z"}"#
+                .to_string(),
+        ),
+        download_id: None,
+        import_transfer_phase: None,
+        import_transfer_bytes: None,
+        import_transfer_total_bytes: None,
+        import_transfer_started_at: None,
+        import_transfer_updated_at: None,
+        started_at: Some(now.clone()),
+        finished_at: Some(now.clone()),
+        created_at: now.clone(),
+        updated_at: now,
+    });
+    app.refresh_import_record_queue_snapshot("import-manual-1")
+        .await;
+    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
+        .await;
+
+    let page = app
+        .list_download_import_page(&user, 50, 0, DownloadImportFilter::Failed)
+        .await
+        .expect("failed import page should include the failed manual import");
+
+    assert_eq!(page.items.len(), 1);
+    let row = &page.items[0];
+    assert_eq!(row.download_client_item_id, "blocked-manual-1");
+    assert_eq!(row.import_status, Some(ImportStatus::Failed));
+    assert_eq!(
+        row.import_type,
+        Some(scryer_domain::ImportType::ManualImport)
+    );
+    assert_eq!(
+        row.import_error_message.as_deref(),
+        Some("permission denied writing to the library root")
+    );
+    assert_eq!(
+        row.import_error_code,
+        Some(scryer_domain::ImportErrorCode::PermissionDenied)
+    );
+    assert_eq!(
+        crate::integration::derive_download_queue_display_state(row),
+        DownloadDisplayState::ImportFailed
     );
 }
 
@@ -10062,6 +10155,7 @@ async fn download_queue_subscription_bootstraps_from_runtime_cache_without_clien
         download_client_item_id: "queue-1".to_string(),
         download_id: None,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,

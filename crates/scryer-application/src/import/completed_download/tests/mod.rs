@@ -1795,6 +1795,7 @@ fn build_tracked_download(title_id: &str, facet: &str, release_title: &str) -> T
             download_client_item_id: "dl-1".to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

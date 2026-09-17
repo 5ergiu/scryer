@@ -204,6 +204,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "application-updater"
 version = "0.1.0"
+source = "git+https://github.com/scryer-media/application-updater.git?tag=v0.1.0#a2442b4f14b156b1c943e0c9e517295a5592aff7"
 dependencies = [
  "artifact-trust",
  "blake3",
@@ -268,8 +269,8 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "artifact-trust"
-version = "0.1.1"
-source = "git+https://github.com/scryer-media/artifact-trust.git?tag=v0.1.1#fe348b428489fb9ab4744e3b6dbf804688dcb33c"
+version = "0.1.2"
+source = "git+https://github.com/scryer-media/artifact-trust.git?tag=v0.1.2#b0753163049ddcb4e0eacfa92161beca753c1f53"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",

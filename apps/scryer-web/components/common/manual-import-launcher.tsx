@@ -15,6 +15,7 @@ import {
 import type { DownloadQueueItem } from "@/lib/types/download-queue";
 import {
   type DirectMovieManualImportCandidate,
+  allowsManualImport,
   directMovieManualImportMappings,
   manualImportNeedsMapping,
   manualImportSelectionNeedsDialog,
@@ -194,7 +195,10 @@ export function useManualImportLauncher({
 
 /**
  * A title overview's Manual Import button. It imports the most recent finished
- * download for the title and appears only when there is one to import.
+ * download the server says can still be imported by hand, and appears only
+ * when there is one. Taking the newest finished download blindly offered the
+ * button for downloads that were already imported or still mid-import, and the
+ * click then failed or re-ran an import nobody asked for.
  */
 export function TitleManualImportButton({
   launcher,
@@ -208,7 +212,7 @@ export function TitleManualImportButton({
   className?: string;
 }) {
   const t = useTranslate();
-  const item = completedDownloads[0];
+  const item = completedDownloads.find((candidate) => allowsManualImport(candidate));
   if (!canManageTitle || !item) {
     return null;
   }

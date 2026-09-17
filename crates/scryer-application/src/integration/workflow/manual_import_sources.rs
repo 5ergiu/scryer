@@ -232,21 +232,31 @@ impl AppUseCase {
             }
         }
 
-        if let Some(existing) = crate::import_workflow::find_active_manual_import_for_source(
+        let active_manual_import = crate::import_workflow::find_active_manual_import_for_source(
             self,
             Some(client_id),
             &source_identity.client_type,
             &source_identity.item_id,
         )
-        .await?
-            && !crate::import_workflow::manual_import_record_requires_reconciliation(&existing)
+        .await?;
+        if let Some(existing) = active_manual_import.as_ref()
+            && !crate::import_workflow::manual_import_record_requires_reconciliation(existing)
         {
             self.refresh_import_record_queue_snapshot(&existing.id)
                 .await;
             return Ok(crate::QueuedManualImport {
-                import_id: existing.id,
+                import_id: existing.id.clone(),
                 source_identity,
             });
+        }
+        // Same gate the queue row's Manual Import button is drawn from, so the
+        // UI rule and the server rule cannot drift. It is checked only when no
+        // manual import is already in flight for this source: an in-flight one
+        // is what makes the row read as importing, and re-queueing it (to
+        // reconcile) has always been allowed.
+        if active_manual_import.is_none() {
+            self.require_manual_import_eligible_source(&source_identity)
+                .await?;
         }
 
         let candidate_ids = mappings

@@ -1105,6 +1105,8 @@ async fn fetch_upgrade_manifest(
     client: &reqwest::Client,
     release_tag: &str,
 ) -> AppResult<FetchedUpgradeManifest> {
+    #[cfg(feature = "runtime-plugin-trust")]
+    crate::plugins::trust::install_embedded_trust_snapshot()?;
     application_updater::pipeline::fetch_upgrade_manifest(&SCRYER_PRODUCT, client, release_tag)
         .await
         .map_err(map_updater_error)

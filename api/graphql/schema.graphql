@@ -4942,6 +4942,32 @@ enum DownloadHistorySortKeyValue {
 }
 
 """
+The import actions one queue item offers, decided by the server so every client surface agrees.
+"""
+type DownloadImportActionsPayload {
+	"""
+	Whether a manual import should open the file-mapping dialog first.
+	"""
+	manualImportInteractive: Boolean!
+	"""
+	Whether a manual import can run without the mapping dialog.
+	"""
+	manualImportDirect: Boolean!
+	"""
+	Whether the item can be assigned to a title.
+	"""
+	assignTitle: Boolean!
+	"""
+	Whether the item can be ignored.
+	"""
+	ignore: Boolean!
+	"""
+	Whether the item can be marked failed.
+	"""
+	markFailed: Boolean!
+}
+
+"""
 Filter for import activity.
 """
 enum DownloadImportFilterValue {
@@ -5259,6 +5285,10 @@ type DownloadQueueItemPayload {
 	Whether the torrent's metainfo carries the private flag; null when the client cannot say.
 	"""
 	isPrivate: Boolean
+	"""
+	Import actions this download currently offers; every client surface renders from this.
+	"""
+	importActions: DownloadImportActionsPayload!
 	"""
 	Acquisition scope for this queue item, or its episode scope when no more specific scope is available.
 	"""

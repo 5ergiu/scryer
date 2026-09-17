@@ -98,6 +98,13 @@ function blockedItem(overrides: Partial<DownloadQueueItem> = {}): DownloadQueueI
     seedTimeSeconds: null,
     seedTimeGoalSeconds: null,
     isPrivate: null,
+    importActions: {
+      manualImportInteractive: false,
+      manualImportDirect: false,
+      assignTitle: true,
+      ignore: true,
+      markFailed: true,
+    },
     queueScope: null,
     ...overrides,
   };
