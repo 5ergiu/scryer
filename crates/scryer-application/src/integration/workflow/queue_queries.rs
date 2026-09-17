@@ -1516,6 +1516,7 @@ impl AppUseCase {
             .collect_download_history_items_for_actor(
                 actor,
                 scryer_domain::LibraryPermission::ResolveImports,
+                DurableHistoryRows::Skip,
             )
             .await?
             .into_iter()
@@ -1581,6 +1582,7 @@ impl AppUseCase {
             .collect_download_history_items_for_actor(
                 actor,
                 scryer_domain::LibraryPermission::ResolveImports,
+                DurableHistoryRows::Skip,
             )
             .await?
             .into_iter()
@@ -1619,7 +1621,11 @@ impl AppUseCase {
                 .collect::<HashSet<_>>()
         });
         let mut items = self
-            .collect_download_history_items_for_actor(actor, scryer_domain::LibraryPermission::View)
+            .collect_download_history_items_for_actor(
+                actor,
+                scryer_domain::LibraryPermission::View,
+                DurableHistoryRows::Include,
+            )
             .await?
             .into_iter()
             .filter(|item| {

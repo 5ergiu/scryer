@@ -357,6 +357,110 @@ fn canonical_tracked_state_key(canonical_download_id: &DownloadId) -> String {
     format!("download:{canonical_download_id}")
 }
 
+/// The latest identity state per client locator, for the locators `clauses`
+/// matches.
+fn identity_tracked_states_for_client_items_sql(clauses: &str) -> String {
+    format!(
+        "SELECT client_id, client_type, download_client_item_id, tracked_state
+         FROM (
+             SELECT states.client_id, states.client_type,
+                    states.download_client_item_id, states.tracked_state,
+                    states.updated_at, states.id AS state_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(states.client_id, ''),
+                                     states.client_type,
+                                     states.download_client_item_id
+                        ORDER BY submissions.submitted_at DESC, submissions.id DESC
+                    ) AS row_number
+             FROM download_identity_states states
+             JOIN download_submissions submissions
+               ON submissions.id = states.canonical_download_id
+             WHERE {clauses}
+         ) ranked
+         WHERE row_number = 1
+         ORDER BY updated_at ASC, state_id ASC"
+    )
+}
+
+/// The same answer for submissions that never grew an identity state, read off
+/// the submission's own legacy `tracked_state`.
+fn legacy_submission_tracked_states_sql(clauses: &str) -> String {
+    format!(
+        "SELECT download_client_id, download_client_type, download_client_item_id,
+                tracked_state
+         FROM (
+             SELECT download_client_id, download_client_type,
+                    download_client_item_id, tracked_state,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(download_client_id, ''),
+                                     download_client_type,
+                                     download_client_item_id
+                        ORDER BY submitted_at DESC, id DESC
+                    ) AS row_number
+             FROM download_submissions
+             WHERE tracked_state IS NOT NULL AND tracked_state <> ''
+               AND ({clauses})
+         ) ranked
+         WHERE row_number = 1"
+    )
+}
+
+/// A `WHERE` fragment matching a chunk of client locators that the planner can
+/// search an index for.
+///
+/// One `OR`ed triple per locator — a client list runs to hundreds — left it
+/// nothing to search on: the disjunction spans the whole table and
+/// `COALESCE(client_id, '')` hides the column even where an index covers it, so
+/// both locator lookups scanned. Grouping the chunk by client type and client
+/// id gives each group an equality prefix with the item ids in an `IN` list,
+/// which is the shape the `(client type, item id, client id)` indexes added in
+/// migration 0243 answer.
+///
+/// The blank client id is spelled out rather than coalesced, and means exactly
+/// what the coalesce meant: identity states hold NULL for a locator that named
+/// no client, and the legacy submissions column defaults to `''`.
+fn client_locator_chunk_predicate<'a>(
+    locators: impl IntoIterator<Item = &'a ClientJobLocator>,
+    client_type_column: &str,
+    item_id_column: &str,
+    client_id_column: &str,
+    args: &mut Vec<SqlArg>,
+) -> String {
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for locator in locators {
+        groups
+            .entry((
+                locator.client_type.clone(),
+                normalize_download_client_id(locator.client_id.as_deref()),
+            ))
+            .or_default()
+            .push(locator.item_id.clone());
+    }
+    groups
+        .into_iter()
+        .map(|((client_type, client_id), item_ids)| {
+            args.push(SqlArg::Text(client_type));
+            let item_placeholders = placeholders(item_ids.len());
+            for item_id in item_ids {
+                args.push(SqlArg::Text(item_id));
+            }
+            let client_id_clause = if client_id.is_empty() {
+                format!("({client_id_column} IS NULL OR {client_id_column} = '')")
+            } else {
+                args.push(SqlArg::Text(client_id));
+                format!("{client_id_column} = {{}}")
+            };
+            format!(
+                "({client_type_column} = {{}} \
+                 AND {item_id_column} IN ({item_placeholders}) \
+                 AND {client_id_clause})"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// The durable tracked states that end a grab, spelled the way
 /// [`TrackedDownloadState::as_str`] spells them.
 ///
@@ -373,6 +477,18 @@ const TERMINAL_HISTORY_TRACKED_STATES: [&str; 3] = ["imported", "failed", "ignor
 /// `tracked_state`. Client identity prefers the canonical binding's snapshot and
 /// falls back to the submission's legacy locator columns, so a row still names
 /// its client after the binding was ended.
+///
+/// The latest identity state is resolved once, as a join onto the row the
+/// correlated subquery picks, rather than once per projected column: three
+/// copies of the same `ORDER BY ... LIMIT 1` ran for every download in the
+/// table, each sorting its own matches.
+/// `idx_download_identity_states_canonical_latest` (migration 0243) is what
+/// makes that pick an index search instead of a sort.
+///
+/// The ordering stays a sort over the filtered set. `downloads.terminal_at`
+/// leads the `last_state_at` COALESCE but nothing in the runtime ever writes
+/// that column — it is only read — so there is no populated column an indexed
+/// `ORDER BY` could be driven from.
 static TERMINAL_DOWNLOAD_HISTORY_SQL: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| {
         let states = TERMINAL_HISTORY_TRACKED_STATES
@@ -387,24 +503,9 @@ const TERMINAL_DOWNLOAD_HISTORY_SQL_TEMPLATE: &str = "SELECT * FROM (
                 SELECT
                     d.id AS download_id,
                     d.origin AS origin,
-                    COALESCE(
-                        (SELECT st.tracked_state
-                           FROM download_identity_states st
-                          WHERE st.canonical_download_id = d.id
-                          ORDER BY st.updated_at DESC, st.id DESC
-                          LIMIT 1),
-                        s.tracked_state
-                    ) AS tracked_state,
-                    (SELECT st.reason
-                       FROM download_identity_states st
-                      WHERE st.canonical_download_id = d.id
-                      ORDER BY st.updated_at DESC, st.id DESC
-                      LIMIT 1) AS tracked_reason,
-                    (SELECT st.detail
-                       FROM download_identity_states st
-                      WHERE st.canonical_download_id = d.id
-                      ORDER BY st.updated_at DESC, st.id DESC
-                      LIMIT 1) AS tracked_detail,
+                    COALESCE(st.tracked_state, s.tracked_state) AS tracked_state,
+                    st.reason AS tracked_reason,
+                    st.detail AS tracked_detail,
                     s.title_id AS title_id,
                     s.episode_id AS episode_id,
                     s.facet AS facet,
@@ -429,6 +530,14 @@ const TERMINAL_DOWNLOAD_HISTORY_SQL_TEMPLATE: &str = "SELECT * FROM (
                 LEFT JOIN download_client_bindings b ON b.download_id = d.id
                 LEFT JOIN download_clients cl
                        ON cl.id = COALESCE(b.client_config_id, s.download_client_id)
+                LEFT JOIN download_identity_states st
+                       ON st.id = (
+                              SELECT latest.id
+                                FROM download_identity_states latest
+                               WHERE latest.canonical_download_id = d.id
+                               ORDER BY latest.updated_at DESC, latest.id DESC
+                               LIMIT 1
+                          )
             ) terminal_downloads
             WHERE terminal_downloads.tracked_state IN ({terminal_states})
             ORDER BY terminal_downloads.last_state_at DESC, terminal_downloads.download_id
@@ -1309,41 +1418,17 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
 
         let mut states = Vec::new();
         for chunk in chunks {
-            let mut args = Vec::with_capacity(chunk.len() * 3);
-            let clauses = chunk
-                .iter()
-                .map(|identity| {
-                    args.push(SqlArg::Text(identity.client_type.clone()));
-                    args.push(SqlArg::Text(identity.item_id.clone()));
-                    args.push(SqlArg::Text(normalize_download_client_id(
-                        identity.client_id.as_deref(),
-                    )));
-                    "(states.client_type = {} AND states.download_client_item_id = {} AND COALESCE(states.client_id, '') = {})"
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            let mut args = Vec::with_capacity(chunk.len() + 2);
+            let clauses = client_locator_chunk_predicate(
+                chunk.iter(),
+                "states.client_type",
+                "states.download_client_item_id",
+                "states.client_id",
+                &mut args,
+            );
             let rows = SqlRuntime::fetch_all(
                 self.datastore.read_exec(),
-                &format!(
-                    "SELECT client_id, client_type, download_client_item_id, tracked_state
-                     FROM (
-                         SELECT states.client_id, states.client_type,
-                                states.download_client_item_id, states.tracked_state,
-                                states.updated_at, states.id AS state_id,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY COALESCE(states.client_id, ''),
-                                                 states.client_type,
-                                                 states.download_client_item_id
-                                    ORDER BY submissions.submitted_at DESC, submissions.id DESC
-                                ) AS row_number
-                         FROM download_identity_states states
-                         JOIN download_submissions submissions
-                           ON submissions.id = states.canonical_download_id
-                         WHERE {clauses}
-                     ) ranked
-                     WHERE row_number = 1
-                     ORDER BY updated_at ASC, state_id ASC"
-                ),
+                &identity_tracked_states_for_client_items_sql(&clauses),
                 &args,
             )
             .await?;
@@ -1376,39 +1461,17 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
             if missing.is_empty() {
                 continue;
             }
-            let mut args = Vec::with_capacity(missing.len() * 3);
-            let clauses = missing
-                .iter()
-                .map(|identity| {
-                    args.push(SqlArg::Text(identity.client_type.clone()));
-                    args.push(SqlArg::Text(identity.item_id.clone()));
-                    args.push(SqlArg::Text(normalize_download_client_id(
-                        identity.client_id.as_deref(),
-                    )));
-                    "(download_client_type = {} AND download_client_item_id = {} AND COALESCE(download_client_id, '') = {})"
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            let mut args = Vec::with_capacity(missing.len() + 2);
+            let clauses = client_locator_chunk_predicate(
+                missing.iter().copied(),
+                "download_client_type",
+                "download_client_item_id",
+                "download_client_id",
+                &mut args,
+            );
             let rows = SqlRuntime::fetch_all(
                 self.datastore.read_exec(),
-                &format!(
-                    "SELECT download_client_id, download_client_type, download_client_item_id,
-                            tracked_state
-                     FROM (
-                         SELECT download_client_id, download_client_type,
-                                download_client_item_id, tracked_state,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY COALESCE(download_client_id, ''),
-                                                 download_client_type,
-                                                 download_client_item_id
-                                    ORDER BY submitted_at DESC, id DESC
-                                ) AS row_number
-                         FROM download_submissions
-                         WHERE tracked_state IS NOT NULL AND tracked_state <> ''
-                           AND ({clauses})
-                     ) ranked
-                     WHERE row_number = 1"
-                ),
+                &legacy_submission_tracked_states_sql(&clauses),
                 &args,
             )
             .await?;
@@ -2039,6 +2102,15 @@ mod seed_goal_tests {
         .execute(&pool)
         .await
         .expect("cleanup migration should apply");
+        // The query-plan tests assert against the indexes this migration ships,
+        // so the fixture takes them from the migration itself rather than
+        // restating them.
+        sqlx::raw_sql(include_str!(
+            "../../../../scryer/src/db/migrations/0243_download_state_lookup_indexes.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("download state lookup indexes should apply");
         DownloadSubmissionStore::new(StoreDatastore::Sqlite {
             pool,
             writer_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -3690,6 +3762,165 @@ mod seed_goal_tests {
             panic!("expired worker lease must recover");
         };
         assert_eq!(retry.attempts, 2);
+    }
+
+    /// `EXPLAIN QUERY PLAN` detail lines for one of the production queries.
+    ///
+    /// The plans are sqlite's; the fixture is an in-memory sqlite database, so
+    /// nothing here runs against postgres, whose planner answers its own way.
+    async fn query_plan(
+        store: &DownloadSubmissionStore,
+        sql: &str,
+        args: &[SqlArg],
+    ) -> Vec<String> {
+        SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            &format!("EXPLAIN QUERY PLAN {sql}"),
+            args,
+        )
+        .await
+        .expect("query plan should read")
+        .iter()
+        .map(|row| row.text("detail").expect("plan detail"))
+        .collect()
+    }
+
+    /// The history projection used to re-run the same "latest identity state"
+    /// pick once per projected column, each sorting its own matches, for every
+    /// download in the table.
+    #[tokio::test]
+    async fn terminal_history_finds_the_latest_identity_state_without_sorting() {
+        let store = store().await;
+        let plan = query_plan(
+            &store,
+            TERMINAL_DOWNLOAD_HISTORY_SQL.as_str(),
+            &[SqlArg::I64(50)],
+        )
+        .await;
+
+        assert!(
+            plan.iter().any(|line| line.contains("SEARCH latest")
+                && line.contains("idx_download_identity_states_canonical_latest")),
+            "the latest identity state must be an index search: {plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN latest")),
+            "the latest identity state must never be scanned for: {plan:#?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|line| line.contains("TEMP B-TREE"))
+                .count(),
+            1,
+            "only the final ordering may sort; the state pick must not: {plan:#?}"
+        );
+    }
+
+    /// Both halves of the batch locator lookup used to scan their whole table:
+    /// no index covered `download_client_item_id`, and the client id was hidden
+    /// inside a `COALESCE`.
+    #[tokio::test]
+    async fn client_item_state_lookups_search_the_locator_indexes() {
+        let store = store().await;
+        let locators = [
+            ClientJobLocator::new(Some("primary"), "qbittorrent", "job-1"),
+            ClientJobLocator::new(Some("primary"), "qbittorrent", "job-2"),
+            ClientJobLocator::new(None, "sabnzbd", "job-3"),
+        ];
+
+        let mut args = Vec::new();
+        let clauses = client_locator_chunk_predicate(
+            locators.iter(),
+            "states.client_type",
+            "states.download_client_item_id",
+            "states.client_id",
+            &mut args,
+        );
+        let plan = query_plan(
+            &store,
+            &identity_tracked_states_for_client_items_sql(&clauses),
+            &args,
+        )
+        .await;
+        assert!(
+            plan.iter().any(|line| line.contains("SEARCH states")
+                && line.contains("idx_download_identity_states_client_item")),
+            "identity states must be searched by locator: {plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN states")),
+            "identity states must never be scanned: {plan:#?}"
+        );
+
+        let mut args = Vec::new();
+        let clauses = client_locator_chunk_predicate(
+            locators.iter(),
+            "download_client_type",
+            "download_client_item_id",
+            "download_client_id",
+            &mut args,
+        );
+        let plan = query_plan(
+            &store,
+            &legacy_submission_tracked_states_sql(&clauses),
+            &args,
+        )
+        .await;
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("SEARCH download_submissions")
+                    && line.contains("idx_download_submissions_client_item")),
+            "the legacy fallback must be searched by locator: {plan:#?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|line| line.starts_with("SCAN download_submissions")),
+            "the legacy fallback must never scan the submissions table: {plan:#?}"
+        );
+    }
+
+    /// A locator that names no client matches the rows stored with a NULL
+    /// client id as well as the ones stored blank, which is what the
+    /// `COALESCE(client_id, '')` the predicate replaced did.
+    #[tokio::test]
+    async fn a_client_less_locator_still_matches_its_identity_state() {
+        let store = store().await;
+        let id = DownloadId::new();
+        let mut legacy = submission(id, "legacy-job", "title-1");
+        legacy.download_client_id = Some(String::new());
+        store
+            .record_submission_with_identity(legacy, submission_identity(id), None)
+            .await
+            .unwrap();
+        store
+            .record_identity_tracked_state_for_download(
+                Some(&id),
+                &submission_identity(id),
+                Some(&ClientJobLocator::new(None, "qbittorrent", "legacy-job")),
+                "imported",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let states = store
+            .list_identity_tracked_states_for_client_items(&[ClientJobLocator::new(
+                None,
+                "qbittorrent",
+                "legacy-job",
+            )])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            states,
+            vec![(
+                ClientJobLocator::new(None, "qbittorrent", "legacy-job"),
+                "imported".to_string()
+            )]
+        );
     }
 
     #[tokio::test]

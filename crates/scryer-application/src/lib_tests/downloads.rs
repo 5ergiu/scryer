@@ -12602,13 +12602,18 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
 struct DurableHistorySubmissionRepo {
     inner: crate::NullDownloadSubmissionRepository,
     rows: Vec<crate::TerminalDownloadHistoryRow>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DurableHistorySubmissionRepo {
-    fn new(rows: Vec<crate::TerminalDownloadHistoryRow>) -> Self {
+    fn new(
+        rows: Vec<crate::TerminalDownloadHistoryRow>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
         Self {
             inner: crate::NullDownloadSubmissionRepository,
             rows,
+            reads,
         }
     }
 }
@@ -12619,6 +12624,8 @@ impl crate::DownloadSubmissionRepository for DurableHistorySubmissionRepo {
         &self,
         _limit: usize,
     ) -> AppResult<Vec<crate::TerminalDownloadHistoryRow>> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.rows.clone())
     }
 
@@ -12724,14 +12731,24 @@ fn terminal_history_row(
 async fn history_app_with_durable_rows(
     rows: Vec<crate::TerminalDownloadHistoryRow>,
 ) -> (AppUseCase, User) {
+    let (app, user, _) = history_app_counting_durable_reads(rows).await;
+    (app, user)
+}
+
+/// The same app, plus how many times the durable history query was run.
+async fn history_app_counting_durable_reads(
+    rows: Vec<crate::TerminalDownloadHistoryRow>,
+) -> (AppUseCase, User, Arc<std::sync::atomic::AtomicUsize>) {
     let download_client = Arc::new(StubDownloadClient::default());
     let (mut app, user) = bootstrap_with_cleanup_tracking(
         download_client,
         Arc::new(TrackingDownloadSubmissionRepo::default()),
         Arc::new(TrackingPendingReleaseRepo::default()),
     );
-    app.services.workflow.download_submissions = Arc::new(DurableHistorySubmissionRepo::new(rows));
-    (app, user)
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    app.services.workflow.download_submissions =
+        Arc::new(DurableHistorySubmissionRepo::new(rows, reads.clone()));
+    (app, user, reads)
 }
 
 /// rTorrent (among others) evicts finished jobs from its own list, which used
@@ -12773,6 +12790,531 @@ async fn download_history_keeps_a_terminal_row_the_client_has_evicted() {
     assert_eq!(
         page.items[0].download_id.as_deref(),
         Some(evicted_id.to_wire().as_str())
+    );
+}
+
+/// The navigation badge polls the import count every 30 seconds, and the
+/// import surfaces keep `Import`-bucket rows only. A durable row is terminal —
+/// imported, failed or ignored — and every one of those classifies into a
+/// history bucket, so reading them for an import surface was a whole-archive
+/// query whose every row was then discarded. The counts must not move.
+#[tokio::test]
+async fn import_surfaces_answer_without_reading_durable_download_history() {
+    let mut failed_row = terminal_history_row(
+        scryer_domain::download_identity::DownloadId::new(),
+        "durable-failed-1",
+        None,
+        "Quiet Meridian",
+    );
+    failed_row.tracked_state = TrackedDownloadState::Failed.as_str().to_string();
+    let mut ignored_row = terminal_history_row(
+        scryer_domain::download_identity::DownloadId::new(),
+        "durable-ignored-1",
+        None,
+        "Salt and Signal",
+    );
+    ignored_row.tracked_state = TrackedDownloadState::Ignored.as_str().to_string();
+    let (app, user, durable_reads) = history_app_counting_durable_reads(vec![
+        terminal_history_row(
+            scryer_domain::download_identity::DownloadId::new(),
+            "durable-imported-1",
+            None,
+            "Paper Lanterns",
+        ),
+        failed_row,
+        ignored_row,
+    ])
+    .await;
+
+    let mut blocked = queue_history_fixture_item("blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+
+    let attention = app
+        .count_download_import_items(&user, DownloadImportFilter::Attention)
+        .await
+        .expect("attention import count");
+    let page = app
+        .list_download_import_page(&user, 50, 0, DownloadImportFilter::All)
+        .await
+        .expect("import page should load");
+
+    assert_eq!(attention, 1, "only the live blocked row needs attention");
+    assert_eq!(page.total_count, 1);
+    assert_eq!(
+        durable_reads.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "no import surface may run the durable history query"
+    );
+
+    // The history surface is the one that needs those rows, and still gets them.
+    let history = app
+        .list_download_history_page(
+            &user,
+            50,
+            0,
+            Some(vec![DownloadHistoryFilter::All]),
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("history page should load");
+    assert_eq!(history.total_count, 3);
+    assert_eq!(durable_reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A pending-import repository that refuses to be read.
+///
+/// The navigation badge may not reach a store on the request path at all, so
+/// the test swaps this in once the facts are published: if the badge still
+/// counts anything for itself, the read panics instead of answering.
+struct UnreadablePendingImportRepo;
+
+#[async_trait]
+impl crate::LibraryScanUnmatchedItemRepository for UnreadablePendingImportRepo {
+    async fn upsert_library_scan_unmatched_item(
+        &self,
+        item: &crate::LibraryScanUnmatchedItem,
+    ) -> AppResult<String> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .upsert_library_scan_unmatched_item(item)
+            .await
+    }
+
+    async fn get_library_scan_unmatched_item(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::LibraryScanUnmatchedItem>> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .get_library_scan_unmatched_item(id)
+            .await
+    }
+
+    async fn delete_library_scan_unmatched_item(
+        &self,
+        library_id: &str,
+        facet: MediaFacet,
+        item_path: &str,
+    ) -> AppResult<()> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_library_scan_unmatched_item(library_id, facet, item_path)
+            .await
+    }
+
+    async fn delete_for_library(&self, library_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_library(library_id)
+            .await
+    }
+
+    async fn delete_for_title(&self, title_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_title(title_id)
+            .await
+    }
+
+    async fn list_library_scan_unmatched_items(
+        &self,
+        _facet: Option<MediaFacet>,
+        _scan_root: Option<&str>,
+        _status: Option<crate::PendingImportStatus>,
+        _limit: i64,
+        _offset: i64,
+    ) -> AppResult<Vec<crate::LibraryScanUnmatchedItem>> {
+        panic!("the navigation badge request path must not read pending imports");
+    }
+
+    async fn count_library_scan_unmatched_items(
+        &self,
+        _facet: Option<MediaFacet>,
+        _scan_root: Option<&str>,
+        _status: Option<crate::PendingImportStatus>,
+    ) -> AppResult<i64> {
+        panic!("the navigation badge request path must not count pending imports");
+    }
+}
+
+/// Every open tab polls the navigation badge every 30 seconds, so the badge is
+/// answered from the published facts and never from a store. The numbers it
+/// reports have to stay the ones the per-actor queries produce.
+#[tokio::test]
+async fn navigation_badge_counts_are_served_from_the_cached_facts() {
+    let (mut app, user, durable_reads) = history_app_counting_durable_reads(Vec::new()).await;
+    let mut blocked =
+        queue_history_fixture_item("badge-blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+
+    let expected_attention = app
+        .count_download_import_items(&user, DownloadImportFilter::Attention)
+        .await
+        .expect("attention import count");
+    let expected_pending_imports = app
+        .pending_import_counts(&user)
+        .await
+        .expect("pending import counts");
+    let expected_media_requests = app
+        .pending_media_request_counts(&user)
+        .await
+        .expect("pending media request counts");
+    assert_eq!(
+        expected_attention, 1,
+        "the fixture has to produce a badge number worth caching"
+    );
+
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+    app.services.library.library_scan_unmatched_items = Arc::new(UnreadablePendingImportRepo);
+
+    let counts = app
+        .navigation_badge_counts(&user)
+        .await
+        .expect("badge counts should come from the cache");
+
+    assert_eq!(counts.activity_import_count, expected_attention);
+    assert_eq!(counts.pending_imports.movie, expected_pending_imports.movie);
+    assert_eq!(
+        counts.pending_imports.series,
+        expected_pending_imports.series
+    );
+    assert_eq!(counts.pending_imports.anime, expected_pending_imports.anime);
+    assert_eq!(
+        counts.pending_media_requests.movie,
+        expected_media_requests.movie
+    );
+    assert_eq!(
+        counts.pending_media_requests.series,
+        expected_media_requests.series
+    );
+    assert_eq!(
+        counts.pending_media_requests.anime,
+        expected_media_requests.anime
+    );
+    assert_eq!(
+        durable_reads.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the badge must never run the durable history query"
+    );
+}
+
+/// A pending-import repository that answers with fixed rows until it is told to
+/// fail.
+///
+/// Lets a test watch one durable badge section go down while the others stay
+/// fresh: the failing section has to keep the number it last published.
+struct ScriptedPendingImportRepo {
+    items: Vec<crate::LibraryScanUnmatchedItem>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl crate::LibraryScanUnmatchedItemRepository for ScriptedPendingImportRepo {
+    async fn upsert_library_scan_unmatched_item(
+        &self,
+        item: &crate::LibraryScanUnmatchedItem,
+    ) -> AppResult<String> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .upsert_library_scan_unmatched_item(item)
+            .await
+    }
+
+    async fn get_library_scan_unmatched_item(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::LibraryScanUnmatchedItem>> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .get_library_scan_unmatched_item(id)
+            .await
+    }
+
+    async fn delete_library_scan_unmatched_item(
+        &self,
+        library_id: &str,
+        facet: MediaFacet,
+        item_path: &str,
+    ) -> AppResult<()> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_library_scan_unmatched_item(library_id, facet, item_path)
+            .await
+    }
+
+    async fn delete_for_library(&self, library_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_library(library_id)
+            .await
+    }
+
+    async fn delete_for_title(&self, title_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_title(title_id)
+            .await
+    }
+
+    async fn list_library_scan_unmatched_items(
+        &self,
+        facet: Option<MediaFacet>,
+        _scan_root: Option<&str>,
+        status: Option<crate::PendingImportStatus>,
+        _limit: i64,
+        _offset: i64,
+    ) -> AppResult<Vec<crate::LibraryScanUnmatchedItem>> {
+        if self.failing.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AppError::Repository("pending import store is down".into()));
+        }
+        Ok(self
+            .items
+            .iter()
+            .filter(|item| facet.as_ref().is_none_or(|facet| &item.facet == facet))
+            .filter(|item| status.as_ref().is_none_or(|status| &item.status == status))
+            .cloned()
+            .collect())
+    }
+
+    async fn count_library_scan_unmatched_items(
+        &self,
+        facet: Option<MediaFacet>,
+        scan_root: Option<&str>,
+        status: Option<crate::PendingImportStatus>,
+    ) -> AppResult<i64> {
+        Ok(self
+            .list_library_scan_unmatched_items(facet, scan_root, status, i64::MAX, 0)
+            .await?
+            .len() as i64)
+    }
+}
+
+/// One pending movie import in the first library a permission check resolves
+/// against, so the badge actually has a durable number to hold onto.
+async fn app_with_one_pending_import() -> (AppUseCase, User, Arc<std::sync::atomic::AtomicBool>) {
+    let (mut app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    let library_id = app
+        .permission_candidate_library_ids(None)
+        .await
+        .expect("candidate libraries")
+        .into_iter()
+        .next()
+        .expect("a candidate library");
+    let mut item = build_test_unmatched_item(
+        "pending-import-1",
+        MediaFacet::Movie,
+        "/library/movies",
+        "/library/movies/Quiet Meridian",
+        "Quiet Meridian",
+        "quiet meridian",
+        None,
+    );
+    item.library_id = library_id;
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.services.library.library_scan_unmatched_items = Arc::new(ScriptedPendingImportRepo {
+        items: vec![item],
+        failing: failing.clone(),
+    });
+    (app, user, failing)
+}
+
+/// A new queue snapshot moves the import attention count and nothing else, so
+/// it must recount that list alone. The durable sections cost store reads, and
+/// a client that is downloading anything commits a snapshot every few seconds.
+#[tokio::test]
+async fn a_queue_snapshot_recount_leaves_the_durable_badge_facts_alone() {
+    let (mut app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0
+    );
+
+    app.services.library.library_scan_unmatched_items = Arc::new(UnreadablePendingImportRepo);
+    let mut blocked =
+        queue_history_fixture_item("snapshot-blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("a snapshot recount may not read a durable store");
+
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        1
+    );
+}
+
+/// A busy client commits a snapshot every couple of seconds — progress alone
+/// bumps the revision — so a burst has to collapse into a single recount taken
+/// from the newest snapshot.
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_queue_snapshots_costs_one_attention_recount() {
+    let (app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    let token = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(crate::start_navigation_badge_facts_refresh(
+        app.clone(),
+        token.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0,
+        "the loop's first pass publishes the empty queue"
+    );
+
+    for index in 1..=5 {
+        let blocked = (1..=index)
+            .map(|item| {
+                let mut blocked = queue_history_fixture_item(
+                    &format!("burst-blocked-{item}"),
+                    DownloadQueueState::Completed,
+                    20,
+                );
+                blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+                blocked
+            })
+            .collect::<Vec<_>>();
+        publish_test_download_queue_snapshot(&app, blocked).await;
+    }
+
+    // Still inside the coalesce floor: every one of those revisions has landed
+    // and none of them has been counted.
+    tokio::time::sleep(
+        crate::app_usecase_integration::NAVIGATION_BADGE_ATTENTION_COALESCE_FLOOR / 4,
+    )
+    .await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0,
+        "a snapshot burst may not recount once per revision"
+    );
+
+    tokio::time::sleep(crate::app_usecase_integration::NAVIGATION_BADGE_ATTENTION_COALESCE_FLOOR)
+        .await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        5,
+        "the single recount reads the newest snapshot, not the one that woke it"
+    );
+    token.cancel();
+}
+
+/// Snapshots keep landing for as long as anything downloads, so the durable
+/// half has to run on its own clock. A timer re-armed by every snapshot wake-up
+/// would never reach its interval and the durable numbers would freeze for the
+/// length of the download.
+#[tokio::test(start_paused = true)]
+async fn constant_queue_snapshots_do_not_starve_the_durable_badge_facts() {
+    let (app, user, failing) = app_with_one_pending_import().await;
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    let token = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(crate::start_navigation_badge_facts_refresh(
+        app.clone(),
+        token.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        0,
+        "the start-up pass could not read the pending imports"
+    );
+
+    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+    let churn_step = Duration::from_secs(5);
+    let mut elapsed = Duration::ZERO;
+    let mut index = 0;
+    while elapsed < crate::app_usecase_integration::NAVIGATION_BADGE_FACTS_REFRESH_INTERVAL * 2 {
+        index += 1;
+        publish_test_download_queue_snapshot(
+            &app,
+            vec![queue_history_fixture_item(
+                &format!("churn-{index}"),
+                DownloadQueueState::Downloading,
+                20,
+            )],
+        )
+        .await;
+        tokio::time::sleep(churn_step).await;
+        elapsed += churn_step;
+    }
+
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        1,
+        "the durable refresh keeps its own interval under snapshot churn"
+    );
+    token.cancel();
+}
+
+/// A store that refuses one section may not blank the badge or hold up the
+/// sections that answered: the badge keeps that section's last number and goes
+/// on serving the rest.
+#[tokio::test]
+async fn a_failing_durable_section_keeps_its_previous_badge_number() {
+    let (app, user, failing) = app_with_one_pending_import().await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        1
+    );
+
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut blocked =
+        queue_history_fixture_item("failing-blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+
+    let counts = app
+        .navigation_badge_counts(&user)
+        .await
+        .expect("badge counts should survive a failing section");
+    assert_eq!(
+        counts.pending_imports.movie, 1,
+        "the failing section keeps the number it last published"
+    );
+    assert_eq!(
+        counts.activity_import_count, 1,
+        "the sections that answered stay fresh"
     );
 }
 
@@ -12871,21 +13413,24 @@ async fn download_history_applies_permission_filtering_to_durable_rows() {
         .expect("series title should be added");
 
     let mut app = app;
-    app.services.workflow.download_submissions = Arc::new(DurableHistorySubmissionRepo::new(vec![
-        terminal_history_row(
-            visible_id,
-            "visible-1",
-            Some(&visible_title.id),
-            "Quiet Meridian",
-        ),
-        terminal_history_row(operational_id, "operational-1", None, "Unattributed Grab"),
-        terminal_history_row(
-            hidden_id,
-            "hidden-1",
-            Some(&hidden_title.id),
-            "Salt and Signal",
-        ),
-    ]));
+    app.services.workflow.download_submissions = Arc::new(DurableHistorySubmissionRepo::new(
+        vec![
+            terminal_history_row(
+                visible_id,
+                "visible-1",
+                Some(&visible_title.id),
+                "Quiet Meridian",
+            ),
+            terminal_history_row(operational_id, "operational-1", None, "Unattributed Grab"),
+            terminal_history_row(
+                hidden_id,
+                "hidden-1",
+                Some(&hidden_title.id),
+                "Salt and Signal",
+            ),
+        ],
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    ));
     publish_test_download_queue_snapshot(&app, Vec::new()).await;
 
     let movie_viewer = library_permission_user(

@@ -2098,6 +2098,78 @@ where
 #[derive(Clone)]
 pub struct AppRuntimeIntegrationState {
     pub managed_indexer_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) navigation_badge_facts: NavigationBadgeFactsCache,
+}
+
+/// The unfiltered facts behind the navigation badges.
+///
+/// The badge query is polled every 30 seconds by every open tab, and answering
+/// it from the durable stores put five reads (three of them unbounded) on that
+/// path. These are the same facts, counted off that path and filtered per actor
+/// in memory: counts are kept per library so an actor still sees only the
+/// libraries they hold the permission on.
+///
+/// Split in two because the halves move at different rates. The attention list
+/// follows the download queue and is recounted from the in-memory read model
+/// whenever a snapshot lands; the durable half costs store reads and is
+/// recounted on the refresh interval only, so a busy queue cannot turn every
+/// progress tick into an archive scan.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigationBadgeFacts {
+    pub(crate) durable: Arc<NavigationBadgeDurableFacts>,
+    /// One entry per download-import row needing attention: the library its
+    /// title belongs to, or `None` for a row with no title an operator can be
+    /// scoped by (operational history).
+    pub(crate) import_attention: Vec<Option<String>>,
+}
+
+/// The half of the badge facts that only a store can answer.
+///
+/// Each field is refreshed independently: a section whose read fails keeps the
+/// value it last had rather than blanking the badge or holding up the sections
+/// that did answer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigationBadgeDurableFacts {
+    /// The libraries a permission check may resolve against, in catalog order
+    /// — the same candidate list `authorized_library_ids` builds, including its
+    /// stand-in defaults for an install with no library rows yet.
+    pub(crate) candidate_library_ids: Vec<String>,
+    /// Pending imports that need an operator, per library.
+    pub(crate) pending_imports: HashMap<String, crate::types::PendingImportCounts>,
+    /// Pending media requests per library.
+    pub(crate) media_requests: HashMap<String, crate::types::MediaRequestCounts>,
+    pub(crate) plugin_update_count: i64,
+    pub(crate) plugin_blocked_count: i64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NavigationBadgeFactsCache {
+    pub(crate) current: Arc<tokio::sync::RwLock<Option<Arc<NavigationBadgeFacts>>>>,
+    pub(crate) build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Which durable sections are mid-failure, so a store that stays down is
+    /// logged once per streak instead of once per refresh.
+    pub(crate) failing_sections:
+        Arc<tokio::sync::Mutex<HashSet<crate::services::NavigationBadgeSection>>>,
+}
+
+/// The independently refreshed sections of the durable badge facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NavigationBadgeSection {
+    Libraries,
+    PendingImports,
+    MediaRequests,
+    Plugins,
+}
+
+impl NavigationBadgeSection {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Libraries => "libraries",
+            Self::PendingImports => "pending imports",
+            Self::MediaRequests => "media requests",
+            Self::Plugins => "plugins",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2246,6 +2318,7 @@ impl AppRuntimeState {
             },
             integrations: AppRuntimeIntegrationState {
                 managed_indexer_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+                navigation_badge_facts: NavigationBadgeFactsCache::default(),
             },
         }
     }

@@ -5,28 +5,24 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use chrono::{DateTime, Utc};
 use scryer_application::{
-    AppError, DownloadImportFilter, ExternalImportArrSourceKind as AppArrSourceKind,
-    ExternalImportMonitorWarmupStatus,
+    AppError, ExternalImportArrSourceKind as AppArrSourceKind, ExternalImportMonitorWarmupStatus,
     ExternalImportSetupSecretDraft as AppExternalImportSetupSecretDraft,
     ExternalImportSetupSecretDraftStatus, ExternalImportSetupSecretInstanceKind,
-    ExternalImportSetupSecretOverrideDraft, ImageProxyKind, JwtSessionScope, MediaRequestCounts,
-    OAuthAuthorizationSource, PendingImportCounts, RenamePlan, RenameWriteAction,
-    RulePackRegistryEntry, RuntimePathStyle, SCRYER_VERSION, SortDirection,
-    TitleCatalogContentStatus, TitleCatalogFilter, TitleCatalogSort, TitleCatalogSortKey,
-    TitleHistoryFilter, is_supported_title_history_event_type, supported_title_history_event_types,
+    ExternalImportSetupSecretOverrideDraft, ImageProxyKind, JwtSessionScope,
+    OAuthAuthorizationSource, RenamePlan, RenameWriteAction, RulePackRegistryEntry,
+    RuntimePathStyle, SCRYER_VERSION, SortDirection, TitleCatalogContentStatus, TitleCatalogFilter,
+    TitleCatalogSort, TitleCatalogSortKey, TitleHistoryFilter,
+    is_supported_title_history_event_type, supported_title_history_event_types,
 };
-use scryer_domain::{
-    AppPermission, LibraryPermission, RulePackInstallation, RuleSet, TitleHistoryEventType,
-};
+use scryer_domain::{AppPermission, RulePackInstallation, RuleSet, TitleHistoryEventType};
 use scryer_interface_metadata::MetadataQueries;
 use scryer_interface_settings::SettingsQueries;
 use std::{collections::HashMap, fs, io, path::Path};
 
 use scryer_interface_core as context;
 use scryer_interface_core::{
-    actor_from_ctx, actor_has_any_library_permission, actor_has_app_permission, app_from_ctx,
-    application_upgrade_assessment_from_ctx, current_user_from_ctx, mfa_verification_from_ctx,
-    require_app_permission, require_config_app_permission, to_gql_error,
+    actor_from_ctx, app_from_ctx, application_upgrade_assessment_from_ctx, current_user_from_ctx,
+    mfa_verification_from_ctx, require_app_permission, require_config_app_permission, to_gql_error,
 };
 use scryer_interface_media::mappers;
 use scryer_interface_media::mappers::{
@@ -2415,71 +2411,20 @@ impl ActivityQueries {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
 
-        let can_resolve_imports =
-            actor_has_any_library_permission(ctx, LibraryPermission::ResolveImports).await?;
-        let can_manage_titles =
-            actor_has_any_library_permission(ctx, LibraryPermission::ManageTitles).await?;
-        let can_manage_system_settings =
-            actor_has_app_permission(ctx, AppPermission::ManageSystemSettings).await?;
-
-        let pending_import_counts = async {
-            if can_resolve_imports {
-                app.pending_import_counts(&actor).await
-            } else {
-                Ok(PendingImportCounts::default())
-            }
-        };
-        let pending_media_request_counts = async {
-            if can_manage_titles {
-                app.pending_media_request_counts(&actor).await
-            } else {
-                Ok(MediaRequestCounts::default())
-            }
-        };
-        let activity_import_count = async {
-            if can_resolve_imports {
-                app.count_download_import_items(&actor, DownloadImportFilter::Attention)
-                    .await
-            } else {
-                Ok(0)
-            }
-        };
-        let plugin_update_count = async {
-            if can_manage_system_settings {
-                app.plugin_update_count(&actor).await
-            } else {
-                Ok(0)
-            }
-        };
-        let plugin_blocked_count = async {
-            if can_manage_system_settings {
-                app.plugin_blocked_count(&actor).await
-            } else {
-                Ok(0)
-            }
-        };
-
-        let (
-            pending_import_counts,
-            pending_media_request_counts,
-            activity_import_count,
-            plugin_update_count,
-            plugin_blocked_count,
-        ) = tokio::try_join!(
-            pending_import_counts,
-            pending_media_request_counts,
-            activity_import_count,
-            plugin_update_count,
-            plugin_blocked_count,
-        )
-        .map_err(to_gql_error)?;
+        // Every open tab polls this every 30 seconds. It is answered from the
+        // cached badge facts, filtered to the actor in memory; the counting
+        // itself happens off this path.
+        let counts = app
+            .navigation_badge_counts(&actor)
+            .await
+            .map_err(to_gql_error)?;
 
         Ok(NavigationBadgeCountsPayload {
-            pending_import_counts: from_pending_import_counts(pending_import_counts),
-            pending_media_request_counts: from_media_request_counts(pending_media_request_counts),
-            activity_import_count: activity_import_count as i32,
-            plugin_update_count: plugin_update_count as i32,
-            plugin_blocked_count: plugin_blocked_count as i32,
+            pending_import_counts: from_pending_import_counts(counts.pending_imports),
+            pending_media_request_counts: from_media_request_counts(counts.pending_media_requests),
+            activity_import_count: counts.activity_import_count as i32,
+            plugin_update_count: counts.plugin_update_count as i32,
+            plugin_blocked_count: counts.plugin_blocked_count as i32,
         })
     }
 
