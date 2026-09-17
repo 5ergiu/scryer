@@ -241,17 +241,13 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                   )}
                 >
                   <div className="min-w-0 space-y-3">
-                    <div
-                      className={cn(
-                        "flex gap-2.5",
-                        selectedTitlePresentation ? "items-center" : "items-start",
-                      )}
-                    >
+                    {/* The path wraps, so the icon sits beside its first line. */}
+                    <div className="flex items-start gap-2.5">
                       <PathIcon
                         className={cn(
                           "shrink-0",
                           selectedTitlePresentation
-                            ? "h-3.5 w-3.5 text-[var(--scry-faint)]"
+                            ? "mt-[3px] h-3.5 w-3.5 text-[var(--scry-faint)]"
                             : "mt-0.5 h-3.5 w-3.5 text-muted-foreground/60",
                         )}
                       />
@@ -261,7 +257,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         className={cn(
                           "min-w-0 leading-5",
                           selectedTitlePresentation
-                            ? "truncate font-[var(--font-code)] text-[12px] text-[var(--scry-text2)]"
+                            ? "break-all font-[var(--font-code)] text-[12px] text-[var(--scry-text2)]"
                             : "break-all font-[var(--font-code)] text-sm text-muted-foreground",
                         )}
                       >
