@@ -279,6 +279,7 @@ pub use app_usecase_integration::{
 pub use app_usecase_integration::{DownloadSeedingState, derive_download_seeding_state};
 pub use app_usecase_post_processing::{PostProcessingContext, run_post_processing};
 pub use app_usecase_rss::RssSyncReport;
+pub use audio_requirements::inferred_audio_track_language;
 #[cfg(test)]
 pub(crate) use audio_requirements::missing_required_audio_languages;
 #[cfg(feature = "runtime-media-analysis")]

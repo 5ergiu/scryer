@@ -6163,6 +6163,7 @@ const ru: LocaleDictionary = {
   "mediaInfo.colSampleDepth": "Sample depth",
   "mediaInfo.colRoles": "Roles",
   "mediaInfo.colName": "Name",
+  "mediaInfo.inferredLanguageFootnote": "Определено по названию дорожки, так как у дорожки нет поля языка.",
   "mediaInfo.colForced": "Forced",
   "mediaInfo.colDefault": "Default",
   "mediaInfo.colStart": "Start",

@@ -3502,6 +3502,7 @@ const nl: LocaleDictionary = {
   "mediaInfo.colSampleDepth": "Sample depth",
   "mediaInfo.colRoles": "Roles",
   "mediaInfo.colName": "Name",
+  "mediaInfo.inferredLanguageFootnote": "Afgeleid van de tracknaam omdat de track geen taalveld heeft.",
   "mediaInfo.colForced": "Forced",
   "mediaInfo.colDefault": "Default",
   "mediaInfo.colStart": "Start",

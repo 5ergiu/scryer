@@ -928,6 +928,10 @@ pub fn from_title_media_file(file: scryer_application::TitleMediaFile) -> TitleM
             .audio_streams
             .into_iter()
             .map(|s| crate::types::AudioStreamDetailPayload {
+                inferred_language: scryer_application::inferred_audio_track_language(
+                    s.language.as_deref(),
+                    s.name.as_deref(),
+                ),
                 profile: s.profile,
                 name: s.name,
                 codec: s.codec,

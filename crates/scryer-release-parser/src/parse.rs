@@ -3058,6 +3058,9 @@ fn release_group_part_is_valid(token: &Token, continuation: bool) -> bool {
     if parse_year(normalized).is_some() && !continuation {
         return false;
     }
+    if is_repost_tag(normalized) {
+        return false;
+    }
     !matches!(
         normalized,
         "WEB"
@@ -3141,6 +3144,30 @@ fn release_group_part_is_valid(token: &Token, continuation: bool) -> bool {
             | "REPACK"
             | "REMUX"
     )
+}
+
+/// Tags that reposters and obfuscators append after the real release group
+/// (`-LEGi0N-AsRequested`). They name the repost, never the group.
+fn is_repost_tag(normalized: &str) -> bool {
+    normalized.starts_with("RAKUV")
+        || matches!(
+            normalized,
+            "ASREQUESTED"
+                | "ALTERNATIVETOREQUESTED"
+                | "OBFUSCATED"
+                | "SCRAMBLED"
+                | "NZBGEEK"
+                | "POSTBOT"
+                | "XPOST"
+                | "REPACKPOST"
+                | "WHITEREV"
+                | "BUYMORE"
+                | "GEROV"
+                | "Z0IDS3N"
+                | "CHAMELE0N"
+                | "4PLANET"
+                | "ALTEZACHEN"
+        )
 }
 
 fn is_compound_metadata_suffix(tokens: &[Token], index: usize) -> bool {

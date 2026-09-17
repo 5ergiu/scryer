@@ -278,7 +278,6 @@ pub(crate) fn required_audio_languages_match(required: &[String], actual: &[Stri
 /// title is tokenized on non-alphanumeric boundaries (no whole-string subtag
 /// splitting, which would turn "no-audio" into Norwegian). Returns distinct
 /// languages in order; empty when nothing maps.
-#[cfg(any(test, feature = "runtime-media-analysis"))]
 pub(crate) fn resolve_audio_languages_from_track_title(title: &str) -> Vec<String> {
     let mut found = Vec::new();
     for token in title.split(|ch: char| !ch.is_ascii_alphanumeric()) {
@@ -315,6 +314,25 @@ fn resolved_track_languages(stream: &crate::AudioStreamDetail) -> Vec<String> {
         .as_deref()
         .map(resolve_audio_languages_from_track_title)
         .unwrap_or_default()
+}
+
+/// The language inferred for an audio track whose container carries no language
+/// field, or `None` when the track is tagged or nothing can be inferred.
+///
+/// Uses the same track-title resolution as the required-audio gate, so display
+/// surfaces show the language the gate acts on rather than a bare unknown.
+pub fn inferred_audio_track_language(language: Option<&str>, name: Option<&str>) -> Option<String> {
+    let tagged = language
+        .map(str::trim)
+        .is_some_and(|language| !language.is_empty() && !language.eq_ignore_ascii_case("und"));
+    if tagged {
+        return None;
+    }
+    name.and_then(|name| {
+        resolve_audio_languages_from_track_title(name)
+            .into_iter()
+            .next()
+    })
 }
 
 /// Verdict for the post-download required-audio-language gate.
@@ -416,6 +434,29 @@ mod tests {
             name: name.map(str::to_string),
             bitrate_kbps: None,
         }
+    }
+
+    #[test]
+    fn inferred_track_language_only_applies_to_untagged_tracks() {
+        use super::inferred_audio_track_language;
+
+        assert_eq!(
+            inferred_audio_track_language(None, Some("English / DTS-HD MA / 7.1")).as_deref(),
+            Some("eng")
+        );
+        assert_eq!(
+            inferred_audio_track_language(Some("und"), Some("Japanese")).as_deref(),
+            Some("jpn")
+        );
+        assert_eq!(
+            inferred_audio_track_language(Some("jpn"), Some("English")),
+            None
+        );
+        assert_eq!(
+            inferred_audio_track_language(None, Some("Surround 5.1")),
+            None
+        );
+        assert_eq!(inferred_audio_track_language(None, None), None);
     }
 
     #[test]

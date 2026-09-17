@@ -135,6 +135,7 @@ export type MediaStreamDetail = {
   height: number | null;
   channels: number | null;
   language: string | null;
+  inferredLanguage?: string | null;
   name: string | null;
   metadata: MediaStreamMetadata;
 };
@@ -252,6 +253,7 @@ export const MEDIA_DISC_FIELDS = `
       height
       channels
       language
+      inferredLanguage
       name
       metadata {
         id
@@ -379,6 +381,7 @@ export const MEDIA_ANALYSIS_FIELDS = `
     height
     channels
     language
+    inferredLanguage
     name
     metadata {
       id

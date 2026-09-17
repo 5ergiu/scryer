@@ -86,10 +86,18 @@ jobs:
             --source-branch main \
             scryer-provenance-validation.txt
 
-      - name: Install Cosign
+      # Mirrors the dual Cosign v2 + v3 blob signing in scryer.yml.
+      - name: Install Cosign v2
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v2.6.5
+          install-dir: $HOME/.cosign-v2
+
+      - name: Install Cosign v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+          install-dir: $HOME/.cosign-v3
 
       - name: Verify keyless checksum signing
         working-directory: validation
@@ -97,11 +105,30 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum scryer-provenance-validation.txt > scryer-checksums.txt
-          cosign sign-blob --yes \
+          identity="https://github.com/${{ github.repository }}/.github/workflows/release-provenance-validation.yml@refs/heads/main"
+          issuer="https://token.actions.githubusercontent.com"
+
+          "$HOME/.cosign-v2/cosign" sign-blob --yes \
             --bundle scryer-checksums.txt.sigstore.json \
             scryer-checksums.txt
-          cosign verify-blob \
+          "$HOME/.cosign-v2/cosign" verify-blob \
             --bundle scryer-checksums.txt.sigstore.json \
-            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/release-provenance-validation.yml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "$issuer" \
             scryer-checksums.txt
+          jq -e 'has("base64Signature") and has("rekorBundle")' \
+            scryer-checksums.txt.sigstore.json >/dev/null
+
+          "$HOME/.cosign-v3/cosign" sign-blob --yes \
+            --bundle scryer-checksums.txt.cosign-v3.sigstore.json \
+            scryer-checksums.txt
+          "$HOME/.cosign-v3/cosign" verify-blob \
+            --bundle scryer-checksums.txt.cosign-v3.sigstore.json \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "$issuer" \
+            scryer-checksums.txt
+          jq -e '(.mediaType | startswith("application/vnd.dev.sigstore.bundle"))
+                 and (.verificationMaterial.tlogEntries | length == 1)
+                 and (.verificationMaterial.tlogEntries[0].kindVersion
+                      == {"kind": "hashedrekord", "version": "0.0.1"})' \
+            scryer-checksums.txt.cosign-v3.sigstore.json >/dev/null

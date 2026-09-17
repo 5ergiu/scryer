@@ -928,6 +928,11 @@ type AudioStreamDetailPayload {
 	"""
 	language: String
 	"""
+	Language inferred from the track name when the container has no language
+	field for this track, or null when the track is tagged or nothing can be inferred.
+	"""
+	inferredLanguage: String
+	"""
 	Bitrate in kilobits per second, or null when unavailable.
 	"""
 	bitrateKbps: Int
@@ -14949,6 +14954,11 @@ type MediaStreamDetailPayload {
 	Normalized language tag, when known.
 	"""
 	language: String
+	"""
+	Language inferred from the track name when an audio stream has no language
+	field in the container; null when the stream is tagged or nothing can be inferred.
+	"""
+	inferredLanguage: String
 	"""
 	Name supplied by the container metadata.
 	"""

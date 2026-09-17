@@ -2792,6 +2792,7 @@ const it: LocaleDictionary = {
   "mediaInfo.colSampleDepth": "Sample depth",
   "mediaInfo.colRoles": "Roles",
   "mediaInfo.colName": "Name",
+  "mediaInfo.inferredLanguageFootnote": "Dedotto dal nome della traccia perché la traccia non ha un campo lingua.",
   "mediaInfo.colForced": "Forced",
   "mediaInfo.colDefault": "Default",
   "mediaInfo.colStart": "Start",
