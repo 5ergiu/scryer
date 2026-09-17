@@ -3141,3 +3141,125 @@ async fn failed_transactions_preserve_the_previous_title_credit_cache() {
 
     let _ = std::fs::remove_file(db);
 }
+
+#[tokio::test]
+async fn bulk_title_reads_hydrate_canonical_tags_only_when_the_projection_asks() {
+    let db = std::env::temp_dir().join(format!(
+        "scryer_title_tag_projection_{}.db",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let services = SqliteServices::new(db.to_string_lossy())
+        .await
+        .expect("db should initialize");
+    let catalog = title_store(&services);
+
+    let mut title = make_test_title("title-projection", None);
+    title.external_ids = vec![ExternalId {
+        source: "tvdb".to_string(),
+        value: "778899".to_string(),
+    }];
+    let library_ids = vec![title.library_id.clone()];
+    TitleRepository::create(&catalog, title.clone())
+        .await
+        .expect("title should insert");
+
+    let tag = scryer_domain::CanonicalMediaTag {
+        key: "canonical:genre:projection".to_string(),
+        category: "genre".to_string(),
+        name: "Projection".to_string(),
+        confidence: Some(0.8),
+        sources: vec!["test".to_string()],
+        source_tag_keys: vec!["projection".to_string()],
+        is_adult: false,
+        is_spoiler: false,
+    };
+    TitleRepository::update_title_hydrated_metadata(
+        &catalog,
+        &title.id,
+        TitleMetadataUpdate {
+            metadata_fetched_at: Some(Utc::now().to_rfc3339()),
+            canonical_tags: vec![tag.clone()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("canonical tags should persist");
+
+    // The tag-consuming reads must keep seeing tags: the catalog list and its
+    // genre/theme filter options are built from them.
+    let listed = TitleRepository::list(&catalog, None, None)
+        .await
+        .expect("plain list should load");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].canonical_tags, vec![tag.clone()]);
+
+    let for_libraries = TitleRepository::list_for_libraries(&catalog, None, &library_ids, None)
+        .await
+        .expect("library list should load");
+    assert_eq!(for_libraries.len(), 1);
+    assert_eq!(for_libraries[0].canonical_tags, vec![tag.clone()]);
+
+    let filter_options =
+        TitleRepository::title_catalog_filter_options(&catalog, None, &library_ids, &[])
+            .await
+            .expect("filter options should load");
+    assert!(
+        filter_options
+            .genres
+            .iter()
+            .any(|option| option.key == tag.key),
+        "catalog genre filter options are derived from canonical tags"
+    );
+
+    // Asking for the default projection is the same read as `list`.
+    let projected_with_tags = TitleRepository::list_with_projection(
+        &catalog,
+        None,
+        None,
+        None,
+        TitleListProjection::default(),
+    )
+    .await
+    .expect("default projection should load");
+    assert_eq!(projected_with_tags.len(), 1);
+    assert_eq!(projected_with_tags[0].canonical_tags, vec![tag.clone()]);
+
+    // Opting out skips the hydration query entirely, so the field comes back
+    // empty rather than stale.
+    let projected_without_tags = TitleRepository::list_with_projection(
+        &catalog,
+        None,
+        None,
+        None,
+        TitleListProjection::without_canonical_tags(),
+    )
+    .await
+    .expect("tag-free projection should load");
+    assert_eq!(projected_without_tags.len(), 1);
+    assert!(projected_without_tags[0].canonical_tags.is_empty());
+    assert!(
+        !projected_without_tags[0].external_ids.is_empty(),
+        "dropping tags must not drop the rest of the record"
+    );
+
+    let projected_library_scoped = TitleRepository::list_with_projection(
+        &catalog,
+        None,
+        Some(&library_ids),
+        None,
+        TitleListProjection::without_canonical_tags().without_external_ids(),
+    )
+    .await
+    .expect("library-scoped tag-free projection should load");
+    assert_eq!(projected_library_scoped.len(), 1);
+    assert!(projected_library_scoped[0].canonical_tags.is_empty());
+
+    // Matching reads index titles by name and id; they never render tags.
+    let for_matching = TitleRepository::list_for_matching(&catalog, None, None)
+        .await
+        .expect("matching list should load");
+    assert_eq!(for_matching.len(), 1);
+    assert!(for_matching[0].canonical_tags.is_empty());
+
+    let _ = std::fs::remove_file(db);
+}

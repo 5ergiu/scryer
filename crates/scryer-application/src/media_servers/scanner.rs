@@ -421,7 +421,19 @@ impl AppUseCase {
         connection: &MediaServerConnection,
         catalog: &[MediaServerCatalogItem],
     ) -> AppResult<Vec<MediaServerPlaybackItem>> {
-        let titles = self.services.catalog.titles.list(None, None).await?;
+        // Playback mapping matches a title to a provider item by name, year and
+        // facet, so this all-title read skips the canonical-tag hydration.
+        let titles = self
+            .services
+            .catalog
+            .titles
+            .list_with_projection(
+                None,
+                None,
+                None,
+                crate::TitleListProjection::without_canonical_tags(),
+            )
+            .await?;
         let now = Utc::now();
         let mut mappings = Vec::new();
 
