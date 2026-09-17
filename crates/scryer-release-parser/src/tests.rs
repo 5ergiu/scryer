@@ -2611,6 +2611,39 @@ fn release_group_uses_terminal_component_for_two_part_p2p_suffix() {
 }
 
 #[test]
+fn release_group_skips_trailing_repost_tags() {
+    let mut target = context(ContextFacetHint::Movie, "Lantern Ridge");
+    target.known_years.push(2019);
+
+    for (release, expected) in [
+        (
+            "Lantern.Ridge.2019.REMUX.UHD.BluRay.2160p.HEVC.10bit.HDR.Atmos.DTS-HD.MA.7.1-VRT3X-AsRequested",
+            "VRT3X",
+        ),
+        (
+            "Lantern.Ridge.2019.1080p.BluRay.x264.DTS-VRT3X-Obfuscated",
+            "VRT3X",
+        ),
+        (
+            "Lantern.Ridge.2019.1080p.WEB-DL.DDP5.1.H.264-VRT3X-Rakuvfinhel",
+            "VRT3X",
+        ),
+        (
+            "Lantern.Ridge.2019.1080p.BluRay.x264.DTS-Qorl-VRT3X",
+            "VRT3X",
+        ),
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        let candidate = analysis.best_candidate().expect("best candidate");
+        assert_eq!(
+            candidate.projected.release_group.as_deref(),
+            Some(expected),
+            "{release}"
+        );
+    }
+}
+
+#[test]
 fn bracketed_short_hyphenated_release_group_preserves_both_parts() {
     let analysis = analyze_release_for_target(
         "Emberfall - 224 - 3 vs 1 Battle! Rangiku's Crisis [C-W].avi",
