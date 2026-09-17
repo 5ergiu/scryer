@@ -12963,9 +12963,10 @@ async fn navigation_badge_counts_are_served_from_the_cached_facts() {
         "the fixture has to produce a badge number worth caching"
     );
 
-    app.refresh_navigation_badge_facts()
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
         .await
-        .expect("badge facts should refresh");
+        .expect("badge attention should refresh");
     app.services.library.library_scan_unmatched_items = Arc::new(UnreadablePendingImportRepo);
 
     let counts = app
@@ -12996,6 +12997,268 @@ async fn navigation_badge_counts_are_served_from_the_cached_facts() {
         durable_reads.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "the badge must never run the durable history query"
+    );
+}
+
+/// A pending-import repository that answers with fixed rows until it is told to
+/// fail.
+///
+/// Lets a test watch one durable badge section go down while the others stay
+/// fresh: the failing section has to keep the number it last published.
+struct ScriptedPendingImportRepo {
+    items: Vec<crate::LibraryScanUnmatchedItem>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl crate::LibraryScanUnmatchedItemRepository for ScriptedPendingImportRepo {
+    async fn upsert_library_scan_unmatched_item(
+        &self,
+        item: &crate::LibraryScanUnmatchedItem,
+    ) -> AppResult<String> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .upsert_library_scan_unmatched_item(item)
+            .await
+    }
+
+    async fn get_library_scan_unmatched_item(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::LibraryScanUnmatchedItem>> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .get_library_scan_unmatched_item(id)
+            .await
+    }
+
+    async fn delete_library_scan_unmatched_item(
+        &self,
+        library_id: &str,
+        facet: MediaFacet,
+        item_path: &str,
+    ) -> AppResult<()> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_library_scan_unmatched_item(library_id, facet, item_path)
+            .await
+    }
+
+    async fn delete_for_library(&self, library_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_library(library_id)
+            .await
+    }
+
+    async fn delete_for_title(&self, title_id: &str) -> AppResult<u32> {
+        crate::NullLibraryScanUnmatchedItemRepository
+            .delete_for_title(title_id)
+            .await
+    }
+
+    async fn list_library_scan_unmatched_items(
+        &self,
+        facet: Option<MediaFacet>,
+        _scan_root: Option<&str>,
+        status: Option<crate::PendingImportStatus>,
+        _limit: i64,
+        _offset: i64,
+    ) -> AppResult<Vec<crate::LibraryScanUnmatchedItem>> {
+        if self.failing.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AppError::Repository("pending import store is down".into()));
+        }
+        Ok(self
+            .items
+            .iter()
+            .filter(|item| facet.as_ref().is_none_or(|facet| &item.facet == facet))
+            .filter(|item| status.as_ref().is_none_or(|status| &item.status == status))
+            .cloned()
+            .collect())
+    }
+
+    async fn count_library_scan_unmatched_items(
+        &self,
+        facet: Option<MediaFacet>,
+        scan_root: Option<&str>,
+        status: Option<crate::PendingImportStatus>,
+    ) -> AppResult<i64> {
+        Ok(self
+            .list_library_scan_unmatched_items(facet, scan_root, status, i64::MAX, 0)
+            .await?
+            .len() as i64)
+    }
+}
+
+/// One pending movie import in the first library a permission check resolves
+/// against, so the badge actually has a durable number to hold onto.
+async fn app_with_one_pending_import() -> (AppUseCase, User, Arc<std::sync::atomic::AtomicBool>) {
+    let (mut app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    let library_id = app
+        .permission_candidate_library_ids(None)
+        .await
+        .expect("candidate libraries")
+        .into_iter()
+        .next()
+        .expect("a candidate library");
+    let mut item = build_test_unmatched_item(
+        "pending-import-1",
+        MediaFacet::Movie,
+        "/library/movies",
+        "/library/movies/Quiet Meridian",
+        "Quiet Meridian",
+        "quiet meridian",
+        None,
+    );
+    item.library_id = library_id;
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.services.library.library_scan_unmatched_items = Arc::new(ScriptedPendingImportRepo {
+        items: vec![item],
+        failing: failing.clone(),
+    });
+    (app, user, failing)
+}
+
+/// A new queue snapshot moves the import attention count and nothing else, so
+/// it must recount that list alone. The durable sections cost store reads, and
+/// a client that is downloading anything commits a snapshot every few seconds.
+#[tokio::test]
+async fn a_queue_snapshot_recount_leaves_the_durable_badge_facts_alone() {
+    let (mut app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0
+    );
+
+    app.services.library.library_scan_unmatched_items = Arc::new(UnreadablePendingImportRepo);
+    let mut blocked =
+        queue_history_fixture_item("snapshot-blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("a snapshot recount may not read a durable store");
+
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        1
+    );
+}
+
+/// A busy client commits a snapshot every couple of seconds — progress alone
+/// bumps the revision — so a burst has to collapse into a single recount taken
+/// from the newest snapshot.
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_queue_snapshots_costs_one_attention_recount() {
+    let (app, user, _) = history_app_counting_durable_reads(Vec::new()).await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    let token = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(crate::start_navigation_badge_facts_refresh(
+        app.clone(),
+        token.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0,
+        "the loop's first pass publishes the empty queue"
+    );
+
+    for index in 1..=5 {
+        let blocked = (1..=index)
+            .map(|item| {
+                let mut blocked = queue_history_fixture_item(
+                    &format!("burst-blocked-{item}"),
+                    DownloadQueueState::Completed,
+                    20,
+                );
+                blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+                blocked
+            })
+            .collect::<Vec<_>>();
+        publish_test_download_queue_snapshot(&app, blocked).await;
+    }
+
+    // Still inside the coalesce floor: every one of those revisions has landed
+    // and none of them has been counted.
+    tokio::time::sleep(
+        crate::app_usecase_integration::NAVIGATION_BADGE_ATTENTION_COALESCE_FLOOR / 4,
+    )
+    .await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        0,
+        "a snapshot burst may not recount once per revision"
+    );
+
+    tokio::time::sleep(crate::app_usecase_integration::NAVIGATION_BADGE_ATTENTION_COALESCE_FLOOR)
+        .await;
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .activity_import_count,
+        5,
+        "the single recount reads the newest snapshot, not the one that woke it"
+    );
+    token.cancel();
+}
+
+/// A store that refuses one section may not blank the badge or hold up the
+/// sections that answered: the badge keeps that section's last number and goes
+/// on serving the rest.
+#[tokio::test]
+async fn a_failing_durable_section_keeps_its_previous_badge_number() {
+    let (app, user, failing) = app_with_one_pending_import().await;
+    publish_test_download_queue_snapshot(&app, Vec::new()).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+    assert_eq!(
+        app.navigation_badge_counts(&user)
+            .await
+            .expect("badge counts")
+            .pending_imports
+            .movie,
+        1
+    );
+
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut blocked =
+        queue_history_fixture_item("failing-blocked-1", DownloadQueueState::Completed, 20);
+    blocked.tracked_state = Some(TrackedDownloadState::ImportBlocked);
+    publish_test_download_queue_snapshot(&app, vec![blocked]).await;
+    app.refresh_navigation_badge_durable_facts().await;
+    app.refresh_navigation_badge_import_attention()
+        .await
+        .expect("badge attention should refresh");
+
+    let counts = app
+        .navigation_badge_counts(&user)
+        .await
+        .expect("badge counts should survive a failing section");
+    assert_eq!(
+        counts.pending_imports.movie, 1,
+        "the failing section keeps the number it last published"
+    );
+    assert_eq!(
+        counts.activity_import_count, 1,
+        "the sections that answered stay fresh"
     );
 }
 
