@@ -27,7 +27,16 @@ These notes cover what's changed since **0.20.1**.
 
 ## Included fixes
 
-- **Rename:** external subtitles now follow their video file in Scryer as well as on disk. A rename moved the subtitle files, but the title kept listing them at their old location. Downloaded subtitles keep their provider, score and sync details after the move. The title page still doesn't refresh on its own after a rename; reopen the title to see the new paths. This addresses issue #226.
+- **Rename:** external subtitles now follow their video file in Scryer as well as on disk. A rename moved the subtitle files, but the title kept listing them at their old location. Downloaded subtitles keep their provider, score and sync details after the move. The title page now shows the new paths once the rename has finished, without reopening the title. This addresses issue #226.
+- **Title pages:** movies, series and anime now share one set of title actions, so each works the same way on all three.
+  - **Refresh** on a movie now rescans the movie's folder for files, as it already did for series and anime, and updates the movie's download activity.
+  - **Manual Import** now appears on a movie's page when a finished download is waiting for it, as it already did for series and anime.
+  - Searching a movie when no download client is set up now explains why nothing was searched, as it already did for series and anime.
+  - **Preview rename** is hidden when renaming is turned off for that media type, and from users who can't manage the title. Before, a movie showed it to everyone, and the preview then failed.
+  - **Remove** on a movie's blocked release is shown only to users who can manage titles in that movie's own library. Before, managing titles in any movie library was enough to see it.
+  - Users with Manage Titles but no access to media settings now get the quality profile list when editing a title.
+  - Series and anime pages now use the same action bar and blocked releases section as movies.
+- **Manual import:** a direct movie import that fails from the dashboard or the activity page is now shown as an error.
 - **Permissions:** users who can only view a library no longer see **Delete file** or **Make primary** on a movie's files. Scryer already refused both actions for them; the buttons are now hidden too.
 - **Subtitle providers:** saving a subtitle provider now tests its connection first and only saves when the test passes, as saving a download client does. A new provider also keeps the content types its plugin recommends (Anime for Jimaku). Before, a provider added without changing the preselected type was saved with no content types, and Scryer never searched it. Saving now requires at least one content type. If a provider's **Content types** column shows `-`, edit it, tick the types it should cover, and save.
 - **Subtitles:** **Delete** and **Blocklist** in the subtitle search window now open their confirmation on top of the window. Before, the confirmation opened hidden behind it, so both buttons seemed to do nothing.
@@ -45,6 +54,7 @@ These affect scripts and tools that call Scryer's GraphQL API. The Scryer web ap
 
   Change a query that selected result fields directly on `searchSubtitles` so it selects them under `results { ... }`.
 - **Added:** the library permission enum `LibraryPermissionValue` has a new value, `MANAGE_SUBTITLES`. Clients that match every enum value should handle it.
+- **Added:** titles have a `renameEnabled` field. It is `true` when renaming is turned on for the title's media type; rename previews and rename requests for the title are refused while it is `false`.
 
 ## Upgrading
 

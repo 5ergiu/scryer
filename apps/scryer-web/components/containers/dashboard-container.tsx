@@ -2,7 +2,7 @@ import * as React from "react";
 import { useClient, useMutation } from "urql";
 
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
-import { ManualImportDialog } from "@/components/dialogs/manual-import-dialog";
+import { useManualImportLauncher } from "@/components/common/manual-import-launcher";
 import { DashboardView } from "@/components/views/dashboard-view";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -13,11 +13,9 @@ import {
 } from "@/lib/events/navigation-badges";
 import {
   approveMediaRequestMutation,
-  beginManualImportSelectionMutation,
   deleteDownloadMutation,
   dismissMediaRequestMutation,
   markTrackedDownloadFailedMutation,
-  queueManualImportMutation,
 } from "@/lib/graphql/mutations";
 import {
   dashboardOverviewQuery,
@@ -37,10 +35,6 @@ import type {
 } from "@/lib/types";
 import { isBreakingVersionChange } from "@/lib/utils/dashboard";
 import { isHistoryQueueState } from "@/lib/utils/download-queue";
-import {
-  type DirectMovieManualImportCandidate,
-  directMovieManualImportMappings,
-} from "@/lib/utils/manual-import-actions";
 
 /** Trailing window the two 24h tiles compare against the window before it. */
 const ACTIVITY_WINDOW_HOURS = 24;
@@ -78,18 +72,12 @@ export function DashboardContainer() {
   const [queueTotal, setQueueTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [actionRequestId, setActionRequestId] = React.useState<string | null>(null);
-  const [manualImportItem, setManualImportItem] =
-    React.useState<DownloadQueueItem | null>(null);
   const [deleteConfirmItem, setDeleteConfirmItem] =
     React.useState<DownloadQueueItem | null>(null);
   const [importActionItemId, setImportActionItemId] = React.useState<string | null>(
     null,
   );
   const [deleteInProgress, setDeleteInProgress] = React.useState(false);
-  const [, executeBeginManualImportSelection] = useMutation(
-    beginManualImportSelectionMutation,
-  );
-  const [, executeQueueManualImport] = useMutation(queueManualImportMutation);
   const [, executeMarkTrackedDownloadFailed] = useMutation(
     markTrackedDownloadFailedMutation,
   );
@@ -241,78 +229,9 @@ export function DashboardContainer() {
 
   // The activity page's action subset: movies import directly, series and anime
   // open the mapper dialog. Everything richer lives on the import page.
-  const importItem = React.useCallback(
-    async (item: DownloadQueueItem) => {
-      if (!item.titleId) {
-        setGlobalStatus(t("queue.assignTitleBeforeImport"));
-        return;
-      }
-      if (item.facet === "SERIES" || item.facet === "ANIME") {
-        setManualImportItem(item);
-        return;
-      }
-      setImportActionItemId(item.id);
-      try {
-        const selection = await executeBeginManualImportSelection({
-          input: {
-            clientId: item.clientId,
-            clientType: item.clientType,
-            downloadClientItemId: item.downloadClientItemId,
-            titleId: item.titleId,
-          },
-        });
-        if (selection.error) {
-          setGlobalStatus(selection.error.message ?? t("queue.manualImportFailed"));
-          return;
-        }
-        let preview = selection.data?.beginManualImportSelection;
-        if (preview?.archiveExtractionNeeded) {
-          const extracted = await executeBeginManualImportSelection({
-            input: {
-              clientId: item.clientId,
-              clientType: item.clientType,
-              downloadClientItemId: item.downloadClientItemId,
-              titleId: item.titleId,
-              extractArchives: true,
-            },
-          });
-          if (extracted.error) {
-            setGlobalStatus(extracted.error.message ?? t("queue.manualImportFailed"));
-            return;
-          }
-          preview = extracted.data?.beginManualImportSelection;
-        }
-        const candidates: DirectMovieManualImportCandidate[] = preview?.files ?? [];
-        if (preview?.files?.some((file: { fileName: string }) => file.fileName.toLowerCase().endsWith(".iso"))) {
-          setManualImportItem(item);
-          return;
-        }
-        const files = directMovieManualImportMappings(candidates);
-        if (!preview?.selectionId || files.length === 0) {
-          setGlobalStatus(t("queue.manualImportFailed"));
-          return;
-        }
-        const result = await executeQueueManualImport({
-          input: { selectionId: preview.selectionId, files },
-        });
-        if (result.error) {
-          setGlobalStatus(result.error.message ?? t("queue.manualImportFailed"));
-          return;
-        }
-        setGlobalStatus(t("queue.manualImportQueued"));
-        refreshAfterImportAction();
-      } finally {
-        setImportActionItemId(null);
-      }
-    },
-    [
-      executeBeginManualImportSelection,
-      executeQueueManualImport,
-      refreshAfterImportAction,
-      setGlobalStatus,
-      t,
-    ],
-  );
+  const manualImport = useManualImportLauncher({
+    onImportQueued: refreshAfterImportAction,
+  });
 
   const markImportFailed = React.useCallback(
     async (item: DownloadQueueItem) => {
@@ -537,10 +456,10 @@ export function DashboardContainer() {
         pluginUpdates={pluginUpdates}
         updatingPluginIds={mutatingPluginIds}
         actionRequestId={actionRequestId}
-        importActionItemId={importActionItemId}
+        importActionItemId={importActionItemId ?? manualImport.busyItemId}
         onApproveRequest={(request) => void approveRequest(request)}
         onDismissRequest={(request) => void dismissRequest(request)}
-        onImportItem={(item) => void importItem(item)}
+        onImportItem={(item) => void manualImport.launch(item)}
         onMarkImportFailed={(item) => void markImportFailed(item)}
         onRemoveImportItem={setDeleteConfirmItem}
         onUpdatePlugin={updatePlugin}
@@ -556,26 +475,7 @@ export function DashboardContainer() {
         onConfirm={() => void removeFromClient()}
         onCancel={() => setDeleteConfirmItem(null)}
       />
-      {manualImportItem?.titleId ? (
-        <ManualImportDialog
-          open={manualImportItem !== null}
-          onOpenChange={(open) => {
-            if (!open) {
-              setManualImportItem(null);
-            }
-          }}
-          titleId={manualImportItem.titleId}
-          facet={manualImportItem.facet}
-          titleName={manualImportItem.titleName}
-          clientId={manualImportItem.clientId}
-          clientType={manualImportItem.clientType}
-          downloadClientItemId={manualImportItem.downloadClientItemId}
-          onImportQueued={() => {
-            setManualImportItem(null);
-            refreshAfterImportAction();
-          }}
-        />
-      ) : null}
+      {manualImport.dialog}
     </>
   );
 }

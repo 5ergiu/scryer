@@ -1,14 +1,10 @@
 import * as React from "react";
 import { useLocation } from "react-router";
-import { useAutomaticSearch } from "@/lib/hooks/use-automatic-search";
 import {
   ArrowDown,
   ArrowUp,
   ChevronDown,
-  ChevronRight,
-  ClipboardList,
   Columns3,
-  Edit,
   Eye,
   EyeOff,
   FolderPen,
@@ -17,14 +13,12 @@ import {
   PanelLeftOpen,
   PanelRightOpen,
   Pencil,
-  RefreshCw,
   Search,
   SlidersHorizontal,
   Sparkles,
   Table as TableIcon,
   Trash2,
   X,
-  Zap,
 } from "lucide-react";
 import { deriveInteractiveSearchPresentation } from "@/lib/utils/interactive-search-presentation";
 import {
@@ -42,15 +36,9 @@ import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import { useActiveDownloadTitleIds } from "@/lib/hooks/use-active-download-title-ids";
-import { useDownloadQueue } from "@/lib/hooks/use-download-queue";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import {
   Popover,
   PopoverContent,
@@ -69,10 +57,6 @@ import {
 } from "@/components/common/media-files-on-disk-panel";
 import { TitleFilesOnDiskRail } from "@/components/common/title-files-on-disk-rail";
 import { MovieOverviewDownloadList } from "@/components/common/download-queue-overview";
-import {
-  MediaRenamePlanPanel,
-  type MediaRenamePlan,
-} from "@/components/common/media-rename-plan-panel";
 import { TitleHistoryModal } from "@/components/common/title-history-modal";
 import { WatchInMediaServerMenu } from "@/components/common/watch-in-media-server-menu";
 import {
@@ -133,8 +117,6 @@ import { TitleTable } from "./media-content/title-table";
 import { CompactTitleTable } from "./media-content/compact-title-table";
 import {
   TitleBulkPosterStack,
-  TitleWorkspaceActionButton,
-  TitleWorkspaceActionGrid,
   TitleWorkspaceHero,
   TitleWorkspacePosterFrame,
   TitleWorkspaceSectionCard,
@@ -187,7 +169,28 @@ import { persistOverviewWindowScroll } from "@/lib/hooks/use-overview-window-scr
 import { releaseSupportsAdditionalFileQueue } from "@/lib/utils/release-queue-scope";
 import type { LocalPathStyle } from "@/lib/utils/local-path-style";
 import type { ContentViewMode } from "./media-content/content-view-mode";
-import { MovieTitleSettingsPanel } from "./media-content/movie-title-settings-panel";
+import { TitleSettingsPanel } from "./title-settings-panel";
+import { TitleOverviewActions } from "./title-overview-actions";
+import { TitleBlockedReleasesSection } from "@/components/common/title-blocked-releases-section";
+import { useMediaFileDeletion } from "@/components/common/media-file-deletion";
+import {
+  TitleManualImportButton,
+  useManualImportLauncher,
+} from "@/components/common/manual-import-launcher";
+import {
+  TitleRenamePlan,
+  TitleRenamePreviewButton,
+} from "@/components/common/title-rename-controls";
+import { TitleSearchDownloadClientNotice } from "@/components/common/title-search-download-client-notice";
+import { useCanManageOverviewTitle } from "@/lib/hooks/use-title-overview-access";
+import {
+  useDownloadClientsConfigured,
+  useTitleDownloadFeedback,
+} from "@/lib/hooks/use-title-download-feedback";
+import { useTitleRefreshAndScan } from "@/lib/hooks/use-title-refresh-and-scan";
+import { useTitleReleaseBlocklistClear } from "@/lib/hooks/use-title-release-blocklist-clear";
+import { useTitleRename } from "@/lib/hooks/use-title-rename";
+import { useTitleSearchAction } from "@/lib/hooks/use-title-search-action";
 import { localizedTitleStatus } from "./overview-localization";
 import { SeriesOverviewContainer } from "@/components/containers/series-overview-container";
 import { handleFixTitleMatchComplete } from "@/lib/fix-title-match";
@@ -195,10 +198,6 @@ import type { TitleOptionUpdates } from "@/lib/types/title-options";
 import { LoadingMark } from "@/components/common/loading-mark";
 
 type Facet = "MOVIE" | "SERIES" | "ANIME";
-
-// Queue activity is supplemental context for a title overview. A temporary
-// queue read failure must not interrupt the rest of the catalog page.
-const ignoreTitleOverviewQueueError = () => {};
 
 function titleTableColumnLabel(
   key: TitleTableColumnKey,
@@ -1043,24 +1042,17 @@ function TitleContextPanel({
   onClearAdvancedFilters,
   view,
   blocklistEntries,
-  clearingBlocklistEntryId,
-  onClearBlocklistEntry,
+  onBlocklistChanged,
   externalSubtitles,
   isTogglingMonitored,
   isDeleting,
   onUpdateTitleOptions,
   onTitleOptionsChanged,
+  onCriticalMutation,
   onToggleMonitored,
-  onAutoQueue,
-  onRefreshTitles,
   onRefreshSubtitles,
-  onDeleteMediaFile,
-  deletingMediaFileIds,
   onMakePrimaryMediaFile,
   primaryMediaFileUpdatingId,
-  onPreviewRename,
-  onApplyRename,
-  refreshLoading,
   onInteractiveSearch,
   onQueueFromInteractive,
   onQueueAdditionalFromInteractive,
@@ -1068,7 +1060,6 @@ function TitleContextPanel({
   onDelete,
   onClearSelection,
   canManageTitle,
-  canManageTitlesInLibrary,
   canRequestMedia,
   manageableDiscoveryFacets,
   requestableDiscoveryFacets,
@@ -1102,8 +1093,8 @@ function TitleContextPanel({
   onClearAdvancedFilters: () => void;
   view: ViewId;
   blocklistEntries: TitleReleaseBlocklistEntry[];
-  clearingBlocklistEntryId: string | null;
-  onClearBlocklistEntry: (entryId: string) => Promise<void> | void;
+  /** Reloads the blocklist of the title with this id. */
+  onBlocklistChanged: (titleId: string) => Promise<void> | void;
   externalSubtitles: ExternalSubtitleRecord[];
   isTogglingMonitored: boolean;
   isDeleting: boolean;
@@ -1112,28 +1103,18 @@ function TitleContextPanel({
     options: TitleOptionUpdates,
   ) => Promise<void> | void;
   onTitleOptionsChanged: (title: TitleRecord) => Promise<void> | void;
+  /** Marks a change that older catalog reads must not overwrite. */
+  onCriticalMutation: () => void;
   onToggleMonitored?: (
     title: TitleRecord,
     monitored: boolean,
   ) => Promise<void> | void;
-  onAutoQueue: (title: TitleRecord) => Promise<void> | void;
-  onRefreshTitles: () => Promise<void> | void;
   onRefreshSubtitles: () => Promise<void> | void;
-  onDeleteMediaFile: (title: TitleRecord, fileId: string) => void;
-  deletingMediaFileIds: ReadonlySet<string>;
   onMakePrimaryMediaFile: (
     title: TitleRecord,
     fileId: string,
   ) => Promise<void> | void;
   primaryMediaFileUpdatingId: string | null;
-  onPreviewRename: (
-    title: TitleRecord,
-  ) => Promise<MediaRenamePlan | null> | MediaRenamePlan | null;
-  onApplyRename: (
-    title: TitleRecord,
-    plan: MediaRenamePlan,
-  ) => Promise<boolean | void> | boolean | void;
-  refreshLoading: boolean;
   onInteractiveSearch: (
     title: TitleRecord,
     onUpdate?: (snapshot: InteractiveSearchProgress) => void,
@@ -1150,7 +1131,6 @@ function TitleContextPanel({
   onDelete: (title: TitleRecord) => void;
   onClearSelection: () => void;
   canManageTitle: boolean;
-  canManageTitlesInLibrary: (libraryId: string | null | undefined) => boolean;
   canRequestMedia: boolean;
   manageableDiscoveryFacets: ReadonlySet<Facet>;
   requestableDiscoveryFacets: ReadonlySet<Facet>;
@@ -1173,41 +1153,68 @@ function TitleContextPanel({
   // Library and root moves are still being finished, so the panel's move entry
   // point only exists when the instance has opted in.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
-  const [autoQueueLoadingTitleId, setAutoQueueLoadingTitleId] = React.useState<
-    string | null
-  >(null);
-  const { isSearching } = useAutomaticSearch();
   const [releaseSearchRequestId, setReleaseSearchRequestId] = React.useState(0);
   const [releaseSearchLoading, setReleaseSearchLoading] = React.useState(false);
   const [releaseSearchTitleId, setReleaseSearchTitleId] = React.useState<
     string | null
   >(null);
-  const [renamePlan, setRenamePlan] = React.useState<MediaRenamePlan | null>(
-    null,
-  );
-  const [renamePreviewing, setRenamePreviewing] = React.useState(false);
-  const [renameApplying, setRenameApplying] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(false);
-  const [blockedReleasesOpen, setBlockedReleasesOpen] =
-    React.useState(false);
-  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [fixMatchOpen, setFixMatchOpen] = React.useState(false);
   const releaseSearchOpen = title !== null && releaseSearchTitleId === title.id;
-  const releaseSearchActionLoading = releaseSearchOpen && releaseSearchLoading;
-  const movieTitleId = title?.facet === "MOVIE" ? title.id : null;
-  const { queueItems: movieDownloadQueueItems } = useDownloadQueue({
-    enabled: movieTitleId !== null,
-    includeAllActivity: true,
-    includeHistoryOnly: false,
-    includeImportActivity: true,
-    titleId: movieTitleId,
-    activityFilter: "ALL",
-    onErrorStatus: ignoreTitleOverviewQueueError,
-  });
   // The action bar only carries mutations, so a viewer without manage rights
   // on this title's library gets no bar rather than a row of failing buttons.
-  const canManageThisTitle =
-    title !== null && canManageTitlesInLibrary(title.libraryId);
+  const canManageThisTitle = useCanManageOverviewTitle(title?.libraryId);
+  const titleId = title?.id ?? null;
+  const hasDownloadClients = useDownloadClientsConfigured(titleId);
+  const downloadFeedback = useTitleDownloadFeedback({
+    titleId,
+    hasDownloadClients,
+  });
+  const refreshDownloadFeedback = downloadFeedback.refresh;
+  const searchAction = useTitleSearchAction({
+    titleId,
+    titleName: title?.name ?? "",
+    hasDownloadClients,
+  });
+  const rename = useTitleRename({
+    title,
+    canManageTitle: canManageThisTitle,
+    onBeforeApply: onCriticalMutation,
+    onApplied: onTitleOptionsChanged,
+  });
+  const reloadTitleAndDownloads = React.useCallback(() => {
+    void refreshDownloadFeedback();
+    return title ? onTitleOptionsChanged(title) : undefined;
+  }, [onTitleOptionsChanged, refreshDownloadFeedback, title]);
+  const refreshAndScan = useTitleRefreshAndScan({
+    titleId,
+    onScanned: reloadTitleAndDownloads,
+  });
+  const mediaFileDeletion = useMediaFileDeletion<
+    { id: string; filePath: string; title: TitleRecord },
+    TitleRecord
+  >({
+    captureContext: (file) => file.title,
+    onBeforeDelete: onCriticalMutation,
+    onFinished: (_run, _file, fileTitle) => onTitleOptionsChanged(fileTitle),
+  });
+  const reloadSelectedBlocklist = React.useCallback(
+    () => (titleId ? onBlocklistChanged(titleId) : undefined),
+    [onBlocklistChanged, titleId],
+  );
+  const blocklistClear = useTitleReleaseBlocklistClear({
+    onCleared: reloadSelectedBlocklist,
+  });
+  const manualImportTitle = React.useMemo(
+    () => (title ? { id: title.id, name: title.name, facet: title.facet } : null),
+    [title],
+  );
+  const manualImport = useManualImportLauncher({
+    title: manualImportTitle,
+    onImportQueued: () => {
+      void reloadTitleAndDownloads();
+    },
+  });
   const panelClassName = cn(
     "min-h-0 w-full min-w-0 flex-col overflow-visible min-[981px]:overflow-hidden rounded-[16px] border border-[var(--scry-border2)] bg-[var(--scry-surfD)]",
     className,
@@ -1286,12 +1293,7 @@ function TitleContextPanel({
     setReleaseSearchTitleId(null);
   }, [title?.id]);
   React.useEffect(() => {
-    setRenamePlan(null);
-    setRenamePreviewing(false);
-    setRenameApplying(false);
     setHistoryOpen(false);
-    setBlockedReleasesOpen(false);
-    setSettingsOpen(false);
     setFixMatchOpen(false);
   }, [title?.facet, title?.id]);
 
@@ -1312,35 +1314,6 @@ function TitleContextPanel({
     },
     [onTitleOptionsChanged, setGlobalStatus, t, title],
   );
-
-  const handlePreviewRename = React.useCallback(async () => {
-    if (!title) {
-      return;
-    }
-
-    setRenamePreviewing(true);
-    try {
-      setRenamePlan(await onPreviewRename(title));
-    } finally {
-      setRenamePreviewing(false);
-    }
-  }, [onPreviewRename, title]);
-
-  const handleApplyRename = React.useCallback(async () => {
-    if (!title || !renamePlan) {
-      return;
-    }
-
-    setRenameApplying(true);
-    try {
-      const applied = await onApplyRename(title, renamePlan);
-      if (applied !== false) {
-        setRenamePlan(null);
-      }
-    } finally {
-      setRenameApplying(false);
-    }
-  }, [onApplyRename, renamePlan, title]);
 
   if (!title) {
     return (
@@ -1420,18 +1393,7 @@ function TitleContextPanel({
     studioOrNetworkLabel,
   ].filter((value): value is string => Boolean(value));
   const heroGenreLabels = titleGenreLabels(title).slice(0, 4);
-  const autoQueueLoading = autoQueueLoadingTitleId === title.id || isSearching(title.id);
   const releaseSearchPanelId = `title-context-release-search-${title.id}`;
-  const handleAutoQueue = async () => {
-    setAutoQueueLoadingTitleId(title.id);
-    try {
-      await onAutoQueue(title);
-    } finally {
-      setAutoQueueLoadingTitleId((current) =>
-        current === title.id ? null : current,
-      );
-    }
-  };
   const handleInteractiveSearchAction = () => {
     if (releaseSearchOpen) {
       setReleaseSearchTitleId(null);
@@ -1573,93 +1535,52 @@ function TitleContextPanel({
         </div>
 
         {canManageThisTitle ? (
-          <TitleWorkspaceActionGrid>
-            <TitleWorkspaceActionButton
-              id="title-overview-toggle-monitoring"
-              icon={title.monitored ? EyeOff : Eye}
-              label={
-                title.monitored
-                  ? t("title.unmonitorAction")
-                  : t("title.monitorAction")
-              }
-              active={title.monitored}
-              pressed={title.monitored}
-              loading={isTogglingMonitored}
-              disabled={bulkActionBusy || !onToggleMonitored}
-              onClick={() => void onToggleMonitored?.(title, !title.monitored)}
-            />
-            <TitleWorkspaceActionButton
-              id={titleOverviewSearchButtonId(title.id)}
-              icon={Zap}
-              label={t("label.search")}
-              loading={autoQueueLoading}
-              disabled={bulkActionBusy}
-              onClick={() => void handleAutoQueue()}
-            />
-            <TitleWorkspaceActionButton
-              icon={Search}
-              label={t("label.interactive")}
-              active={releaseSearchOpen}
-              loading={releaseSearchActionLoading}
-              disabled={bulkActionBusy && !releaseSearchOpen}
-              expanded={releaseSearchOpen}
-              controlsId={releaseSearchPanelId}
-              onClick={handleInteractiveSearchAction}
-            />
-            <TitleWorkspaceActionButton
-              icon={RefreshCw}
-              label={t("label.refresh")}
-              loading={refreshLoading}
-              disabled={bulkActionBusy || refreshLoading}
-              onClick={() => void onRefreshTitles()}
-            />
-            <TitleWorkspaceActionButton
-              icon={ClipboardList}
-              label={t("activity.history")}
-              disabled={bulkActionBusy}
-              onClick={() => setHistoryOpen(true)}
-            />
-            <TitleWorkspaceActionButton
-              id="title-overview-edit-settings"
-              icon={Edit}
-              label={t("label.edit")}
-              active={settingsOpen}
-              disabled={bulkActionBusy}
-              expanded={settingsOpen}
-              controlsId="title-overview-settings-panel"
-              onClick={() => setSettingsOpen((current) => !current)}
-            />
-            <TitleWorkspaceActionButton
-              icon={Trash2}
-              label={t("label.delete")}
-              destructive
-              loading={isDeleting}
-              disabled={bulkActionBusy}
-              onClick={() => onDelete(title)}
-            />
-          </TitleWorkspaceActionGrid>
-        ) : null}
-
-        {settingsOpen ? (
-          <div
-            id="title-overview-settings-panel"
-            role="region"
-            aria-label={t("label.edit")}
-            className="mb-3 overflow-hidden rounded-[12px] border border-[var(--scry-border)] bg-[var(--scry-card2)]"
-          >
-            <MovieTitleSettingsPanel
-              title={title}
-              libraries={libraries}
-              onUpdateTitleOptions={(options) =>
-                Promise.resolve(onUpdateTitleOptions(title, options))
-              }
-              onTitleChanged={() =>
-                Promise.resolve(onTitleOptionsChanged(title))
-              }
-              onOpenFixMatch={() => setFixMatchOpen(true)}
-              experimentalFeaturesEnabled={experimentalFeaturesEnabled}
-            />
-          </div>
+          <TitleOverviewActions
+            key={title.id}
+            monitored={title.monitored}
+            monitoredUpdating={isTogglingMonitored}
+            onToggleMonitoring={
+              onToggleMonitored
+                ? () => void onToggleMonitored(title, !title.monitored)
+                : undefined
+            }
+            searchButtonId={titleOverviewSearchButtonId(title.id)}
+            searchLoading={searchAction.searching}
+            onSearch={() => void searchAction.search()}
+            searchNotice={
+              searchAction.showDownloadClientNotice ? (
+                <TitleSearchDownloadClientNotice />
+              ) : null
+            }
+            interactiveSearch={{
+              open: releaseSearchOpen,
+              loading: releaseSearchLoading,
+              disabled: bulkActionBusy && !releaseSearchOpen,
+              panelId: releaseSearchPanelId,
+              onToggle: handleInteractiveSearchAction,
+            }}
+            refreshLoading={refreshAndScan.loading}
+            onRefresh={() => void refreshAndScan.refreshAndScan()}
+            onHistory={() => setHistoryOpen(true)}
+            settingsPanel={
+              <TitleSettingsPanel
+                idPrefix="title-overview-settings"
+                title={title}
+                libraries={libraries}
+                onUpdateTitleOptions={(options) =>
+                  Promise.resolve(onUpdateTitleOptions(title, options))
+                }
+                onTitleChanged={() =>
+                  Promise.resolve(onTitleOptionsChanged(title))
+                }
+                onOpenFixMatch={() => setFixMatchOpen(true)}
+                experimentalFeaturesEnabled={experimentalFeaturesEnabled}
+              />
+            }
+            deleteLoading={isDeleting}
+            onDelete={() => onDelete(title)}
+            busy={bulkActionBusy}
+          />
         ) : null}
 
         {releaseSearchOpen ? (
@@ -1683,14 +1604,14 @@ function TitleContextPanel({
         ) : null}
 
         <div className="mt-3 space-y-3">
-          {movieDownloadQueueItems.length > 0 ? (
+          {downloadFeedback.queueItems.length > 0 ? (
             <Card>
               <CardContent className="p-4">
                 <h2 className="text-base font-semibold text-card-foreground">
                   {t("activity.activity")}
                 </h2>
                 <MovieOverviewDownloadList
-                  items={movieDownloadQueueItems}
+                  items={downloadFeedback.queueItems}
                   className="mt-3"
                 />
               </CardContent>
@@ -1699,44 +1620,27 @@ function TitleContextPanel({
 
           <TitleFilesOnDiskRail
             action={
-              <Button
-                id={`title-context-rename-preview-${title.id}`}
-                data-ui="title-context-rename-preview"
-                data-title-id={title.id}
-                type="button"
-                variant="primary"
-                size="sm"
-                className="h-[34px] shrink-0 justify-center gap-2 rounded-md border border-transparent !bg-primary px-3 text-xs font-semibold !text-primary-foreground shadow-sm hover:!bg-primary/90 focus-visible:ring-[var(--scry-accent-ring)]"
-                onClick={() => {
-                  void handlePreviewRename();
-                }}
-                disabled={renamePreviewing || renameApplying}
-              >
-                {renamePreviewing ? (
-                  <LoadingMark className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-                <span>
-                  {renamePreviewing
-                    ? t("rename.previewing")
-                    : t("rename.previewButton")}
-                </span>
-              </Button>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <TitleManualImportButton
+                  launcher={manualImport}
+                  completedDownloads={downloadFeedback.completedDownloads}
+                  canManageTitle={canManageThisTitle}
+                  className="h-[34px]"
+                />
+                <TitleRenamePreviewButton
+                  rename={rename}
+                  id={`title-context-rename-preview-${title.id}`}
+                  dataUi="title-context-rename-preview"
+                  titleId={title.id}
+                  className="h-[34px] shrink-0 justify-center gap-2 rounded-md border border-transparent !bg-primary px-3 text-xs font-semibold !text-primary-foreground shadow-sm hover:!bg-primary/90 focus-visible:ring-[var(--scry-accent-ring)]"
+                />
+              </div>
             }
             footer={
-              renamePlan ? (
-                <MediaRenamePlanPanel
-                  plan={renamePlan}
-                  applying={renameApplying}
-                  applyDisabled={renameApplying || renamePlan.renamable === 0}
-                  applyButtonId={`title-context-rename-apply-${title.id}`}
-                  onApply={() => {
-                    void handleApplyRename();
-                  }}
-                  onCancel={() => setRenamePlan(null)}
-                />
-              ) : null
+              <TitleRenamePlan
+                rename={rename}
+                applyButtonId={`title-context-rename-apply-${title.id}`}
+              />
             }
           >
             <MediaFilesOnDiskPanel
@@ -1748,10 +1652,21 @@ function TitleContextPanel({
               onRefreshSubtitles={onRefreshSubtitles}
               onDeleteFile={
                 canManageThisTitle
-                  ? (fileId) => onDeleteMediaFile(title, fileId)
+                  ? (fileId) => {
+                      const file = titleMediaFiles.find(
+                        (candidate) => candidate.id === fileId,
+                      );
+                      if (file) {
+                        mediaFileDeletion.requestDelete({
+                          id: file.id,
+                          filePath: file.filePath,
+                          title,
+                        });
+                      }
+                    }
                   : undefined
               }
-              deletingFileIds={deletingMediaFileIds}
+              deletingFileIds={mediaFileDeletion.deletingFileIds}
               onMakePrimaryFile={
                 canManageThisTitle && title.facet === "MOVIE"
                   ? (fileId) => onMakePrimaryMediaFile(title, fileId)
@@ -1786,107 +1701,17 @@ function TitleContextPanel({
 
           <TitleDubCastStrip credits={title.credits} variant="workspace" />
 
-          {blocklistEntries.length === 0 ? (
-            <section className="flex min-h-[3.25rem] items-center gap-2.5 rounded-[12px] border border-[var(--scry-border)] bg-[var(--scry-card2)] px-4">
-              <ChevronRight className="h-4 w-4 shrink-0 text-[var(--scry-faint)]" />
-              <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-[var(--scry-text2)]">
-                {t("title.contextBlockedReleases")}
-              </span>
-              <span className="shrink-0 rounded-[7px] bg-white/[0.06] px-2 py-0.5 text-[11px] font-semibold text-[var(--scry-muted)]">
-                {blocklistEntries.length}
-              </span>
-            </section>
-          ) : (
-            <Collapsible
-              open={blockedReleasesOpen}
-              onOpenChange={setBlockedReleasesOpen}
-            >
-              <section className="overflow-hidden rounded-[12px] border border-[var(--scry-border)] bg-[var(--scry-card2)]">
-                <CollapsibleTrigger asChild>
-                  <button
-                    type="button"
-                    className="flex min-h-[3.25rem] w-full min-w-0 items-center gap-2.5 px-4 text-left transition hover:bg-[var(--scry-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--scry-focus)]"
-                  >
-                    <ChevronRight
-                      className={cn(
-                        "h-4 w-4 shrink-0 text-[var(--scry-faint)] transition-transform",
-                        blockedReleasesOpen && "rotate-90",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-[var(--scry-text2)]">
-                      {t("title.contextBlockedReleases")}
-                    </span>
-                    <span className="shrink-0 rounded-[7px] bg-white/[0.06] px-2 py-0.5 text-[11px] font-semibold text-[var(--scry-muted)]">
-                      {blocklistEntries.length}
-                    </span>
-                  </button>
-                </CollapsibleTrigger>
-                <CollapsibleContent className="border-t border-[var(--scry-line3)] p-4">
-                  <div className="space-y-2">
-                    {blocklistEntries.map((entry) => {
-                      const attemptedAtLabel = formatTitleDate(
-                        entry.attemptedAt,
-                        dateTimeFormat,
-                      );
-                      const releaseLabel =
-                        entry.releaseName.trim() ||
-                        t("episode.untitledRelease");
-
-                      return (
-                        <div
-                          key={entry.id}
-                          className="rounded-[11px] border border-[var(--scry-line3)] bg-[var(--scry-inset)] p-3"
-                        >
-                          <div className="flex min-w-0 items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="line-clamp-2 break-words text-[12px] font-semibold text-[var(--scry-ink2)]">
-                                {releaseLabel}
-                              </p>
-                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--scry-muted3)]">
-                                {attemptedAtLabel ? (
-                                  <span>{attemptedAtLabel}</span>
-                                ) : null}
-                              </div>
-                            </div>
-                            {canManageTitle ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                aria-label={t("title.clearBlockedRelease", {
-                                  releaseName: releaseLabel,
-                                })}
-                                title={t("title.clearBlockedReleaseHint")}
-                                className="h-7 shrink-0 gap-1.5 px-2 text-[11px] font-semibold text-[var(--scry-muted)] hover:bg-[var(--scry-danger-bg)] hover:text-[var(--scry-danger-text)]"
-                                disabled={clearingBlocklistEntryId === entry.id}
-                                onClick={() => {
-                                  void onClearBlocklistEntry(entry.id);
-                                }}
-                              >
-                                {clearingBlocklistEntryId === entry.id ? (
-                                  <LoadingMark className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                )}
-                                <span>{t("label.remove")}</span>
-                              </Button>
-                            ) : null}
-                          </div>
-                          {entry.errorMessage ? (
-                            <p className="mt-2 line-clamp-3 rounded-[8px] bg-[var(--scry-danger-bg)] px-2.5 py-1.5 text-[11px] leading-4 text-[var(--scry-danger-text)]">
-                              {entry.errorMessage}
-                            </p>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </CollapsibleContent>
-              </section>
-            </Collapsible>
-          )}
+          <TitleBlockedReleasesSection
+            key={title.id}
+            entries={blocklistEntries}
+            canManageTitle={canManageThisTitle}
+            clearingEntryId={blocklistClear.clearingEntryId}
+            onClear={blocklistClear.clear}
+          />
         </div>
       </div>
+      {mediaFileDeletion.dialog}
+      {manualImport.dialog}
       <FixTitleMatchDialog
         open={fixMatchOpen}
         onOpenChange={setFixMatchOpen}
@@ -2108,7 +1933,6 @@ export function MediaContentView({
     catalogDiscoveryGroups: CatalogDiscoveryGroup[];
     canViewCatalog: boolean;
     canManageTitle: boolean;
-    canManageTitlesInLibrary: (libraryId: string | null | undefined) => boolean;
     canRequestMedia: boolean;
     canManageCatalogDiscovery: boolean;
     canRequestCatalogDiscovery: boolean;
@@ -2228,29 +2052,15 @@ export function MediaContentView({
     routeOverviewPending: boolean;
     routeOverviewEpisodeId: string | null;
     selectedOverviewBlocklistEntries: TitleReleaseBlocklistEntry[];
-    clearingSelectedOverviewBlocklistEntryId: string | null;
-    clearSelectedOverviewBlocklistEntry: (
-      entryId: string,
-    ) => Promise<void> | void;
+    reloadSelectedOverviewBlocklist: (titleId: string) => Promise<void> | void;
     selectedOverviewExternalSubtitles: ExternalSubtitleRecord[];
     refreshSelectedOverviewExternalSubtitles: () => Promise<void> | void;
-    deleteSelectedOverviewMediaFile: (
-      title: TitleRecord,
-      fileId: string,
-    ) => void;
-    pendingMediaFileDeletionIds: ReadonlySet<string>;
     makeSelectedOverviewMovieFilePrimary: (
       title: TitleRecord,
       fileId: string,
     ) => Promise<void> | void;
     selectedOverviewPrimaryMovieFileUpdatingId: string | null;
-    previewTitleRename: (
-      title: TitleRecord,
-    ) => Promise<MediaRenamePlan | null> | MediaRenamePlan | null;
-    applyTitleRename: (
-      title: TitleRecord,
-      plan: MediaRenamePlan,
-    ) => Promise<boolean | void> | boolean | void;
+    recordCriticalCatalogMutation: () => void;
     setSelectedOverviewTitleId: (titleId: string | null) => void;
     clearSelectedOverviewTitle: () => void;
     onCloseOverview: () => void;
@@ -2393,7 +2203,6 @@ export function MediaContentView({
     catalogDiscoveryGroups,
     canViewCatalog,
     canManageTitle,
-    canManageTitlesInLibrary,
     canManageCatalogDiscovery,
     canRequestCatalogDiscovery,
     manageableDiscoveryFacets,
@@ -2454,16 +2263,12 @@ export function MediaContentView({
     routeOverviewPending,
     routeOverviewEpisodeId,
     selectedOverviewBlocklistEntries,
-    clearingSelectedOverviewBlocklistEntryId,
-    clearSelectedOverviewBlocklistEntry,
+    reloadSelectedOverviewBlocklist,
     selectedOverviewExternalSubtitles,
     refreshSelectedOverviewExternalSubtitles,
-    deleteSelectedOverviewMediaFile,
-    pendingMediaFileDeletionIds,
     makeSelectedOverviewMovieFilePrimary,
     selectedOverviewPrimaryMovieFileUpdatingId,
-    previewTitleRename,
-    applyTitleRename,
+    recordCriticalCatalogMutation,
     setSelectedOverviewTitleId,
     onCloseOverview,
     updateMovieTitleOptions,
@@ -4270,12 +4075,7 @@ export function MediaContentView({
                       onClearAdvancedFilters={clearAdvancedTitleFilters}
                       view={view}
                       blocklistEntries={selectedOverviewBlocklistEntries}
-                      clearingBlocklistEntryId={
-                        clearingSelectedOverviewBlocklistEntryId
-                      }
-                      onClearBlocklistEntry={
-                        clearSelectedOverviewBlocklistEntry
-                      }
+                      onBlocklistChanged={reloadSelectedOverviewBlocklist}
                       externalSubtitles={selectedOverviewExternalSubtitles}
                       isTogglingMonitored={
                         activeOverviewTitle
@@ -4293,21 +4093,15 @@ export function MediaContentView({
                       }
                       onUpdateTitleOptions={updateMovieTitleOptions}
                       onTitleOptionsChanged={refreshMovieTitleOptions}
+                      onCriticalMutation={recordCriticalCatalogMutation}
                       onToggleMonitored={toggleTitleMonitored}
-                      onAutoQueue={queueExisting}
-                      onRefreshTitles={handleRefreshTitles}
                       onRefreshSubtitles={refreshSelectedOverviewExternalSubtitles}
-                      onDeleteMediaFile={deleteSelectedOverviewMediaFile}
-                      deletingMediaFileIds={pendingMediaFileDeletionIds}
                       onMakePrimaryMediaFile={
                         makeSelectedOverviewMovieFilePrimary
                       }
                       primaryMediaFileUpdatingId={
                         selectedOverviewPrimaryMovieFileUpdatingId
                       }
-                      onPreviewRename={previewTitleRename}
-                      onApplyRename={applyTitleRename}
-                      refreshLoading={titleLoading || catalogBootstrapLoading}
                       onInteractiveSearch={runInteractiveSearchForTitle}
                       onQueueFromInteractive={queueExistingFromRelease}
                       onQueueAdditionalFromInteractive={
@@ -4317,7 +4111,6 @@ export function MediaContentView({
                       onDelete={handleDeleteCatalogTitle}
                       onClearSelection={onCloseOverview}
                       canManageTitle={canManageTitle}
-                      canManageTitlesInLibrary={canManageTitlesInLibrary}
                       canRequestMedia={canRequestCatalogDiscovery}
                       manageableDiscoveryFacets={manageableDiscoveryFacetSet}
                       requestableDiscoveryFacets={requestableDiscoveryFacetSet}

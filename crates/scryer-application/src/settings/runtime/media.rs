@@ -375,6 +375,12 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// Whether renaming is turned on for titles of this facet. Rename preview
+    /// and apply refuse with `renamer_disabled` when this is false.
+    pub async fn title_rename_enabled(&self, facet: &MediaFacet) -> AppResult<bool> {
+        self.resolve_rename_enabled(facet).await
+    }
+
     pub(crate) async fn resolve_rename_enabled(&self, facet: &MediaFacet) -> AppResult<bool> {
         Ok(self
             .read_setting_bool_value(RENAME_ENABLED_KEY, Some(facet.as_str()))

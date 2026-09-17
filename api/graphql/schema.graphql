@@ -26838,6 +26838,11 @@ type TitlePayload {
 	"""
 	rootFolderPath: String!
 	"""
+	Whether renaming is turned on for this title's media type. Rename preview
+	and rename requests for the title are refused while this is false.
+	"""
+	renameEnabled: Boolean!
+	"""
 	Explicit metadata-language override, or null when the global default is inherited.
 	"""
 	metadataLanguageOverride: String
