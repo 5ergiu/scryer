@@ -2622,6 +2622,7 @@ const zh_CN: LocaleDictionary = {
   "mediaInfo.colSampleDepth": "Sample depth",
   "mediaInfo.colRoles": "Roles",
   "mediaInfo.colName": "Name",
+  "mediaInfo.inferredLanguageFootnote": "该音轨没有语言字段，因此根据音轨名称推断。",
   "mediaInfo.colForced": "Forced",
   "mediaInfo.colDefault": "Default",
   "mediaInfo.colStart": "Start",

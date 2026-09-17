@@ -409,6 +409,7 @@ export const TITLE_MEDIA_FILE_FIELDS = `
         codec
         channels
         language
+        inferredLanguage
         bitrateKbps
       }
       subtitleLanguages

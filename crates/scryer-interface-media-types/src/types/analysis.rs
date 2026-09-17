@@ -653,6 +653,9 @@ pub struct MediaStreamDetailPayload {
     pub channels: Option<i32>,
     /// Normalized language tag, when known.
     pub language: Option<String>,
+    /// Language inferred from the track name when an audio stream has no language
+    /// field in the container; null when the stream is tagged or nothing can be inferred.
+    pub inferred_language: Option<String>,
     /// Name supplied by the container metadata.
     pub name: Option<String>,
     /// Precise stream properties and evidence.
@@ -660,6 +663,14 @@ pub struct MediaStreamDetailPayload {
 }
 impl From<scryer_media_types::StreamDetail> for MediaStreamDetailPayload {
     fn from(value: scryer_media_types::StreamDetail) -> Self {
+        let inferred_language = matches!(value.kind, scryer_media_types::StreamKind::Audio)
+            .then(|| {
+                scryer_application::inferred_audio_track_language(
+                    value.language.as_deref(),
+                    value.name.as_deref(),
+                )
+            })
+            .flatten();
         Self {
             kind: value.kind.into(),
             codec: value.codec,
@@ -667,6 +678,7 @@ impl From<scryer_media_types::StreamDetail> for MediaStreamDetailPayload {
             height: value.height,
             channels: value.channels,
             language: value.language,
+            inferred_language,
             name: value.name,
             metadata: value.metadata.into(),
         }

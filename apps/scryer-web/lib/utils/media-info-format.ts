@@ -14,6 +14,7 @@ export type AudioStreamDetail = {
   codec: string | null;
   channels: number | null;
   language: string | null;
+  inferredLanguage?: string | null;
   bitrateKbps: number | null;
 };
 
@@ -80,6 +81,8 @@ export type MediaInfoSection = { id: string; titleKey: string; rows: MediaInfoRo
 export type MediaInfoAudioTrackRow = {
   index: number;
   language: string;
+  /** True when the container has no language field and the value comes from the track name. */
+  languageInferred: boolean;
   codec: string | null;
   profile: string | null;
   channels: string | null;
@@ -284,6 +287,7 @@ function audioStreamFromAnalysis(stream: MediaStreamDetail): AudioStreamDetail {
     codec: stream.codec,
     channels: stream.channels,
     language: stream.language,
+    inferredLanguage: stream.inferredLanguage ?? null,
     profile: stream.metadata.profile,
     name: stream.name,
     metadata: stream.metadata,
@@ -502,9 +506,11 @@ export function audioTrackRows(file: MediaInfoFile): MediaInfoAudioTrackRow[] {
     if (disposition?.commentary) roleKeys.push("mediaFile.commentary");
     if (disposition?.visualImpaired) roleKeys.push("mediaFile.audioDescription");
     if (disposition?.hearingImpaired) roleKeys.push("mediaFile.hearingImpaired");
+    const languageInferred = !stream.language && Boolean(stream.inferredLanguage);
     return {
       index: index + 1,
-      language: formatLanguage(stream.language),
+      language: formatLanguage(languageInferred ? (stream.inferredLanguage ?? null) : stream.language),
+      languageInferred,
       codec: resolveAudioCodec(stream.codec),
       profile: stream.profile ?? null,
       channels: resolveAudioChannels(stream.channels, stream.metadata?.channelLayout),
