@@ -27,6 +27,7 @@ These notes cover what's changed since **0.20.1**.
 
 ## Included fixes
 
+- **Search (SQLite):** a title search could stall on its last step and freeze every save in Scryer until it was restarted, so imports, download progress and settings changes all hung. Searches now finish, and the rest of Scryer keeps saving while a search records its progress.
 - **Rename:** external subtitles now follow their video file in Scryer as well as on disk. A rename moved the subtitle files, but the title kept listing them at their old location. Downloaded subtitles keep their provider, score and sync details after the move. The title page now shows the new paths once the rename has finished, without reopening the title. This addresses issue #226.
 - **Title pages:** movies, series and anime now share one set of title actions, so each works the same way on all three.
   - **Refresh** on a movie now rescans the movie's folder for files, as it already did for series and anime, and updates the movie's download activity.
@@ -37,6 +38,7 @@ These notes cover what's changed since **0.20.1**.
   - Users with Manage Titles but no access to media settings now get the quality profile list when editing a title.
   - Series and anime pages now use the same action bar and blocked releases section as movies.
 - **Manual import:** a direct movie import that fails from the dashboard or the activity page is now shown as an error.
+- **Media files:** a file's full path on a movie's page now wraps onto further lines instead of being cut off. The **Info** window no longer shows the Analysis section of internal file-probe details.
 - **Permissions:** users who can only view a library no longer see **Delete file** or **Make primary** on a movie's files. Scryer already refused both actions for them; the buttons are now hidden too.
 - **Subtitle providers:** saving a subtitle provider now tests its connection first and only saves when the test passes, as saving a download client does. A new provider also keeps the content types its plugin recommends (Anime for Jimaku). Before, a provider added without changing the preselected type was saved with no content types, and Scryer never searched it. Saving now requires at least one content type. If a provider's **Content types** column shows `-`, edit it, tick the types it should cover, and save.
 - **Subtitles:** **Delete** and **Blocklist** in the subtitle search window now open their confirmation on top of the window. Before, the confirmation opened hidden behind it, so both buttons seemed to do nothing.
