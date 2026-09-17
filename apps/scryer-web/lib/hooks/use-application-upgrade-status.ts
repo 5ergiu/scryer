@@ -15,6 +15,7 @@ import { normalizeJobRun } from "@/lib/utils/job-runs";
 const INSTALLATION_KINDS = new Set<ApplicationInstallationKind>([
   "PORTABLE",
   "DIRECT_MSI",
+  "MACOS_APP_BUNDLE",
   "DOCKER",
   "HOMEBREW",
   "WINGET",

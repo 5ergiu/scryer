@@ -1979,6 +1979,12 @@ pub struct AppRuntimeJobState {
     /// restart controller.
     pub application_upgrade_restart:
         Arc<std::sync::RwLock<Option<crate::application_upgrade::ApplicationUpgradeRestartHandle>>>,
+    /// Overrides the staged-bundle signature check for a macOS application
+    /// bundle upgrade. Only the promotion tests set this; a shipped build
+    /// leaves it empty and runs the real `codesign`.
+    #[cfg(not(windows))]
+    pub application_upgrade_bundle_signature_check:
+        Arc<std::sync::RwLock<Option<application_updater::macos_bundle::BundleSignatureCheck>>>,
     /// Single-flight guard for the interactive acquisition-search job — mirrors `title_deletion_lock`.
     pub acquisition_search_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -2232,6 +2238,8 @@ impl AppRuntimeState {
                 title_deletion_lock: Arc::new(tokio::sync::Mutex::new(())),
                 system_maintenance_lock: Arc::new(tokio::sync::Mutex::new(())),
                 application_upgrade_restart: Arc::new(std::sync::RwLock::new(None)),
+                #[cfg(not(windows))]
+                application_upgrade_bundle_signature_check: Arc::new(std::sync::RwLock::new(None)),
                 acquisition_search_lock: Arc::new(tokio::sync::Mutex::new(())),
             },
             health: AppRuntimeHealthState {

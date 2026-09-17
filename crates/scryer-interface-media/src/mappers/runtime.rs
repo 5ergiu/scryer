@@ -114,6 +114,9 @@ pub fn from_application_upgrade_status(
             scryer_application::application_upgrade::InstallationKind::DirectMsi => {
                 ApplicationInstallationKindValue::DirectMsi
             }
+            scryer_application::application_upgrade::InstallationKind::MacosAppBundle => {
+                ApplicationInstallationKindValue::MacosAppBundle
+            }
             scryer_application::application_upgrade::InstallationKind::Docker => {
                 ApplicationInstallationKindValue::Docker
             }

@@ -9,6 +9,13 @@ use application_updater::ProductDescriptor;
 /// The schema identifier accepted for signed upgrade manifests.
 pub const UPGRADE_MANIFEST_SCHEMA_VERSION: &str = "scryer.upgrade.manifest.v1";
 
+/// The schema identifier accepted for signed v2 upgrade manifests.
+///
+/// v1 is frozen: its parser denies unknown fields and unknown enum values, so
+/// every shipped client rejects the whole document on anything new. v2 exists
+/// to carry everything added from now on, and is published beside v1.
+pub const UPGRADE_MANIFEST_V2_SCHEMA_VERSION: &str = "scryer.upgrade.manifest.v2";
+
 /// The schema identifier written into the durable upgrade journal.
 pub const JOURNAL_SCHEMA: &str = "scryer.upgrade.journal.v1";
 
@@ -23,6 +30,10 @@ pub const SCRYER_PRODUCT: ProductDescriptor = ProductDescriptor {
     manifest_asset_name: "scryer-upgrade-manifest.json",
     manifest_signature_asset_name: "scryer-upgrade-manifest.json.sigstore.json",
     manifest_schema: UPGRADE_MANIFEST_SCHEMA_VERSION,
+    manifest_v2_asset_name: "scryer-upgrade-manifest.v2.json",
+    manifest_v2_signature_asset_name: "scryer-upgrade-manifest.v2.json.sigstore.json",
+    manifest_v2_schema: UPGRADE_MANIFEST_V2_SCHEMA_VERSION,
+    macos_bundle_name: "Scryer.app",
     journal_schema: JOURNAL_SCHEMA,
     helper_plan_schema: APPLICATION_UPGRADE_HELPER_PLAN_SCHEMA,
     windows_server_executable: "scryer.exe",
@@ -46,6 +57,27 @@ mod tests {
     #[test]
     fn product_identity_matches_the_shipped_wire_contract() {
         assert_eq!(SCRYER_PRODUCT.manifest_schema, "scryer.upgrade.manifest.v1");
+        assert_eq!(
+            SCRYER_PRODUCT.manifest_asset_name,
+            "scryer-upgrade-manifest.json"
+        );
+        assert_eq!(
+            SCRYER_PRODUCT.manifest_signature_asset_name,
+            "scryer-upgrade-manifest.json.sigstore.json"
+        );
+        assert_eq!(
+            SCRYER_PRODUCT.manifest_v2_schema,
+            "scryer.upgrade.manifest.v2"
+        );
+        assert_eq!(
+            SCRYER_PRODUCT.manifest_v2_asset_name,
+            "scryer-upgrade-manifest.v2.json"
+        );
+        assert_eq!(
+            SCRYER_PRODUCT.manifest_v2_signature_asset_name,
+            "scryer-upgrade-manifest.v2.json.sigstore.json"
+        );
+        assert_eq!(SCRYER_PRODUCT.macos_bundle_name, "Scryer.app");
         assert_eq!(SCRYER_PRODUCT.journal_schema, "scryer.upgrade.journal.v1");
         assert_eq!(
             SCRYER_PRODUCT.helper_plan_schema,

@@ -5,12 +5,15 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use flate2::read::GzDecoder;
 use rustls_pki_types::CertificateDer;
 #[cfg(test)]
-use scryer_application::application_upgrade::manifest::parse_and_validate_upgrade_manifest;
+use scryer_application::application_upgrade::manifest::{
+    parse_and_validate_upgrade_manifest, parse_and_validate_upgrade_manifest_v2,
+};
 use scryer_application::{
     PluginDescriptorLoader,
     application_upgrade::manifest::{
-        UPGRADE_MANIFEST_SCHEMA_VERSION, UpgradeArchitecture, UpgradeArchive, UpgradeArtifact,
-        UpgradeArtifactMember, UpgradeChannel, UpgradeManifest, UpgradePlatform,
+        UPGRADE_MANIFEST_SCHEMA_VERSION, UPGRADE_MANIFEST_V2_SCHEMA_VERSION, UpgradeArchitecture,
+        UpgradeArchive, UpgradeArtifact, UpgradeArtifactMember, UpgradeChannel, UpgradeManifest,
+        UpgradePlatform,
     },
 };
 use scryer_plugins::WasmPluginDescriptorLoader;
@@ -368,6 +371,23 @@ struct UpgradeManifestArgs {
     artifacts_dir: PathBuf,
     #[arg(long, help = "Destination JSON file")]
     output: PathBuf,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = UpgradeManifestGeneration::V1,
+        help = "Which manifest generation to write"
+    )]
+    schema: UpgradeManifestGeneration,
+}
+
+/// The two manifest generations published side by side for each release.
+///
+/// v1 is frozen and must stay byte-for-byte what every shipped client already
+/// parses; v2 carries the same artifacts plus everything added since.
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum UpgradeManifestGeneration {
+    V1,
+    V2,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -1256,6 +1276,31 @@ const UPGRADE_MANIFEST_ASSETS: [UpgradeManifestAssetSpec; 8] = [
     },
 ];
 
+/// Artifacts that exist only in the v2 manifest.
+///
+/// The v1 schema is frozen and its parser rejects any value it has never seen,
+/// so a v1 manifest carrying one of these would be rejected in full by every
+/// shipped client. They are therefore appended to the v2 manifest only.
+///
+/// Each of these is the notarized `Scryer.app` bundle, archived with the bundle
+/// directory at its root.
+const UPGRADE_MANIFEST_V2_ONLY_ASSETS: [UpgradeManifestAssetSpec; 2] = [
+    UpgradeManifestAssetSpec {
+        platform: UpgradePlatform::Darwin,
+        arch: UpgradeArchitecture::X86_64,
+        channel: UpgradeChannel::App,
+        archive: UpgradeArchive::TarGz,
+        asset_name: "scryer-darwin-x86_64.app.tar.gz",
+    },
+    UpgradeManifestAssetSpec {
+        platform: UpgradePlatform::Darwin,
+        arch: UpgradeArchitecture::Arm64,
+        channel: UpgradeChannel::App,
+        archive: UpgradeArchive::TarGz,
+        asset_name: "scryer-darwin-arm64.app.tar.gz",
+    },
+];
+
 fn run_ci_upgrade_manifest(ctx: &TaskContext, args: UpgradeManifestArgs) -> Result<()> {
     step("Generating signed upgrade manifest");
     let version = normalize_upgrade_manifest_version(&args.version)?;
@@ -1266,7 +1311,14 @@ fn run_ci_upgrade_manifest(ctx: &TaskContext, args: UpgradeManifestArgs) -> Resu
     let repository = normalize_github_repository(&args.repository)?;
     let artifacts_dir = resolve_ci_path(ctx, args.artifacts_dir);
     let output = resolve_ci_path(ctx, args.output);
-    let raw = generate_upgrade_manifest(&version, tag, &repository, &artifacts_dir)?;
+    let raw = match args.schema {
+        UpgradeManifestGeneration::V1 => {
+            generate_upgrade_manifest(&version, tag, &repository, &artifacts_dir)?
+        }
+        UpgradeManifestGeneration::V2 => {
+            generate_upgrade_manifest_v2(&version, tag, &repository, &artifacts_dir)?
+        }
+    };
 
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
@@ -1313,6 +1365,36 @@ fn generate_upgrade_manifest(
 
     let manifest = UpgradeManifest {
         schema: UPGRADE_MANIFEST_SCHEMA_VERSION.to_string(),
+        tag: tag.to_string(),
+        version: version.to_string(),
+        artifacts,
+    };
+    let mut raw = serde_json::to_vec_pretty(&manifest)?;
+    raw.push(b'\n');
+    Ok(raw)
+}
+
+/// Build the v2 manifest: every v1 artifact, plus the v2-only ones.
+///
+/// Deliberately the same collection, sorting and serialization as v1 — the only
+/// differences are the schema string and the extra artifacts, so the two
+/// manifests describe exactly the same release and cannot drift.
+fn generate_upgrade_manifest_v2(
+    version: &str,
+    tag: &str,
+    repository: &str,
+    artifacts_dir: &Path,
+) -> Result<Vec<u8>> {
+    let mut artifacts = UPGRADE_MANIFEST_ASSETS
+        .iter()
+        .chain(UPGRADE_MANIFEST_V2_ONLY_ASSETS.iter())
+        .copied()
+        .map(|spec| collect_upgrade_manifest_artifact(spec, repository, tag, artifacts_dir))
+        .collect::<Result<Vec<_>>>()?;
+    artifacts.sort_by_key(upgrade_manifest_artifact_sort_key);
+
+    let manifest = UpgradeManifest {
+        schema: UPGRADE_MANIFEST_V2_SCHEMA_VERSION.to_string(),
         tag: tag.to_string(),
         version: version.to_string(),
         artifacts,
@@ -1467,6 +1549,7 @@ fn upgrade_architecture_name(architecture: UpgradeArchitecture) -> &'static str 
 
 fn upgrade_channel_name(channel: UpgradeChannel) -> &'static str {
     match channel {
+        UpgradeChannel::App => "app",
         UpgradeChannel::Msi => "msi",
         UpgradeChannel::Portable => "portable",
     }
@@ -4307,13 +4390,29 @@ mod tests {
     use super::*;
 
     fn write_upgrade_manifest_fixture(artifacts_dir: &Path) {
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_ASSETS);
+    }
+
+    /// Both generations' assets, for the v2 fixture.
+    fn write_upgrade_manifest_v2_fixture(artifacts_dir: &Path) {
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_ASSETS);
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_V2_ONLY_ASSETS);
+    }
+
+    fn write_upgrade_manifest_fixture_for(
+        artifacts_dir: &Path,
+        specs: &[UpgradeManifestAssetSpec],
+    ) {
         fs::create_dir_all(artifacts_dir).expect("create fixture artifact directory");
-        for spec in UPGRADE_MANIFEST_ASSETS {
+        for spec in specs {
             let path = artifacts_dir.join(spec.asset_name);
             match spec.archive {
-                UpgradeArchive::TarGz => {
-                    write_fixture_tar_gz(&path, spec.asset_name, fixture_members(spec.platform))
-                }
+                UpgradeArchive::TarGz => write_fixture_tar_gz(
+                    &path,
+                    spec.asset_name,
+                    fixture_members(spec.platform, spec.channel),
+                    fixture_directories(spec.channel),
+                ),
                 UpgradeArchive::Msi => {
                     fs::write(&path, format!("fixture MSI {}\n", spec.asset_name))
                         .expect("write fixture MSI");
@@ -4322,8 +4421,22 @@ mod tests {
         }
     }
 
-    /// The member layout each platform's portable tarball actually ships.
-    fn fixture_members(platform: UpgradePlatform) -> &'static [(&'static str, u32)] {
+    /// The member layout each artifact actually ships.
+    fn fixture_members(
+        platform: UpgradePlatform,
+        channel: UpgradeChannel,
+    ) -> &'static [(&'static str, u32)] {
+        // A bundle archive is rooted at `Scryer.app/`, and its executables and
+        // code signature are listed the same way a portable archive's are.
+        if channel == UpgradeChannel::App {
+            return &[
+                ("Scryer.app/Contents/Info.plist", 0o644),
+                ("Scryer.app/Contents/MacOS/scryer", 0o755),
+                ("Scryer.app/Contents/MacOS/scryer-tray", 0o755),
+                ("Scryer.app/Contents/Resources/scryer.icns", 0o644),
+                ("Scryer.app/Contents/_CodeSignature/CodeResources", 0o644),
+            ];
+        }
         match platform {
             UpgradePlatform::Windows => &[
                 ("scryer.exe", 0o755),
@@ -4335,10 +4448,44 @@ mod tests {
         }
     }
 
-    fn write_fixture_tar_gz(path: &Path, asset_name: &str, members: &[(&str, u32)]) {
+    /// `tar` records a directory entry for every directory in a bundle tree,
+    /// and the generator has to skip them rather than list them as members.
+    fn fixture_directories(channel: UpgradeChannel) -> &'static [&'static str] {
+        if channel == UpgradeChannel::App {
+            &[
+                "Scryer.app/",
+                "Scryer.app/Contents/",
+                "Scryer.app/Contents/MacOS/",
+                "Scryer.app/Contents/Resources/",
+                "Scryer.app/Contents/_CodeSignature/",
+            ]
+        } else {
+            &[]
+        }
+    }
+
+    fn write_fixture_tar_gz(
+        path: &Path,
+        asset_name: &str,
+        members: &[(&str, u32)],
+        directories: &[&str],
+    ) {
         let file = fs::File::create(path).expect("create fixture tarball");
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
+        for directory in directories {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, directory, std::io::empty())
+                .expect("append fixture tar directory");
+        }
         for (member, mode) in members {
             let content = format!("fixture tar member {member} for {asset_name}\n");
             let mut header = tar::Header::new_gnu();
@@ -4385,6 +4532,83 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../api/upgrade/manifest.v1.example.json"
             ))
+        );
+    }
+
+    #[test]
+    fn upgrade_manifest_v2_generation_is_deterministic_and_matches_the_golden_fixture() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let artifacts_dir = tempdir.path().join("artifacts");
+        write_upgrade_manifest_v2_fixture(&artifacts_dir);
+
+        let first = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate first v2 upgrade manifest");
+        let second = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate second v2 upgrade manifest");
+
+        assert_eq!(first, second);
+        parse_and_validate_upgrade_manifest_v2(&first).expect("generated v2 manifest is valid");
+        assert_eq!(
+            String::from_utf8(first).expect("manifest is UTF-8"),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../api/upgrade/manifest.v2.example.json"
+            ))
+        );
+    }
+
+    /// v1 is frozen. Its parser rejects any value it has never seen, so a v1
+    /// manifest that carried a v2-only artifact would be rejected in full by
+    /// every shipped client — the exact failure v2 exists to prevent.
+    #[test]
+    fn the_v1_manifest_never_carries_v2_only_artifacts() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let artifacts_dir = tempdir.path().join("artifacts");
+        write_upgrade_manifest_v2_fixture(&artifacts_dir);
+
+        let v1 = generate_upgrade_manifest(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate v1 upgrade manifest");
+        let parsed = parse_and_validate_upgrade_manifest(&v1).expect("v1 manifest is valid");
+        assert!(
+            parsed
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.channel != UpgradeChannel::App),
+            "the v1 manifest must never list an app-bundle artifact"
+        );
+        assert_eq!(parsed.schema, UPGRADE_MANIFEST_SCHEMA_VERSION);
+
+        let v2 = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate v2 upgrade manifest");
+        let parsed_v2 = parse_and_validate_upgrade_manifest_v2(&v2).expect("v2 manifest is valid");
+        assert_eq!(
+            parsed_v2.understood.schema,
+            UPGRADE_MANIFEST_V2_SCHEMA_VERSION
+        );
+        // Every v1 artifact, plus one app-bundle artifact per macOS arch.
+        assert_eq!(
+            parsed_v2.understood.artifacts.len(),
+            parsed.artifacts.len() + UPGRADE_MANIFEST_V2_ONLY_ASSETS.len()
         );
     }
 

@@ -5,6 +5,10 @@ mod application_upgrade_evidence;
 mod application_upgrade_helper;
 mod backup_routes;
 mod base_path;
+/// The exit status this binary uses to ask `scryer-tray` to relaunch the
+/// replaced application bundle. Both binaries compile this file so they cannot
+/// drift apart.
+mod bundle_relaunch;
 #[cfg(any(debug_assertions, test, feature = "e2e-harness"))]
 mod dev_api_keys;
 mod http_error;
@@ -439,10 +443,15 @@ impl SelfRestartController {
     ) -> scryer_application::application_upgrade::ApplicationUpgradeRestartHandle {
         let restart_controller = self.clone();
         let exit_controller = self.clone();
+        let relaunch_controller = self.clone();
         scryer_application::application_upgrade::ApplicationUpgradeRestartHandle::new_with_exit(
             move || restart_controller.schedule_restart(),
             move || exit_controller.schedule_exit_only(),
         )
+        .with_bundle_relaunch(move || {
+            relaunch_controller
+                .schedule_exit_with_code(crate::bundle_relaunch::BUNDLE_RELAUNCH_EXIT_CODE);
+        })
     }
 
     fn schedule_restart(&self) {
@@ -462,6 +471,15 @@ impl SelfRestartController {
     }
 
     fn schedule_exit_only(&self) {
+        self.schedule_exit_with_code(0);
+    }
+
+    /// Exit with a specific status after the usual delay.
+    ///
+    /// The delay is what lets the in-flight GraphQL response reach the client
+    /// before the process goes away; the code is what the supervising wrapper
+    /// reads, so it must survive that path unchanged.
+    fn schedule_exit_with_code(&self, code: i32) {
         if self.inner.scheduled.swap(true, Ordering::SeqCst) {
             tracing::info!("restart or exit already scheduled");
             return;
@@ -469,7 +487,7 @@ impl SelfRestartController {
         let delay = self.inner.delay;
         std::thread::spawn(move || {
             std::thread::sleep(delay);
-            std::process::exit(0);
+            std::process::exit(code);
         });
     }
 }

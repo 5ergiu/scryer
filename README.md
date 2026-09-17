@@ -132,9 +132,16 @@ from a terminal:
 xattr -dr com.apple.quarantine /Applications/Scryer.app
 ```
 
-Scryer does not upgrade an `.app` install in place — replacing files inside a
-signed bundle would break it. Scryer detects the bundle and tells you to
-download the new disk image instead.
+Scryer updates an `.app` install in place. It downloads the signed replacement
+bundle, checks its signature before anything moves, and swaps it for the
+installed one — then the app restarts itself on the new version. The previous
+bundle is kept beside it until the new one has started successfully.
+
+For that to work, Scryer has to be able to replace the bundle where it lives:
+drag it into your **Applications** folder (or any folder you can write to) and
+open it from there. Scryer will tell you to do that, rather than updating, if
+you are running it straight from the disk image or from the temporary copy macOS
+makes when an app is opened from your Downloads folder.
 
 The `scryer-darwin-*-portable.tar.gz` archives still ship the plain `scryer`
 server binary for anyone running it headless.

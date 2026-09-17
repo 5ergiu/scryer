@@ -14,6 +14,11 @@
 #[path = "tray_ipc.rs"]
 mod tray_ipc;
 
+/// The exit status `scryer` uses to ask this binary to relaunch the replaced
+/// application bundle. Both binaries compile this file so they cannot drift
+/// apart.
+mod bundle_relaunch;
+
 /// The per-user "start Scryer when I sign in" registration, shared verbatim
 /// with `scryer.exe` and its MSI upgrade helper.
 #[cfg(windows)]

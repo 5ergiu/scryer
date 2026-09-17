@@ -123,6 +123,8 @@ pub enum ApplicationInstallationKindValue {
     Portable,
     /// A directly installed Windows MSI package.
     DirectMsi,
+    /// A macOS application bundle, upgraded by replacing the bundle in place.
+    MacosAppBundle,
     /// A container-managed installation.
     Docker,
     /// A Homebrew-managed installation.

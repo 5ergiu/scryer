@@ -10,14 +10,29 @@ use crate::{AppResult, plugins::catalog::RequiredSigner};
 
 pub use application_updater::manifest::{
     UPGRADE_MANIFEST_MAX_BYTES, UpgradeArchitecture, UpgradeArchive, UpgradeArtifact,
-    UpgradeArtifactMember, UpgradeChannel, UpgradeManifest, UpgradePlatform,
+    UpgradeArtifactMember, UpgradeChannel, UpgradeManifest, UpgradeManifestV2, UpgradePlatform,
+    ValidatedUpgradeManifestV2,
 };
 
-pub use crate::application_upgrade::product::UPGRADE_MANIFEST_SCHEMA_VERSION;
+pub use crate::application_upgrade::product::{
+    UPGRADE_MANIFEST_SCHEMA_VERSION, UPGRADE_MANIFEST_V2_SCHEMA_VERSION,
+};
 
 /// Parses and validates a signed upgrade manifest payload.
 pub fn parse_and_validate_upgrade_manifest(raw: &[u8]) -> AppResult<UpgradeManifest> {
     application_updater::manifest::parse_and_validate_upgrade_manifest(&SCRYER_PRODUCT, raw)
+        .map_err(map_updater_error)
+}
+
+/// Parses and validates a signed v2 upgrade manifest payload.
+///
+/// v2 is forward-tolerant: artifacts naming a platform, architecture, channel
+/// or archive this build has never heard of are retained but never selected,
+/// and unknown JSON fields are ignored. Everything this build *does* understand
+/// is validated exactly as strictly as v1. See the shared crate's `manifest`
+/// module documentation for the full compatibility contract.
+pub fn parse_and_validate_upgrade_manifest_v2(raw: &[u8]) -> AppResult<ValidatedUpgradeManifestV2> {
+    application_updater::manifest::parse_and_validate_upgrade_manifest_v2(&SCRYER_PRODUCT, raw)
         .map_err(map_updater_error)
 }
 

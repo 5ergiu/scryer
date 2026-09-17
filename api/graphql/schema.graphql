@@ -699,6 +699,10 @@ enum ApplicationInstallationKindValue {
 	"""
 	DIRECT_MSI
 	"""
+	A macOS application bundle, upgraded by replacing the bundle in place.
+	"""
+	MACOS_APP_BUNDLE
+	"""
 	A container-managed installation.
 	"""
 	DOCKER

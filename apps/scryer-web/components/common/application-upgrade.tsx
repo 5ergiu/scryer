@@ -24,6 +24,7 @@ import { normalizeJobRun } from "@/lib/utils/job-runs";
 const INSTALLATION_KIND_KEYS: Record<ApplicationInstallationKind, string> = {
   PORTABLE: "appUpgrade.installationKind.portable",
   DIRECT_MSI: "appUpgrade.installationKind.directMsi",
+  MACOS_APP_BUNDLE: "appUpgrade.installationKind.macosAppBundle",
   DOCKER: "appUpgrade.installationKind.docker",
   HOMEBREW: "appUpgrade.installationKind.homebrew",
   WINGET: "appUpgrade.installationKind.winget",

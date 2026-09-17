@@ -100,4 +100,15 @@ plutil -lint "$bundle/Contents/Info.plist"
 codesign --sign - --force --deep --timestamp=none "$bundle"
 codesign --verify --deep --strict "$bundle"
 
+# The bundle is also shipped as an upgrade artifact, and the upgrade extractor
+# accepts regular files and directories only — a rule that exists so an archive
+# can never write outside the directory it is extracted into. Nothing above
+# creates a link, and codesign does not either, so this asserts that rather than
+# the extractor relaxing its rule.
+if find "$bundle" \( -type l -o -type p -o -type s \) -print -quit | grep -q .; then
+  echo "Scryer.app contains a link or special file; the upgrade archive accepts regular files and directories only" >&2
+  find "$bundle" \( -type l -o -type p -o -type s \) -print >&2
+  exit 1
+fi
+
 echo "built $bundle"

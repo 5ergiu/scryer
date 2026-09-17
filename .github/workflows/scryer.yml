@@ -1758,6 +1758,41 @@ jobs:
           xcrun stapler staple scryer-darwin-${{ matrix.arch }}.dmg
           xcrun stapler validate scryer-darwin-${{ matrix.arch }}.dmg
 
+      # The upgrade artifact for an `.app` install. Archived after every step
+      # that touches the bundle, so what ships carries the bundle's final
+      # signature and extracts back to a bundle `codesign --verify --deep
+      # --strict` still accepts. The archive is rooted at `Scryer.app/`, which
+      # is what the signed manifest lists and what the client extracts beside
+      # the installed bundle.
+      #
+      # `COPYFILE_DISABLE` keeps bsdtar from emitting AppleDouble `._` members
+      # for extended attributes: those are not part of the sealed bundle, and
+      # the upgrade extractor would have to write files the manifest does not
+      # list.
+      - name: Package app bundle archive
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          COPYFILE_DISABLE=1 tar -czf scryer-darwin-${{ matrix.arch }}.app.tar.gz \
+            -C dist/app Scryer.app
+
+      # Proves the round trip the upgrade actually performs: extract the archive
+      # somewhere else and check the bundle still verifies. A lost executable
+      # bit or a mangled `_CodeSignature` fails here rather than on a user's
+      # machine after their application has already been replaced.
+      - name: Validate app bundle archive
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          tar -xzf scryer-darwin-${{ matrix.arch }}.app.tar.gz -C "$extracted"
+          test -x "$extracted/Scryer.app/Contents/MacOS/scryer"
+          test -x "$extracted/Scryer.app/Contents/MacOS/scryer-tray"
+          codesign --verify --deep --strict "$extracted/Scryer.app"
+
       - name: Remove signing keychain
         if: ${{ steps.scope.outputs.run == 'true' && (always() && steps.signing.outputs.signed == 'true') }}
         run: security delete-keychain build.keychain-db || true
@@ -1809,6 +1844,7 @@ jobs:
           path: |
             ${{ matrix.artifact_name }}.tar.gz
             scryer-darwin-${{ matrix.arch }}.dmg
+            scryer-darwin-${{ matrix.arch }}.app.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -2895,6 +2931,8 @@ jobs:
             --source-tag "${{ github.ref_name }}" \
             scryer-darwin-arm64-portable.tar.gz \
             scryer-darwin-x86_64-portable.tar.gz \
+            scryer-darwin-arm64.app.tar.gz \
+            scryer-darwin-x86_64.app.tar.gz \
             scryer-darwin-arm64.dmg \
             scryer-darwin-x86_64.dmg \
             scryer-linux-arm64-portable.tar.gz \
@@ -2917,6 +2955,8 @@ jobs:
           sha256sum \
             scryer-darwin-arm64-portable.tar.gz \
             scryer-darwin-x86_64-portable.tar.gz \
+            scryer-darwin-arm64.app.tar.gz \
+            scryer-darwin-x86_64.app.tar.gz \
             scryer-darwin-arm64.dmg \
             scryer-darwin-x86_64.dmg \
             scryer-linux-arm64-portable.tar.gz \
@@ -3009,8 +3049,22 @@ jobs:
             --tag "${{ github.ref_name }}" \
             --repository "${{ github.repository }}" \
             --artifacts-dir release-artifacts \
+            --schema v1 \
             --output release-artifacts/scryer-upgrade-manifest.json
           "$RUNNER_TEMP/cosign-dual-sign.sh" release-artifacts/scryer-upgrade-manifest.json \
+            "https://github.com/${{ github.repository }}/.github/workflows/scryer.yml@refs/tags/${{ github.ref_name }}"
+          # v2 is published beside v1 for the whole transition. v1 is frozen and
+          # can never carry anything new, so every client that understands v2
+          # reads v2; clients older than v2 keep reading v1 untouched. Both are
+          # signed by the same workflow identity for the same tag.
+          ./winget-tools/xtask-release ci upgrade-manifest \
+            --version "$VERSION" \
+            --tag "${{ github.ref_name }}" \
+            --repository "${{ github.repository }}" \
+            --artifacts-dir release-artifacts \
+            --schema v2 \
+            --output release-artifacts/scryer-upgrade-manifest.v2.json
+          "$RUNNER_TEMP/cosign-dual-sign.sh" release-artifacts/scryer-upgrade-manifest.v2.json \
             "https://github.com/${{ github.repository }}/.github/workflows/scryer.yml@refs/tags/${{ github.ref_name }}"
 
       - name: Verify release notes
@@ -3037,6 +3091,9 @@ jobs:
             release-artifacts/scryer-upgrade-manifest.json
             release-artifacts/scryer-upgrade-manifest.json.sigstore.json
             release-artifacts/scryer-upgrade-manifest.json.cosign-v3.sigstore.json
+            release-artifacts/scryer-upgrade-manifest.v2.json
+            release-artifacts/scryer-upgrade-manifest.v2.json.sigstore.json
+            release-artifacts/scryer-upgrade-manifest.v2.json.cosign-v3.sigstore.json
             release-artifacts/scryer-provenance.intoto.jsonl
           fail_on_unmatched_files: true
 
@@ -3281,6 +3338,8 @@ jobs:
           sha256sum \
             scryer-darwin-arm64-portable.tar.gz \
             scryer-darwin-x86_64-portable.tar.gz \
+            scryer-darwin-arm64.app.tar.gz \
+            scryer-darwin-x86_64.app.tar.gz \
             scryer-darwin-arm64.dmg \
             scryer-darwin-x86_64.dmg \
             scryer-linux-arm64-portable.tar.gz \

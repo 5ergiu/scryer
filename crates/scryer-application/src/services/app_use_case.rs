@@ -24,6 +24,25 @@ impl AppUseCase {
         }
     }
 
+    /// Replace the staged-bundle signature check used by application upgrades.
+    ///
+    /// Test-only: the shipped build always runs the real `codesign`, and the
+    /// promotion tests have no signing identity to satisfy it with.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_application_upgrade_bundle_signature_check(
+        &self,
+        check: application_updater::macos_bundle::BundleSignatureCheck,
+    ) {
+        if let Ok(mut current) = self
+            .runtime
+            .jobs
+            .application_upgrade_bundle_signature_check
+            .write()
+        {
+            *current = Some(check);
+        }
+    }
+
     /// Acquire the process-local coordinator for a destructive system-wide
     /// maintenance operation without waiting behind an existing operation.
     pub fn try_acquire_system_maintenance(&self) -> AppResult<tokio::sync::OwnedMutexGuard<()>> {

@@ -17,17 +17,14 @@ use serde::{Deserialize, Serialize};
 use application_updater::helper_plan::ApplicationUpgradeHelperPlan;
 use application_updater::helper_plan::reboot_required_completion_allowed;
 use application_updater::pipeline::{
-    DownloadProgress, PortablePromotionFailure, PortableUpgradePaths, ProgressFuture,
-    UPGRADE_BUNDLE_MAX_BYTES, rename_path,
+    DownloadProgress, FetchedUpgradeManifest, PortablePromotionFailure, PortableUpgradePaths,
+    ProgressFuture, rename_path,
 };
 #[cfg(windows)]
 use application_updater::windows_handoff::{WindowsUpgradeHandoff, WindowsUpgradeHandoffInput};
 
 use crate::application_upgrade::InstallationKind;
-use crate::application_upgrade::manifest::{
-    UPGRADE_MANIFEST_MAX_BYTES, UpgradeArtifact, UpgradeManifest,
-    parse_and_validate_upgrade_manifest,
-};
+use crate::application_upgrade::manifest::{UpgradeArtifact, UpgradeManifest};
 use crate::application_upgrade::product::{JOURNAL_SCHEMA, SCRYER_PRODUCT};
 use crate::application_upgrade::shared::{map_updater_error, to_updater_error};
 use crate::domain_events::DomainEventActor;
@@ -157,7 +154,9 @@ impl AppUseCase {
 
         if !matches!(
             request.installation_kind,
-            InstallationKind::Portable | InstallationKind::DirectMsi
+            InstallationKind::Portable
+                | InstallationKind::DirectMsi
+                | InstallationKind::MacosAppBundle
         ) {
             return Err(AppError::Validation(
                 "application upgrade installation is not eligible".to_string(),
@@ -281,30 +280,16 @@ impl AppUseCase {
         )
         .await?;
         let client = application_upgrade_http_client()?;
-        let manifest_url =
-            release_asset_url(&request.expected_tag, "scryer-upgrade-manifest.json")?;
-        let bundle_url = release_asset_url(
-            &request.expected_tag,
-            "scryer-upgrade-manifest.json.sigstore.json",
-        )?;
-        let manifest_raw = fetch_capped_bytes(
-            &client,
-            manifest_url.as_str(),
-            UPGRADE_MANIFEST_MAX_BYTES,
-            "upgrade manifest",
-        )
-        .await?;
-        let bundle_raw = fetch_capped_bytes(
-            &client,
-            bundle_url.as_str(),
-            UPGRADE_BUNDLE_MAX_BYTES,
-            "upgrade manifest signature bundle",
-        )
-        .await?;
-        verify_upgrade_manifest_signature(manifest_raw.clone(), bundle_raw, &request.expected_tag)
-            .await?;
-        let manifest = parse_and_validate_upgrade_manifest(&manifest_raw)?;
-        self.run_upgrade_pipeline(run, request, &manifest, &client, None)
+        // v2 first, v1 only when the v2 asset is absent for this tag. Any other
+        // v2 failure is fatal — see `fetch_upgrade_manifest`.
+        let fetched = fetch_upgrade_manifest(&client, &request.expected_tag).await?;
+        tracing::debug!(
+            run_id = %run.id,
+            tag = %request.expected_tag,
+            generation = ?fetched.generation,
+            "resolved upgrade manifest generation"
+        );
+        self.run_upgrade_pipeline(run, request, &fetched.manifest, &client, None)
             .await
     }
 
@@ -358,7 +343,26 @@ impl AppUseCase {
             },
         )
         .await?;
-        let staging_dir = self.application_upgrade_staging_dir();
+        // A bundle is promoted by renaming it inside its own parent directory,
+        // so its replacement has to be staged on the same filesystem. Every
+        // other installation kind stages under the config directory as before.
+        let bundle_paths = if request.installation_kind == InstallationKind::MacosAppBundle {
+            Some(macos_bundle_upgrade_paths(
+                request.installation_kind,
+                // The request carries the running server's own path, which is
+                // the binary inside the bundle; falling back to `current_exe`
+                // resolves the same thing.
+                request.executable_path.as_deref(),
+                SCRYER_VERSION,
+                &request.expected_version,
+            )?)
+        } else {
+            None
+        };
+        let staging_dir = bundle_paths.as_ref().map_or_else(
+            || self.application_upgrade_staging_dir(),
+            |paths| paths.staging_dir.clone(),
+        );
         recreate_staging_dir(&staging_dir)?;
         (dependencies.ensure_available_space)(&staging_dir, staging_space_requirement(&artifact))?;
         let download_path = staging_dir.join("artifact");
@@ -417,6 +421,13 @@ impl AppUseCase {
         }
 
         #[cfg(not(windows))]
+        if let Some(bundle_paths) = bundle_paths {
+            return self
+                .promote_macos_bundle_upgrade(run, request, &artifact, &bundle_paths, &dependencies)
+                .await;
+        }
+
+        #[cfg(not(windows))]
         {
             let paths = portable_upgrade_paths(request, SCRYER_VERSION)?;
             let journal_path = self.application_upgrade_journal_path();
@@ -431,6 +442,8 @@ impl AppUseCase {
                 phase: phases::RESTARTING.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             };
             // The journal has to be durable before the binary moves: a crash in
             // between must never leave a promoted executable that the next boot
@@ -496,6 +509,121 @@ impl AppUseCase {
             restart.schedule_restart();
             Ok(())
         }
+    }
+
+    /// Swap a freshly extracted `Scryer.app` over the installed one.
+    ///
+    /// The staged bundle is already downloaded, hash-verified and extracted
+    /// beside the installed bundle by the time this runs. What is left is the
+    /// part that must not be got wrong: prove the staged bundle would actually
+    /// launch, write the durable journal before anything moves, promote by two
+    /// renames inside one directory, and put the previous bundle back on any
+    /// failure.
+    ///
+    /// The relaunch is the wrapper's, not this process's: the executable this
+    /// server is running from has just been replaced, so re-executing it is not
+    /// an option.
+    #[cfg(not(windows))]
+    async fn promote_macos_bundle_upgrade(
+        &self,
+        run: &mut JobRunRecord,
+        request: &ApplicationUpgradeJobRequest,
+        artifact: &UpgradeArtifact,
+        paths: &application_updater::macos_bundle::MacosBundleUpgradePaths,
+        dependencies: &UpgradePipelineDependencies<'_>,
+    ) -> AppResult<()> {
+        let journal_path = self.application_upgrade_journal_path();
+        let journal = ApplicationUpgradeJournal {
+            schema: JOURNAL_SCHEMA.to_string(),
+            run_id: run.id.clone(),
+            expected_version: request.expected_version.clone(),
+            expected_tag: request.expected_tag.clone(),
+            executable_path: paths.bundle_path.clone(),
+            backup_path: paths.backup_path.clone(),
+            backup_paths: vec![paths.backup_path.clone()],
+            phase: phases::RESTARTING.to_string(),
+            helper_error: None,
+            written_at: Some(Utc::now()),
+            macos_bundle_upgrade: true,
+            staging_dir: Some(paths.staging_dir.clone()),
+        };
+        // Durable before anything moves: a crash between the renames must leave
+        // the next boot a record of both the bundle and its backup.
+        write_journal(&journal_path, &journal)?;
+
+        if let Err(failure) = apply_macos_bundle_upgrade(
+            paths,
+            self.macos_bundle_signature_check(),
+            dependencies.rename,
+        ) {
+            let (error, restored) = failure.into_parts();
+            let error = map_updater_error(error);
+            if restored {
+                if let Err(cleanup_error) = remove_file_if_exists(&journal_path) {
+                    tracing::warn!(
+                        error = %cleanup_error,
+                        "failed to remove the application upgrade journal after a restored bundle promotion failure"
+                    );
+                }
+            } else {
+                tracing::error!(
+                    journal_path = %journal_path.display(),
+                    backup_path = %paths.backup_path.display(),
+                    "application bundle upgrade could not restore the previous bundle; preserving recovery journal"
+                );
+            }
+            return Err(error);
+        }
+
+        if let Err(error) = self
+            .update_application_upgrade_progress(
+                run,
+                ApplicationUpgradeProgress {
+                    phase: phases::RESTARTING.to_string(),
+                    downloaded_bytes: artifact.size,
+                    total_bytes: artifact.size,
+                    ..ApplicationUpgradeProgress::checking(request)
+                },
+            )
+            .await
+        {
+            return Err(roll_back_macos_bundle_promotion(
+                paths,
+                &journal_path,
+                dependencies.rename,
+                error,
+            ));
+        }
+        let restart = match self.application_upgrade_restart_handle() {
+            Ok(restart) => restart,
+            Err(error) => {
+                return Err(roll_back_macos_bundle_promotion(
+                    paths,
+                    &journal_path,
+                    dependencies.rename,
+                    error,
+                ));
+            }
+        };
+        restart.schedule_bundle_relaunch();
+        Ok(())
+    }
+
+    /// The staged-bundle signature check this run uses.
+    ///
+    /// A seam rather than a direct call so the promotion tests never need a
+    /// signing identity; the shipped build always runs the real `codesign`.
+    #[cfg(not(windows))]
+    fn macos_bundle_signature_check(
+        &self,
+    ) -> application_updater::macos_bundle::BundleSignatureCheck {
+        self.runtime
+            .jobs
+            .application_upgrade_bundle_signature_check
+            .read()
+            .ok()
+            .and_then(|check| *check)
+            .unwrap_or(application_updater::macos_bundle::verify_bundle_signature)
     }
 
     fn application_upgrade_restart_handle(
@@ -683,8 +811,19 @@ impl AppUseCase {
         // Startup evidence records the canonical executable path, so the journal
         // comparison has to canonicalize too; otherwise a Homebrew or symlinked
         // layout looks like a boot of the wrong binary.
+        // A replaced application bundle journals the bundle itself, because the
+        // bundle is what was renamed; the process that boots afterwards runs the
+        // binary inside it, so the comparison is against the running binary's
+        // own bundle.
+        let booted_path = if journal.macos_bundle_upgrade {
+            application_updater::installation::macos_app_bundle_path(&current_executable)
+                .map(Path::to_path_buf)
+                .unwrap_or(current_executable)
+        } else {
+            current_executable
+        };
         let expected_executable_booted =
-            canonical_path(&current_executable) == canonical_path(&journal.executable_path);
+            canonical_path(&booted_path) == canonical_path(&journal.executable_path);
         if journal.phase == phases::REBOOT_REQUIRED {
             if reboot_required_completion_allowed(
                 journal.written_at,
@@ -797,9 +936,23 @@ impl AppUseCase {
             None,
         )
         .await?;
-        remove_file_if_exists(&journal.backup_path)?;
-        for backup_path in &journal.backup_paths {
-            remove_file_if_exists(backup_path)?;
+        // A replaced application bundle's backup is a directory, and it lives
+        // beside the installed bundle rather than under the config directory,
+        // so it is removed through the guarded helper that refuses any name the
+        // upgrade does not own.
+        if journal.macos_bundle_upgrade {
+            remove_upgrade_owned_directory(&journal.backup_path)?;
+            for backup_path in &journal.backup_paths {
+                remove_upgrade_owned_directory(backup_path)?;
+            }
+            if let Some(staging_dir) = journal.staging_dir.as_deref() {
+                remove_upgrade_owned_directory(staging_dir)?;
+            }
+        } else {
+            remove_file_if_exists(&journal.backup_path)?;
+            for backup_path in &journal.backup_paths {
+                remove_file_if_exists(backup_path)?;
+            }
         }
         remove_file_if_exists(journal_path)?;
         remove_dir_if_exists(&self.application_upgrade_staging_dir())?;
@@ -927,6 +1080,7 @@ fn application_upgrade_http_client() -> AppResult<reqwest::Client> {
         .map_err(map_updater_error)
 }
 
+#[cfg(test)]
 async fn verify_upgrade_manifest_signature(
     manifest_raw: Vec<u8>,
     bundle_raw: Vec<u8>,
@@ -942,20 +1096,37 @@ async fn verify_upgrade_manifest_signature(
     .map_err(map_updater_error)
 }
 
-fn release_asset_url(tag: &str, filename: &str) -> AppResult<url::Url> {
-    application_updater::pipeline::release_asset_url(&SCRYER_PRODUCT, tag, filename)
+/// Fetch, verify and validate this release's manifest, preferring v2.
+///
+/// The generation choice, the 404-only fallback and the refusal to downgrade on
+/// any other v2 failure all live in the shared core, because none of it is
+/// Scryer-specific.
+async fn fetch_upgrade_manifest(
+    client: &reqwest::Client,
+    release_tag: &str,
+) -> AppResult<FetchedUpgradeManifest> {
+    application_updater::pipeline::fetch_upgrade_manifest(&SCRYER_PRODUCT, client, release_tag)
+        .await
         .map_err(map_updater_error)
 }
 
-async fn fetch_capped_bytes(
+/// [`fetch_upgrade_manifest`] against a local server with signature
+/// verification stubbed, so the fetch order can be tested without a genuine
+/// signed release for every case.
+#[cfg(all(test, unix))]
+async fn fetch_upgrade_manifest_with_overrides(
     client: &reqwest::Client,
-    url: &str,
-    cap: u64,
-    label: &str,
-) -> AppResult<Vec<u8>> {
-    application_updater::pipeline::fetch_capped_bytes(client, url, cap, label)
-        .await
-        .map_err(map_updater_error)
+    release_tag: &str,
+    overrides: application_updater::pipeline::UpgradeManifestFetchOverrides<'_>,
+) -> AppResult<FetchedUpgradeManifest> {
+    application_updater::pipeline::fetch_upgrade_manifest_with_overrides(
+        &SCRYER_PRODUCT,
+        client,
+        release_tag,
+        overrides,
+    )
+    .await
+    .map_err(map_updater_error)
 }
 
 fn select_artifact(
@@ -1075,6 +1246,55 @@ fn roll_back_portable_promotion(
         rename,
         to_updater_error(error),
     ))
+}
+
+/// Remove a directory this upgrade owns, by the shared crate's name guard.
+fn remove_upgrade_owned_directory(path: &Path) -> AppResult<()> {
+    application_updater::macos_bundle::remove_upgrade_owned_directory(&SCRYER_PRODUCT, path)
+        .map_err(map_updater_error)
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn macos_bundle_upgrade_paths(
+    installation_kind: InstallationKind,
+    executable_path: Option<&Path>,
+    current_version: &str,
+    expected_version: &str,
+) -> AppResult<application_updater::macos_bundle::MacosBundleUpgradePaths> {
+    application_updater::macos_bundle::macos_bundle_upgrade_paths(
+        &SCRYER_PRODUCT,
+        installation_kind,
+        executable_path,
+        current_version,
+        expected_version,
+    )
+    .map_err(map_updater_error)
+}
+
+#[cfg(not(windows))]
+fn apply_macos_bundle_upgrade(
+    paths: &application_updater::macos_bundle::MacosBundleUpgradePaths,
+    verify_signature: application_updater::macos_bundle::BundleSignatureCheck,
+    rename: UpgradeRename,
+) -> Result<(), application_updater::macos_bundle::BundlePromotionFailure> {
+    application_updater::macos_bundle::apply_macos_bundle_upgrade(paths, verify_signature, rename)
+}
+
+#[cfg(not(windows))]
+fn roll_back_macos_bundle_promotion(
+    paths: &application_updater::macos_bundle::MacosBundleUpgradePaths,
+    journal_path: &Path,
+    rename: UpgradeRename,
+    error: AppError,
+) -> AppError {
+    map_updater_error(
+        application_updater::macos_bundle::roll_back_macos_bundle_promotion(
+            paths,
+            journal_path,
+            rename,
+            to_updater_error(error),
+        ),
+    )
 }
 
 #[cfg(windows)]
@@ -1870,6 +2090,501 @@ mod tests {
         assert!(error.to_string().contains("workflow identity mismatch"));
     }
 
+    // -----------------------------------------------------------------------
+    // macOS application-bundle promotion.
+    //
+    // Everything here runs inside a tempdir: the "installed" bundle, its
+    // replacement and the staging directory are all created by the test, and
+    // `codesign` is replaced through the runtime seam.
+    // -----------------------------------------------------------------------
+
+    #[cfg(target_os = "macos")]
+    const BUNDLE_NAME: &str = "Scryer.app";
+
+    #[cfg(target_os = "macos")]
+    fn install_fake_bundle(parent: &Path, marker: &[u8]) -> PathBuf {
+        let bundle = parent.join(BUNDLE_NAME);
+        fs::create_dir_all(bundle.join("Contents/MacOS")).expect("create bundle");
+        fs::create_dir_all(bundle.join("Contents/_CodeSignature")).expect("create signature dir");
+        fs::write(bundle.join("Contents/MacOS/scryer"), marker).expect("write server binary");
+        fs::write(bundle.join("Contents/Info.plist"), b"<plist/>").expect("write Info.plist");
+        bundle
+    }
+
+    #[cfg(target_os = "macos")]
+    fn bundle_archive(marker: &[u8]) -> (Vec<u8>, Vec<UpgradeArtifactMember>) {
+        let members: Vec<(&str, &[u8], u32)> = vec![
+            ("Scryer.app/Contents/Info.plist", b"<plist/>", 0o644),
+            ("Scryer.app/Contents/MacOS/scryer", marker, 0o755),
+            (
+                "Scryer.app/Contents/_CodeSignature/CodeResources",
+                b"<resources/>",
+                0o644,
+            ),
+        ];
+        let archive = tar_gz(&members);
+        let listed = members
+            .iter()
+            .map(|(path, bytes, mode)| UpgradeArtifactMember {
+                path: (*path).to_string(),
+                size: bytes.len() as u64,
+                executable: mode & 0o111 != 0,
+            })
+            .collect();
+        (archive, listed)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn bundle_manifest(bytes: &[u8], members: Vec<UpgradeArtifactMember>) -> UpgradeManifest {
+        UpgradeManifest {
+            schema: UPGRADE_MANIFEST_SCHEMA_VERSION.to_string(),
+            tag: "v99.0.0".to_string(),
+            version: "99.0.0".to_string(),
+            artifacts: vec![UpgradeArtifact {
+                platform: UpgradePlatform::Darwin,
+                arch: runtime_architecture(),
+                channel: UpgradeChannel::App,
+                asset_name: "scryer-darwin.app.tar.gz".to_string(),
+                url: "https://github.com/scryer-media/scryer/releases/download/v99.0.0/scryer-darwin.app.tar.gz"
+                    .to_string(),
+                size: bytes.len() as u64,
+                blake3: blake3::hash(bytes).to_hex().to_string(),
+                archive: UpgradeArchive::TarGz,
+                members,
+            }],
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn accept_bundle_signature(_bundle: &Path) -> application_updater::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reject_bundle_signature(_bundle: &Path) -> application_updater::Result<()> {
+        Err(application_updater::Error::Validation(
+            "staged application bundle failed signature verification: injected test failure"
+                .to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn bundle_request(executable_path: PathBuf) -> ApplicationUpgradeJobRequest {
+        ApplicationUpgradeJobRequest {
+            installation_kind: InstallationKind::MacosAppBundle,
+            tray_supervised: true,
+            ..test_request(executable_path)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn pipeline_swaps_the_application_bundle_and_asks_the_wrapper_to_relaunch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let applications = temp.path().join("Applications");
+        fs::create_dir_all(&applications).expect("create applications directory");
+        let bundle = install_fake_bundle(&applications, b"old server");
+        let (archive, members) = bundle_archive(b"new server");
+        let manifest = bundle_manifest(&archive, members);
+        let (_server, artifact_url) = artifact_server(archive).await;
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        app.set_application_upgrade_bundle_signature_check(accept_bundle_signature);
+        let relaunched = Arc::new(AtomicBool::new(false));
+        let restarted = Arc::new(AtomicBool::new(false));
+        let relaunch_observed = Arc::clone(&relaunched);
+        let restart_observed = Arc::clone(&restarted);
+        app.set_application_upgrade_restart_handle(
+            ApplicationUpgradeRestartHandle::new(move || {
+                restart_observed.store(true, Ordering::SeqCst);
+            })
+            .with_bundle_relaunch(move || {
+                relaunch_observed.store(true, Ordering::SeqCst);
+            }),
+        );
+        let request = bundle_request(bundle.join("Contents/MacOS/scryer"));
+        let mut run = test_run(&request);
+        job_runs.seed(run.clone()).await;
+        let client = test_http_client();
+
+        app.run_upgrade_pipeline_with_dependencies(
+            &mut run,
+            &request,
+            &manifest,
+            UpgradePipelineDependencies {
+                client: &client,
+                artifact_url_override: Some(&artifact_url),
+                ensure_available_space,
+                rename: rename_path,
+            },
+        )
+        .await
+        .expect("bundle upgrade pipeline succeeds");
+
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/scryer")).expect("promoted server binary"),
+            b"new server"
+        );
+        let backup = applications.join(format!("{BUNDLE_NAME}.pre-upgrade-{SCRYER_VERSION}"));
+        assert_eq!(
+            fs::read(backup.join("Contents/MacOS/scryer")).expect("previous server binary"),
+            b"old server"
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(bundle.join("Contents/MacOS/scryer"))
+            .expect("promoted binary metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "the promoted binary stays executable");
+        assert!(
+            bundle
+                .join("Contents/_CodeSignature/CodeResources")
+                .exists(),
+            "the promoted bundle keeps its code signature"
+        );
+
+        let journal = load_journal(&app.application_upgrade_journal_path())
+            .expect("load journal")
+            .expect("journal exists");
+        assert!(journal.macos_bundle_upgrade);
+        assert_eq!(journal.executable_path, bundle);
+        assert_eq!(journal.backup_path, backup);
+        assert!(journal.staging_dir.is_some());
+        assert!(relaunched.load(Ordering::SeqCst));
+        assert!(
+            !restarted.load(Ordering::SeqCst),
+            "the server must not re-exec a binary that has just been replaced"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_staged_bundle_that_fails_its_signature_check_never_replaces_the_installed_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let applications = temp.path().join("Applications");
+        fs::create_dir_all(&applications).expect("create applications directory");
+        let bundle = install_fake_bundle(&applications, b"old server");
+        let (archive, members) = bundle_archive(b"new server");
+        let manifest = bundle_manifest(&archive, members);
+        let (_server, artifact_url) = artifact_server(archive).await;
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        app.set_application_upgrade_bundle_signature_check(reject_bundle_signature);
+        let request = bundle_request(bundle.join("Contents/MacOS/scryer"));
+        let mut run = test_run(&request);
+        job_runs.seed(run.clone()).await;
+        let client = test_http_client();
+
+        let error = run_pipeline_and_finish_failure(
+            &app,
+            &mut run,
+            &request,
+            &manifest,
+            UpgradePipelineDependencies {
+                client: &client,
+                artifact_url_override: Some(&artifact_url),
+                ensure_available_space,
+                rename: rename_path,
+            },
+        )
+        .await;
+
+        assert!(error.to_string().contains("signature verification"));
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/scryer")).expect("installed server binary"),
+            b"old server"
+        );
+        assert!(
+            !applications
+                .join(format!("{BUNDLE_NAME}.pre-upgrade-{SCRYER_VERSION}"))
+                .exists(),
+            "a promotion that never happened leaves no backup behind"
+        );
+        assert!(
+            !app.application_upgrade_journal_path().exists(),
+            "a restored promotion failure clears the recovery journal"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_failed_bundle_promotion_puts_the_installed_bundle_back() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let applications = temp.path().join("Applications");
+        fs::create_dir_all(&applications).expect("create applications directory");
+        let bundle = install_fake_bundle(&applications, b"old server");
+        let (archive, members) = bundle_archive(b"new server");
+        let manifest = bundle_manifest(&archive, members);
+        let (_server, artifact_url) = artifact_server(archive).await;
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        app.set_application_upgrade_bundle_signature_check(accept_bundle_signature);
+        // No restart handle is installed, so the promotion succeeds and the step
+        // after it fails — which is the path that has to undo both renames.
+        let request = bundle_request(bundle.join("Contents/MacOS/scryer"));
+        let mut run = test_run(&request);
+        job_runs.seed(run.clone()).await;
+        let client = test_http_client();
+
+        let error = run_pipeline_and_finish_failure(
+            &app,
+            &mut run,
+            &request,
+            &manifest,
+            UpgradePipelineDependencies {
+                client: &client,
+                artifact_url_override: Some(&artifact_url),
+                ensure_available_space,
+                rename: rename_path,
+            },
+        )
+        .await;
+
+        assert!(error.to_string().contains("restart controller"));
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/scryer")).expect("restored server binary"),
+            b"old server"
+        );
+        assert!(
+            !applications
+                .join(format!("{BUNDLE_NAME}.pre-upgrade-{SCRYER_VERSION}"))
+                .exists(),
+            "a rolled-back promotion leaves no backup behind"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Manifest generation selection.
+    //
+    // The signature check is stubbed in these tests: what is under test is the
+    // fetch order and the refusal to downgrade, and a genuine signed v2 release
+    // does not exist yet. `real_signed_upgrade_manifest_requires_its_exact_release_tag`
+    // above covers the verification itself, and the stub is only reachable from
+    // test code.
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    const FIXTURE_TAG: &str = "scryer-v9.8.7";
+
+    #[cfg(unix)]
+    const V1_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../api/upgrade/manifest.v1.example.json"
+    ));
+
+    #[cfg(unix)]
+    const V2_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../api/upgrade/manifest.v2.example.json"
+    ));
+
+    #[cfg(unix)]
+    fn accept_signature(
+        _raw: &[u8],
+        _bundle: &[u8],
+        _tag: &str,
+    ) -> application_updater::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn reject_signature(
+        _raw: &[u8],
+        _bundle: &[u8],
+        _tag: &str,
+    ) -> application_updater::Result<()> {
+        Err(application_updater::Error::Validation(
+            "upgrade manifest signature verification failed: injected test failure".to_string(),
+        ))
+    }
+
+    /// Mounts one release asset, and returns the base the fetcher appends
+    /// `<tag>/<asset>` to.
+    #[cfg(unix)]
+    async fn mount_release_asset(
+        server: &MockServer,
+        asset_name: &str,
+        response: ResponseTemplate,
+        expected_calls: impl Into<wiremock::Times>,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/releases/download/{FIXTURE_TAG}/{asset_name}"
+            )))
+            .respond_with(response)
+            .expect(expected_calls)
+            .mount(server)
+            .await;
+    }
+
+    #[cfg(unix)]
+    fn release_asset_base(server: &MockServer) -> url::Url {
+        url::Url::parse(&format!("{}/releases/download/", server.uri()))
+            .expect("release asset base URL")
+    }
+
+    #[cfg(unix)]
+    async fn fetch_fixture_manifest(
+        server: &MockServer,
+        verify_signature: fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+    ) -> AppResult<FetchedUpgradeManifest> {
+        let base = release_asset_base(server);
+        fetch_upgrade_manifest_with_overrides(
+            &test_http_client(),
+            FIXTURE_TAG,
+            application_updater::pipeline::UpgradeManifestFetchOverrides {
+                asset_base: Some(&base),
+                verify_signature: Some(verify_signature),
+            },
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_v2_manifest_is_preferred_when_the_release_publishes_one() {
+        let server = MockServer::start().await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.v2.json",
+            ResponseTemplate::new(200).set_body_bytes(V2_FIXTURE.to_vec()),
+            1,
+        )
+        .await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.v2.json.sigstore.json",
+            ResponseTemplate::new(200).set_body_bytes(b"stub bundle".to_vec()),
+            1,
+        )
+        .await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.json",
+            ResponseTemplate::new(200).set_body_bytes(V1_FIXTURE.to_vec()),
+            0,
+        )
+        .await;
+
+        let fetched = fetch_fixture_manifest(&server, accept_signature)
+            .await
+            .expect("the v2 manifest must be used");
+
+        assert_eq!(
+            fetched.generation,
+            application_updater::pipeline::UpgradeManifestGeneration::V2
+        );
+        assert!(
+            fetched
+                .manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.channel == UpgradeChannel::App),
+            "the v2 manifest carries the app-bundle artifacts the v1 manifest never has"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_v1_manifest_is_used_only_when_the_v2_asset_is_absent() {
+        let server = MockServer::start().await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.v2.json",
+            ResponseTemplate::new(404),
+            1,
+        )
+        .await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.json",
+            ResponseTemplate::new(200).set_body_bytes(V1_FIXTURE.to_vec()),
+            1,
+        )
+        .await;
+        mount_release_asset(
+            &server,
+            "scryer-upgrade-manifest.json.sigstore.json",
+            ResponseTemplate::new(200).set_body_bytes(b"stub bundle".to_vec()),
+            1,
+        )
+        .await;
+
+        let fetched = fetch_fixture_manifest(&server, accept_signature)
+            .await
+            .expect("a release published before v2 existed must still upgrade");
+
+        assert_eq!(
+            fetched.generation,
+            application_updater::pipeline::UpgradeManifestGeneration::V1
+        );
+        assert!(
+            fetched
+                .manifest
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.channel != UpgradeChannel::App)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_v2_manifest_never_silently_downgrades_to_v1() {
+        for (label, response, verify) in [
+            (
+                "server error",
+                ResponseTemplate::new(500),
+                accept_signature as fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+            ),
+            (
+                "forbidden",
+                ResponseTemplate::new(403),
+                accept_signature as fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+            ),
+            (
+                "oversized document",
+                ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 300 * 1024]),
+                accept_signature as fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+            ),
+            (
+                "unparseable document",
+                ResponseTemplate::new(200).set_body_bytes(b"{}".to_vec()),
+                accept_signature as fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+            ),
+            (
+                "signature failure",
+                ResponseTemplate::new(200).set_body_bytes(V2_FIXTURE.to_vec()),
+                reject_signature as fn(&[u8], &[u8], &str) -> application_updater::Result<()>,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount_release_asset(&server, "scryer-upgrade-manifest.v2.json", response, 1).await;
+            mount_release_asset(
+                &server,
+                "scryer-upgrade-manifest.v2.json.sigstore.json",
+                ResponseTemplate::new(200).set_body_bytes(b"stub bundle".to_vec()),
+                // Only reached once the v2 manifest itself arrives intact.
+                wiremock::Times::from(0..=1),
+            )
+            .await;
+            mount_release_asset(
+                &server,
+                "scryer-upgrade-manifest.json",
+                ResponseTemplate::new(200).set_body_bytes(V1_FIXTURE.to_vec()),
+                0,
+            )
+            .await;
+
+            fetch_fixture_manifest(&server, verify)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("a v2 {label} must abort the upgrade"));
+
+            // The v1 mock's `expect(0)` is checked when the server drops.
+            drop(server);
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn journal_finalization_completes_matching_boot_and_cleans_recovery_files() {
@@ -1898,6 +2613,8 @@ mod tests {
                 phase: phases::RESTARTING.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -1918,6 +2635,63 @@ mod tests {
         assert!(!backup_path.exists());
         assert!(!app.application_upgrade_journal_path().exists());
         assert!(!app.application_upgrade_staging_dir().exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn journal_finalization_removes_a_replaced_bundle_and_its_staging_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        let applications = temp.path().join("Applications");
+        fs::create_dir_all(&applications).expect("create applications directory");
+        let bundle = install_fake_bundle(&applications, b"new server");
+        let backup_path = applications.join(format!("{BUNDLE_NAME}.pre-upgrade-0.0.1"));
+        install_fake_bundle(&backup_path, b"old server");
+        let staging_dir = applications.join(format!(".scryer-upgrade-new-{SCRYER_VERSION}"));
+        fs::create_dir_all(staging_dir.join("extracted")).expect("create staging directory");
+        let unrelated = applications.join("Something Else.app");
+        fs::create_dir_all(&unrelated).expect("create unrelated directory");
+        let request = bundle_request(bundle.join("Contents/MacOS/scryer"));
+        let run = test_run(&request);
+        job_runs.seed(run.clone()).await;
+        let journal = ApplicationUpgradeJournal {
+            schema: JOURNAL_SCHEMA.to_string(),
+            run_id: run.id.clone(),
+            expected_version: SCRYER_VERSION.to_string(),
+            expected_tag: request.expected_tag.clone(),
+            executable_path: bundle.clone(),
+            backup_path: backup_path.clone(),
+            backup_paths: vec![backup_path.clone()],
+            phase: phases::RESTARTING.to_string(),
+            helper_error: None,
+            written_at: Some(Utc::now()),
+            macos_bundle_upgrade: true,
+            staging_dir: Some(staging_dir.clone()),
+        };
+        let journal_path = app.application_upgrade_journal_path();
+        write_journal(&journal_path, &journal).expect("write journal");
+
+        // Called directly: the boot check that guards it compares the running
+        // binary's own bundle, and this test process does not run from one.
+        app.complete_journal_application_upgrade(&journal, &journal_path)
+            .await
+            .expect("complete bundle upgrade journal");
+
+        let finalized = job_runs
+            .get_job_run(&run.id)
+            .await
+            .expect("load finalized run")
+            .expect("run exists");
+        assert_eq!(finalized.status, JobRunStatus::Completed);
+        assert!(!backup_path.exists(), "the replaced bundle is removed");
+        assert!(!staging_dir.exists(), "the staging directory is removed");
+        assert!(bundle.exists(), "the running bundle is left alone");
+        assert!(
+            unrelated.exists(),
+            "cleanup never touches a directory the upgrade does not own"
+        );
+        assert!(!app.application_upgrade_journal_path().exists());
     }
 
     #[cfg(unix)]
@@ -1944,6 +2718,8 @@ mod tests {
                 phase: phases::RESTARTING.to_string(),
                 helper_error: Some("elevation helper failed".to_string()),
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -1990,6 +2766,8 @@ mod tests {
                 phase: phases::RESTARTING.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -2038,6 +2816,8 @@ mod tests {
                 phase: phases::REBOOT_REQUIRED.to_string(),
                 helper_error: None,
                 written_at: None,
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -2092,6 +2872,8 @@ mod tests {
                 phase: phases::REBOOT_REQUIRED.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now() - chrono::Duration::seconds(5)),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -2143,6 +2925,8 @@ mod tests {
                 phase: phases::REBOOT_REQUIRED.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -2193,6 +2977,8 @@ mod tests {
                 phase: phases::REBOOT_REQUIRED.to_string(),
                 helper_error: None,
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
@@ -2280,6 +3066,8 @@ mod tests {
                 phase: phases::RESTARTING.to_string(),
                 helper_error: Some("elevation helper failed".to_string()),
                 written_at: Some(Utc::now()),
+                macos_bundle_upgrade: false,
+                staging_dir: None,
             },
         )
         .expect("write journal");
