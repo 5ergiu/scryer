@@ -3,23 +3,12 @@ use std::collections::HashSet;
 #[cfg(feature = "runtime-plugin-trust")]
 use std::io::Read;
 
-#[cfg(all(test, feature = "runtime-plugin-trust"))]
-use base64::Engine;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
-#[cfg(all(test, feature = "runtime-plugin-trust"))]
-use sha2::{Digest, Sha256};
-#[cfg(all(test, feature = "runtime-plugin-trust"))]
-use sigstore::trust::{TrustRoot, sigstore::SigstoreTrustRoot};
 use url::Url;
 
 use crate::{AppError, AppResult};
 use scryer_domain::PluginSupportTier;
-
-#[cfg(all(test, feature = "runtime-plugin-trust"))]
-use super::trust::{
-    normalize_bundle_cert, pem_encode_certificate, verify_rekor_hashedrekord_binding,
-};
 
 #[cfg(test)]
 const CHILD_CATALOG_SCHEMA_VERSION: &str = "scryer.plugin.child_catalog.v2";
@@ -54,14 +43,7 @@ pub struct RulePackCatalogEntry {
 // clients. Unknown fields are now ignored instead. Integrity does not depend on
 // this: the catalog blob is Sigstore-verified against a required signer and
 // every artifact is digest-checked before it is used.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RequiredSigner {
-    pub github_repository: String,
-    #[serde(default)]
-    pub github_workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github_ref: Option<String>,
-}
+pub use artifact_trust::RequiredSigner;
 
 pub const CATALOG_V3_SCHEMA_VERSION: &str = "scryer.plugin.catalog.v3";
 pub const CATALOG_V3_REDIRECT_SCHEMA_VERSION: &str = "scryer.plugin.catalog.v3.redirect";
@@ -1491,142 +1473,5 @@ mod tests {
                 .contains("support tier must be verified_community"),
             "unexpected error: {err}"
         );
-    }
-
-    #[cfg(feature = "runtime-plugin-trust")]
-    #[test]
-    fn normalize_bundle_cert_wraps_base64_der_as_pem() {
-        let der_base64 =
-            base64::engine::general_purpose::STANDARD.encode([0x30, 0x03, 0x02, 0x01, 0x05]);
-        let pem = normalize_bundle_cert(&der_base64).expect("DER certificate should normalize");
-        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
-        assert!(pem.contains(&der_base64));
-        assert!(pem.ends_with("-----END CERTIFICATE-----\n"));
-    }
-
-    #[cfg(feature = "runtime-plugin-trust")]
-    fn rekor_hashedrekord_body(raw: &[u8], signature: &str, cert_pem: &str) -> String {
-        let digest = Sha256::digest(raw);
-        let digest = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec(&serde_json::json!({
-                "kind": "hashedrekord",
-                "apiVersion": "0.0.1",
-                "spec": {
-                    "data": {"hash": {"algorithm": "sha256", "value": digest}},
-                    "signature": {
-                        "content": signature,
-                        "publicKey": {"content": cert_pem}
-                    }
-                }
-            }))
-            .expect("serialize Rekor body"),
-        )
-    }
-
-    #[cfg(feature = "runtime-plugin-trust")]
-    #[tokio::test]
-    async fn rekor_hashedrekord_binding_accepts_matching_artifact_signature_and_certificate() {
-        scryer_outbound_http::install_default_rustls_provider();
-        let trust_root = SigstoreTrustRoot::new(None)
-            .await
-            .expect("embedded Sigstore trust root should load");
-        let fulcio_certs = trust_root
-            .fulcio_certs()
-            .expect("trust root should provide Fulcio certificates");
-        let certificate = fulcio_certs
-            .first()
-            .expect("at least one Fulcio certificate");
-        let cert_pem = pem_encode_certificate(certificate);
-        let raw = b"plugin artifact";
-        let signature = base64::engine::general_purpose::STANDARD.encode(b"signature");
-        let body = rekor_hashedrekord_body(raw, &signature, &cert_pem);
-
-        verify_rekor_hashedrekord_binding(raw, &signature, &cert_pem, &body)
-            .expect("matching Rekor body should bind to the bundle");
-    }
-
-    #[cfg(feature = "runtime-plugin-trust")]
-    #[test]
-    fn rekor_hashedrekord_binding_rejects_signature_transplant() {
-        let raw = b"plugin artifact";
-        let signature = base64::engine::general_purpose::STANDARD.encode(b"signature");
-        let body = rekor_hashedrekord_body(
-            raw,
-            &base64::engine::general_purpose::STANDARD.encode(b"different signature"),
-            "-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n",
-        );
-
-        let error = verify_rekor_hashedrekord_binding(
-            raw,
-            &signature,
-            "-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n",
-            &body,
-        )
-        .expect_err("signature transplant must fail before certificate parsing");
-        assert!(error.to_string().contains("signature does not match"));
-    }
-
-    #[cfg(feature = "runtime-plugin-trust")]
-    #[tokio::test]
-    async fn rekor_hashedrekord_binding_rejects_altered_artifact_certificate_and_body() {
-        scryer_outbound_http::install_default_rustls_provider();
-        let trust_root = SigstoreTrustRoot::new(None)
-            .await
-            .expect("embedded Sigstore trust root should load");
-        let cert_pems = trust_root
-            .fulcio_certs()
-            .expect("trust root should provide Fulcio certificates")
-            .iter()
-            .map(|certificate| pem_encode_certificate(certificate.as_ref()))
-            .collect::<Vec<_>>();
-        let cert_pem = cert_pems.first().expect("at least one Fulcio certificate");
-        let raw = b"plugin artifact";
-        let signature = base64::engine::general_purpose::STANDARD.encode(b"signature");
-        let body = rekor_hashedrekord_body(raw, &signature, cert_pem);
-
-        let digest_error = verify_rekor_hashedrekord_binding(
-            b"altered plugin artifact",
-            &signature,
-            cert_pem,
-            &body,
-        )
-        .expect_err("Rekor digest must bind to the artifact");
-        assert!(digest_error.to_string().contains("digest"));
-
-        let malformed_error =
-            verify_rekor_hashedrekord_binding(raw, &signature, cert_pem, "not-base64")
-                .expect_err("malformed Rekor body must fail");
-        assert!(malformed_error.to_string().contains("encoding"));
-
-        let unsupported_body = base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec(&serde_json::json!({
-                "kind": "rekord",
-                "apiVersion": "0.0.1",
-                "spec": {}
-            }))
-            .expect("serialize unsupported Rekor body"),
-        );
-        let unsupported_error =
-            verify_rekor_hashedrekord_binding(raw, &signature, cert_pem, &unsupported_body)
-                .expect_err("unsupported Rekor body must fail");
-        assert!(
-            unsupported_error
-                .to_string()
-                .contains("unsupported Rekor body")
-        );
-
-        let alternate_cert = cert_pems
-            .iter()
-            .find(|candidate| candidate.as_bytes() != cert_pem.as_bytes())
-            .expect("embedded trust root should include distinct Fulcio certificates");
-        let certificate_body = rekor_hashedrekord_body(raw, &signature, alternate_cert);
-        let certificate_error =
-            verify_rekor_hashedrekord_binding(raw, &signature, cert_pem, &certificate_body)
-                .expect_err("Rekor certificate must bind to the bundle certificate");
-        assert!(certificate_error.to_string().contains("certificate"));
     }
 }
