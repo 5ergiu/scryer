@@ -2,9 +2,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use const_oid::db::rfc5280::ID_KP_CODE_SIGNING;
 use flate2::read::GzDecoder;
-use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
+use rustls_pki_types::CertificateDer;
 #[cfg(test)]
 use scryer_application::application_upgrade::manifest::parse_and_validate_upgrade_manifest;
 use scryer_application::{
@@ -18,31 +17,18 @@ use scryer_plugins::WasmPluginDescriptorLoader;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sigstore::{
-    cosign::{CosignCapabilities, bundle::SignedArtifactBundle},
-    crypto::{CosignVerificationKey, SigningScheme},
-    trust::{TrustRoot, sigstore::SigstoreTrustRoot},
-};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use toml::Value as TomlValue;
 use toml_edit::{DocumentMut, value};
-use webpki::{EndEntityCert, KeyUsage};
-use x509_cert::{
-    Certificate,
-    der::{Decode, DecodePem, Encode},
-    ext::{
-        Extension,
-        pkix::{SubjectAltName, name::GeneralName},
-    },
-};
+use x509_cert::{Certificate, der::Decode};
 use xtask_support::{
     BOLD, GREEN, RESET, TaskContext, YELLOW, command_available, ok, prefixed_ok, prefixed_step,
     require_command, run_capture, run_checked, run_streaming, step, warn,
@@ -124,9 +110,6 @@ const SIGSTORE_TRUST_ROOT_TARGET: &str = "trusted_root.json";
 const SIGSTORE_TRUST_ROOT_TIMEOUT: Duration = Duration::from_secs(120);
 const OFFICIAL_PLUGIN_REPO: &str = "scryer-media/scryer-plugins";
 const OFFICIAL_PLUGIN_V3_RELEASE_WORKFLOW: &str = ".github/workflows/release-plugin-v3.yml";
-const SIGSTORE_GITHUB_WORKFLOW_NAME_OID: &str = "1.3.6.1.4.1.57264.1.4";
-const SIGSTORE_GITHUB_WORKFLOW_REPOSITORY_OID: &str = "1.3.6.1.4.1.57264.1.5";
-const SIGSTORE_GITHUB_WORKFLOW_REF_OID: &str = "1.3.6.1.4.1.57264.1.6";
 const RELEASE_LOCAL_PATH_TOKENS: &[&str] = &["~/", "/Users/", "/home/", "C:\\Users\\", "C:/Users/"];
 const RELEASE_MACOS_HOME_PATH_COMPONENTS: &[&str] = &[
     "Applications",
@@ -173,13 +156,6 @@ const REQUIRED_SCRYER_DRY_RUN_STEPS: &[&str] = &[
     GRAPHQL_API_COMPAT_STEP,
     "release_hygiene",
 ];
-
-type RekorVerificationKeys = BTreeMap<String, CosignVerificationKey>;
-type FulcioTrustAnchors = Vec<TrustAnchor<'static>>;
-
-static REKOR_VERIFICATION_KEYS: OnceLock<Result<Arc<RekorVerificationKeys>, String>> =
-    OnceLock::new();
-static FULCIO_TRUST_ANCHORS: OnceLock<Result<Arc<FulcioTrustAnchors>, String>> = OnceLock::new();
 
 struct BuiltinPluginSpec {
     plugin_id: &'static str,
@@ -2541,12 +2517,29 @@ fn validate_materialized_trusted_logs(logs: &[MaterializedTrustedLog], label: &s
             &log.public_key.raw_bytes,
             &format!("{label} public key"),
         )?;
-        CosignVerificationKey::try_from_der(&key_der)
+        validate_materialized_public_key(&key_der)
             .with_context(|| format!("failed to parse Sigstore {label} public key"))?;
         validate_materialized_time_range(
             &log.public_key.valid_for,
             &format!("{label} public key"),
         )?;
+    }
+    Ok(())
+}
+
+/// A log key must be a SubjectPublicKeyInfo of a type the verifier can use:
+/// ECDSA, RSA or Ed25519.
+fn validate_materialized_public_key(key_der: &[u8]) -> Result<()> {
+    const SUPPORTED_KEY_ALGORITHMS: [&str; 3] = [
+        "1.2.840.10045.2.1",    // id-ecPublicKey
+        "1.2.840.113549.1.1.1", // rsaEncryption
+        "1.3.101.112",          // id-Ed25519
+    ];
+    let spki = x509_cert::spki::SubjectPublicKeyInfoOwned::from_der(key_der)
+        .map_err(|error| anyhow!("not a SubjectPublicKeyInfo: {error}"))?;
+    let algorithm = spki.algorithm.oid.to_string();
+    if !SUPPORTED_KEY_ALGORITHMS.contains(&algorithm.as_str()) {
+        bail!("unsupported public key algorithm {algorithm}");
     }
     Ok(())
 }
@@ -2636,43 +2629,6 @@ fn resolved_cargo_package_version(ctx: &TaskContext, package_name: &str) -> Resu
     Ok(versions.into_iter().next().expect("one version checked"))
 }
 
-fn install_xtask_sigstore_trust_material(trust_root: &SigstoreTrustRoot) -> Result<()> {
-    let rekor_keys = trust_root
-        .rekor_keys()
-        .map_err(|error| anyhow!("failed to load Sigstore Rekor public keys: {error}"))?;
-    let rekor_keys = Arc::new(parse_rekor_verification_keys(rekor_keys)?);
-    if let Some(existing) = REKOR_VERIFICATION_KEYS.get() {
-        existing.as_ref().map_err(|error| anyhow!(error.clone()))?;
-    } else {
-        REKOR_VERIFICATION_KEYS
-            .set(Ok(rekor_keys))
-            .map_err(|_| anyhow!("failed to initialize Sigstore Rekor keys"))?;
-    }
-
-    let fulcio_certs = trust_root
-        .fulcio_certs()
-        .map_err(|error| anyhow!("failed to load Sigstore Fulcio certificates: {error}"))?;
-    let anchors = fulcio_certs
-        .iter()
-        .map(|cert| {
-            webpki::anchor_from_trusted_cert(cert)
-                .map(|anchor| anchor.to_owned())
-                .map_err(|error| anyhow!(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if anchors.is_empty() {
-        bail!("Sigstore Fulcio trust root is empty");
-    }
-    if let Some(existing) = FULCIO_TRUST_ANCHORS.get() {
-        existing.as_ref().map_err(|error| anyhow!(error.clone()))?;
-    } else {
-        FULCIO_TRUST_ANCHORS
-            .set(Ok(Arc::new(anchors)))
-            .map_err(|_| anyhow!("failed to initialize Sigstore Fulcio anchors"))?;
-    }
-    Ok(())
-}
-
 fn write_materialized_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -2695,16 +2651,13 @@ fn write_materialized_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Result<()> {
     step("Materializing TUF-verified Sigstore trust root");
-    let checkout = tempfile::tempdir().context("failed to create Sigstore TUF checkout")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build Sigstore trust-root runtime")?;
-    let trust_root = runtime
+    // The refreshed root also becomes the one artifact-trust verifies the
+    // built-in downloads against, so they are checked with what gets embedded.
+    let root_bytes = sigstore_runtime()?
         .block_on(async {
             tokio::time::timeout(
                 SIGSTORE_TRUST_ROOT_TIMEOUT,
-                SigstoreTrustRoot::new(Some(checkout.path())),
+                artifact_trust::refresh_sigstore_trusted_root(),
             )
             .await
         })
@@ -2715,10 +2668,7 @@ fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Resu
             )
         })?
         .map_err(|error| anyhow!("failed to load Sigstore trust root: {error}"))?;
-    let root_bytes = fs::read(checkout.path().join(SIGSTORE_TRUST_ROOT_TARGET))
-        .context("failed to read TUF-verified Sigstore trusted_root.json")?;
     validate_runtime_sigstore_trust_root_document(&root_bytes)?;
-    install_xtask_sigstore_trust_material(&trust_root)?;
 
     let sha256 = Sha256::digest(&root_bytes)
         .iter()
@@ -2731,8 +2681,8 @@ fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Resu
         sha256: sha256.clone(),
         retrieved_at: Utc::now().to_rfc3339(),
         sigstore_version: format!(
-            "sigstore-rs {}",
-            resolved_cargo_package_version(ctx, "sigstore")?
+            "artifact-trust {}",
+            resolved_cargo_package_version(ctx, "artifact-trust")?
         ),
         source_commit: current_head_commit(ctx)?,
         github_repository: std::env::var("GITHUB_REPOSITORY").ok(),
@@ -2780,290 +2730,28 @@ fn verify_signed_blob(
     bundle_raw: &[u8],
     required_signer: &RequiredSigner,
 ) -> Result<()> {
-    let bundle_text = std::str::from_utf8(bundle_raw).context("invalid Sigstore bundle UTF-8")?;
-    let bundle_text = normalize_sigstore_bundle(bundle_text)?;
-    let rekor_keys = cached_rekor_verification_keys()?;
-    let bundle = SignedArtifactBundle::new_verified(bundle_text.as_str(), rekor_keys.as_ref())
-        .map_err(|error| anyhow!("Sigstore Rekor bundle verification failed: {error}"))?;
-    let cert_pem = normalize_bundle_cert(&bundle.cert)?;
-    <sigstore::cosign::Client as CosignCapabilities>::verify_blob(
-        &cert_pem,
-        &bundle.base64_signature,
-        raw,
-    )
-    .map_err(|error| anyhow!("Sigstore blob signature verification failed: {error}"))?;
-    verify_fulcio_certificate_chain(&cert_pem, &bundle)?;
-    verify_signer_identity(&cert_pem, required_signer)?;
-    Ok(())
+    sigstore_runtime()?
+        .block_on(artifact_trust::verify_signed_blob(
+            raw.to_vec(),
+            bundle_raw.to_vec(),
+            artifact_trust::RequiredSigner {
+                github_repository: required_signer.github_repository.clone(),
+                github_workflow: required_signer.github_workflow.clone(),
+                github_ref: None,
+            },
+        ))
+        .map_err(|error| anyhow!("Sigstore blob verification failed: {error}"))
 }
 
-fn verify_fulcio_certificate_chain(cert_pem: &str, bundle: &SignedArtifactBundle) -> Result<()> {
-    let cert = Certificate::from_pem(cert_pem.as_bytes())
-        .map_err(|error| anyhow!("failed to parse Sigstore certificate: {error}"))?;
-    let cert_der = cert
-        .to_der()
-        .map_err(|error| anyhow!("failed to encode Sigstore certificate: {error}"))?;
-    let cert_der = CertificateDer::from(cert_der.as_slice());
-    let end_entity = EndEntityCert::try_from(&cert_der)
-        .map_err(|error| anyhow!("invalid Sigstore certificate: {error}"))?;
-    let verification_time = rekor_integrated_time(bundle.rekor_bundle.payload.integrated_time)?;
-    let trust_anchors = cached_fulcio_trust_anchors()?;
-
-    end_entity
-        .verify_for_usage(
-            webpki::ALL_VERIFICATION_ALGS,
-            trust_anchors.as_slice(),
-            &[],
-            verification_time,
-            KeyUsage::required(ID_KP_CODE_SIGNING.as_bytes()),
-            None,
-            None,
-        )
-        .map_err(|error| {
-            anyhow!("Sigstore Fulcio certificate chain verification failed: {error}")
-        })?;
-
-    Ok(())
-}
-
-fn rekor_integrated_time(integrated_time: i64) -> Result<UnixTime> {
-    let integrated_time =
-        u64::try_from(integrated_time).context("Sigstore Rekor integrated time is negative")?;
-    Ok(UnixTime::since_unix_epoch(std::time::Duration::from_secs(
-        integrated_time,
-    )))
-}
-
-fn cached_rekor_verification_keys() -> Result<Arc<RekorVerificationKeys>> {
-    REKOR_VERIFICATION_KEYS
-        .get()
-        .ok_or_else(|| anyhow!("Sigstore trust root was not materialized before verification"))?
-        .clone()
-        .map_err(anyhow::Error::msg)
-}
-
-fn cached_fulcio_trust_anchors() -> Result<Arc<FulcioTrustAnchors>> {
-    FULCIO_TRUST_ANCHORS
-        .get()
-        .ok_or_else(|| anyhow!("Sigstore trust root was not materialized before verification"))?
-        .clone()
-        .map_err(anyhow::Error::msg)
-}
-
-fn parse_rekor_verification_keys(keys: BTreeMap<String, &[u8]>) -> Result<RekorVerificationKeys> {
-    let parsed = keys
-        .into_iter()
-        .filter_map(|(key_id, key)| {
-            CosignVerificationKey::from_der(key, &SigningScheme::default())
-                .ok()
-                .map(|key| (key_id, key))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if parsed.is_empty() {
-        bail!("failed to parse any Rekor public keys from the Sigstore trust root");
-    }
-    Ok(parsed)
-}
-
-fn normalize_sigstore_bundle(bundle_text: &str) -> Result<String> {
-    let Ok(bundle_json) = serde_json::from_str::<serde_json::Value>(bundle_text) else {
-        return Ok(bundle_text.to_string());
-    };
-    if bundle_json.get("base64Signature").is_some() || bundle_json.get("messageSignature").is_none()
-    {
-        return Ok(bundle_text.to_string());
-    }
-
-    let tlog_entry = sigstore_bundle_value(&bundle_json, &["verificationMaterial", "tlogEntries"])
-        .and_then(|value| value.as_array())
-        .and_then(|entries| entries.first())
-        .ok_or_else(|| anyhow!("Sigstore bundle missing verificationMaterial.tlogEntries[0]"))?;
-    let cert_pem = normalize_bundle_cert(sigstore_bundle_string_field(
-        &bundle_json,
-        &["verificationMaterial", "certificate", "rawBytes"],
-        "verificationMaterial.certificate.rawBytes",
-    )?)?;
-
-    serde_json::to_string(&serde_json::json!({
-        "base64Signature": sigstore_bundle_string_field(
-            &bundle_json,
-            &["messageSignature", "signature"],
-            "messageSignature.signature",
-        )?,
-        "cert": cert_pem,
-        "rekorBundle": {
-            "SignedEntryTimestamp": sigstore_bundle_string_field(
-                tlog_entry,
-                &["inclusionPromise", "signedEntryTimestamp"],
-                "verificationMaterial.tlogEntries[0].inclusionPromise.signedEntryTimestamp",
-            )?,
-            "Payload": {
-                "body": sigstore_bundle_string_field(
-                    tlog_entry,
-                    &["canonicalizedBody"],
-                    "verificationMaterial.tlogEntries[0].canonicalizedBody",
-                )?,
-                "integratedTime": sigstore_bundle_i64_field(
-                    tlog_entry,
-                    &["integratedTime"],
-                    "verificationMaterial.tlogEntries[0].integratedTime",
-                )?,
-                "logIndex": sigstore_bundle_i64_field(
-                    tlog_entry,
-                    &["logIndex"],
-                    "verificationMaterial.tlogEntries[0].logIndex",
-                )?,
-                "logID": sigstore_bundle_string_field(
-                    tlog_entry,
-                    &["logId", "keyId"],
-                    "verificationMaterial.tlogEntries[0].logId.keyId",
-                )
-                .map(normalize_rekor_log_id)?,
-            }
-        }
-    }))
-    .context("failed to normalize Sigstore bundle")
-}
-
-fn sigstore_bundle_value<'a>(
-    value: &'a serde_json::Value,
-    path: &[&str],
-) -> Option<&'a serde_json::Value> {
-    path.iter()
-        .try_fold(value, |current, segment| current.get(*segment))
-}
-
-fn sigstore_bundle_string_field<'a>(
-    value: &'a serde_json::Value,
-    path: &[&str],
-    label: &str,
-) -> Result<&'a str> {
-    sigstore_bundle_value(value, path)
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow!("Sigstore bundle missing {label}"))
-}
-
-fn sigstore_bundle_i64_field(value: &serde_json::Value, path: &[&str], label: &str) -> Result<i64> {
-    let Some(value) = sigstore_bundle_value(value, path) else {
-        bail!("Sigstore bundle missing {label}");
-    };
-    if let Some(number) = value.as_i64() {
-        return Ok(number);
-    }
-    let Some(number) = value.as_str() else {
-        bail!("Sigstore bundle {label} is not an integer");
-    };
-    number
-        .parse::<i64>()
-        .with_context(|| format!("Sigstore bundle {label} is not a valid integer"))
-}
-
-fn normalize_rekor_log_id(key_id: &str) -> String {
-    if key_id.len().is_multiple_of(2) && key_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return key_id.to_ascii_lowercase();
-    }
-
-    match base64::engine::general_purpose::STANDARD.decode(key_id.as_bytes()) {
-        Ok(decoded) => {
-            use std::fmt::Write as _;
-
-            let mut hex = String::with_capacity(decoded.len() * 2);
-            for byte in decoded {
-                let _ = write!(&mut hex, "{byte:02x}");
-            }
-            hex
-        }
-        Err(_) => key_id.to_string(),
-    }
-}
-
-fn normalize_bundle_cert(cert: &str) -> Result<String> {
-    if cert.contains("-----BEGIN CERTIFICATE-----") {
-        return Ok(cert.to_string());
-    }
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(cert.as_bytes())
-        .context("invalid base64 Sigstore certificate")?;
-    if let Ok(decoded_text) = String::from_utf8(decoded.clone())
-        && decoded_text.contains("-----BEGIN CERTIFICATE-----")
-    {
-        return Ok(decoded_text);
-    }
-    Ok(pem_encode_certificate(&decoded))
-}
-
-fn pem_encode_certificate(der: &[u8]) -> String {
-    let base64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-    for chunk in base64.as_bytes().chunks(64) {
-        pem.push_str(&String::from_utf8_lossy(chunk));
-        pem.push('\n');
-    }
-    pem.push_str("-----END CERTIFICATE-----\n");
-    pem
-}
-
-fn cert_extension_utf8(cert: &Certificate, oid: &str) -> Result<Option<String>> {
-    let Some(extensions) = cert.tbs_certificate().extensions() else {
-        return Ok(None);
-    };
-    extensions
-        .iter()
-        .find(|ext: &&Extension| ext.extn_id.to_string() == oid)
-        .map(|ext| {
-            String::from_utf8(ext.extn_value.clone().into_bytes().into_vec())
-                .map_err(|_| anyhow!("Sigstore certificate extension {oid} is not valid UTF-8"))
-        })
-        .transpose()
-}
-
-fn cert_subject_uri(cert: &Certificate) -> Result<Option<String>> {
-    let san = cert
-        .tbs_certificate()
-        .get_extension::<SubjectAltName>()
-        .map_err(|error| anyhow!("failed to read certificate SAN: {error}"))?
-        .map(|(_, san)| san);
-    let Some(san) = san else {
-        return Ok(None);
-    };
-    Ok(san.0.iter().find_map(|name| match name {
-        GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
-        _ => None,
-    }))
-}
-
-fn verify_signer_identity(cert_pem: &str, required_signer: &RequiredSigner) -> Result<()> {
-    let cert = Certificate::from_pem(cert_pem.as_bytes())
-        .map_err(|error| anyhow!("failed to parse Sigstore certificate: {error}"))?;
-    let repository = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_REPOSITORY_OID)?;
-    if repository.as_deref() != Some(required_signer.github_repository.as_str()) {
-        bail!(
-            "Sigstore signer repo mismatch: expected '{}', got '{}'",
-            required_signer.github_repository,
-            repository.unwrap_or_else(|| "<missing>".to_string())
-        );
-    }
-
-    if let Some(expected_workflow) = required_signer.github_workflow.as_deref() {
-        let workflow_name = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_NAME_OID)?;
-        let workflow_ref = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_REF_OID)?;
-        let subject_uri = cert_subject_uri(&cert)?;
-        let matched = workflow_name.as_deref() == Some(expected_workflow)
-            || workflow_ref
-                .as_deref()
-                .is_some_and(|value| value.contains(expected_workflow))
-            || subject_uri
-                .as_deref()
-                .is_some_and(|value| value.contains(expected_workflow));
-        if !matched {
-            bail!(
-                "Sigstore workflow mismatch for '{}'",
-                required_signer.github_repository
-            );
-        }
-    }
-
-    Ok(())
+/// artifact-trust verifies and refreshes on Tokio, and reaches the network
+/// through a rustls client that expects the process to have picked its crypto
+/// provider.
+fn sigstore_runtime() -> Result<tokio::runtime::Runtime> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Sigstore verification runtime")
 }
 
 fn fetch_verified_bytes(
@@ -5542,60 +5230,6 @@ mod tests {
                 "}\n"
             )
         );
-    }
-
-    #[test]
-    fn normalize_bundle_cert_wraps_base64_der_as_pem() {
-        let der_base64 =
-            base64::engine::general_purpose::STANDARD.encode([0x30, 0x03, 0x02, 0x01, 0x05]);
-        let pem = normalize_bundle_cert(&der_base64).expect("DER certificate should normalize");
-        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
-        assert!(pem.contains(&der_base64));
-        assert!(pem.ends_with("-----END CERTIFICATE-----\n"));
-    }
-
-    #[test]
-    fn normalize_sigstore_bundle_rewrites_v03_payloads() {
-        let der_base64 = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3, 4]);
-        let key_id_base64 = base64::engine::general_purpose::STANDARD.encode([0_u8, 1, 2, 3]);
-        let bundle = serde_json::json!({
-            "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-            "messageSignature": {
-                "signature": "sig=="
-            },
-            "verificationMaterial": {
-                "certificate": {
-                    "rawBytes": der_base64
-                },
-                "tlogEntries": [
-                    {
-                        "logIndex": "12",
-                        "logId": {
-                            "keyId": key_id_base64
-                        },
-                        "integratedTime": "34",
-                        "inclusionPromise": {
-                            "signedEntryTimestamp": "set=="
-                        },
-                        "canonicalizedBody": "body=="
-                    }
-                ]
-            }
-        });
-
-        let normalized =
-            normalize_sigstore_bundle(&bundle.to_string()).expect("bundle should normalize");
-        let parsed: SignedArtifactBundle =
-            serde_json::from_str(&normalized).expect("bundle should parse in legacy shape");
-        assert_eq!(parsed.base64_signature, "sig==");
-        assert_eq!(
-            parsed.cert.lines().next(),
-            Some("-----BEGIN CERTIFICATE-----")
-        );
-        assert_eq!(parsed.rekor_bundle.payload.log_index, 12);
-        assert_eq!(parsed.rekor_bundle.payload.integrated_time, 34);
-        assert_eq!(parsed.rekor_bundle.payload.log_id, "00010203");
-        assert_eq!(parsed.rekor_bundle.payload.body, "body==");
     }
 
     #[test]
