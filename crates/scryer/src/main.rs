@@ -16,6 +16,7 @@ mod metrics_setup;
 mod middleware;
 mod oauth_routes;
 mod rate_limit;
+mod runtime_health;
 mod settings_bootstrap;
 mod splash;
 mod startup_auth;
@@ -1895,6 +1896,10 @@ async fn bootstrap_application(
     ));
     tokio::spawn(start_navigation_badge_facts_refresh(
         app_use_case.clone(),
+        shutdown_token.child_token(),
+    ));
+    tokio::spawn(runtime_health::start_runtime_health_monitor(
+        datastore.datastore(),
         shutdown_token.child_token(),
     ));
     tokio::spawn(start_notification_dispatcher(

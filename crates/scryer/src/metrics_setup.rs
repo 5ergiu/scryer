@@ -242,6 +242,7 @@ pub fn describe_metrics() {
     scryer_infrastructure_acquisition::describe_download_client_router_metrics();
     scryer_interface::describe_graphql_metrics();
     scryer_outbound_http::describe_outbound_http_metrics();
+    crate::runtime_health::describe_runtime_health_metrics();
 
     // --- Process identity -----------------------------------------------------------------
     describe_gauge!(
