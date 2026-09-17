@@ -157,6 +157,93 @@ pub fn derive_download_queue_display_state(item: &DownloadQueueItem) -> Download
         _ => base_state,
     }
 }
+/// The import actions one download offers, decided next to the display state
+/// that governs them.
+///
+/// Every surface used to answer this for itself — the activity rows off
+/// `displayState`, the same rows' assign/ignore/fail buttons off
+/// `trackedState`, the dashboard off a subset, and the title overviews off
+/// nothing at all — so the same download could offer three different action
+/// sets depending on where the operator was standing. This is the one answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DownloadImportActions {
+    /// Open the mapping dialog: series and anime files must be matched to
+    /// episodes before anything is imported.
+    pub manual_import_interactive: bool,
+    /// Import straight away: a movie lands exactly one file.
+    pub manual_import_direct: bool,
+    pub assign_title: bool,
+    pub ignore: bool,
+    pub mark_failed: bool,
+}
+
+/// Whether the download is in a state a manual import may be started against,
+/// setting aside which title it would import into and which dialog it would
+/// use.
+///
+/// The mutations that begin and queue a manual import enforce exactly this, so
+/// the button the operator sees and the rule the server applies are the same
+/// rule. They deliberately do not enforce the title/facet half: the caller
+/// names the title, which is how an unmatched download is imported at all.
+pub fn download_queue_item_allows_manual_import(item: &DownloadQueueItem) -> bool {
+    let display_state = derive_download_queue_display_state(item);
+    // An import that is running, or a row on its way out of the client, is
+    // mid-flight: nothing new may be started against it.
+    if matches!(
+        display_state,
+        DownloadDisplayState::Importing | DownloadDisplayState::Removing
+    ) {
+        return false;
+    }
+
+    // A finished download that no import ever claimed is importable by hand:
+    // this is what a title overview offers, and it is the only route a
+    // hand-added or orphaned download has into the library.
+    let finished_never_imported =
+        display_state == DownloadDisplayState::Completed && item.import_status.is_none();
+    matches!(
+        display_state,
+        DownloadDisplayState::ImportBlocked | DownloadDisplayState::ImportFailed
+    ) || finished_never_imported
+}
+
+/// Which import actions this download offers right now.
+///
+/// The server decides, so the button an operator sees and the rule the mutation
+/// enforces cannot drift apart.
+pub fn derive_download_queue_import_actions(item: &DownloadQueueItem) -> DownloadImportActions {
+    let display_state = derive_download_queue_display_state(item);
+    let busy = matches!(
+        display_state,
+        DownloadDisplayState::Importing | DownloadDisplayState::Removing
+    );
+    let facet = item
+        .facet
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let manual_import = item.title_id.is_some() && download_queue_item_allows_manual_import(item);
+
+    DownloadImportActions {
+        manual_import_interactive: manual_import && matches!(facet.as_str(), "series" | "anime"),
+        manual_import_direct: manual_import && facet == "movie",
+        assign_title: !busy && item.tracked_state == Some(TrackedDownloadState::ImportBlocked),
+        ignore: !busy
+            && (item.tracked_state == Some(TrackedDownloadState::ImportBlocked)
+                || display_state == DownloadDisplayState::ImportFailed),
+        mark_failed: !busy
+            && matches!(
+                item.tracked_state,
+                Some(
+                    TrackedDownloadState::ImportBlocked
+                        | TrackedDownloadState::ImportPending
+                        | TrackedDownloadState::FailedPending
+                )
+            ),
+    }
+}
+
 /// How a torrent's seeding obligation reads to an operator looking at the
 /// queue.
 ///

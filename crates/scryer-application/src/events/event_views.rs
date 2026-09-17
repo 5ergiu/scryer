@@ -1784,6 +1784,7 @@ mod tests {
             download_client_item_id: id.to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

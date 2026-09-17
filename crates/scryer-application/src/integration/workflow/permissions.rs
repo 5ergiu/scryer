@@ -237,6 +237,7 @@ fn download_history_item_from_terminal_row(
         download_client_item_id,
         download_id: Some(row.download_id.to_wire()),
         import_status,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,

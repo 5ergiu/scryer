@@ -2481,6 +2481,11 @@ pub struct DownloadQueueItem {
     #[serde(default)]
     pub download_id: Option<String>,
     pub import_status: Option<ImportStatus>,
+    /// Which executor produced `import_status`. A manual import is an operator
+    /// action against this exact download, so its outcome outranks a tracked
+    /// block that was decided before the operator intervened.
+    #[serde(default)]
+    pub import_type: Option<ImportType>,
     pub import_error_code: Option<ImportErrorCode>,
     pub import_error_message: Option<String>,
     pub imported_at: Option<String>,

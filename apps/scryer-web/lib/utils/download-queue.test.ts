@@ -95,6 +95,13 @@ function queueItem(overrides: Partial<DownloadQueueItem> = {}): DownloadQueueIte
     seedTimeSeconds: null,
     seedTimeGoalSeconds: null,
     isPrivate: null,
+    importActions: {
+      manualImportInteractive: false,
+      manualImportDirect: false,
+      assignTitle: false,
+      ignore: false,
+      markFailed: false,
+    },
     queueScope: null,
     ...overrides,
   };

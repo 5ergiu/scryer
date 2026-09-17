@@ -63,6 +63,7 @@ async fn check_emits_manual_interaction_notification_once() {
             download_client_item_id: "dl-2".to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

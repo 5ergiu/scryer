@@ -866,8 +866,13 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // 850->852. Root-field and INPUT_OBJECT counts are unchanged - the mutation
     // already existed, `SearchSubtitlesInput` only made `language` optional, and
     // MANAGE_SUBTITLES is a value on the existing `LibraryPermissionValue`.
-    assert_eq!(public_types.len(), 852);
-    assert_eq!(kind_count("OBJECT"), 460);
+    // Which import actions a download offers is now the server's answer rather
+    // than something each surface re-derives, so `DownloadQueueItemPayload`
+    // carries a `DownloadImportActionsPayload`: OBJECT 460->461, public types
+    // 852->853. It is an additive field on a type that already existed, so no
+    // other count moves.
+    assert_eq!(public_types.len(), 853);
+    assert_eq!(kind_count("OBJECT"), 461);
     assert_eq!(kind_count("INPUT_OBJECT"), 221);
     assert_eq!(kind_count("ENUM"), 159);
     assert_eq!(kind_count("SCALAR"), 10);

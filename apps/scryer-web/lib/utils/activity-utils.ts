@@ -5,7 +5,7 @@ import {
   buildQueueStatusDetail,
   normalizeQueueState,
 } from "@/lib/utils/download-queue";
-import { manualImportActions } from "@/lib/utils/manual-import-actions";
+import { downloadImportActions } from "@/lib/utils/manual-import-actions";
 
 export type TranslateFn = ReturnType<typeof useTranslate>;
 
@@ -196,25 +196,10 @@ export function deriveQueueRowPresentation(
       displayStateKey === "IMPORT_BLOCKED" ||
       displayStateKey === "IMPORT_FAILED") &&
     failureReason.length > 0;
-  const manualActions = manualImportActions({
-    displayState: displayStateKey,
-    facet: queueItem.facet,
-    hasTitle: Boolean(queueItem.titleId),
-  });
-  const canAssignTitle =
-    trackedStateKey === "import_blocked" &&
-    displayStateKey !== "IMPORTING" &&
-    displayStateKey !== "REMOVING";
-  const canIgnore =
-    (trackedStateKey === "import_blocked" || displayStateKey === "IMPORT_FAILED") &&
-    displayStateKey !== "IMPORTING" &&
-    displayStateKey !== "REMOVING";
-  const canMarkFailed =
-    (trackedStateKey === "import_blocked" ||
-      trackedStateKey === "import_pending" ||
-      trackedStateKey === "failed_pending") &&
-    displayStateKey !== "IMPORTING" &&
-    displayStateKey !== "REMOVING";
+  // Every action on this row comes from the server's one answer; the row no
+  // longer mixes `displayState` for one button with `trackedState` for the
+  // next.
+  const actions = downloadImportActions(queueItem);
   const releaseTitle =
     queueItem.titleName.trim() || queueItem.downloadClientItemId.trim() || "—";
   const displayTitle = releaseTitle;
@@ -245,11 +230,11 @@ export function deriveQueueRowPresentation(
     releaseTitle,
     canPause: stateKey === "downloading" || stateKey === "queued",
     canResume: stateKey === "paused",
-    canAssignTitle,
-    canIgnore,
-    canMarkFailed,
-    canInteractiveManualImport: manualActions.interactive,
-    canDirectManualImport: manualActions.direct,
+    canAssignTitle: actions.assignTitle,
+    canIgnore: actions.ignore,
+    canMarkFailed: actions.markFailed,
+    canInteractiveManualImport: actions.manualImportInteractive,
+    canDirectManualImport: actions.manualImportDirect,
   };
 }
 
@@ -269,13 +254,7 @@ export function downloadQueueItemRowSelectorKey(
 }
 
 export function canIgnoreImportItem(queueItem: DownloadQueueItem): boolean {
-  const trackedStateKey = normalizeQueueState(queueItem.trackedState);
-  const displayStateKey = normalizeQueueState(queueItem.displayState);
-  return (
-    (trackedStateKey === "import_blocked" || displayStateKey === "import_failed") &&
-    displayStateKey !== "importing" &&
-    displayStateKey !== "removing"
-  );
+  return downloadImportActions(queueItem).ignore;
 }
 
 export function canDeleteImportItem(queueItem: DownloadQueueItem): boolean {

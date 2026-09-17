@@ -155,6 +155,22 @@ export type DownloadQueueItem = {
   seedTimeGoalSeconds: number | null;
   isPrivate: boolean | null;
   queueScope: ReleaseQueueScope | null;
+  /**
+   * Which import actions this download offers. The server decides once, so the
+   * activity rows, the dashboard rows and the title overviews cannot each
+   * answer it differently for the same download.
+   */
+  importActions: DownloadImportActions;
+};
+
+export type DownloadImportActions = {
+  /** Manual import that opens the file-mapping dialog first (series, anime). */
+  manualImportInteractive: boolean;
+  /** Manual import that runs without the dialog (movie). */
+  manualImportDirect: boolean;
+  assignTitle: boolean;
+  ignore: boolean;
+  markFailed: boolean;
 };
 
 export type ActiveImportStream = {
