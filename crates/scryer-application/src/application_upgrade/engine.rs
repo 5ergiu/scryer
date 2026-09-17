@@ -1,30 +1,36 @@
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+//! Job-run orchestration for in-application upgrades.
+//!
+//! The upgrade mechanics live in the shared `application-updater` crate. What
+//! remains here is everything that belongs to Scryer: the durable job run, its
+//! domain events and progress records, the restart handle, and the thin
+//! adapters that bind the shared core to Scryer's product identity and error
+//! type.
+
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use flate2::read::GzDecoder;
-use futures_util::StreamExt;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+
+#[cfg(windows)]
+use application_updater::helper_plan::ApplicationUpgradeHelperPlan;
+use application_updater::helper_plan::reboot_required_completion_allowed;
+use application_updater::pipeline::{
+    DownloadProgress, PortablePromotionFailure, PortableUpgradePaths, ProgressFuture,
+    UPGRADE_BUNDLE_MAX_BYTES, rename_path,
+};
+#[cfg(windows)]
+use application_updater::windows_handoff::{WindowsUpgradeHandoff, WindowsUpgradeHandoffInput};
 
 use crate::application_upgrade::InstallationKind;
-use crate::application_upgrade::helper_plan::reboot_required_completion_allowed;
-use crate::application_upgrade::helper_plan::{
-    APPLICATION_UPGRADE_HELPER_PLAN_SCHEMA, ApplicationUpgradeHelperMode,
-    ApplicationUpgradeHelperOwner, ApplicationUpgradeHelperPlan, ApplicationUpgradeHelperRelaunch,
-    ApplicationUpgradeHelperReplacement,
-};
 use crate::application_upgrade::manifest::{
-    UPGRADE_MANIFEST_MAX_BYTES, UpgradeArchitecture, UpgradeArchive, UpgradeArtifact,
-    UpgradeChannel, UpgradeManifest, UpgradePlatform, parse_and_validate_upgrade_manifest,
-    scryer_release_required_signer,
+    UPGRADE_MANIFEST_MAX_BYTES, UpgradeArtifact, UpgradeManifest,
+    parse_and_validate_upgrade_manifest,
 };
+use crate::application_upgrade::product::{JOURNAL_SCHEMA, SCRYER_PRODUCT};
+use crate::application_upgrade::shared::{map_updater_error, to_updater_error};
 use crate::domain_events::DomainEventActor;
-use crate::plugins::catalog::verify_signed_blob;
 use crate::{
     AppError, AppResult, AppUseCase, JobKey, JobRun, JobRunRecord, JobRunStatus, JobTriggerSource,
     SCRYER_VERSION, filesystem_space_raw,
@@ -35,21 +41,10 @@ use scryer_domain::{
 };
 
 /// Stable progress phase names consumed by the application-upgrade UI.
-pub mod phases {
-    pub const CHECKING: &str = "checking";
-    pub const DOWNLOADING: &str = "downloading";
-    pub const VERIFYING: &str = "verifying";
-    pub const STAGING: &str = "staging";
-    pub const APPLYING: &str = "applying";
-    pub const AWAITING_ELEVATION: &str = "awaiting_elevation";
-    pub const RESTARTING: &str = "restarting";
-    pub const REBOOT_REQUIRED: &str = "reboot_required";
-}
+pub use application_updater::phases;
 
-const UPGRADE_BUNDLE_MAX_BYTES: u64 = 256 * 1024;
-const UPGRADE_STAGING_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
-const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
-const JOURNAL_SCHEMA: &str = "scryer.upgrade.journal.v1";
+/// The crash-safe handoff between applying an upgrade and validating the next boot.
+pub use application_updater::journal::ApplicationUpgradeJournal;
 
 /// Progress persisted in `workflow_operations.progress_json` for an application upgrade.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,96 +77,12 @@ pub struct ApplicationUpgradeJobAccepted {
     pub job_run: JobRun,
 }
 
-/// Crash-safe handoff between applying an upgrade and validating the next boot.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApplicationUpgradeJournal {
-    pub schema: String,
-    pub run_id: String,
-    pub expected_version: String,
-    pub expected_tag: String,
-    pub executable_path: PathBuf,
-    pub backup_path: PathBuf,
-    #[serde(default)]
-    pub backup_paths: Vec<PathBuf>,
-    pub phase: String,
-    pub helper_error: Option<String>,
-    #[serde(default)]
-    pub written_at: Option<DateTime<Utc>>,
-}
-
-/// Executable and backup locations for a portable promotion.
-///
-/// These are resolved before anything is moved so the durable journal can be
-/// written ahead of the promotion it describes.
-#[derive(Clone, Debug)]
-#[cfg_attr(windows, allow(dead_code))]
-struct PortableUpgradePaths {
-    executable_path: PathBuf,
-    backup_path: PathBuf,
-}
-
-/// Failure state of a portable promotion after its journal was written.
-///
-/// Once the current executable has moved aside, a failed restoration must keep
-/// the journal and backup paths available for recovery on the next boot.
-#[cfg_attr(windows, allow(dead_code))]
-enum PortablePromotionFailure {
-    Restored(AppError),
-    RecoveryRequired(AppError),
-}
-
-#[cfg_attr(windows, allow(dead_code))]
-impl From<AppError> for PortablePromotionFailure {
-    fn from(error: AppError) -> Self {
-        Self::Restored(error)
-    }
-}
-
-#[cfg_attr(windows, allow(dead_code))]
-impl PortablePromotionFailure {
-    fn into_parts(self) -> (AppError, bool) {
-        match self {
-            Self::Restored(error) => (error, true),
-            Self::RecoveryRequired(error) => (error, false),
-        }
-    }
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-struct WindowsUpgradeHandoffInput<'a> {
-    run_id: &'a str,
-    expected_version: &'a str,
-    expected_tag: &'a str,
-    installation_kind: InstallationKind,
-    tray_supervised: bool,
-    executable_path: &'a Path,
-    install_dir: &'a Path,
-    /// Process id of the backend the helper must outlive before it replaces files.
-    backend_process_id: u32,
-    artifact: Option<&'a UpgradeArtifact>,
-    extracted_dir: Option<&'a Path>,
-    msi_path: Option<&'a Path>,
-    journal_path: PathBuf,
-    direct_relaunch_args: &'a [String],
-    direct_relaunch_cwd: &'a Path,
-    current_version: &'a str,
-    written_at: DateTime<Utc>,
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-struct WindowsUpgradeHandoff {
-    journal: ApplicationUpgradeJournal,
-    plan: ApplicationUpgradeHelperPlan,
-    progress_phase: &'static str,
-}
-
+/// The host-owned free-space admission check, injectable so tests can drive the
+/// insufficient-space path without filling a filesystem.
 type UpgradeSpaceCheck = fn(&Path, u64) -> AppResult<()>;
+/// The rename primitive, injectable so tests can drive promotion and rollback
+/// failures.
 type UpgradeRename = fn(&Path, &Path) -> std::io::Result<()>;
-
-fn rename_path(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::rename(from, to)
-}
 
 struct UpgradePipelineDependencies<'a> {
     client: &'a reqwest::Client,
@@ -534,6 +445,7 @@ impl AppUseCase {
                 dependencies.rename,
             ) {
                 let (error, restored) = failure.into_parts();
+                let error = map_updater_error(error);
                 if restored {
                     if let Err(cleanup_error) = remove_file_if_exists(&journal_path) {
                         tracing::warn!(
@@ -1002,18 +914,17 @@ impl AppUseCase {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Adapters onto the shared application-upgrade core.
+//
+// Each of these binds one shared operation to Scryer's product identity and
+// maps the shared error onto `AppError`. The messages, checks and ordering are
+// the shared core's, which are the ones this module used before the extraction.
+// ---------------------------------------------------------------------------
+
 fn application_upgrade_http_client() -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .connect_timeout(Duration::from_secs(30))
-        // Release artifacts can legitimately take longer than an ordinary API
-        // request on slow links; retain a bounded long-running HTTP budget.
-        .timeout(scryer_outbound_http::LONG_RUNNING_HTTP_OPERATION_TIMEOUT)
-        .build()
-        .map_err(|error| {
-            AppError::Repository(format!("failed to build upgrade HTTP client: {error}"))
-        })
+    application_updater::pipeline::application_upgrade_http_client(&SCRYER_PRODUCT)
+        .map_err(map_updater_error)
 }
 
 async fn verify_upgrade_manifest_signature(
@@ -1021,29 +932,19 @@ async fn verify_upgrade_manifest_signature(
     bundle_raw: Vec<u8>,
     release_tag: &str,
 ) -> AppResult<()> {
-    verify_signed_blob(
+    application_updater::pipeline::verify_upgrade_manifest_signature(
+        &SCRYER_PRODUCT,
         manifest_raw,
         bundle_raw,
-        scryer_release_required_signer(release_tag),
+        release_tag,
     )
     .await
-    .map_err(|error| {
-        AppError::Validation(format!(
-            "upgrade manifest signature verification failed: {error}"
-        ))
-    })
+    .map_err(map_updater_error)
 }
 
 fn release_asset_url(tag: &str, filename: &str) -> AppResult<url::Url> {
-    let mut url = url::Url::parse("https://github.com/scryer-media/scryer/releases/download/")
-        .map_err(|error| AppError::Repository(format!("invalid release URL base: {error}")))?;
-    url.path_segments_mut()
-        .map_err(|_| {
-            AppError::Repository("release URL base cannot accept path segments".to_string())
-        })?
-        .push(tag)
-        .push(filename);
-    Ok(url)
+    application_updater::pipeline::release_asset_url(&SCRYER_PRODUCT, tag, filename)
+        .map_err(map_updater_error)
 }
 
 async fn fetch_capped_bytes(
@@ -1052,81 +953,43 @@ async fn fetch_capped_bytes(
     cap: u64,
     label: &str,
 ) -> AppResult<Vec<u8>> {
-    let response = client
-        .get(url)
-        .send()
+    application_updater::pipeline::fetch_capped_bytes(client, url, cap, label)
         .await
-        .map_err(|error| AppError::Repository(format!("failed to fetch {label}: {error}")))?
-        .error_for_status()
-        .map_err(|error| AppError::Repository(format!("failed to fetch {label}: {error}")))?;
-    if response
-        .content_length()
-        .is_some_and(|content_length| content_length > cap)
-    {
-        return Err(AppError::Validation(format!(
-            "{label} exceeds the maximum size of {cap} bytes"
-        )));
-    }
-
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| AppError::Repository(format!("failed to read {label}: {error}")))?;
-        let next_len = u64::try_from(bytes.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        if next_len > cap {
-            return Err(AppError::Validation(format!(
-                "{label} exceeds the maximum size of {cap} bytes"
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+        .map_err(map_updater_error)
 }
 
 fn select_artifact(
     manifest: &UpgradeManifest,
     installation_kind: InstallationKind,
 ) -> AppResult<&UpgradeArtifact> {
-    let platform = match std::env::consts::OS {
-        "macos" => UpgradePlatform::Darwin,
-        "linux" => UpgradePlatform::Linux,
-        "windows" => UpgradePlatform::Windows,
-        os => {
-            return Err(AppError::Validation(format!(
-                "no application upgrade artifact is available for operating system {os}"
-            )));
-        }
-    };
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => UpgradeArchitecture::Arm64,
-        "x86_64" => UpgradeArchitecture::X86_64,
-        arch => {
-            return Err(AppError::Validation(format!(
-                "no application upgrade artifact is available for architecture {arch}"
-            )));
-        }
-    };
-    let channel = match installation_kind {
-        InstallationKind::Portable => UpgradeChannel::Portable,
-        InstallationKind::DirectMsi => UpgradeChannel::Msi,
-        _ => {
-            return Err(AppError::Validation(
-                "application upgrade installation is not eligible".to_string(),
-            ));
-        }
-    };
-    manifest
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.platform == platform && artifact.arch == arch && artifact.channel == channel
+    application_updater::pipeline::select_artifact(manifest, installation_kind)
+        .map_err(map_updater_error)
+}
+
+/// Reports download progress into the durable job run.
+struct JobRunDownloadProgress<'a> {
+    app: &'a AppUseCase,
+    run: &'a mut JobRunRecord,
+    request: &'a ApplicationUpgradeJobRequest,
+}
+
+impl DownloadProgress for JobRunDownloadProgress<'_> {
+    fn report(&mut self, downloaded_bytes: u64, total_bytes: u64) -> ProgressFuture<'_> {
+        Box::pin(async move {
+            self.app
+                .update_application_upgrade_progress(
+                    self.run,
+                    ApplicationUpgradeProgress {
+                        phase: phases::DOWNLOADING.to_string(),
+                        downloaded_bytes,
+                        total_bytes,
+                        ..ApplicationUpgradeProgress::checking(self.request)
+                    },
+                )
+                .await
+                .map_err(to_updater_error)
         })
-        .ok_or_else(|| {
-            AppError::Validation("no upgrade artifact is available for this platform".to_string())
-        })
+    }
 }
 
 async fn download_artifact(
@@ -1138,325 +1001,43 @@ async fn download_artifact(
     artifact_url_override: Option<&str>,
     destination: &Path,
 ) -> AppResult<()> {
-    let response = client
-        .get(artifact_url_override.unwrap_or(&artifact.url))
-        .send()
-        .await
-        .map_err(|error| {
-            AppError::Repository(format!("failed to download upgrade artifact: {error}"))
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            AppError::Repository(format!("failed to download upgrade artifact: {error}"))
-        })?;
-    if response
-        .content_length()
-        .is_some_and(|content_length| content_length > artifact.size)
-    {
-        return Err(AppError::Validation(
-            "upgrade artifact exceeds the manifest size".to_string(),
-        ));
-    }
-
-    let mut file = tokio::fs::File::create(destination)
-        .await
-        .map_err(|error| {
-            AppError::Repository(format!("failed to create upgrade staging file: {error}"))
-        })?;
-    let mut downloaded = 0_u64;
-    let mut hasher = blake3::Hasher::new();
-    let mut last_progress = Instant::now() - DOWNLOAD_PROGRESS_INTERVAL;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            AppError::Repository(format!("failed to read upgrade artifact response: {error}"))
-        })?;
-        let next_downloaded =
-            downloaded.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        if next_downloaded > artifact.size {
-            return Err(AppError::Validation(
-                "upgrade artifact exceeds the manifest size".to_string(),
-            ));
-        }
-        file.write_all(&chunk).await.map_err(|error| {
-            AppError::Repository(format!("failed to write upgrade staging file: {error}"))
-        })?;
-        hasher.update(&chunk);
-        downloaded = next_downloaded;
-        if last_progress.elapsed() >= DOWNLOAD_PROGRESS_INTERVAL {
-            app.update_application_upgrade_progress(
-                run,
-                ApplicationUpgradeProgress {
-                    phase: phases::DOWNLOADING.to_string(),
-                    downloaded_bytes: downloaded,
-                    total_bytes: artifact.size,
-                    ..ApplicationUpgradeProgress::checking(request)
-                },
-            )
-            .await?;
-            last_progress = Instant::now();
-        }
-    }
-    file.flush().await.map_err(|error| {
-        AppError::Repository(format!("failed to flush upgrade staging file: {error}"))
-    })?;
-    if downloaded != artifact.size {
-        return Err(AppError::Validation(format!(
-            "upgrade artifact size mismatch: expected {} bytes, received {downloaded}",
-            artifact.size
-        )));
-    }
-    let expected_hash = blake3::Hash::from_hex(&artifact.blake3)
-        .map_err(|error| AppError::Validation(format!("invalid manifest BLAKE3 hash: {error}")))?;
-    if hasher.finalize() != expected_hash {
-        return Err(AppError::Validation(
-            "upgrade artifact BLAKE3 hash does not match the manifest".to_string(),
-        ));
-    }
-    app.update_application_upgrade_progress(
-        run,
-        ApplicationUpgradeProgress {
-            phase: phases::DOWNLOADING.to_string(),
-            downloaded_bytes: downloaded,
-            total_bytes: artifact.size,
-            ..ApplicationUpgradeProgress::checking(request)
-        },
+    let mut progress = JobRunDownloadProgress { app, run, request };
+    application_updater::pipeline::download_artifact(
+        client,
+        artifact,
+        artifact_url_override,
+        destination,
+        &mut progress,
     )
     .await
+    .map_err(map_updater_error)
 }
 
 fn verify_artifact_hash(path: &Path, artifact: &UpgradeArtifact) -> AppResult<()> {
-    let mut file = fs::File::open(path).map_err(|error| {
-        AppError::Repository(format!("failed to open upgrade artifact: {error}"))
-    })?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            AppError::Repository(format!("failed to read upgrade artifact: {error}"))
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if hasher.finalize().to_hex().as_str() != artifact.blake3 {
-        return Err(AppError::Validation(
-            "upgrade artifact BLAKE3 hash does not match the manifest".to_string(),
-        ));
-    }
-    Ok(())
+    application_updater::pipeline::verify_artifact_hash(path, artifact).map_err(map_updater_error)
 }
 
 fn validate_archive_members(path: &Path, artifact: &UpgradeArtifact) -> AppResult<()> {
-    match artifact.archive {
-        UpgradeArchive::TarGz => validate_tar_members(path, artifact),
-        UpgradeArchive::Msi => Ok(()),
-    }
-}
-
-fn validate_tar_members(path: &Path, artifact: &UpgradeArtifact) -> AppResult<()> {
-    let file = fs::File::open(path).map_err(|error| {
-        AppError::Repository(format!("failed to open upgrade archive: {error}"))
-    })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    let mut actual = BTreeMap::new();
-    for entry in archive.entries().map_err(archive_error)? {
-        let entry = entry.map_err(archive_error)?;
-        let member_path = archive_member_path(entry.path().map_err(archive_error)?.as_ref())?;
-        if !entry.header().entry_type().is_file() {
-            return Err(AppError::Validation(format!(
-                "upgrade archive member '{member_path}' is not a regular file"
-            )));
-        }
-        let size = entry.size();
-        if actual.insert(member_path.clone(), size).is_some() {
-            return Err(AppError::Validation(format!(
-                "upgrade archive has duplicate member '{member_path}'"
-            )));
-        }
-    }
-    ensure_member_set_matches(&actual, artifact)
-}
-
-fn ensure_member_set_matches(
-    actual: &BTreeMap<String, u64>,
-    artifact: &UpgradeArtifact,
-) -> AppResult<()> {
-    let expected = artifact
-        .members
-        .iter()
-        .map(|member| (member.path.clone(), member.size))
-        .collect::<BTreeMap<_, _>>();
-    if actual != &expected {
-        return Err(AppError::Validation(
-            "upgrade archive members do not exactly match the signed manifest".to_string(),
-        ));
-    }
-    Ok(())
+    application_updater::pipeline::validate_archive_members(path, artifact)
+        .map_err(map_updater_error)
 }
 
 fn extract_archive(path: &Path, artifact: &UpgradeArtifact, destination: &Path) -> AppResult<()> {
-    fs::create_dir_all(destination).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to create extracted upgrade directory: {error}"
-        ))
-    })?;
-    match artifact.archive {
-        UpgradeArchive::TarGz => extract_tar(path, artifact, destination),
-        UpgradeArchive::Msi => Ok(()),
-    }
+    application_updater::pipeline::extract_archive(path, artifact, destination)
+        .map_err(map_updater_error)
 }
 
-fn extract_tar(path: &Path, artifact: &UpgradeArtifact, destination: &Path) -> AppResult<()> {
-    let file = fs::File::open(path).map_err(|error| {
-        AppError::Repository(format!("failed to open upgrade archive: {error}"))
-    })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    let expected = artifact_member_paths(artifact);
-    for entry in archive.entries().map_err(archive_error)? {
-        let mut entry = entry.map_err(archive_error)?;
-        let member_path = archive_member_path(entry.path().map_err(archive_error)?.as_ref())?;
-        let member = expected.get(&member_path).ok_or_else(|| {
-            AppError::Validation(format!("unexpected upgrade archive member '{member_path}'"))
-        })?;
-        if !entry.header().entry_type().is_file() || entry.size() != member.size {
-            return Err(AppError::Validation(format!(
-                "invalid upgrade archive member '{member_path}'"
-            )));
-        }
-        let output = destination.join(&member_path);
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent).map_err(archive_error)?;
-        }
-        let mut output_file = fs::File::create(&output).map_err(archive_error)?;
-        std::io::copy(&mut entry, &mut output_file).map_err(archive_error)?;
-        set_extracted_permissions(
-            &output,
-            entry.header().mode().unwrap_or(0o644),
-            member.executable,
-        )?;
-    }
-    Ok(())
-}
-
-fn artifact_member_paths(
-    artifact: &UpgradeArtifact,
-) -> BTreeMap<String, crate::application_upgrade::manifest::UpgradeArtifactMember> {
-    artifact
-        .members
-        .iter()
-        .cloned()
-        .map(|member| (member.path.clone(), member))
-        .collect()
-}
-
-fn archive_member_path(path: &Path) -> AppResult<String> {
-    let raw = path.to_string_lossy();
-    let windows_drive_prefix = raw.as_bytes().get(1) == Some(&b':')
-        && raw
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| byte.is_ascii_alphabetic());
-    if path.is_absolute() || raw.starts_with('\\') || raw.contains('\\') || windows_drive_prefix {
-        return Err(AppError::Validation(
-            "upgrade archive contains an absolute member path".to_string(),
-        ));
-    }
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(component) => {
-                components.push(component.to_string_lossy().to_string())
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(AppError::Validation(
-                    "upgrade archive contains an unsafe member path".to_string(),
-                ));
-            }
-        }
-    }
-    if components.is_empty() {
-        return Err(AppError::Validation(
-            "upgrade archive contains an empty member path".to_string(),
-        ));
-    }
-    Ok(components.join("/"))
-}
-
-#[cfg(unix)]
-fn set_extracted_permissions(path: &Path, mode: u32, executable: bool) -> AppResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = if executable {
-        mode | 0o111
-    } else {
-        mode & !0o111
-    };
-    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777)).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to set extracted upgrade permissions: {error}"
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_extracted_permissions(_path: &Path, _mode: u32, _executable: bool) -> AppResult<()> {
-    Ok(())
-}
-
-/// Resolve the executable and backup locations a portable promotion will use.
-///
-/// This performs every check that must precede the durable journal: the
-/// installation must be portable, the executable must be resolvable and live in
-/// a directory, and no earlier backup may be overwritten.
 #[cfg_attr(windows, allow(dead_code))]
 fn portable_upgrade_paths(
     request: &ApplicationUpgradeJobRequest,
     current_version: &str,
 ) -> AppResult<PortableUpgradePaths> {
-    #[cfg(unix)]
-    {
-        if request.installation_kind != InstallationKind::Portable {
-            return Err(AppError::Validation(
-                "portable replacement is only available for portable installations".to_string(),
-            ));
-        }
-        let executable_path = request
-            .executable_path
-            .clone()
-            .or_else(|| std::env::current_exe().ok())
-            .ok_or_else(|| {
-                AppError::Repository("failed to resolve the running executable path".to_string())
-            })?;
-        if executable_path.parent().is_none() {
-            return Err(AppError::Validation(
-                "running executable has no parent directory".to_string(),
-            ));
-        }
-        let backup_path = PathBuf::from(format!(
-            "{}.pre-upgrade-{current_version}",
-            executable_path.display()
-        ));
-        if backup_path.exists() {
-            return Err(AppError::Validation(format!(
-                "refusing to overwrite existing application backup '{}'",
-                backup_path.display()
-            )));
-        }
-        Ok(PortableUpgradePaths {
-            executable_path,
-            backup_path,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (request, current_version);
-        Err(AppError::Validation(
-            "portable replacement is not available on this platform".to_string(),
-        ))
-    }
+    application_updater::pipeline::portable_upgrade_paths(
+        request.installation_kind,
+        request.executable_path.as_deref(),
+        current_version,
+    )
+    .map_err(map_updater_error)
 }
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -1468,73 +1049,19 @@ fn apply_portable_upgrade(
     ensure_available_space: UpgradeSpaceCheck,
     rename: UpgradeRename,
 ) -> Result<(), PortablePromotionFailure> {
-    #[cfg(unix)]
-    {
-        let executable_dir = paths.executable_path.parent().ok_or_else(|| {
-            AppError::Validation("running executable has no parent directory".to_string())
-        })?;
-        let new_binary = find_upgraded_executable(extracted_dir, artifact, &paths.executable_path)?;
-        let new_binary_size = fs::metadata(&new_binary)
-            .map_err(|error| {
-                AppError::Repository(format!("failed to stat upgraded executable: {error}"))
-            })?
-            .len();
-        ensure_available_space(
-            executable_dir,
-            new_binary_size.saturating_add(UPGRADE_STAGING_RESERVE_BYTES),
-        )?;
-        let new_path = executable_dir.join(format!(".scryer-upgrade-new-{expected_version}"));
-        fs::copy(&new_binary, &new_path).map_err(|error| {
-            AppError::Repository(format!("failed to stage replacement executable: {error}"))
-        })?;
-        if let Err(error) = rename(&paths.executable_path, &paths.backup_path) {
-            let _ = fs::remove_file(&new_path);
-            return Err(AppError::Repository(format!(
-                "failed to retain current executable backup: {error}"
-            ))
-            .into());
-        }
-        if let Err(error) = rename(&new_path, &paths.executable_path) {
-            return match rename(&paths.backup_path, &paths.executable_path) {
-                Ok(()) => {
-                    let _ = fs::remove_file(&new_path);
-                    Err(AppError::Repository(format!(
-                        "failed to replace application executable: {error}; the previous executable was restored"
-                    ))
-                    .into())
-                }
-                Err(rollback_error) => Err(PortablePromotionFailure::RecoveryRequired(
-                    AppError::Repository(format!(
-                        "failed to replace application executable: {error}; failed to restore the previous executable from '{}': {rollback_error}",
-                        paths.backup_path.display()
-                    )),
-                )),
-            };
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            extracted_dir,
-            artifact,
-            paths,
-            expected_version,
-            ensure_available_space,
-            rename,
-        );
-        Err(AppError::Validation(
-            "portable replacement is not available on this platform".to_string(),
-        )
-        .into())
-    }
+    application_updater::pipeline::apply_portable_upgrade(
+        &SCRYER_PRODUCT,
+        extracted_dir,
+        artifact,
+        paths,
+        expected_version,
+        |path, required_bytes| {
+            ensure_available_space(path, required_bytes).map_err(to_updater_error)
+        },
+        rename,
+    )
 }
 
-/// Undo a completed promotion after a later step failed.
-///
-/// The backup is moved back over the newly installed executable. The journal is
-/// removed only after that restoration succeeds so an interrupted rollback
-/// retains the paths needed for recovery.
 #[cfg(not(windows))]
 fn roll_back_portable_promotion(
     paths: &PortableUpgradePaths,
@@ -1542,291 +1069,42 @@ fn roll_back_portable_promotion(
     rename: UpgradeRename,
     error: AppError,
 ) -> AppError {
-    let outcome = match rename(&paths.backup_path, &paths.executable_path) {
-        Ok(()) => {
-            let mut outcome = "the previous executable was restored".to_string();
-            if let Err(cleanup_error) = remove_file_if_exists(journal_path) {
-                outcome.push_str(&format!(
-                    "; the application upgrade journal could not be removed: {cleanup_error}"
-                ));
-            }
-            outcome
-        }
-        Err(rollback_error) => format!(
-            "the previous executable could not be restored from '{}': {rollback_error}; the recovery journal was retained",
-            paths.backup_path.display()
-        ),
-    };
-    AppError::Repository(format!(
-        "application upgrade failed after the executable was replaced: {error}; {outcome}"
+    map_updater_error(application_updater::pipeline::roll_back_portable_promotion(
+        paths,
+        journal_path,
+        rename,
+        to_updater_error(error),
     ))
 }
 
-#[cfg(unix)]
-fn find_upgraded_executable(
-    extracted_dir: &Path,
-    artifact: &UpgradeArtifact,
-    executable_path: &Path,
-) -> AppResult<PathBuf> {
-    let current_name = executable_path.file_name();
-    let exact = artifact
-        .members
-        .iter()
-        .find(|member| member.executable && Path::new(&member.path).file_name() == current_name);
-    let candidates = artifact
-        .members
-        .iter()
-        .filter(|member| member.executable)
-        .collect::<Vec<_>>();
-    let selected = exact
-        .or_else(|| (candidates.len() == 1).then_some(candidates[0]))
-        .ok_or_else(|| {
-            AppError::Validation(
-                "upgrade archive does not identify a unique replacement executable".to_string(),
-            )
-        })?;
-    Ok(extracted_dir.join(&selected.path))
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(windows)]
 fn build_windows_upgrade_handoff(
     input: WindowsUpgradeHandoffInput<'_>,
 ) -> AppResult<WindowsUpgradeHandoff> {
-    let owner = if input.tray_supervised {
-        ApplicationUpgradeHelperOwner::Tray
-    } else {
-        ApplicationUpgradeHelperOwner::Direct
-    };
-    let tray_path = input.install_dir.join("scryer-tray.exe");
-    let relaunch = if owner == ApplicationUpgradeHelperOwner::Tray {
-        ApplicationUpgradeHelperRelaunch {
-            program: tray_path.clone(),
-            args: vec!["--login-start".to_string()],
-            cwd: input.install_dir.to_path_buf(),
-        }
-    } else {
-        ApplicationUpgradeHelperRelaunch {
-            program: input.executable_path.to_path_buf(),
-            args: input.direct_relaunch_args.to_vec(),
-            cwd: input.direct_relaunch_cwd.to_path_buf(),
-        }
-    };
-    let backup_suffix = format!(".pre-upgrade-{}", input.current_version);
-    let (mode, replace, backup_paths, staged_dir, msi_path, progress_phase) = match input
-        .installation_kind
-    {
-        InstallationKind::Portable => {
-            let artifact = input.artifact.ok_or_else(|| {
-                AppError::Validation(
-                    "portable Windows upgrade handoff requires an artifact".to_string(),
-                )
-            })?;
-            let extracted_dir = input.extracted_dir.ok_or_else(|| {
-                AppError::Validation(
-                    "portable Windows upgrade handoff requires an extracted directory".to_string(),
-                )
-            })?;
-            let replacements =
-                windows_portable_replacements(extracted_dir, artifact, input.install_dir)?;
-            let backup_paths = replacements
-                .iter()
-                .map(|replacement| {
-                    PathBuf::from(format!(
-                        "{}{}",
-                        replacement.to_install.display(),
-                        backup_suffix
-                    ))
-                })
-                .collect();
-            (
-                ApplicationUpgradeHelperMode::Portable,
-                replacements,
-                backup_paths,
-                Some(extracted_dir.to_path_buf()),
-                None,
-                phases::RESTARTING,
-            )
-        }
-        InstallationKind::DirectMsi => {
-            let msi_path = input.msi_path.ok_or_else(|| {
-                AppError::Validation(
-                    "MSI Windows upgrade handoff requires an installer path".to_string(),
-                )
-            })?;
-            (
-                ApplicationUpgradeHelperMode::Msi,
-                Vec::new(),
-                Vec::new(),
-                None,
-                Some(msi_path.to_path_buf()),
-                phases::AWAITING_ELEVATION,
-            )
-        }
-        _ => {
-            return Err(AppError::Validation(
-                "application upgrade installation is not eligible".to_string(),
-            ));
-        }
-    };
-    let journal = ApplicationUpgradeJournal {
-        schema: JOURNAL_SCHEMA.to_string(),
-        run_id: input.run_id.to_string(),
-        expected_version: input.expected_version.to_string(),
-        expected_tag: input.expected_tag.to_string(),
-        executable_path: input.executable_path.to_path_buf(),
-        backup_path: PathBuf::from(format!(
-            "{}{}",
-            input.executable_path.display(),
-            backup_suffix
-        )),
-        backup_paths,
-        phase: phases::RESTARTING.to_string(),
-        helper_error: None,
-        written_at: Some(input.written_at),
-    };
-    let plan = ApplicationUpgradeHelperPlan {
-        schema: APPLICATION_UPGRADE_HELPER_PLAN_SCHEMA.to_string(),
-        mode,
-        owner,
-        journal_path: input.journal_path,
-        staged_dir,
-        msi_path,
-        install_dir: input.install_dir.to_path_buf(),
-        wait_process_ids: vec![input.backend_process_id],
-        replace,
-        backup_suffix,
-        relaunch,
-        tray_shutdown_program: (owner == ApplicationUpgradeHelperOwner::Tray).then_some(tray_path),
-        expected_version: input.expected_version.to_string(),
-        expected_tag: input.expected_tag.to_string(),
-    };
-    plan.validate().map_err(AppError::Validation)?;
-    Ok(WindowsUpgradeHandoff {
-        journal,
-        plan,
-        progress_phase,
-    })
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn windows_portable_replacements(
-    extracted_dir: &Path,
-    artifact: &UpgradeArtifact,
-    install_dir: &Path,
-) -> AppResult<Vec<ApplicationUpgradeHelperReplacement>> {
-    ["scryer.exe", "scryer-tray.exe"]
-        .into_iter()
-        .map(|filename| {
-            let member = artifact
-                .members
-                .iter()
-                .find(|member| {
-                    Path::new(&member.path)
-                        .file_name()
-                        .is_some_and(|name| name == filename)
-                })
-                .ok_or_else(|| {
-                    AppError::Validation(format!(
-                        "upgrade archive does not contain required Windows executable '{filename}'"
-                    ))
-                })?;
-            Ok(ApplicationUpgradeHelperReplacement {
-                from_staged: extracted_dir.join(&member.path),
-                to_install: install_dir.join(filename),
-            })
-        })
-        .collect()
+    application_updater::windows_handoff::build_windows_upgrade_handoff(&SCRYER_PRODUCT, input)
+        .map_err(map_updater_error)
 }
 
 #[cfg(windows)]
 fn write_helper_plan(path: &Path, plan: &ApplicationUpgradeHelperPlan) -> AppResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        AppError::Repository(
-            "application upgrade helper plan path has no parent directory".to_string(),
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to create application upgrade helper directory: {error}"
-        ))
-    })?;
-    let bytes = serde_json::to_vec(plan).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to encode application upgrade helper plan: {error}"
-        ))
-    })?;
-    let temporary = parent.join(".plan.tmp");
-    fs::write(&temporary, bytes).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to write application upgrade helper plan: {error}"
-        ))
-    })?;
-    fs::rename(&temporary, path).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to activate application upgrade helper plan: {error}"
-        ))
-    })
+    application_updater::windows_handoff::write_helper_plan(path, plan).map_err(map_updater_error)
 }
 
 #[cfg(windows)]
 fn copy_and_spawn_windows_upgrade_helper(helper_path: &Path, plan_path: &Path) -> AppResult<()> {
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-
-    let source = std::env::current_exe().map_err(|error| {
-        AppError::Repository(format!(
-            "failed to resolve upgrade helper source executable: {error}"
-        ))
-    })?;
-    fs::copy(&source, helper_path).map_err(|error| {
-        AppError::Repository(format!("failed to copy temporary upgrade helper: {error}"))
-    })?;
-    std::process::Command::new(helper_path)
-        .arg("--upgrade-helper")
-        .arg(plan_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|error| {
-            AppError::Repository(format!("failed to spawn temporary upgrade helper: {error}"))
-        })?;
-    Ok(())
+    application_updater::windows_handoff::copy_and_spawn_windows_upgrade_helper(
+        helper_path,
+        plan_path,
+    )
+    .map_err(map_updater_error)
 }
 
 fn recreate_staging_dir(path: &Path) -> AppResult<()> {
-    remove_dir_if_exists(path)?;
-    fs::create_dir_all(path).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to create upgrade staging directory: {error}"
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            AppError::Repository(format!(
-                "failed to protect upgrade staging directory: {error}"
-            ))
-        })?;
-    }
-    Ok(())
+    application_updater::pipeline::recreate_staging_dir(path).map_err(map_updater_error)
 }
 
-/// Bytes the staging filesystem must hold: the downloaded artifact, everything
-/// it decompresses into, and the fixed working reserve.
-///
-/// MSI artifacts declare no members, so their admission is the artifact plus the
-/// reserve exactly as before.
 fn staging_space_requirement(artifact: &UpgradeArtifact) -> u64 {
-    artifact
-        .members
-        .iter()
-        .fold(artifact.size, |total, member| {
-            total.saturating_add(member.size)
-        })
-        .saturating_add(UPGRADE_STAGING_RESERVE_BYTES)
+    application_updater::pipeline::staging_space_requirement(artifact)
 }
 
 fn ensure_available_space(path: &Path, required_bytes: u64) -> AppResult<()> {
@@ -1845,177 +1123,38 @@ fn ensure_available_space(path: &Path, required_bytes: u64) -> AppResult<()> {
 }
 
 fn write_journal(path: &Path, journal: &ApplicationUpgradeJournal) -> AppResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        AppError::Repository("application upgrade journal path has no parent directory".to_string())
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to create application upgrade journal directory: {error}"
-        ))
-    })?;
-    let bytes = serde_json::to_vec(journal).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to encode application upgrade journal: {error}"
-        ))
-    })?;
-    let temporary = parent.join(format!(".journal-{}.tmp", journal.run_id));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to create application upgrade journal: {error}"
-        ))
-    })?;
-    file.write_all(&bytes).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to write application upgrade journal: {error}"
-        ))
-    })?;
-    file.sync_all().map_err(|error| {
-        AppError::Repository(format!(
-            "failed to flush application upgrade journal: {error}"
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).map_err(|error| {
-            AppError::Repository(format!(
-                "failed to protect application upgrade journal: {error}"
-            ))
-        })?;
-    }
-    activate_journal(&temporary, path).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to activate application upgrade journal: {error}"
-        ))
-    })
-}
-
-#[cfg(not(windows))]
-fn activate_journal(temporary: &Path, path: &Path) -> std::io::Result<()> {
-    fs::rename(temporary, path)
-}
-
-/// Atomically replace an existing journal on Windows.
-///
-/// `std::fs::rename` cannot replace an existing destination there. `MoveFileExW`
-/// does, and `MOVEFILE_WRITE_THROUGH` keeps the helper's terminal state durable
-/// before it relaunches the application.
-#[cfg(windows)]
-fn activate_journal(temporary: &Path, path: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(
-            existing_file_name: *const u16,
-            new_file_name: *const u16,
-            flags: u32,
-        ) -> i32;
-    }
-
-    let existing = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let replacement = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: Both paths are NUL-terminated UTF-16 buffers that outlive the call.
-    if unsafe {
-        MoveFileExW(
-            existing.as_ptr(),
-            replacement.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    application_updater::journal::write_journal(path, journal).map_err(map_updater_error)
 }
 
 /// Resolve a path through symlinks, falling back to the path as given.
-///
-/// Startup evidence canonicalizes the running executable, so every comparison
-/// against it must resolve the same way or a symlinked install (Homebrew's
-/// `/usr/local/opt`, `/home/linuxbrew`) never matches itself.
 fn canonical_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    application_updater::pipeline::canonical_path(path)
 }
 
 fn load_journal(path: &Path) -> AppResult<Option<ApplicationUpgradeJournal>> {
-    let raw = match fs::read(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(AppError::Repository(format!(
-                "failed to read application upgrade journal: {error}"
-            )));
-        }
-    };
-    serde_json::from_slice(&raw).map(Some).map_err(|error| {
-        AppError::Validation(format!("invalid application upgrade journal: {error}"))
-    })
+    application_updater::journal::load_journal(path).map_err(map_updater_error)
 }
 
 /// Persist a terminal status observed by the temporary upgrade helper.
-///
-/// The helper is intentionally hosted by the executable crate, so journal mutation
-/// remains here with the schema owner rather than duplicating its atomic-write logic.
 pub fn application_upgrade_helper_update_journal(
     path: &Path,
     phase: &str,
     helper_error: Option<String>,
 ) -> AppResult<()> {
-    let mut journal = load_journal(path)?.ok_or_else(|| {
-        AppError::NotFound(format!(
-            "application upgrade journal '{}' was not found",
-            path.display()
-        ))
-    })?;
-    journal.phase = phase.to_string();
-    journal.helper_error = helper_error;
-    write_journal(path, &journal)
+    application_updater::journal::application_upgrade_helper_update_journal(
+        path,
+        phase,
+        helper_error,
+    )
+    .map_err(map_updater_error)
 }
 
 fn remove_file_if_exists(path: &Path) -> AppResult<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::Repository(format!(
-            "failed to remove application upgrade file '{}': {error}",
-            path.display()
-        ))),
-    }
+    application_updater::journal::remove_file_if_exists(path).map_err(map_updater_error)
 }
 
 fn remove_dir_if_exists(path: &Path) -> AppResult<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::Repository(format!(
-            "failed to remove application upgrade staging directory '{}': {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn archive_error(error: impl std::fmt::Display) -> AppError {
-    AppError::Validation(format!("invalid upgrade archive: {error}"))
+    application_updater::journal::remove_dir_if_exists(path).map_err(map_updater_error)
 }
 
 #[cfg(test)]
@@ -2025,475 +1164,28 @@ mod tests {
     use crate::JobRunRepository;
     #[cfg(unix)]
     use crate::application_upgrade::ApplicationUpgradeRestartHandle;
+    #[cfg(unix)]
     use crate::application_upgrade::InstallationKind;
     #[cfg(unix)]
     use crate::application_upgrade::manifest::UPGRADE_MANIFEST_SCHEMA_VERSION;
-    use crate::application_upgrade::manifest::UpgradeArtifactMember;
+    #[cfg(unix)]
+    use crate::application_upgrade::manifest::{
+        UpgradeArchitecture, UpgradeArchive, UpgradeArtifactMember, UpgradeChannel, UpgradePlatform,
+    };
+    #[cfg(unix)]
+    use application_updater::pipeline::UPGRADE_STAGING_RESERVE_BYTES;
+    #[cfg(unix)]
+    use std::fs;
     #[cfg(unix)]
     use std::sync::Arc;
     #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
     #[cfg(unix)]
+    use std::time::Duration;
+    #[cfg(unix)]
     use wiremock::matchers::{method, path};
     #[cfg(unix)]
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[test]
-    fn archive_member_paths_reject_parent_components() {
-        let error = archive_member_path(Path::new("bin/../scryer")).expect_err("unsafe path");
-        assert!(error.to_string().contains("unsafe member path"));
-    }
-
-    #[test]
-    fn archive_member_paths_reject_windows_paths_on_all_platforms() {
-        for path in ["C:\\scryer", "bin\\scryer"] {
-            let error = archive_member_path(Path::new(path)).expect_err("unsafe path");
-            assert!(error.to_string().contains("absolute member path"));
-        }
-    }
-
-    #[test]
-    fn journal_round_trip_is_schema_stable() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("application-upgrade/journal.json");
-        let journal = ApplicationUpgradeJournal {
-            schema: JOURNAL_SCHEMA.to_string(),
-            run_id: "run-1".to_string(),
-            expected_version: "0.18.22".to_string(),
-            expected_tag: "v0.18.22".to_string(),
-            executable_path: PathBuf::from("/opt/scryer/scryer"),
-            backup_path: PathBuf::from("/opt/scryer/scryer.pre-upgrade-0.18.21"),
-            backup_paths: vec![PathBuf::from("/opt/scryer/scryer.pre-upgrade-0.18.21")],
-            phase: phases::RESTARTING.to_string(),
-            helper_error: None,
-            written_at: Some(Utc::now()),
-        };
-        write_journal(&path, &journal).expect("write journal");
-        assert_eq!(load_journal(&path).expect("load journal"), Some(journal));
-    }
-
-    #[test]
-    fn legacy_journal_without_additive_fields_still_parses() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("application-upgrade/journal.json");
-        fs::create_dir_all(path.parent().expect("journal parent")).expect("create parent");
-        fs::write(
-            &path,
-            r#"{
-                "schema":"scryer.upgrade.journal.v1",
-                "run_id":"run-1",
-                "expected_version":"0.18.22",
-                "expected_tag":"v0.18.22",
-                "executable_path":"/opt/scryer/scryer",
-                "backup_path":"/opt/scryer/scryer.pre-upgrade-0.18.21",
-                "phase":"reboot_required",
-                "helper_error":null
-            }"#,
-        )
-        .expect("write legacy journal");
-        let journal = load_journal(&path)
-            .expect("load legacy journal")
-            .expect("journal exists");
-        assert!(journal.backup_paths.is_empty());
-        assert_eq!(journal.written_at, None);
-    }
-
-    fn portable_tar_artifact(size: u64) -> UpgradeArtifact {
-        UpgradeArtifact {
-            platform: UpgradePlatform::Linux,
-            arch: UpgradeArchitecture::X86_64,
-            channel: UpgradeChannel::Portable,
-            asset_name: "scryer.tar.gz".to_string(),
-            url: "https://github.com/scryer-media/scryer/releases/download/v0.18.22/scryer.tar.gz"
-                .to_string(),
-            size: 0,
-            blake3: "0".repeat(64),
-            archive: UpgradeArchive::TarGz,
-            members: vec![
-                crate::application_upgrade::manifest::UpgradeArtifactMember {
-                    path: "scryer".to_string(),
-                    size,
-                    executable: true,
-                },
-            ],
-        }
-    }
-
-    fn windows_portable_artifact(members: Vec<UpgradeArtifactMember>) -> UpgradeArtifact {
-        UpgradeArtifact {
-            platform: UpgradePlatform::Windows,
-            arch: UpgradeArchitecture::X86_64,
-            channel: UpgradeChannel::Portable,
-            asset_name: "scryer-windows-x86_64-portable.tar.gz".to_string(),
-            url: "https://example.invalid/scryer-windows-x86_64-portable.tar.gz".to_string(),
-            size: 0,
-            blake3: "0".repeat(64),
-            archive: UpgradeArchive::TarGz,
-            members,
-        }
-    }
-
-    fn windows_member(path: &str, size: u64) -> UpgradeArtifactMember {
-        UpgradeArtifactMember {
-            path: path.to_string(),
-            size,
-            executable: true,
-        }
-    }
-
-    #[test]
-    fn windows_handoff_builder_covers_portable_and_msi_direct_and_tray_owners() {
-        let executable_path = PathBuf::from("C:/Scryer/scryer.exe");
-        let install_dir = PathBuf::from("C:/Scryer");
-        let extracted_dir = PathBuf::from("C:/data/application-upgrade/staging/extracted");
-        let msi_path = PathBuf::from("C:/data/application-upgrade/staging/artifact");
-        let journal_path = PathBuf::from("C:/data/application-upgrade/journal.json");
-        let direct_args = vec!["--data-dir".to_string(), "C:/data".to_string()];
-        let direct_cwd = PathBuf::from("C:/working");
-        let artifact = windows_portable_artifact(vec![
-            windows_member("bin/scryer.exe", 1),
-            windows_member("bin/scryer-tray.exe", 1),
-        ]);
-        let written_at = Utc::now();
-
-        for (installation_kind, tray_supervised) in [
-            (InstallationKind::Portable, false),
-            (InstallationKind::Portable, true),
-            (InstallationKind::DirectMsi, false),
-            (InstallationKind::DirectMsi, true),
-        ] {
-            let handoff = build_windows_upgrade_handoff(WindowsUpgradeHandoffInput {
-                run_id: "run-1",
-                expected_version: "99.0.0",
-                expected_tag: "v99.0.0",
-                installation_kind,
-                tray_supervised,
-                executable_path: &executable_path,
-                install_dir: &install_dir,
-                backend_process_id: 4242,
-                artifact: Some(&artifact),
-                extracted_dir: Some(&extracted_dir),
-                msi_path: Some(&msi_path),
-                journal_path: journal_path.clone(),
-                direct_relaunch_args: &direct_args,
-                direct_relaunch_cwd: &direct_cwd,
-                current_version: "98.0.0",
-                written_at,
-            })
-            .expect("build Windows upgrade handoff");
-
-            handoff.plan.validate().expect("validate helper plan");
-            assert_eq!(handoff.journal.phase, phases::RESTARTING);
-            assert_eq!(handoff.journal.written_at, Some(written_at));
-            assert_eq!(handoff.plan.backup_suffix, ".pre-upgrade-98.0.0");
-            assert_eq!(handoff.plan.wait_process_ids, vec![4242]);
-            assert_eq!(
-                handoff.journal.backup_path,
-                PathBuf::from("C:/Scryer/scryer.exe.pre-upgrade-98.0.0")
-            );
-            assert_eq!(handoff.plan.journal_path, journal_path);
-
-            if tray_supervised {
-                assert_eq!(handoff.plan.owner, ApplicationUpgradeHelperOwner::Tray);
-                assert_eq!(
-                    handoff.plan.relaunch.program,
-                    install_dir.join("scryer-tray.exe")
-                );
-                assert_eq!(handoff.plan.relaunch.args, vec!["--login-start"]);
-                assert_eq!(handoff.plan.relaunch.cwd, install_dir);
-                assert_eq!(
-                    handoff.plan.tray_shutdown_program,
-                    Some(install_dir.join("scryer-tray.exe"))
-                );
-            } else {
-                assert_eq!(handoff.plan.owner, ApplicationUpgradeHelperOwner::Direct);
-                assert_eq!(handoff.plan.relaunch.program, executable_path);
-                assert_eq!(handoff.plan.relaunch.args, direct_args);
-                assert_eq!(handoff.plan.relaunch.cwd, direct_cwd);
-                assert_eq!(handoff.plan.tray_shutdown_program, None);
-            }
-
-            match installation_kind {
-                InstallationKind::Portable => {
-                    assert_eq!(handoff.plan.mode, ApplicationUpgradeHelperMode::Portable);
-                    assert_eq!(handoff.progress_phase, phases::RESTARTING);
-                    assert_eq!(handoff.plan.staged_dir, Some(extracted_dir.clone()));
-                    assert_eq!(handoff.plan.msi_path, None);
-                    assert_eq!(
-                        handoff.plan.replace,
-                        vec![
-                            ApplicationUpgradeHelperReplacement {
-                                from_staged: extracted_dir.join("bin/scryer.exe"),
-                                to_install: install_dir.join("scryer.exe"),
-                            },
-                            ApplicationUpgradeHelperReplacement {
-                                from_staged: extracted_dir.join("bin/scryer-tray.exe"),
-                                to_install: install_dir.join("scryer-tray.exe"),
-                            },
-                        ]
-                    );
-                    assert_eq!(
-                        handoff.journal.backup_paths,
-                        vec![
-                            PathBuf::from("C:/Scryer/scryer.exe.pre-upgrade-98.0.0"),
-                            PathBuf::from("C:/Scryer/scryer-tray.exe.pre-upgrade-98.0.0"),
-                        ]
-                    );
-                }
-                InstallationKind::DirectMsi => {
-                    assert_eq!(handoff.plan.mode, ApplicationUpgradeHelperMode::Msi);
-                    assert_eq!(handoff.progress_phase, phases::AWAITING_ELEVATION);
-                    assert_eq!(handoff.plan.staged_dir, None);
-                    assert_eq!(handoff.plan.msi_path, Some(msi_path.clone()));
-                    assert!(handoff.plan.replace.is_empty());
-                    assert!(handoff.journal.backup_paths.is_empty());
-                }
-                _ => unreachable!("test only covers eligible Windows installation kinds"),
-            }
-        }
-    }
-
-    #[test]
-    fn tar_archive_members_must_match_the_signed_manifest_exactly() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let archive_path = temp.path().join("upgrade.tar.gz");
-        let output = fs::File::create(&archive_path).expect("create archive");
-        let encoder = flate2::write::GzEncoder::new(output, flate2::Compression::default());
-        let mut archive = tar::Builder::new(encoder);
-        let bytes = b"new executable";
-        let mut header = tar::Header::new_gnu();
-        header.set_path("scryer").expect("set path");
-        header.set_size(bytes.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
-        archive.append(&header, &bytes[..]).expect("append member");
-        let encoder = archive.into_inner().expect("finish tar");
-        encoder.finish().expect("finish gzip");
-
-        let artifact = portable_tar_artifact(bytes.len() as u64);
-        validate_archive_members(&archive_path, &artifact).expect("manifest member matches");
-
-        let mismatch = portable_tar_artifact(bytes.len() as u64 + 1);
-        let error = validate_archive_members(&archive_path, &mismatch)
-            .expect_err("signed member size must match");
-        assert!(error.to_string().contains("do not exactly match"));
-    }
-
-    /// The Windows portable artifact travels the same `.tar.gz` container as
-    /// every other platform, so it gets the same member validation.
-    const WINDOWS_ARCHIVE_MEMBERS: [(&str, &[u8], u32); 4] = [
-        ("scryer.exe", b"windows backend".as_slice(), 0o755),
-        ("scryer-tray.exe", b"windows tray".as_slice(), 0o755),
-        ("LICENSE", b"license text".as_slice(), 0o644),
-        ("README.txt", b"readme text".as_slice(), 0o644),
-    ];
-
-    fn write_windows_archive(directory: &Path, members: &[(&str, &[u8], u32)]) -> PathBuf {
-        fs::create_dir_all(directory).expect("create archive directory");
-        let archive_path = directory.join("scryer-windows-x86_64-portable.tar.gz");
-        fs::write(&archive_path, tar_gz(members)).expect("write windows upgrade archive");
-        archive_path
-    }
-
-    fn windows_manifest_members(members: &[(&str, &[u8], u32)]) -> Vec<UpgradeArtifactMember> {
-        let mut members = members
-            .iter()
-            .map(|(path, bytes, mode)| UpgradeArtifactMember {
-                path: (*path).to_string(),
-                size: bytes.len() as u64,
-                executable: mode & 0o111 != 0,
-            })
-            .collect::<Vec<_>>();
-        members.sort_by(|left, right| left.path.cmp(&right.path));
-        members
-    }
-
-    #[test]
-    fn windows_tar_archive_members_must_match_the_signed_manifest_exactly() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let archive_path = write_windows_archive(temp.path(), &WINDOWS_ARCHIVE_MEMBERS);
-        let artifact =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-        validate_archive_members(&archive_path, &artifact).expect("archive matches the manifest");
-
-        // A member the manifest never signed.
-        let mut missing = artifact.clone();
-        missing.members.retain(|member| member.path != "LICENSE");
-        assert!(
-            validate_archive_members(&archive_path, &missing)
-                .expect_err("unsigned member is rejected")
-                .to_string()
-                .contains("do not exactly match")
-        );
-
-        // A signed member the archive does not carry.
-        let mut extra = artifact.clone();
-        extra.members.push(windows_member("scryer-extra.exe", 1));
-        extra
-            .members
-            .sort_by(|left, right| left.path.cmp(&right.path));
-        assert!(
-            validate_archive_members(&archive_path, &extra)
-                .expect_err("absent member is rejected")
-                .to_string()
-                .contains("do not exactly match")
-        );
-
-        // A member whose length differs from the signed length.
-        let mut resized = artifact.clone();
-        resized
-            .members
-            .iter_mut()
-            .find(|member| member.path == "scryer.exe")
-            .expect("backend member")
-            .size += 1;
-        assert!(
-            validate_archive_members(&archive_path, &resized)
-                .expect_err("resized member is rejected")
-                .to_string()
-                .contains("do not exactly match")
-        );
-    }
-
-    #[test]
-    fn windows_tar_archive_rejects_duplicate_and_non_regular_members() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-
-        let mut duplicated = WINDOWS_ARCHIVE_MEMBERS.to_vec();
-        duplicated.push(("scryer.exe", b"windows backend".as_slice(), 0o755));
-        let duplicate_path = write_windows_archive(&temp.path().join("duplicate"), &duplicated);
-        assert!(
-            validate_archive_members(&duplicate_path, &artifact)
-                .expect_err("duplicate member is rejected")
-                .to_string()
-                .contains("duplicate member")
-        );
-
-        let directory_path = temp.path().join("directory");
-        fs::create_dir_all(&directory_path).expect("create archive directory");
-        let archive_path = directory_path.join("scryer-windows-x86_64-portable.tar.gz");
-        let encoder = flate2::write::GzEncoder::new(
-            fs::File::create(&archive_path).expect("create archive"),
-            flate2::Compression::default(),
-        );
-        let mut builder = tar::Builder::new(encoder);
-        let mut header = tar::Header::new_gnu();
-        header.set_path("bin").expect("set directory path");
-        header.set_entry_type(tar::EntryType::Directory);
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder.append(&header, &[][..]).expect("append directory");
-        builder
-            .into_inner()
-            .expect("finish tar")
-            .finish()
-            .expect("finish gzip");
-        assert!(
-            validate_archive_members(&archive_path, &artifact)
-                .expect_err("directory entry is rejected")
-                .to_string()
-                .contains("is not a regular file")
-        );
-    }
-
-    #[test]
-    fn windows_tar_artifact_hash_must_match_the_signed_manifest() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let archive_path = write_windows_archive(temp.path(), &WINDOWS_ARCHIVE_MEMBERS);
-        let bytes = fs::read(&archive_path).expect("read archive");
-
-        let mut artifact =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-        artifact.size = bytes.len() as u64;
-        artifact.blake3 = blake3::hash(&bytes).to_hex().to_string();
-        verify_artifact_hash(&archive_path, &artifact).expect("hash matches the manifest");
-
-        artifact.blake3 = blake3::hash(b"other bytes").to_hex().to_string();
-        assert!(
-            verify_artifact_hash(&archive_path, &artifact)
-                .expect_err("hash mismatch is rejected")
-                .to_string()
-                .contains("BLAKE3 hash does not match")
-        );
-    }
-
-    #[test]
-    fn windows_tar_extraction_produces_the_layout_the_helper_swap_expects() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let archive_path = write_windows_archive(temp.path(), &WINDOWS_ARCHIVE_MEMBERS);
-        let artifact =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-        let extracted_dir = temp.path().join("extracted");
-        extract_archive(&archive_path, &artifact, &extracted_dir).expect("extract archive");
-
-        for (path, bytes, _) in WINDOWS_ARCHIVE_MEMBERS {
-            let output = extracted_dir.join(path);
-            assert!(
-                output.is_file(),
-                "{path} is a regular file after extraction"
-            );
-            assert_eq!(fs::read(&output).expect("read extracted member"), bytes);
-        }
-
-        // The helper swaps the two executables by their manifest member paths,
-        // so extraction must place them exactly where the plan will look.
-        let install_dir = Path::new("C:/Program Files/Scryer");
-        let replacements = windows_portable_replacements(&extracted_dir, &artifact, install_dir)
-            .expect("build helper replacements");
-        assert_eq!(
-            replacements,
-            vec![
-                ApplicationUpgradeHelperReplacement {
-                    from_staged: extracted_dir.join("scryer.exe"),
-                    to_install: install_dir.join("scryer.exe"),
-                },
-                ApplicationUpgradeHelperReplacement {
-                    from_staged: extracted_dir.join("scryer-tray.exe"),
-                    to_install: install_dir.join("scryer-tray.exe"),
-                },
-            ]
-        );
-        for replacement in &replacements {
-            assert!(
-                replacement.from_staged.is_file(),
-                "staged {} exists",
-                replacement.from_staged.display()
-            );
-        }
-    }
-
-    #[test]
-    fn windows_tar_extraction_rejects_members_the_manifest_never_signed() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let archive_path = write_windows_archive(temp.path(), &WINDOWS_ARCHIVE_MEMBERS);
-        let mut artifact =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-        artifact
-            .members
-            .retain(|member| member.path != "README.txt");
-        let error = extract_archive(&archive_path, &artifact, &temp.path().join("extracted"))
-            .expect_err("unsigned member is rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("unexpected upgrade archive member")
-        );
-
-        let mut resized =
-            windows_portable_artifact(windows_manifest_members(&WINDOWS_ARCHIVE_MEMBERS));
-        resized
-            .members
-            .iter_mut()
-            .find(|member| member.path == "scryer-tray.exe")
-            .expect("tray member")
-            .size += 1;
-        let error = extract_archive(&archive_path, &resized, &temp.path().join("resized"))
-            .expect_err("resized member is rejected");
-        assert!(error.to_string().contains("invalid upgrade archive member"));
-    }
 
     #[cfg(unix)]
     fn test_request(executable_path: PathBuf) -> ApplicationUpgradeJobRequest {
@@ -2549,6 +1241,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn tar_gz(members: &[(&str, &[u8], u32)]) -> Vec<u8> {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut archive = tar::Builder::new(encoder);
@@ -2930,37 +1623,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn staging_admission_includes_every_decompressed_member() {
-        let mut artifact = portable_tar_artifact(10);
-        artifact.size = 7;
-        assert_eq!(
-            staging_space_requirement(&artifact),
-            7 + 10 + UPGRADE_STAGING_RESERVE_BYTES
-        );
-
-        artifact.members.push(UpgradeArtifactMember {
-            path: "scryer-tray".to_string(),
-            size: 5,
-            executable: true,
-        });
-        assert_eq!(
-            staging_space_requirement(&artifact),
-            7 + 10 + 5 + UPGRADE_STAGING_RESERVE_BYTES
-        );
-
-        // MSI artifacts declare no members, so their admission is unchanged.
-        artifact.members.clear();
-        assert_eq!(
-            staging_space_requirement(&artifact),
-            7 + UPGRADE_STAGING_RESERVE_BYTES
-        );
-
-        let mut saturating = portable_tar_artifact(u64::MAX);
-        saturating.size = u64::MAX;
-        assert_eq!(staging_space_requirement(&saturating), u64::MAX);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn pipeline_apply_rename_failure_restores_original_executable() {
@@ -3185,59 +1847,6 @@ mod tests {
         assert!(
             app.application_upgrade_journal_path().exists(),
             "a failed rollback must retain the recovery journal"
-        );
-    }
-
-    #[test]
-    fn helper_journal_updates_replace_an_existing_journal_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("application-upgrade/journal.json");
-        let journal = ApplicationUpgradeJournal {
-            schema: JOURNAL_SCHEMA.to_string(),
-            run_id: "run-1".to_string(),
-            expected_version: "0.18.22".to_string(),
-            expected_tag: "v0.18.22".to_string(),
-            executable_path: PathBuf::from("C:/Scryer/scryer.exe"),
-            backup_path: PathBuf::from("C:/Scryer/scryer.exe.pre-upgrade-0.18.21"),
-            backup_paths: vec![PathBuf::from("C:/Scryer/scryer.exe.pre-upgrade-0.18.21")],
-            phase: phases::RESTARTING.to_string(),
-            helper_error: None,
-            written_at: Some(Utc::now()),
-        };
-        write_journal(&path, &journal).expect("write journal");
-
-        application_upgrade_helper_update_journal(
-            &path,
-            phases::REBOOT_REQUIRED,
-            Some("elevation was declined".to_string()),
-        )
-        .expect("update an existing journal in place");
-
-        let updated = load_journal(&path)
-            .expect("load updated journal")
-            .expect("journal exists");
-        assert_eq!(updated.phase, phases::REBOOT_REQUIRED);
-        assert_eq!(
-            updated.helper_error.as_deref(),
-            Some("elevation was declined")
-        );
-        assert_eq!(updated.run_id, journal.run_id);
-        assert_eq!(updated.written_at, journal.written_at);
-    }
-
-    #[tokio::test]
-    async fn tampered_signature_is_rejected_by_the_real_sigstore_verifier() {
-        let error = verify_upgrade_manifest_signature(
-            b"{\"schema\":\"scryer.upgrade.manifest.v1\"}".to_vec(),
-            b"not a sigstore bundle".to_vec(),
-            "scryer-v0.19.4",
-        )
-        .await
-        .expect_err("garbage signature bundle must be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("upgrade manifest signature verification failed")
         );
     }
 

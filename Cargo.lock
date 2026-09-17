@@ -213,6 +213,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "application-updater"
+version = "0.1.0"
+dependencies = [
+ "artifact-trust",
+ "blake3",
+ "chrono",
+ "flate2",
+ "futures-util",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -255,6 +276,32 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "artifact-trust"
+version = "0.1.1"
+source = "git+https://github.com/scryer-media/artifact-trust.git?tag=v0.1.1#fe348b428489fb9ab4744e3b6dbf804688dcb33c"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "chrono",
+ "const-oid 0.10.2",
+ "der 0.8.2",
+ "futures-core",
+ "reqwest",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tokio",
+ "tough",
+ "tracing",
+ "url",
+ "x509-cert 0.3.0",
+]
 
 [[package]]
 name = "as-slice"
@@ -6257,6 +6304,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "scryer"
 version = "0.21.1"
 dependencies = [
+ "application-updater",
  "async-graphql",
  "async-graphql-axum",
  "async-trait",
@@ -6320,7 +6368,9 @@ dependencies = [
 name = "scryer-application"
 version = "0.21.1"
 dependencies = [
+ "application-updater",
  "argon2",
+ "artifact-trust",
  "async-trait",
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6329,7 +6379,6 @@ dependencies = [
  "bytes",
  "chardetng",
  "chrono",
- "const-oid 0.10.2",
  "crc-fast",
  "encoding_rs",
  "flate2",
@@ -6349,7 +6398,6 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-pki-types",
- "rustls-webpki",
  "scryer-domain",
  "scryer-logging",
  "scryer-media-types",
@@ -6363,10 +6411,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "serde_json_canonicalizer",
  "sha2 0.11.0",
- "sigstore",
- "sigstore_protobuf_specs",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -6379,7 +6424,6 @@ dependencies = [
  "whatlang",
  "windows-sys 0.61.2",
  "wiremock",
- "x509-cert 0.2.5",
  "zstd 0.14.0",
 ]
 
