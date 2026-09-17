@@ -2098,6 +2098,38 @@ where
 #[derive(Clone)]
 pub struct AppRuntimeIntegrationState {
     pub managed_indexer_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) navigation_badge_facts: NavigationBadgeFactsCache,
+}
+
+/// The unfiltered facts behind the navigation badges.
+///
+/// The badge query is polled every 30 seconds by every open tab, and answering
+/// it from the durable stores put five reads (three of them unbounded) on that
+/// path. These are the same facts, counted once per refresh and filtered per
+/// actor in memory: counts are kept per library so an actor still sees only the
+/// libraries they hold the permission on.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigationBadgeFacts {
+    /// The libraries a permission check may resolve against, in catalog order
+    /// — the same candidate list `authorized_library_ids` builds, including its
+    /// stand-in defaults for an install with no library rows yet.
+    pub(crate) candidate_library_ids: Vec<String>,
+    /// Pending imports that need an operator, per library.
+    pub(crate) pending_imports: HashMap<String, crate::types::PendingImportCounts>,
+    /// Pending media requests per library.
+    pub(crate) media_requests: HashMap<String, crate::types::MediaRequestCounts>,
+    /// One entry per download-import row needing attention: the library its
+    /// title belongs to, or `None` for a row with no title an operator can be
+    /// scoped by (operational history).
+    pub(crate) import_attention: Vec<Option<String>>,
+    pub(crate) plugin_update_count: i64,
+    pub(crate) plugin_blocked_count: i64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NavigationBadgeFactsCache {
+    pub(crate) current: Arc<tokio::sync::RwLock<Option<Arc<NavigationBadgeFacts>>>>,
+    pub(crate) build_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -2246,6 +2278,7 @@ impl AppRuntimeState {
             },
             integrations: AppRuntimeIntegrationState {
                 managed_indexer_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+                navigation_badge_facts: NavigationBadgeFactsCache::default(),
             },
         }
     }

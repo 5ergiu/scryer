@@ -1282,6 +1282,26 @@ impl AppUseCase {
             .await
     }
 
+    /// The same counts, per library and before any actor is considered, so a
+    /// caller that answers for many actors — the navigation badges — counts
+    /// once and filters in memory.
+    pub(crate) async fn pending_media_request_counts_by_library(
+        &self,
+        library_ids: &[String],
+    ) -> AppResult<HashMap<String, MediaRequestCounts>> {
+        let mut by_library = HashMap::with_capacity(library_ids.len());
+        for library_id in library_ids {
+            let counts = self
+                .services
+                .catalog
+                .media_requests
+                .count_pending_by_facet(std::slice::from_ref(library_id))
+                .await?;
+            by_library.insert(library_id.clone(), counts);
+        }
+        Ok(by_library)
+    }
+
     pub async fn can_manage_media_requests(&self, actor: &User) -> AppResult<bool> {
         Ok(!self
             .authorized_library_ids(actor, None, LibraryPermission::ManageTitles)
