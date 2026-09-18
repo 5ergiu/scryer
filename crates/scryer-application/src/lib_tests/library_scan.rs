@@ -2664,7 +2664,10 @@ async fn movie_full_scan_external_id_nfo_without_gateway_match_persists_unmatche
 
     let items = unmatched_items.items().await;
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].reason_code, "no_metadata_search_results");
+    // The NFO carries a tvdb id, so the only lookup is the id-anchored one and
+    // an empty answer means that id did not resolve — reported with its own
+    // reason rather than the generic "nothing matched the name".
+    assert_eq!(items[0].reason_code, "metadata_id_lookup_unresolved");
     assert_eq!(items[0].error_message, None);
     assert_eq!(items[0].item_path, movie_path.to_string_lossy());
 }

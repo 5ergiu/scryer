@@ -1202,9 +1202,13 @@ impl PendingImportReasonClass {
     pub fn from_reason_code(reason_code: &str) -> Self {
         match reason_code.trim() {
             // A lookup ran and produced nothing to choose from.
-            "no_metadata_search_results" | "no_metadata_match" | "episode_lookup_failed" => {
-                Self::Unmatched
-            }
+            // `metadata_id_lookup_unresolved` is the same outcome for a folder
+            // that carries an external id: the id-anchored lookup came back
+            // empty and there is no title-text fallback to widen it.
+            "no_metadata_search_results"
+            | "no_metadata_match"
+            | "metadata_id_lookup_unresolved"
+            | "episode_lookup_failed" => Self::Unmatched,
             // A lookup produced candidates but none could be accepted.
             "no_acceptable_metadata_match" => Self::Ambiguous,
             // Media analysis failed, so the file's quality is unknown.
@@ -4036,6 +4040,10 @@ mod pending_import_reason_class_tests {
             ),
             ("episode_lookup_failed", PendingImportReasonClass::Unmatched),
             ("no_metadata_match", PendingImportReasonClass::Unmatched),
+            (
+                "metadata_id_lookup_unresolved",
+                PendingImportReasonClass::Unmatched,
+            ),
             (
                 "no_acceptable_metadata_match",
                 PendingImportReasonClass::Ambiguous,

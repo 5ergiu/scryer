@@ -400,6 +400,19 @@ fn select_metadata_identity_hint(
                 )
             })
         })
+        // A walk that carries an external id wins over one that only produced a
+        // title. `Quiet Meridian (2019) {tmdb-900001}/Quiet Meridian (2019)
+        // Bluray-1080p.mkv` parses a title out of the file name and the id out
+        // of the folder; taking the file walk first would drop the id and send
+        // the candidate to a title-text search, which is how a tagged folder
+        // ended up bound to a different film with the same name.
+        .or_else(|| {
+            [file_walk, folder_walk]
+                .into_iter()
+                .flatten()
+                .find(|walk| walk.has_external_ids())
+                .and_then(|walk| metadata_identity_hint_from_title_walk(Some(walk)))
+        })
         .or_else(|| metadata_identity_hint_from_title_walk(file_walk))
         .or_else(|| metadata_identity_hint_from_title_walk(folder_walk))
         .or_else(|| metadata_identity_hint_from_filename(parsed, fallback_query, fallback_year))
@@ -459,6 +472,7 @@ pub(crate) fn build_library_scan_unmatched_search_attempts(
                             search_candidate,
                             *year_hint,
                             primary_year_hint,
+                            identity_hint,
                         ),
                         result_count: results.len(),
                         top_results: results
@@ -477,11 +491,22 @@ pub(crate) fn build_library_scan_unmatched_search_attempts(
 /// persisted payload is unchanged for the common single-year case. Retries
 /// with a different (or absent) year are labelled so the pending-import UI
 /// shows what was actually tried.
+///
+/// The id-anchored attempt carries an empty query by design, which would leave
+/// the operator staring at a blank row; it is labelled with the ids that were
+/// asked for instead, so a failed lookup names the id that failed.
 fn unmatched_search_attempt_query_label(
     search_candidate: &str,
     year_hint: Option<u32>,
     primary_year_hint: Option<u32>,
+    identity_hint: Option<&MetadataIdentityHint>,
 ) -> String {
+    if search_candidate.trim().is_empty()
+        && let Some(label) = identity_hint.and_then(external_id_hint_label)
+    {
+        return label;
+    }
+
     if year_hint == primary_year_hint {
         return search_candidate.to_string();
     }
@@ -492,13 +517,42 @@ fn unmatched_search_attempt_query_label(
     }
 }
 
+/// `tmdb-272878 imdb-tt0000000`-style label for the external ids a hint carries,
+/// matching the `{tmdb-NNN}` folder-tag spelling operators already recognise.
+pub(crate) fn external_id_hint_label(identity_hint: &MetadataIdentityHint) -> Option<String> {
+    let label = [
+        ("tmdb", identity_hint.tmdb_id.as_deref()),
+        ("imdb", identity_hint.imdb_id.as_deref()),
+        ("tvdb", identity_hint.tvdb_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(provider, value)| {
+        let value = value?.trim();
+        (!value.is_empty()).then(|| format!("{provider}-{value}"))
+    })
+    .collect::<Vec<_>>()
+    .join(" ");
+
+    (!label.is_empty()).then_some(label)
+}
+
+/// An id-anchored candidate never falls back to a title-text search, so an
+/// empty result set means SMG could not resolve *that id* yet — not that
+/// nothing matched the folder's name. The distinct code keeps the pending
+/// import honest and tells the operator the next scan retries the id.
+pub(crate) const LIBRARY_SCAN_METADATA_ID_LOOKUP_UNRESOLVED: &str = "metadata_id_lookup_unresolved";
+
 pub(crate) fn library_scan_unmatched_reason_code(
+    identity_hint: Option<&MetadataIdentityHint>,
     search_attempts: &[LibraryScanUnmatchedSearchAttempt],
 ) -> &'static str {
     if search_attempts
         .iter()
         .all(|attempt| attempt.result_count == 0)
     {
+        if identity_hint.is_some_and(MetadataIdentityHint::has_external_ids) {
+            return LIBRARY_SCAN_METADATA_ID_LOOKUP_UNRESOLVED;
+        }
         "no_metadata_search_results"
     } else {
         "no_acceptable_metadata_match"
@@ -1508,16 +1562,18 @@ async fn build_prepared_movie_library_scan_candidate(
     };
 
     if metadata_lookup_attempted {
-        // Lead with an empty-query, id-anchored lookup whenever the hint carries
-        // external ids (NFO/plexmatch/arr-import). SMG only resolves by id when
-        // the query is empty. The title-text variants follow as fallback, and
-        // selection takes the first auto-match-safe hit in this order, so a real
-        // id resolves confidently without depending on SMG's text ranking. An
-        // arr-import hint stays id-only (its parsed-filename title is noise).
+        // An external id (folder/filename walk, NFO, plexmatch, arr-import) is
+        // authoritative, so the only lookup is the empty-query, id-anchored one
+        // (SMG resolves by id only when the query is empty). There is
+        // deliberately no title-text fallback: SMG answers a text query with the
+        // film it already knows and flags it auto-match-safe, so a folder
+        // carrying `{tmdb-272878}` used to bind to a same-named or similarly
+        // named film SMG had not been asked about. Without the fallback the item
+        // stays unmatched with an id-specific reason, and the next scan retries
+        // the id (SMG creates unknown ids a batch at a time).
         if has_external_ids {
             search_candidates.push(String::new());
-        }
-        if !external_import_identity_only {
+        } else {
             let raw_queries = query_variants
                 .iter()
                 .cloned()
@@ -1664,14 +1720,15 @@ pub(crate) async fn prepare_series_library_scan_candidate(
             vec![query.clone()]
         };
         let mut search_candidates = Vec::new();
-        // Lead with an empty-query, id-anchored lookup whenever the hint carries
-        // external ids (NFO/plexmatch/arr-import). SMG only resolves by id when
-        // the query is empty. Title variants follow as fallback for local hints;
-        // arr-import hints stay id-only because their parsed folder title is noise.
+        // Same rule as the movie path: an external id is authoritative, so the
+        // id-anchored lookup is the only metadata search. A title-text fallback
+        // would let SMG answer with a different show it already knows, flagged
+        // auto-match-safe, and bind the folder to it.
         if has_external_ids {
             search_candidates.push(String::new());
+        } else {
+            search_candidates.extend(expand_search_candidates(&raw_queries));
         }
-        search_candidates.extend(expand_search_candidates(&raw_queries));
         let title_match_candidates = build_title_match_candidates(&raw_queries);
         (search_candidates, title_match_candidates)
     } else {
@@ -2839,7 +2896,7 @@ mod tests {
                 .any(|attempt| attempt.query == format!("{primary} (no year)"))
         );
         assert_eq!(
-            library_scan_unmatched_reason_code(&attempts),
+            library_scan_unmatched_reason_code(candidate.identity_hint.as_ref(), &attempts),
             "no_metadata_search_results"
         );
     }
@@ -3670,17 +3727,13 @@ mod tests {
             Some("415677")
         );
         assert!(candidate.metadata_lookup_attempted);
-        // The tvshow.nfo carries a tvdb id, so the scan leads with an
-        // empty-query, id-anchored lookup (SMG resolves by id only when the
-        // query is empty) and keeps the title variants as fallback.
-        assert_eq!(
-            candidate.search_candidates,
-            vec![
-                String::new(),
-                "Nightfall!!".to_string(),
-                "nightfall".to_string()
-            ]
-        );
+        // The tvshow.nfo carries a tvdb id, so the scan does an empty-query,
+        // id-anchored lookup and nothing else (SMG resolves by id only when the
+        // query is empty). This test used to assert the title variants followed
+        // as fallback; that fallback is exactly what let SMG answer with a
+        // different, already-known show and bind the folder to it, so the
+        // expectation now pins the id-only search.
+        assert_eq!(candidate.search_candidates, vec![String::new()]);
     }
 
     #[tokio::test]
@@ -4008,19 +4061,232 @@ mod tests {
         assert_eq!(identity.tvdb_id.as_deref(), Some("933"));
         assert_eq!(identity.imdb_id.as_deref(), Some("tt0118617"));
         assert_eq!(identity.tmdb_id.as_deref(), Some("9444"));
-        // The NFO ids drive an empty-query, id-anchored lookup first; the title
-        // text variants follow as fallback.
-        assert_eq!(
-            candidate.search_candidates.first().map(String::as_str),
-            Some("")
+        // The NFO ids drive an empty-query, id-anchored lookup and nothing
+        // else. This test used to require title-text variants after it; they
+        // are gone on purpose, because SMG answers a text query with whatever
+        // same-named film it already knows and flags it auto-match-safe.
+        assert_eq!(candidate.search_candidates, vec![String::new()]);
+    }
+
+    fn tagged_movie_library_file(movie_path: &Path) -> LibraryFile {
+        LibraryFile {
+            path: path_to_stored_string(movie_path),
+            display_name: movie_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            nfo_path: None,
+            size_bytes: None,
+            source_signature_scheme: None,
+            source_signature_value: None,
+        }
+    }
+
+    fn safe_metadata_search_item(name: &str, year: i32, tvdb_id: &str) -> MetadataSearchItem {
+        MetadataSearchItem {
+            tvdb_id: tvdb_id.into(),
+            smg_id: None,
+            primary_source: None,
+            external_ids: vec![],
+            name: name.into(),
+            year: Some(year),
+            auto_match_safe: true,
+            auto_match_signals: vec![],
+        }
+    }
+
+    /// A folder tagged `{tmdb-NNN}` must never be answered by a title-text
+    /// search. SMG resolves an unknown id by creating it, but only so many per
+    /// batch request, so the id lookup legitimately comes back empty; the old
+    /// text fallback then took SMG's safe hit for the film it already knew and
+    /// bound the folder to the wrong title.
+    #[tokio::test]
+    async fn movie_folder_tmdb_id_never_falls_back_to_a_title_text_search() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let folder = tempdir.path().join("Quiet Meridian (2019) {tmdb-900001}");
+        std::fs::create_dir_all(&folder).expect("create movie dir");
+        let movie_path = folder.join("Quiet Meridian (2019) Bluray-1080p.mkv");
+        std::fs::write(&movie_path, b"movie").expect("write movie");
+        let file = tagged_movie_library_file(&movie_path);
+        let library_path = path_to_stored_string(tempdir.path());
+
+        let candidate = prepare_movie_library_scan_candidate(file.clone(), library_path.clone())
+            .await
+            .expect("prepare movie candidate");
+
+        let identity = candidate.identity_hint.as_ref().expect("identity hint");
+        assert_eq!(identity.tmdb_id.as_deref(), Some("900001"));
+        assert_eq!(candidate.search_candidates, vec![String::new()]);
+
+        let keys = movie_candidate_batch_search_keys(&candidate).expect("movie search keys");
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].query.is_empty());
+        assert_eq!(keys[0].tmdb_id.as_deref(), Some("900001"));
+
+        let gateway = CountingMetadataGateway::default();
+        // SMG has not created tmdb-900001 yet, but it does know a same-named
+        // 1994 film and would answer the text query with it.
+        gateway.set_search_results(METADATA_TYPE_MOVIE, "", Vec::new());
+        gateway.set_search_results(
+            METADATA_TYPE_MOVIE,
+            "Quiet Meridian",
+            vec![safe_metadata_search_item("Quiet Meridian", 1994, "900002")],
         );
+
+        let (candidates, _stats) = preload_movie_library_scan_candidates(
+            Arc::new(gateway.clone()),
+            std::slice::from_ref(&file),
+            &library_path,
+        )
+        .await
+        .expect("preload movie candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].selected_metadata.is_none(),
+            "an unresolved id must not fall through to a same-named film: {:?}",
+            candidates[0].selected_metadata
+        );
+        assert_eq!(
+            gateway.search_call_count(METADATA_TYPE_MOVIE, "Quiet Meridian"),
+            0,
+            "the title text must not even be asked for"
+        );
+
+        let (unmatched_keys, _stats) =
+            build_movie_metadata_batch_stats(std::slice::from_ref(&candidate));
+        let results: MetadataSearchResults = unmatched_keys
+            .into_iter()
+            .map(|key| (key, Arc::new(Vec::new())))
+            .collect();
+        let attempts = build_library_scan_unmatched_search_attempts(
+            METADATA_TYPE_MOVIE,
+            &candidate.search_candidates,
+            &movie_candidate_year_hint_variants(&candidate),
+            candidate.identity_hint.as_ref(),
+            &results,
+        );
+        assert_eq!(attempts.len(), 1);
+        // The pending-import row names the id that failed, not a blank query.
+        assert_eq!(attempts[0].query, "tmdb-900001");
+        assert_eq!(
+            library_scan_unmatched_reason_code(candidate.identity_hint.as_ref(), &attempts),
+            LIBRARY_SCAN_METADATA_ID_LOOKUP_UNRESOLVED
+        );
+    }
+
+    /// Regression guard: when SMG does resolve the id, the id-anchored lookup
+    /// still returns the right film.
+    #[tokio::test]
+    async fn movie_folder_tmdb_id_still_matches_when_the_id_resolves() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let folder = tempdir.path().join("Quiet Meridian (2019) {tmdb-900001}");
+        std::fs::create_dir_all(&folder).expect("create movie dir");
+        let movie_path = folder.join("Quiet Meridian (2019) Bluray-1080p.mkv");
+        std::fs::write(&movie_path, b"movie").expect("write movie");
+        let file = tagged_movie_library_file(&movie_path);
+        let library_path = path_to_stored_string(tempdir.path());
+
+        let gateway = CountingMetadataGateway::default();
+        gateway.set_search_results(
+            METADATA_TYPE_MOVIE,
+            "",
+            vec![safe_metadata_search_item("Quiet Meridian", 2019, "900001")],
+        );
+
+        let (candidates, _stats) = preload_movie_library_scan_candidates(
+            Arc::new(gateway.clone()),
+            std::slice::from_ref(&file),
+            &library_path,
+        )
+        .await
+        .expect("preload movie candidates");
+
+        let selected = candidates[0]
+            .selected_metadata
+            .as_ref()
+            .expect("id-anchored match");
+        assert_eq!(selected.name, "Quiet Meridian");
+        assert_eq!(selected.year, Some(2019));
+    }
+
+    /// Regression guard for the ordinary path: with no external id there is
+    /// nothing authoritative to anchor on, so the text variants and the
+    /// year retries stay exactly as they were.
+    #[tokio::test]
+    async fn movie_folder_without_external_ids_keeps_its_text_fallback() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let folder = tempdir.path().join("Quiet Meridian (2019)");
+        std::fs::create_dir_all(&folder).expect("create movie dir");
+        let movie_path = folder.join("Quiet Meridian (2018) Bluray-1080p.mkv");
+        std::fs::write(&movie_path, b"movie").expect("write movie");
+
+        let candidate = prepare_movie_library_scan_candidate(
+            tagged_movie_library_file(&movie_path),
+            path_to_stored_string(tempdir.path()),
+        )
+        .await
+        .expect("prepare movie candidate");
+
         assert!(
             candidate
-                .search_candidates
-                .iter()
-                .any(|value| !value.trim().is_empty()),
-            "title fallback variants should follow the id-anchored lookup: {:?}",
+                .identity_hint
+                .as_ref()
+                .is_none_or(|hint| !hint.has_external_ids())
+        );
+        assert!(
+            !candidate.search_candidates.is_empty()
+                && candidate
+                    .search_candidates
+                    .iter()
+                    .all(|value| !value.trim().is_empty()),
+            "text variants are the only lookup without an id: {:?}",
             candidate.search_candidates
+        );
+        // Filename year and folder year disagree, so the year retries stand.
+        assert_eq!(
+            movie_candidate_year_hint_variants(&candidate),
+            vec![Some(2018), Some(2019), None]
+        );
+    }
+
+    /// Series parity for the tvdb case: an id-tagged folder is id-only too.
+    #[tokio::test]
+    async fn series_folder_tvdb_id_never_falls_back_to_a_title_text_search() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let folder = tempdir.path().join("Harbor Lantern (2018) {tvdb-900011}");
+        std::fs::create_dir_all(&folder).expect("create series dir");
+
+        let candidate = prepare_series_library_scan_candidate(folder.clone(), None)
+            .await
+            .expect("prepare series candidate");
+
+        let identity = candidate.identity_hint.as_ref().expect("identity hint");
+        assert_eq!(identity.tvdb_id.as_deref(), Some("900011"));
+        assert_eq!(candidate.search_candidates, vec![String::new()]);
+
+        let gateway = CountingMetadataGateway::default();
+        gateway.set_search_results(METADATA_TYPE_SERIES, "", Vec::new());
+        gateway.set_search_results(
+            METADATA_TYPE_SERIES,
+            "Harbor Lantern",
+            vec![safe_metadata_search_item("Harbor Lantern", 2004, "900012")],
+        );
+
+        let (candidates, _stats) =
+            preload_series_library_scan_candidates(Arc::new(gateway.clone()), &[folder])
+                .await
+                .expect("preload series candidates");
+
+        assert!(
+            candidates[0].selected_metadata.is_none(),
+            "an unresolved tvdb id must not fall through to a same-named show: {:?}",
+            candidates[0].selected_metadata
+        );
+        assert_eq!(
+            gateway.search_call_count(METADATA_TYPE_SERIES, "Harbor Lantern"),
+            0,
+            "the title text must not even be asked for"
         );
     }
 }
