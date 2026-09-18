@@ -1144,6 +1144,69 @@ impl DownloadClientCategoryAdmissionSnapshot {
                     .values()
                     .any(|categories| categories.contains(&category)))
     }
+
+    /// Whether this client's *effective* categories cover `category`.
+    ///
+    /// The effective set is the one the server-side feedback filter uses
+    /// (`feedback_scope_for_client`), so the categories Scryer asks the client
+    /// about and the categories Scryer adopts rows from cannot drift apart.
+    ///
+    /// Three shapes mean "unfiltered", and all keep the pre-scoping behaviour
+    /// of adopting everything the client lists:
+    /// * no entry at all — the operator configured no categories for this
+    ///   client, so nothing distinguishes Scryer's work from theirs;
+    /// * an entry holding the empty-string marker — the client still holds a
+    ///   live download whose grab-time category this instance cannot name;
+    /// * a row that reports no category — a client that does not file its work
+    ///   by category (a bridged Weaver row carries none) says nothing that
+    ///   could place the row outside Scryer's scope, and a silent client must
+    ///   not lose its rows. Placing such a row is the pre-existing admission
+    ///   gate's job, not this one's.
+    pub(crate) fn client_categories_cover(&self, client_id: &str, category: Option<&str>) -> bool {
+        let client_id = client_id.trim();
+        let Some(categories) = self
+            .feedback_categories_by_client
+            .get(client_id)
+            .filter(|categories| !categories.is_empty())
+        else {
+            return true;
+        };
+        if categories.iter().any(|category| category.trim().is_empty()) {
+            return true;
+        }
+        let Some(category) = category
+            .map(normalize_download_client_category)
+            .filter(|category| !category.is_empty())
+        else {
+            return true;
+        };
+        categories
+            .iter()
+            .any(|configured| normalize_download_client_category(configured) == category)
+    }
+}
+
+/// Whether a client row Scryer never submitted may be adopted into the
+/// download registry (a `downloads` row plus an active binding).
+///
+/// Every tick reads the client's queue plus its newest history rows, and a
+/// client shared with the operator's own work (a "music" category, say) hands
+/// Scryer hundreds of rows it will never touch. Adopting them minted a
+/// permanent identity and a never-ending binding each. A row outside the
+/// categories this client feeds Scryer is therefore left alone entirely.
+///
+/// Rows Scryer submitted are never filtered: their identity is Scryer's own,
+/// whatever category the client reports for them.
+pub(crate) fn foreign_observation_is_in_client_scope(
+    has_scryer_submission: bool,
+    client_id: &str,
+    category: Option<&str>,
+    snapshot: Option<&DownloadClientCategoryAdmissionSnapshot>,
+) -> bool {
+    has_scryer_submission
+        // Admission that is not loaded yet is not proof of anything, so the
+        // pre-scoping behaviour stands until it is.
+        || snapshot.is_none_or(|snapshot| snapshot.client_categories_cover(client_id, category))
 }
 
 pub(crate) fn download_observation_is_admitted(
@@ -1235,6 +1298,55 @@ mod download_client_category_admission_tests {
             )]),
             feedback_categories_by_client: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn foreign_rows_are_adopted_only_inside_their_clients_effective_categories() {
+        let snapshot = DownloadClientCategoryAdmissionSnapshot::from_feedback_categories(
+            HashMap::from([
+                (
+                    "shared-sab".to_string(),
+                    vec!["Series-HD".to_string(), "Movies".to_string()],
+                ),
+                // The "live download this instance cannot name" marker.
+                (
+                    "mid-routing-change".to_string(),
+                    vec![String::new(), "Series-HD".to_string()],
+                ),
+            ]),
+        );
+        let in_scope = |client_id: &str, category: Option<&str>| {
+            foreign_observation_is_in_client_scope(false, client_id, category, Some(&snapshot))
+        };
+
+        assert!(in_scope("shared-sab", Some("series-hd")));
+        assert!(in_scope("shared-sab", Some(" Movies ")));
+        assert!(!in_scope("shared-sab", Some("music")));
+        // A row that reports no category says nothing that could place it
+        // outside Scryer's scope, so it is left alone.
+        assert!(in_scope("shared-sab", None));
+        assert!(in_scope("shared-sab", Some("  ")));
+
+        // A client with nothing configured stays unfiltered, and so does one
+        // still holding a download whose grab-time category is unknown.
+        assert!(in_scope("unconfigured", Some("music")));
+        assert!(in_scope("unconfigured", None));
+        assert!(in_scope("mid-routing-change", Some("music")));
+
+        // Scryer's own rows are never filtered, and neither is a client whose
+        // admission has not loaded yet.
+        assert!(foreign_observation_is_in_client_scope(
+            true,
+            "shared-sab",
+            Some("music"),
+            Some(&snapshot)
+        ));
+        assert!(foreign_observation_is_in_client_scope(
+            false,
+            "shared-sab",
+            Some("music"),
+            None
+        ));
     }
 
     #[tokio::test]
