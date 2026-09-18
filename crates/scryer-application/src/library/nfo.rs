@@ -1340,10 +1340,7 @@ fn nfo_temp_path(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Write the whole content to a freshly created temp file and get it onto the
 /// device before anything links it into place.
-async fn write_nfo_temp_file(
-    temp_path: &std::path::Path,
-    content: &str,
-) -> std::io::Result<()> {
+async fn write_nfo_temp_file(temp_path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let mut file = tokio::fs::OpenOptions::new()
