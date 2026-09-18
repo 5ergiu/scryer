@@ -406,7 +406,7 @@ pub struct LibraryScanHint {
 /// scanned file.
 #[derive(Clone, Debug, Default)]
 struct LibraryScanHintIndex {
-    hints: Vec<LibraryScanHint>,
+    hints: StoredLibraryScanHints,
     /// Facet -> normalized leaf path key -> bucket. Nested so a lookup can
     /// borrow the candidate key instead of allocating one to probe with.
     by_path_key: HashMap<LibraryScanHintFacet, HashMap<Box<str>, LibraryScanHintPathBucket>>,
@@ -428,6 +428,60 @@ struct LibraryScanHintPathBucket {
     by_full_path_key: HashMap<Box<str>, u32>,
     /// Position of the hint in this bucket that carries no full path key.
     without_full_path_key: Option<u32>,
+}
+
+/// The stored hints, reachable only by position.
+///
+/// Every read of a stored hint goes through [`Self::get`] or [`Self::get_mut`],
+/// and test builds count those reads. That lets the scale tests assert how many
+/// hints a push or a lookup examines, which is the property that has to hold,
+/// instead of timing it. There is deliberately no iterator: a linear walk of the
+/// set is exactly what the indexes exist to avoid.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StoredLibraryScanHints(Vec<LibraryScanHint>);
+
+impl StoredLibraryScanHints {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn push(&mut self, hint: LibraryScanHint) {
+        self.0.push(hint);
+    }
+
+    fn get(&self, position: u32) -> &LibraryScanHint {
+        note_library_scan_hint_examined();
+        &self.0[position as usize]
+    }
+
+    fn get_mut(&mut self, position: u32) -> &mut LibraryScanHint {
+        note_library_scan_hint_examined();
+        &mut self.0[position as usize]
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIBRARY_SCAN_HINTS_EXAMINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn note_library_scan_hint_examined() {
+    #[cfg(test)]
+    LIBRARY_SCAN_HINTS_EXAMINED.with(|count| count.set(count.get() + 1));
+}
+
+/// Runs `work` and returns how many stored hints it examined on this thread.
+#[cfg(test)]
+fn library_scan_hints_examined_by<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    let before = LIBRARY_SCAN_HINTS_EXAMINED.with(std::cell::Cell::get);
+    let result = work();
+    let after = LIBRARY_SCAN_HINTS_EXAMINED.with(std::cell::Cell::get);
+    (result, after - before)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -474,7 +528,7 @@ impl LibraryScanHintSet {
                 None => bucket.without_full_path_key,
             }
         {
-            let existing = &mut index.hints[position as usize];
+            let existing = index.hints.get_mut(position);
             if existing.ids.is_empty() || !external_ids_overlap(&existing.ids, &hint.ids) {
                 // Ambiguous: one path now points at two different titles, so the
                 // hint stops asserting anything. Its stale external id index
@@ -553,12 +607,12 @@ impl LibraryScanHintSet {
                 if best.is_some_and(|best| best <= position) {
                     continue;
                 }
-                if !self.inner.hints[position as usize].ids.is_empty() {
+                if !self.inner.hints.get(position).ids.is_empty() {
                     best = Some(position);
                 }
             }
         }
-        best.map(|position| &self.inner.hints[position as usize])
+        best.map(|position| self.inner.hints.get(position))
     }
 
     pub fn hint_for_stored_path(
@@ -590,14 +644,14 @@ impl LibraryScanHintSet {
         let mut first: Option<u32> = None;
         let mut ambiguous = false;
         for position in bucket.order.iter().copied() {
-            let hint = &self.inner.hints[position as usize];
+            let hint = self.inner.hints.get(position);
             if hint.ids.is_empty() {
                 continue;
             }
             match first {
                 None => first = Some(position),
                 Some(first) => {
-                    if !external_ids_overlap(&self.inner.hints[first as usize].ids, &hint.ids) {
+                    if !external_ids_overlap(&self.inner.hints.get(first).ids, &hint.ids) {
                         ambiguous = true;
                         break;
                     }
@@ -606,7 +660,7 @@ impl LibraryScanHintSet {
         }
         let first = first?;
         if !ambiguous {
-            return Some(&self.inner.hints[first as usize]);
+            return Some(self.inner.hints.get(first));
         }
 
         // Ambiguous leaf key: only the full path can name one title, and it maps
@@ -619,7 +673,7 @@ impl LibraryScanHintSet {
             .by_full_path_key
             .get(full_path_key.as_str())
             .copied()?;
-        let hint = &self.inner.hints[position as usize];
+        let hint = self.inner.hints.get(position);
         (!hint.ids.is_empty()).then_some(hint)
     }
 }
@@ -4077,7 +4131,7 @@ mod tests {
         ExternalIdHint, ExternalIdProvider, LibraryScanHint, LibraryScanHintFacet,
         LibraryScanHintSet, LibraryScanHintSource, library_scan_file_full_path_key,
         library_scan_file_leaf_key, library_scan_folder_full_path_key,
-        library_scan_folder_leaf_key,
+        library_scan_folder_leaf_key, library_scan_hints_examined_by,
     };
 
     #[test]
@@ -4241,31 +4295,36 @@ mod tests {
         );
     }
 
+    /// A push or lookup reads a handful of stored hints however many are in the
+    /// set. A linear walk would read tens of thousands per call, so this bound
+    /// fails loudly on one without depending on how fast the machine is.
+    const MAX_HINTS_EXAMINED_PER_CALL: u64 = 4;
+
     #[test]
     fn library_scan_hint_set_handles_a_leaf_key_shared_by_many_titles() {
         const HINTS: usize = 50_000;
-        let started = std::time::Instant::now();
         let mut hints = LibraryScanHintSet::new();
         let mut paths = Vec::new();
-        for index in 0..HINTS {
-            // Uniform episode naming makes every one of these share a leaf key.
-            let path = format!("/media/synthetic-{index:06}/Season 01/S01E01.mkv");
-            hints.push(LibraryScanHint {
-                source: LibraryScanHintSource::ExternalImportSonarr,
-                facet: LibraryScanHintFacet::Series,
-                path_key: library_scan_file_leaf_key(&path).expect("leaf key"),
-                full_path_key: library_scan_file_full_path_key(&path),
-                ids: vec![ExternalIdHint {
-                    provider: ExternalIdProvider::Tvdb,
-                    value: (500_000 + index).to_string(),
-                }],
-            });
-            paths.push(path);
-        }
-        let elapsed = started.elapsed();
+        let ((), push_examined) = library_scan_hints_examined_by(|| {
+            for index in 0..HINTS {
+                // Uniform episode naming makes every one of these share a leaf key.
+                let path = format!("/media/synthetic-{index:06}/Season 01/S01E01.mkv");
+                hints.push(LibraryScanHint {
+                    source: LibraryScanHintSource::ExternalImportSonarr,
+                    facet: LibraryScanHintFacet::Series,
+                    path_key: library_scan_file_leaf_key(&path).expect("leaf key"),
+                    full_path_key: library_scan_file_full_path_key(&path),
+                    ids: vec![ExternalIdHint {
+                        provider: ExternalIdProvider::Tvdb,
+                        value: (500_000 + index).to_string(),
+                    }],
+                });
+                paths.push(path);
+            }
+        });
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "pushing {HINTS} hints under one leaf key took {elapsed:?}"
+            push_examined <= HINTS as u64 * MAX_HINTS_EXAMINED_PER_CALL,
+            "pushing {HINTS} hints under one leaf key examined {push_examined} stored hints"
         );
 
         let leaf_key = library_scan_file_leaf_key(&paths[0]).expect("leaf key");
@@ -4275,65 +4334,69 @@ mod tests {
                 .hint_for_stored_path(LibraryScanHintFacet::Series, &leaf_key)
                 .is_none()
         );
-        let started = std::time::Instant::now();
-        for index in (0..HINTS).step_by(100) {
-            let hint = hints
-                .hint_for_scan_path(
-                    LibraryScanHintFacet::Series,
-                    &leaf_key,
-                    library_scan_file_full_path_key(&paths[index]).as_deref(),
-                )
-                .expect("full path disambiguates");
-            assert_eq!(hint.ids[0].value, (500_000 + index).to_string());
-        }
-        let elapsed = started.elapsed();
+        let mut lookups = 0_u64;
+        let ((), lookup_examined) = library_scan_hints_examined_by(|| {
+            for index in (0..HINTS).step_by(100) {
+                let hint = hints
+                    .hint_for_scan_path(
+                        LibraryScanHintFacet::Series,
+                        &leaf_key,
+                        library_scan_file_full_path_key(&paths[index]).as_deref(),
+                    )
+                    .expect("full path disambiguates");
+                assert_eq!(hint.ids[0].value, (500_000 + index).to_string());
+                lookups += 1;
+            }
+        });
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "500 ambiguous-leaf lookups took {elapsed:?}"
+            lookup_examined <= lookups * MAX_HINTS_EXAMINED_PER_CALL,
+            "{lookups} ambiguous-leaf lookups examined {lookup_examined} stored hints"
         );
     }
 
     #[test]
-    fn library_scan_hint_set_pushes_and_looks_up_two_hundred_thousand_hints_quickly() {
+    fn library_scan_hint_set_examines_a_bounded_number_of_hints_at_two_hundred_thousand() {
         const HINTS: usize = 200_000;
-        let started = std::time::Instant::now();
         let mut hints = LibraryScanHintSet::new();
-        for index in 0..HINTS {
-            hints.push(synthetic_series_hint(index));
-        }
-        let push_elapsed = started.elapsed();
+        let ((), push_examined) = library_scan_hints_examined_by(|| {
+            for index in 0..HINTS {
+                hints.push(synthetic_series_hint(index));
+            }
+        });
         assert!(
-            push_elapsed < std::time::Duration::from_secs(2),
-            "pushing {HINTS} hints took {push_elapsed:?}"
+            push_examined <= HINTS as u64 * MAX_HINTS_EXAMINED_PER_CALL,
+            "pushing {HINTS} hints examined {push_examined} stored hints"
         );
 
-        let started = std::time::Instant::now();
-        for index in (0..HINTS).step_by(200) {
-            let folder = format!("/other-root/synthetic-{index:06}");
-            let path_key = library_scan_folder_leaf_key(&folder).expect("leaf key");
-            let hint = hints
-                .hint_for_scan_path(
-                    LibraryScanHintFacet::Series,
-                    &path_key,
-                    library_scan_folder_full_path_key(&folder).as_deref(),
-                )
-                .expect("hint resolves by leaf key");
-            assert_eq!(hint.ids[0].value, (700_000 + index).to_string());
-            let by_id = hints
-                .hint_for_external_ids(
-                    LibraryScanHintFacet::Series,
-                    &[ExternalIdHint {
-                        provider: ExternalIdProvider::Tvdb,
-                        value: (700_000 + index).to_string(),
-                    }],
-                )
-                .expect("hint resolves by id");
-            assert_eq!(by_id.path_key, path_key);
-        }
-        let lookup_elapsed = started.elapsed();
+        let mut lookups = 0_u64;
+        let ((), lookup_examined) = library_scan_hints_examined_by(|| {
+            for index in (0..HINTS).step_by(200) {
+                let folder = format!("/other-root/synthetic-{index:06}");
+                let path_key = library_scan_folder_leaf_key(&folder).expect("leaf key");
+                let hint = hints
+                    .hint_for_scan_path(
+                        LibraryScanHintFacet::Series,
+                        &path_key,
+                        library_scan_folder_full_path_key(&folder).as_deref(),
+                    )
+                    .expect("hint resolves by leaf key");
+                assert_eq!(hint.ids[0].value, (700_000 + index).to_string());
+                let by_id = hints
+                    .hint_for_external_ids(
+                        LibraryScanHintFacet::Series,
+                        &[ExternalIdHint {
+                            provider: ExternalIdProvider::Tvdb,
+                            value: (700_000 + index).to_string(),
+                        }],
+                    )
+                    .expect("hint resolves by id");
+                assert_eq!(by_id.path_key, path_key);
+                lookups += 2;
+            }
+        });
         assert!(
-            lookup_elapsed < std::time::Duration::from_secs(2),
-            "1000 lookups against {HINTS} hints took {lookup_elapsed:?}"
+            lookup_examined <= lookups * MAX_HINTS_EXAMINED_PER_CALL,
+            "{lookups} lookups against {HINTS} hints examined {lookup_examined} stored hints"
         );
     }
 }
