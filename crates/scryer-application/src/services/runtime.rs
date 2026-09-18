@@ -554,6 +554,14 @@ impl DownloadQueueSnapshotCache {
         });
     }
 
+    /// Test seam: commits whatever is staged right now instead of waiting out
+    /// the coalesce window, so a test can read its own staged snapshot without
+    /// racing the spawned commit timer.
+    #[cfg(test)]
+    pub(crate) async fn commit_pending_for_test(&self) {
+        self.commit_pending().await;
+    }
+
     async fn commit_pending(&self) {
         let Some(pending) = self.pending.lock().await.take() else {
             return;
@@ -761,7 +769,9 @@ mod download_queue_snapshot_cache_tests {
         }
     }
 
-    #[tokio::test]
+    // Paused clock: the burst is staged without the runtime ever idling, so
+    // virtual time cannot reach the coalesce window until the burst is done.
+    #[tokio::test(start_paused = true)]
     async fn one_thousand_item_burst_commits_one_revision_and_deduplicates() {
         let cache = DownloadQueueSnapshotCache::default();
         for index in 0..1_000 {

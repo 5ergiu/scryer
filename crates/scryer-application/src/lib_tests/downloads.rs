@@ -227,7 +227,16 @@ async fn publish_test_download_queue_snapshot(app: &AppUseCase, items: Vec<Downl
         .download_queue_snapshot
         .stage_success(items)
         .await;
-    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
+    commit_test_download_queue_snapshot(app).await;
+}
+
+/// Commits the staged download-queue snapshot now rather than sleeping out the
+/// coalesce window, which a stalled commit timer could overrun.
+async fn commit_test_download_queue_snapshot(app: &AppUseCase) {
+    app.runtime
+        .acquisition
+        .download_queue_snapshot
+        .commit_pending_for_test()
         .await;
 }
 
@@ -281,7 +290,7 @@ async fn push_snapshot_observation_is_recorded_by_the_registry_resolver() {
         .await
         .expect("push snapshot should publish");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if registry.contains(&locator).await {
                 break;
@@ -388,8 +397,11 @@ async fn failed_client_poll_does_not_end_bindings_or_clean_manual_import_records
         .await;
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
-    let (base_app, user) =
-        bootstrap_with_cleanup_tracking(download_client, download_submissions, pending_releases);
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions,
+        pending_releases,
+    );
     let registry = Arc::new(RecordingDownloadRegistry::default());
     let imports = Arc::new(TrackingImportRepo::default());
     let app = base_app.with_test_overrides(|services| {
@@ -442,7 +454,12 @@ async fn failed_client_poll_does_not_end_bindings_or_clean_manual_import_records
             },
         ),
     );
-    sleep(Duration::from_millis(250)).await;
+    // The poller is serial, so the sixth client read proves five whole failed
+    // ticks ran to completion: each had its chance to end the binding.
+    wait_until("five complete failed poll ticks", || async {
+        *download_client.queue_calls.lock().await >= 6
+    })
+    .await;
     assert!(!registry.ended.lock().await.contains(&download_id));
     assert!(
         imports
@@ -669,8 +686,7 @@ async fn list_download_queue_reads_cached_observed_items_without_client_calls() 
         .download_queue_snapshot
         .stage_success(download_client.queue_items.lock().await.clone())
         .await;
-    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
-        .await;
+    commit_test_download_queue_snapshot(&app).await;
 
     let items = app
         .list_download_queue(&user, true, false, false, DownloadActivityFilter::All)
@@ -867,8 +883,7 @@ async fn list_download_queue_for_title_filters_the_shared_cache() {
         .download_queue_snapshot
         .stage_success(download_client.queue_items.lock().await.clone())
         .await;
-    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
-        .await;
+    commit_test_download_queue_snapshot(&app).await;
 
     let items = app
         .list_download_queue_for_title(
@@ -1313,8 +1328,7 @@ async fn download_import_page_reports_a_failed_manual_import_over_the_stale_bloc
     });
     app.refresh_import_record_queue_snapshot("import-manual-1")
         .await;
-    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
-        .await;
+    commit_test_download_queue_snapshot(&app).await;
 
     let page = app
         .list_download_import_page(&user, 50, 0, DownloadImportFilter::Failed)
@@ -2536,8 +2550,10 @@ async fn list_download_import_page_returns_promptly_when_tracked_snapshot_handle
     let snapshot_items = download_client.history_items.lock().await.clone();
     publish_test_download_queue_snapshot(&app, snapshot_items).await;
 
+    // Hang guard only: a wedged read never returns, so a regression still
+    // fails, while a stalled runner cannot trip a sub-second bound.
     let page = timeout(
-        Duration::from_millis(100),
+        TEST_WAIT_DEADLINE,
         app.list_download_import_page(&user, 50, 0, DownloadImportFilter::All),
     )
     .await
@@ -2611,8 +2627,10 @@ async fn list_download_import_page_uses_runtime_tracked_snapshot_cache() {
     projected_item.tracked_status_messages = vec!["moving files to nas".to_string()];
     publish_test_download_queue_snapshot(&app, vec![projected_item]).await;
 
+    // Hang guard only: a wedged read never returns, so a regression still
+    // fails, while a stalled runner cannot trip a sub-second bound.
     let page = timeout(
-        Duration::from_millis(100),
+        TEST_WAIT_DEADLINE,
         app.list_download_import_page(&user, 50, 0, DownloadImportFilter::All),
     )
     .await
@@ -2674,8 +2692,10 @@ async fn list_download_import_page_degrades_promptly_for_limit_one_count_reads_w
         .write()
         .await;
 
+    // Hang guard only: a wedged read never returns, so a regression still
+    // fails, while a stalled runner cannot trip a sub-second bound.
     let page = timeout(
-        Duration::from_millis(100),
+        TEST_WAIT_DEADLINE,
         app.list_download_import_page(&user, 1, 0, DownloadImportFilter::All),
     )
     .await
@@ -2907,7 +2927,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
         ),
     );
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -2973,7 +2993,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
         .await
         .retain(|item| item.download_client_item_id != item_id);
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if !download_client.deleted_requests.lock().await.is_empty() {
                 break;
@@ -3000,7 +3020,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
         )]
     );
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if !app
                 .runtime
@@ -3110,7 +3130,7 @@ async fn external_failed_snapshot_dispatches_failure_worker_without_completed_ro
         })
         .await
         .expect("publish initial downloading update");
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -3143,7 +3163,7 @@ async fn external_failed_snapshot_dispatches_failure_worker_without_completed_ro
         .expect("publish failed-only external update");
 
     let expected_source_title = crate::normalize_release_name(Some(release_title));
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if blocklist_repo.entries.lock().await.iter().any(|entry| {
                 entry.title_id == title.id
@@ -3214,7 +3234,7 @@ async fn external_weaver_snapshot_uses_tracked_runtime_and_provided_completed_ro
         .await
         .expect("publish missing-history update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -3249,7 +3269,7 @@ async fn external_weaver_snapshot_uses_tracked_runtime_and_provided_completed_ro
         .await
         .expect("publish provided completed update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -3353,7 +3373,7 @@ async fn external_weaver_missing_history_retries_from_tracked_runtime() {
         .await
         .expect("publish missing-history update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let snapshot_state = app
                 .runtime
@@ -3377,7 +3397,7 @@ async fn external_weaver_missing_history_retries_from_tracked_runtime() {
     .await
     .expect("missing history should remain retryable and be retried centrally");
 
-    timeout(Duration::from_secs(2), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let snapshot = app
                 .runtime
@@ -3425,7 +3445,7 @@ async fn external_weaver_missing_history_retries_from_tracked_runtime() {
     completed.download_id = None;
     *download_client.recent_completed_downloads.lock().await = Some(vec![completed]);
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if import_repo
                 .records
@@ -3531,7 +3551,7 @@ async fn external_weaver_aged_out_history_recovers_via_widened_batch_lookup() {
         .await
         .expect("publish missing-history update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -3575,7 +3595,7 @@ async fn external_weaver_aged_out_history_recovers_via_widened_batch_lookup() {
         *download_client.recent_completed_downloads.lock().await = Some(recent);
     }
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if import_repo
                 .records
@@ -3658,7 +3678,7 @@ async fn every_poll_tick_reads_recent_history_alongside_the_queue() {
 
     // Wait for several ticks, then require history reads to have kept pace with
     // them rather than trailing on a slower cadence of their own.
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if download_client.recent_activity_calls.lock().await.len() >= 3 {
                 break;
@@ -3762,7 +3782,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
         .await
         .expect("publish unmatched completed update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -3781,7 +3801,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
     .await
     .expect("unmatched observed completion should block for manual review");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let tracked_recorded = download_submissions
                 .tracked_states
@@ -3804,7 +3824,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
     .await
     .expect("blocked outcome should be persisted to submissions and identity states");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if sync_rx.borrow().revision > initial_revision {
                 break;
@@ -3823,7 +3843,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
         *download_client.history_calls.lock().await,
         download_client.recent_activity_calls.lock().await.len(),
     );
-    let page = timeout(Duration::from_secs(5), async {
+    let page = timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let page = app
                 .list_download_import_page(&user, 50, 0, DownloadImportFilter::Blocked)
@@ -3911,7 +3931,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
         })
         .await
         .expect("publish source snapshot without the blocked row");
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let page = app
                 .list_download_import_page(&user, 50, 0, DownloadImportFilter::Blocked)
@@ -3942,7 +3962,7 @@ async fn blocked_import_outcome_is_persisted_durably() {
         .ignore(tracked_id.clone())
         .await
         .expect("ignore blocked tracked download");
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let page = app
                 .list_download_import_page(&user, 50, 0, DownloadImportFilter::Blocked)
@@ -4046,7 +4066,7 @@ async fn queued_manual_import_on_blocked_bridged_row_renders_as_pending() {
         })
         .await
         .expect("publish unmatched completed update");
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -4089,7 +4109,7 @@ async fn queued_manual_import_on_blocked_bridged_row_renders_as_pending() {
         })
         .await
         .expect("publish bridge snapshot with the blocked row");
-    let queued_row = timeout(Duration::from_secs(5), async {
+    let queued_row = timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let page = app
                 .list_download_import_page(&user, 50, 0, DownloadImportFilter::All)
@@ -4132,7 +4152,7 @@ async fn queued_manual_import_on_blocked_bridged_row_renders_as_pending() {
         })
         .await
         .expect("publish bridge snapshot after the manual import finished");
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let page = app
                 .list_download_import_page(&user, 50, 0, DownloadImportFilter::All)
@@ -4237,7 +4257,7 @@ async fn external_weaver_idless_missing_history_retries_and_dispatches_without_s
         .await
         .expect("publish idless missing-history update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let snapshot = app
                 .runtime
@@ -4280,7 +4300,7 @@ async fn external_weaver_idless_missing_history_retries_and_dispatches_without_s
     completed.download_id = None;
     *download_client.recent_completed_downloads.lock().await = Some(vec![completed]);
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if import_repo
                 .records
@@ -4387,7 +4407,7 @@ async fn external_weaver_path_wait_retries_from_tracked_runtime_without_second_d
         .await
         .expect("publish path-wait completed update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -4424,7 +4444,7 @@ async fn external_weaver_path_wait_retries_from_tracked_runtime_without_second_d
     ready_completed.download_id = None;
     *download_client.recent_completed_downloads.lock().await = Some(vec![ready_completed]);
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if import_repo
                 .records
@@ -4507,7 +4527,7 @@ async fn external_weaver_idless_bad_observed_item_blocks_after_history_retry() {
         .await
         .expect("publish unsafe idless missing-history update");
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -4552,7 +4572,7 @@ async fn external_weaver_idless_bad_observed_item_blocks_after_history_retry() {
     completed.parameters.clear();
     *download_client.recent_completed_downloads.lock().await = Some(vec![completed]);
 
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if app
                 .runtime
@@ -5691,13 +5711,11 @@ async fn catalog_scan_and_final_import_join_the_same_native_probe() {
         ),
         async {
             // One held handle, one worker, and both production waiters.
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while references() < 4 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("both production paths must join the held native probe");
+            wait_until(
+                "both production paths must join the held native probe",
+                || async { references() >= 4 },
+            )
+            .await;
             release.send(()).unwrap();
         },
     );
@@ -5749,13 +5767,11 @@ async fn shared_native_probe_rejects_source_changes_in_both_production_paths() {
             None,
         ),
         async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while references() < 4 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("both production paths must join before changing the source");
+            wait_until(
+                "both production paths must join before changing the source",
+                || async { references() >= 4 },
+            )
+            .await;
             let mut replacement = original.clone();
             replacement.extend_from_slice(&[0; 16]);
             std::fs::write(&path, replacement).unwrap();
@@ -10195,14 +10211,13 @@ async fn download_queue_subscription_bootstraps_from_runtime_cache_without_clien
         .download_queue_snapshot
         .stage_success(download_client.queue_items.lock().await.clone())
         .await;
-    sleep(crate::services::DOWNLOAD_QUEUE_SNAPSHOT_COALESCE_WINDOW + Duration::from_millis(50))
-        .await;
+    commit_test_download_queue_snapshot(&app).await;
 
     let mut receiver = app
         .subscribe_download_queue(&user)
         .await
         .expect("queue subscription should start");
-    let snapshot = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let snapshot = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .expect("initial queue snapshot should arrive")
         .expect("queue subscription should stay open");
@@ -10239,7 +10254,7 @@ async fn download_queue_subscription_sends_empty_bootstrap_snapshot() {
         .subscribe_download_queue(&user)
         .await
         .expect("queue subscription should start");
-    let snapshot = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let snapshot = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .expect("initial empty queue snapshot should arrive")
         .expect("queue subscription should stay open");
@@ -10320,7 +10335,7 @@ async fn queued_delete_poller_executes_client_delete() {
         token.child_token(),
     ));
 
-    let record = tokio::time::timeout(Duration::from_secs(1), async {
+    let record = tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if let Some(record) = download_queue_commands.get(&command_id).await
                 && record.status == scryer_domain::DownloadQueueDeleteStatus::Completed
@@ -10373,7 +10388,7 @@ async fn queue_delete_ends_bound_download_when_client_is_unavailable() {
         app,
         token.child_token(),
     ));
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if download_queue_commands
                 .get(&command.id)
@@ -10468,7 +10483,7 @@ async fn legacy_queue_delete_ends_binding_that_predates_the_command() {
         app,
         token.child_token(),
     ));
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if download_queue_commands
                 .get(&command_id)
@@ -10631,7 +10646,7 @@ async fn queue_delete_registry_miss_or_error_uses_legacy_command_and_still_execu
         app,
         token.child_token(),
     ));
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let missed_completed =
                 download_queue_commands
@@ -10700,7 +10715,7 @@ async fn legacy_delete_command_does_not_end_binding_created_after_command() {
         app,
         token.child_token(),
     ));
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if download_queue_commands
                 .get(&command_id)
@@ -10778,7 +10793,7 @@ async fn queued_delete_poller_completes_local_delete_when_client_is_unavailable(
         token.child_token(),
     ));
 
-    let record = tokio::time::timeout(Duration::from_secs(1), async {
+    let record = tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if let Some(record) = download_queue_commands.get(&command_id).await
                 && record.status == scryer_domain::DownloadQueueDeleteStatus::Completed
@@ -10860,7 +10875,7 @@ async fn queued_delete_removes_orphaned_import_blocked_item_locally() {
         token.child_token(),
     ));
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let completed = download_queue_commands
                 .get(&command_id)
@@ -11203,7 +11218,7 @@ async fn active_library_scans_and_subscription_use_runtime_tracker_state() {
         .subscribe_library_scan_progress(&user)
         .await
         .expect("library scan subscription should start");
-    let initial = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let initial = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .expect("initial library scan snapshot should arrive")
         .expect("library scan subscription should stay open");
@@ -11228,7 +11243,7 @@ async fn library_scan_subscription_includes_libraries_created_after_connecting()
         .await
         .unwrap();
     let mut receiver = app.subscribe_library_scan_progress(&user).await.unwrap();
-    let initial = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let initial = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .unwrap()
         .unwrap();
@@ -11261,7 +11276,7 @@ async fn library_scan_subscription_includes_libraries_created_after_connecting()
         )
         .await
         .unwrap();
-    let progress = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let progress = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .unwrap()
         .unwrap();
@@ -11275,7 +11290,7 @@ async fn library_scan_subscription_includes_libraries_created_after_connecting()
         .complete_if_finished("new-library-scan")
         .await
         .unwrap();
-    let completed = tokio::time::timeout(Duration::from_secs(1), async {
+    let completed = tokio::time::timeout(TEST_WAIT_DEADLINE, async {
         loop {
             let session = receiver.recv().await.unwrap();
             if session.status.is_terminal() {
@@ -11305,7 +11320,7 @@ async fn library_scan_subscription_does_not_expose_unknown_libraries() {
         .await
         .unwrap();
     let mut receiver = app.subscribe_library_scan_progress(&user).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .unwrap()
         .unwrap();
@@ -11320,7 +11335,7 @@ async fn library_scan_subscription_does_not_expose_unknown_libraries() {
         .unwrap();
     tracker.cancel_session("invisible-scan").await.unwrap();
     tracker.cancel_session("visible-initial").await.unwrap();
-    let received = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let received = tokio::time::timeout(TEST_WAIT_DEADLINE, receiver.recv())
         .await
         .unwrap()
         .unwrap();
@@ -15612,7 +15627,7 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = bool>,
 {
-    timeout(Duration::from_secs(5), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if condition().await {
                 break;
@@ -15790,7 +15805,13 @@ async fn a_failed_client_read_never_ends_a_foreign_binding() {
         download_client
             .set_recent_activity_error(Some("client unavailable"))
             .await;
-        sleep(Duration::from_millis(300)).await;
+        // Every read counted from here fails. The poller is serial, so the
+        // fourth one proves three whole blackout ticks ran to completion.
+        let reads_before_blackout = *download_client.queue_calls.lock().await;
+        wait_until("three complete blackout poll ticks", || async {
+            *download_client.queue_calls.lock().await >= reads_before_blackout + 4
+        })
+        .await;
 
         assert!(
             !registry.ended.lock().await.contains(&download_id),
