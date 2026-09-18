@@ -5762,9 +5762,9 @@ mod tests {
     #[test]
     fn sigstore_provenance_uses_the_resolved_lockfile_version() {
         let ctx = TaskContext::new();
-        let version = resolved_cargo_package_version(&ctx, "sigstore")
-            .expect("resolve sigstore from Cargo.lock");
-        Version::parse(&version).expect("resolved sigstore version should be semver");
+        let version = resolved_cargo_package_version(&ctx, "artifact-trust")
+            .expect("resolve artifact-trust from Cargo.lock");
+        Version::parse(&version).expect("resolved artifact-trust version should be semver");
     }
 
     #[test]
