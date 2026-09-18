@@ -673,6 +673,15 @@ async fn enrich_download_queue_items_from_submissions_with_original_identities(
         }
     };
 
+    // One read for the whole pass: the by-download-id fallback below is the
+    // path that adopts rows Scryer never submitted, and it must not adopt a
+    // row from outside the categories its client feeds Scryer.
+    let adoption_scope = if items.is_empty() {
+        None
+    } else {
+        app.download_client_category_admission_snapshot().await
+    };
+
     for (index, item) in items.iter_mut().enumerate() {
         let current = download_queue_item_source_identity(item);
         let original = original_source_identities.and_then(|identities| identities.get(index));
@@ -729,7 +738,8 @@ async fn enrich_download_queue_items_from_submissions_with_original_identities(
         }
 
         if let Some(submission) =
-            find_submission_for_queue_item_by_download_id(app, item, original).await
+            find_submission_for_queue_item_by_download_id(app, item, original, &adoption_scope)
+                .await
         {
             apply_submission_to_queue_item(item, &submission);
         }
@@ -757,9 +767,21 @@ async fn find_submission_for_queue_item_by_download_id(
     app: &AppUseCase,
     item: &DownloadQueueItem,
     original: Option<&ClientJobLocator>,
+    adoption_scope: &Option<
+        std::sync::Arc<crate::services::DownloadClientCategoryAdmissionSnapshot>,
+    >,
 ) -> Option<DownloadSubmission> {
     let download_id = item.download_id.as_deref().map(str::trim)?;
     if download_id.is_empty() {
+        return None;
+    }
+
+    // Resolving is adoption: a row with no submission and no Scryer token
+    // leaves this call owning a `downloads` row and an active binding. Rows
+    // outside the categories this client feeds Scryer are left alone, and a
+    // row that carries a Scryer wire token is Scryer's own whatever its
+    // category says.
+    if !crate::download_identity::queue_item_is_in_adoption_scope(item, adoption_scope.as_deref()) {
         return None;
     }
 

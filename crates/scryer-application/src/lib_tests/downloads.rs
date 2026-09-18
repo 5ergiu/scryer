@@ -32,6 +32,13 @@ impl RecordingDownloadRegistry {
         self.rows.lock().await.contains_key(locator)
     }
 
+    pub(super) async fn download_id_for(
+        &self,
+        locator: &ClientJobLocator,
+    ) -> Option<scryer_domain::download_identity::DownloadId> {
+        self.rows.lock().await.get(locator).copied()
+    }
+
     pub(super) async fn bind(
         &self,
         locator: ClientJobLocator,
@@ -15556,6 +15563,241 @@ fn foreign_client_history_item(item_id: &str) -> DownloadQueueItem {
         tracked_match_type: None,
         seeding: None,
     }
+}
+
+/// The same synthetic row, filed under a client and a category.
+fn categorized_client_history_item(
+    client_id: &str,
+    item_id: &str,
+    category: Option<&str>,
+) -> DownloadQueueItem {
+    let mut item = foreign_client_history_item(item_id);
+    item.client_id = client_id.to_string();
+    item.category = category.map(str::to_string);
+    // A real SABnzbd row carries its native job id here, which is what sends
+    // every foreign row through the by-download-id resolution that adopts it.
+    item.download_id = Some(format!("nzo_{item_id}"));
+    item
+}
+
+/// Run the poller over the stub client for the duration of `body`.
+async fn with_download_queue_poller<F, Fut, T>(app: AppUseCase, body: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(1);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(
+        crate::integration::start_download_queue_poller_with_options(
+            app,
+            cancellation.child_token(),
+            tracked_download_rx,
+            snapshot_rx,
+            crate::integration::DownloadQueuePollerOptions {
+                interval: Duration::from_millis(25),
+                ..Default::default()
+            },
+        ),
+    );
+    let outcome = body().await;
+    cancellation.cancel();
+    poller.await.expect("poller should stop cleanly");
+    outcome
+}
+
+async fn wait_for_registry_state<F, Fut>(label: &str, condition: F)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if condition().await {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the poller never reached the expected registry state: {label}"));
+}
+
+async fn bootstrap_shared_download_client(
+    categories: Option<Vec<String>>,
+) -> (
+    AppUseCase,
+    Arc<StubDownloadClient>,
+    Arc<RecordingDownloadRegistry>,
+    DownloadClientConfig,
+) {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions,
+        pending_releases,
+    );
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let config =
+        create_enabled_download_client_config(&app, &user, "Shared Downloader", "sabnzbd").await;
+    // Creating the config refreshes admission, so the scope under test is
+    // installed afterwards.
+    let (feedback_categories_by_client, categories_by_client) = match categories {
+        Some(categories) => (
+            HashMap::from([(config.id.clone(), categories.clone())]),
+            HashMap::from([(
+                config.id.clone(),
+                categories
+                    .iter()
+                    .map(|category| category.to_ascii_lowercase())
+                    .collect::<HashSet<_>>(),
+            )]),
+        ),
+        None => (HashMap::new(), HashMap::new()),
+    };
+    app.runtime
+        .acquisition
+        .download_client_category_admission
+        .replace(crate::services::DownloadClientCategoryAdmissionSnapshot {
+            default_categories: HashSet::new(),
+            categories_by_client,
+            feedback_categories_by_client,
+        })
+        .await;
+    *download_client
+        .snapshot_authoritative_client_ids
+        .lock()
+        .await = HashSet::from([config.id.clone()]);
+    (app, download_client, registry, config)
+}
+
+fn shared_client_locator(config: &DownloadClientConfig, item_id: &str) -> ClientJobLocator {
+    ClientJobLocator::new(Some(config.id.as_str()), "sabnzbd", item_id)
+}
+
+/// A download client Scryer shares with the operator's own work must not mint
+/// a permanent identity and a never-ending binding for every row it lists.
+#[tokio::test]
+async fn foreign_rows_outside_the_client_categories_are_never_adopted_or_tracked() {
+    let (app, download_client, registry, config) =
+        bootstrap_shared_download_client(Some(vec!["tv".to_string()])).await;
+    *download_client.history_items.lock().await = vec![
+        categorized_client_history_item(&config.id, "scoped-owned", Some("TV")),
+        categorized_client_history_item(&config.id, "scoped-foreign", Some("music")),
+    ];
+    let owned = shared_client_locator(&config, "scoped-owned");
+    let foreign = shared_client_locator(&config, "scoped-foreign");
+
+    with_download_queue_poller(app, || async {
+        wait_for_registry_state("the in-scope row is adopted", || async {
+            registry.contains(&owned).await
+        })
+        .await;
+        // Both rows ride in the same snapshot, so the in-scope adoption proves
+        // the out-of-scope row was offered and refused, not merely late.
+        assert!(
+            !registry.contains(&foreign).await,
+            "a row outside this client's categories must not be adopted"
+        );
+    })
+    .await;
+}
+
+/// A client with nothing configured is unfiltered, exactly as before.
+#[tokio::test]
+async fn a_client_without_configured_categories_still_adopts_every_row() {
+    let (app, download_client, registry, config) = bootstrap_shared_download_client(None).await;
+    *download_client.history_items.lock().await = vec![
+        categorized_client_history_item(&config.id, "unfiltered-a", Some("music")),
+        categorized_client_history_item(&config.id, "unfiltered-b", None),
+    ];
+    let first = shared_client_locator(&config, "unfiltered-a");
+    let second = shared_client_locator(&config, "unfiltered-b");
+
+    with_download_queue_poller(app, || async {
+        wait_for_registry_state("every row is adopted", || async {
+            registry.contains(&first).await && registry.contains(&second).await
+        })
+        .await;
+    })
+    .await;
+}
+
+/// A foreign row that leaves the client's window takes its binding with it.
+#[tokio::test]
+async fn a_foreign_binding_ends_once_its_row_leaves_the_client_window() {
+    let (app, download_client, registry, config) =
+        bootstrap_shared_download_client(Some(vec!["tv".to_string()])).await;
+    *download_client.history_items.lock().await = vec![categorized_client_history_item(
+        &config.id,
+        "leaving",
+        Some("tv"),
+    )];
+    let locator = shared_client_locator(&config, "leaving");
+
+    with_download_queue_poller(app, || async {
+        wait_for_registry_state("the foreign row is adopted", || async {
+            registry.contains(&locator).await
+        })
+        .await;
+        let download_id = registry
+            .download_id_for(&locator)
+            .await
+            .expect("the foreign row was adopted");
+        assert!(!registry.ended.lock().await.contains(&download_id));
+
+        download_client.history_items.lock().await.clear();
+        wait_for_registry_state("the foreign binding is released", || async {
+            registry.ended.lock().await.contains(&download_id)
+        })
+        .await;
+    })
+    .await;
+}
+
+/// A client that answered nothing proves nothing: a read failure must never
+/// end a binding.
+#[tokio::test]
+async fn a_failed_client_read_never_ends_a_foreign_binding() {
+    let (app, download_client, registry, config) =
+        bootstrap_shared_download_client(Some(vec!["tv".to_string()])).await;
+    *download_client.history_items.lock().await = vec![categorized_client_history_item(
+        &config.id,
+        "blackout",
+        Some("tv"),
+    )];
+    let locator = shared_client_locator(&config, "blackout");
+
+    with_download_queue_poller(app, || async {
+        wait_for_registry_state("the foreign row is adopted", || async {
+            registry.contains(&locator).await
+        })
+        .await;
+        let download_id = registry
+            .download_id_for(&locator)
+            .await
+            .expect("the foreign row was adopted");
+
+        // The row is still in the client; the client simply cannot be read.
+        download_client
+            .set_queue_error(Some("client unavailable"))
+            .await;
+        download_client
+            .set_recent_activity_error(Some("client unavailable"))
+            .await;
+        sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            !registry.ended.lock().await.contains(&download_id),
+            "a client blackout must never end a binding"
+        );
+    })
+    .await;
 }
 
 /// The steady-state tick must cost nothing.

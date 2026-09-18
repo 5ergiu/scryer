@@ -637,6 +637,36 @@ pub(crate) async fn resolve_observed_client_job(
     }
 }
 
+/// Whether a client row carries a Scryer-minted download token. Such a row is
+/// Scryer's own work whatever category the client files it under.
+pub(crate) fn queue_item_carries_scryer_token(item: &scryer_domain::DownloadQueueItem) -> bool {
+    item.download_id
+        .as_deref()
+        .and_then(DownloadId::from_wire)
+        .is_some()
+}
+
+/// Whether this client row may be resolved against the download registry.
+///
+/// Resolution *is* adoption for a row Scryer never submitted: it leaves behind
+/// a permanent `downloads` row and an active `download_client_bindings` row.
+/// Rows sitting outside the categories their client feeds Scryer are therefore
+/// never resolved, so they never become a download, a binding, or a tracked
+/// download. Scryer's own rows — a submission joined onto the row, or a
+/// Scryer wire token on it — are never filtered.
+pub(crate) fn queue_item_is_in_adoption_scope(
+    item: &scryer_domain::DownloadQueueItem,
+    snapshot: Option<&crate::services::DownloadClientCategoryAdmissionSnapshot>,
+) -> bool {
+    queue_item_carries_scryer_token(item)
+        || crate::services::foreign_observation_is_in_client_scope(
+            item.is_scryer_origin,
+            item.client_id.as_str(),
+            item.category.as_deref(),
+            snapshot,
+        )
+}
+
 pub(crate) fn observed_queue_item_job(
     item: &scryer_domain::DownloadQueueItem,
 ) -> ObservedClientJob {

@@ -916,6 +916,7 @@ async fn process_tracked_download_snapshot(
     let cycle_started_at = Instant::now();
 
     enrich_download_queue_items_from_submissions(app, &mut items).await;
+    drop_rows_outside_download_client_adoption_scope(app, &mut items, snapshot_label).await;
     if let TrackedDownloadSnapshotProjection::Publish { source } = &projection {
         // Poller items already carry import-record state (the poller loads
         // them through `enrich_download_queue_items`). Bridged clients (Weaver)
@@ -1221,6 +1222,38 @@ pub(crate) async fn record_download_client_refresh_outcomes(
                 "failed to record download client refresh status"
             );
         }
+    }
+}
+
+/// Drop client rows Scryer never submitted that sit outside the categories
+/// their client feeds Scryer.
+///
+/// Tracking a row resolves it, and resolving a foreign row adopts it: one
+/// permanent `downloads` row and one never-ending binding each, every tick,
+/// for work Scryer will never touch. A client with no configured categories is
+/// unfiltered and keeps listing everything, as before.
+async fn drop_rows_outside_download_client_adoption_scope(
+    app: &AppUseCase,
+    items: &mut Vec<DownloadQueueItem>,
+    snapshot_label: &'static str,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let Some(scope) = app.download_client_category_admission_snapshot().await else {
+        return;
+    };
+    let before = items.len();
+    items.retain(|item| {
+        crate::download_identity::queue_item_is_in_adoption_scope(item, Some(scope.as_ref()))
+    });
+    let dropped = before - items.len();
+    if dropped > 0 {
+        tracing::debug!(
+            snapshot = snapshot_label,
+            dropped,
+            "skipped client rows outside the categories their download client feeds Scryer"
+        );
     }
 }
 
