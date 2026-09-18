@@ -15,6 +15,7 @@ import type { LucideIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { finalizeProgressPercent } from "@/lib/external-import-wizard-orchestration";
 import type { UseExternalImportSetupReturn } from "@/lib/hooks/use-external-import-setup";
 import { LoadingMark } from "@/components/common/loading-mark";
 
@@ -70,6 +71,9 @@ export default function SetupImportSummaryView({
     preview,
     previewError,
     loadPreview,
+    finalizing,
+    finalizeError,
+    finalizeProgress,
   } = wizard;
 
   // The Summary also needs the preview loaded (it yields the root mappings for
@@ -153,6 +157,22 @@ export default function SetupImportSummaryView({
       count: summary.indexers,
     },
   ];
+
+  // ── Finalize (background apply) ──────────────────────────────────────────
+  // The apply runs server-side after Finish is pressed; show it with the same
+  // progress bar the warmup uses, and render its failure in place (the toast
+  // alone leaves an operator staring at a dead button).
+  const finalizeApplied = finalizeProgress?.completed ?? 0;
+  const finalizeTotal = finalizeProgress?.total ?? 0;
+  const finalizeDone = finalizeProgress?.status === "COMPLETED";
+  const finalizePct = finalizeProgressPercent(
+    finalizeApplied,
+    finalizeTotal,
+    finalizeDone,
+  );
+  const showFinalizeCard = Boolean(
+    finalizing || finalizeProgress || finalizeError,
+  );
 
   const titlesFetched = aggregateProgress?.titlesFetched ?? 0;
   const titlesTotal = aggregateProgress?.titlesTotal ?? 0;
@@ -378,6 +398,111 @@ export default function SetupImportSummaryView({
           </>
         )}
       </div>
+
+      {/* ── Finalize apply card ────────────────────────────────────────── */}
+      {showFinalizeCard ? (
+        <div
+          id="setup-import-finalize-card"
+          data-slot="setup-import-finalize"
+          style={cardStyle}
+        >
+          {finalizeError ? (
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 14 }}
+              data-slot="setup-import-finalize-error"
+            >
+              <div
+                style={{
+                  ...accentTileStyle,
+                  background: "var(--scry-danger-bg)",
+                  border: "1px solid var(--scry-danger-border)",
+                  color: "var(--scry-danger-text-soft)",
+                }}
+              >
+                <TriangleAlert size={18} strokeWidth={2} aria-hidden />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{ fontSize: 14.5, fontWeight: 600, color: "#f1f5ff" }}
+                >
+                  {t("setup.importFinalizeFailedTitle")}
+                </div>
+                <div style={{ fontSize: 12.5, color: "var(--scry-muted3)" }}>
+                  {finalizeError
+                    .replace(/^\[(?:GraphQL|Network)\]\s*/i, "")
+                    .trim() || t("setup.importFinalizeFailed")}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                <div style={accentTileStyle}>
+                  {finalizeDone ? (
+                    <CircleCheckBig size={18} strokeWidth={2} aria-hidden />
+                  ) : (
+                    <LoadingMark className="size-[18px]" />
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{ fontSize: 14.5, fontWeight: 600, color: "#f1f5ff" }}
+                  >
+                    {finalizeDone
+                      ? t("setup.importApplied")
+                      : t("setup.applyingImport")}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--scry-muted3)" }}>
+                    {finalizeDone
+                      ? t("setup.importAppliedDetail")
+                      : t("setup.applyingImportDetail")}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    flex: "none",
+                    fontFamily: "var(--font-space-grotesk)",
+                    fontWeight: 700,
+                    fontSize: 22,
+                    color: finalizeDone
+                      ? "var(--scry-success-text-soft)"
+                      : "#fff",
+                    letterSpacing: "-0.02em",
+                  }}
+                >
+                  {finalizePct}%
+                </div>
+              </div>
+
+              <Progress
+                value={finalizePct}
+                className="mt-3.5 h-2"
+                style={{ background: "var(--scry-page2)" }}
+                indicatorClassName={
+                  finalizeDone ? "bg-[var(--scry-success-solid)]" : undefined
+                }
+              />
+
+              {finalizeTotal > 0 ? (
+                <div
+                  style={{
+                    marginTop: 12,
+                    textAlign: "right",
+                    fontFamily: "var(--font-code)",
+                    fontSize: 12.5,
+                    color: "var(--scry-faint)",
+                  }}
+                >
+                  {t("setup.titlesApplied", {
+                    applied: finalizeApplied.toLocaleString(),
+                    total: finalizeTotal.toLocaleString(),
+                  })}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
 
       {/* Unmapped-root notice: finalize requires every detected source root to
           be mapped, so explain a disabled Finish instead of failing later. */}

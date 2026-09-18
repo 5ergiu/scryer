@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Client } from "urql";
 
-import { isProwlarrDiscoveryReady } from "@/lib/external-import-wizard-orchestration";
+import {
+  isProwlarrDiscoveryReady,
+  pollExternalImportFinalize,
+  runFinalizeStart,
+  type FinalizeStatusSample,
+} from "@/lib/external-import-wizard-orchestration";
 import {
   cancelExternalImportArrSourceWarmupMutation,
   clearExternalImportSetupSecretDraftMutation,
@@ -34,6 +39,7 @@ import type {
   ExternalImportPreview,
   ExternalImportAggregateWarmupProgress,
   ExternalImportMonitorWarmupProgress,
+  ExternalImportMonitorWarmupStatus,
   ExternalImportResult,
 } from "@/lib/types/external-import";
 
@@ -200,6 +206,11 @@ function isLostWarmupSessionError(message: string | null | undefined): boolean {
 // apiKey stripped; it is re-merged from the server draft on load.
 const IMPORT_WIZARD_STORAGE_KEY = "scryer:import-wizard:v1";
 
+// Session the backend writes the merged monitored-status snapshot under.
+// It is a fixed id (see EXTERNAL_IMPORT_MONITOR_APPLY_SESSION_ID server-side),
+// and it is what a hinted library scan reads its import hints from.
+const EXTERNAL_IMPORT_MONITOR_APPLY_SESSION_ID = "external-import-monitor-apply";
+
 interface PersistedImportWizardState {
   instances: ImportInstance[]; // apiKey stripped — restored from the server draft
   manualRoots: ImportRoot[];
@@ -211,6 +222,12 @@ interface PersistedImportWizardState {
   dcSelectionSeeded: boolean;
   idxSelectionSeeded: boolean;
   executeResult: ExternalImportResult | null;
+  /** In-flight background finalize, so a refresh resumes polling instead of
+   *  re-running the apply. */
+  finalizeSessionId: string | null;
+  /** Libraries already created/updated by a finalize attempt, keyed by draft
+   *  id, so a resumed finalize scans them without re-creating them. */
+  createdLibraries: [string, string][];
 }
 
 function loadPersistedImportWizardState(): Partial<PersistedImportWizardState> | null {
@@ -266,9 +283,12 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
   const lastVerifiedRef = useRef<
     Record<string, { baseUrl: string; apiKey: string }>
   >({});
-  // Libraries created during a finalize attempt, persisted across retries so a
-  // resumed finalize doesn't re-create (and conflict on) existing libraries.
-  const createdLibrariesRef = useRef<Map<string, string>>(new Map());
+  // Libraries created during a finalize attempt, persisted across retries AND
+  // across a page refresh so a resumed finalize doesn't re-create (and conflict
+  // on) existing libraries, and still knows what to scan once the apply lands.
+  const createdLibrariesRef = useRef<Map<string, string>>(
+    new Map(initial?.createdLibraries ?? []),
+  );
 
   const arrInstances = useMemo(
     () => instances.filter((inst) => inst.kind !== "PROWLARR"),
@@ -1387,169 +1407,274 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
 
   const [finalizing, setFinalizing] = useState(false);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  // Session id of the background apply started by `finalizeExternalImport`.
+  // Persisted, so a refresh mid-apply resumes polling instead of re-running it.
+  const [finalizeSessionId, setFinalizeSessionId] = useState<string | null>(
+    () => initial?.finalizeSessionId ?? null,
+  );
+  const [finalizeProgress, setFinalizeProgress] =
+    useState<FinalizeStatusSample | null>(null);
+  // Set once the apply landed AND setup/scan follow-up finished: the wizard
+  // watches this to navigate away.
+  const [finalizeComplete, setFinalizeComplete] = useState<{
+    scanErrors: string[];
+  } | null>(null);
 
   /**
-   * Creates the mapped libraries, applies the monitored-status mappings, marks
-   * setup complete, and triggers a hinted scan per created library.
+   * Finish the background apply: mark setup complete and trigger a hinted scan
+   * per created library. Runs only after the apply session reports COMPLETED,
+   * because the scan hints it passes are written by that apply.
    */
-  const finalizeImport = useCallback(async (): Promise<{
-    ok: boolean;
-    scanErrors: string[];
-    error: string | null;
-  }> => {
-    setFinalizing(true);
-    setFinalizeError(null);
+  const completeFinalizedImport = useCallback(async () => {
     const scanErrors: string[] = [];
-    const fail = (message: string) => {
-      setFinalizing(false);
-      setFinalizeError(message);
-      return { ok: false, scanErrors, error: message };
-    };
-    const normPath = (p: string) =>
-      p.trim().replace(/[\\/]+$/, "").toLowerCase();
-
-    // Safety net: the backend requires a mapping for every source root it
-    // warmed (configured root folders AND the folders titles actually live in).
-    // If any detected root is still unmapped — e.g. the preview was reloaded
-    // after a refresh and surfaced a content root that wasn't mapped — finalize
-    // would fail server-side with a cryptic "missing mapping for source … root".
-    // Catch it here with actionable guidance instead.
-    const unmappedDetected = detectedRoots.filter((root) => !assign[root.id]);
-    if (connectedArrSessionIds.length > 0 && unmappedDetected.length > 0) {
-      return fail(
-        `Some detected source folders aren't mapped to a library yet (e.g. "${unmappedDetected[0].arrRootPath}"). Go back to the Libraries step to map them.`,
-      );
-    }
-
-    const { librariesToCreate } = buildMappings();
-
-    // Cross-library guard: the backend rejects a root path already owned by
-    // another library, so two drafts sharing an effective root path can't both
-    // be created. Surface it up front instead of failing mid-create.
-    const pathOwner = new Map<string, { id: string; name: string }>();
-    for (const { draft, rootPaths } of librariesToCreate) {
-      for (const path of rootPaths) {
-        const owner = pathOwner.get(normPath(path));
-        if (owner && owner.id !== draft.id) {
-          return fail(
-            `Root "${path}" is mapped to more than one library (${owner.name} and ${draft.name}). A root can belong to only one library.`,
-          );
-        }
-        pathOwner.set(normPath(path), { id: draft.id, name: draft.name });
-      }
-    }
-
-    // Resumable: reuse libraries resolved on a prior (failed) attempt so a retry
-    // does only the pending work and never re-creates (and root-conflicts on)
-    // libraries that already exist. Existing/default libraries are UPDATED with
-    // their mapped roots; user-added libraries are CREATED.
-    const createdByDraftId = createdLibrariesRef.current;
-    for (const { draft, rootPaths } of librariesToCreate) {
-      if (createdByDraftId.has(draft.id)) continue;
-      const roots = rootPaths.map((path, index) => ({
-        path,
-        isDefault: index === 0,
-      }));
-      const settings = {
-        qualityProfileId: draft.qualityProfileId,
-        scoringPersona: draft.scoringPersona,
-      };
-      let resolvedId: string | null = null;
-      // Default libraries: update in place if they exist. The default may not
-      // exist yet during onboarding, so fall through to create on failure.
-      if (draft.existingLibraryId) {
-        const { data } = await client
-          .mutation(updateLibraryMutation, {
-            input: { libraryId: draft.existingLibraryId, roots, settings },
-          })
-          .toPromise();
-        if (data?.updateLibrary?.id) {
-          resolvedId = data.updateLibrary.id as string;
-        }
-      }
-      if (!resolvedId) {
-        const { data, error } = await client
-          .mutation(createLibraryMutation, {
-            input: { facet: draft.facet, name: draft.name, roots, settings },
-          })
-          .toPromise();
-        const created = data?.createLibrary;
-        if (error || !created?.id) {
-          return fail(
-            `${gqlError(error) || "Failed to create library"}: ${draft.name}`,
-          );
-        }
-        resolvedId = created.id as string;
-      }
-      createdByDraftId.set(draft.id, resolvedId);
-    }
-
-    // Build mappings, deduped by the backend's mapping key so duplicate manual
-    // roots (same library + path) don't trip "duplicate source root mapping".
-    const mappings: ExternalImportSourceLibraryMappingInput[] = [];
-    const seenMappingKey = new Set<string>();
-    for (const root of roots) {
-      const draftId = assign[root.id];
-      if (!draftId) continue;
-      const libraryId = createdByDraftId.get(draftId);
-      const draft = libraries.find((lib) => lib.id === draftId);
-      if (!libraryId || !draft) continue;
-      const scryerRootPath = effectiveRootPath(root);
-      const mappingKey = root.manual
-        ? `manual|${libraryId}|${normPath(scryerRootPath)}`
-        : `src|${root.sourceWarmupSessionId ?? ""}|${root.sourceKey ?? ""}|${normPath(root.arrRootPath)}`;
-      if (seenMappingKey.has(mappingKey)) continue;
-      seenMappingKey.add(mappingKey);
-      mappings.push({
-        sourceWarmupSessionId: root.sourceWarmupSessionId,
-        sourceKey: root.sourceKey,
-        kind: root.manual ? null : (root.kind as ExternalArrSourceKind),
-        arrRootPath: root.arrRootPath,
-        scryerRootPath,
-        libraryId,
-        facet: draft.facet,
-      });
-    }
-
-    const { data: finalizeData, error: finalizeErr } = await client
-      .mutation(finalizeExternalImportMutation, {
-        input: {
-          sourceWarmupSessionIds: connectedArrSessionIds,
-          mappings,
-        },
-      })
-      .toPromise();
-    const finalized = finalizeData?.finalizeExternalImport;
-    if (finalizeErr || !finalized?.monitorWarmupSessionId) {
-      return fail(gqlError(finalizeErr) || "Failed to finalize import");
-    }
-    const monitorWarmupSessionId = finalized.monitorWarmupSessionId as string;
-
     const { data: completeData, error: completeErr } = await client
       .mutation(completeSetupMutation, {})
       .toPromise();
     if (completeErr || !completeData?.completeSetup?.completed) {
-      return fail(gqlError(completeErr) || "Failed to complete setup");
+      setFinalizeError(gqlError(completeErr) || "Failed to complete setup");
+      setFinalizing(false);
+      return;
     }
 
-    // Scan each created library, passing the warmup session for import hints.
-    const createdLibraryIds = Array.from(new Set(createdByDraftId.values()));
+    const createdLibraryIds = Array.from(
+      new Set(createdLibrariesRef.current.values()),
+    );
     for (const libraryId of createdLibraryIds) {
       const { error: scanErr } = await client
         .mutation(scanLibraryMutation, {
-          input: { libraryId, importWarmupSessionId: monitorWarmupSessionId },
+          input: {
+            libraryId,
+            importWarmupSessionId: EXTERNAL_IMPORT_MONITOR_APPLY_SESSION_ID,
+          },
         })
         .toPromise();
       if (scanErr) scanErrors.push(gqlError(scanErr));
     }
 
-    setFinalizing(false);
     // Setup is complete — drop both the local draft and the server secret draft.
     clearPersistedImportWizardState();
     void client
       .mutation(clearExternalImportSetupSecretDraftMutation, {})
       .toPromise();
-    return { ok: true, scanErrors, error: null };
+    setFinalizing(false);
+    setFinalizeSessionId(null);
+    setFinalizeComplete({ scanErrors });
+  }, [client]);
+
+  // Poll the background apply until it settles. A refresh mid-apply rehydrates
+  // `finalizeSessionId` from sessionStorage, so this resumes rather than
+  // re-running finalize (which would re-do the whole snapshot rewrite).
+  useEffect(() => {
+    if (!finalizeSessionId) return;
+    let stopped = false;
+    setFinalizing(true);
+    void (async () => {
+      const { ok, error } = await pollExternalImportFinalize(finalizeSessionId, {
+        fetchStatus: async (sessionId) => {
+          const { data, error: queryError } = await client
+            .query(
+              externalImportWarmupStatusQuery,
+              { sessionId },
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
+          const status = data?.externalImportWarmupStatus as
+            | ExternalImportMonitorWarmupProgress
+            | undefined;
+          if (!status) {
+            return {
+              sample: null,
+              error: gqlError(queryError) || "Failed to load import progress",
+            };
+          }
+          return {
+            sample: {
+              status: status.status,
+              completed: status.snapshotBuildProgress.completed,
+              total: status.snapshotBuildProgress.total,
+              errorMessage: status.errorMessage,
+            },
+            error: null,
+          };
+        },
+        onSample: (sample) => {
+          if (!stopped) setFinalizeProgress(sample);
+        },
+        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        isStopped: () => stopped,
+      });
+      if (stopped) return;
+      if (ok) {
+        await completeFinalizedImport();
+        return;
+      }
+      if (error === null) return;
+      // Failure is durable and readable: surface it on the Summary step and
+      // re-enable Finish so the operator can retry the apply.
+      setFinalizeError(error);
+      setFinalizeSessionId(null);
+      setFinalizing(false);
+    })();
+    return () => {
+      stopped = true;
+    };
+  }, [client, finalizeSessionId, completeFinalizedImport]);
+
+  /**
+   * Creates the mapped libraries and starts the background apply. Resolves as
+   * soon as the apply is ACCEPTED — the apply itself is polled above. Failures
+   * are reported by the caller-side guard, never by mutating state here, so a
+   * throw anywhere in the sequence still clears `finalizing`.
+   */
+  const startFinalizeImport = useCallback(async (): Promise<{
+    ok: boolean;
+    error: string | null;
+  }> => {
+    setFinalizing(true);
+    setFinalizeError(null);
+    setFinalizeProgress(null);
+    const fail = (message: string) => ({ ok: false, error: message });
+    {
+      const normPath = (p: string) =>
+        p.trim().replace(/[\\/]+$/, "").toLowerCase();
+
+      // Safety net: the backend requires a mapping for every source root it
+      // warmed (configured root folders AND the folders titles actually live in).
+      // If any detected root is still unmapped — e.g. the preview was reloaded
+      // after a refresh and surfaced a content root that wasn't mapped — finalize
+      // would fail server-side with a cryptic "missing mapping for source … root".
+      // Catch it here with actionable guidance instead.
+      const unmappedDetected = detectedRoots.filter((root) => !assign[root.id]);
+      if (connectedArrSessionIds.length > 0 && unmappedDetected.length > 0) {
+        return fail(
+          `Some detected source folders aren't mapped to a library yet (e.g. "${unmappedDetected[0].arrRootPath}"). Go back to the Libraries step to map them.`,
+        );
+      }
+
+      const { librariesToCreate } = buildMappings();
+
+      // Cross-library guard: the backend rejects a root path already owned by
+      // another library, so two drafts sharing an effective root path can't both
+      // be created. Surface it up front instead of failing mid-create.
+      const pathOwner = new Map<string, { id: string; name: string }>();
+      for (const { draft, rootPaths } of librariesToCreate) {
+        for (const path of rootPaths) {
+          const owner = pathOwner.get(normPath(path));
+          if (owner && owner.id !== draft.id) {
+            return fail(
+              `Root "${path}" is mapped to more than one library (${owner.name} and ${draft.name}). A root can belong to only one library.`,
+            );
+          }
+          pathOwner.set(normPath(path), { id: draft.id, name: draft.name });
+        }
+      }
+
+      // Resumable: reuse libraries resolved on a prior (failed) attempt so a retry
+      // does only the pending work and never re-creates (and root-conflicts on)
+      // libraries that already exist. Existing/default libraries are UPDATED with
+      // their mapped roots; user-added libraries are CREATED.
+      const createdByDraftId = createdLibrariesRef.current;
+      for (const { draft, rootPaths } of librariesToCreate) {
+        if (createdByDraftId.has(draft.id)) continue;
+        const roots = rootPaths.map((path, index) => ({
+          path,
+          isDefault: index === 0,
+        }));
+        const settings = {
+          qualityProfileId: draft.qualityProfileId,
+          scoringPersona: draft.scoringPersona,
+        };
+        let resolvedId: string | null = null;
+        // Default libraries: update in place if they exist. The default may not
+        // exist yet during onboarding, so fall through to create on failure.
+        if (draft.existingLibraryId) {
+          const { data } = await client
+            .mutation(updateLibraryMutation, {
+              input: { libraryId: draft.existingLibraryId, roots, settings },
+            })
+            .toPromise();
+          if (data?.updateLibrary?.id) {
+            resolvedId = data.updateLibrary.id as string;
+          }
+        }
+        if (!resolvedId) {
+          const { data, error } = await client
+            .mutation(createLibraryMutation, {
+              input: { facet: draft.facet, name: draft.name, roots, settings },
+            })
+            .toPromise();
+          const created = data?.createLibrary;
+          if (error || !created?.id) {
+            return fail(
+              `${gqlError(error) || "Failed to create library"}: ${draft.name}`,
+            );
+          }
+          resolvedId = created.id as string;
+        }
+        createdByDraftId.set(draft.id, resolvedId);
+      }
+
+      // Build mappings, deduped by the backend's mapping key so duplicate manual
+      // roots (same library + path) don't trip "duplicate source root mapping".
+      const mappings: ExternalImportSourceLibraryMappingInput[] = [];
+      const seenMappingKey = new Set<string>();
+      for (const root of roots) {
+        const draftId = assign[root.id];
+        if (!draftId) continue;
+        const libraryId = createdByDraftId.get(draftId);
+        const draft = libraries.find((lib) => lib.id === draftId);
+        if (!libraryId || !draft) continue;
+        const scryerRootPath = effectiveRootPath(root);
+        const mappingKey = root.manual
+          ? `manual|${libraryId}|${normPath(scryerRootPath)}`
+          : `src|${root.sourceWarmupSessionId ?? ""}|${root.sourceKey ?? ""}|${normPath(root.arrRootPath)}`;
+        if (seenMappingKey.has(mappingKey)) continue;
+        seenMappingKey.add(mappingKey);
+        mappings.push({
+          sourceWarmupSessionId: root.sourceWarmupSessionId,
+          sourceKey: root.sourceKey,
+          kind: root.manual ? null : (root.kind as ExternalArrSourceKind),
+          arrRootPath: root.arrRootPath,
+          scryerRootPath,
+          libraryId,
+          facet: draft.facet,
+        });
+      }
+
+      const { data: finalizeData, error: finalizeErr } = await client
+        .mutation(finalizeExternalImportMutation, {
+          input: {
+            sourceWarmupSessionIds: connectedArrSessionIds,
+            mappings,
+          },
+        })
+        .toPromise();
+      const finalized = finalizeData?.finalizeExternalImport as
+        | {
+            finalizeSessionId?: string;
+            progress?: {
+              status: ExternalImportMonitorWarmupStatus;
+              snapshotBuildProgress: { total: number; completed: number };
+              errorMessage: string | null;
+            };
+          }
+        | undefined;
+      if (finalizeErr || !finalized?.finalizeSessionId) {
+        return fail(gqlError(finalizeErr) || "Failed to finalize import");
+      }
+      if (finalized.progress) {
+        setFinalizeProgress({
+          status: finalized.progress.status,
+          completed: finalized.progress.snapshotBuildProgress.completed,
+          total: finalized.progress.snapshotBuildProgress.total,
+          errorMessage: finalized.progress.errorMessage,
+        });
+      }
+      // The apply runs in the background; the polling effect above takes it
+      // from here and `finalizing` stays true until it settles.
+      setFinalizeSessionId(finalized.finalizeSessionId);
+      return { ok: true, error: null };
+    }
   }, [
     client,
     buildMappings,
@@ -1559,6 +1684,15 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
     libraries,
     connectedArrSessionIds,
   ]);
+
+  const finalizeImport = useCallback(
+    () =>
+      runFinalizeStart(startFinalizeImport, (message) => {
+        setFinalizing(false);
+        setFinalizeError(message);
+      }),
+    [startFinalizeImport],
+  );
 
   // ── Derived summary counts ─────────────────────────────────────────────────
   const summary = useMemo(() => {
@@ -1697,6 +1831,8 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
       dcSelectionSeeded: dcSelectionSeeded.current,
       idxSelectionSeeded: idxSelectionSeeded.current,
       executeResult,
+      finalizeSessionId,
+      createdLibraries: [...createdLibrariesRef.current],
     });
   }, [
     instances,
@@ -1707,6 +1843,7 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
     selectedDcKeys,
     selectedIdxKeys,
     executeResult,
+    finalizeSessionId,
   ]);
 
   return {
@@ -1791,6 +1928,9 @@ export function useExternalImportSetup({ client }: UseExternalImportSetupArgs) {
     clearPendingReverify,
     finalizing,
     finalizeError,
+    finalizeSessionId,
+    finalizeProgress,
+    finalizeComplete,
     finalizeImport,
     summary,
   };

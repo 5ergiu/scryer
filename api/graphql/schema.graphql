@@ -6901,6 +6901,15 @@ type FinalizeExternalImportPayload {
 	Monitor warmup session ID tracking accepted background work.
 	"""
 	monitorWarmupSessionId: ID!
+	"""
+	Session ID of the background apply; poll `externalImportWarmupStatus`
+	with it until the apply reaches a terminal status.
+	"""
+	finalizeSessionId: ID!
+	"""
+	Status of the background apply at the moment finalize was accepted.
+	"""
+	progress: ExternalImportMonitorWarmupProgressPayload!
 }
 
 """

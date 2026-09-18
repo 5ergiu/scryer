@@ -3548,6 +3548,14 @@ const en: LocaleDictionary = {
   "setup.importWarmupSessionExpired":
     "Your import preparation is no longer available — Scryer may have restarted, or it sat idle too long. Reconnect to your instances to start a fresh import.",
   "setup.importReconnect": "Reconnect",
+  "setup.applyingImport": "Applying import…",
+  "setup.applyingImportDetail":
+    "Writing the imported monitored state into your libraries. This keeps running if you leave the page.",
+  "setup.importApplied": "Import applied",
+  "setup.importAppliedDetail":
+    "Every imported title's monitored state was written to your libraries.",
+  "setup.importFinalizeFailedTitle": "Finishing the import failed",
+  "setup.titlesApplied": "{{applied}} / {{total}} titles",
   "setup.importUnmappedRootsNotice":
     "Some detected source folders still need a library. Go back to the Libraries step to map them before finishing.",
 
