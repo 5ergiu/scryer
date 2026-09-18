@@ -1040,6 +1040,11 @@ pub struct AppRuntimeAcquisitionState {
     /// not keep resolving). Bumping invalidates the whole memo; in steady
     /// state (history unchanged, nothing grabbed or imported) nothing bumps.
     pub(crate) download_registry_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Process-wide memo of client-observation identity resolutions, shared by
+    /// the queue-enrichment and tracked-download paths. See
+    /// [`crate::download_identity::ObservationResolutionCache`].
+    pub(crate) download_observation_resolutions:
+        Arc<tokio::sync::Mutex<crate::download_identity::ObservationResolutionCache>>,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,
@@ -2272,6 +2277,9 @@ impl AppRuntimeState {
                 download_queue_read_model: DownloadQueueReadModelCache::default(),
                 wanted_projection_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_registry_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                download_observation_resolutions: Arc::new(tokio::sync::Mutex::new(
+                    Default::default(),
+                )),
                 wanted_projection_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 wanted_projection_build_lock: Arc::new(tokio::sync::Mutex::new(())),
                 download_client_category_admission: DownloadClientCategorySnapshotStore::default(),

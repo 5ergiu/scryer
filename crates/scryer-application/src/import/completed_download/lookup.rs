@@ -61,85 +61,16 @@ impl CompletedDownloadLookup {
     }
 }
 
-/// The inputs a completed-history row contributes to its identity
-/// resolution, plus the freshness fields that prove the row is the same
-/// sighting: configured client, client type, native item id, wire token, and
-/// completion timestamp.
-type CompletedObservationKey = (String, String, String, Option<String>, Option<i64>);
-
-fn completed_observation_key(completed: &CompletedDownload) -> CompletedObservationKey {
-    let (client_id, client_type, item_id) = completed_download_lookup_key(
-        Some(&completed.client_id),
-        &completed.client_type,
-        &completed.download_client_item_id,
-    );
-    (
-        client_id,
-        client_type,
-        item_id,
-        completed
-            .download_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-        completed.completed_at.map(|at| at.timestamp()),
-    )
-}
-
 /// Per-poller memo of completed-history identity resolutions.
 ///
-/// The download-queue poller re-reads the same completed history six times a
-/// minute, and `resolve_observed_client_job` is a registry transaction per
-/// row. The answer for an unchanged row can only change when the registry
-/// itself changes, so entries are held against
-/// [`AppRuntimeAcquisitionState::download_registry_generation`] and the whole
-/// memo is dropped the moment a binding is created, attached or ended. Rows
-/// that fall out of the client's history drop out of the memo with them, and
-/// a resolution that was merely *unavailable* (a registry read error) or in
-/// `Conflict` (which a later tick may heal) is never memoized.
-///
-/// Bindings are also created and retired inside the workflow stores' own
-/// transactions (a re-add that retires a stale terminal binding and mints its
-/// replacement, a title delete, a queue-item delete). The app-layer call sites
-/// of those paths bump the generation, but the generation is only as good as
-/// that enumeration, so [`COMPLETED_OBSERVATION_MEMO_TTL`] is the backstop: no
-/// entry is reused past it, whatever the generation says. At a 10 s tick that
-/// is one re-resolution per row per 10 minutes instead of six per minute.
-#[derive(Default)]
-pub(crate) struct CompletedDownloadResolutionCache {
-    generation: u64,
-    entries: HashMap<CompletedObservationKey, MemoizedObservationResolution>,
-}
-
-#[derive(Clone)]
-struct MemoizedObservationResolution {
-    resolution: crate::download_identity::ObservedClientJobResolution,
-    /// When this row was actually resolved. Carried across ticks unchanged, so
-    /// reuse cannot slide the expiry forward indefinitely.
-    resolved_at: std::time::Instant,
-}
-
-/// Longest a memoized resolution is trusted, regardless of registry generation.
-const COMPLETED_OBSERVATION_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
-impl CompletedDownloadResolutionCache {
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Backdates every entry, so a test can reach the age backstop without
-    /// sleeping.
-    #[cfg(test)]
-    pub(crate) fn age_entries_for_test(&mut self, by: std::time::Duration) {
-        for entry in self.entries.values_mut() {
-            if let Some(resolved_at) = entry.resolved_at.checked_sub(by) {
-                entry.resolved_at = resolved_at;
-            }
-        }
-    }
-}
+/// This is a listing-scoped instance of the shared
+/// [`crate::download_identity::ObservationResolutionCache`]: it is rebuilt from
+/// each completed listing, so a row that falls out of the client's history
+/// window drops out of the memo with it. The resolution semantics (registry
+/// generation, TTL backstop, which resolutions are memoizable) all live on the
+/// shared type.
+pub(crate) type CompletedDownloadResolutionCache =
+    crate::download_identity::ObservationResolutionCache;
 
 /// Per-tick reuse handed to the completed-download lookup loader.
 ///
@@ -158,21 +89,6 @@ impl CompletedDownloadLookupCycle<'_> {
             resolutions: None,
             prefetched: None,
         }
-    }
-}
-
-fn observation_resolution_is_memoizable(
-    resolution: &crate::download_identity::ObservedClientJobResolution,
-) -> bool {
-    match resolution {
-        // A resolved binding and an ended binding are both facts about the
-        // registry's current generation; a bump retires them.
-        crate::download_identity::ObservedClientJobResolution::Resolved(_)
-        | crate::download_identity::ObservedClientJobResolution::BindingAlreadyEnded => true,
-        // A conflict may be healed by a later tick, and an unavailable
-        // resolution is a read failure that must be retried.
-        crate::download_identity::ObservedClientJobResolution::Conflict
-        | crate::download_identity::ObservedClientJobResolution::Unavailable => false,
     }
 }
 
@@ -464,55 +380,44 @@ pub(super) async fn resolve_completed_download_observations_with_cache(
     };
 
     let generation = app.runtime.acquisition.download_registry_generation();
-    if cache.generation != generation {
-        cache.entries.clear();
-        cache.generation = generation;
-    }
+    cache.begin_generation(generation);
 
     let mut resolutions = Vec::with_capacity(completed_downloads.len());
     // Rebuilt from this listing so a row the client no longer reports drops
     // out of the memo with it.
-    let mut retained = HashMap::with_capacity(completed_downloads.len());
+    let mut listed = HashSet::with_capacity(completed_downloads.len());
     for completed in completed_downloads {
-        let key = completed_observation_key(completed);
-        if let Some(memoized) = cache
-            .entries
-            .get(&key)
-            .filter(|memoized| memoized.resolved_at.elapsed() < COMPLETED_OBSERVATION_MEMO_TTL)
-        {
-            // The entry keeps its original `resolved_at`, so reuse cannot push
-            // the age backstop out forever.
-            retained.insert(key, memoized.clone());
-            resolutions.push(memoized.resolution.clone());
+        let observation = crate::download_identity::observed_completed_job(completed);
+        let key = crate::download_identity::observation_memo_key(
+            &observation,
+            completed.download_id.as_deref(),
+            completed.completed_at.map(|at| at.timestamp()),
+        );
+        listed.insert(key.clone());
+        // A hit costs no registry transaction; it may enqueue the binding's
+        // 60 s freshness refresh, which is flushed as one batch below.
+        if let Some(memoized) = cache.hit(&key, observation.observed_at) {
+            resolutions.push(memoized.resolution);
             continue;
         }
 
-        let resolution = crate::download_identity::resolve_observed_client_job(
-            app,
-            crate::download_identity::observed_completed_job(completed),
-        )
-        .await;
-        if observation_resolution_is_memoizable(&resolution) {
-            retained.insert(
-                key,
-                MemoizedObservationResolution {
-                    resolution: resolution.clone(),
-                    resolved_at: std::time::Instant::now(),
-                },
-            );
-        }
+        let resolution =
+            crate::download_identity::resolve_observed_client_job(app, observation).await;
+        cache.insert(key, &resolution);
         resolutions.push(resolution);
     }
 
     // A live resolution can itself have mutated the registry (it attaches or
     // mints bindings). Anything decided against the older generation is
     // retired rather than carried forward.
-    if app.runtime.acquisition.download_registry_generation() == generation {
-        cache.entries = retained;
+    let generation_now = app.runtime.acquisition.download_registry_generation();
+    if generation_now == generation {
+        cache.retain_keys(&listed);
     } else {
-        cache.entries.clear();
-        cache.generation = app.runtime.acquisition.download_registry_generation();
+        cache.reset_to_generation(generation_now);
     }
+    let touches = cache.take_pending_touches();
+    crate::download_identity::flush_observation_touches(app, touches).await;
     resolutions
 }
 

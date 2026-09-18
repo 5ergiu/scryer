@@ -15,6 +15,10 @@ pub(super) struct RecordingDownloadRegistry {
     failing_bindings: Arc<Mutex<HashSet<ClientJobLocator>>>,
     failing_ends: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
     strict_conflicts: bool,
+    /// Registry transactions the resolver actually entered.
+    pub(super) resolutions: Arc<std::sync::atomic::AtomicUsize>,
+    /// Batched freshness writes, one entry per `touch_observations` call.
+    pub(super) touch_batches: Arc<Mutex<Vec<Vec<crate::ports::ObservationTouch>>>>,
 }
 
 fn fixed_time(value: &str) -> chrono::DateTime<Utc> {
@@ -65,6 +69,8 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         &self,
         observation: &ObservedClientJob,
     ) -> AppResult<ObservationResolution> {
+        self.resolutions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut rows = self.rows.lock().await;
         let ended = self.ended.lock().await;
         let known = rows
@@ -196,6 +202,14 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
             ));
         }
         self.ended.lock().await.insert(*id);
+        Ok(())
+    }
+
+    async fn touch_observations(
+        &self,
+        touches: &[crate::ports::ObservationTouch],
+    ) -> AppResult<()> {
+        self.touch_batches.lock().await.push(touches.to_vec());
         Ok(())
     }
 }
@@ -15497,4 +15511,184 @@ async fn an_existing_sidecar_survives_the_import_that_lands_beside_it() {
         curated,
         "an existing sidecar is never replaced"
     );
+}
+
+/// A synthetic client row standing in for one of the many history entries a
+/// download client keeps reporting tick after tick.
+fn foreign_client_history_item(item_id: &str) -> DownloadQueueItem {
+    DownloadQueueItem {
+        id: item_id.to_string(),
+        title_id: None,
+        episode_id: None,
+        title_name: format!("Synthetic.Fixture.S01E01.{item_id}"),
+        facet: None,
+        category: None,
+        client_id: "client-churn".to_string(),
+        client_name: "Churn Client".to_string(),
+        client_type: "sabnzbd".to_string(),
+        state: DownloadQueueState::Completed,
+        progress_percent: 100,
+        import_transfer_phase: None,
+        import_transfer_bytes: None,
+        import_transfer_total_bytes: None,
+        import_transfer_started_at: None,
+        import_transfer_updated_at: None,
+        size_bytes: None,
+        remaining_seconds: None,
+        queued_at: None,
+        last_updated_at: None,
+        attention_required: false,
+        attention_reason: None,
+        download_client_item_id: item_id.to_string(),
+        download_id: None,
+        import_status: None,
+        import_type: None,
+        import_error_code: None,
+        import_error_message: None,
+        imported_at: None,
+        delete_status: None,
+        delete_error_message: None,
+        source_provider: None,
+        is_scryer_origin: false,
+        tracked_state: None,
+        tracked_status: None,
+        tracked_status_messages: Vec::new(),
+        tracked_match_type: None,
+        seeding: None,
+    }
+}
+
+/// The steady-state tick must cost nothing.
+///
+/// A client history window full of rows Scryer never submitted used to run a
+/// `resolve_observation` transaction per row per tick — ~200 transactions
+/// through the SQLite writer gate every 10 s, forever, for an answer that
+/// cannot have changed.
+#[tokio::test]
+async fn tracking_unchanged_client_rows_resolves_each_observation_once() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let resolutions = registry.resolutions.clone();
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let items = (0..4)
+        .map(|index| foreign_client_history_item(&format!("churn-{index}")))
+        .collect::<Vec<_>>();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+
+    // Adopting a row Scryer never submitted is itself a registry mutation, so
+    // the first ticks settle: each adoption retires the memo taken against the
+    // generation before it. Steady state is what this bug is about.
+    for _ in 0..2 {
+        for item in &items {
+            tracker.track(&app, item.clone()).await;
+        }
+    }
+    let settled = resolutions.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Steady-state tick over the identical rows: the memo answers every one,
+    // so not a single registry transaction is entered.
+    for item in &items {
+        tracker.track(&app, item.clone()).await;
+    }
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        settled
+    );
+
+    // A structural registry change (a binding created, attached or ended)
+    // retires the memo, so the next tick resolves again.
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
+    for item in &items {
+        tracker.track(&app, item.clone()).await;
+    }
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        settled + items.len()
+    );
+}
+
+/// A row whose client-reported identity moved is a different sighting.
+#[tokio::test]
+async fn tracking_re_resolves_a_row_whose_client_token_changed() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let resolutions = registry.resolutions.clone();
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let mut item = foreign_client_history_item("churn-token");
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+
+    for _ in 0..3 {
+        tracker.track(&app, item.clone()).await;
+    }
+    let settled = resolutions.load(std::sync::atomic::Ordering::SeqCst);
+
+    item.download_id = Some(scryer_domain::download_identity::DownloadId::new().to_wire());
+    tracker.track(&app, item).await;
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        settled + 1
+    );
+}
+
+/// The 60 s freshness write survives memoization, but is batched.
+///
+/// Memoizing the identity must not stop a live binding's `last_seen_at` being
+/// refreshed — and the refresh must not reinstate a transaction per row per
+/// tick. Only rows actually due may reach the repository, and all of them ride
+/// in ONE batched call.
+#[tokio::test]
+async fn due_observation_touches_are_batched_into_one_call_and_throttled() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let touch_batches = registry.touch_batches.clone();
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let items = (0..3)
+        .map(|index| foreign_client_history_item(&format!("touch-{index}")))
+        .collect::<Vec<_>>();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+
+    for _ in 0..2 {
+        for item in &items {
+            tracker.track(&app, item.clone()).await;
+        }
+    }
+    // The resolving transaction wrote the timestamps itself, so nothing is due.
+    crate::download_identity::flush_shared_observation_touches(&app).await;
+    assert!(touch_batches.lock().await.is_empty());
+
+    // A tick inside the throttle window still writes nothing.
+    for item in &items {
+        tracker.track(&app, item.clone()).await;
+    }
+    crate::download_identity::flush_shared_observation_touches(&app).await;
+    assert!(touch_batches.lock().await.is_empty());
+
+    // Past the throttle, every row is due — and they are written together.
+    app.runtime
+        .acquisition
+        .download_observation_resolutions
+        .lock()
+        .await
+        .age_entries_for_test(
+            crate::download_identity::OBSERVATION_TOUCH_INTERVAL + Duration::from_secs(1),
+        );
+    for item in &items {
+        tracker.track(&app, item.clone()).await;
+    }
+    crate::download_identity::flush_shared_observation_touches(&app).await;
+    let batches = touch_batches.lock().await.clone();
+    assert_eq!(batches.len(), 1, "one transaction, not one per row");
+    assert_eq!(batches[0].len(), items.len());
+
+    // The claim moved the clock, so the next tick is quiet again.
+    for item in &items {
+        tracker.track(&app, item.clone()).await;
+    }
+    crate::download_identity::flush_shared_observation_touches(&app).await;
+    assert_eq!(touch_batches.lock().await.len(), 1);
 }

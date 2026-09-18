@@ -4540,6 +4540,29 @@ pub trait DownloadRegistryRepository: Send + Sync {
 
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
+
+    /// Refresh the observation timestamps of already-resolved downloads.
+    ///
+    /// A client tick re-observes the same rows every 10 s, but a binding's
+    /// `last_seen_at` only needs writing once a minute. Callers that serve the
+    /// identity from a memo therefore batch the rows that actually came due
+    /// and write them here, in ONE transaction, instead of entering a
+    /// resolution transaction per row per tick just to discover the write is
+    /// throttled away.
+    ///
+    /// The default is a no-op so repositories that keep no durable timestamps
+    /// (the null repository, test fakes) need not implement it.
+    async fn touch_observations(&self, touches: &[ObservationTouch]) -> AppResult<()> {
+        let _ = touches;
+        Ok(())
+    }
+}
+
+/// One due freshness refresh for a download whose identity is already resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationTouch {
+    pub download_id: DownloadId,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// The canonical row and compatibility values carried by a tracked-state update.

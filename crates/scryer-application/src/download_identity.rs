@@ -65,6 +65,356 @@ pub(crate) enum ObservedClientJobResolution {
     Unavailable,
 }
 
+/// Memo of client-observation identity resolutions.
+///
+/// Every download-client tick re-reads the same queue and history rows — six
+/// times a minute at the default 10 s cadence — and
+/// [`resolve_observed_client_job`] is a registry *transaction* per row. A
+/// client history window full of rows Scryer never submitted therefore cost a
+/// couple of hundred transactions through the SQLite writer gate every tick,
+/// forever, for an answer that cannot have changed.
+///
+/// The answer for an unchanged row is a pure function of the observed
+/// locator/token/name and the registry's binding state, so entries are held
+/// against [`AppRuntimeAcquisitionState::download_registry_generation`] and the
+/// whole memo is dropped the moment a binding is created, attached or ended.
+/// A resolution that was merely *unavailable* (a registry read error) or in
+/// `Conflict` (which a later tick may heal) is never memoized.
+///
+/// Bindings are also created and retired inside the workflow stores' own
+/// transactions (a re-add that retires a stale terminal binding and mints its
+/// replacement, a title delete, a queue-item delete). The app-layer call sites
+/// of those paths bump the generation, but the generation is only as good as
+/// that enumeration, so [`OBSERVATION_MEMO_TTL`] is the backstop: no entry is
+/// reused past it, whatever the generation says. At a 10 s tick that is one
+/// re-resolution per row per 10 minutes instead of six per minute.
+///
+/// Two instances exist, of this one type: the download-queue poller owns a
+/// listing-scoped instance for the completed-history read (it is rebuilt from
+/// each listing, so a row the client stops reporting drops out with it), and
+/// [`AppRuntimeAcquisitionState::download_observation_resolutions`] holds the
+/// process-wide instance the queue-enrichment and tracker paths share, pruned
+/// by [`OBSERVATION_MEMO_TTL`] and capped by
+/// [`OBSERVATION_MEMO_MAX_ENTRIES`].
+#[derive(Default)]
+pub(crate) struct ObservationResolutionCache {
+    generation: u64,
+    entries: std::collections::HashMap<ObservationMemoKey, MemoizedObservationResolution>,
+    /// Bindings whose `last_seen_at`/`last_observed_at` refresh came due while
+    /// serving a memo hit, waiting to be written as one batch.
+    pending_touches: Vec<crate::ports::ObservationTouch>,
+}
+
+/// The inputs a client row contributes to its identity resolution, plus the
+/// freshness fields that prove the row is the same sighting.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ObservationMemoKey {
+    client_id: Option<String>,
+    client_type: String,
+    item_id: String,
+    /// The raw client-reported download id, not the parsed wire token: the
+    /// token is a pure function of it, and the by-id submission fallback is
+    /// keyed on the raw string.
+    download_id: Option<String>,
+    observed_name: Option<String>,
+    /// A completion timestamp for history rows; `None` for live queue rows.
+    freshness: Option<i64>,
+}
+
+#[derive(Clone)]
+struct MemoizedObservationResolution {
+    resolution: ObservedClientJobResolution,
+    /// When this row was actually resolved. Carried across ticks unchanged, so
+    /// reuse cannot slide the expiry forward indefinitely.
+    resolved_at: std::time::Instant,
+    /// When this row's binding timestamps were last written. The resolving
+    /// transaction writes them itself, so a fresh entry starts here.
+    touched_at: std::time::Instant,
+    /// The by-id submission fallback ran for this row and found nothing. A
+    /// grab that would change that bumps the registry generation (it mints an
+    /// unbound binding), which retires this entry.
+    submission_lookup_missed: bool,
+}
+
+/// Longest a memoized resolution is trusted, regardless of registry generation.
+pub(crate) const OBSERVATION_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How often a live binding's `last_seen_at` is refreshed while its row keeps
+/// being observed. Mirrors the 60 s throttle the resolving transaction applies
+/// (`observation_timestamp_write_required`), so memoizing a row does not stop
+/// its freshness being recorded.
+pub(crate) const OBSERVATION_TOUCH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Hard cap on the process-wide memo. Reaching it means far more distinct rows
+/// than any client set observes in a TTL window, so the whole memo is dropped
+/// rather than grown without bound.
+const OBSERVATION_MEMO_MAX_ENTRIES: usize = 8_192;
+
+/// What a memo hit tells the caller.
+pub(crate) struct MemoizedObservation {
+    pub(crate) resolution: ObservedClientJobResolution,
+    /// The by-id submission fallback already ran for this row and found
+    /// nothing, so the caller may skip it instead of re-issuing its selects.
+    pub(crate) submission_lookup_missed: bool,
+}
+
+pub(crate) fn observation_memo_key(
+    observation: &ObservedClientJob,
+    raw_download_id: Option<&str>,
+    freshness: Option<i64>,
+) -> ObservationMemoKey {
+    ObservationMemoKey {
+        client_id: observation.locator.client_id.clone(),
+        client_type: observation.locator.client_type.clone(),
+        item_id: observation.locator.item_id.clone(),
+        download_id: raw_download_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        observed_name: observation
+            .observed_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase),
+        freshness,
+    }
+}
+
+pub(crate) fn observation_resolution_is_memoizable(
+    resolution: &ObservedClientJobResolution,
+) -> bool {
+    match resolution {
+        // A resolved binding and an ended binding are both facts about the
+        // registry's current generation; a bump retires them.
+        ObservedClientJobResolution::Resolved(_)
+        | ObservedClientJobResolution::BindingAlreadyEnded => true,
+        // A conflict may be healed by a later tick, and an unavailable
+        // resolution is a read failure that must be retried.
+        ObservedClientJobResolution::Conflict | ObservedClientJobResolution::Unavailable => false,
+    }
+}
+
+impl ObservationResolutionCache {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Backdates every entry, so a test can reach the age backstop without
+    /// sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_entries_for_test(&mut self, by: std::time::Duration) {
+        for entry in self.entries.values_mut() {
+            if let Some(resolved_at) = entry.resolved_at.checked_sub(by) {
+                entry.resolved_at = resolved_at;
+            }
+            if let Some(touched_at) = entry.touched_at.checked_sub(by) {
+                entry.touched_at = touched_at;
+            }
+        }
+    }
+
+    /// Drop everything decided against an older registry generation.
+    pub(crate) fn begin_generation(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.entries.clear();
+            self.generation = generation;
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn reset_to_generation(&mut self, generation: u64) {
+        self.entries.clear();
+        self.generation = generation;
+    }
+
+    /// Serve a memoized resolution, enqueueing the binding's periodic
+    /// freshness write when it has come due.
+    ///
+    /// The touch is *claimed* here (the entry's clock moves) and written by
+    /// [`flush_observation_touches`] as one batch, so a tick over many rows
+    /// costs at most one touch transaction instead of one per row.
+    pub(crate) fn hit(
+        &mut self,
+        key: &ObservationMemoKey,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> Option<MemoizedObservation> {
+        let entry = self.entries.get_mut(key)?;
+        if entry.resolved_at.elapsed() >= OBSERVATION_MEMO_TTL {
+            self.entries.remove(key);
+            return None;
+        }
+        if let ObservedClientJobResolution::Resolved(download_id) = entry.resolution
+            && entry.touched_at.elapsed() >= OBSERVATION_TOUCH_INTERVAL
+        {
+            entry.touched_at = std::time::Instant::now();
+            self.pending_touches.push(crate::ports::ObservationTouch {
+                download_id,
+                observed_at,
+            });
+        }
+        let entry = &self.entries[key];
+        Some(MemoizedObservation {
+            resolution: entry.resolution.clone(),
+            submission_lookup_missed: entry.submission_lookup_missed,
+        })
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        key: ObservationMemoKey,
+        resolution: &ObservedClientJobResolution,
+    ) {
+        if !observation_resolution_is_memoizable(resolution) {
+            self.entries.remove(&key);
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.entries.insert(
+            key,
+            MemoizedObservationResolution {
+                resolution: resolution.clone(),
+                resolved_at: now,
+                // The resolving transaction wrote the timestamps itself.
+                touched_at: now,
+                submission_lookup_missed: false,
+            },
+        );
+    }
+
+    /// Record that the by-id submission fallback found nothing for this row.
+    pub(crate) fn record_submission_lookup_miss(&mut self, key: &ObservationMemoKey) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.submission_lookup_missed = true;
+        }
+    }
+
+    /// Keep only the rows this listing reported, so a row the client stopped
+    /// reporting leaves the memo with it.
+    pub(crate) fn retain_keys(&mut self, keys: &std::collections::HashSet<ObservationMemoKey>) {
+        self.entries.retain(|key, _| keys.contains(key));
+    }
+
+    /// Bound the process-wide memo: expired entries go, and a memo that has
+    /// somehow grown past the cap is dropped whole.
+    fn prune(&mut self) {
+        self.entries
+            .retain(|_, entry| entry.resolved_at.elapsed() < OBSERVATION_MEMO_TTL);
+        if self.entries.len() > OBSERVATION_MEMO_MAX_ENTRIES {
+            self.entries.clear();
+        }
+    }
+
+    pub(crate) fn take_pending_touches(&mut self) -> Vec<crate::ports::ObservationTouch> {
+        std::mem::take(&mut self.pending_touches)
+    }
+}
+
+/// Resolve an observation through the process-wide memo.
+///
+/// A row whose locator, token, name and freshness are unchanged, and whose
+/// registry generation has not moved, costs no registry transaction and no
+/// statements at all.
+pub(crate) async fn resolve_observed_client_job_memoized(
+    app: &AppUseCase,
+    observation: ObservedClientJob,
+    raw_download_id: Option<&str>,
+) -> MemoizedObservation {
+    let key = observation_memo_key(&observation, raw_download_id, None);
+    let generation = app.runtime.acquisition.download_registry_generation();
+    {
+        let mut cache = app
+            .runtime
+            .acquisition
+            .download_observation_resolutions
+            .lock()
+            .await;
+        cache.begin_generation(generation);
+        if let Some(hit) = cache.hit(&key, observation.observed_at) {
+            return hit;
+        }
+    }
+
+    let resolution = resolve_observed_client_job(app, observation).await;
+    let mut cache = app
+        .runtime
+        .acquisition
+        .download_observation_resolutions
+        .lock()
+        .await;
+    // A live resolution can itself have mutated the registry (it attaches or
+    // mints bindings). Anything decided against the older generation is
+    // retired rather than carried forward.
+    let generation_now = app.runtime.acquisition.download_registry_generation();
+    if cache.generation() != generation_now {
+        cache.reset_to_generation(generation_now);
+    }
+    cache.prune();
+    cache.insert(key, &resolution);
+    MemoizedObservation {
+        resolution,
+        submission_lookup_missed: false,
+    }
+}
+
+/// Note that the by-id submission fallback found nothing for this row, so a
+/// later tick over the same unchanged row can skip it.
+pub(crate) async fn record_memoized_submission_lookup_miss(
+    app: &AppUseCase,
+    observation: &ObservedClientJob,
+    raw_download_id: Option<&str>,
+) {
+    let key = observation_memo_key(observation, raw_download_id, None);
+    app.runtime
+        .acquisition
+        .download_observation_resolutions
+        .lock()
+        .await
+        .record_submission_lookup_miss(&key);
+}
+
+/// Write every binding freshness refresh that came due this cycle, in one
+/// transaction.
+pub(crate) async fn flush_observation_touches(
+    app: &AppUseCase,
+    touches: Vec<crate::ports::ObservationTouch>,
+) {
+    if touches.is_empty() {
+        return;
+    }
+    if let Err(error) = app
+        .services
+        .workflow
+        .download_registry
+        .touch_observations(&touches)
+        .await
+    {
+        tracing::debug!(
+            target: "download_identity_resolver",
+            error = %error,
+            touches = touches.len(),
+            "failed to refresh observed download timestamps"
+        );
+    }
+}
+
+/// Drain and write the process-wide memo's due freshness refreshes.
+pub(crate) async fn flush_shared_observation_touches(app: &AppUseCase) {
+    let touches = app
+        .runtime
+        .acquisition
+        .download_observation_resolutions
+        .lock()
+        .await
+        .take_pending_touches();
+    flush_observation_touches(app, touches).await;
+}
+
 pub(crate) fn legacy_binding_predates_delete(
     binding: &crate::DownloadClientBindingRecord,
     command_created_at: chrono::DateTime<Utc>,

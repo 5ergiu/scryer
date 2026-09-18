@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use scryer_application::{
     AppError, AppResult, ClientJobLocator, DownloadClientBindingRecord, DownloadOrigin,
-    DownloadRecord, DownloadRegistryRepository, ObservationResolution, ObservedClientJob,
+    DownloadRecord, DownloadRegistryRepository, ObservationResolution, ObservationTouch,
+    ObservedClientJob,
 };
 use scryer_domain::download_identity::DownloadId;
 
@@ -165,6 +166,31 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .await?
         .map(binding_from_row)
         .transpose()
+    }
+
+    /// Write every due freshness refresh in ONE transaction.
+    ///
+    /// Callers reach this only for downloads whose identity they already
+    /// resolved and whose 60 s throttle has lapsed, so the batch is the whole
+    /// cost of keeping `last_seen_at`/`last_observed_at` current for a client
+    /// tick — instead of a `resolve_observation` transaction per row per tick
+    /// that mostly decided to write nothing.
+    async fn touch_observations(&self, touches: &[ObservationTouch]) -> AppResult<()> {
+        if touches.is_empty() {
+            return Ok(());
+        }
+        let touches = touches.to_vec();
+        SqlRuntime::run_in_transaction(&self.datastore, "touch_download_observations", move |tx| {
+            let touches = touches.clone();
+            Box::pin(async move {
+                for touch in touches {
+                    touch_observation_timestamps_tx(tx, touch.download_id, touch.observed_at)
+                        .await?;
+                }
+                Ok(())
+            })
+        })
+        .await
     }
 
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()> {
@@ -626,6 +652,14 @@ async fn touch_observation_tx(
     download_id: DownloadId,
     observation: &ObservedClientJob,
 ) -> AppResult<()> {
+    touch_observation_timestamps_tx(tx, download_id, observation.observed_at).await
+}
+
+async fn touch_observation_timestamps_tx(
+    tx: &mut SqlTx<'_>,
+    download_id: DownloadId,
+    observed_at: DateTime<Utc>,
+) -> AppResult<()> {
     SqlRuntime::execute(
         SqlExec::Tx(tx),
         "UPDATE downloads
@@ -636,9 +670,9 @@ async fn touch_observation_tx(
              END
          WHERE id = {}",
         &[
-            SqlArg::Timestamp(observation.observed_at),
-            SqlArg::Timestamp(observation.observed_at),
-            SqlArg::Timestamp(observation.observed_at),
+            SqlArg::Timestamp(observed_at),
+            SqlArg::Timestamp(observed_at),
+            SqlArg::Timestamp(observed_at),
             SqlArg::Text(download_id.to_string()),
         ],
     )
@@ -652,8 +686,8 @@ async fn touch_observation_tx(
              END
          WHERE download_id = {}",
         &[
-            SqlArg::Timestamp(observation.observed_at),
-            SqlArg::Timestamp(observation.observed_at),
+            SqlArg::Timestamp(observed_at),
+            SqlArg::Timestamp(observed_at),
             SqlArg::Text(download_id.to_string()),
         ],
     )
@@ -1345,6 +1379,75 @@ mod tests {
             )
         );
         assert_eq!(later_binding.last_seen_at, later_download.last_observed_at);
+    }
+
+    /// The batched touch is what keeps memoized rows fresh.
+    ///
+    /// Callers that serve a row's identity from their observation memo never
+    /// enter a resolution transaction, so this is the only writer of those
+    /// rows' `last_observed_at`/`last_seen_at` — and it must write every due
+    /// row, not just the first, in one transaction.
+    #[tokio::test]
+    async fn batched_touch_refreshes_every_due_observation_in_one_transaction() {
+        let store = store().await;
+        let first = DownloadId::parse(FIRST_ID).unwrap();
+        let second = DownloadId::parse(SECOND_ID).unwrap();
+        for id in [FIRST_ID, SECOND_ID] {
+            insert_download(&store, id, "foreign_observation", None).await;
+        }
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), Some("job-2"), None).await;
+
+        let observed_at: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-08-24T13:00:00Z")
+            .unwrap()
+            .into();
+        store
+            .touch_observations(&[
+                ObservationTouch {
+                    download_id: first,
+                    observed_at,
+                },
+                ObservationTouch {
+                    download_id: second,
+                    observed_at,
+                },
+            ])
+            .await
+            .unwrap();
+
+        for id in [first, second] {
+            let download = store.load_download(&id).await.unwrap().unwrap();
+            let binding = store.load_binding(&id).await.unwrap().unwrap();
+            assert_eq!(download.first_observed_at, Some(observed_at));
+            assert_eq!(download.last_observed_at, Some(observed_at));
+            assert_eq!(binding.last_seen_at, Some(observed_at));
+        }
+
+        // An older sighting never walks the timestamps backwards.
+        let earlier: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-08-24T12:00:00Z")
+            .unwrap()
+            .into();
+        store
+            .touch_observations(&[ObservationTouch {
+                download_id: first,
+                observed_at: earlier,
+            }])
+            .await
+            .unwrap();
+        let download = store.load_download(&first).await.unwrap().unwrap();
+        assert_eq!(download.last_observed_at, Some(observed_at));
+        assert_eq!(
+            store
+                .load_binding(&first)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_seen_at,
+            Some(observed_at)
+        );
+
+        // An empty batch is a no-op, not a transaction.
+        store.touch_observations(&[]).await.unwrap();
     }
 
     #[tokio::test]

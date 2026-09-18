@@ -382,8 +382,18 @@ impl TrackedDownloadService {
     /// On update: refreshes client_item but preserves scryer state if past Downloading.
     pub async fn track(&mut self, app: &AppUseCase, client_item: DownloadQueueItem) {
         let observed_job = crate::download_identity::observed_queue_item_job(&client_item);
-        let resolved_download_id =
-            crate::download_identity::resolve_observed_client_job(app, observed_job.clone()).await;
+        // Memoized: the poller tracks every client row on every tick, and an
+        // item whose locator, token and name have not moved cannot have changed
+        // identity while the registry generation stands. Without this, a client
+        // history window full of rows Scryer never submitted cost one registry
+        // transaction per row per tick, forever.
+        let resolved_download_id = crate::download_identity::resolve_observed_client_job_memoized(
+            app,
+            observed_job.clone(),
+            client_item.download_id.as_deref(),
+        )
+        .await
+        .resolution;
         let id = tracked_download_id_for_item(&client_item);
         let download_id = match resolved_download_id {
             crate::download_identity::ObservedClientJobResolution::Resolved(download_id) => {
