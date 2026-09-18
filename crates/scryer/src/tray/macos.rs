@@ -83,14 +83,9 @@ const PROBE_TIMED_OUT: u8 = 2;
 
 /// The menu-bar glyph: one drawing per menu-bar appearance, at both
 /// backing-store scales. The files are named for the appearance they serve —
-/// the dark-named drawing is the light-coloured one. These carry interior
-/// detail a one-colour template mask cannot, so the wrapper selects between
-/// them itself instead of letting AppKit tint a template.
-///
-/// The brand pack names its folders for the artwork's own tone, so the
-/// generator's mapping is crossed: the pack's "Light Theme" (white) mark
-/// becomes `menubar-dark`, and its "Dark Theme" (navy) mark becomes
-/// `menubar-light`. See `packaging/macos/assets/generate-assets.sh`.
+/// the dark-named drawing is the white one, the light-named one is black. Both
+/// come from the single-colour macOS mark, matching Weaver's menu-bar glyphs;
+/// see `packaging/macos/assets/generate-assets.sh`.
 const MENU_BAR_ICON_LIGHT: &[u8] = include_bytes!("../../resources/macos/menubar-light.png");
 const MENU_BAR_ICON_LIGHT_2X: &[u8] = include_bytes!("../../resources/macos/menubar-light@2x.png");
 const MENU_BAR_ICON_DARK: &[u8] = include_bytes!("../../resources/macos/menubar-dark.png");

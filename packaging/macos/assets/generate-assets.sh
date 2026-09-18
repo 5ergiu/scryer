@@ -12,23 +12,25 @@
 #
 # --- the naming trap --------------------------------------------------------
 #
-# The brand pack's folders are named for the ICON'S OWN TONE. The tray's
-# resource files are named, like Weaver's, for the MENU-BAR APPEARANCE THEY
-# SERVE. A white mark is what a dark menu bar needs, so the mapping is CROSSED:
+# The tray's resource files are named, like Weaver's, for the MENU-BAR
+# APPEARANCE THEY SERVE, not for their own colour. A white glyph is what a dark
+# menu bar needs, so the mapping is CROSSED:
 #
-#   pack "Light Theme" (white-outlined mark)  ->  menubar-dark{,@2x}.png
-#   pack "Dark Theme"  (navy-outlined mark)   ->  menubar-light{,@2x}.png
+#   white glyph  ->  menubar-dark{,@2x}.png
+#   black glyph  ->  menubar-light{,@2x}.png
 #
-# Only the `Logo` mark is used for the menu bar; `Logo+Text` and `Text` are
-# unreadable at 18 points.
+# Both are drawn from the single-colour macOS mark (--menubar), not from the
+# brand pack: the pack's colour marks turn to mush at 18 points and look out of
+# place beside the system's monochrome menu-bar icons.
 set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: generate-assets.sh --brand <dir-or-zip> [--output <dir>]
+usage: generate-assets.sh --brand <dir-or-zip> --menubar <svg> [--output <dir>]
 
   --brand   The extracted Scryer brand art pack, or the zip itself. Must
             contain "Light Theme" and "Dark Theme" directories.
+  --menubar The single-colour macOS menu-bar mark as SVG (MacOS-B-W-Logo.svg).
   --output  Directory to write scryer.icns and dmg-background.tiff into.
             Defaults to this script's directory, i.e. it overwrites the
             committed assets in place. The menu-bar glyphs always go to
@@ -42,10 +44,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
 output_dir="$script_dir"
 brand=""
+menubar_mark=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --brand) brand="${2:-}"; shift 2 ;;
+    --menubar) menubar_mark="${2:-}"; shift 2 ;;
     --output) output_dir="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -53,6 +57,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$brand" ] || usage
+[ -f "$menubar_mark" ] || usage
 [ -n "$output_dir" ] || usage
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
@@ -103,13 +108,20 @@ square_ink() {
 # Named for the appearance each one serves, not for its own colour — see the
 # naming trap at the top of this file. The tray picks between them itself, so
 # these ship as finished artwork rather than as a template mask for AppKit to
-# tint.
+# tint. The SVG is rasterized large first so the downscale, not the
+# rasterizer, decides the 18px edges; only its alpha is kept, then filled solid.
+magick -background none -density 600 "$menubar_mark" -resize 2048x2048 \
+  -alpha extract "$work/menubar-alpha.png"
+for tone in white black; do
+  magick -size 2048x2048 "xc:$tone" "$work/menubar-alpha.png" \
+    -alpha off -compose copy_opacity -composite "$work/menubar-$tone.png"
+done
 menubar_dir="$repo_root/crates/scryer/resources/macos"
 mkdir -p "$menubar_dir"
-square_ink "$white_mark" 18 "$menubar_dir/menubar-dark.png"
-square_ink "$white_mark" 36 "$menubar_dir/menubar-dark@2x.png"
-square_ink "$navy_mark" 18 "$menubar_dir/menubar-light.png"
-square_ink "$navy_mark" 36 "$menubar_dir/menubar-light@2x.png"
+square_ink "$work/menubar-white.png" 18 "$menubar_dir/menubar-dark.png"
+square_ink "$work/menubar-white.png" 36 "$menubar_dir/menubar-dark@2x.png"
+square_ink "$work/menubar-black.png" 18 "$menubar_dir/menubar-light.png"
+square_ink "$work/menubar-black.png" 36 "$menubar_dir/menubar-light@2x.png"
 
 # --- scryer.icns -------------------------------------------------------------
 #
