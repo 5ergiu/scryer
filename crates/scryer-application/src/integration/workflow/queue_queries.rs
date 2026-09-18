@@ -734,6 +734,11 @@ async fn enrich_download_queue_items_from_submissions_with_original_identities(
             apply_submission_to_queue_item(item, &submission);
         }
     }
+
+    // Rows served from the memo still owe their binding a `last_seen_at`
+    // refresh once a minute. Everything that came due in this pass is written
+    // here, in one transaction, instead of one per row.
+    crate::download_identity::flush_shared_observation_touches(app).await;
 }
 /// Join the goals a torrent was grabbed under onto its queue row.
 ///
@@ -758,12 +763,19 @@ async fn find_submission_for_queue_item_by_download_id(
         return None;
     }
 
-    let canonical_download_id = match crate::download_identity::resolve_observed_client_job(
+    // Memoized: an unchanged row on an unchanged registry generation costs no
+    // registry transaction at all. The poller re-reads the same queue and
+    // history rows six times a minute, and this fallback runs for every row the
+    // batched submission maps miss — which every row Scryer never submitted
+    // always does.
+    let observation = crate::download_identity::observed_queue_item_job(item);
+    let memoized = crate::download_identity::resolve_observed_client_job_memoized(
         app,
-        crate::download_identity::observed_queue_item_job(item),
+        observation.clone(),
+        item.download_id.as_deref(),
     )
-    .await
-    {
+    .await;
+    let canonical_download_id = match memoized.resolution {
         crate::download_identity::ObservedClientJobResolution::Resolved(download_id) => {
             Some(download_id)
         }
@@ -771,6 +783,11 @@ async fn find_submission_for_queue_item_by_download_id(
         | crate::download_identity::ObservedClientJobResolution::BindingAlreadyEnded => return None,
         crate::download_identity::ObservedClientJobResolution::Unavailable => None,
     };
+    // This row's by-id lookup already came back empty against this registry
+    // generation, and it is the same row: nothing to look up again.
+    if memoized.submission_lookup_missed {
+        return None;
+    }
 
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
@@ -830,10 +847,19 @@ async fn find_submission_for_queue_item_by_download_id(
                     client_type = %client_type,
                     "failed to load download submission by download id for queue enrichment"
                 );
+                // A read failure is not proof there is nothing to find, so the
+                // miss is not memoized.
+                return None;
             }
         }
     }
 
+    crate::download_identity::record_memoized_submission_lookup_miss(
+        app,
+        &observation,
+        item.download_id.as_deref(),
+    )
+    .await;
     None
 }
 fn config_value_is_empty(value: Option<&serde_json::Value>) -> bool {

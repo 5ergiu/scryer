@@ -1014,6 +1014,11 @@ async fn process_tracked_download_snapshot(
         }
     }
 
+    // Phase 1 served most rows from the observation memo, so the binding
+    // freshness writes those rows came due for are written here as one
+    // transaction rather than one per row inside a resolution transaction.
+    crate::download_identity::flush_shared_observation_touches(app).await;
+
     let unavailable_sources = match prune {
         TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes => runtime
             .tracker
