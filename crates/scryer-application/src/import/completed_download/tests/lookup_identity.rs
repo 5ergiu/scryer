@@ -1196,10 +1196,16 @@ async fn completed_lookup_applies_the_snapshot_limit_per_client() {
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
     let mut busy = build_tracked_download("title-1", "movie", "Paper.Lantern.2012.1080p.PART0");
+    // The lookup keys on the tracked download's own client fields, so they
+    // have to agree with the queue item's.
+    busy.client_id = "sab-client".to_string();
+    busy.client_type = "sabnzbd".to_string();
     busy.client_item.client_id = "sab-client".to_string();
     busy.client_item.client_type = "sabnzbd".to_string();
     busy.client_item.download_client_item_id = "sab-job-0".to_string();
     let mut tracked_quiet = build_tracked_download("title-2", "series", "Harbor.Pals.S01E01.1080p");
+    tracked_quiet.client_id = "nzbget-client".to_string();
+    tracked_quiet.client_type = "nzbget".to_string();
     tracked_quiet.client_item.client_id = "nzbget-client".to_string();
     tracked_quiet.client_item.client_type = "nzbget".to_string();
     tracked_quiet.client_item.download_client_item_id = "nzbget-job-1".to_string();
