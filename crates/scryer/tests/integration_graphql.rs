@@ -18,6 +18,8 @@ mod dataloader_enrichment;
 mod downloads_housekeeping_system;
 #[path = "integration_graphql/emby_contract.rs"]
 mod emby_contract;
+#[path = "integration_graphql/external_import_finalize.rs"]
+mod external_import_finalize;
 #[path = "integration_graphql/external_import_secret_drafts.rs"]
 mod external_import_secret_drafts;
 #[path = "integration_graphql/folder_match.rs"]

@@ -1614,6 +1614,15 @@ pub trait TitleRepository: Send + Sync {
     ) -> AppResult<()>;
     async fn clear_title_metadata_hydration_retry_state(&self, id: &str) -> AppResult<()>;
     async fn update_monitored(&self, id: &str, monitored: bool) -> AppResult<Title>;
+    /// Sets the monitored flag on many titles at once. The default walks the
+    /// singular call; stores override it so a bulk apply costs one write
+    /// transaction per batch instead of one per title.
+    async fn set_titles_monitored(&self, ids: &[String], monitored: bool) -> AppResult<()> {
+        for id in ids {
+            self.update_monitored(id, monitored).await?;
+        }
+        Ok(())
+    }
     async fn update_metadata(
         &self,
         id: &str,

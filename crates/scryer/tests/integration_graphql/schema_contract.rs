@@ -1202,7 +1202,10 @@ async fn graphql_introspection_external_import_finalize_settings_payload_is_trim
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect();
-    assert_eq!(finalize_fields, vec!["monitorWarmupSessionId"]);
+    assert_eq!(
+        finalize_fields,
+        vec!["monitorWarmupSessionId", "finalizeSessionId", "progress"]
+    );
 
     assert!(body["data"]["applicationPayload"].is_null());
     assert!(body["data"]["valuePayload"].is_null());
@@ -4719,7 +4722,10 @@ async fn graphql_introspection_external_import_finalize_uses_payload_results() {
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect();
-    assert_eq!(finalize_fields, vec!["monitorWarmupSessionId"]);
+    assert_eq!(
+        finalize_fields,
+        vec!["monitorWarmupSessionId", "finalizeSessionId", "progress"]
+    );
 }
 
 fn graphql_type_leaf_name(type_value: &Value) -> Option<&str> {
