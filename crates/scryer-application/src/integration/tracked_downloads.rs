@@ -5621,7 +5621,11 @@ mod tests {
         let mut tracker = TrackedDownloadService::new();
         let states = [
             ("foreign-importing", TrackedDownloadState::Importing, false),
-            ("foreign-attempted", TrackedDownloadState::ImportPending, true),
+            (
+                "foreign-attempted",
+                TrackedDownloadState::ImportPending,
+                true,
+            ),
         ];
         let mut tracked_ids = Vec::new();
         for (suffix, state, import_attempted) in states {
