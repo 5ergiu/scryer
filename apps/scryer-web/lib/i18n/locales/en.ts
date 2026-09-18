@@ -1573,6 +1573,8 @@ const en: LocaleDictionary = {
   "pendingImports.library": "Library:",
   "pendingImports.knownTitle": "Known title:",
   "pendingImports.reason.title_already_owns_another_folder": "Title already owns another folder",
+  "pendingImports.reason.metadata_id_lookup_unresolved":
+    "Metadata lookup could not resolve this folder's external id; the next scan retries it",
   "pendingImports.reason.folder_ownership_changed_by_user":
     "Folder ownership changed by user",
   "pendingImports.folderOwnershipChangedHelp":
