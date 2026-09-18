@@ -205,23 +205,23 @@ async fn dispatch_event(app: &AppUseCase, event: &DomainEvent) {
     let scope_title_id = notification_scope_title_id(event);
     let scope_facet = notification_scope_facet(event);
 
-    let mut subscriptions = Vec::new();
-    for subscription_event_type in subscription_event_types(notification.payload.event_type) {
-        match sub_repo
-            .list_subscriptions_for_event(subscription_event_type)
-            .await
-        {
-            Ok(mut matching) => subscriptions.append(&mut matching),
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    event_type = subscription_event_type.as_str(),
-                    "failed to list notification subscriptions"
-                );
-                return;
-            }
+    // A notification reaches only the channels subscribed to its own event type.
+    // "File Deleted" and "File Deleted for Upgrade" are independent toggles in
+    // settings, so an upgrade cleanup must not reach a plain-delete subscriber.
+    let mut subscriptions = match sub_repo
+        .list_subscriptions_for_event(notification.payload.event_type)
+        .await
+    {
+        Ok(matching) => matching,
+        Err(error) => {
+            warn!(
+                error = %error,
+                event_type = notification.payload.event_type.as_str(),
+                "failed to list notification subscriptions"
+            );
+            return;
         }
-    }
+    };
     subscriptions.sort_by(|left, right| left.id.cmp(&right.id));
     subscriptions.dedup_by(|left, right| left.id == right.id);
     let mut dispatched_targets = BTreeSet::new();
@@ -1474,16 +1474,6 @@ fn media_file_payload_from_record(
     }
 }
 
-fn subscription_event_types(event_type: NotificationEventType) -> Vec<NotificationEventType> {
-    match event_type {
-        NotificationEventType::FileDeletedForUpgrade => vec![
-            NotificationEventType::FileDeletedForUpgrade,
-            NotificationEventType::FileDeleted,
-        ],
-        _ => vec![event_type],
-    }
-}
-
 fn notification_scope_title_id(event: &DomainEvent) -> Option<&str> {
     event.title_id.as_deref().or(match &event.payload {
         DomainEventPayload::MediaRequestApproved(data) => data.created_title_id.as_deref(),
@@ -2294,5 +2284,320 @@ mod tests {
                 expected_created_title_id
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod file_delete_subscription_tests {
+    use super::*;
+    use crate::AppResult;
+    use crate::lib_tests::bootstrap;
+    use crate::ports::{NotificationClient, NotificationPluginProvider};
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use scryer_domain::{
+        ChannelType, DomainEventActorKind, MediaFacet, NotificationChannelConfig,
+        NotificationSubscription,
+    };
+    use std::sync::{Arc, Mutex};
+
+    const FIXTURE_CHANNEL_TYPE: &str = "fixturenotify";
+
+    #[derive(Default)]
+    struct RecordingNotificationClient {
+        sent: Arc<Mutex<Vec<NotificationEventType>>>,
+    }
+
+    #[async_trait]
+    impl NotificationClient for RecordingNotificationClient {
+        async fn send_notification(&self, payload: &NotificationPayload) -> AppResult<()> {
+            self.sent.lock().expect("sent log").push(payload.event_type);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingNotificationProvider {
+        sent: Arc<Mutex<Vec<NotificationEventType>>>,
+    }
+
+    impl RecordingNotificationProvider {
+        fn sent(&self) -> Vec<NotificationEventType> {
+            self.sent.lock().expect("sent log").clone()
+        }
+    }
+
+    impl NotificationPluginProvider for RecordingNotificationProvider {
+        fn client_for_channel(
+            &self,
+            config: &NotificationChannelConfig,
+        ) -> Option<Arc<dyn NotificationClient>> {
+            (config.channel_type.as_str() == FIXTURE_CHANNEL_TYPE).then(|| {
+                Arc::new(RecordingNotificationClient {
+                    sent: Arc::clone(&self.sent),
+                }) as Arc<dyn NotificationClient>
+            })
+        }
+
+        fn available_provider_types(&self) -> Vec<String> {
+            vec![FIXTURE_CHANNEL_TYPE.to_string()]
+        }
+
+        fn config_fields_for_provider(&self, _: &str) -> Vec<scryer_domain::ConfigFieldDef> {
+            Vec::new()
+        }
+
+        fn plugin_name_for_provider(&self, provider_type: &str) -> Option<String> {
+            (provider_type == FIXTURE_CHANNEL_TYPE).then(|| "Fixture Notifier".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct InMemoryNotificationStore {
+        channels: Mutex<Vec<NotificationChannelConfig>>,
+        subscriptions: Mutex<Vec<NotificationSubscription>>,
+    }
+
+    impl InMemoryNotificationStore {
+        fn seed_channel(&self, id: &str) -> NotificationChannelConfig {
+            let channel = NotificationChannelConfig {
+                id: id.to_string(),
+                name: format!("Channel {id}"),
+                channel_type: ChannelType::parse(FIXTURE_CHANNEL_TYPE).expect("channel type"),
+                config_json: "{}".to_string(),
+                media_server_connection_id: None,
+                is_enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            self.channels
+                .lock()
+                .expect("channels")
+                .push(channel.clone());
+            channel
+        }
+
+        fn seed_subscription(&self, id: &str, channel_id: &str, event_type: NotificationEventType) {
+            self.subscriptions
+                .lock()
+                .expect("subscriptions")
+                .push(NotificationSubscription {
+                    id: id.to_string(),
+                    channel_id: Some(channel_id.to_string()),
+                    target_kind: NotificationTargetKind::PluginChannel,
+                    target_id: channel_id.to_string(),
+                    event_type,
+                    scope: "global".to_string(),
+                    scope_id: None,
+                    is_enabled: true,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                });
+        }
+    }
+
+    #[async_trait]
+    impl crate::NotificationChannelRepository for InMemoryNotificationStore {
+        async fn list_channels(&self) -> AppResult<Vec<NotificationChannelConfig>> {
+            Ok(self.channels.lock().expect("channels").clone())
+        }
+
+        async fn get_channel(&self, id: &str) -> AppResult<Option<NotificationChannelConfig>> {
+            Ok(self
+                .channels
+                .lock()
+                .expect("channels")
+                .iter()
+                .find(|channel| channel.id == id)
+                .cloned())
+        }
+
+        async fn create_channel(
+            &self,
+            config: NotificationChannelConfig,
+        ) -> AppResult<NotificationChannelConfig> {
+            self.channels.lock().expect("channels").push(config.clone());
+            Ok(config)
+        }
+
+        async fn update_channel(
+            &self,
+            config: NotificationChannelConfig,
+        ) -> AppResult<NotificationChannelConfig> {
+            Ok(config)
+        }
+
+        async fn delete_channel(&self, _: &str) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::NotificationSubscriptionRepository for InMemoryNotificationStore {
+        async fn list_subscriptions(&self) -> AppResult<Vec<NotificationSubscription>> {
+            Ok(self.subscriptions.lock().expect("subscriptions").clone())
+        }
+
+        async fn list_subscriptions_for_channel(
+            &self,
+            channel_id: &str,
+        ) -> AppResult<Vec<NotificationSubscription>> {
+            Ok(self
+                .subscriptions
+                .lock()
+                .expect("subscriptions")
+                .iter()
+                .filter(|sub| sub.channel_id.as_deref() == Some(channel_id))
+                .cloned()
+                .collect())
+        }
+
+        async fn list_subscriptions_for_target(
+            &self,
+            target_kind: NotificationTargetKind,
+            target_id: &str,
+        ) -> AppResult<Vec<NotificationSubscription>> {
+            Ok(self
+                .subscriptions
+                .lock()
+                .expect("subscriptions")
+                .iter()
+                .filter(|sub| sub.target_kind == target_kind && sub.target_id == target_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn list_subscriptions_for_event(
+            &self,
+            event_type: NotificationEventType,
+        ) -> AppResult<Vec<NotificationSubscription>> {
+            Ok(self
+                .subscriptions
+                .lock()
+                .expect("subscriptions")
+                .iter()
+                .filter(|sub| sub.event_type == event_type)
+                .cloned()
+                .collect())
+        }
+
+        async fn create_subscription(
+            &self,
+            sub: NotificationSubscription,
+        ) -> AppResult<NotificationSubscription> {
+            self.subscriptions
+                .lock()
+                .expect("subscriptions")
+                .push(sub.clone());
+            Ok(sub)
+        }
+
+        async fn update_subscription(
+            &self,
+            sub: NotificationSubscription,
+        ) -> AppResult<NotificationSubscription> {
+            Ok(sub)
+        }
+
+        async fn delete_subscription(&self, _: &str) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    fn media_file_deleted_event(event_id: &str, reason: MediaFileDeletedReason) -> DomainEvent {
+        DomainEvent {
+            sequence: 1,
+            event_id: event_id.to_string(),
+            occurred_at: Utc::now(),
+            actor_kind: DomainEventActorKind::System,
+            actor_user_id: None,
+            actor_display_name: "System".to_string(),
+            title_id: Some("title-fixture".to_string()),
+            facet: Some(MediaFacet::Movie),
+            correlation_id: None,
+            causation_id: None,
+            schema_version: 1,
+            stream: scryer_domain::DomainEventStream::Global,
+            payload: DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData {
+                title: TitleContextSnapshot {
+                    title_name: "Harbor Lantern".to_string(),
+                    facet: MediaFacet::Movie,
+                    external_ids: DomainExternalIds::default(),
+                    poster_url: None,
+                    year: Some(2024),
+                },
+                media_updates: vec![MediaPathUpdate {
+                    path: "/library/Harbor Lantern (2024)/harbor-lantern.mkv".to_string(),
+                    update_type: MediaUpdateType::Deleted,
+                }],
+                file_id: Some("file-fixture".to_string()),
+                reason,
+                episode_ids: Vec::new(),
+            }),
+        }
+    }
+
+    async fn dispatched_event_types(
+        subscribed_to: NotificationEventType,
+        reason: MediaFileDeletedReason,
+    ) -> Vec<NotificationEventType> {
+        let store = Arc::new(InMemoryNotificationStore::default());
+        let channel = store.seed_channel("channel-fixture");
+        store.seed_subscription("sub-fixture", &channel.id, subscribed_to);
+        let provider = Arc::new(RecordingNotificationProvider::default());
+
+        let (app, _) = bootstrap();
+        let app = app.with_test_overrides(|services| {
+            services
+                .with_notification_store(Arc::clone(&store))
+                .with_notification_provider(provider.clone())
+        });
+
+        dispatch_event(&app, &media_file_deleted_event("evt-fixture", reason)).await;
+        provider.sent()
+    }
+
+    #[tokio::test]
+    async fn file_deleted_subscription_skips_upgrade_cleanup_deletions() {
+        assert_eq!(
+            dispatched_event_types(
+                NotificationEventType::FileDeleted,
+                MediaFileDeletedReason::Deleted
+            )
+            .await,
+            vec![NotificationEventType::FileDeleted]
+        );
+
+        assert!(
+            dispatched_event_types(
+                NotificationEventType::FileDeleted,
+                MediaFileDeletedReason::UpgradeCleanup
+            )
+            .await
+            .is_empty(),
+            "an upgrade cleanup must not reach a plain File Deleted subscriber"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_deleted_for_upgrade_subscription_skips_plain_deletions() {
+        assert_eq!(
+            dispatched_event_types(
+                NotificationEventType::FileDeletedForUpgrade,
+                MediaFileDeletedReason::UpgradeCleanup
+            )
+            .await,
+            vec![NotificationEventType::FileDeletedForUpgrade]
+        );
+
+        assert!(
+            dispatched_event_types(
+                NotificationEventType::FileDeletedForUpgrade,
+                MediaFileDeletedReason::Deleted
+            )
+            .await
+            .is_empty(),
+            "a plain deletion must not reach a File Deleted for Upgrade subscriber"
+        );
     }
 }
