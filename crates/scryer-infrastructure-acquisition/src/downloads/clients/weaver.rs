@@ -171,8 +171,12 @@ pub enum WeaverQueueState {
     Downloading,
     #[serde(rename = "CHECKING")]
     Checking,
+    #[serde(rename = "FINALIZING_DOWNLOAD")]
+    FinalizingDownload,
     #[serde(rename = "VERIFYING")]
     Verifying,
+    #[serde(rename = "FETCHING_REPAIR_DATA")]
+    FetchingRepairData,
     #[serde(rename = "QUEUED_REPAIR")]
     QueuedRepair,
     #[serde(rename = "REPAIRING")]
@@ -181,6 +185,8 @@ pub enum WeaverQueueState {
     QueuedExtract,
     #[serde(rename = "EXTRACTING")]
     Extracting,
+    #[serde(rename = "POST_PROCESSING")]
+    PostProcessing,
     #[serde(rename = "MOVING")]
     Moving,
     #[serde(rename = "FINALIZING")]
@@ -191,6 +197,14 @@ pub enum WeaverQueueState {
     Failed,
     #[serde(rename = "PAUSED")]
     Paused,
+    /// Any state this build of scryer does not know about.
+    ///
+    /// Without this catch-all a single job in a state added by a newer weaver
+    /// fails the whole `Vec<WeaverQueueItem>` page, so `list_queue` returns an
+    /// error and the bridge loses its queue view entirely. Unknown states are
+    /// deliberately treated as still-active work — never as terminal.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1032,16 +1046,23 @@ fn extract_scryer_metadata(
 fn map_weaver_status(status: WeaverQueueState) -> DownloadQueueState {
     match status {
         WeaverQueueState::Queued => DownloadQueueState::Queued,
-        WeaverQueueState::Downloading | WeaverQueueState::Checking => {
-            DownloadQueueState::Downloading
-        }
+        // `Unknown` is a state a newer weaver added that this build has never
+        // heard of. It maps to an active state on purpose: guessing
+        // `Completed` or `Failed` would hand a still-running job to import or
+        // to failed-download handling.
+        WeaverQueueState::Downloading
+        | WeaverQueueState::Checking
+        | WeaverQueueState::FinalizingDownload
+        | WeaverQueueState::FetchingRepairData
+        | WeaverQueueState::Unknown => DownloadQueueState::Downloading,
         WeaverQueueState::Verifying => DownloadQueueState::Verifying,
         WeaverQueueState::QueuedRepair => DownloadQueueState::Downloading,
         WeaverQueueState::Repairing => DownloadQueueState::Repairing,
         WeaverQueueState::QueuedExtract => DownloadQueueState::Repairing,
-        WeaverQueueState::Extracting | WeaverQueueState::Moving | WeaverQueueState::Finalizing => {
-            DownloadQueueState::Extracting
-        }
+        WeaverQueueState::Extracting
+        | WeaverQueueState::PostProcessing
+        | WeaverQueueState::Moving
+        | WeaverQueueState::Finalizing => DownloadQueueState::Extracting,
         WeaverQueueState::Completed => DownloadQueueState::Completed,
         WeaverQueueState::Failed => DownloadQueueState::Failed,
         WeaverQueueState::Paused => DownloadQueueState::Paused,
@@ -1997,8 +2018,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::{
-        SubmissionPayload, WeaverDownloadClient, WeaverQueueItem, map_weaver_outbound_error,
-        weaver_item_to_queue_item,
+        QueueItemsPayload, SubmissionPayload, WeaverDownloadClient, WeaverQueueItem,
+        WeaverQueueState, map_weaver_outbound_error, map_weaver_status, weaver_item_to_queue_item,
     };
     use scryer_application::{
         AppError, DownloadClient, DownloadClientAddRequest, DownloadSubmissionPurpose,
@@ -2902,6 +2923,90 @@ mod tests {
         assert_eq!(item.download_id.as_deref(), Some("scryer-download:abc123"));
         assert!(item.is_scryer_origin);
         assert_eq!(item.category.as_deref(), Some("movies"));
+    }
+
+    #[test]
+    fn queue_page_survives_states_this_build_does_not_know() {
+        let page = json!({
+            "queueItems": [
+                {
+                    "id": 101,
+                    "name": "Crimson Aviary S02E04",
+                    "state": "FETCHING_REPAIR_DATA",
+                    "error": null,
+                    "progressPercent": 92.0,
+                    "totalBytes": 9000,
+                    "category": null,
+                    "outputDir": null,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "completedAt": null,
+                    "clientRequestId": null,
+                    "attributes": [],
+                    "attention": null
+                },
+                {
+                    "id": 102,
+                    "name": "Lanternfall Hollow 2031",
+                    "state": "SOMETHING_NEW",
+                    "error": null,
+                    "progressPercent": 4.0,
+                    "totalBytes": 9000,
+                    "category": null,
+                    "outputDir": null,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "completedAt": null,
+                    "clientRequestId": null,
+                    "attributes": [],
+                    "attention": null
+                }
+            ]
+        });
+
+        let payload: QueueItemsPayload = serde_json::from_value(page)
+            .expect("a page with an unrecognised state must still parse");
+
+        assert_eq!(payload.queue_items.len(), 2);
+        assert_eq!(
+            payload.queue_items[0].state,
+            WeaverQueueState::FetchingRepairData
+        );
+        assert_eq!(payload.queue_items[1].state, WeaverQueueState::Unknown);
+    }
+
+    #[test]
+    fn newer_weaver_states_never_map_to_a_terminal_state() {
+        for state in [
+            WeaverQueueState::FetchingRepairData,
+            WeaverQueueState::FinalizingDownload,
+            WeaverQueueState::PostProcessing,
+            WeaverQueueState::Unknown,
+        ] {
+            let mapped = map_weaver_status(state);
+            assert!(
+                !matches!(
+                    mapped,
+                    DownloadQueueState::Completed | DownloadQueueState::Failed
+                ),
+                "{state:?} mapped to terminal {mapped:?}"
+            );
+        }
+
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::FetchingRepairData),
+            DownloadQueueState::Downloading
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::FinalizingDownload),
+            DownloadQueueState::Downloading
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::PostProcessing),
+            DownloadQueueState::Extracting
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::Unknown),
+            DownloadQueueState::Downloading
+        );
     }
 
     #[tokio::test]
