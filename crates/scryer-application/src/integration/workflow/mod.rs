@@ -30,4 +30,5 @@ include!("tracked_commands.rs");
 include!("queue_mutations.rs");
 include!("subscriptions.rs");
 include!("permissions.rs");
+include!("navigation_badges.rs");
 include!("tests.rs");

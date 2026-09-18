@@ -358,7 +358,9 @@ pub use import_workflow::{
 };
 pub use integration::download_queue_commands::start_background_download_delete_poller;
 pub(crate) use integration::integration::ManualImportSourceResolution;
-pub use integration::workflow::{ImportRecordResultOverlay, import_record_result_overlay};
+pub use integration::workflow::{
+    ImportRecordResultOverlay, import_record_result_overlay, start_navigation_badge_facts_refresh,
+};
 pub use jobs::jobs::start_background_library_refresh_loop;
 pub use library::rename::{
     LibraryRenamer, NullLibraryRenamer, RenameApplyItemResult, RenameApplyResult,
@@ -598,9 +600,9 @@ pub use ports::{
     SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
     SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
     SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
-    TitleImageRepository, TitleRepository, TotpRepository, UserExternalAccountRepository,
-    UserRepository, VerifiedExternalIdentity, WebauthnRepository, WorkflowOperationInfo,
-    WorkflowOperationRepository,
+    TitleImageRepository, TitleListProjection, TitleRepository, TotpRepository,
+    UserExternalAccountRepository, UserRepository, VerifiedExternalIdentity, WebauthnRepository,
+    WorkflowOperationInfo, WorkflowOperationRepository,
 };
 pub use ports::{
     ConnectionPlaybackActivity, MediaServerPlaybackProbe, PlaybackActivitySnapshot,

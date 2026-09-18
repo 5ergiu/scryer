@@ -266,11 +266,36 @@ fn prefetched_scope_coverage(
     // Stable, so rows keep the order the snapshot read put them in within a
     // completion timestamp.
     rows.sort_by_key(|completed| std::cmp::Reverse(completed.completed_at));
-    rows.truncate(limit);
+    truncate_completed_downloads_per_client(&mut rows, limit);
     Some(PrefetchedScopeCoverage {
         rows,
         uncovered_client_ids,
     })
+}
+
+/// Keep each client's newest `limit` rows.
+///
+/// The limit is per client everywhere else — the router reads `limit` rows
+/// from every client and never trims the merged listing — so trimming the
+/// merged rows to `limit` here would drop a client's newest completions
+/// whenever a busier client happened to fill the budget, while coverage still
+/// claimed the whole scope and no fallback read made up for it.
+///
+/// `rows` must already be sorted newest-first; the retained rows keep that
+/// order.
+fn truncate_completed_downloads_per_client(rows: &mut Vec<CompletedDownload>, limit: usize) {
+    let mut kept_per_client: HashMap<&str, usize> = HashMap::new();
+    let mut keep = Vec::with_capacity(rows.len());
+    for completed in rows.iter() {
+        let kept = kept_per_client
+            .entry(completed.client_id.trim())
+            .or_insert(0);
+        keep.push(*kept < limit);
+        *kept += 1;
+    }
+
+    let mut keep = keep.into_iter();
+    rows.retain(|_| keep.next().unwrap_or(false));
 }
 
 async fn load_recent_completed_download_lookup_for_client_scope_or_default_excluding_client_types(
@@ -313,7 +338,7 @@ async fn load_recent_completed_download_lookup_for_client_scope_or_default_exclu
                 Ok(mut rows) => {
                     rows.extend(coverage.rows);
                     rows.sort_by_key(|completed| std::cmp::Reverse(completed.completed_at));
-                    rows.truncate(limit);
+                    truncate_completed_downloads_per_client(&mut rows, limit);
                     Ok(rows)
                 }
                 Err(error) => Err(error),

@@ -20,6 +20,7 @@ mod metrics_setup;
 mod middleware;
 mod oauth_routes;
 mod rate_limit;
+mod runtime_health;
 mod settings_bootstrap;
 mod splash;
 mod startup_auth;
@@ -62,7 +63,8 @@ use scryer_application::{
     start_background_library_refresh_loop, start_background_manual_import_poller,
     start_background_media_server_playback_reconciliation_loop, start_background_subtitle_poller,
     start_background_title_hydration_loop, start_background_title_image_loop,
-    start_download_queue_poller_with_options, start_notification_dispatcher,
+    start_download_queue_poller_with_options, start_navigation_badge_facts_refresh,
+    start_notification_dispatcher,
     tracked_downloads::{
         BridgedClientTypesHandle, TrackedDownloadHandle, TrackedDownloadSnapshotIngestHandle,
     },
@@ -1967,6 +1969,14 @@ async fn bootstrap_application(
     ));
     tokio::spawn(start_background_title_image_loop(
         app_use_case.clone(),
+        shutdown_token.child_token(),
+    ));
+    tokio::spawn(start_navigation_badge_facts_refresh(
+        app_use_case.clone(),
+        shutdown_token.child_token(),
+    ));
+    tokio::spawn(runtime_health::start_runtime_health_monitor(
+        datastore.datastore(),
         shutdown_token.child_token(),
     ));
     tokio::spawn(start_notification_dispatcher(

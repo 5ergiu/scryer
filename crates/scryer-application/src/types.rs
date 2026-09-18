@@ -1097,6 +1097,19 @@ pub struct PendingImportCounts {
     pub anime: i64,
 }
 
+/// Every number the navigation badges show, for one actor.
+///
+/// Answered from the cached badge facts rather than from the stores: the web
+/// polls this every 30 seconds per open tab.
+#[derive(Clone, Debug, Default)]
+pub struct NavigationBadgeCounts {
+    pub pending_imports: PendingImportCounts,
+    pub pending_media_requests: MediaRequestCounts,
+    pub activity_import_count: i64,
+    pub plugin_update_count: i64,
+    pub plugin_blocked_count: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MediaRequestCounts {
     pub movie: i64,

@@ -3525,6 +3525,28 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         .collect();
 
     let success_count = results.iter().filter(|r| r.success).count();
+    // The per-episode sidecars are written as each file lands, but the
+    // series-level ones belong to the folder and are written once. A manual
+    // import can be the first — or only — file a series ever receives, so it
+    // owes them exactly as the automatic path does. Movies have no series
+    // document; the movie sidecar is the per-file one already written above.
+    if success_count > 0 && title.facet != MediaFacet::Movie {
+        let nfo_enabled = match app
+            .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
+            .await
+        {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id = %title.id,
+                    "failed to resolve the NFO sidecar setting; no series sidecar written"
+                );
+                false
+            }
+        };
+        write_series_sidecars(app, &title, &full_folder_path, nfo_enabled).await;
+    }
     let (terminal_status, _, _) = manual_import_terminal_status_and_error(&results);
     if success_count > 0 && terminal_status == ImportStatus::Completed {
         let mut episode_ids = Vec::new();
