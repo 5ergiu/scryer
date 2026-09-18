@@ -58,6 +58,17 @@ The Rust workspace has more than 8,000 tests. Repeated workspace sweeps and Clip
 
 An explicit user request for an earlier or additional validation run overrides this cadence. Do not infer such a request from ordinary instructions to implement, review, fix, finish, or merge work.
 
+## Test determinism
+
+A test must give the same result on a slow, loaded, or shared CI runner as on a fast idle workstation. Passing locally proves nothing if the result depends on machine speed, load, core count, or scheduling order. A test that can fail that way is broken and must be fixed before it merges.
+
+- Wait for the condition the assertion depends on, such as a state change, an event, a row, or a message. Never wait for elapsed time. Fixed sleeps are forbidden.
+- Do not assume one concurrent operation finishes before another unless the code under test guarantees that order. Background workers, pollers, schedulers, and timers race the test unless the test controls them.
+- Control time and scheduling explicitly. Use the paused or mocked clock, injected intervals, or explicit triggers instead of racing real timers.
+- Tie every wait to the specific item under test, using its ID, sequence number, or a watermark taken before the action. Earlier or unrelated activity must not be able to satisfy the wait.
+- Treat timeouts only as failure bounds. Make them generous enough that a correct run on a slow runner never reaches them. Every awaited call needs a bound, so a missed condition fails the test instead of hanging it.
+- Never fix a flaky test by raising a timeout, adding a sleep, or adding a retry. Find and remove the race. If the product exposes nothing observable to wait on, report that gap instead of working around it.
+
 ## Code Review Rules
 
 - Before performing any code review, read the repository-root `SECURITY.md` completely.
