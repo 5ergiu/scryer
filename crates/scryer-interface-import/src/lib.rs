@@ -48,8 +48,13 @@ const SONARR_EPISODE_FETCH_CONCURRENCY_PER_INSTANCE: usize = 16;
 const SONARR_ACTIVE_EPISODE_INSTANCE_CONCURRENCY: usize = 2;
 const SNAPSHOT_CHUNK_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_CHUNK_READ_BATCH_SIZE: i32 = 32;
-/// Entries applied between finalize progress publishes.
-const APPLY_PROGRESS_PUBLISH_ENTRIES: i32 = 250;
+/// Entries applied between finalize progress publishes. Whichever of this and
+/// [`APPLY_PROGRESS_PUBLISH_INTERVAL`] comes first wins, so a 100k-title apply
+/// costs ~100 progress upserts rather than one per 25 entries.
+const APPLY_PROGRESS_PUBLISH_ENTRIES: i32 = 1_000;
+/// Wall-clock ceiling between finalize progress publishes, so a slow apply still
+/// moves the bar.
+const APPLY_PROGRESS_PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 /// Orchestrator fingerprint the finalize apply session is tracked under. One
 /// per actor, so a second finalize joins the running one instead of racing it.
 const EXTERNAL_IMPORT_FINALIZE_FINGERPRINT: &str = "external-import-finalize";
@@ -152,6 +157,7 @@ struct ExternalImportApplyProgress<'a> {
     snapshot: &'a mut ExternalImportMonitorWarmupProgressSnapshot,
     processed: i32,
     published_at: i32,
+    published_instant: std::time::Instant,
 }
 
 impl ExternalImportApplyProgress<'_> {
@@ -164,13 +170,17 @@ impl ExternalImportApplyProgress<'_> {
         if self.snapshot.snapshot_build_progress.total < self.processed {
             self.snapshot.snapshot_build_progress.total = self.processed;
         }
-        if self.processed - self.published_at >= APPLY_PROGRESS_PUBLISH_ENTRIES {
-            self.published_at = self.processed;
+        if self.processed > self.published_at
+            && (self.processed - self.published_at >= APPLY_PROGRESS_PUBLISH_ENTRIES
+                || self.published_instant.elapsed() >= APPLY_PROGRESS_PUBLISH_INTERVAL)
+        {
             self.publish().await;
         }
     }
 
     async fn publish(&mut self) {
+        self.published_at = self.processed;
+        self.published_instant = std::time::Instant::now();
         publish_warmup_progress(self.app, self.session_id, self.snapshot).await;
     }
 }
@@ -1553,8 +1563,8 @@ impl ProwlarrImportGroup {
     }
 
     fn merge(&mut self, detected: DetectedProwlarrIndexer, source: &str) {
-        push_unique(&mut self.sources, source.to_string());
-        push_unique(&mut self.child_names, detected.child_name);
+        push_unique(&mut self.sources, source);
+        push_unique(&mut self.child_names, &detected.child_name);
         if self.has_direct_api_key {
             return;
         }
@@ -1617,18 +1627,22 @@ fn merge_direct_prowlarr_group(
             has_direct_api_key: false,
         });
 
-    push_unique(&mut group.sources, "prowlarr".to_string());
+    push_unique(&mut group.sources, "prowlarr");
     for child_name in child_names {
-        push_unique(&mut group.child_names, child_name.clone());
+        push_unique(&mut group.child_names, child_name);
     }
     group.api_key_conflict = false;
     group.api_key = Some(api_key.trim().to_string());
     group.has_direct_api_key = true;
 }
 
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.iter().any(|existing| existing == &value) {
-        values.push(value);
+/// Appends `value` when it is not already present. The vectors this guards hold
+/// distinct root folders and source names -- a handful of entries -- so the scan
+/// stays cheap; taking `&str` keeps a per-title caller from allocating a string
+/// it usually throws away.
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
     }
 }
 
@@ -2153,7 +2167,7 @@ impl ExternalImportMutations {
                 if let Some(&existing) = dc_key_idx.get(&mapped.dedup_key) {
                     push_unique(
                         &mut payload.download_clients[existing].source_keys,
-                        result.source_key.clone(),
+                        &result.source_key,
                     );
                 } else {
                     dc_key_idx.insert(mapped.dedup_key.clone(), payload.download_clients.len());
@@ -2176,7 +2190,7 @@ impl ExternalImportMutations {
                 if let Some(&existing) = idx_key_idx.get(&mapped.dedup_key) {
                     push_unique(
                         &mut payload.indexers[existing].source_keys,
-                        result.source_key.clone(),
+                        &result.source_key,
                     );
                 } else {
                     idx_key_idx.insert(mapped.dedup_key.clone(), payload.indexers.len());
@@ -3186,7 +3200,7 @@ async fn capture_external_import_arr_source_warmup(
                     return Ok(());
                 }
                 movie_writer.push(&movie).await?;
-                push_unique(&mut result.title_root_paths, movie.root_folder_path.clone());
+                push_unique(&mut result.title_root_paths, &movie.root_folder_path);
                 snapshot.movies_progress.completed =
                     snapshot.movies_progress.completed.saturating_add(1);
                 if should_publish_progress(snapshot.movies_progress.completed) {
@@ -3267,10 +3281,7 @@ async fn capture_external_import_arr_source_warmup(
                     AppError::Repository(format!("failed to join Sonarr episode fetch task: {err}"))
                 })?;
                 let episodes = episodes_result?;
-                push_unique(
-                    &mut result.title_root_paths,
-                    series.root_folder_path.clone(),
-                );
+                push_unique(&mut result.title_root_paths, &series.root_folder_path);
                 let entry = ExternalImportArrSourceSeriesEntry { series, episodes };
                 series_writer.push(&entry).await?;
                 snapshot.series_progress.completed =
@@ -3394,6 +3405,7 @@ async fn apply_external_import_finalize(
             snapshot,
             processed: 0,
             published_at: 0,
+            published_instant: std::time::Instant::now(),
         };
 
         for session_id in source_order {
@@ -3878,9 +3890,14 @@ mod tests {
         detect_imported_prowlarr_proxy_indexer, imported_download_client_connection_config,
         imported_indexer_config_json, is_external_import_library_auto_apply_setting,
         map_download_client, map_indexer, merge_direct_prowlarr_group, merge_prowlarr_group,
-        movie_scan_hint_from_arr, prowlarr_dedup_key, push_sonarr_scan_hints_for_mapping,
-        record_series_setting_sample, remap_import_path, series_episode_scan_hint_from_arr,
-        series_folder_scan_hint_from_arr,
+        merge_series_monitor_entry, movie_monitor_entry_from_arr,
+        movie_monitor_merge_key_for_source, movie_scan_hint_from_arr, prowlarr_dedup_key,
+        push_sonarr_scan_hints_for_mapping, record_series_setting_sample, remap_import_path,
+        series_episode_scan_hint_from_arr, series_folder_scan_hint_from_arr,
+        series_monitor_entry_from_arr, series_monitor_merge_key_for_source,
+    };
+    use scryer_application::{
+        ExternalImportMonitorMovieEntry, ExternalImportMonitorSeriesEntry,
     };
 
     #[test]
@@ -3981,6 +3998,117 @@ mod tests {
                 .ids
                 .iter()
                 .any(|id| id.provider == ExternalIdProvider::Imdb)
+        );
+    }
+
+    /// Synthetic catalog-scale rehearsal of finalize's CPU-bound half: the scan
+    /// hint build plus the entry transform and cross-source merge, with no I/O.
+    /// Ignored by default; `SCRYER_BENCH_SERIES` scales it down for comparisons.
+    ///
+    /// cargo nextest run -p scryer-interface-import --run-ignored all \
+    ///   finalize_transform_and_hint_build_at_catalog_scale --no-capture
+    #[test]
+    #[ignore = "benchmark: run explicitly"]
+    fn finalize_transform_and_hint_build_at_catalog_scale() {
+        let series_count = std::env::var("SCRYER_BENCH_SERIES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(100_000);
+        let episodes_per_series = std::env::var("SCRYER_BENCH_EPISODES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20);
+        let facet = MediaFacet::Series;
+        let mut scan_hints = LibraryScanHintSet::new();
+        let mut series_entries =
+            BTreeMap::<(String, String), (MediaFacet, ExternalImportMonitorSeriesEntry)>::new();
+        let mut movie_entries =
+            BTreeMap::<(String, String), ExternalImportMonitorMovieEntry>::new();
+
+        let started = std::time::Instant::now();
+        for index in 0..series_count {
+            let series = ArrSeries {
+                id: index as i64,
+                root_folder_path: "/arr-data/series".into(),
+                path: Some(format!("/arr-data/series/Synthetic Show {index:06}")),
+                tvdb_id: Some((400_000 + index).to_string()),
+                monitored: index % 3 != 0,
+                quality_profile_id: None,
+                series_type: None,
+                season_folder: Some(true),
+                monitor_new_items: None,
+                original_language: None,
+                tags: Vec::new(),
+                seasons: Vec::new(),
+                statistics: ArrSeriesStatistics {
+                    total_episode_count: None,
+                    monitored_episode_count: None,
+                },
+            };
+            let episodes = (0..episodes_per_series)
+                .map(|episode_index| ArrEpisode {
+                    id: (index * episodes_per_series + episode_index) as i64,
+                    series_id: index as i64,
+                    tvdb_id: Some((9_000_000 + index * episodes_per_series + episode_index).to_string()),
+                    season_number: 1,
+                    episode_number: episode_index as i32 + 1,
+                    file_path: Some(format!(
+                        "/arr-data/series/Synthetic Show {index:06}/Season 01/Synthetic.Show.{index:06}.S01E{:02}.mkv",
+                        episode_index + 1
+                    )),
+                    monitored: true,
+                })
+                .collect::<Vec<_>>();
+
+            push_sonarr_scan_hints_for_mapping(&mut scan_hints, &facet, &series, &episodes);
+            let series_id = series.id;
+            let entry = series_monitor_entry_from_arr(series, episodes);
+            let merge_key =
+                series_monitor_merge_key_for_source(&facet, &entry, "sonarr@bench", series_id);
+            match series_entries.entry(("library-bench".to_string(), merge_key)) {
+                std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                    merge_series_monitor_entry(&mut occupied.get_mut().1, entry);
+                }
+                std::collections::btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert((facet.clone(), entry));
+                }
+            }
+        }
+
+        for index in 0..series_count {
+            let movie = ArrMovie {
+                id: index as i64,
+                root_folder_path: "/arr-data/films".into(),
+                path: Some(format!("/arr-data/films/Synthetic Film {index:06} (2021)")),
+                file_path: Some(format!(
+                    "/arr-data/films/Synthetic Film {index:06} (2021)/Synthetic.Film.mkv"
+                )),
+                tmdb_id: Some((600_000 + index).to_string()),
+                imdb_id: None,
+                monitored: index % 2 == 0,
+                quality_profile_id: None,
+                minimum_availability: None,
+                original_language: None,
+                tags: Vec::new(),
+            };
+            if let Some(hint) = movie_scan_hint_from_arr(&movie) {
+                scan_hints.push(hint);
+            }
+            let movie_id = movie.id;
+            let entry = movie_monitor_entry_from_arr(&movie);
+            let merge_key = movie_monitor_merge_key_for_source(&entry, "radarr@bench", movie_id);
+            movie_entries
+                .entry(("library-bench".to_string(), merge_key))
+                .and_modify(|existing| existing.monitored |= entry.monitored)
+                .or_insert(entry);
+        }
+        let elapsed = started.elapsed();
+
+        assert_eq!(series_entries.len(), series_count);
+        assert_eq!(movie_entries.len(), series_count);
+        assert!(!scan_hints.is_empty());
+        println!(
+            "finalize transform + hint build: {series_count} series x {episodes_per_series} episodes + {series_count} movies in {elapsed:?}"
         );
     }
 

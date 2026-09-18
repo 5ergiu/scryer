@@ -311,6 +311,10 @@ impl TitleStore {
     }
 }
 
+/// Ids per `UPDATE ... WHERE id IN (...)`, under sqlite's historical 999
+/// variable ceiling with room for the monitored bind.
+const SET_TITLES_MONITORED_BIND_CHUNK: usize = 900;
+
 #[async_trait]
 impl TitleRepository for TitleStore {
     async fn list(
@@ -1810,6 +1814,30 @@ impl TitleRepository for TitleStore {
                 title.monitored = monitored;
                 persist_title_tx(tx, &title, HydrationStateWrite::Preserve).await?;
                 load_title_tx_or_not_found(tx, &id, true).await
+            })
+        })
+        .await
+    }
+
+    async fn set_titles_monitored(&self, ids: &[String], monitored: bool) -> AppResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        SqlRuntime::run_in_transaction(&self.datastore, "set_titles_monitored", move |tx| {
+            let ids = ids.clone();
+            Box::pin(async move {
+                for chunk in ids.chunks(SET_TITLES_MONITORED_BIND_CHUNK) {
+                    let placeholders = std::iter::repeat_n("{}", chunk.len())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql =
+                        format!("UPDATE titles SET monitored = {{}} WHERE id IN ({placeholders})");
+                    let mut args = vec![SqlArg::Bool(monitored)];
+                    args.extend(chunk.iter().cloned().map(SqlArg::Text));
+                    tx.execute(&sql, &args).await?;
+                }
+                Ok(())
             })
         })
         .await
