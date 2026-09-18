@@ -1302,8 +1302,8 @@ mod download_client_category_admission_tests {
 
     #[test]
     fn foreign_rows_are_adopted_only_inside_their_clients_effective_categories() {
-        let snapshot = DownloadClientCategoryAdmissionSnapshot::from_feedback_categories(
-            HashMap::from([
+        let snapshot =
+            DownloadClientCategoryAdmissionSnapshot::from_feedback_categories(HashMap::from([
                 (
                     "shared-sab".to_string(),
                     vec!["Series-HD".to_string(), "Movies".to_string()],
@@ -1313,8 +1313,7 @@ mod download_client_category_admission_tests {
                     "mid-routing-change".to_string(),
                     vec![String::new(), "Series-HD".to_string()],
                 ),
-            ]),
-        );
+            ]));
         let in_scope = |client_id: &str, category: Option<&str>| {
             foreign_observation_is_in_client_scope(false, client_id, category, Some(&snapshot))
         };

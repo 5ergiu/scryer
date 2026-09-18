@@ -460,8 +460,7 @@ impl LibraryScanHintSet {
             .as_deref()
             .map(normalize_stored_path_key)
             .filter(|value| !value.is_empty());
-        let full_path_key_matchable =
-            hint.full_path_key.is_none() || full_path_key.is_some();
+        let full_path_key_matchable = hint.full_path_key.is_none() || full_path_key.is_some();
         let index = Arc::make_mut(&mut self.inner);
 
         if !path_key.is_empty()
@@ -616,7 +615,10 @@ impl LibraryScanHintSet {
         if full_path_key.is_empty() {
             return None;
         }
-        let position = bucket.by_full_path_key.get(full_path_key.as_str()).copied()?;
+        let position = bucket
+            .by_full_path_key
+            .get(full_path_key.as_str())
+            .copied()?;
         let hint = &self.inner.hints[position as usize];
         (!hint.ids.is_empty()).then_some(hint)
     }

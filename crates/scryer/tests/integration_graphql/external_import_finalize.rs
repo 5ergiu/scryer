@@ -210,7 +210,13 @@ fn finalize_input(session_id: &str, library_id: &str) -> Value {
 /// Poll the tracked apply session until it settles, mirroring the Summary step.
 async fn await_settled_apply(ctx: &TestContext, actor: &User, session_id: &str) -> Value {
     for _ in 0..600 {
-        let body = schema_exec(ctx, WARMUP_STATUS, json!({ "sessionId": session_id }), actor).await;
+        let body = schema_exec(
+            ctx,
+            WARMUP_STATUS,
+            json!({ "sessionId": session_id }),
+            actor,
+        )
+        .await;
         assert_no_errors(&body);
         let status = body["data"]["externalImportWarmupStatus"].clone();
         match status["status"].as_str() {
