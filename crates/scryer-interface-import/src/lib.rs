@@ -185,6 +185,7 @@ impl ExternalImportApplyProgress<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_external_import_source_chunk_entries<T, F>(
     app: &scryer_application::AppUseCase,
     actor: &scryer_domain::User,
@@ -3539,9 +3540,7 @@ async fn apply_external_import_finalize(
                                 &source_result.source_key,
                                 series_id,
                             );
-                            match series_entries
-                                .entry((mapping.library_id.clone(), merge_key))
-                            {
+                            match series_entries.entry((mapping.library_id.clone(), merge_key)) {
                                 std::collections::btree_map::Entry::Occupied(mut existing) => {
                                     merge_series_monitor_entry(&mut existing.get_mut().1, entry);
                                 }
@@ -3896,9 +3895,7 @@ mod tests {
         series_episode_scan_hint_from_arr, series_folder_scan_hint_from_arr,
         series_monitor_entry_from_arr, series_monitor_merge_key_for_source,
     };
-    use scryer_application::{
-        ExternalImportMonitorMovieEntry, ExternalImportMonitorSeriesEntry,
-    };
+    use scryer_application::{ExternalImportMonitorMovieEntry, ExternalImportMonitorSeriesEntry};
 
     #[test]
     fn radarr_warmup_builds_movie_hint_with_tmdb_and_imdb() {

@@ -411,7 +411,7 @@ impl AppUseCase {
                 .await?;
             for item in items
                 .into_iter()
-                .filter(|item| pending_import_item_requires_action(item))
+                .filter(pending_import_item_requires_action)
             {
                 let counts = by_library.entry(item.library_id).or_default();
                 match facet {
