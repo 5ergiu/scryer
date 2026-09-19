@@ -329,6 +329,7 @@ test("audioTrackRows describes each track, roles included", () => {
     {
       index: 1,
       language: undefined,
+      languageInferred: false,
       codec: "TrueHD",
       profile: "TrueHD Atmos",
       channels: "7.1",
@@ -341,6 +342,26 @@ test("audioTrackRows describes each track, roles included", () => {
   );
   assert.deepEqual(rows[1].roleKeys, ["mediaFile.commentary"]);
   assert.equal(rows[1].channels, "2ch");
+});
+
+test("audioTrackRows marks a language inferred only when the track has no language field", () => {
+  const file = mediaFile({
+    analysis: analysis({
+      streams: [
+        stream({ codec: "truehd", language: null, inferredLanguage: "eng", name: "English" }),
+        stream({ codec: "ac3", language: "jpn", inferredLanguage: null, name: "English" }),
+        stream({ codec: "ac3", language: null, inferredLanguage: null, name: "Surround" }),
+      ],
+    }),
+  });
+
+  const rows = audioTrackRows(file);
+  assert.deepEqual(
+    rows.map((entry) => entry.languageInferred),
+    [true, false, false],
+  );
+  assert.equal(rows[0].language, new Intl.DisplayNames(undefined, { type: "language" }).of("eng"));
+  assert.equal(rows[2].language, "?");
 });
 
 test("subtitleTrackRows fills in from the legacy language and codec columns", () => {

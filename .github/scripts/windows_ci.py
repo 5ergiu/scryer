@@ -26,8 +26,14 @@ WINDOWS_TESTS = {
         "desktop_profile_uses_dedicated_credential_namespace",
     ],
     "scryer": [
+        "ctrl_w_is_the_letter_w",
         "default_wasmtime_cache_uses_local_app_data",
         "desktop_profile_is_isolated_from_legacy_portable_state",
+        "every_menu_command_has_its_own_id",
+        "every_tray_callback_event_is_distinct",
+        "the_app_window_class_is_not_the_tray_class",
+        "the_callback_anchor_is_signed",
+        "the_flyout_timers_do_not_collide",
         "tray_mutex_is_global_but_scoped_to_one_windows_user",
     ],
 }

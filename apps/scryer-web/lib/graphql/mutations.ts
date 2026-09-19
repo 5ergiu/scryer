@@ -2765,6 +2765,13 @@ export const executeExternalImportMutation = `mutation ExecuteExternalImport($in
 export const finalizeExternalImportMutation = `mutation FinalizeExternalImport($input: FinalizeExternalImportInput!) {
   finalizeExternalImport(input: $input) {
     monitorWarmupSessionId
+    finalizeSessionId
+    progress {
+      sessionId
+      status
+      snapshotBuildProgress { total completed failed }
+      errorMessage
+    }
   }
 }`;
 

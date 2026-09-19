@@ -3,6 +3,7 @@ import type { JobRun } from "./jobs";
 export type ApplicationInstallationKind =
   | "PORTABLE"
   | "DIRECT_MSI"
+  | "MACOS_APP_BUNDLE"
   | "DOCKER"
   | "HOMEBREW"
   | "WINGET"
@@ -20,7 +21,10 @@ export type ApplicationUpgradeEligibilityReason =
   | "windows_supervised"
   | "disabled_by_operator"
   | "unsupported_layout"
-  | "install_dir_not_writable";
+  | "install_dir_not_writable"
+  | "app_bundle_translocated"
+  | "app_bundle_read_only_volume"
+  | "app_bundle_not_tray_supervised";
 
 export type ApplicationUpgradeStatus = {
   currentVersion: string;

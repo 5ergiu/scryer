@@ -172,7 +172,7 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
-    async fn build_available_plugins(&self) -> AppResult<Vec<RegistryPlugin>> {
+    pub(crate) async fn build_available_plugins(&self) -> AppResult<Vec<RegistryPlugin>> {
         let installations = self
             .services
             .customization

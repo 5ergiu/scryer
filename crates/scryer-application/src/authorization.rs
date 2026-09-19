@@ -94,7 +94,10 @@ impl AppUseCase {
         Ok(actor)
     }
 
-    async fn authorization_for_actor(&self, actor: &User) -> AppResult<UserAuthorization> {
+    pub(crate) async fn authorization_for_actor(
+        &self,
+        actor: &User,
+    ) -> AppResult<UserAuthorization> {
         if actor.authorization.loaded {
             Ok(actor.authorization.clone())
         } else {
@@ -236,22 +239,34 @@ impl AppUseCase {
             .collect())
     }
 
-    /// Ids of the libraries the actor holds `permission` on. Before any
-    /// library row exists the built-in default library ids stand in, so
-    /// bootstrap-time callers still resolve a scope.
+    /// The library ids a permission check resolves against, before any actor is
+    /// considered. Before any library row exists the built-in default library
+    /// ids stand in, so bootstrap-time callers still resolve a scope.
+    ///
+    /// Held apart from [`Self::authorized_library_ids`] so a caller that
+    /// filters many actors against the same catalog — the navigation badge
+    /// counts — can read it once instead of per actor.
+    pub(crate) async fn permission_candidate_library_ids(
+        &self,
+        facet: Option<MediaFacet>,
+    ) -> AppResult<Vec<String>> {
+        let libraries = self.services.catalog.libraries.list(facet.clone()).await?;
+        Ok(if libraries.is_empty() {
+            default_library_ids(facet)
+        } else {
+            libraries.into_iter().map(|library| library.id).collect()
+        })
+    }
+
+    /// Ids of the libraries the actor holds `permission` on.
     pub async fn authorized_library_ids(
         &self,
         actor: &User,
         facet: Option<MediaFacet>,
         permission: LibraryPermission,
     ) -> AppResult<Vec<String>> {
-        let libraries = self.services.catalog.libraries.list(facet.clone()).await?;
+        let candidates = self.permission_candidate_library_ids(facet).await?;
         let authorization = self.authorization_for_actor(actor).await?;
-        let candidates = if libraries.is_empty() {
-            default_library_ids(facet)
-        } else {
-            libraries.into_iter().map(|library| library.id).collect()
-        };
         Ok(candidates
             .into_iter()
             .filter(|library_id| {

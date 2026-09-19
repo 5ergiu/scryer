@@ -5,6 +5,10 @@ mod application_upgrade_evidence;
 mod application_upgrade_helper;
 mod backup_routes;
 mod base_path;
+/// The exit status this binary uses to ask `scryer-tray` to relaunch the
+/// replaced application bundle. Both binaries compile this file so they cannot
+/// drift apart.
+mod bundle_relaunch;
 #[cfg(any(debug_assertions, test, feature = "e2e-harness"))]
 mod dev_api_keys;
 mod http_error;
@@ -16,10 +20,16 @@ mod metrics_setup;
 mod middleware;
 mod oauth_routes;
 mod rate_limit;
+mod runtime_health;
 mod settings_bootstrap;
 mod splash;
 mod startup_auth;
 mod startup_migrations;
+/// The window class and messages `scryer-tray.exe` listens on. Both binaries
+/// compile this file so they cannot drift apart.
+#[cfg(windows)]
+#[path = "tray_ipc.rs"]
+mod tray_ipc;
 mod ui_assets;
 #[cfg(windows)]
 mod windows_startup;
@@ -53,7 +63,8 @@ use scryer_application::{
     start_background_library_refresh_loop, start_background_manual_import_poller,
     start_background_media_server_playback_reconciliation_loop, start_background_subtitle_poller,
     start_background_title_hydration_loop, start_background_title_image_loop,
-    start_download_queue_poller_with_options, start_notification_dispatcher,
+    start_download_queue_poller_with_options, start_navigation_badge_facts_refresh,
+    start_notification_dispatcher,
     tracked_downloads::{
         BridgedClientTypesHandle, TrackedDownloadHandle, TrackedDownloadSnapshotIngestHandle,
     },
@@ -324,8 +335,22 @@ fn application_upgrade_boot_time() -> Option<std::time::SystemTime> {
     None
 }
 
+/// Windows has no `exec`. Either the desktop tray supervises this process and
+/// owns the relaunch, or nothing does and the process starts its own
+/// replacement.
+///
+/// Handing the relaunch to the tray matters for more than tidiness: a
+/// replacement this process spawned would be a grandchild of the tray, so the
+/// tray would go on supervising a process that had already exited — its Stop,
+/// Restart and quit-time teardown would all miss the server the user can see.
 #[cfg(not(unix))]
 fn restart_current_process(spec: &RestartSpec) -> io::Result<()> {
+    #[cfg(windows)]
+    if post_tray_restart() {
+        tracing::info!("handed the restart to the Scryer tray");
+        std::process::exit(0);
+    }
+
     let mut command = Command::new(&spec.executable);
     command.current_dir(&spec.current_dir);
     command.args(&spec.args);
@@ -335,6 +360,46 @@ fn restart_current_process(spec: &RestartSpec) -> io::Result<()> {
     }
     let _child = command.spawn()?;
     std::process::exit(0);
+}
+
+/// Ask the tray to restart the server it owns. False when no tray is running
+/// in this session, or when the message could not be delivered — either way
+/// the caller falls back to starting the replacement itself.
+///
+/// Both halves are required. `SCRYER_TRAY_SUPERVISED` says the tray started
+/// this process; the window says the tray is still there to act. A portable
+/// server the user runs beside the desktop tray has the window in its session
+/// but not the variable, and must not hand its restart to a tray that would
+/// relaunch its own server instead.
+#[cfg(windows)]
+fn post_tray_restart() -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+
+    let tray_supervised = std::env::var("SCRYER_TRAY_SUPERVISED")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if !tray_supervised {
+        return false;
+    }
+
+    let class_name: Vec<u16> = std::ffi::OsStr::new(tray_ipc::CLASS_NAME)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: The class name is a valid nul-terminated UTF-16 string.
+    let window = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
+    if window.is_null() {
+        return false;
+    }
+    // SAFETY: The target is a same-session Scryer tray window identified by its private class.
+    if unsafe { PostMessageW(window, tray_ipc::RESTART_MESSAGE, 0, 0) } == 0 {
+        tracing::error!(
+            error = %std::io::Error::last_os_error(),
+            "failed to ask the Scryer tray to restart the server"
+        );
+        return false;
+    }
+    true
 }
 
 #[derive(Clone)]
@@ -380,10 +445,15 @@ impl SelfRestartController {
     ) -> scryer_application::application_upgrade::ApplicationUpgradeRestartHandle {
         let restart_controller = self.clone();
         let exit_controller = self.clone();
+        let relaunch_controller = self.clone();
         scryer_application::application_upgrade::ApplicationUpgradeRestartHandle::new_with_exit(
             move || restart_controller.schedule_restart(),
             move || exit_controller.schedule_exit_only(),
         )
+        .with_bundle_relaunch(move || {
+            relaunch_controller
+                .schedule_exit_with_code(crate::bundle_relaunch::BUNDLE_RELAUNCH_EXIT_CODE);
+        })
     }
 
     fn schedule_restart(&self) {
@@ -403,6 +473,15 @@ impl SelfRestartController {
     }
 
     fn schedule_exit_only(&self) {
+        self.schedule_exit_with_code(0);
+    }
+
+    /// Exit with a specific status after the usual delay.
+    ///
+    /// The delay is what lets the in-flight GraphQL response reach the client
+    /// before the process goes away; the code is what the supervising wrapper
+    /// reads, so it must survive that path unchanged.
+    fn schedule_exit_with_code(&self, code: i32) {
         if self.inner.scheduled.swap(true, Ordering::SeqCst) {
             tracing::info!("restart or exit already scheduled");
             return;
@@ -410,7 +489,7 @@ impl SelfRestartController {
         let delay = self.inner.delay;
         std::thread::spawn(move || {
             std::thread::sleep(delay);
-            std::process::exit(0);
+            std::process::exit(code);
         });
     }
 }
@@ -1890,6 +1969,14 @@ async fn bootstrap_application(
     ));
     tokio::spawn(start_background_title_image_loop(
         app_use_case.clone(),
+        shutdown_token.child_token(),
+    ));
+    tokio::spawn(start_navigation_badge_facts_refresh(
+        app_use_case.clone(),
+        shutdown_token.child_token(),
+    ));
+    tokio::spawn(runtime_health::start_runtime_health_monitor(
+        datastore.datastore(),
         shutdown_token.child_token(),
     ));
     tokio::spawn(start_notification_dispatcher(

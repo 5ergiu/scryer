@@ -1,3 +1,5 @@
+import type { DownloadImportActions } from "@/lib/types/download-queue";
+
 export type DirectMovieManualImportCandidate = {
   candidateId: string;
   sizeBytes?: number | null;
@@ -45,23 +47,35 @@ export function directMovieManualImportMappings(
   return primary ? [{ candidateId: primary.candidateId }] : [];
 }
 
-export function manualImportActions({
-  displayState,
-  facet,
-  hasTitle,
-}: {
-  displayState: string;
-  facet: string | null;
-  hasTitle: boolean;
-}) {
-  const actionable =
-    displayState === "IMPORT_BLOCKED" || displayState === "IMPORT_FAILED";
-  const normalizedFacet = facet?.trim().toLowerCase() ?? "";
+const NO_IMPORT_ACTIONS: DownloadImportActions = {
+  manualImportInteractive: false,
+  manualImportDirect: false,
+  assignTitle: false,
+  ignore: false,
+  markFailed: false,
+};
 
-  return {
-    interactive: hasTitle && actionable && manualImportNeedsMapping(facet),
-    direct: hasTitle && actionable && normalizedFacet === "movie",
-  };
+/**
+ * The import actions a download offers, as the server decided them.
+ *
+ * Eligibility lives on the server (`derive_download_queue_import_actions`) so
+ * that the activity rows, the dashboard rows and the title overviews cannot
+ * disagree about the same download, and so the mutation enforces the same rule
+ * the button was drawn from. This only reads the answer; a payload from an
+ * older server that carries none offers nothing rather than guessing.
+ */
+export function downloadImportActions(item: {
+  importActions?: DownloadImportActions | null;
+}): DownloadImportActions {
+  return item.importActions ?? NO_IMPORT_ACTIONS;
+}
+
+/** Whether the download offers a manual import at all, in either flavour. */
+export function allowsManualImport(item: {
+  importActions?: DownloadImportActions | null;
+}): boolean {
+  const actions = downloadImportActions(item);
+  return actions.manualImportInteractive || actions.manualImportDirect;
 }
 
 /** Series and anime files have to be matched to episodes in the dialog. */

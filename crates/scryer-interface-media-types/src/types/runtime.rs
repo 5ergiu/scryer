@@ -15,6 +15,9 @@ pub struct AudioStreamDetailPayload {
     pub channels: Option<i32>,
     /// Language code, or null when unavailable.
     pub language: Option<String>,
+    /// Language inferred from the track name when the container has no language
+    /// field for this track, or null when the track is tagged or nothing can be inferred.
+    pub inferred_language: Option<String>,
     /// Bitrate in kilobits per second, or null when unavailable.
     pub bitrate_kbps: Option<i32>,
 }
@@ -120,6 +123,8 @@ pub enum ApplicationInstallationKindValue {
     Portable,
     /// A directly installed Windows MSI package.
     DirectMsi,
+    /// A macOS application bundle, upgraded by replacing the bundle in place.
+    MacosAppBundle,
     /// A container-managed installation.
     Docker,
     /// A Homebrew-managed installation.

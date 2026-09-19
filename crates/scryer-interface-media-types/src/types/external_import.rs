@@ -393,6 +393,11 @@ pub struct ExternalImportLibrarySettingApplicationPayload {
 pub struct FinalizeExternalImportPayload {
     /// Monitor warmup session ID tracking accepted background work.
     pub monitor_warmup_session_id: ID,
+    /// Session ID of the background apply; poll `externalImportWarmupStatus`
+    /// with it until the apply reaches a terminal status.
+    pub finalize_session_id: ID,
+    /// Status of the background apply at the moment finalize was accepted.
+    pub progress: ExternalImportMonitorWarmupProgressPayload,
 }
 
 #[derive(InputObject)]

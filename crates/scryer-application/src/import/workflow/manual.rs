@@ -1753,6 +1753,10 @@ pub async fn begin_manual_import_selection(
     let authorized =
         authorize_manual_import_source(app, actor, client_id, &client_type, source_ref, title_id)
             .await?;
+    // Same gate the queue row's Manual Import button is drawn from, so the two
+    // can never disagree about which downloads may be imported by hand.
+    app.require_manual_import_eligible_source(&authorized.identity)
+        .await?;
     let completed = resolve_authorized_manual_import_source(app, &authorized.identity).await?;
     let canonical_download_id = match crate::download_identity::resolve_observed_client_job(
         app,
@@ -2621,10 +2625,23 @@ fn manual_import_terminal_status_and_error(
             Some(ImportErrorCode::Unknown),
             Some("manual import did not import any file".to_string()),
         ),
+        // A failed run must always carry a reason: the operator sees this
+        // message and nothing else, so a file result that reported no message
+        // still gets one rather than surfacing an empty failure.
         Some(failure) => (
             ImportStatus::Failed,
             failure.error_code.or(Some(ImportErrorCode::Unknown)),
-            failure.error_message.clone(),
+            Some(
+                failure
+                    .error_message
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+                    .map_or_else(
+                        || "manual import failed without a reported reason".to_string(),
+                        str::to_string,
+                    ),
+            ),
         ),
     }
 }
@@ -3508,6 +3525,28 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         .collect();
 
     let success_count = results.iter().filter(|r| r.success).count();
+    // The per-episode sidecars are written as each file lands, but the
+    // series-level ones belong to the folder and are written once. A manual
+    // import can be the first — or only — file a series ever receives, so it
+    // owes them exactly as the automatic path does. Movies have no series
+    // document; the movie sidecar is the per-file one already written above.
+    if success_count > 0 && title.facet != MediaFacet::Movie {
+        let nfo_enabled = match app
+            .resolve_nfo_write_on_import(Some(&title.library_id), &title.facet)
+            .await
+        {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id = %title.id,
+                    "failed to resolve the NFO sidecar setting; no series sidecar written"
+                );
+                false
+            }
+        };
+        write_series_sidecars(app, &title, &full_folder_path, nfo_enabled).await;
+    }
     let (terminal_status, _, _) = manual_import_terminal_status_and_error(&results);
     if success_count > 0 && terminal_status == ImportStatus::Completed {
         let mut episode_ids = Vec::new();

@@ -286,6 +286,7 @@ fn safe_source_provider_name(raw: &str) -> Option<String> {
 }
 fn apply_import_record_overlay_to_queue_item(item: &mut DownloadQueueItem, record: &ImportRecord) {
     item.import_status = Some(record.status);
+    item.import_type = Some(record.import_type);
     item.import_transfer_phase = record.import_transfer_phase;
     item.import_transfer_bytes = record.import_transfer_bytes;
     item.import_transfer_total_bytes = record.import_transfer_total_bytes;
@@ -297,25 +298,98 @@ fn apply_import_record_overlay_to_queue_item(item: &mut DownloadQueueItem, recor
         .or(Some(record.updated_at.clone()));
 }
 
+/// Everything a finished import record can tell a reader, whichever executor
+/// wrote it.
+///
+/// Automatic imports persist a `scryer_domain::ImportResult`; manual imports
+/// persist a `ManualImportExecutionResult`, which is a different shape
+/// entirely. Every surface that reads a stored result — queue rows, the import
+/// page, import history — goes through this one function so a manual failure
+/// can never be legible in one place and blank in another.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportRecordResultOverlay {
+    pub error_code: Option<scryer_domain::ImportErrorCode>,
+    pub error_message: Option<String>,
+    pub decision: Option<scryer_domain::ImportDecision>,
+    pub skip_reason: Option<scryer_domain::ImportSkipReason>,
+    pub title_id: Option<String>,
+    pub source_path: Option<String>,
+    pub dest_path: Option<String>,
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn import_record_result_overlay(record: &ImportRecord) -> ImportRecordResultOverlay {
+    let Some(result_json) = record.result_json.as_deref() else {
+        return ImportRecordResultOverlay::default();
+    };
+
+    if record.import_type == ImportType::ManualImport {
+        let Ok(result) = serde_json::from_str::<crate::ManualImportExecutionResult>(result_json)
+        else {
+            return ImportRecordResultOverlay::default();
+        };
+        // The top-level message is the summary; when the executor recorded the
+        // reason only on the mapping that failed, that is still the reason the
+        // operator has to see.
+        let first_failure = result
+            .file_results
+            .iter()
+            .find(|file| !file.success && !file.skipped);
+        let error_message = non_empty(result.error_message)
+            .or_else(|| non_empty(first_failure.and_then(|file| file.error_message.clone())));
+        let error_code = result
+            .error_code
+            .or_else(|| first_failure.and_then(|file| file.error_code));
+        // A manual import names its own source file and where it was headed;
+        // there is no `ImportResult` to carry them.
+        let source_path = non_empty(
+            first_failure
+                .or_else(|| result.file_results.first())
+                .map(|file| file.file_path.clone()),
+        );
+        let dest_path = non_empty(
+            result
+                .file_results
+                .iter()
+                .find_map(|file| file.dest_path.clone()),
+        );
+        return ImportRecordResultOverlay {
+            error_code,
+            error_message,
+            decision: None,
+            skip_reason: None,
+            title_id: non_empty(result.title_id),
+            source_path,
+            dest_path,
+        };
+    }
+
+    let Ok(result) = serde_json::from_str::<scryer_domain::ImportResult>(result_json) else {
+        return ImportRecordResultOverlay::default();
+    };
+    ImportRecordResultOverlay {
+        error_code: None,
+        error_message: non_empty(result.error_message),
+        decision: Some(result.decision),
+        skip_reason: result.skip_reason,
+        title_id: non_empty(result.title_id),
+        // Unfiltered on purpose: an automatic import always records a source
+        // path, and history has always shown whatever it recorded.
+        source_path: Some(result.source_path),
+        dest_path: result.dest_path,
+    }
+}
+
 pub(crate) fn import_record_error_overlay(
     record: &ImportRecord,
 ) -> (Option<scryer_domain::ImportErrorCode>, Option<String>) {
-    if record.import_type == ImportType::ManualImport {
-        return record
-            .result_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<crate::ManualImportExecutionResult>(json).ok())
-            .map_or((None, None), |result| {
-                (result.error_code, result.error_message)
-            });
-    }
-
-    let error_message = record
-        .result_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<scryer_domain::ImportResult>(json).ok())
-        .and_then(|result| result.error_message);
-    (None, error_message)
+    let overlay = import_record_result_overlay(record);
+    (overlay.error_code, overlay.error_message)
 }
 
 fn apply_import_record_to_queue_item(item: &mut DownloadQueueItem, record: &ImportRecord) {
@@ -599,6 +673,15 @@ async fn enrich_download_queue_items_from_submissions_with_original_identities(
         }
     };
 
+    // One read for the whole pass: the by-download-id fallback below is the
+    // path that adopts rows Scryer never submitted, and it must not adopt a
+    // row from outside the categories its client feeds Scryer.
+    let adoption_scope = if items.is_empty() {
+        None
+    } else {
+        app.download_client_category_admission_snapshot().await
+    };
+
     for (index, item) in items.iter_mut().enumerate() {
         let current = download_queue_item_source_identity(item);
         let original = original_source_identities.and_then(|identities| identities.get(index));
@@ -655,11 +738,17 @@ async fn enrich_download_queue_items_from_submissions_with_original_identities(
         }
 
         if let Some(submission) =
-            find_submission_for_queue_item_by_download_id(app, item, original).await
+            find_submission_for_queue_item_by_download_id(app, item, original, &adoption_scope)
+                .await
         {
             apply_submission_to_queue_item(item, &submission);
         }
     }
+
+    // Rows served from the memo still owe their binding a `last_seen_at`
+    // refresh once a minute. Everything that came due in this pass is written
+    // here, in one transaction, instead of one per row.
+    crate::download_identity::flush_shared_observation_touches(app).await;
 }
 /// Join the goals a torrent was grabbed under onto its queue row.
 ///
@@ -678,18 +767,37 @@ async fn find_submission_for_queue_item_by_download_id(
     app: &AppUseCase,
     item: &DownloadQueueItem,
     original: Option<&ClientJobLocator>,
+    adoption_scope: &Option<
+        std::sync::Arc<crate::services::DownloadClientCategoryAdmissionSnapshot>,
+    >,
 ) -> Option<DownloadSubmission> {
     let download_id = item.download_id.as_deref().map(str::trim)?;
     if download_id.is_empty() {
         return None;
     }
 
-    let canonical_download_id = match crate::download_identity::resolve_observed_client_job(
+    // Resolving is adoption: a row with no submission and no Scryer token
+    // leaves this call owning a `downloads` row and an active binding. Rows
+    // outside the categories this client feeds Scryer are left alone, and a
+    // row that carries a Scryer wire token is Scryer's own whatever its
+    // category says.
+    if !crate::download_identity::queue_item_is_in_adoption_scope(item, adoption_scope.as_deref()) {
+        return None;
+    }
+
+    // Memoized: an unchanged row on an unchanged registry generation costs no
+    // registry transaction at all. The poller re-reads the same queue and
+    // history rows six times a minute, and this fallback runs for every row the
+    // batched submission maps miss — which every row Scryer never submitted
+    // always does.
+    let observation = crate::download_identity::observed_queue_item_job(item);
+    let memoized = crate::download_identity::resolve_observed_client_job_memoized(
         app,
-        crate::download_identity::observed_queue_item_job(item),
+        observation.clone(),
+        item.download_id.as_deref(),
     )
-    .await
-    {
+    .await;
+    let canonical_download_id = match memoized.resolution {
         crate::download_identity::ObservedClientJobResolution::Resolved(download_id) => {
             Some(download_id)
         }
@@ -697,6 +805,11 @@ async fn find_submission_for_queue_item_by_download_id(
         | crate::download_identity::ObservedClientJobResolution::BindingAlreadyEnded => return None,
         crate::download_identity::ObservedClientJobResolution::Unavailable => None,
     };
+    // This row's by-id lookup already came back empty against this registry
+    // generation, and it is the same row: nothing to look up again.
+    if memoized.submission_lookup_missed {
+        return None;
+    }
 
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
@@ -756,10 +869,19 @@ async fn find_submission_for_queue_item_by_download_id(
                     client_type = %client_type,
                     "failed to load download submission by download id for queue enrichment"
                 );
+                // A read failure is not proof there is nothing to find, so the
+                // miss is not memoized.
+                return None;
             }
         }
     }
 
+    crate::download_identity::record_memoized_submission_lookup_miss(
+        app,
+        &observation,
+        item.download_id.as_deref(),
+    )
+    .await;
     None
 }
 fn config_value_is_empty(value: Option<&serde_json::Value>) -> bool {
@@ -1395,6 +1517,35 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// Refuse a manual import against a download the queue says is not in a
+    /// state to take one, using the same rule that decides the button.
+    ///
+    /// A download the queue does not know about is allowed through: hand-added
+    /// and orphaned sources are resolved from the client directly and have
+    /// never had a queue row to gate on.
+    pub(crate) async fn require_manual_import_eligible_source(
+        &self,
+        identity: &ClientJobLocator,
+    ) -> AppResult<()> {
+        let Ok((_, model)) = self.current_download_queue_read_model().await else {
+            return Ok(());
+        };
+        let Some(item) = model
+            .items
+            .iter()
+            .find(|item| download_queue_item_source_identity(item) == *identity)
+        else {
+            return Ok(());
+        };
+        if download_queue_item_allows_manual_import(item) {
+            return Ok(());
+        }
+
+        Err(AppError::Validation(
+            "this download is not in a state that can be imported by hand right now".to_string(),
+        ))
+    }
+
     pub async fn list_download_import_page(
         &self,
         actor: &User,
@@ -1413,6 +1564,7 @@ impl AppUseCase {
             .collect_download_history_items_for_actor(
                 actor,
                 scryer_domain::LibraryPermission::ResolveImports,
+                DurableHistoryRows::Skip,
             )
             .await?
             .into_iter()
@@ -1478,6 +1630,7 @@ impl AppUseCase {
             .collect_download_history_items_for_actor(
                 actor,
                 scryer_domain::LibraryPermission::ResolveImports,
+                DurableHistoryRows::Skip,
             )
             .await?
             .into_iter()
@@ -1516,7 +1669,11 @@ impl AppUseCase {
                 .collect::<HashSet<_>>()
         });
         let mut items = self
-            .collect_download_history_items_for_actor(actor, scryer_domain::LibraryPermission::View)
+            .collect_download_history_items_for_actor(
+                actor,
+                scryer_domain::LibraryPermission::View,
+                DurableHistoryRows::Include,
+            )
             .await?
             .into_iter()
             .filter(|item| {
@@ -1857,6 +2014,7 @@ mod queue_query_unit_tests {
             download_client_item_id: "item-1".to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,

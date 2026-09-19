@@ -49,6 +49,42 @@ impl StoreDatastore {
             Self::Postgres { pool } => SqlExec::Target(SqlTarget::Postgres(pool)),
         }
     }
+
+    /// A point-in-time sample for diagnostics. It takes no connection and
+    /// never waits, so sampling cannot add to the pressure it measures.
+    pub fn pool_usage(&self) -> PoolUsage {
+        match self {
+            Self::Sqlite { pool, writer_gate } => PoolUsage {
+                max_connections: pool.options().get_max_connections(),
+                open_connections: pool.size(),
+                idle_connections: pool.num_idle(),
+                writer_gate_held: writer_gate.try_lock().is_err(),
+            },
+            Self::Postgres { pool } => PoolUsage {
+                max_connections: pool.options().get_max_connections(),
+                open_connections: pool.size(),
+                idle_connections: pool.num_idle(),
+                writer_gate_held: false,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolUsage {
+    pub max_connections: u32,
+    pub open_connections: u32,
+    pub idle_connections: usize,
+    /// Sqlite only: a write currently holds the single-writer gate.
+    pub writer_gate_held: bool,
+}
+
+impl PoolUsage {
+    /// Every connection the pool may open is checked out, so the next read
+    /// waits for one to come back.
+    pub fn is_saturated(&self) -> bool {
+        self.open_connections >= self.max_connections && self.idle_connections == 0
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -313,7 +313,15 @@ pub fn from_download_queue_item(item: DownloadQueueItem) -> DownloadQueueItemPay
     let seeding_state = scryer_application::derive_download_seeding_state(&item)
         .map(DownloadSeedingStateValue::from_application);
     let seeding = item.seeding.clone().unwrap_or_default();
+    let actions = scryer_application::derive_download_queue_import_actions(&item);
     DownloadQueueItemPayload {
+        import_actions: DownloadImportActionsPayload {
+            manual_import_interactive: actions.manual_import_interactive,
+            manual_import_direct: actions.manual_import_direct,
+            assign_title: actions.assign_title,
+            ignore: actions.ignore,
+            mark_failed: actions.mark_failed,
+        },
         seeding_state,
         seed_ratio: seeding.seed_ratio,
         seed_ratio_goal: seeding.seed_goal_ratio,

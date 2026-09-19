@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  allowsManualImport,
   compareManualImportSeasonLabels,
   directMovieManualImportMappings,
-  manualImportActions,
+  downloadImportActions,
   manualImportNeedsMapping,
   manualImportSelectionNeedsDialog,
 } from "./manual-import-actions.ts";
@@ -49,60 +50,64 @@ test("direct movie manual import maps nothing without candidates", () => {
   assert.deepEqual(directMovieManualImportMappings([]), []);
 });
 
-for (const facet of ["MOVIE", "SERIES", "ANIME"] as const) {
-  test(`pending ${facet} import exposes no manual action`, () => {
-    assert.deepEqual(
-      manualImportActions({
-        displayState: "IMPORT_PENDING",
-        facet,
-        hasTitle: true,
-      }),
-      { direct: false, interactive: false },
-    );
-  });
-}
+// Which download offers which import action is decided once on the server
+// (`derive_download_queue_import_actions`); the state matrix that used to live
+// here is now covered by the Rust test
+// `import_actions_follow_the_state_the_download_is_actually_in`. What the web
+// still owns is reading that answer, including from a payload that predates
+// the field.
 
-for (const displayState of ["IMPORT_BLOCKED", "IMPORT_FAILED"] as const) {
-  test(`${displayState} series and anime imports use interactive mapping`, () => {
-    for (const facet of ["SERIES", "ANIME"] as const) {
-      assert.deepEqual(
-        manualImportActions({ displayState, facet, hasTitle: true }),
-        { direct: false, interactive: true },
-      );
-    }
-  });
+const ALL_IMPORT_ACTIONS = {
+  manualImportInteractive: true,
+  manualImportDirect: true,
+  assignTitle: true,
+  ignore: true,
+  markFailed: true,
+};
 
-  test(`${displayState} movie imports use the direct action`, () => {
-    assert.deepEqual(
-      manualImportActions({
-        displayState,
-        facet: "MOVIE",
-        hasTitle: true,
-      }),
-      { direct: true, interactive: false },
-    );
-  });
-}
-
-test("manual import actions require an assigned title", () => {
+test("import actions come straight from the server's answer", () => {
   assert.deepEqual(
-    manualImportActions({
-      displayState: "IMPORT_BLOCKED",
-      facet: "series",
-      hasTitle: false,
-    }),
-    { direct: false, interactive: false },
+    downloadImportActions({ importActions: ALL_IMPORT_ACTIONS }),
+    ALL_IMPORT_ACTIONS,
   );
 });
 
-test("manual import actions tolerate legacy lowercase facet values", () => {
-  assert.deepEqual(
-    manualImportActions({
-      displayState: "IMPORT_BLOCKED",
-      facet: "series",
-      hasTitle: true,
+test("a payload without server import actions offers nothing", () => {
+  const expected = {
+    manualImportInteractive: false,
+    manualImportDirect: false,
+    assignTitle: false,
+    ignore: false,
+    markFailed: false,
+  };
+
+  assert.deepEqual(downloadImportActions({}), expected);
+  assert.deepEqual(downloadImportActions({ importActions: null }), expected);
+  assert.equal(allowsManualImport({}), false);
+});
+
+test("either manual import flavour counts as manual import eligibility", () => {
+  assert.equal(
+    allowsManualImport({
+      importActions: { ...ALL_IMPORT_ACTIONS, manualImportDirect: false },
     }),
-    { direct: false, interactive: true },
+    true,
+  );
+  assert.equal(
+    allowsManualImport({
+      importActions: { ...ALL_IMPORT_ACTIONS, manualImportInteractive: false },
+    }),
+    true,
+  );
+  assert.equal(
+    allowsManualImport({
+      importActions: {
+        ...ALL_IMPORT_ACTIONS,
+        manualImportInteractive: false,
+        manualImportDirect: false,
+      },
+    }),
+    false,
   );
 });
 

@@ -409,6 +409,7 @@ export const TITLE_MEDIA_FILE_FIELDS = `
         codec
         channels
         language
+        inferredLanguage
         bitrateKbps
       }
       subtitleLanguages
@@ -499,6 +500,13 @@ const DOWNLOAD_QUEUE_ITEM_FIELDS = `
     trackedStatus
     trackedStatusMessages
     trackedMatchType
+    importActions {
+      manualImportInteractive
+      manualImportDirect
+      assignTitle
+      ignore
+      markFailed
+    }
     seedingState
     seedRatio
     seedRatioGoal

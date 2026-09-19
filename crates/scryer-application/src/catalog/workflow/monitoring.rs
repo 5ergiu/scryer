@@ -1,4 +1,12 @@
 const EXTERNAL_IMPORT_MONITOR_SNAPSHOT_APPLY_CHUNK_BATCH_SIZE: i32 = 4;
+/// Titles whose monitored flag is flipped in one write transaction. A 100k-title
+/// import must not take 100k trips through the sqlite writer gate.
+const MONITOR_APPLY_TITLE_WRITE_BATCH_SIZE: usize = 500;
+/// Per-title `TitleUpdated` activity events one monitor apply may emit. Beyond
+/// this the apply is a bulk operation, not a feed of individual edits: the
+/// activity feed and the web title-list reactive refresh both react per title,
+/// so an unbounded emit floods the feed and fans out one refetch per title.
+const MONITOR_APPLY_TITLE_ACTIVITY_LIMIT: usize = 200;
 fn parse_external_import_monitor_snapshot_line<T: serde::de::DeserializeOwned>(
     line: &str,
 ) -> AppResult<T> {
@@ -296,6 +304,120 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// Applies the title-level outcome of a monitor snapshot apply.
+    ///
+    /// `changes` are titles whose monitored flag flips; they are written in
+    /// batched transactions grouped by target value rather than one transaction
+    /// per title. `related_only` are titles whose seasons or episodes changed
+    /// without the title itself flipping; they get the same follow-ups minus the
+    /// write.
+    async fn flush_monitor_apply_title_changes(
+        &self,
+        changes: HashMap<String, (Title, bool)>,
+        related_only: HashMap<String, Title>,
+    ) -> AppResult<()> {
+        let mut changes = changes.into_values().collect::<Vec<_>>();
+        changes.sort_by(|(left, _), (right, _)| left.id.cmp(&right.id));
+        let mut related_only = related_only.into_values().collect::<Vec<_>>();
+        related_only.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let mut emitted_activities = 0usize;
+        let mut suppressed_activities = 0usize;
+        for batch in changes.chunks(MONITOR_APPLY_TITLE_WRITE_BATCH_SIZE) {
+            let mut enable = Vec::new();
+            let mut disable = Vec::new();
+            for (title, monitored) in batch {
+                if *monitored {
+                    enable.push(title.id.clone());
+                } else {
+                    disable.push(title.id.clone());
+                }
+            }
+            if !enable.is_empty() {
+                self.services
+                    .catalog
+                    .titles
+                    .set_titles_monitored(&enable, true)
+                    .await?;
+            }
+            if !disable.is_empty() {
+                self.services
+                    .catalog
+                    .titles
+                    .set_titles_monitored(&disable, false)
+                    .await?;
+            }
+
+            for (title, monitored) in batch {
+                let mut updated = title.clone();
+                updated.monitored = *monitored;
+                self.reconcile_series_movie_link_monitoring_for_title(&updated)
+                    .await?;
+                if !*monitored
+                    && let Err(err) = self
+                        .services
+                        .workflow
+                        .acquisition_scope_states
+                        .delete_acquisition_scope_states_for_title(&updated.id)
+                        .await
+                {
+                    warn!(
+                        title_id = updated.id.as_str(),
+                        error = %err,
+                        "failed to delete wanted items after disabling monitoring"
+                    );
+                }
+                self.emit_monitor_apply_title_activity(
+                    &updated,
+                    &mut emitted_activities,
+                    &mut suppressed_activities,
+                )
+                .await;
+            }
+            if !enable.is_empty() {
+                // The derived target set already reflects the new monitored
+                // state; the woken cycle picks the titles up immediately.
+                self.runtime.acquisition.acquisition_wake.notify_one();
+            }
+        }
+
+        for title in &related_only {
+            self.emit_monitor_apply_title_activity(
+                title,
+                &mut emitted_activities,
+                &mut suppressed_activities,
+            )
+            .await;
+        }
+        if !related_only.is_empty() {
+            self.runtime.acquisition.acquisition_wake.notify_one();
+        }
+
+        if suppressed_activities > 0 {
+            tracing::info!(
+                emitted_activities,
+                suppressed_activities,
+                "external import monitor apply suppressed per-title activity beyond its cap"
+            );
+        }
+        Ok(())
+    }
+
+    async fn emit_monitor_apply_title_activity(
+        &self,
+        title: &Title,
+        emitted: &mut usize,
+        suppressed: &mut usize,
+    ) {
+        if *emitted >= MONITOR_APPLY_TITLE_ACTIVITY_LIMIT {
+            *suppressed += 1;
+            return;
+        }
+        *emitted += 1;
+        self.emit_title_updated_activity(None, title).await;
+    }
+}
+impl AppUseCase {
     async fn apply_movie_monitor_snapshot_chunks(
         &self,
         session_id: &str,
@@ -324,7 +446,7 @@ impl AppUseCase {
             );
         }
 
-        let mut touched_title_ids = HashSet::new();
+        let mut pending_changes = HashMap::<String, (Title, bool)>::new();
         let mut unresolved_entries = 0usize;
         let mut processed_chunk_count = 0i32;
         let mut after_chunk_index = None;
@@ -365,10 +487,13 @@ impl AppUseCase {
                         continue;
                     };
 
-                    let updated = self
-                        .apply_title_monitoring_change(None, &title.id, entry.monitored)
-                        .await?;
-                    touched_title_ids.insert(updated.id);
+                    if title.monitored == entry.monitored {
+                        // The in-memory library listing is the same row the
+                        // singular path would re-read, so an unchanged entry
+                        // costs no round trip at all.
+                        continue;
+                    }
+                    pending_changes.insert(title.id.clone(), (title, entry.monitored));
                 }
             }
         }
@@ -376,23 +501,8 @@ impl AppUseCase {
             return Ok(());
         }
 
-        for title_id in touched_title_ids {
-            let Some(title) = self.services.catalog.titles.get_by_id(&title_id).await? else {
-                continue;
-            };
-
-            if title.monitored {
-                // The derived target set already reflects the new monitored
-                // state; the woken cycle picks the title up immediately.
-                self.runtime.acquisition.acquisition_wake.notify_one();
-            } else {
-                self.services
-                    .workflow
-                    .acquisition_scope_states
-                    .delete_acquisition_scope_states_for_title(&title.id)
-                    .await?;
-            }
-        }
+        self.flush_monitor_apply_title_changes(pending_changes, HashMap::new())
+            .await?;
 
         if unresolved_entries > 0 {
             return Err(AppError::Repository(format!(
@@ -404,11 +514,13 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// Applies the season/episode/collection side of one series entry and
+    /// reports whether anything below the title changed.
     async fn apply_series_monitor_snapshot_entry(
         &self,
         title: &Title,
         entry: &ExternalImportMonitorSeriesEntry,
-    ) -> AppResult<(bool, bool)> {
+    ) -> AppResult<bool> {
         let collections = self
             .services
             .catalog
@@ -528,18 +640,12 @@ impl AppUseCase {
                 .await?;
         }
 
-        let updated_title = self
-            .apply_title_monitoring_change(None, &title.id, entry.monitored)
-            .await?;
-
-        Ok((
-            updated_title.monitored != title.monitored
-                || !collections_to_enable.is_empty()
-                || !collections_to_disable.is_empty()
-                || !episodes_to_enable.is_empty()
-                || !episodes_to_disable.is_empty(),
-            updated_title.monitored != title.monitored,
-        ))
+        // The title's own monitored flip is left to the caller so a bulk apply
+        // can batch every flip into a handful of write transactions.
+        Ok(!collections_to_enable.is_empty()
+            || !collections_to_disable.is_empty()
+            || !episodes_to_enable.is_empty()
+            || !episodes_to_disable.is_empty())
     }
 }
 impl AppUseCase {
@@ -566,8 +672,8 @@ impl AppUseCase {
             );
         }
 
-        let mut touched_title_ids = HashSet::new();
-        let mut title_ids_needing_activity = HashSet::<String>::new();
+        let mut pending_changes = HashMap::<String, (Title, bool)>::new();
+        let mut related_only_changes = HashMap::<String, Title>::new();
         let mut unresolved_entries = 0usize;
         let mut processed_chunk_count = 0i32;
         let mut after_chunk_index = None;
@@ -605,14 +711,14 @@ impl AppUseCase {
                         continue;
                     };
 
-                    let (changed, title_activity_emitted) = self
+                    let related_changed = self
                         .apply_series_monitor_snapshot_entry(&title, &entry)
                         .await?;
-                    if changed {
-                        touched_title_ids.insert(title.id.clone());
-                        if !title_activity_emitted {
-                            title_ids_needing_activity.insert(title.id.clone());
-                        }
+                    if title.monitored != entry.monitored {
+                        related_only_changes.remove(&title.id);
+                        pending_changes.insert(title.id.clone(), (title, entry.monitored));
+                    } else if related_changed && !pending_changes.contains_key(&title.id) {
+                        related_only_changes.insert(title.id.clone(), title);
                     }
                 }
             }
@@ -621,18 +727,8 @@ impl AppUseCase {
             return Ok(());
         }
 
-        for title_id in touched_title_ids {
-            let Some(title) = self.services.catalog.titles.get_by_id(&title_id).await? else {
-                continue;
-            };
-
-            if title_ids_needing_activity.contains(&title_id) {
-                self.emit_title_updated_activity(None, &title).await;
-            }
-            // Monitored-state changes flow straight into the derived target
-            // set; waking the cycle is all immediate acquisition needs.
-            self.runtime.acquisition.acquisition_wake.notify_one();
-        }
+        self.flush_monitor_apply_title_changes(pending_changes, related_only_changes)
+            .await?;
 
         if unresolved_entries > 0 {
             return Err(AppError::Repository(format!(

@@ -126,9 +126,11 @@ export function MediaInfoDialog({
               </TableHeader>
               <TableBody>
                 {audio.map((track) => (
-                  <TableRow key={track.index}>
+                  <TableRow key={track.index} data-ui="media-info-row">
                     <TableCell>{track.index}</TableCell>
-                    <TableCell>{track.language}</TableCell>
+                    <TableCell>
+                      {track.languageInferred ? <em>{track.language}*</em> : track.language}
+                    </TableCell>
                     <TableCell>{track.codec ?? "—"}</TableCell>
                     <TableCell>{track.profile ?? "—"}</TableCell>
                     <TableCell>{track.channels ?? "—"}</TableCell>
@@ -141,6 +143,11 @@ export function MediaInfoDialog({
                 ))}
               </TableBody>
             </Table>
+            {audio.some((track) => track.languageInferred) ? (
+              <p id="media-info-audio-language-footnote" className="mt-2 text-xs text-muted-foreground">
+                * {t("mediaInfo.inferredLanguageFootnote")}
+              </p>
+            ) : null}
           </Section>
         ) : null}
 
@@ -159,7 +166,7 @@ export function MediaInfoDialog({
               </TableHeader>
               <TableBody>
                 {subtitles.map((track) => (
-                  <TableRow key={track.index}>
+                  <TableRow key={track.index} data-ui="media-info-row">
                     <TableCell>{track.index}</TableCell>
                     <TableCell>{track.language}</TableCell>
                     <TableCell>{track.codec}</TableCell>
@@ -211,7 +218,7 @@ export function MediaInfoDialog({
               </TableHeader>
               <TableBody>
                 {chapters.map((chapter) => (
-                  <TableRow key={chapter.index}>
+                  <TableRow key={chapter.index} data-ui="media-info-row">
                     <TableCell>{chapter.index}</TableCell>
                     <TableCell>{chapter.start}</TableCell>
                     <TableCell>{chapter.end ?? "—"}</TableCell>
@@ -235,7 +242,7 @@ export function MediaInfoDialog({
               </TableHeader>
               <TableBody>
                 {attachments.map((attachment) => (
-                  <TableRow key={attachment.id}>
+                  <TableRow key={attachment.id} data-ui="media-info-row">
                     <TableCell className="break-all">{attachment.name}</TableCell>
                     <TableCell>{attachment.mediaType ?? "—"}</TableCell>
                     <TableCell>{attachment.size ?? "—"}</TableCell>
@@ -286,7 +293,7 @@ function FieldTable({
     <Table density="dense">
       <TableBody>
         {section.rows.map((entry, index) => (
-          <TableRow key={`${entry.labelKey}-${index}`}>
+          <TableRow key={`${entry.labelKey}-${index}`} data-ui="media-info-row">
             <TableCell className="w-56 align-top font-medium text-muted-foreground">{t(entry.labelKey)}</TableCell>
             <TableCell className="break-all">{entry.value}</TableCell>
           </TableRow>

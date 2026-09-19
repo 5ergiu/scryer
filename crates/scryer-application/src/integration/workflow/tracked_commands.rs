@@ -312,19 +312,33 @@ fn apply_tracked_download_activity_projection(
             item.progress_percent = 100;
             item.remaining_seconds = Some(0);
             item.attention_required = true;
-            // The block is authoritative over any *finished* import record
-            // (a stale Failed/Skipped/Completed must not repaint the row), but
-            // a manual import the operator just queued or that is copying
-            // right now is live state the row has to show: keeping it is what
-            // turns the display into the active import state, greys the
-            // actions, and lets the transfer phase render. Dropping it left
-            // blocked rows fully interactive while a manual import was in
+            // The block is authoritative over any *finished automatic* import
+            // record (a stale Failed/Skipped/Completed must not repaint the
+            // row), but a manual import the operator just queued or that is
+            // copying right now is live state the row has to show: keeping it
+            // is what turns the display into the active import state, greys
+            // the actions, and lets the transfer phase render. Dropping it
+            // left blocked rows fully interactive while a manual import was in
             // flight.
-            if !matches!(
+            //
+            // A *finished* manual import is kept for the same reason. The
+            // operator asked for that import against this exact download after
+            // the block was decided, so its outcome is newer than the block
+            // and is the only record of what went wrong; the tracker itself
+            // never learns of it. Clearing it was what left a failed manual
+            // import invisible everywhere: the row went back to the original
+            // block message with `importStatus: null`.
+            let keep_import_status = matches!(
                 item.import_status,
                 Some(ImportStatus::Pending | ImportStatus::Running | ImportStatus::Processing)
-            ) {
+            ) || (item.import_type == Some(ImportType::ManualImport)
+                && matches!(
+                    item.import_status,
+                    Some(ImportStatus::Failed | ImportStatus::Skipped)
+                ));
+            if !keep_import_status {
                 item.import_status = None;
+                item.import_type = None;
             }
         }
         TrackedDownloadState::Downloading
@@ -902,6 +916,7 @@ async fn process_tracked_download_snapshot(
     let cycle_started_at = Instant::now();
 
     enrich_download_queue_items_from_submissions(app, &mut items).await;
+    drop_rows_outside_download_client_adoption_scope(app, &mut items, snapshot_label).await;
     if let TrackedDownloadSnapshotProjection::Publish { source } = &projection {
         // Poller items already carry import-record state (the poller loads
         // them through `enrich_download_queue_items`). Bridged clients (Weaver)
@@ -999,6 +1014,11 @@ async fn process_tracked_download_snapshot(
             }
         }
     }
+
+    // Phase 1 served most rows from the observation memo, so the binding
+    // freshness writes those rows came due for are written here as one
+    // transaction rather than one per row inside a resolution transaction.
+    crate::download_identity::flush_shared_observation_touches(app).await;
 
     let unavailable_sources = match prune {
         TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes => runtime
@@ -1202,6 +1222,38 @@ pub(crate) async fn record_download_client_refresh_outcomes(
                 "failed to record download client refresh status"
             );
         }
+    }
+}
+
+/// Drop client rows Scryer never submitted that sit outside the categories
+/// their client feeds Scryer.
+///
+/// Tracking a row resolves it, and resolving a foreign row adopts it: one
+/// permanent `downloads` row and one never-ending binding each, every tick,
+/// for work Scryer will never touch. A client with no configured categories is
+/// unfiltered and keeps listing everything, as before.
+async fn drop_rows_outside_download_client_adoption_scope(
+    app: &AppUseCase,
+    items: &mut Vec<DownloadQueueItem>,
+    snapshot_label: &'static str,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let Some(scope) = app.download_client_category_admission_snapshot().await else {
+        return;
+    };
+    let before = items.len();
+    items.retain(|item| {
+        crate::download_identity::queue_item_is_in_adoption_scope(item, Some(scope.as_ref()))
+    });
+    let dropped = before - items.len();
+    if dropped > 0 {
+        tracing::debug!(
+            snapshot = snapshot_label,
+            dropped,
+            "skipped client rows outside the categories their download client feeds Scryer"
+        );
     }
 }
 
@@ -1785,6 +1837,27 @@ async fn handle_tracked_download_command(
                 )
                 .await?
                 {
+                    // Verification says the download is not fully imported, so
+                    // the block stands. What must not stand is the message
+                    // that put it there: the operator just watched files land
+                    // and has to be told why the download is still blocked
+                    // instead of reading the original pre-import complaint
+                    // again. Verification semantics are untouched.
+                    if files_imported_this_pass > 0 {
+                        tracing::warn!(
+                            id = %id,
+                            files_imported_this_pass,
+                            expected_mapping_count,
+                            "manual import moved files but the download did not verify as complete"
+                        );
+                        if let Some(td) = tracker.find_mut(&id) {
+                            td.status = TrackedDownloadStatus::Warning;
+                            td.status_messages = vec![format!(
+                                "manual import moved {files_imported_this_pass} file(s) but the download could not be verified complete; review it manually"
+                            )];
+                            activity_item = Some(tracked_download_activity_queue_item(td));
+                        }
+                    }
                     return Ok(false);
                 }
 
@@ -1803,7 +1876,7 @@ async fn handle_tracked_download_command(
                 Ok(true)
             }
             .await;
-            if matches!(result, Ok(true)) {
+            if matches!(result, Ok(true)) || activity_item.is_some() {
                 publish_runtime_tracked_download_and_activity_item(app, tracker, activity_item)
                     .await;
             }

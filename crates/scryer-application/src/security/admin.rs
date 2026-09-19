@@ -72,7 +72,19 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
-        let titles = self.services.catalog.titles.list(None, None).await?;
+        // System health only counts titles by facet and monitored flag, so this
+        // all-title read skips the canonical-tag hydration.
+        let titles = self
+            .services
+            .catalog
+            .titles
+            .list_with_projection(
+                None,
+                None,
+                None,
+                crate::TitleListProjection::without_canonical_tags(),
+            )
+            .await?;
         let users = self.services.identity.users.list_all().await?;
         let recent_activity = self.recent_activity_page(12, 0).await?;
 

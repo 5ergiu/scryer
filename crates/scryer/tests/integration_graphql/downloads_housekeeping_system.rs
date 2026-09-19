@@ -1134,6 +1134,7 @@ async fn graphql_application_upgrade_status_requires_system_settings_permission(
         Some(
             "PORTABLE"
                 | "DIRECT_MSI"
+                | "MACOS_APP_BUNDLE"
                 | "DOCKER"
                 | "HOMEBREW"
                 | "WINGET"
@@ -1160,6 +1161,9 @@ async fn graphql_application_upgrade_status_requires_system_settings_permission(
                 | "eligible"
                 | "unsupported_layout"
                 | "install_dir_not_writable"
+                | "app_bundle_translocated"
+                | "app_bundle_read_only_volume"
+                | "app_bundle_not_tray_supervised"
         )
     ));
 }

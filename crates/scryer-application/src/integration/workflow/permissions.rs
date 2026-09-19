@@ -237,6 +237,7 @@ fn download_history_item_from_terminal_row(
         download_client_item_id,
         download_id: Some(row.download_id.to_wire()),
         import_status,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -250,6 +251,19 @@ fn download_history_item_from_terminal_row(
         tracked_match_type: None,
         seeding: None,
     })
+}
+
+/// Whether a history read needs the durable rows the live snapshot dropped.
+///
+/// Every durable row is terminal — `imported`, `failed` or `ignored` — and
+/// those classify into the history buckets, never `Import`. The import
+/// surfaces keep `Import`-bucket rows only, so for them the terminal-history
+/// query is a whole-archive read whose every row is then discarded; the
+/// navigation badge polls one of those every 30 seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DurableHistoryRows {
+    Include,
+    Skip,
 }
 
 impl AppUseCase {
@@ -305,6 +319,7 @@ impl AppUseCase {
         &self,
         actor: &User,
         permission: scryer_domain::LibraryPermission,
+        durable: DurableHistoryRows,
     ) -> AppResult<Vec<DownloadQueueItem>> {
         let allowed_library_ids = self
             .authorized_library_ids(actor, None, permission)
@@ -323,7 +338,10 @@ impl AppUseCase {
             .cloned()
             .collect::<Vec<_>>();
 
-        let durable = self.durable_download_history_items(&items).await?;
+        let durable = match durable {
+            DurableHistoryRows::Include => self.durable_download_history_items(&items).await?,
+            DurableHistoryRows::Skip => Vec::new(),
+        };
         // The read model's title map only covers the live rows, and it is
         // shared behind an `Arc`; the durable rows' titles go in an overlay
         // rather than forcing a copy of the whole map on every history query.

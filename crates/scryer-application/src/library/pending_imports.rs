@@ -379,10 +379,26 @@ impl AppUseCase {
             .await?
             .into_iter()
             .collect::<HashSet<_>>();
+        let by_library = self.pending_import_counts_by_library().await?;
+        let mut counts = PendingImportCounts::default();
+        for (library_id, library_counts) in by_library {
+            if manageable.contains(&library_id) {
+                counts.movie += library_counts.movie;
+                counts.series += library_counts.series;
+                counts.anime += library_counts.anime;
+            }
+        }
+        Ok(counts)
+    }
+
+    /// The same counts, per library and before any actor is considered, so a
+    /// caller that answers for many actors — the navigation badges — counts
+    /// once and filters in memory.
+    pub(crate) async fn pending_import_counts_by_library(
+        &self,
+    ) -> AppResult<HashMap<String, PendingImportCounts>> {
         let repository = self.services.library.library_scan_unmatched_items.clone();
-        let mut movie = 0;
-        let mut series = 0;
-        let mut anime = 0;
+        let mut by_library: HashMap<String, PendingImportCounts> = HashMap::new();
         for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
             let items = repository
                 .list_library_scan_unmatched_items(
@@ -393,25 +409,19 @@ impl AppUseCase {
                     0,
                 )
                 .await?;
-            let count = items
+            for item in items
                 .into_iter()
-                .filter(|item| {
-                    manageable.contains(&item.library_id)
-                        && pending_import_item_requires_action(item)
-                })
-                .count() as i64;
-            match facet {
-                MediaFacet::Movie => movie = count,
-                MediaFacet::Series => series = count,
-                MediaFacet::Anime => anime = count,
+                .filter(pending_import_item_requires_action)
+            {
+                let counts = by_library.entry(item.library_id).or_default();
+                match facet {
+                    MediaFacet::Movie => counts.movie += 1,
+                    MediaFacet::Series => counts.series += 1,
+                    MediaFacet::Anime => counts.anime += 1,
+                }
             }
         }
-
-        Ok(PendingImportCounts {
-            movie,
-            series,
-            anime,
-        })
+        Ok(by_library)
     }
 
     pub async fn pending_imports(

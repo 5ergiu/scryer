@@ -13,7 +13,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { continueExternalImportFromConnect } from "@/lib/external-import-wizard-orchestration";
+import {
+  continueExternalImportFromConnect,
+  isFinalizeBlocked,
+} from "@/lib/external-import-wizard-orchestration";
 import { useExternalImportSetup } from "@/lib/hooks/use-external-import-setup";
 
 import {
@@ -235,17 +238,24 @@ export function SetupImportWizard({
     goToStep(5, "import");
   }, [wizard, t, goToStep]);
 
+  // Starting finalize only ACCEPTS the background apply; the hook polls it and
+  // reports through `finalizeComplete`. A rejected start is surfaced on the
+  // Summary view (wizard.finalizeError) as well as toasted here.
   const finish = useCallback(async () => {
-    const { ok, scanErrors, error } = await wizard.finalizeImport();
-    if (!ok) {
-      toast.warning(error ?? t("setup.importFinalizeFailed"));
-      return;
-    }
-    for (const message of scanErrors) {
+    const { ok, error } = await wizard.finalizeImport();
+    if (!ok) toast.warning(error ?? t("setup.importFinalizeFailed"));
+  }, [wizard, t]);
+
+  const finalizeComplete = wizard.finalizeComplete;
+  const exitedRef = useRef(false);
+  useEffect(() => {
+    if (!finalizeComplete || exitedRef.current) return;
+    exitedRef.current = true;
+    for (const message of finalizeComplete.scanErrors) {
       toast.info(message);
     }
     onExit();
-  }, [wizard, t, onExit]);
+  }, [finalizeComplete, onExit]);
 
   // A lost warmup session can't be re-fetched — reset connections and route back
   // to Connect, where re-verifying mints fresh sessions.
@@ -303,11 +313,14 @@ export function SetupImportWizard({
       // Finish needs the warmup complete AND a loaded preview whose every
       // detected root is mapped — otherwise finalize would omit required
       // source-root mappings (e.g. after a refresh that dropped the preview).
-      primaryDisabled =
-        !wizard.warmupComplete ||
-        !wizard.previewSettled ||
-        !wizard.mappingReady ||
-        wizard.finalizing;
+      // It also stays disabled for the duration of the background apply, and
+      // re-enables for a retry the moment that apply fails.
+      primaryDisabled = isFinalizeBlocked({
+        warmupComplete: wizard.warmupComplete,
+        previewSettled: wizard.previewSettled,
+        mappingReady: wizard.mappingReady,
+        finalizing: wizard.finalizing,
+      });
       onPrimary = () => void finish();
       break;
   }

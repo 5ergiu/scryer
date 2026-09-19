@@ -1950,6 +1950,14 @@ async fn notification_dispatcher_delivers_structured_lifecycle_metadata() {
     ] {
         create_media_server_subscription(&app, &user, &connection, event_type.as_str()).await;
     }
+    // Upgrade clean-up deletions reach only their own subscribers.
+    create_media_server_subscription(
+        &app,
+        &user,
+        &connection,
+        NotificationEventType::FileDeletedForUpgrade.as_str(),
+    )
+    .await;
 
     let cancel = CancellationToken::new();
     let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));

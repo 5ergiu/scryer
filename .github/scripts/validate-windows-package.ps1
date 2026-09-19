@@ -420,7 +420,7 @@ ManifestVersion: 1.10.0
 PackageIdentifier: ScryerMedia.Scryer
 PackageVersion: $PackageVersion
 InstallerType: msi
-UpgradeBehavior: uninstallPrevious
+UpgradeBehavior: install
 Installers:
 - Architecture: $wingetArchitecture
   InstallerUrl: https://github.com/scryer-media/scryer/releases/download/scryer-local-ci/$(Split-Path $PackageMsi -Leaf)
@@ -570,9 +570,12 @@ foreach ($unsignedArtifact in @($packagedExe, $packagedTray, $msiCopy, $wingetMs
 }
 
 $desktopProfile = Join-Path $env:LOCALAPPDATA "ScryerMedia\Scryer"
-$profileMarker = Join-Path $desktopProfile "preserve-on-uninstall.txt"
-New-Item -ItemType Directory -Force -Path $desktopProfile | Out-Null
-"preserve me" | Set-Content $profileMarker
+# Neither file may collide with anything Scryer writes: this runs against the real profile.
+$profileMarker = Join-Path $desktopProfile "logs\uninstall-removes-this.txt"
+$keptBackup = Join-Path $desktopProfile "backups\uninstall-keeps-this.txt"
+New-Item -ItemType Directory -Force -Path (Split-Path $profileMarker), (Split-Path $keptBackup) | Out-Null
+"remove me" | Set-Content $profileMarker
+"keep me" | Set-Content $keptBackup
 
 $msiExitCode = Invoke-MsiExec -Arguments @("/i", $msiCopy, "/qn", "/norestart", "/l*v", $msiLog)
 if ($msiExitCode -ne 0) {
@@ -621,9 +624,13 @@ if ($msiExitCode -ne 0) {
 if (Test-Path $installDir) {
   throw "MSI uninstall retained the Program Files payload directory $installDir."
 }
-if (-not (Test-Path $profileMarker)) {
-  throw "MSI uninstall removed desktop user data at $profileMarker."
+if (Test-Path $profileMarker) {
+  throw "MSI uninstall left desktop profile data at $profileMarker."
 }
+if (-not (Test-Path $keptBackup)) {
+  throw "MSI uninstall removed a user backup at $keptBackup."
+}
+Remove-Item -Force $keptBackup
 
 Invoke-WinGetManifestValidation `
   -PackageMsi $wingetMsiCopy `

@@ -4,7 +4,7 @@ use scryer_domain::Title;
 
 use crate::library::workflow::{LibraryRootState, library_root_state};
 use crate::stored_paths::{folder_paths_match, path_to_stored_string, stored_path_to_path_buf};
-use crate::{AppError, AppResult, AppUseCase};
+use crate::{AppError, AppResult, AppUseCase, TitleListProjection};
 
 fn non_empty_folder_path(path: Option<&str>) -> Option<&str> {
     path.filter(|path| !path.is_empty())
@@ -104,11 +104,20 @@ pub(crate) async fn find_other_folder_owner(
     folder_path: &str,
 ) -> AppResult<Option<Title>> {
     let library_ids = vec![title.library_id.clone()];
+    // Ownership is decided from the id and the folder path alone, and a scan or
+    // pending-import pass asks this question once per folder it touches. Paying
+    // for the canonical-tag hydration on every one of those passes was stalling
+    // the read pool on large libraries.
     Ok(app
         .services
         .catalog
         .titles
-        .list_for_libraries_without_external_ids(None, &library_ids, None)
+        .list_with_projection(
+            None,
+            Some(&library_ids),
+            None,
+            TitleListProjection::without_canonical_tags().without_external_ids(),
+        )
         .await?
         .into_iter()
         .find(|candidate| {

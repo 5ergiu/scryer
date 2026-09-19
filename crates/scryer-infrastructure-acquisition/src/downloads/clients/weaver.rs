@@ -171,8 +171,12 @@ pub enum WeaverQueueState {
     Downloading,
     #[serde(rename = "CHECKING")]
     Checking,
+    #[serde(rename = "FINALIZING_DOWNLOAD")]
+    FinalizingDownload,
     #[serde(rename = "VERIFYING")]
     Verifying,
+    #[serde(rename = "FETCHING_REPAIR_DATA")]
+    FetchingRepairData,
     #[serde(rename = "QUEUED_REPAIR")]
     QueuedRepair,
     #[serde(rename = "REPAIRING")]
@@ -181,6 +185,8 @@ pub enum WeaverQueueState {
     QueuedExtract,
     #[serde(rename = "EXTRACTING")]
     Extracting,
+    #[serde(rename = "POST_PROCESSING")]
+    PostProcessing,
     #[serde(rename = "MOVING")]
     Moving,
     #[serde(rename = "FINALIZING")]
@@ -191,6 +197,14 @@ pub enum WeaverQueueState {
     Failed,
     #[serde(rename = "PAUSED")]
     Paused,
+    /// Any state this build of scryer does not know about.
+    ///
+    /// Without this catch-all a single job in a state added by a newer weaver
+    /// fails the whole `Vec<WeaverQueueItem>` page, so `list_queue` returns an
+    /// error and the bridge loses its queue view entirely. Unknown states are
+    /// deliberately treated as still-active work — never as terminal.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1032,16 +1046,23 @@ fn extract_scryer_metadata(
 fn map_weaver_status(status: WeaverQueueState) -> DownloadQueueState {
     match status {
         WeaverQueueState::Queued => DownloadQueueState::Queued,
-        WeaverQueueState::Downloading | WeaverQueueState::Checking => {
-            DownloadQueueState::Downloading
-        }
+        // `Unknown` is a state a newer weaver added that this build has never
+        // heard of. It maps to an active state on purpose: guessing
+        // `Completed` or `Failed` would hand a still-running job to import or
+        // to failed-download handling.
+        WeaverQueueState::Downloading
+        | WeaverQueueState::Checking
+        | WeaverQueueState::FinalizingDownload
+        | WeaverQueueState::FetchingRepairData
+        | WeaverQueueState::Unknown => DownloadQueueState::Downloading,
         WeaverQueueState::Verifying => DownloadQueueState::Verifying,
         WeaverQueueState::QueuedRepair => DownloadQueueState::Downloading,
         WeaverQueueState::Repairing => DownloadQueueState::Repairing,
         WeaverQueueState::QueuedExtract => DownloadQueueState::Repairing,
-        WeaverQueueState::Extracting | WeaverQueueState::Moving | WeaverQueueState::Finalizing => {
-            DownloadQueueState::Extracting
-        }
+        WeaverQueueState::Extracting
+        | WeaverQueueState::PostProcessing
+        | WeaverQueueState::Moving
+        | WeaverQueueState::Finalizing => DownloadQueueState::Extracting,
         WeaverQueueState::Completed => DownloadQueueState::Completed,
         WeaverQueueState::Failed => DownloadQueueState::Failed,
         WeaverQueueState::Paused => DownloadQueueState::Paused,
@@ -1107,6 +1128,7 @@ pub fn weaver_item_to_queue_item(job: &WeaverQueueItem) -> DownloadQueueItem {
         download_client_item_id: job.id.to_string(),
         download_id: scryer_metadata.download_id,
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -1793,9 +1815,15 @@ impl DownloadClient for WeaverDownloadClient {
     /// (`weaver-server-core` `SchedulerCommand::CancelJob`), and a history
     /// delete for a job that is still live is refused with `CONFLICT`
     /// (`SchedulerCommand::DeleteHistory`). Neither removes anything, and the
-    /// row would come back on the next poll, so a wrong hint in either
-    /// direction falls through to the other mode. Routing keys on the
-    /// `extensions.code` Weaver attaches, never on the message text.
+    /// row would come back on the next poll.
+    ///
+    /// A queue hint for a job that has already finished falls through to the
+    /// history delete: nothing is running, so nothing can be lost. A history
+    /// hint for a job Weaver still holds live does *not* fall through to a
+    /// cancel. Cancelling there would stop a download nobody asked to stop, on
+    /// nothing better than a stale local view, so the refusal is reported and
+    /// the job is left running. Routing keys on the `extensions.code` Weaver
+    /// attaches, never on the message text.
     async fn delete_queue_item(
         &self,
         id: &str,
@@ -1809,34 +1837,20 @@ impl DownloadClient for WeaverDownloadClient {
             match self.remove_history_item(job_id, remove_data).await {
                 Ok(()) => Ok(()),
                 Err(error) if error.refused_with(WeaverErrorCode::Conflict) => {
-                    debug!(
+                    // The two views disagree: this side believes the job is
+                    // finished, Weaver says it is still running. Weaver is the
+                    // one holding the job, so it wins. Cancelling to force the
+                    // history delete through would destroy a download the user
+                    // never asked to stop, so the entry stays and the
+                    // disagreement is reported for a human to settle.
+                    warn!(
                         job_id,
-                        "weaver: job hinted as history is still live; cancelling it instead"
+                        "weaver: still reports this job as live; leaving it running instead of cancelling it"
                     );
-                    match self.cancel_queue_job(job_id).await {
-                        Ok(()) => {
-                            // Cancelling leaves a cancelled history row behind,
-                            // and the caller asked for the entry to go away, so
-                            // clear that too. The job itself is already gone,
-                            // so this is best effort.
-                            if let Err(error) = self.remove_history_item(job_id, remove_data).await
-                            {
-                                warn!(
-                                    job_id,
-                                    error = %error,
-                                    "weaver: cancelled job could not be cleared from history"
-                                );
-                            }
-                            Ok(())
-                        }
-                        // The job finished between the two calls, so the
-                        // history delete is the real removal now.
-                        Err(error) if error.refused_with(WeaverErrorCode::NotFound) => self
-                            .remove_history_item(job_id, remove_data)
-                            .await
-                            .map_err(AppError::from),
-                        Err(error) => Err(error.into()),
-                    }
+                    Err(AppError::ManualReconciliationRequired(format!(
+                        "weaver still reports job {job_id} as live, so its entry was not removed; \
+                         the download was left running"
+                    )))
                 }
                 Err(error) => Err(error.into()),
             }
@@ -1996,8 +2010,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::{
-        SubmissionPayload, WeaverDownloadClient, WeaverQueueItem, map_weaver_outbound_error,
-        weaver_item_to_queue_item,
+        QueueItemsPayload, SubmissionPayload, WeaverDownloadClient, WeaverQueueItem,
+        WeaverQueueState, map_weaver_outbound_error, map_weaver_status, weaver_item_to_queue_item,
     };
     use scryer_application::{
         AppError, DownloadClient, DownloadClientAddRequest, DownloadSubmissionPurpose,
@@ -2454,11 +2468,13 @@ mod tests {
             .expect("finished job should be removed from history instead");
     }
 
-    // The history hint is stale: Scryer saw the job as failed while Weaver
-    // still holds it live, so the history delete answers CONFLICT. The client
-    // cancels the job and then clears the cancelled row the cancel leaves.
+    // The history hint is stale: this side saw the job as finished while
+    // Weaver still holds it live, so the history delete answers CONFLICT.
+    // Weaver owns the job, so the disagreement is reported and the job keeps
+    // running. Nothing is cancelled: a stale local view is not a reason to
+    // stop a download the user never asked to stop.
     #[tokio::test]
-    async fn delete_history_item_cancels_when_job_is_still_live() {
+    async fn delete_history_item_never_cancels_a_job_weaver_still_holds_live() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/graphql"))
@@ -2473,10 +2489,52 @@ mod tests {
                     "extensions": { "code": "CONFLICT" }
                 }]
             })))
-            .up_to_n_times(1)
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("authorization", "Bearer wvr_test"))
+            .and(body_string_contains("mutation CancelQueueItem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "cancelQueueItem": { "success": true } }
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = WeaverDownloadClient::new(server.uri(), Some("wvr_test".to_string()));
+        let error = client
+            .delete_queue_item("10002", true, false)
+            .await
+            .expect_err("a live job must not be removed behind the user's back");
+        assert!(
+            matches!(&error, AppError::ManualReconciliationRequired(message)
+                if message.contains("still reports job 10002 as live")),
+            "expected a reconciliation refusal naming the job, got {error:?}"
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be recorded");
+        let bodies: Vec<String> = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .collect();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("mutation RemoveHistoryItems"));
+        assert!(
+            !bodies.iter().any(|body| body.contains("CancelQueueItem")),
+            "no cancel may be sent for a job weaver still reports as live"
+        );
+    }
+
+    // The queue branch is the user's own "cancel this download": it still
+    // cancels, and nothing about the history refusal changes that.
+    #[tokio::test]
+    async fn delete_queue_item_cancels_a_live_job_on_a_queue_hint() {
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(header("authorization", "Bearer wvr_test"))
@@ -2490,34 +2548,19 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(header("authorization", "Bearer wvr_test"))
-            .and(body_string_contains(
-                "mutation RemoveHistoryItems($ids: [Int!]!)",
-            ))
+            .and(body_string_contains("mutation RemoveHistoryItems"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": { "removeHistoryItems": { "success": true } }
             })))
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
 
         let client = WeaverDownloadClient::new(server.uri(), Some("wvr_test".to_string()));
         client
-            .delete_queue_item("10002", true, false)
+            .delete_queue_item("10002", false, false)
             .await
-            .expect("live job hinted as history should be cancelled");
-
-        let requests = server
-            .received_requests()
-            .await
-            .expect("requests should be recorded");
-        let bodies: Vec<String> = requests
-            .iter()
-            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-            .collect();
-        assert_eq!(bodies.len(), 3);
-        assert!(bodies[0].contains("mutation RemoveHistoryItems"));
-        assert!(bodies[1].contains("mutation CancelQueueItem"));
-        assert!(bodies[2].contains("mutation RemoveHistoryItems"));
+            .expect("a queued job should be cancelled");
     }
 
     // Other cancel refusals (here: the final move is running) are real and
@@ -2589,60 +2632,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             AppError::Repository("weaver GraphQL error: job 10002 not found".into()).to_string()
-        );
-    }
-
-    // History hint, job still live, but it finishes between the CONFLICT and
-    // the cancel: the second history delete is the real removal.
-    #[tokio::test]
-    async fn delete_history_item_retries_history_when_job_finishes_mid_cancel() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_string_contains("mutation RemoveHistoryItems"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": null,
-                "errors": [{
-                    "message": "cannot delete active job — cancel it first",
-                    "extensions": { "code": "CONFLICT" }
-                }]
-            })))
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_string_contains("mutation CancelQueueItem"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": null,
-                "errors": [{
-                    "message": "job 10002 not found",
-                    "extensions": { "code": "NOT_FOUND" }
-                }]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_string_contains("mutation RemoveHistoryItems"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "removeHistoryItems": { "success": false } }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = WeaverDownloadClient::new(server.uri(), Some("wvr_test".to_string()));
-        let error = client
-            .delete_queue_item("10002", true, false)
-            .await
-            .expect_err("the retried history delete is authoritative");
-        assert!(
-            error
-                .to_string()
-                .contains("removeHistoryItems did not succeed")
         );
     }
 
@@ -2901,6 +2890,90 @@ mod tests {
         assert_eq!(item.download_id.as_deref(), Some("scryer-download:abc123"));
         assert!(item.is_scryer_origin);
         assert_eq!(item.category.as_deref(), Some("movies"));
+    }
+
+    #[test]
+    fn queue_page_survives_states_this_build_does_not_know() {
+        let page = json!({
+            "queueItems": [
+                {
+                    "id": 101,
+                    "name": "Crimson Aviary S02E04",
+                    "state": "FETCHING_REPAIR_DATA",
+                    "error": null,
+                    "progressPercent": 92.0,
+                    "totalBytes": 9000,
+                    "category": null,
+                    "outputDir": null,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "completedAt": null,
+                    "clientRequestId": null,
+                    "attributes": [],
+                    "attention": null
+                },
+                {
+                    "id": 102,
+                    "name": "Lanternfall Hollow 2031",
+                    "state": "SOMETHING_NEW",
+                    "error": null,
+                    "progressPercent": 4.0,
+                    "totalBytes": 9000,
+                    "category": null,
+                    "outputDir": null,
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "completedAt": null,
+                    "clientRequestId": null,
+                    "attributes": [],
+                    "attention": null
+                }
+            ]
+        });
+
+        let payload: QueueItemsPayload = serde_json::from_value(page)
+            .expect("a page with an unrecognised state must still parse");
+
+        assert_eq!(payload.queue_items.len(), 2);
+        assert_eq!(
+            payload.queue_items[0].state,
+            WeaverQueueState::FetchingRepairData
+        );
+        assert_eq!(payload.queue_items[1].state, WeaverQueueState::Unknown);
+    }
+
+    #[test]
+    fn newer_weaver_states_never_map_to_a_terminal_state() {
+        for state in [
+            WeaverQueueState::FetchingRepairData,
+            WeaverQueueState::FinalizingDownload,
+            WeaverQueueState::PostProcessing,
+            WeaverQueueState::Unknown,
+        ] {
+            let mapped = map_weaver_status(state);
+            assert!(
+                !matches!(
+                    mapped,
+                    DownloadQueueState::Completed | DownloadQueueState::Failed
+                ),
+                "{state:?} mapped to terminal {mapped:?}"
+            );
+        }
+
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::FetchingRepairData),
+            DownloadQueueState::Downloading
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::FinalizingDownload),
+            DownloadQueueState::Downloading
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::PostProcessing),
+            DownloadQueueState::Extracting
+        );
+        assert_eq!(
+            map_weaver_status(WeaverQueueState::Unknown),
+            DownloadQueueState::Downloading
+        );
     }
 
     #[tokio::test]

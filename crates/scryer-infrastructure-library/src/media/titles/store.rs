@@ -7,8 +7,8 @@ use scryer_application::{
     TitleCatalogFilterCounts, TitleCatalogFilterOptions, TitleCatalogProfileNames,
     TitleCatalogResult, TitleCatalogSort, TitleCatalogSortKey, TitleCatalogTagFilterOption,
     TitleCredit, TitleDeletePreviewInfo, TitleExternalIdLookup, TitleExternalIdLookupMatch,
-    TitleMetadataUpdate, TitleOptionsPatch, TitleRatingSummary, TitleRepository,
-    TitleTagDefinitionSummary, TitleTagMembershipCounts, is_reserved_title_tag,
+    TitleListProjection, TitleMetadataUpdate, TitleOptionsPatch, TitleRatingSummary,
+    TitleRepository, TitleTagDefinitionSummary, TitleTagMembershipCounts, is_reserved_title_tag,
     persisted_records::{
         PersistedTitleDecodeOptions, PersistedTitleReadMode, finalize_persisted_title,
     },
@@ -222,6 +222,10 @@ impl TitleStore {
         .await
     }
 
+    /// `include_canonical_tags` decides whether the read pays for the metadata
+    /// tag join. It is a second query bound to every id the list returned, so a
+    /// caller that does not read `Title::canonical_tags` should say so rather
+    /// than drag thousands of placeholders through the pool.
     async fn list_internal(
         &self,
         facet: Option<MediaFacet>,
@@ -229,6 +233,7 @@ impl TitleStore {
         query: Option<String>,
         mode: PersistedTitleReadMode,
         include_external_ids: bool,
+        include_canonical_tags: bool,
     ) -> AppResult<Vec<Title>> {
         if matches!(library_ids, Some(library_ids) if library_ids.is_empty()) {
             return Ok(Vec::new());
@@ -251,8 +256,10 @@ impl TitleStore {
                             include_external_ids,
                         )
                         .await?;
-                        attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut titles)
-                            .await?;
+                        if include_canonical_tags {
+                            attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut titles)
+                                .await?;
+                        }
                         return Ok(titles);
                     }
                     StoreDatastore::Postgres { .. } => {
@@ -272,7 +279,9 @@ impl TitleStore {
         };
 
         let mut titles = decode_runtime_title_rows(&rows, mode, include_external_ids)?;
-        attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut titles).await?;
+        if include_canonical_tags {
+            attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut titles).await?;
+        }
         Ok(titles)
     }
 
@@ -302,6 +311,10 @@ impl TitleStore {
     }
 }
 
+/// Ids per `UPDATE ... WHERE id IN (...)`, under sqlite's historical 999
+/// variable ceiling with room for the monitored bind.
+const SET_TITLES_MONITORED_BIND_CHUNK: usize = 900;
+
 #[async_trait]
 impl TitleRepository for TitleStore {
     async fn list(
@@ -314,6 +327,7 @@ impl TitleRepository for TitleStore {
             None,
             query,
             PersistedTitleReadMode::Presentation,
+            true,
             true,
         )
         .await
@@ -588,6 +602,28 @@ impl TitleRepository for TitleStore {
             query,
             PersistedTitleReadMode::Presentation,
             false,
+            true,
+        )
+        .await
+    }
+
+    /// The projection-aware read. Everything else on this store is a fixed
+    /// projection over the same query; this one lets the caller drop the
+    /// canonical-tag hydration it does not use.
+    async fn list_with_projection(
+        &self,
+        facet: Option<MediaFacet>,
+        library_ids: Option<&[String]>,
+        query: Option<String>,
+        projection: TitleListProjection,
+    ) -> AppResult<Vec<Title>> {
+        self.list_internal(
+            facet,
+            library_ids,
+            query,
+            PersistedTitleReadMode::Presentation,
+            projection.include_external_ids,
+            projection.include_canonical_tags,
         )
         .await
     }
@@ -688,6 +724,7 @@ impl TitleRepository for TitleStore {
             query,
             PersistedTitleReadMode::Presentation,
             true,
+            true,
         )
         .await
     }
@@ -759,6 +796,7 @@ impl TitleRepository for TitleStore {
             query,
             PersistedTitleReadMode::Presentation,
             false,
+            true,
         )
         .await
     }
@@ -981,8 +1019,20 @@ impl TitleRepository for TitleStore {
         facet: Option<MediaFacet>,
         query: Option<String>,
     ) -> AppResult<Vec<Title>> {
-        self.list_internal(facet, None, query, PersistedTitleReadMode::Matching, true)
-            .await
+        // A matching read exists to index every title by name, alias and
+        // external id so a release or a scanned file can be attributed. Nothing
+        // downstream of it looks at canonical metadata tags, and it is the
+        // all-title read that the scan, RSS and subtitle cycles each repeat, so
+        // it must not drag the tag join along.
+        self.list_internal(
+            facet,
+            None,
+            query,
+            PersistedTitleReadMode::Matching,
+            true,
+            false,
+        )
+        .await
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
@@ -1764,6 +1814,30 @@ impl TitleRepository for TitleStore {
                 title.monitored = monitored;
                 persist_title_tx(tx, &title, HydrationStateWrite::Preserve).await?;
                 load_title_tx_or_not_found(tx, &id, true).await
+            })
+        })
+        .await
+    }
+
+    async fn set_titles_monitored(&self, ids: &[String], monitored: bool) -> AppResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        SqlRuntime::run_in_transaction(&self.datastore, "set_titles_monitored", move |tx| {
+            let ids = ids.clone();
+            Box::pin(async move {
+                for chunk in ids.chunks(SET_TITLES_MONITORED_BIND_CHUNK) {
+                    let placeholders = std::iter::repeat_n("{}", chunk.len())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql =
+                        format!("UPDATE titles SET monitored = {{}} WHERE id IN ({placeholders})");
+                    let mut args = vec![SqlArg::Bool(monitored)];
+                    args.extend(chunk.iter().cloned().map(SqlArg::Text));
+                    tx.execute(&sql, &args).await?;
+                }
+                Ok(())
             })
         })
         .await

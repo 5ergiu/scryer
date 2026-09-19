@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use chrono::DateTime;
 use scryer_domain::{
@@ -395,10 +396,106 @@ pub struct LibraryScanHint {
     pub ids: Vec<ExternalIdHint>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LibraryScanHintSet {
-    hints: Vec<LibraryScanHint>,
+/// Insertion-ordered hint list plus the lookup indexes built alongside it.
+///
+/// Every path key is normalized once, at insert, and the normalized form is what
+/// the indexes are keyed on, so neither `push` nor a lookup ever allocates a
+/// comparison string. Finalize pushes one hint per movie, per series and per
+/// episode -- millions for a large Sonarr library -- so push has to stay O(1) in
+/// the size of the set, and so does every lookup the scan pipeline makes per
+/// scanned file.
+#[derive(Clone, Debug, Default)]
+struct LibraryScanHintIndex {
+    hints: StoredLibraryScanHints,
+    /// Facet -> normalized leaf path key -> bucket. Nested so a lookup can
+    /// borrow the candidate key instead of allocating one to probe with.
+    by_path_key: HashMap<LibraryScanHintFacet, HashMap<Box<str>, LibraryScanHintPathBucket>>,
+    /// Facet -> external id -> hint positions, in insertion order.
+    by_external_id: HashMap<LibraryScanHintFacet, HashMap<ExternalIdHint, Vec<u32>>>,
 }
+
+/// The hints that share one normalized leaf path key.
+///
+/// Leaf keys collide whenever two libraries use the same file or folder naming,
+/// so a bucket can hold thousands of hints; the full-path map is what keeps
+/// insert and disambiguation off a linear walk of it.
+#[derive(Clone, Debug, Default)]
+struct LibraryScanHintPathBucket {
+    /// Positions in insertion order, which is the order lookups resolve in.
+    order: Vec<u32>,
+    /// Normalized full path key -> position. `push` dedups on
+    /// (facet, leaf key, full key), so there is at most one hint per entry.
+    by_full_path_key: HashMap<Box<str>, u32>,
+    /// Position of the hint in this bucket that carries no full path key.
+    without_full_path_key: Option<u32>,
+}
+
+/// The stored hints, reachable only by position.
+///
+/// Every read of a stored hint goes through [`Self::get`] or [`Self::get_mut`],
+/// and test builds count those reads. That lets the scale tests assert how many
+/// hints a push or a lookup examines, which is the property that has to hold,
+/// instead of timing it. There is deliberately no iterator: a linear walk of the
+/// set is exactly what the indexes exist to avoid.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StoredLibraryScanHints(Vec<LibraryScanHint>);
+
+impl StoredLibraryScanHints {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn push(&mut self, hint: LibraryScanHint) {
+        self.0.push(hint);
+    }
+
+    fn get(&self, position: u32) -> &LibraryScanHint {
+        note_library_scan_hint_examined();
+        &self.0[position as usize]
+    }
+
+    fn get_mut(&mut self, position: u32) -> &mut LibraryScanHint {
+        note_library_scan_hint_examined();
+        &mut self.0[position as usize]
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIBRARY_SCAN_HINTS_EXAMINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn note_library_scan_hint_examined() {
+    #[cfg(test)]
+    LIBRARY_SCAN_HINTS_EXAMINED.with(|count| count.set(count.get() + 1));
+}
+
+/// Runs `work` and returns how many stored hints it examined on this thread.
+#[cfg(test)]
+fn library_scan_hints_examined_by<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    let before = LIBRARY_SCAN_HINTS_EXAMINED.with(std::cell::Cell::get);
+    let result = work();
+    let after = LIBRARY_SCAN_HINTS_EXAMINED.with(std::cell::Cell::get);
+    (result, after - before)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LibraryScanHintSet {
+    inner: Arc<LibraryScanHintIndex>,
+}
+
+impl PartialEq for LibraryScanHintSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.hints == other.inner.hints
+    }
+}
+
+impl Eq for LibraryScanHintSet {}
 
 impl LibraryScanHintSet {
     pub fn new() -> Self {
@@ -409,30 +506,83 @@ impl LibraryScanHintSet {
         if hint.ids.is_empty() || hint.path_key.trim().is_empty() {
             return;
         }
-        if let Some(existing) = self.hints.iter_mut().find(|existing| {
-            existing.facet == hint.facet
-                && stored_path_keys_match(&existing.path_key, &hint.path_key)
-                && optional_stored_path_keys_match(
-                    existing.full_path_key.as_deref(),
-                    hint.full_path_key.as_deref(),
-                )
-        }) {
+        let path_key = normalize_stored_path_key(&hint.path_key);
+        // A key that normalizes away matches nothing, not even an identical one,
+        // so such a hint neither merges nor becomes findable by path.
+        let full_path_key = hint
+            .full_path_key
+            .as_deref()
+            .map(normalize_stored_path_key)
+            .filter(|value| !value.is_empty());
+        let full_path_key_matchable = hint.full_path_key.is_none() || full_path_key.is_some();
+        let index = Arc::make_mut(&mut self.inner);
+
+        if !path_key.is_empty()
+            && full_path_key_matchable
+            && let Some(bucket) = index
+                .by_path_key
+                .get(&hint.facet)
+                .and_then(|by_key| by_key.get(path_key.as_str()))
+            && let Some(position) = match full_path_key.as_deref() {
+                Some(full_path_key) => bucket.by_full_path_key.get(full_path_key).copied(),
+                None => bucket.without_full_path_key,
+            }
+        {
+            let existing = index.hints.get_mut(position);
             if existing.ids.is_empty() || !external_ids_overlap(&existing.ids, &hint.ids) {
+                // Ambiguous: one path now points at two different titles, so the
+                // hint stops asserting anything. Its stale external id index
+                // entries are skipped at lookup because the id list is empty.
                 existing.ids.clear();
                 return;
             }
+            let mut added = Vec::new();
             for id in hint.ids {
                 if !existing.ids.iter().any(|existing_id| existing_id == &id) {
-                    existing.ids.push(id);
+                    existing.ids.push(id.clone());
+                    added.push(id);
                 }
+            }
+            let by_id = index.by_external_id.entry(hint.facet).or_default();
+            for id in added {
+                by_id.entry(id).or_default().push(position);
             }
             return;
         }
-        self.hints.push(hint);
+
+        let Ok(position) = u32::try_from(index.hints.len()) else {
+            return;
+        };
+        let facet = hint.facet;
+        let by_id = index.by_external_id.entry(facet).or_default();
+        for id in &hint.ids {
+            by_id.entry(id.clone()).or_default().push(position);
+        }
+        if !path_key.is_empty() {
+            let bucket = index
+                .by_path_key
+                .entry(facet)
+                .or_default()
+                .entry(path_key.into_boxed_str())
+                .or_default();
+            bucket.order.push(position);
+            match full_path_key {
+                Some(full_path_key) => {
+                    bucket
+                        .by_full_path_key
+                        .insert(full_path_key.into_boxed_str(), position);
+                }
+                None if hint.full_path_key.is_none() => {
+                    bucket.without_full_path_key.get_or_insert(position);
+                }
+                None => {}
+            }
+        }
+        index.hints.push(hint);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.hints.is_empty()
+        self.inner.hints.is_empty()
     }
 
     pub fn hint_for_external_ids(
@@ -443,9 +593,26 @@ impl LibraryScanHintSet {
         if candidate_ids.is_empty() {
             return None;
         }
-        self.hints
-            .iter()
-            .find(|hint| hint.facet == facet && external_ids_overlap(&hint.ids, candidate_ids))
+        // Each bucket is in insertion order, so the first live hint in a bucket
+        // is that id's earliest match and the answer is the earliest of those.
+        let by_id = self.inner.by_external_id.get(&facet)?;
+        let mut best: Option<u32> = None;
+        for id in candidate_ids {
+            let Some(positions) = by_id.get(id) else {
+                continue;
+            };
+            // Positions are appended as ids merge into earlier hints, so the
+            // list is not sorted: take the earliest live hint over all of them.
+            for position in positions.iter().copied() {
+                if best.is_some_and(|best| best <= position) {
+                    continue;
+                }
+                if !self.inner.hints.get(position).ids.is_empty() {
+                    best = Some(position);
+                }
+            }
+        }
+        best.map(|position| self.inner.hints.get(position))
     }
 
     pub fn hint_for_stored_path(
@@ -462,52 +629,53 @@ impl LibraryScanHintSet {
         candidate_path_key: &str,
         candidate_full_path_key: Option<&str>,
     ) -> Option<&LibraryScanHint> {
-        let leaf_matches = self
-            .hints
-            .iter()
-            .filter(|hint| {
-                hint.facet == facet
-                    && !hint.ids.is_empty()
-                    && stored_path_keys_match(&hint.path_key, candidate_path_key)
-            })
-            .collect::<Vec<_>>();
-        let first = leaf_matches.first().copied()?;
-        if leaf_matches
-            .iter()
-            .all(|hint| external_ids_overlap(&first.ids, &hint.ids))
-        {
-            return Some(first);
+        let path_key = normalize_stored_path_key(candidate_path_key);
+        if path_key.is_empty() {
+            return None;
+        }
+        let bucket = self
+            .inner
+            .by_path_key
+            .get(&facet)
+            .and_then(|by_key| by_key.get(path_key.as_str()))?;
+
+        // The leaf key answers on its own only while every hint under it agrees
+        // on the title; the walk stops at the first hint that disagrees.
+        let mut first: Option<u32> = None;
+        let mut ambiguous = false;
+        for position in bucket.order.iter().copied() {
+            let hint = self.inner.hints.get(position);
+            if hint.ids.is_empty() {
+                continue;
+            }
+            match first {
+                None => first = Some(position),
+                Some(first) => {
+                    if !external_ids_overlap(&self.inner.hints.get(first).ids, &hint.ids) {
+                        ambiguous = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let first = first?;
+        if !ambiguous {
+            return Some(self.inner.hints.get(first));
         }
 
-        let full_path_key = candidate_full_path_key?;
-        let full_matches = leaf_matches
-            .into_iter()
-            .filter(|hint| {
-                hint.full_path_key
-                    .as_deref()
-                    .is_some_and(|hint_key| stored_path_keys_match(hint_key, full_path_key))
-            })
-            .collect::<Vec<_>>();
-        let first = full_matches.first().copied()?;
-        full_matches
-            .iter()
-            .all(|hint| external_ids_overlap(&first.ids, &hint.ids))
-            .then_some(first)
+        // Ambiguous leaf key: only the full path can name one title, and it maps
+        // to at most one hint.
+        let full_path_key = normalize_stored_path_key(candidate_full_path_key?);
+        if full_path_key.is_empty() {
+            return None;
+        }
+        let position = bucket
+            .by_full_path_key
+            .get(full_path_key.as_str())
+            .copied()?;
+        let hint = self.inner.hints.get(position);
+        (!hint.ids.is_empty()).then_some(hint)
     }
-}
-
-fn optional_stored_path_keys_match(left: Option<&str>, right: Option<&str>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => stored_path_keys_match(left, right),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn stored_path_keys_match(left: &str, right: &str) -> bool {
-    let left = normalize_stored_path_key(left);
-    let right = normalize_stored_path_key(right);
-    !left.is_empty() && left == right
 }
 
 fn normalize_stored_path_key(value: &str) -> String {
@@ -1097,6 +1265,19 @@ pub struct PendingImportCounts {
     pub anime: i64,
 }
 
+/// Every number the navigation badges show, for one actor.
+///
+/// Answered from the cached badge facts rather than from the stores: the web
+/// polls this every 30 seconds per open tab.
+#[derive(Clone, Debug, Default)]
+pub struct NavigationBadgeCounts {
+    pub pending_imports: PendingImportCounts,
+    pub pending_media_requests: MediaRequestCounts,
+    pub activity_import_count: i64,
+    pub plugin_update_count: i64,
+    pub plugin_blocked_count: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MediaRequestCounts {
     pub movie: i64,
@@ -1189,9 +1370,13 @@ impl PendingImportReasonClass {
     pub fn from_reason_code(reason_code: &str) -> Self {
         match reason_code.trim() {
             // A lookup ran and produced nothing to choose from.
-            "no_metadata_search_results" | "no_metadata_match" | "episode_lookup_failed" => {
-                Self::Unmatched
-            }
+            // `metadata_id_lookup_unresolved` is the same outcome for a folder
+            // that carries an external id: the id-anchored lookup came back
+            // empty and there is no title-text fallback to widen it.
+            "no_metadata_search_results"
+            | "no_metadata_match"
+            | "metadata_id_lookup_unresolved"
+            | "episode_lookup_failed" => Self::Unmatched,
             // A lookup produced candidates but none could be accepted.
             "no_acceptable_metadata_match" => Self::Ambiguous,
             // Media analysis failed, so the file's quality is unknown.
@@ -3945,7 +4130,8 @@ mod tests {
     use super::{
         ExternalIdHint, ExternalIdProvider, LibraryScanHint, LibraryScanHintFacet,
         LibraryScanHintSet, LibraryScanHintSource, library_scan_file_full_path_key,
-        library_scan_file_leaf_key, library_scan_folder_leaf_key,
+        library_scan_file_leaf_key, library_scan_folder_full_path_key,
+        library_scan_folder_leaf_key, library_scan_hints_examined_by,
     };
 
     #[test]
@@ -4005,6 +4191,214 @@ mod tests {
             .expect("full path resolves conflict");
         assert_eq!(hint.ids[0].value, "366972");
     }
+
+    fn synthetic_series_hint(index: usize) -> LibraryScanHint {
+        let folder = format!("/media/synthetic-{index:06}");
+        LibraryScanHint {
+            source: LibraryScanHintSource::ExternalImportSonarr,
+            facet: LibraryScanHintFacet::Series,
+            path_key: library_scan_folder_leaf_key(&folder).expect("leaf key"),
+            full_path_key: library_scan_folder_full_path_key(&folder),
+            ids: vec![ExternalIdHint {
+                provider: ExternalIdProvider::Tvdb,
+                value: (700_000 + index).to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn library_scan_hint_set_merges_ids_for_the_same_path() {
+        let mut hints = LibraryScanHintSet::new();
+        let mut first = synthetic_series_hint(1);
+        first.ids.push(ExternalIdHint {
+            provider: ExternalIdProvider::Imdb,
+            value: "tt4100001".to_string(),
+        });
+        let path_key = first.path_key.clone();
+        hints.push(first);
+        let mut second = synthetic_series_hint(1);
+        second.ids.push(ExternalIdHint {
+            provider: ExternalIdProvider::Tmdb,
+            value: "8100001".to_string(),
+        });
+        hints.push(second);
+
+        let hint = hints
+            .hint_for_stored_path(LibraryScanHintFacet::Series, &path_key)
+            .expect("merged hint");
+        assert_eq!(hint.ids.len(), 3);
+        let merged = hints
+            .hint_for_external_ids(
+                LibraryScanHintFacet::Series,
+                &[ExternalIdHint {
+                    provider: ExternalIdProvider::Tmdb,
+                    value: "8100001".to_string(),
+                }],
+            )
+            .expect("merged id is indexed");
+        assert_eq!(merged.path_key, path_key);
+    }
+
+    #[test]
+    fn library_scan_hint_set_clears_ambiguous_hints_for_every_lookup() {
+        let mut hints = LibraryScanHintSet::new();
+        let first = synthetic_series_hint(2);
+        let path_key = first.path_key.clone();
+        let full_path_key = first.full_path_key.clone();
+        let original_id = first.ids[0].clone();
+        hints.push(first);
+        let mut conflicting = synthetic_series_hint(2);
+        conflicting.ids = vec![ExternalIdHint {
+            provider: ExternalIdProvider::Tvdb,
+            value: "900002".to_string(),
+        }];
+        hints.push(conflicting);
+
+        assert!(
+            hints
+                .hint_for_stored_path(LibraryScanHintFacet::Series, &path_key)
+                .is_none()
+        );
+        assert!(
+            hints
+                .hint_for_scan_path(
+                    LibraryScanHintFacet::Series,
+                    &path_key,
+                    full_path_key.as_deref()
+                )
+                .is_none()
+        );
+        assert!(
+            hints
+                .hint_for_external_ids(LibraryScanHintFacet::Series, &[original_id])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn library_scan_hint_set_ignores_the_other_facet() {
+        let mut hints = LibraryScanHintSet::new();
+        let hint = synthetic_series_hint(3);
+        let path_key = hint.path_key.clone();
+        let id = hint.ids[0].clone();
+        hints.push(hint);
+
+        assert!(
+            hints
+                .hint_for_stored_path(LibraryScanHintFacet::Movie, &path_key)
+                .is_none()
+        );
+        assert!(
+            hints
+                .hint_for_external_ids(LibraryScanHintFacet::Movie, &[id])
+                .is_none()
+        );
+    }
+
+    /// A push or lookup reads a handful of stored hints however many are in the
+    /// set. A linear walk would read tens of thousands per call, so this bound
+    /// fails loudly on one without depending on how fast the machine is.
+    const MAX_HINTS_EXAMINED_PER_CALL: u64 = 4;
+
+    #[test]
+    fn library_scan_hint_set_handles_a_leaf_key_shared_by_many_titles() {
+        const HINTS: usize = 50_000;
+        let mut hints = LibraryScanHintSet::new();
+        let mut paths = Vec::new();
+        let ((), push_examined) = library_scan_hints_examined_by(|| {
+            for index in 0..HINTS {
+                // Uniform episode naming makes every one of these share a leaf key.
+                let path = format!("/media/synthetic-{index:06}/Season 01/S01E01.mkv");
+                hints.push(LibraryScanHint {
+                    source: LibraryScanHintSource::ExternalImportSonarr,
+                    facet: LibraryScanHintFacet::Series,
+                    path_key: library_scan_file_leaf_key(&path).expect("leaf key"),
+                    full_path_key: library_scan_file_full_path_key(&path),
+                    ids: vec![ExternalIdHint {
+                        provider: ExternalIdProvider::Tvdb,
+                        value: (500_000 + index).to_string(),
+                    }],
+                });
+                paths.push(path);
+            }
+        });
+        assert!(
+            push_examined <= HINTS as u64 * MAX_HINTS_EXAMINED_PER_CALL,
+            "pushing {HINTS} hints under one leaf key examined {push_examined} stored hints"
+        );
+
+        let leaf_key = library_scan_file_leaf_key(&paths[0]).expect("leaf key");
+        // The leaf key alone is ambiguous, so it must not answer.
+        assert!(
+            hints
+                .hint_for_stored_path(LibraryScanHintFacet::Series, &leaf_key)
+                .is_none()
+        );
+        let mut lookups = 0_u64;
+        let ((), lookup_examined) = library_scan_hints_examined_by(|| {
+            for index in (0..HINTS).step_by(100) {
+                let hint = hints
+                    .hint_for_scan_path(
+                        LibraryScanHintFacet::Series,
+                        &leaf_key,
+                        library_scan_file_full_path_key(&paths[index]).as_deref(),
+                    )
+                    .expect("full path disambiguates");
+                assert_eq!(hint.ids[0].value, (500_000 + index).to_string());
+                lookups += 1;
+            }
+        });
+        assert!(
+            lookup_examined <= lookups * MAX_HINTS_EXAMINED_PER_CALL,
+            "{lookups} ambiguous-leaf lookups examined {lookup_examined} stored hints"
+        );
+    }
+
+    #[test]
+    fn library_scan_hint_set_examines_a_bounded_number_of_hints_at_two_hundred_thousand() {
+        const HINTS: usize = 200_000;
+        let mut hints = LibraryScanHintSet::new();
+        let ((), push_examined) = library_scan_hints_examined_by(|| {
+            for index in 0..HINTS {
+                hints.push(synthetic_series_hint(index));
+            }
+        });
+        assert!(
+            push_examined <= HINTS as u64 * MAX_HINTS_EXAMINED_PER_CALL,
+            "pushing {HINTS} hints examined {push_examined} stored hints"
+        );
+
+        let mut lookups = 0_u64;
+        let ((), lookup_examined) = library_scan_hints_examined_by(|| {
+            for index in (0..HINTS).step_by(200) {
+                let folder = format!("/other-root/synthetic-{index:06}");
+                let path_key = library_scan_folder_leaf_key(&folder).expect("leaf key");
+                let hint = hints
+                    .hint_for_scan_path(
+                        LibraryScanHintFacet::Series,
+                        &path_key,
+                        library_scan_folder_full_path_key(&folder).as_deref(),
+                    )
+                    .expect("hint resolves by leaf key");
+                assert_eq!(hint.ids[0].value, (700_000 + index).to_string());
+                let by_id = hints
+                    .hint_for_external_ids(
+                        LibraryScanHintFacet::Series,
+                        &[ExternalIdHint {
+                            provider: ExternalIdProvider::Tvdb,
+                            value: (700_000 + index).to_string(),
+                        }],
+                    )
+                    .expect("hint resolves by id");
+                assert_eq!(by_id.path_key, path_key);
+                lookups += 2;
+            }
+        });
+        assert!(
+            lookup_examined <= lookups * MAX_HINTS_EXAMINED_PER_CALL,
+            "{lookups} lookups against {HINTS} hints examined {lookup_examined} stored hints"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4023,6 +4417,10 @@ mod pending_import_reason_class_tests {
             ),
             ("episode_lookup_failed", PendingImportReasonClass::Unmatched),
             ("no_metadata_match", PendingImportReasonClass::Unmatched),
+            (
+                "metadata_id_lookup_unresolved",
+                PendingImportReasonClass::Unmatched,
+            ),
             (
                 "no_acceptable_metadata_match",
                 PendingImportReasonClass::Ambiguous,

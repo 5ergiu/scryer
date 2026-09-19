@@ -483,6 +483,7 @@ impl DownloadQueueSnapshotCache {
             item.attention_reason = None;
         }
         item.import_status = Some(record.status);
+        item.import_type = Some(record.import_type);
         item.import_error_code = error_code;
         item.import_error_message = error_message.clone();
         if error_message.is_some() {
@@ -719,6 +720,7 @@ mod download_queue_snapshot_cache_tests {
             download_client_item_id: id,
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,
@@ -1038,6 +1040,11 @@ pub struct AppRuntimeAcquisitionState {
     /// not keep resolving). Bumping invalidates the whole memo; in steady
     /// state (history unchanged, nothing grabbed or imported) nothing bumps.
     pub(crate) download_registry_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Process-wide memo of client-observation identity resolutions, shared by
+    /// the queue-enrichment and tracked-download paths. See
+    /// [`crate::download_identity::ObservationResolutionCache`].
+    pub(crate) download_observation_resolutions:
+        Arc<tokio::sync::Mutex<crate::download_identity::ObservationResolutionCache>>,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,
@@ -1137,6 +1144,69 @@ impl DownloadClientCategoryAdmissionSnapshot {
                     .values()
                     .any(|categories| categories.contains(&category)))
     }
+
+    /// Whether this client's *effective* categories cover `category`.
+    ///
+    /// The effective set is the one the server-side feedback filter uses
+    /// (`feedback_scope_for_client`), so the categories Scryer asks the client
+    /// about and the categories Scryer adopts rows from cannot drift apart.
+    ///
+    /// Three shapes mean "unfiltered", and all keep the pre-scoping behaviour
+    /// of adopting everything the client lists:
+    /// * no entry at all — the operator configured no categories for this
+    ///   client, so nothing distinguishes Scryer's work from theirs;
+    /// * an entry holding the empty-string marker — the client still holds a
+    ///   live download whose grab-time category this instance cannot name;
+    /// * a row that reports no category — a client that does not file its work
+    ///   by category (a bridged Weaver row carries none) says nothing that
+    ///   could place the row outside Scryer's scope, and a silent client must
+    ///   not lose its rows. Placing such a row is the pre-existing admission
+    ///   gate's job, not this one's.
+    pub(crate) fn client_categories_cover(&self, client_id: &str, category: Option<&str>) -> bool {
+        let client_id = client_id.trim();
+        let Some(categories) = self
+            .feedback_categories_by_client
+            .get(client_id)
+            .filter(|categories| !categories.is_empty())
+        else {
+            return true;
+        };
+        if categories.iter().any(|category| category.trim().is_empty()) {
+            return true;
+        }
+        let Some(category) = category
+            .map(normalize_download_client_category)
+            .filter(|category| !category.is_empty())
+        else {
+            return true;
+        };
+        categories
+            .iter()
+            .any(|configured| normalize_download_client_category(configured) == category)
+    }
+}
+
+/// Whether a client row Scryer never submitted may be adopted into the
+/// download registry (a `downloads` row plus an active binding).
+///
+/// Every tick reads the client's queue plus its newest history rows, and a
+/// client shared with the operator's own work (a "music" category, say) hands
+/// Scryer hundreds of rows it will never touch. Adopting them minted a
+/// permanent identity and a never-ending binding each. A row outside the
+/// categories this client feeds Scryer is therefore left alone entirely.
+///
+/// Rows Scryer submitted are never filtered: their identity is Scryer's own,
+/// whatever category the client reports for them.
+pub(crate) fn foreign_observation_is_in_client_scope(
+    has_scryer_submission: bool,
+    client_id: &str,
+    category: Option<&str>,
+    snapshot: Option<&DownloadClientCategoryAdmissionSnapshot>,
+) -> bool {
+    has_scryer_submission
+        // Admission that is not loaded yet is not proof of anything, so the
+        // pre-scoping behaviour stands until it is.
+        || snapshot.is_none_or(|snapshot| snapshot.client_categories_cover(client_id, category))
 }
 
 pub(crate) fn download_observation_is_admitted(
@@ -1228,6 +1298,54 @@ mod download_client_category_admission_tests {
             )]),
             feedback_categories_by_client: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn foreign_rows_are_adopted_only_inside_their_clients_effective_categories() {
+        let snapshot =
+            DownloadClientCategoryAdmissionSnapshot::from_feedback_categories(HashMap::from([
+                (
+                    "shared-sab".to_string(),
+                    vec!["Series-HD".to_string(), "Movies".to_string()],
+                ),
+                // The "live download this instance cannot name" marker.
+                (
+                    "mid-routing-change".to_string(),
+                    vec![String::new(), "Series-HD".to_string()],
+                ),
+            ]));
+        let in_scope = |client_id: &str, category: Option<&str>| {
+            foreign_observation_is_in_client_scope(false, client_id, category, Some(&snapshot))
+        };
+
+        assert!(in_scope("shared-sab", Some("series-hd")));
+        assert!(in_scope("shared-sab", Some(" Movies ")));
+        assert!(!in_scope("shared-sab", Some("music")));
+        // A row that reports no category says nothing that could place it
+        // outside Scryer's scope, so it is left alone.
+        assert!(in_scope("shared-sab", None));
+        assert!(in_scope("shared-sab", Some("  ")));
+
+        // A client with nothing configured stays unfiltered, and so does one
+        // still holding a download whose grab-time category is unknown.
+        assert!(in_scope("unconfigured", Some("music")));
+        assert!(in_scope("unconfigured", None));
+        assert!(in_scope("mid-routing-change", Some("music")));
+
+        // Scryer's own rows are never filtered, and neither is a client whose
+        // admission has not loaded yet.
+        assert!(foreign_observation_is_in_client_scope(
+            true,
+            "shared-sab",
+            Some("music"),
+            Some(&snapshot)
+        ));
+        assert!(foreign_observation_is_in_client_scope(
+            false,
+            "shared-sab",
+            Some("music"),
+            None
+        ));
     }
 
     #[tokio::test]
@@ -1979,6 +2097,12 @@ pub struct AppRuntimeJobState {
     /// restart controller.
     pub application_upgrade_restart:
         Arc<std::sync::RwLock<Option<crate::application_upgrade::ApplicationUpgradeRestartHandle>>>,
+    /// Overrides the staged-bundle signature check for a macOS application
+    /// bundle upgrade. Only the promotion tests set this; a shipped build
+    /// leaves it empty and runs the real `codesign`.
+    #[cfg(not(windows))]
+    pub application_upgrade_bundle_signature_check:
+        Arc<std::sync::RwLock<Option<application_updater::macos_bundle::BundleSignatureCheck>>>,
     /// Single-flight guard for the interactive acquisition-search job — mirrors `title_deletion_lock`.
     pub acquisition_search_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -2096,6 +2220,78 @@ where
 #[derive(Clone)]
 pub struct AppRuntimeIntegrationState {
     pub managed_indexer_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) navigation_badge_facts: NavigationBadgeFactsCache,
+}
+
+/// The unfiltered facts behind the navigation badges.
+///
+/// The badge query is polled every 30 seconds by every open tab, and answering
+/// it from the durable stores put five reads (three of them unbounded) on that
+/// path. These are the same facts, counted off that path and filtered per actor
+/// in memory: counts are kept per library so an actor still sees only the
+/// libraries they hold the permission on.
+///
+/// Split in two because the halves move at different rates. The attention list
+/// follows the download queue and is recounted from the in-memory read model
+/// whenever a snapshot lands; the durable half costs store reads and is
+/// recounted on the refresh interval only, so a busy queue cannot turn every
+/// progress tick into an archive scan.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigationBadgeFacts {
+    pub(crate) durable: Arc<NavigationBadgeDurableFacts>,
+    /// One entry per download-import row needing attention: the library its
+    /// title belongs to, or `None` for a row with no title an operator can be
+    /// scoped by (operational history).
+    pub(crate) import_attention: Vec<Option<String>>,
+}
+
+/// The half of the badge facts that only a store can answer.
+///
+/// Each field is refreshed independently: a section whose read fails keeps the
+/// value it last had rather than blanking the badge or holding up the sections
+/// that did answer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NavigationBadgeDurableFacts {
+    /// The libraries a permission check may resolve against, in catalog order
+    /// — the same candidate list `authorized_library_ids` builds, including its
+    /// stand-in defaults for an install with no library rows yet.
+    pub(crate) candidate_library_ids: Vec<String>,
+    /// Pending imports that need an operator, per library.
+    pub(crate) pending_imports: HashMap<String, crate::types::PendingImportCounts>,
+    /// Pending media requests per library.
+    pub(crate) media_requests: HashMap<String, crate::types::MediaRequestCounts>,
+    pub(crate) plugin_update_count: i64,
+    pub(crate) plugin_blocked_count: i64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NavigationBadgeFactsCache {
+    pub(crate) current: Arc<tokio::sync::RwLock<Option<Arc<NavigationBadgeFacts>>>>,
+    pub(crate) build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Which durable sections are mid-failure, so a store that stays down is
+    /// logged once per streak instead of once per refresh.
+    pub(crate) failing_sections:
+        Arc<tokio::sync::Mutex<HashSet<crate::services::NavigationBadgeSection>>>,
+}
+
+/// The independently refreshed sections of the durable badge facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NavigationBadgeSection {
+    Libraries,
+    PendingImports,
+    MediaRequests,
+    Plugins,
+}
+
+impl NavigationBadgeSection {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Libraries => "libraries",
+            Self::PendingImports => "pending imports",
+            Self::MediaRequests => "media requests",
+            Self::Plugins => "plugins",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2192,6 +2388,9 @@ impl AppRuntimeState {
                 download_queue_read_model: DownloadQueueReadModelCache::default(),
                 wanted_projection_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_registry_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                download_observation_resolutions: Arc::new(tokio::sync::Mutex::new(
+                    Default::default(),
+                )),
                 wanted_projection_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 wanted_projection_build_lock: Arc::new(tokio::sync::Mutex::new(())),
                 download_client_category_admission: DownloadClientCategorySnapshotStore::default(),
@@ -2232,6 +2431,8 @@ impl AppRuntimeState {
                 title_deletion_lock: Arc::new(tokio::sync::Mutex::new(())),
                 system_maintenance_lock: Arc::new(tokio::sync::Mutex::new(())),
                 application_upgrade_restart: Arc::new(std::sync::RwLock::new(None)),
+                #[cfg(not(windows))]
+                application_upgrade_bundle_signature_check: Arc::new(std::sync::RwLock::new(None)),
                 acquisition_search_lock: Arc::new(tokio::sync::Mutex::new(())),
             },
             health: AppRuntimeHealthState {
@@ -2244,6 +2445,7 @@ impl AppRuntimeState {
             },
             integrations: AppRuntimeIntegrationState {
                 managed_indexer_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+                navigation_badge_facts: NavigationBadgeFactsCache::default(),
             },
         }
     }

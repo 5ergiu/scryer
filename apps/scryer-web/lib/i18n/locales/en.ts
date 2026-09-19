@@ -1573,6 +1573,8 @@ const en: LocaleDictionary = {
   "pendingImports.library": "Library:",
   "pendingImports.knownTitle": "Known title:",
   "pendingImports.reason.title_already_owns_another_folder": "Title already owns another folder",
+  "pendingImports.reason.metadata_id_lookup_unresolved":
+    "Metadata lookup could not resolve this folder's external id; the next scan retries it",
   "pendingImports.reason.folder_ownership_changed_by_user":
     "Folder ownership changed by user",
   "pendingImports.folderOwnershipChangedHelp":
@@ -3546,6 +3548,14 @@ const en: LocaleDictionary = {
   "setup.importWarmupSessionExpired":
     "Your import preparation is no longer available — Scryer may have restarted, or it sat idle too long. Reconnect to your instances to start a fresh import.",
   "setup.importReconnect": "Reconnect",
+  "setup.applyingImport": "Applying import…",
+  "setup.applyingImportDetail":
+    "Writing the imported monitored state into your libraries. This keeps running if you leave the page.",
+  "setup.importApplied": "Import applied",
+  "setup.importAppliedDetail":
+    "Every imported title's monitored state was written to your libraries.",
+  "setup.importFinalizeFailedTitle": "Finishing the import failed",
+  "setup.titlesApplied": "{{applied}} / {{total}} titles",
   "setup.importUnmappedRootsNotice":
     "Some detected source folders still need a library. Go back to the Libraries step to map them before finishing.",
 
@@ -3804,6 +3814,9 @@ const en: LocaleDictionary = {
   "appUpgrade.eligibility.disabled_by_operator": "In-app upgrades were disabled by the operator.",
   "appUpgrade.eligibility.unsupported_layout": "This installation layout is not supported.",
   "appUpgrade.eligibility.install_dir_not_writable": "The installation directory is not writable.",
+  "appUpgrade.eligibility.app_bundle_translocated": "macOS is running Scryer from a temporary copy. Move Scryer to your Applications folder and open it from there.",
+  "appUpgrade.eligibility.app_bundle_read_only_volume": "Scryer is running from a read-only volume. Drag Scryer to your Applications folder and open it from there.",
+  "appUpgrade.eligibility.app_bundle_not_tray_supervised": "This app was not started by the Scryer app, so it cannot be restarted after an upgrade.",
   "appUpgrade.eligibility.unknown": "Upgrade eligibility is unavailable.",
   "appUpgrade.rebootRequired": "Restart Windows to finish this upgrade.",
   "appUpgrade.activeRun": "Upgrade in progress",
@@ -3837,6 +3850,7 @@ const en: LocaleDictionary = {
   "appUpgrade.guidance.other": "Use the upgrade method provided by this installation's operator.",
   "appUpgrade.installationKind.portable": "Portable",
   "appUpgrade.installationKind.directMsi": "Direct MSI",
+  "appUpgrade.installationKind.macosAppBundle": "macOS app",
   "appUpgrade.installationKind.docker": "Docker",
   "appUpgrade.installationKind.homebrew": "Homebrew",
   "appUpgrade.installationKind.winget": "winget",
@@ -5276,6 +5290,7 @@ const en: LocaleDictionary = {
   "mediaInfo.colSampleDepth": "Sample depth",
   "mediaInfo.colRoles": "Roles",
   "mediaInfo.colName": "Name",
+  "mediaInfo.inferredLanguageFootnote": "Inferred from the track name because the track has no language field.",
   "mediaInfo.colForced": "Forced",
   "mediaInfo.colDefault": "Default",
   "mediaInfo.colStart": "Start",

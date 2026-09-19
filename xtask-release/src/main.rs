@@ -2,47 +2,36 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use const_oid::db::rfc5280::ID_KP_CODE_SIGNING;
 use flate2::read::GzDecoder;
-use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
+use rustls_pki_types::CertificateDer;
 #[cfg(test)]
-use scryer_application::application_upgrade::manifest::parse_and_validate_upgrade_manifest;
+use scryer_application::application_upgrade::manifest::{
+    parse_and_validate_upgrade_manifest, parse_and_validate_upgrade_manifest_v2,
+};
 use scryer_application::{
     PluginDescriptorLoader,
     application_upgrade::manifest::{
-        UPGRADE_MANIFEST_SCHEMA_VERSION, UpgradeArchitecture, UpgradeArchive, UpgradeArtifact,
-        UpgradeArtifactMember, UpgradeChannel, UpgradeManifest, UpgradePlatform,
+        UPGRADE_MANIFEST_SCHEMA_VERSION, UPGRADE_MANIFEST_V2_SCHEMA_VERSION, UpgradeArchitecture,
+        UpgradeArchive, UpgradeArtifact, UpgradeArtifactMember, UpgradeChannel, UpgradeManifest,
+        UpgradePlatform,
     },
 };
 use scryer_plugins::WasmPluginDescriptorLoader;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sigstore::{
-    cosign::{CosignCapabilities, bundle::SignedArtifactBundle},
-    crypto::{CosignVerificationKey, SigningScheme},
-    trust::{TrustRoot, sigstore::SigstoreTrustRoot},
-};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use toml::Value as TomlValue;
 use toml_edit::{DocumentMut, value};
-use webpki::{EndEntityCert, KeyUsage};
-use x509_cert::{
-    Certificate,
-    der::{Decode, DecodePem, Encode},
-    ext::{
-        Extension,
-        pkix::{SubjectAltName, name::GeneralName},
-    },
-};
+use x509_cert::{Certificate, der::Decode};
 use xtask_support::{
     BOLD, GREEN, RESET, TaskContext, YELLOW, command_available, ok, prefixed_ok, prefixed_step,
     require_command, run_capture, run_checked, run_streaming, step, warn,
@@ -124,9 +113,6 @@ const SIGSTORE_TRUST_ROOT_TARGET: &str = "trusted_root.json";
 const SIGSTORE_TRUST_ROOT_TIMEOUT: Duration = Duration::from_secs(120);
 const OFFICIAL_PLUGIN_REPO: &str = "scryer-media/scryer-plugins";
 const OFFICIAL_PLUGIN_V3_RELEASE_WORKFLOW: &str = ".github/workflows/release-plugin-v3.yml";
-const SIGSTORE_GITHUB_WORKFLOW_NAME_OID: &str = "1.3.6.1.4.1.57264.1.4";
-const SIGSTORE_GITHUB_WORKFLOW_REPOSITORY_OID: &str = "1.3.6.1.4.1.57264.1.5";
-const SIGSTORE_GITHUB_WORKFLOW_REF_OID: &str = "1.3.6.1.4.1.57264.1.6";
 const RELEASE_LOCAL_PATH_TOKENS: &[&str] = &["~/", "/Users/", "/home/", "C:\\Users\\", "C:/Users/"];
 const RELEASE_MACOS_HOME_PATH_COMPONENTS: &[&str] = &[
     "Applications",
@@ -173,13 +159,6 @@ const REQUIRED_SCRYER_DRY_RUN_STEPS: &[&str] = &[
     GRAPHQL_API_COMPAT_STEP,
     "release_hygiene",
 ];
-
-type RekorVerificationKeys = BTreeMap<String, CosignVerificationKey>;
-type FulcioTrustAnchors = Vec<TrustAnchor<'static>>;
-
-static REKOR_VERIFICATION_KEYS: OnceLock<Result<Arc<RekorVerificationKeys>, String>> =
-    OnceLock::new();
-static FULCIO_TRUST_ANCHORS: OnceLock<Result<Arc<FulcioTrustAnchors>, String>> = OnceLock::new();
 
 struct BuiltinPluginSpec {
     plugin_id: &'static str,
@@ -392,6 +371,23 @@ struct UpgradeManifestArgs {
     artifacts_dir: PathBuf,
     #[arg(long, help = "Destination JSON file")]
     output: PathBuf,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = UpgradeManifestGeneration::V1,
+        help = "Which manifest generation to write"
+    )]
+    schema: UpgradeManifestGeneration,
+}
+
+/// The two manifest generations published side by side for each release.
+///
+/// v1 is frozen and must stay byte-for-byte what every shipped client already
+/// parses; v2 carries the same artifacts plus everything added since.
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum UpgradeManifestGeneration {
+    V1,
+    V2,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
@@ -1280,6 +1276,31 @@ const UPGRADE_MANIFEST_ASSETS: [UpgradeManifestAssetSpec; 8] = [
     },
 ];
 
+/// Artifacts that exist only in the v2 manifest.
+///
+/// The v1 schema is frozen and its parser rejects any value it has never seen,
+/// so a v1 manifest carrying one of these would be rejected in full by every
+/// shipped client. They are therefore appended to the v2 manifest only.
+///
+/// Each of these is the notarized `Scryer.app` bundle, archived with the bundle
+/// directory at its root.
+const UPGRADE_MANIFEST_V2_ONLY_ASSETS: [UpgradeManifestAssetSpec; 2] = [
+    UpgradeManifestAssetSpec {
+        platform: UpgradePlatform::Darwin,
+        arch: UpgradeArchitecture::X86_64,
+        channel: UpgradeChannel::App,
+        archive: UpgradeArchive::TarGz,
+        asset_name: "scryer-darwin-x86_64.app.tar.gz",
+    },
+    UpgradeManifestAssetSpec {
+        platform: UpgradePlatform::Darwin,
+        arch: UpgradeArchitecture::Arm64,
+        channel: UpgradeChannel::App,
+        archive: UpgradeArchive::TarGz,
+        asset_name: "scryer-darwin-arm64.app.tar.gz",
+    },
+];
+
 fn run_ci_upgrade_manifest(ctx: &TaskContext, args: UpgradeManifestArgs) -> Result<()> {
     step("Generating signed upgrade manifest");
     let version = normalize_upgrade_manifest_version(&args.version)?;
@@ -1290,7 +1311,14 @@ fn run_ci_upgrade_manifest(ctx: &TaskContext, args: UpgradeManifestArgs) -> Resu
     let repository = normalize_github_repository(&args.repository)?;
     let artifacts_dir = resolve_ci_path(ctx, args.artifacts_dir);
     let output = resolve_ci_path(ctx, args.output);
-    let raw = generate_upgrade_manifest(&version, tag, &repository, &artifacts_dir)?;
+    let raw = match args.schema {
+        UpgradeManifestGeneration::V1 => {
+            generate_upgrade_manifest(&version, tag, &repository, &artifacts_dir)?
+        }
+        UpgradeManifestGeneration::V2 => {
+            generate_upgrade_manifest_v2(&version, tag, &repository, &artifacts_dir)?
+        }
+    };
 
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
@@ -1337,6 +1365,36 @@ fn generate_upgrade_manifest(
 
     let manifest = UpgradeManifest {
         schema: UPGRADE_MANIFEST_SCHEMA_VERSION.to_string(),
+        tag: tag.to_string(),
+        version: version.to_string(),
+        artifacts,
+    };
+    let mut raw = serde_json::to_vec_pretty(&manifest)?;
+    raw.push(b'\n');
+    Ok(raw)
+}
+
+/// Build the v2 manifest: every v1 artifact, plus the v2-only ones.
+///
+/// Deliberately the same collection, sorting and serialization as v1 — the only
+/// differences are the schema string and the extra artifacts, so the two
+/// manifests describe exactly the same release and cannot drift.
+fn generate_upgrade_manifest_v2(
+    version: &str,
+    tag: &str,
+    repository: &str,
+    artifacts_dir: &Path,
+) -> Result<Vec<u8>> {
+    let mut artifacts = UPGRADE_MANIFEST_ASSETS
+        .iter()
+        .chain(UPGRADE_MANIFEST_V2_ONLY_ASSETS.iter())
+        .copied()
+        .map(|spec| collect_upgrade_manifest_artifact(spec, repository, tag, artifacts_dir))
+        .collect::<Result<Vec<_>>>()?;
+    artifacts.sort_by_key(upgrade_manifest_artifact_sort_key);
+
+    let manifest = UpgradeManifest {
+        schema: UPGRADE_MANIFEST_V2_SCHEMA_VERSION.to_string(),
         tag: tag.to_string(),
         version: version.to_string(),
         artifacts,
@@ -1491,6 +1549,7 @@ fn upgrade_architecture_name(architecture: UpgradeArchitecture) -> &'static str 
 
 fn upgrade_channel_name(channel: UpgradeChannel) -> &'static str {
     match channel {
+        UpgradeChannel::App => "app",
         UpgradeChannel::Msi => "msi",
         UpgradeChannel::Portable => "portable",
     }
@@ -1741,6 +1800,11 @@ ManifestVersion: {WINGET_MANIFEST_VERSION}\n"
     )
 }
 
+/// `UpgradeBehavior: install` is load-bearing. A Scryer uninstall now removes
+/// the user's desktop profile — database included — so `uninstallPrevious`
+/// would make every `winget upgrade` wipe the user's library data. The MSI
+/// declares a major upgrade, so installing over the previous version is both
+/// supported and what keeps settings and history.
 fn winget_installer_manifest(
     version: &Version,
     release_date: &str,
@@ -1764,7 +1828,7 @@ fn winget_installer_manifest(
 PackageIdentifier: {WINGET_PACKAGE_IDENTIFIER}\n\
 PackageVersion: {version}\n\
 InstallerType: msi\n\
-UpgradeBehavior: uninstallPrevious\n\
+UpgradeBehavior: install\n\
 ReleaseDate: {release_date}\n\
 Installers:\n\
 {installers}\n\
@@ -2541,12 +2605,29 @@ fn validate_materialized_trusted_logs(logs: &[MaterializedTrustedLog], label: &s
             &log.public_key.raw_bytes,
             &format!("{label} public key"),
         )?;
-        CosignVerificationKey::try_from_der(&key_der)
+        validate_materialized_public_key(&key_der)
             .with_context(|| format!("failed to parse Sigstore {label} public key"))?;
         validate_materialized_time_range(
             &log.public_key.valid_for,
             &format!("{label} public key"),
         )?;
+    }
+    Ok(())
+}
+
+/// A log key must be a SubjectPublicKeyInfo of a type the verifier can use:
+/// ECDSA, RSA or Ed25519.
+fn validate_materialized_public_key(key_der: &[u8]) -> Result<()> {
+    const SUPPORTED_KEY_ALGORITHMS: [&str; 3] = [
+        "1.2.840.10045.2.1",    // id-ecPublicKey
+        "1.2.840.113549.1.1.1", // rsaEncryption
+        "1.3.101.112",          // id-Ed25519
+    ];
+    let spki = x509_cert::spki::SubjectPublicKeyInfoOwned::from_der(key_der)
+        .map_err(|error| anyhow!("not a SubjectPublicKeyInfo: {error}"))?;
+    let algorithm = spki.algorithm.oid.to_string();
+    if !SUPPORTED_KEY_ALGORITHMS.contains(&algorithm.as_str()) {
+        bail!("unsupported public key algorithm {algorithm}");
     }
     Ok(())
 }
@@ -2636,43 +2717,6 @@ fn resolved_cargo_package_version(ctx: &TaskContext, package_name: &str) -> Resu
     Ok(versions.into_iter().next().expect("one version checked"))
 }
 
-fn install_xtask_sigstore_trust_material(trust_root: &SigstoreTrustRoot) -> Result<()> {
-    let rekor_keys = trust_root
-        .rekor_keys()
-        .map_err(|error| anyhow!("failed to load Sigstore Rekor public keys: {error}"))?;
-    let rekor_keys = Arc::new(parse_rekor_verification_keys(rekor_keys)?);
-    if let Some(existing) = REKOR_VERIFICATION_KEYS.get() {
-        existing.as_ref().map_err(|error| anyhow!(error.clone()))?;
-    } else {
-        REKOR_VERIFICATION_KEYS
-            .set(Ok(rekor_keys))
-            .map_err(|_| anyhow!("failed to initialize Sigstore Rekor keys"))?;
-    }
-
-    let fulcio_certs = trust_root
-        .fulcio_certs()
-        .map_err(|error| anyhow!("failed to load Sigstore Fulcio certificates: {error}"))?;
-    let anchors = fulcio_certs
-        .iter()
-        .map(|cert| {
-            webpki::anchor_from_trusted_cert(cert)
-                .map(|anchor| anchor.to_owned())
-                .map_err(|error| anyhow!(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if anchors.is_empty() {
-        bail!("Sigstore Fulcio trust root is empty");
-    }
-    if let Some(existing) = FULCIO_TRUST_ANCHORS.get() {
-        existing.as_ref().map_err(|error| anyhow!(error.clone()))?;
-    } else {
-        FULCIO_TRUST_ANCHORS
-            .set(Ok(Arc::new(anchors)))
-            .map_err(|_| anyhow!("failed to initialize Sigstore Fulcio anchors"))?;
-    }
-    Ok(())
-}
-
 fn write_materialized_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -2695,16 +2739,13 @@ fn write_materialized_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Result<()> {
     step("Materializing TUF-verified Sigstore trust root");
-    let checkout = tempfile::tempdir().context("failed to create Sigstore TUF checkout")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build Sigstore trust-root runtime")?;
-    let trust_root = runtime
+    // The refreshed root also becomes the one artifact-trust verifies the
+    // built-in downloads against, so they are checked with what gets embedded.
+    let root_bytes = sigstore_runtime()?
         .block_on(async {
             tokio::time::timeout(
                 SIGSTORE_TRUST_ROOT_TIMEOUT,
-                SigstoreTrustRoot::new(Some(checkout.path())),
+                artifact_trust::refresh_sigstore_trusted_root(),
             )
             .await
         })
@@ -2715,10 +2756,7 @@ fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Resu
             )
         })?
         .map_err(|error| anyhow!("failed to load Sigstore trust root: {error}"))?;
-    let root_bytes = fs::read(checkout.path().join(SIGSTORE_TRUST_ROOT_TARGET))
-        .context("failed to read TUF-verified Sigstore trusted_root.json")?;
     validate_runtime_sigstore_trust_root_document(&root_bytes)?;
-    install_xtask_sigstore_trust_material(&trust_root)?;
 
     let sha256 = Sha256::digest(&root_bytes)
         .iter()
@@ -2731,8 +2769,8 @@ fn materialize_sigstore_trust_root(ctx: &TaskContext, output_dir: &Path) -> Resu
         sha256: sha256.clone(),
         retrieved_at: Utc::now().to_rfc3339(),
         sigstore_version: format!(
-            "sigstore-rs {}",
-            resolved_cargo_package_version(ctx, "sigstore")?
+            "artifact-trust {}",
+            resolved_cargo_package_version(ctx, "artifact-trust")?
         ),
         source_commit: current_head_commit(ctx)?,
         github_repository: std::env::var("GITHUB_REPOSITORY").ok(),
@@ -2780,290 +2818,28 @@ fn verify_signed_blob(
     bundle_raw: &[u8],
     required_signer: &RequiredSigner,
 ) -> Result<()> {
-    let bundle_text = std::str::from_utf8(bundle_raw).context("invalid Sigstore bundle UTF-8")?;
-    let bundle_text = normalize_sigstore_bundle(bundle_text)?;
-    let rekor_keys = cached_rekor_verification_keys()?;
-    let bundle = SignedArtifactBundle::new_verified(bundle_text.as_str(), rekor_keys.as_ref())
-        .map_err(|error| anyhow!("Sigstore Rekor bundle verification failed: {error}"))?;
-    let cert_pem = normalize_bundle_cert(&bundle.cert)?;
-    <sigstore::cosign::Client as CosignCapabilities>::verify_blob(
-        &cert_pem,
-        &bundle.base64_signature,
-        raw,
-    )
-    .map_err(|error| anyhow!("Sigstore blob signature verification failed: {error}"))?;
-    verify_fulcio_certificate_chain(&cert_pem, &bundle)?;
-    verify_signer_identity(&cert_pem, required_signer)?;
-    Ok(())
+    sigstore_runtime()?
+        .block_on(artifact_trust::verify_signed_blob(
+            raw.to_vec(),
+            bundle_raw.to_vec(),
+            artifact_trust::RequiredSigner {
+                github_repository: required_signer.github_repository.clone(),
+                github_workflow: required_signer.github_workflow.clone(),
+                github_ref: None,
+            },
+        ))
+        .map_err(|error| anyhow!("Sigstore blob verification failed: {error}"))
 }
 
-fn verify_fulcio_certificate_chain(cert_pem: &str, bundle: &SignedArtifactBundle) -> Result<()> {
-    let cert = Certificate::from_pem(cert_pem.as_bytes())
-        .map_err(|error| anyhow!("failed to parse Sigstore certificate: {error}"))?;
-    let cert_der = cert
-        .to_der()
-        .map_err(|error| anyhow!("failed to encode Sigstore certificate: {error}"))?;
-    let cert_der = CertificateDer::from(cert_der.as_slice());
-    let end_entity = EndEntityCert::try_from(&cert_der)
-        .map_err(|error| anyhow!("invalid Sigstore certificate: {error}"))?;
-    let verification_time = rekor_integrated_time(bundle.rekor_bundle.payload.integrated_time)?;
-    let trust_anchors = cached_fulcio_trust_anchors()?;
-
-    end_entity
-        .verify_for_usage(
-            webpki::ALL_VERIFICATION_ALGS,
-            trust_anchors.as_slice(),
-            &[],
-            verification_time,
-            KeyUsage::required(ID_KP_CODE_SIGNING.as_bytes()),
-            None,
-            None,
-        )
-        .map_err(|error| {
-            anyhow!("Sigstore Fulcio certificate chain verification failed: {error}")
-        })?;
-
-    Ok(())
-}
-
-fn rekor_integrated_time(integrated_time: i64) -> Result<UnixTime> {
-    let integrated_time =
-        u64::try_from(integrated_time).context("Sigstore Rekor integrated time is negative")?;
-    Ok(UnixTime::since_unix_epoch(std::time::Duration::from_secs(
-        integrated_time,
-    )))
-}
-
-fn cached_rekor_verification_keys() -> Result<Arc<RekorVerificationKeys>> {
-    REKOR_VERIFICATION_KEYS
-        .get()
-        .ok_or_else(|| anyhow!("Sigstore trust root was not materialized before verification"))?
-        .clone()
-        .map_err(anyhow::Error::msg)
-}
-
-fn cached_fulcio_trust_anchors() -> Result<Arc<FulcioTrustAnchors>> {
-    FULCIO_TRUST_ANCHORS
-        .get()
-        .ok_or_else(|| anyhow!("Sigstore trust root was not materialized before verification"))?
-        .clone()
-        .map_err(anyhow::Error::msg)
-}
-
-fn parse_rekor_verification_keys(keys: BTreeMap<String, &[u8]>) -> Result<RekorVerificationKeys> {
-    let parsed = keys
-        .into_iter()
-        .filter_map(|(key_id, key)| {
-            CosignVerificationKey::from_der(key, &SigningScheme::default())
-                .ok()
-                .map(|key| (key_id, key))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if parsed.is_empty() {
-        bail!("failed to parse any Rekor public keys from the Sigstore trust root");
-    }
-    Ok(parsed)
-}
-
-fn normalize_sigstore_bundle(bundle_text: &str) -> Result<String> {
-    let Ok(bundle_json) = serde_json::from_str::<serde_json::Value>(bundle_text) else {
-        return Ok(bundle_text.to_string());
-    };
-    if bundle_json.get("base64Signature").is_some() || bundle_json.get("messageSignature").is_none()
-    {
-        return Ok(bundle_text.to_string());
-    }
-
-    let tlog_entry = sigstore_bundle_value(&bundle_json, &["verificationMaterial", "tlogEntries"])
-        .and_then(|value| value.as_array())
-        .and_then(|entries| entries.first())
-        .ok_or_else(|| anyhow!("Sigstore bundle missing verificationMaterial.tlogEntries[0]"))?;
-    let cert_pem = normalize_bundle_cert(sigstore_bundle_string_field(
-        &bundle_json,
-        &["verificationMaterial", "certificate", "rawBytes"],
-        "verificationMaterial.certificate.rawBytes",
-    )?)?;
-
-    serde_json::to_string(&serde_json::json!({
-        "base64Signature": sigstore_bundle_string_field(
-            &bundle_json,
-            &["messageSignature", "signature"],
-            "messageSignature.signature",
-        )?,
-        "cert": cert_pem,
-        "rekorBundle": {
-            "SignedEntryTimestamp": sigstore_bundle_string_field(
-                tlog_entry,
-                &["inclusionPromise", "signedEntryTimestamp"],
-                "verificationMaterial.tlogEntries[0].inclusionPromise.signedEntryTimestamp",
-            )?,
-            "Payload": {
-                "body": sigstore_bundle_string_field(
-                    tlog_entry,
-                    &["canonicalizedBody"],
-                    "verificationMaterial.tlogEntries[0].canonicalizedBody",
-                )?,
-                "integratedTime": sigstore_bundle_i64_field(
-                    tlog_entry,
-                    &["integratedTime"],
-                    "verificationMaterial.tlogEntries[0].integratedTime",
-                )?,
-                "logIndex": sigstore_bundle_i64_field(
-                    tlog_entry,
-                    &["logIndex"],
-                    "verificationMaterial.tlogEntries[0].logIndex",
-                )?,
-                "logID": sigstore_bundle_string_field(
-                    tlog_entry,
-                    &["logId", "keyId"],
-                    "verificationMaterial.tlogEntries[0].logId.keyId",
-                )
-                .map(normalize_rekor_log_id)?,
-            }
-        }
-    }))
-    .context("failed to normalize Sigstore bundle")
-}
-
-fn sigstore_bundle_value<'a>(
-    value: &'a serde_json::Value,
-    path: &[&str],
-) -> Option<&'a serde_json::Value> {
-    path.iter()
-        .try_fold(value, |current, segment| current.get(*segment))
-}
-
-fn sigstore_bundle_string_field<'a>(
-    value: &'a serde_json::Value,
-    path: &[&str],
-    label: &str,
-) -> Result<&'a str> {
-    sigstore_bundle_value(value, path)
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow!("Sigstore bundle missing {label}"))
-}
-
-fn sigstore_bundle_i64_field(value: &serde_json::Value, path: &[&str], label: &str) -> Result<i64> {
-    let Some(value) = sigstore_bundle_value(value, path) else {
-        bail!("Sigstore bundle missing {label}");
-    };
-    if let Some(number) = value.as_i64() {
-        return Ok(number);
-    }
-    let Some(number) = value.as_str() else {
-        bail!("Sigstore bundle {label} is not an integer");
-    };
-    number
-        .parse::<i64>()
-        .with_context(|| format!("Sigstore bundle {label} is not a valid integer"))
-}
-
-fn normalize_rekor_log_id(key_id: &str) -> String {
-    if key_id.len().is_multiple_of(2) && key_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return key_id.to_ascii_lowercase();
-    }
-
-    match base64::engine::general_purpose::STANDARD.decode(key_id.as_bytes()) {
-        Ok(decoded) => {
-            use std::fmt::Write as _;
-
-            let mut hex = String::with_capacity(decoded.len() * 2);
-            for byte in decoded {
-                let _ = write!(&mut hex, "{byte:02x}");
-            }
-            hex
-        }
-        Err(_) => key_id.to_string(),
-    }
-}
-
-fn normalize_bundle_cert(cert: &str) -> Result<String> {
-    if cert.contains("-----BEGIN CERTIFICATE-----") {
-        return Ok(cert.to_string());
-    }
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(cert.as_bytes())
-        .context("invalid base64 Sigstore certificate")?;
-    if let Ok(decoded_text) = String::from_utf8(decoded.clone())
-        && decoded_text.contains("-----BEGIN CERTIFICATE-----")
-    {
-        return Ok(decoded_text);
-    }
-    Ok(pem_encode_certificate(&decoded))
-}
-
-fn pem_encode_certificate(der: &[u8]) -> String {
-    let base64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-    for chunk in base64.as_bytes().chunks(64) {
-        pem.push_str(&String::from_utf8_lossy(chunk));
-        pem.push('\n');
-    }
-    pem.push_str("-----END CERTIFICATE-----\n");
-    pem
-}
-
-fn cert_extension_utf8(cert: &Certificate, oid: &str) -> Result<Option<String>> {
-    let Some(extensions) = cert.tbs_certificate().extensions() else {
-        return Ok(None);
-    };
-    extensions
-        .iter()
-        .find(|ext: &&Extension| ext.extn_id.to_string() == oid)
-        .map(|ext| {
-            String::from_utf8(ext.extn_value.clone().into_bytes().into_vec())
-                .map_err(|_| anyhow!("Sigstore certificate extension {oid} is not valid UTF-8"))
-        })
-        .transpose()
-}
-
-fn cert_subject_uri(cert: &Certificate) -> Result<Option<String>> {
-    let san = cert
-        .tbs_certificate()
-        .get_extension::<SubjectAltName>()
-        .map_err(|error| anyhow!("failed to read certificate SAN: {error}"))?
-        .map(|(_, san)| san);
-    let Some(san) = san else {
-        return Ok(None);
-    };
-    Ok(san.0.iter().find_map(|name| match name {
-        GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
-        _ => None,
-    }))
-}
-
-fn verify_signer_identity(cert_pem: &str, required_signer: &RequiredSigner) -> Result<()> {
-    let cert = Certificate::from_pem(cert_pem.as_bytes())
-        .map_err(|error| anyhow!("failed to parse Sigstore certificate: {error}"))?;
-    let repository = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_REPOSITORY_OID)?;
-    if repository.as_deref() != Some(required_signer.github_repository.as_str()) {
-        bail!(
-            "Sigstore signer repo mismatch: expected '{}', got '{}'",
-            required_signer.github_repository,
-            repository.unwrap_or_else(|| "<missing>".to_string())
-        );
-    }
-
-    if let Some(expected_workflow) = required_signer.github_workflow.as_deref() {
-        let workflow_name = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_NAME_OID)?;
-        let workflow_ref = cert_extension_utf8(&cert, SIGSTORE_GITHUB_WORKFLOW_REF_OID)?;
-        let subject_uri = cert_subject_uri(&cert)?;
-        let matched = workflow_name.as_deref() == Some(expected_workflow)
-            || workflow_ref
-                .as_deref()
-                .is_some_and(|value| value.contains(expected_workflow))
-            || subject_uri
-                .as_deref()
-                .is_some_and(|value| value.contains(expected_workflow));
-        if !matched {
-            bail!(
-                "Sigstore workflow mismatch for '{}'",
-                required_signer.github_repository
-            );
-        }
-    }
-
-    Ok(())
+/// artifact-trust verifies and refreshes on Tokio, and reaches the network
+/// through a rustls client that expects the process to have picked its crypto
+/// provider.
+fn sigstore_runtime() -> Result<tokio::runtime::Runtime> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Sigstore verification runtime")
 }
 
 fn fetch_verified_bytes(
@@ -4614,13 +4390,29 @@ mod tests {
     use super::*;
 
     fn write_upgrade_manifest_fixture(artifacts_dir: &Path) {
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_ASSETS);
+    }
+
+    /// Both generations' assets, for the v2 fixture.
+    fn write_upgrade_manifest_v2_fixture(artifacts_dir: &Path) {
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_ASSETS);
+        write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_V2_ONLY_ASSETS);
+    }
+
+    fn write_upgrade_manifest_fixture_for(
+        artifacts_dir: &Path,
+        specs: &[UpgradeManifestAssetSpec],
+    ) {
         fs::create_dir_all(artifacts_dir).expect("create fixture artifact directory");
-        for spec in UPGRADE_MANIFEST_ASSETS {
+        for spec in specs {
             let path = artifacts_dir.join(spec.asset_name);
             match spec.archive {
-                UpgradeArchive::TarGz => {
-                    write_fixture_tar_gz(&path, spec.asset_name, fixture_members(spec.platform))
-                }
+                UpgradeArchive::TarGz => write_fixture_tar_gz(
+                    &path,
+                    spec.asset_name,
+                    fixture_members(spec.platform, spec.channel),
+                    fixture_directories(spec.channel),
+                ),
                 UpgradeArchive::Msi => {
                     fs::write(&path, format!("fixture MSI {}\n", spec.asset_name))
                         .expect("write fixture MSI");
@@ -4629,8 +4421,22 @@ mod tests {
         }
     }
 
-    /// The member layout each platform's portable tarball actually ships.
-    fn fixture_members(platform: UpgradePlatform) -> &'static [(&'static str, u32)] {
+    /// The member layout each artifact actually ships.
+    fn fixture_members(
+        platform: UpgradePlatform,
+        channel: UpgradeChannel,
+    ) -> &'static [(&'static str, u32)] {
+        // A bundle archive is rooted at `Scryer.app/`, and its executables and
+        // code signature are listed the same way a portable archive's are.
+        if channel == UpgradeChannel::App {
+            return &[
+                ("Scryer.app/Contents/Info.plist", 0o644),
+                ("Scryer.app/Contents/MacOS/scryer", 0o755),
+                ("Scryer.app/Contents/MacOS/scryer-tray", 0o755),
+                ("Scryer.app/Contents/Resources/scryer.icns", 0o644),
+                ("Scryer.app/Contents/_CodeSignature/CodeResources", 0o644),
+            ];
+        }
         match platform {
             UpgradePlatform::Windows => &[
                 ("scryer.exe", 0o755),
@@ -4642,10 +4448,44 @@ mod tests {
         }
     }
 
-    fn write_fixture_tar_gz(path: &Path, asset_name: &str, members: &[(&str, u32)]) {
+    /// `tar` records a directory entry for every directory in a bundle tree,
+    /// and the generator has to skip them rather than list them as members.
+    fn fixture_directories(channel: UpgradeChannel) -> &'static [&'static str] {
+        if channel == UpgradeChannel::App {
+            &[
+                "Scryer.app/",
+                "Scryer.app/Contents/",
+                "Scryer.app/Contents/MacOS/",
+                "Scryer.app/Contents/Resources/",
+                "Scryer.app/Contents/_CodeSignature/",
+            ]
+        } else {
+            &[]
+        }
+    }
+
+    fn write_fixture_tar_gz(
+        path: &Path,
+        asset_name: &str,
+        members: &[(&str, u32)],
+        directories: &[&str],
+    ) {
         let file = fs::File::create(path).expect("create fixture tarball");
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
+        for directory in directories {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, directory, std::io::empty())
+                .expect("append fixture tar directory");
+        }
         for (member, mode) in members {
             let content = format!("fixture tar member {member} for {asset_name}\n");
             let mut header = tar::Header::new_gnu();
@@ -4692,6 +4532,83 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../api/upgrade/manifest.v1.example.json"
             ))
+        );
+    }
+
+    #[test]
+    fn upgrade_manifest_v2_generation_is_deterministic_and_matches_the_golden_fixture() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let artifacts_dir = tempdir.path().join("artifacts");
+        write_upgrade_manifest_v2_fixture(&artifacts_dir);
+
+        let first = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate first v2 upgrade manifest");
+        let second = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate second v2 upgrade manifest");
+
+        assert_eq!(first, second);
+        parse_and_validate_upgrade_manifest_v2(&first).expect("generated v2 manifest is valid");
+        assert_eq!(
+            String::from_utf8(first).expect("manifest is UTF-8"),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../api/upgrade/manifest.v2.example.json"
+            ))
+        );
+    }
+
+    /// v1 is frozen. Its parser rejects any value it has never seen, so a v1
+    /// manifest that carried a v2-only artifact would be rejected in full by
+    /// every shipped client — the exact failure v2 exists to prevent.
+    #[test]
+    fn the_v1_manifest_never_carries_v2_only_artifacts() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let artifacts_dir = tempdir.path().join("artifacts");
+        write_upgrade_manifest_v2_fixture(&artifacts_dir);
+
+        let v1 = generate_upgrade_manifest(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate v1 upgrade manifest");
+        let parsed = parse_and_validate_upgrade_manifest(&v1).expect("v1 manifest is valid");
+        assert!(
+            parsed
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.channel != UpgradeChannel::App),
+            "the v1 manifest must never list an app-bundle artifact"
+        );
+        assert_eq!(parsed.schema, UPGRADE_MANIFEST_SCHEMA_VERSION);
+
+        let v2 = generate_upgrade_manifest_v2(
+            "9.8.7",
+            "scryer-v9.8.7",
+            "scryer-media/scryer",
+            &artifacts_dir,
+        )
+        .expect("generate v2 upgrade manifest");
+        let parsed_v2 = parse_and_validate_upgrade_manifest_v2(&v2).expect("v2 manifest is valid");
+        assert_eq!(
+            parsed_v2.understood.schema,
+            UPGRADE_MANIFEST_V2_SCHEMA_VERSION
+        );
+        // Every v1 artifact, plus one app-bundle artifact per macOS arch.
+        assert_eq!(
+            parsed_v2.understood.artifacts.len(),
+            parsed.artifacts.len() + UPGRADE_MANIFEST_V2_ONLY_ASSETS.len()
         );
     }
 
@@ -5390,7 +5307,7 @@ mod tests {
         assert!(manifest.contains("winget-manifest.installer.1.10.0.schema.json"));
         assert!(manifest.contains("ManifestVersion: 1.10.0"));
         assert!(manifest.contains("InstallerType: msi"));
-        assert!(manifest.contains("UpgradeBehavior: uninstallPrevious"));
+        assert!(manifest.contains("UpgradeBehavior: install"));
         assert!(manifest.contains("ProductCode: '{12345678-1234-1234-1234-1234567890AB}'"));
         assert!(manifest.contains("Architecture: x64"));
         assert!(manifest.contains("Architecture: arm64"));
@@ -5542,60 +5459,6 @@ mod tests {
                 "}\n"
             )
         );
-    }
-
-    #[test]
-    fn normalize_bundle_cert_wraps_base64_der_as_pem() {
-        let der_base64 =
-            base64::engine::general_purpose::STANDARD.encode([0x30, 0x03, 0x02, 0x01, 0x05]);
-        let pem = normalize_bundle_cert(&der_base64).expect("DER certificate should normalize");
-        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
-        assert!(pem.contains(&der_base64));
-        assert!(pem.ends_with("-----END CERTIFICATE-----\n"));
-    }
-
-    #[test]
-    fn normalize_sigstore_bundle_rewrites_v03_payloads() {
-        let der_base64 = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3, 4]);
-        let key_id_base64 = base64::engine::general_purpose::STANDARD.encode([0_u8, 1, 2, 3]);
-        let bundle = serde_json::json!({
-            "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-            "messageSignature": {
-                "signature": "sig=="
-            },
-            "verificationMaterial": {
-                "certificate": {
-                    "rawBytes": der_base64
-                },
-                "tlogEntries": [
-                    {
-                        "logIndex": "12",
-                        "logId": {
-                            "keyId": key_id_base64
-                        },
-                        "integratedTime": "34",
-                        "inclusionPromise": {
-                            "signedEntryTimestamp": "set=="
-                        },
-                        "canonicalizedBody": "body=="
-                    }
-                ]
-            }
-        });
-
-        let normalized =
-            normalize_sigstore_bundle(&bundle.to_string()).expect("bundle should normalize");
-        let parsed: SignedArtifactBundle =
-            serde_json::from_str(&normalized).expect("bundle should parse in legacy shape");
-        assert_eq!(parsed.base64_signature, "sig==");
-        assert_eq!(
-            parsed.cert.lines().next(),
-            Some("-----BEGIN CERTIFICATE-----")
-        );
-        assert_eq!(parsed.rekor_bundle.payload.log_index, 12);
-        assert_eq!(parsed.rekor_bundle.payload.integrated_time, 34);
-        assert_eq!(parsed.rekor_bundle.payload.log_id, "00010203");
-        assert_eq!(parsed.rekor_bundle.payload.body, "body==");
     }
 
     #[test]
@@ -5899,9 +5762,9 @@ mod tests {
     #[test]
     fn sigstore_provenance_uses_the_resolved_lockfile_version() {
         let ctx = TaskContext::new();
-        let version = resolved_cargo_package_version(&ctx, "sigstore")
-            .expect("resolve sigstore from Cargo.lock");
-        Version::parse(&version).expect("resolved sigstore version should be semver");
+        let version = resolved_cargo_package_version(&ctx, "artifact-trust")
+            .expect("resolve artifact-trust from Cargo.lock");
+        Version::parse(&version).expect("resolved artifact-trust version should be semver");
     }
 
     #[test]

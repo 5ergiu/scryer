@@ -140,7 +140,8 @@ fn build_movie_unmatched_scan_record(
         candidate.identity_hint.as_ref(),
         batch_search_results,
     );
-    let reason = library_scan_unmatched_reason_code(&search_attempts);
+    let reason =
+        library_scan_unmatched_reason_code(candidate.identity_hint.as_ref(), &search_attempts);
 
     MovieUnmatchedScanRecord {
         path: candidate.file.path.clone(),
@@ -211,8 +212,9 @@ pub(crate) fn build_series_unmatched_scan_item(
         candidate.identity_hint.as_ref(),
         batch_search_results,
     );
-    let reason_code =
-        reason_override.unwrap_or_else(|| library_scan_unmatched_reason_code(&search_attempts));
+    let reason_code = reason_override.unwrap_or_else(|| {
+        library_scan_unmatched_reason_code(candidate.identity_hint.as_ref(), &search_attempts)
+    });
 
     build_library_scan_unmatched_item(
         LibraryScanUnmatchedScope {

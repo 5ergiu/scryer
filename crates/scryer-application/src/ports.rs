@@ -908,6 +908,46 @@ pub trait DiscoveryRepository: Send + Sync {
     ) -> AppResult<DiscoveryPruneReport>;
 }
 
+/// What a title list read projects on top of the `titles` row itself.
+///
+/// Both parts default to on, so a caller that never thinks about the
+/// projection keeps the whole record. Turning one off is an assertion that the
+/// consumer does not read that field — the store is free to skip the query
+/// that fills it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TitleListProjection {
+    pub include_external_ids: bool,
+    pub include_canonical_tags: bool,
+}
+
+impl Default for TitleListProjection {
+    fn default() -> Self {
+        Self {
+            include_external_ids: true,
+            include_canonical_tags: true,
+        }
+    }
+}
+
+impl TitleListProjection {
+    /// Canonical metadata tags live in their own tables, so hydrating them
+    /// costs a second query bound to every id the list returned — thousands of
+    /// placeholders and tens of thousands of joined rows on a large library.
+    /// Folder-ownership lookups, counters and job fan-in read the row only, and
+    /// they run often enough that the tag query shows up as pool pressure.
+    pub const fn without_canonical_tags() -> Self {
+        Self {
+            include_external_ids: true,
+            include_canonical_tags: false,
+        }
+    }
+
+    pub const fn without_external_ids(mut self) -> Self {
+        self.include_external_ids = false;
+        self
+    }
+}
+
 #[async_trait]
 pub trait TitleRepository: Send + Sync {
     async fn list(&self, facet: Option<MediaFacet>, query: Option<String>)
@@ -1035,6 +1075,31 @@ pub trait TitleRepository: Send + Sync {
         query: Option<String>,
     ) -> AppResult<Vec<Title>> {
         self.list(facet, query).await
+    }
+    /// One title list read with its projection spelled out, for callers that
+    /// know they do not need the whole record.
+    ///
+    /// `library_ids` of `None` means every library. The default routes back to
+    /// the projection-free reads and ignores
+    /// [`TitleListProjection::include_canonical_tags`]: a repository that keeps
+    /// whole `Title` values in memory already holds the tags, so honouring the
+    /// hint is a store concern and skipping it here stays safe.
+    async fn list_with_projection(
+        &self,
+        facet: Option<MediaFacet>,
+        library_ids: Option<&[String]>,
+        query: Option<String>,
+        projection: TitleListProjection,
+    ) -> AppResult<Vec<Title>> {
+        match (library_ids, projection.include_external_ids) {
+            (None, true) => self.list(facet, query).await,
+            (None, false) => self.list_without_external_ids(facet, query).await,
+            (Some(library_ids), true) => self.list_for_libraries(facet, library_ids, query).await,
+            (Some(library_ids), false) => {
+                self.list_for_libraries_without_external_ids(facet, library_ids, query)
+                    .await
+            }
+        }
     }
     /// How many titles one library holds, for the request-rule
     /// `library_title_count` fact (spec 0003 §3.2).
@@ -1549,6 +1614,15 @@ pub trait TitleRepository: Send + Sync {
     ) -> AppResult<()>;
     async fn clear_title_metadata_hydration_retry_state(&self, id: &str) -> AppResult<()>;
     async fn update_monitored(&self, id: &str, monitored: bool) -> AppResult<Title>;
+    /// Sets the monitored flag on many titles at once. The default walks the
+    /// singular call; stores override it so a bulk apply costs one write
+    /// transaction per batch instead of one per title.
+    async fn set_titles_monitored(&self, ids: &[String], monitored: bool) -> AppResult<()> {
+        for id in ids {
+            self.update_monitored(id, monitored).await?;
+        }
+        Ok(())
+    }
     async fn update_metadata(
         &self,
         id: &str,
@@ -1614,7 +1688,17 @@ pub trait TitleRepository: Send + Sync {
         after_id: Option<String>,
         limit: usize,
     ) -> AppResult<Vec<Title>> {
-        let mut titles = self.list(None, None).await?;
+        // Paging the whole catalog by id is a bulk walk over the `titles` rows;
+        // no consumer of a page reads the canonical tags, and the store's own
+        // override has never hydrated them.
+        let mut titles = self
+            .list_with_projection(
+                None,
+                None,
+                None,
+                TitleListProjection::without_canonical_tags(),
+            )
+            .await?;
         titles.sort_by(|left, right| left.id.cmp(&right.id));
         let filtered = titles
             .into_iter()
@@ -4465,6 +4549,29 @@ pub trait DownloadRegistryRepository: Send + Sync {
 
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
+
+    /// Refresh the observation timestamps of already-resolved downloads.
+    ///
+    /// A client tick re-observes the same rows every 10 s, but a binding's
+    /// `last_seen_at` only needs writing once a minute. Callers that serve the
+    /// identity from a memo therefore batch the rows that actually came due
+    /// and write them here, in ONE transaction, instead of entering a
+    /// resolution transaction per row per tick just to discover the write is
+    /// throttled away.
+    ///
+    /// The default is a no-op so repositories that keep no durable timestamps
+    /// (the null repository, test fakes) need not implement it.
+    async fn touch_observations(&self, touches: &[ObservationTouch]) -> AppResult<()> {
+        let _ = touches;
+        Ok(())
+    }
+}
+
+/// One due freshness refresh for a download whose identity is already resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationTouch {
+    pub download_id: DownloadId,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// The canonical row and compatibility values carried by a tracked-state update.

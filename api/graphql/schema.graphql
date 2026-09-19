@@ -699,6 +699,10 @@ enum ApplicationInstallationKindValue {
 	"""
 	DIRECT_MSI
 	"""
+	A macOS application bundle, upgraded by replacing the bundle in place.
+	"""
+	MACOS_APP_BUNDLE
+	"""
 	A container-managed installation.
 	"""
 	DOCKER
@@ -927,6 +931,11 @@ type AudioStreamDetailPayload {
 	Language code, or null when unavailable.
 	"""
 	language: String
+	"""
+	Language inferred from the track name when the container has no language
+	field for this track, or null when the track is tagged or nothing can be inferred.
+	"""
+	inferredLanguage: String
 	"""
 	Bitrate in kilobits per second, or null when unavailable.
 	"""
@@ -4933,6 +4942,32 @@ enum DownloadHistorySortKeyValue {
 }
 
 """
+The import actions one queue item offers, decided by the server so every client surface agrees.
+"""
+type DownloadImportActionsPayload {
+	"""
+	Whether a manual import should open the file-mapping dialog first.
+	"""
+	manualImportInteractive: Boolean!
+	"""
+	Whether a manual import can run without the mapping dialog.
+	"""
+	manualImportDirect: Boolean!
+	"""
+	Whether the item can be assigned to a title.
+	"""
+	assignTitle: Boolean!
+	"""
+	Whether the item can be ignored.
+	"""
+	ignore: Boolean!
+	"""
+	Whether the item can be marked failed.
+	"""
+	markFailed: Boolean!
+}
+
+"""
 Filter for import activity.
 """
 enum DownloadImportFilterValue {
@@ -5250,6 +5285,10 @@ type DownloadQueueItemPayload {
 	Whether the torrent's metainfo carries the private flag; null when the client cannot say.
 	"""
 	isPrivate: Boolean
+	"""
+	Import actions this download currently offers; every client surface renders from this.
+	"""
+	importActions: DownloadImportActionsPayload!
 	"""
 	Acquisition scope for this queue item, or its episode scope when no more specific scope is available.
 	"""
@@ -6862,6 +6901,15 @@ type FinalizeExternalImportPayload {
 	Monitor warmup session ID tracking accepted background work.
 	"""
 	monitorWarmupSessionId: ID!
+	"""
+	Session ID of the background apply; poll `externalImportWarmupStatus`
+	with it until the apply reaches a terminal status.
+	"""
+	finalizeSessionId: ID!
+	"""
+	Status of the background apply at the moment finalize was accepted.
+	"""
+	progress: ExternalImportMonitorWarmupProgressPayload!
 }
 
 """
@@ -14949,6 +14997,11 @@ type MediaStreamDetailPayload {
 	Normalized language tag, when known.
 	"""
 	language: String
+	"""
+	Language inferred from the track name when an audio stream has no language
+	field in the container; null when the stream is tagged or nothing can be inferred.
+	"""
+	inferredLanguage: String
 	"""
 	Name supplied by the container metadata.
 	"""

@@ -2340,6 +2340,7 @@ async fn graphql_download_import_exposes_background_import_blocked_state_from_ca
         download_client_item_id: item_id.to_string(),
         download_id: Some(download_id.to_string()),
         import_status: None,
+        import_type: None,
         import_error_code: None,
         import_error_message: None,
         imported_at: None,
@@ -3397,4 +3398,289 @@ async fn graphql_introspection_exposes_paged_queue_sync_and_legacy_deprecations(
     ] {
         assert!(page_fields.contains(name), "missing {name}");
     }
+}
+
+/// US4 real-store reproduction: an unlinked (title-less, orphan-scope) grab
+/// whose client job completes must reach an assignable tracked state, exactly
+/// as a canonical title-bound grab does.
+///
+/// The forensic row from the failing gate run had `download_submissions`
+/// populated but `download_submissions.download_id` NULL — the column only
+/// `record_download_submission_identity_tx` writes — with `tracked_state`
+/// never set despite seven minutes of observation. This drives the real
+/// SQLite store, the real queue poller and the real completed-download
+/// handler through the snapshot ingest, with `with_identity` as the single
+/// flipped variable.
+async fn drive_unlinked_completed_grab(with_identity: bool, staged: u8) -> Option<String> {
+    use scryer_application::{
+        DownloadSubmission, DownloadSubmissionPurpose, DownloadSubmissionRepository,
+        SubmissionScope,
+    };
+    use scryer_infrastructure_workflow::workflow::stores::DownloadSubmissionStore;
+
+    let ctx = TestContext::new().await;
+
+    let item_id = "us4-unlinked-job-1";
+    let client_id = "us4-weaver-client";
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let submissions = DownloadSubmissionStore::new(ctx.db.datastore());
+    let submission = DownloadSubmission {
+        download_id,
+        // The unlinked shape: no title, orphan scope, operator-queued.
+        title_id: String::new(),
+        facet: String::new(),
+        download_client_id: Some(client_id.to_string()),
+        download_client_type: "weaver".to_string(),
+        download_client_item_id: item_id.to_string(),
+        source_hint: None,
+        source_provider_id: None,
+        source_provider_name: None,
+        source_kind: None,
+        source_title: Some("Unlinked.US4.Release.1080p".to_string()),
+        info_hash: None,
+        release_size_bytes: None,
+        request_signature: None,
+        purpose: DownloadSubmissionPurpose::OperatorQueued,
+        scope: SubmissionScope::Orphan,
+    };
+    if with_identity {
+        submissions
+            .record_submission_with_identity(
+                submission,
+                scryer_application::DownloadSubmissionIdentity {
+                    download_id: Some(download_id.to_string()),
+                },
+                None,
+            )
+            .await
+            .expect("record unlinked submission with identity");
+    } else {
+        submissions
+            .record_submission(submission)
+            .await
+            .expect("record unlinked submission");
+    }
+
+    let (_command_tx, tracked_download_rx) = tokio::sync::mpsc::channel(8);
+    let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(8);
+    let ingest = scryer_application::tracked_downloads::TrackedDownloadSnapshotIngestHandle::new(
+        snapshot_tx,
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(start_download_queue_poller_with_options(
+        ctx.app.clone(),
+        token.child_token(),
+        tracked_download_rx,
+        snapshot_rx,
+        DownloadQueuePollerOptions {
+            interval: std::time::Duration::from_millis(50),
+            excluded_client_types: vec!["weaver".to_string()],
+            ..Default::default()
+        },
+    ));
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    std::fs::write(source_dir.path().join("fixture.mkv"), b"video").expect("write fixture video");
+    let item = DownloadQueueItem {
+        id: item_id.to_string(),
+        title_id: None,
+        episode_id: None,
+        title_name: "Unlinked.US4.Release.1080p".to_string(),
+        facet: None,
+        category: Some("movies".to_string()),
+        client_id: client_id.to_string(),
+        client_name: "US4 Weaver".to_string(),
+        client_type: "weaver".to_string(),
+        state: DownloadQueueState::Completed,
+        progress_percent: 100,
+        import_transfer_phase: None,
+        import_transfer_bytes: None,
+        import_transfer_total_bytes: None,
+        import_transfer_started_at: None,
+        import_transfer_updated_at: None,
+        size_bytes: Some(5),
+        remaining_seconds: Some(0),
+        queued_at: Some(Utc::now().to_rfc3339()),
+        last_updated_at: Some(Utc::now().to_rfc3339()),
+        attention_required: false,
+        attention_reason: None,
+        download_client_item_id: item_id.to_string(),
+        download_id: None,
+        import_status: None,
+        import_type: None,
+        import_error_code: None,
+        import_error_message: None,
+        imported_at: None,
+        delete_status: None,
+        delete_error_message: None,
+        is_scryer_origin: true,
+        source_provider: None,
+        tracked_state: None,
+        tracked_status: None,
+        tracked_status_messages: Vec::new(),
+        tracked_match_type: None,
+        seeding: None,
+    };
+    let completed = CompletedDownload {
+        client_type: "weaver".to_string(),
+        client_id: client_id.to_string(),
+        download_client_item_id: item_id.to_string(),
+        download_id: None,
+        name: item.title_name.clone(),
+        release_name: None,
+        dest_dir: source_dir.path().to_string_lossy().into_owned(),
+        category: Some("movies".to_string()),
+        size_bytes: item.size_bytes,
+        completed_at: Some(Utc::now()),
+        parameters: Vec::new(),
+    };
+
+    if staged > 0 {
+        // Production sequencing: the job is observed in the queue first (this
+        // is what writes the `downloads` row and its first_observed_at), and
+        // only a later poll reports it complete, by which time it has left the
+        // queue entirely.
+        let mut downloading = item.clone();
+        downloading.state = DownloadQueueState::Downloading;
+        downloading.progress_percent = 40;
+        ingest
+            .publish(
+                scryer_application::tracked_downloads::TrackedDownloadSnapshotUpdate {
+                    scope:
+                        scryer_application::tracked_downloads::TrackedDownloadSnapshotScope::AuthoritativeForClient {
+                            client_id: Some(client_id.to_string()),
+                            client_type: "weaver".to_string(),
+                        },
+                    items: vec![downloading],
+                    completed_downloads: Vec::new(),
+                    actor_id: None,
+                },
+            )
+            .await
+            .expect("publish in-flight unlinked snapshot");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Mode 1 drops the job from `items` entirely; mode 2 is the production
+        // shape the forensics prove (`downloads.last_observed_at` keeps moving,
+        // and only the Phase 1 items loop stamps it): the job leaves the queue
+        // but keeps arriving as a completed history row.
+        let later_items = if staged == 1 { Vec::new() } else { vec![item] };
+        ingest
+            .publish(
+                scryer_application::tracked_downloads::TrackedDownloadSnapshotUpdate {
+                    scope:
+                        scryer_application::tracked_downloads::TrackedDownloadSnapshotScope::AuthoritativeForClient {
+                            client_id: Some(client_id.to_string()),
+                            client_type: "weaver".to_string(),
+                        },
+                    items: later_items,
+                    completed_downloads: vec![completed],
+                    actor_id: None,
+                },
+            )
+            .await
+            .expect("publish completed unlinked snapshot");
+    } else {
+        ingest
+            .publish(
+                scryer_application::tracked_downloads::TrackedDownloadSnapshotUpdate {
+                    scope:
+                        scryer_application::tracked_downloads::TrackedDownloadSnapshotScope::Delta,
+                    items: vec![item],
+                    completed_downloads: vec![completed],
+                    actor_id: None,
+                },
+            )
+            .await
+            .expect("publish completed unlinked delta");
+    }
+
+    let tracked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state: Option<String> = sqlx::query_scalar(
+                "SELECT tracked_state FROM download_submissions
+                 WHERE download_client_item_id = ?1",
+            )
+            .bind(item_id)
+            .fetch_optional(ctx.db.pool())
+            .await
+            .expect("submission row should load")
+            .flatten();
+            if let Some(state) = state {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .ok();
+
+    token.cancel();
+    poller.await.expect("queue poller should stop cleanly");
+    tracked
+}
+
+#[tokio::test]
+async fn unlinked_completed_grab_reaches_a_tracked_state_in_the_real_store() {
+    let tracked = drive_unlinked_completed_grab(false, 0).await;
+    assert!(
+        tracked.is_some(),
+        "an observed, completed unlinked grab must reach a tracked state"
+    );
+}
+
+#[tokio::test]
+async fn unlinked_completed_grab_with_identity_reaches_a_tracked_state_in_the_real_store() {
+    let tracked = drive_unlinked_completed_grab(true, 0).await;
+    assert!(
+        tracked.is_some(),
+        "control: the same grab recorded with its identity must track"
+    );
+}
+
+/// The production sequencing: observed in the queue first, then reported
+/// complete once it has left the queue.
+#[tokio::test]
+#[ignore = "open question, pre-existing on be2a317fa: only the tracked-items loop stamps tracked_state, so a job that leaves the queue and reappears only as a completed history row is imported but never stamped; the forensic timeline (row stays in items) is covered by the history-row tests"]
+async fn unlinked_grab_observed_then_completed_reaches_a_tracked_state_in_the_real_store() {
+    let tracked = drive_unlinked_completed_grab(false, 1).await;
+    assert!(
+        tracked.is_some(),
+        "an unlinked grab observed in the queue and then completed must reach a tracked state"
+    );
+}
+
+/// Control for the sequencing case: the identical timeline with the identity
+/// recorded at grab time.
+#[tokio::test]
+#[ignore = "open question, pre-existing on be2a317fa: only the tracked-items loop stamps tracked_state, so a job that leaves the queue and reappears only as a completed history row is imported but never stamped; the forensic timeline (row stays in items) is covered by the history-row tests"]
+async fn unlinked_grab_observed_then_completed_with_identity_reaches_a_tracked_state() {
+    let tracked = drive_unlinked_completed_grab(true, 1).await;
+    assert!(
+        tracked.is_some(),
+        "control: the same staged timeline recorded with its identity must track"
+    );
+}
+
+/// The production timeline the forensics prove: the unlinked job is observed in
+/// the queue while downloading, then leaves the queue and keeps arriving as a
+/// completed history row — `downloads.last_observed_at` advanced for seven
+/// minutes, and only the Phase 1 items loop stamps it, so the row was in
+/// `items` throughout.
+#[tokio::test]
+async fn unlinked_grab_seen_as_a_history_row_reaches_a_tracked_state_in_the_real_store() {
+    let tracked = drive_unlinked_completed_grab(false, 2).await;
+    assert!(
+        tracked.is_some(),
+        "an unlinked grab that keeps arriving as a completed history row must reach a tracked state"
+    );
+}
+
+/// Control for the history-row timeline, with the identity recorded at grab time.
+#[tokio::test]
+async fn unlinked_grab_seen_as_a_history_row_with_identity_reaches_a_tracked_state() {
+    let tracked = drive_unlinked_completed_grab(true, 2).await;
+    assert!(
+        tracked.is_some(),
+        "control: the same history-row timeline recorded with its identity must track"
+    );
 }

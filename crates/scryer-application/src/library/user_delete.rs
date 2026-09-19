@@ -989,11 +989,18 @@ impl AppUseCase {
         let root_folders = self
             .root_folders_for_library(&title.library_id, &title.facet)
             .await?;
+        // Only the id, name and folder path survive into a tracked folder, so
+        // this all-title read skips the canonical-tag hydration.
         let other_titles = self
             .services
             .catalog
             .titles
-            .list(None, None)
+            .list_with_projection(
+                None,
+                None,
+                None,
+                crate::TitleListProjection::without_canonical_tags(),
+            )
             .await?
             .into_iter()
             .filter(|candidate| candidate.id != title.id)

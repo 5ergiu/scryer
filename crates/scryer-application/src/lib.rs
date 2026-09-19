@@ -88,6 +88,7 @@ mod plugins;
 mod polling_worker;
 mod ports;
 pub use acquisition::anime_numbering::{ExactCourTitleMatch, exact_cour_title_match};
+pub use ports::ObservationTouch;
 pub use ports::{
     AnimeSearchNumberingContext, CatalogOwnedExternalIdRecord, CatalogOwnedTitleRecord,
     IndexerSearchNumberingContext, TitleOptionsPatch,
@@ -272,6 +273,7 @@ pub use app_usecase_integration::enrich_download_queue_items_from_submissions;
 pub use app_usecase_integration::matches_download_activity_filter;
 pub use app_usecase_integration::matches_download_queue_filter;
 pub use app_usecase_integration::validate_persisted_proxy_config;
+pub use app_usecase_integration::{DownloadImportActions, derive_download_queue_import_actions};
 pub use app_usecase_integration::{
     DownloadQueuePollerOptions, start_download_queue_poller,
     start_download_queue_poller_with_options,
@@ -279,6 +281,7 @@ pub use app_usecase_integration::{
 pub use app_usecase_integration::{DownloadSeedingState, derive_download_seeding_state};
 pub use app_usecase_post_processing::{PostProcessingContext, run_post_processing};
 pub use app_usecase_rss::RssSyncReport;
+pub use audio_requirements::inferred_audio_track_language;
 #[cfg(test)]
 pub(crate) use audio_requirements::missing_required_audio_languages;
 #[cfg(feature = "runtime-media-analysis")]
@@ -356,6 +359,9 @@ pub use import_workflow::{
 };
 pub use integration::download_queue_commands::start_background_download_delete_poller;
 pub(crate) use integration::integration::ManualImportSourceResolution;
+pub use integration::workflow::{
+    ImportRecordResultOverlay, import_record_result_overlay, start_navigation_badge_facts_refresh,
+};
 pub use jobs::jobs::start_background_library_refresh_loop;
 pub use library::rename::{
     LibraryRenamer, NullLibraryRenamer, RenameApplyItemResult, RenameApplyResult,
@@ -595,9 +601,9 @@ pub use ports::{
     SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
     SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
     SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
-    TitleImageRepository, TitleRepository, TotpRepository, UserExternalAccountRepository,
-    UserRepository, VerifiedExternalIdentity, WebauthnRepository, WorkflowOperationInfo,
-    WorkflowOperationRepository,
+    TitleImageRepository, TitleListProjection, TitleRepository, TotpRepository,
+    UserExternalAccountRepository, UserRepository, VerifiedExternalIdentity, WebauthnRepository,
+    WorkflowOperationInfo, WorkflowOperationRepository,
 };
 pub use ports::{
     ConnectionPlaybackActivity, MediaServerPlaybackProbe, PlaybackActivitySnapshot,

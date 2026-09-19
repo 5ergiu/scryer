@@ -87,7 +87,64 @@ docs](https://www.scryer.media/scryer/docs/installation/docker/).
 Scryer publishes two forms of installation for Windows:
 
 - scryer-windows-x86_64.zip, in which contains: scryer.exe | best ran as an [nssm (the Non-Sucking Service Manager)](https://nssm.cc/download) service (Not Recommended)
-- scryer.msi | Windows service install that's completely effortless. Install's the same way as the ARR* stack. (Recommended)
+- scryer.msi | Desktop install that's completely effortless. (Recommended)
+
+The MSI installs a desktop wrapper. Launching Scryer from the Start menu puts an
+icon in the notification area, starts the Scryer server in the background, and
+opens the web UI in an embedded Microsoft Edge WebView2 window — no browser tab
+and no service to configure. Clicking the tray icon shows Scryer's status and
+the usual actions (open, restart, quit); you can also opt into starting Scryer
+when you sign in. If WebView2 is not installed, Scryer opens the web UI in your
+default browser instead.
+
+### Upgrading and uninstalling on Windows
+
+Upgrades — whether from inside Scryer, from a new MSI, or through winget — keep
+everything: your database, settings, logs, backups and your sign-in preference.
+
+Uninstalling removes them. The uninstaller deletes Scryer's data folder
+(`%LOCALAPPDATA%\ScryerMedia\Scryer`), which holds the database, logs, runtime
+state and the WebView2 profile, and removes Scryer's Windows Credential Manager
+entry. A `backups` folder inside it survives if it still contains anything.
+Your media libraries and download folders are configured outside that folder and
+are never touched. Back up anything you want to keep before uninstalling.
+
+## macOS
+
+Scryer publishes a disk image per architecture — `scryer-darwin-arm64.dmg` for
+Apple silicon and `scryer-darwin-x86_64.dmg` for Intel. Open it and drag
+**Scryer** to Applications. Scryer then lives in the menu bar: it starts the
+server for you and opens the web UI in an embedded WebKit window.
+
+Scryer.app is **not signed with an Apple Developer ID and is not notarized**, so
+the first launch needs one extra step:
+
+- On macOS 15 and later: open Scryer once and dismiss the warning, then go to
+  **System Settings → Privacy & Security** and click **Open Anyway** next to
+  the message about Scryer.
+- On macOS 14 and earlier you can instead right-click (or Control-click) Scryer
+  in Applications and choose **Open**, then **Open** again in the dialog.
+
+Either way you only do it once. If you would rather clear the quarantine flag
+from a terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Scryer.app
+```
+
+Scryer updates an `.app` install in place. It downloads the signed replacement
+bundle, checks its signature before anything moves, and swaps it for the
+installed one — then the app restarts itself on the new version. The previous
+bundle is kept beside it until the new one has started successfully.
+
+For that to work, Scryer has to be able to replace the bundle where it lives:
+drag it into your **Applications** folder (or any folder you can write to) and
+open it from there. Scryer will tell you to do that, rather than updating, if
+you are running it straight from the disk image or from the temporary copy macOS
+makes when an app is opened from your Downloads folder.
+
+The `scryer-darwin-*-portable.tar.gz` archives still ship the plain `scryer`
+server binary for anyone running it headless.
 
 ## Unraid
 

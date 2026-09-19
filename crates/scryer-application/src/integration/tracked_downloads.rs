@@ -382,8 +382,18 @@ impl TrackedDownloadService {
     /// On update: refreshes client_item but preserves scryer state if past Downloading.
     pub async fn track(&mut self, app: &AppUseCase, client_item: DownloadQueueItem) {
         let observed_job = crate::download_identity::observed_queue_item_job(&client_item);
-        let resolved_download_id =
-            crate::download_identity::resolve_observed_client_job(app, observed_job.clone()).await;
+        // Memoized: the poller tracks every client row on every tick, and an
+        // item whose locator, token and name have not moved cannot have changed
+        // identity while the registry generation stands. Without this, a client
+        // history window full of rows Scryer never submitted cost one registry
+        // transaction per row per tick, forever.
+        let resolved_download_id = crate::download_identity::resolve_observed_client_job_memoized(
+            app,
+            observed_job.clone(),
+            client_item.download_id.as_deref(),
+        )
+        .await
+        .resolution;
         let id = tracked_download_id_for_item(&client_item);
         let download_id = match resolved_download_id {
             crate::download_identity::ObservedClientJobResolution::Resolved(download_id) => {
@@ -734,11 +744,29 @@ impl TrackedDownloadService {
         )
     }
 
+    /// The same question for a whole tracked download, which is what the
+    /// absence prune actually has in hand.
+    ///
+    /// [`Self::should_preserve_tracking`] holds a job across the client's
+    /// rolling activity window because Scryer still owes it work. A row Scryer
+    /// never submitted owes nothing: its payload is the operator's, and the
+    /// client has stopped offering it. Left preserved, such a row parked in
+    /// `ImportPending` (which every held or unmatched foreign completion does)
+    /// kept its binding active forever — the registry leak this predicate
+    /// closes. A foreign row whose import is genuinely under way still keeps
+    /// today's lifecycle, and so does every row Scryer submitted.
+    pub(crate) fn should_preserve_tracked_download(td: &TrackedDownload) -> bool {
+        if !Self::should_preserve_tracking(td.state) {
+            return false;
+        }
+        !tracked_download_is_foreign(td) || tracked_download_import_is_under_way(td)
+    }
+
     /// Mark downloads no longer visible in any client as untrackable.
     pub fn update_trackable(&mut self, seen_ids: &HashSet<String>) -> Vec<ClientJobLocator> {
         let mut unavailable_sources = Vec::new();
         for td in self.cache.values_mut() {
-            if Self::should_preserve_tracking(td.state) {
+            if Self::should_preserve_tracked_download(td) {
                 td.snapshot_missing_since = None;
                 continue;
             }
@@ -805,7 +833,7 @@ impl TrackedDownloadService {
                 td.snapshot_missing_since = None;
                 continue;
             }
-            if Self::should_preserve_tracking(td.state) {
+            if Self::should_preserve_tracked_download(td) {
                 td.snapshot_missing_since = None;
                 continue;
             }
@@ -865,7 +893,7 @@ impl TrackedDownloadService {
                 td.snapshot_missing_since = None;
                 continue;
             }
-            if Self::should_preserve_tracking(td.state) {
+            if Self::should_preserve_tracked_download(td) {
                 td.snapshot_missing_since = None;
                 continue;
             }
@@ -1405,6 +1433,24 @@ fn should_retry_late_submission_resolution(
             TitleMatchType::Unmatched | TitleMatchType::IdOnly | TitleMatchType::TitleParse
         )
         && !download_submission_identity_is_empty(&observed_queue_item_identity(incoming))
+}
+
+/// Whether Scryer never submitted this download: no accepted submission joined
+/// onto the client row, and no submission-grade title resolution behind it.
+///
+/// `is_scryer_origin` is set by the queue enrichment only for a submission
+/// that carries Scryer's own grab parameters; an observation stub minted for
+/// an adopted foreign row deliberately does not set it.
+pub(crate) fn tracked_download_is_foreign(td: &TrackedDownload) -> bool {
+    !td.client_item.is_scryer_origin && td.match_type != TitleMatchType::Submission
+}
+
+/// Whether an import for this download is actually running or has already been
+/// attempted, in which case its binding is still load-bearing.
+pub(crate) fn tracked_download_import_is_under_way(td: &TrackedDownload) -> bool {
+    td.state == TrackedDownloadState::Importing
+        || td.import_attempted
+        || td.import_execution_retry.is_some()
 }
 
 /// Absence debounce for pruning: stamps the first tick an item goes missing
@@ -3553,6 +3599,7 @@ mod tests {
             download_client_item_id: "dl-1".to_string(),
             download_id: None,
             import_status: None,
+            import_type: None,
             import_error_code: None,
             import_error_message: None,
             imported_at: None,
@@ -5501,6 +5548,139 @@ mod tests {
                 .find(&unavailable_id)
                 .is_some_and(|td| td.snapshot_missing_since.is_none())
         );
+    }
+
+    /// A foreign row parked after the queue owns no work Scryer can finish.
+    ///
+    /// Every completion Scryer is not allowed to import (a category it does
+    /// not own, an unmatched title) parks in `ImportPending`, which
+    /// `should_preserve_tracking` used to hold forever — so its binding stayed
+    /// active long after the client stopped listing the row. A client shared
+    /// with the operator's own work accumulated one such binding per row.
+    #[test]
+    fn authoritative_snapshot_releases_absent_foreign_downloads_parked_after_the_queue() {
+        let mut tracker = TrackedDownloadService::new();
+        let mut foreign = build_tracked_download("foreign-parked");
+        foreign.client_item.is_scryer_origin = false;
+        foreign.match_type = TitleMatchType::Unmatched;
+        foreign.state = TrackedDownloadState::ImportPending;
+        let foreign_id = foreign.id.clone();
+        tracker.cache.insert(foreign.download_id, foreign);
+        expire_snapshot_absence(&mut tracker, &foreign_id);
+
+        let authoritative_client_ids = HashSet::from(["client-1".to_string()]);
+        let unavailable_sources = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::new(),
+                &[],
+                Some(&authoritative_client_ids),
+            );
+
+        assert_eq!(
+            unavailable_sources,
+            vec![ClientJobLocator::new(
+                Some("client-1"),
+                "nzbget",
+                "foreign-parked"
+            )]
+        );
+        assert!(tracker.find(&foreign_id).is_some_and(|td| !td.is_trackable));
+    }
+
+    /// A submission joined onto a foreign-looking row is Scryer's own grab.
+    #[test]
+    fn absent_download_with_a_scryer_submission_keeps_todays_lifecycle() {
+        let mut tracker = TrackedDownloadService::new();
+        let mut submitted = build_tracked_download("submitted-parked");
+        submitted.client_item.is_scryer_origin = false;
+        submitted.match_type = TitleMatchType::Submission;
+        submitted.state = TrackedDownloadState::ImportPending;
+        let submitted_id = submitted.id.clone();
+        tracker.cache.insert(submitted.download_id, submitted);
+        expire_snapshot_absence(&mut tracker, &submitted_id);
+
+        let authoritative_client_ids = HashSet::from(["client-1".to_string()]);
+        let unavailable_sources = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::new(),
+                &[],
+                Some(&authoritative_client_ids),
+            );
+
+        assert!(unavailable_sources.is_empty());
+        assert!(
+            tracker
+                .find(&submitted_id)
+                .is_some_and(|td| td.is_trackable)
+        );
+    }
+
+    /// An import already under way still owns its binding.
+    #[test]
+    fn absent_foreign_download_mid_import_keeps_its_binding() {
+        let mut tracker = TrackedDownloadService::new();
+        let states = [
+            ("foreign-importing", TrackedDownloadState::Importing, false),
+            (
+                "foreign-attempted",
+                TrackedDownloadState::ImportPending,
+                true,
+            ),
+        ];
+        let mut tracked_ids = Vec::new();
+        for (suffix, state, import_attempted) in states {
+            let mut tracked = build_tracked_download(suffix);
+            tracked.client_item.is_scryer_origin = false;
+            tracked.match_type = TitleMatchType::Unmatched;
+            tracked.state = state;
+            tracked.import_attempted = import_attempted;
+            tracked_ids.push(tracked.id.clone());
+            tracker.cache.insert(tracked.download_id, tracked);
+        }
+        for id in &tracked_ids {
+            expire_snapshot_absence(&mut tracker, id);
+        }
+
+        let authoritative_client_ids = HashSet::from(["client-1".to_string()]);
+        let unavailable_sources = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::new(),
+                &[],
+                Some(&authoritative_client_ids),
+            );
+
+        assert!(unavailable_sources.is_empty());
+        for id in tracked_ids {
+            assert!(tracker.find(&id).is_some_and(|td| td.is_trackable));
+        }
+    }
+
+    /// A client that did not answer this tick proves nothing about its rows,
+    /// foreign or not: releasing a binding on a read failure would be the
+    /// blackout bug the grace machinery exists to prevent.
+    #[test]
+    fn absent_foreign_download_on_a_client_that_did_not_answer_keeps_its_binding() {
+        let mut tracker = TrackedDownloadService::new();
+        let mut foreign = build_tracked_download("foreign-blackout");
+        foreign.client_item.is_scryer_origin = false;
+        foreign.match_type = TitleMatchType::Unmatched;
+        foreign.state = TrackedDownloadState::ImportPending;
+        foreign.client_id = "client-2".to_string();
+        foreign.client_item.client_id = "client-2".to_string();
+        let foreign_id = foreign.id.clone();
+        tracker.cache.insert(foreign.download_id, foreign);
+        expire_snapshot_absence(&mut tracker, &foreign_id);
+
+        let authoritative_client_ids = HashSet::from(["client-1".to_string()]);
+        let unavailable_sources = tracker
+            .update_trackable_excluding_client_types_for_authoritative_clients(
+                &HashSet::new(),
+                &[],
+                Some(&authoritative_client_ids),
+            );
+
+        assert!(unavailable_sources.is_empty());
+        assert!(tracker.find(&foreign_id).is_some_and(|td| td.is_trackable));
     }
 
     #[test]

@@ -928,6 +928,10 @@ pub fn from_title_media_file(file: scryer_application::TitleMediaFile) -> TitleM
             .audio_streams
             .into_iter()
             .map(|s| crate::types::AudioStreamDetailPayload {
+                inferred_language: scryer_application::inferred_audio_track_language(
+                    s.language.as_deref(),
+                    s.name.as_deref(),
+                ),
                 profile: s.profile,
                 name: s.name,
                 codec: s.codec,
@@ -971,24 +975,18 @@ pub fn from_title_media_file(file: scryer_application::TitleMediaFile) -> TitleM
 }
 
 pub fn from_import_record(record: scryer_domain::ImportRecord) -> ImportRecordPayload {
-    // Deserialize result_json to extract structured fields
-    let (error_message, decision, skip_reason, title_id, source_path, dest_path) =
-        if let Some(ref result_json) = record.result_json {
-            if let Ok(result) = serde_json::from_str::<scryer_domain::ImportResult>(result_json) {
-                (
-                    result.error_message,
-                    Some(ImportDecisionValue::from_domain(result.decision)),
-                    result.skip_reason.map(ImportSkipReasonValue::from_domain),
-                    result.title_id,
-                    Some(result.source_path),
-                    result.dest_path,
-                )
-            } else {
-                (None, None, None, None, None, None)
-            }
-        } else {
-            (None, None, None, None, None, None)
-        };
+    // Automatic and manual imports persist different result shapes; the
+    // application-layer overlay is the one reader that understands both, so a
+    // manual failure carries its reason here too instead of reading as null.
+    let overlay = scryer_application::import_record_result_overlay(&record);
+    let (error_message, decision, skip_reason, title_id, source_path, dest_path) = (
+        overlay.error_message,
+        overlay.decision.map(ImportDecisionValue::from_domain),
+        overlay.skip_reason.map(ImportSkipReasonValue::from_domain),
+        overlay.title_id,
+        overlay.source_path,
+        overlay.dest_path,
+    );
 
     let payload = serde_json::from_str::<serde_json::Value>(&record.payload_json).ok();
     let source_title = payload.as_ref().and_then(|payload| {

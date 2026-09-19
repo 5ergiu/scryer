@@ -6,6 +6,7 @@ import { audioFormatPills, hdrFormatPills } from "@/lib/utils/media-format-pills
 import {
   audioStreamsForFile,
   formatLanguage,
+  resolveAudioLanguage,
   formatSingleAudioTrack,
   formatSingleSubtitleTrack,
   resolveAudioChannels,
@@ -55,8 +56,15 @@ export function AudioTracksPopover({
   presentation?: "default" | "selected-title";
 }) {
   const t = useTranslate();
+  const inferredFootnote = t("mediaInfo.inferredLanguageFootnote");
   if (streams.length === 1 && presentation === "default") {
-    return <Badge tone="info">{formatSingleAudioTrack(streams[0])}<AudioRoles stream={streams[0]} /></Badge>;
+    const inferred = resolveAudioLanguage(streams[0]).inferred;
+    return (
+      <Badge tone="info">
+        <span title={inferred ? inferredFootnote : undefined}>{formatSingleAudioTrack(streams[0])}</span>
+        <AudioRoles stream={streams[0]} />
+      </Badge>
+    );
   }
   return (
     <Popover>
@@ -75,18 +83,26 @@ export function AudioTracksPopover({
       </PopoverTrigger>
       <PopoverContent className="w-auto max-w-xs p-2" align="start">
         <div className="max-h-60 space-y-1 overflow-y-auto">
-          {streams.map((stream, i) => (
-            <div key={i} className="flex flex-wrap items-center gap-2 rounded px-2 py-1 text-xs even:bg-muted/50">
-              <span className="min-w-[5rem] font-medium">{formatLanguage(stream.language)}</span>
-              <span className="text-muted-foreground">{resolveAudioCodec(stream.codec) ?? "?"} {stream.profile}</span>
-              <span className="text-muted-foreground">{resolveAudioChannels(stream.channels, stream.metadata?.channelLayout) ?? "?"}</span>
-              <AudioRoles stream={stream} />
-              {stream.name ? <span className="text-muted-foreground">{stream.name}</span> : null}
-              {stream.bitrateKbps ? (
-                <span className="text-muted-foreground/60">{stream.bitrateKbps} kbps</span>
-              ) : null}
-            </div>
-          ))}
+          {streams.map((stream, i) => {
+            const language = resolveAudioLanguage(stream);
+            return (
+              <div key={i} className="flex flex-wrap items-center gap-2 rounded px-2 py-1 text-xs even:bg-muted/50">
+                <span className="min-w-[5rem] font-medium">
+                  {language.inferred ? <em>{language.label}*</em> : language.label}
+                </span>
+                <span className="text-muted-foreground">{resolveAudioCodec(stream.codec) ?? "?"} {stream.profile}</span>
+                <span className="text-muted-foreground">{resolveAudioChannels(stream.channels, stream.metadata?.channelLayout) ?? "?"}</span>
+                <AudioRoles stream={stream} />
+                {stream.name ? <span className="text-muted-foreground">{stream.name}</span> : null}
+                {stream.bitrateKbps ? (
+                  <span className="text-muted-foreground/60">{stream.bitrateKbps} kbps</span>
+                ) : null}
+              </div>
+            );
+          })}
+          {streams.some((stream) => resolveAudioLanguage(stream).inferred) ? (
+            <p className="px-2 pt-1 text-[11px] text-muted-foreground">* {inferredFootnote}</p>
+          ) : null}
         </div>
       </PopoverContent>
     </Popover>
