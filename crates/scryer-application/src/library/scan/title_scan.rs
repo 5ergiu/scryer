@@ -2608,7 +2608,11 @@ impl AppUseCase {
                             "episode_identity_missing"
                         }
                     });
-                    debug!(
+                    // A file on disk that the scan cannot place is a gap in the
+                    // library, not routine noise: it must be visible in the log
+                    // and counted against the session, never absorbed into the
+                    // completed tally.
+                    warn!(
                         title_id = %title.id,
                         title_name = %title.name,
                         file_path = %file.path,
@@ -2645,7 +2649,7 @@ impl AppUseCase {
                         );
                     }
                     summary.unmatched += 1;
-                    pending_progress.absorb(TitleScanProgressDelta::completed(1));
+                    pending_progress.absorb(TitleScanProgressDelta::failed(1));
                     flush_title_scan_progress_batch(self, session_id, &mut pending_progress).await;
                     continue;
                 }
