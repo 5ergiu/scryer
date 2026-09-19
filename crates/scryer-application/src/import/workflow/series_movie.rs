@@ -1023,6 +1023,40 @@ async fn hold_replacement_for_manual_resolution(
     Ok(result)
 }
 
+/// The library row an earlier additional import created from this exact source
+/// video, when that copy still exists at the source's size.
+///
+/// `additional_import_dest_path` mints a fresh " (N)" name whenever the previous
+/// one is taken, and `check_not_already_imported` only inspects the chosen
+/// destination, so a retried copy import of the same source would otherwise
+/// land as yet another numbered file every pass. Resolving the earlier copy as
+/// the destination lets the duplicate check reject the retry instead.
+async fn existing_additional_import_media_file(
+    app: &AppUseCase,
+    title: &scryer_domain::Title,
+    source_video: &Path,
+    source_size: i64,
+) -> Option<crate::TitleMediaFile> {
+    let source_key = path_to_stored_string(source_video);
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .ok()?;
+    files
+        .into_iter()
+        .filter(|file| file.role == crate::MediaFileRole::Additional)
+        .filter(|file| file.original_file_path.as_deref() == Some(source_key.as_str()))
+        .filter(|file| file.size_bytes == source_size)
+        .find(|file| {
+            std::fs::metadata(&file.file_path)
+                .map(|metadata| metadata.len() as i64 == source_size)
+                .unwrap_or(false)
+        })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "additional movie imports share the normal movie path context without using the upgrade gate"
@@ -1063,7 +1097,28 @@ async fn import_additional_movie_download(
         };
         full_folder_path.join(&rendered_filename)
     };
-    let dest_path = additional_import_dest_path(&canonical_dest_path, parsed);
+    let prior_additional_file =
+        existing_additional_import_media_file(app, title, source_video, source_size).await;
+    let dest_path = match prior_additional_file.as_ref() {
+        Some(prior) => PathBuf::from(&prior.file_path),
+        None => additional_import_dest_path(&canonical_dest_path, parsed),
+    };
+    // The duplicate check consults `existing_files` for move-mode ownership, and
+    // the caller only passes primary rows; include the prior additional row so
+    // a retry is refused as a duplicate under every import mode.
+    let check_existing_files = prior_additional_file
+        .as_ref()
+        .map(|prior| {
+            let mut files = existing_files.to_vec();
+            files.push(prior.clone());
+            files
+        })
+        .unwrap_or_default();
+    let existing_files = if prior_additional_file.is_some() {
+        check_existing_files.as_slice()
+    } else {
+        existing_files
+    };
     let linked_episode_artifacts = series_movie_context
         .map(|context| context.linked_episode_artifacts)
         .unwrap_or(&[]);

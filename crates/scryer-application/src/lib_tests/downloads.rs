@@ -9409,6 +9409,176 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
     assert_eq!(additional_file.series_movie_link_ids, vec![link.id]);
 }
 
+/// A completed additional-file movie download that is imported again (copy
+/// mode leaves the source in place, and a download whose verification is not
+/// yet satisfied is re-imported on the next poll) must reuse the copy it
+/// already made instead of minting another " (N)" file every pass.
+#[tokio::test]
+async fn completed_import_retry_reuses_existing_additional_movie_file() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let media_files = Arc::new(MockMediaFileRepo::default());
+    let import_repo = Arc::new(TrackingImportRepo::default());
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_imports(import_repo.clone())
+            .with_file_importer(Arc::new(CopyingFileImporter))
+            .with_media_files(media_files.clone())
+    });
+
+    let config =
+        create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
+    let library_dir = tempfile::tempdir().expect("library tempdir");
+    let title_folder = library_dir.path().join("Additional Movie Retry (2026)");
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Additional Movie Retry".to_string(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                tags: vec![],
+                external_ids: vec![],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create movie title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, &title_folder.to_string_lossy())
+        .await
+        .expect("set title folder path");
+    std::fs::create_dir_all(&title_folder).expect("create title folder");
+    let primary_path = title_folder.join("Additional Movie Retry (2026) - 2160p.mkv");
+    std::fs::File::create(&primary_path)
+        .expect("create existing primary")
+        .set_len(80 * 1024 * 1024)
+        .expect("size existing primary");
+    let primary_file_id = app
+        .services
+        .library
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: primary_path.to_string_lossy().into_owned(),
+            size_bytes: 80 * 1024 * 1024,
+            role: MediaFileRole::Primary,
+            quality_label: Some("2160p".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("insert existing primary file");
+
+    let item_id = "additional-movie-retry-1";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: title.id.clone(),
+            purpose: crate::DownloadSubmissionPurpose::AdditionalFile,
+            facet: "movie".to_string(),
+            download_client_id: Some(config.id.clone()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some(
+                "Additional.Movie.Retry.2026.PROPER.1080p.BluRay.x264-Group".to_string(),
+            ),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("record additional movie submission");
+
+    let download_dir = tempfile::tempdir().expect("download tempdir");
+    let source_file = download_dir
+        .path()
+        .join("Additional.Movie.Retry.2026.PROPER.1080p.BluRay.x264-Group.mkv");
+    std::fs::File::create(&source_file)
+        .expect("create source video")
+        .set_len(51 * 1024 * 1024)
+        .expect("size source video above sample threshold");
+    let mut completed = completed_download_fixture_item(
+        item_id,
+        &title.id,
+        "Additional.Movie.Retry.2026.PROPER.1080p.BluRay.x264-Group",
+        download_dir.path().to_string_lossy().as_ref(),
+    );
+    completed.client_id = config.id.clone();
+    completed.parameters.clear();
+    *download_client.completed_downloads.lock().await = vec![completed.clone()];
+
+    let first = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("first additional movie import");
+    assert_eq!(
+        first.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{first:?}"
+    );
+    let first_dest = first.dest_path.clone().expect("first import destination");
+    assert!(
+        source_file.exists(),
+        "copy-mode import must leave the source in place"
+    );
+
+    let second = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("second additional movie import");
+    assert_eq!(
+        second.decision,
+        scryer_domain::ImportDecision::Skipped,
+        "{second:?}"
+    );
+    assert_eq!(
+        second.skip_reason,
+        Some(scryer_domain::ImportSkipReason::AlreadyImported),
+        "{second:?}"
+    );
+    assert_eq!(second.dest_path.as_deref(), Some(first_dest.as_str()));
+
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    let additional_files = files
+        .iter()
+        .filter(|file| file.id != primary_file_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        additional_files.len(),
+        1,
+        "retry must not add a second media row: {additional_files:?}"
+    );
+    assert_eq!(additional_files[0].role, MediaFileRole::Additional);
+    assert_eq!(additional_files[0].file_path, first_dest);
+    let library_videos = std::fs::read_dir(&title_folder)
+        .expect("read title folder")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mkv"))
+        .count();
+    assert_eq!(
+        library_videos, 2,
+        "title folder must hold the primary and exactly one additional copy"
+    );
+}
+
 #[tokio::test]
 async fn path_manual_import_can_target_series_movie_link() {
     let download_client = Arc::new(StubDownloadClient::default());
