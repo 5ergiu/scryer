@@ -1701,11 +1701,16 @@ async fn enumerate_library_scan_title_work(
     Ok(work)
 }
 
-type TitleScanAnalysisTaskResult = AppResult<(
-    PlannedTitleScanFile,
-    crate::media::discs::CataloguedMediaAnalysis,
-    Duration,
-)>;
+/// The outcome of one file's analysis task.
+///
+/// The plan travels back out with the analysis result so that a failure can
+/// be attributed to the file it belongs to. Returning a bare `Err` would end
+/// the whole title walk and drop every file still queued behind it.
+struct TitleScanAnalysisTaskResult {
+    plan: PlannedTitleScanFile,
+    analysis: AppResult<crate::media::discs::CataloguedMediaAnalysis>,
+    elapsed: Duration,
+}
 
 fn launch_pending_title_scan_analysis_tasks(
     analysis_set: &mut tokio::task::JoinSet<TitleScanAnalysisTaskResult>,
@@ -1726,20 +1731,38 @@ fn launch_pending_title_scan_analysis_tasks(
         let file_path = plan.file.path.clone();
         analysis_set.spawn(async move {
             tracing::debug!(file_path = %file_path, "title scan analysis task: start");
-            let _permit = analysis_limit
+            let analysis_started = Instant::now();
+            let permit = analysis_limit
                 .acquire_owned()
                 .await
-                .map_err(|error| AppError::Repository(error.to_string()))?;
-            let analysis_started = Instant::now();
+                .map_err(|error| AppError::Repository(error.to_string()));
+            let _permit = match permit {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return TitleScanAnalysisTaskResult {
+                        plan,
+                        analysis: Err(error),
+                        elapsed: analysis_started.elapsed(),
+                    };
+                }
+            };
             let file_id = match &plan.record {
                 PlannedTitleScanRecord::Existing { file_id, .. } => Some(file_id.as_str()),
                 PlannedTitleScanRecord::New => None,
             };
-            let outcome = app
+            let analysis = app
                 .analyze_catalogued_media_file(file_id, stored_path_to_path_buf(&file_path))
-                .await?;
-            tracing::debug!(file_path = %file_path, "title scan analysis task: complete");
-            Ok::<_, AppError>((plan, outcome, analysis_started.elapsed()))
+                .await;
+            tracing::debug!(
+                file_path = %file_path,
+                failed = analysis.is_err(),
+                "title scan analysis task: complete"
+            );
+            TitleScanAnalysisTaskResult {
+                plan,
+                analysis,
+                elapsed: analysis_started.elapsed(),
+            }
         });
     }
 }
@@ -1762,13 +1785,32 @@ async fn finalize_title_scan_analysis_task_result(
     ctx: TitleScanAnalysisFinalizeContext<'_>,
     result: Result<TitleScanAnalysisTaskResult, tokio::task::JoinError>,
 ) -> AppResult<Duration> {
-    let (plan, analysis_outcome, analysis_duration) =
-        result.map_err(|error| AppError::Repository(error.to_string()))??;
+    let TitleScanAnalysisTaskResult {
+        plan,
+        analysis,
+        elapsed: analysis_duration,
+    } = result.map_err(|error| AppError::Repository(error.to_string()))?;
     if library_scan_cancel_requested(ctx.cancel_token) {
         return Ok(analysis_duration);
     }
 
     let file_path = plan.file.path.clone();
+    // One file's analysis failing is that file's problem. The file is still
+    // catalogued (without analysis details) and marked scan_failed with the
+    // real error, and the walk carries on with the rest of the title.
+    let analysis_outcome = match analysis {
+        Ok(outcome) => Some(outcome),
+        Err(error) => {
+            warn!(
+                error = %error,
+                title_id = %ctx.title.id,
+                title_name = %ctx.title.name,
+                file_path = %file_path,
+                "media analysis failed for one file during title scan; continuing with the title"
+            );
+            return finalize_failed_title_scan_analysis(ctx, plan, error, analysis_duration).await;
+        }
+    };
     debug!(
         title_id = %ctx.title.id,
         title_name = %ctx.title.name,
@@ -1779,7 +1821,7 @@ async fn finalize_title_scan_analysis_task_result(
         ctx.app,
         ctx.title,
         plan,
-        Some(analysis_outcome),
+        analysis_outcome,
         ctx.scan_mode.clone(),
         ctx.episode_links,
         ctx.summary,
@@ -1812,6 +1854,76 @@ async fn finalize_title_scan_analysis_task_result(
         file_path = %file_path,
         "title scan stage: finalize file complete"
     );
+
+    Ok(analysis_duration)
+}
+
+/// Record one file's failed analysis without ending the title walk.
+///
+/// The file is still catalogued, so it stays visible and importable the way
+/// Sonarr keeps a file whose media info could not be read, and its record is
+/// flagged `scan_failed` with the real error. The delta counts the file as
+/// failed so the scan's progress reports it instead of silently losing it.
+async fn finalize_failed_title_scan_analysis(
+    ctx: TitleScanAnalysisFinalizeContext<'_>,
+    plan: PlannedTitleScanFile,
+    error: AppError,
+    analysis_duration: Duration,
+) -> AppResult<Duration> {
+    let file_path = plan.file.path.clone();
+    let outcome = finalize_title_scan_file(
+        ctx.app,
+        ctx.title,
+        plan,
+        None,
+        ctx.scan_mode.clone(),
+        ctx.episode_links,
+        ctx.summary,
+        ctx.db_elapsed,
+        ctx.external_subtitle_cache,
+    )
+    .await;
+
+    match ctx
+        .app
+        .services
+        .library
+        .media_files
+        .get_media_file_by_path(&file_path)
+        .await
+    {
+        Ok(Some(record)) => {
+            if let Err(mark_error) = ctx
+                .app
+                .services
+                .library
+                .media_files
+                .mark_scan_failed(&record.id, &error.to_string())
+                .await
+            {
+                warn!(
+                    error = %mark_error,
+                    title_id = %ctx.title.id,
+                    file_path = %file_path,
+                    "failed to mark media file as scan_failed after a failed title scan analysis"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(lookup_error) => {
+            warn!(
+                error = %lookup_error,
+                title_id = %ctx.title.id,
+                file_path = %file_path,
+                "failed to look up media file after a failed title scan analysis"
+            );
+        }
+    }
+
+    ctx.pending_progress
+        .absorb(TitleScanProgressDelta::failed(1));
+    *ctx.title_updated_since_emit |= outcome.title_updated;
+    flush_title_scan_progress_batch(ctx.app, ctx.session_id, ctx.pending_progress).await;
 
     Ok(analysis_duration)
 }
