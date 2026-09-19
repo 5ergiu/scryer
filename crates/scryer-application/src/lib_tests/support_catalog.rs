@@ -978,10 +978,9 @@ impl TitleRepository for MockTitleRepo {
         title
             .external_ids
             .retain(|external_id| external_id.source != "smg");
-        title.external_ids.push(ExternalId {
-            source: "smg".to_string(),
-            value: smg_id.to_string(),
-        });
+        title
+            .external_ids
+            .push(ExternalId::new("smg".to_string(), smg_id.to_string()));
         self.smg_identity_backfill_attempts
             .lock()
             .await

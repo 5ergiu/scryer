@@ -36,10 +36,7 @@ fn hydration_test_title(name: &str, tvdb_id: i64) -> NewTitle {
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: tvdb_id.to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), tvdb_id.to_string())],
         min_availability: None,
         ..Default::default()
     }
@@ -51,10 +48,7 @@ fn hydration_test_tmdb_title(name: &str, tmdb_id: i64) -> NewTitle {
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tmdb".to_string(),
-            value: tmdb_id.to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tmdb".to_string(), tmdb_id.to_string())],
         min_availability: None,
         ..Default::default()
     }
@@ -695,10 +689,9 @@ async fn bulk_movie_hydration_replaces_redirected_smg_id() {
     });
     let (app, user, _) = bootstrap_with_metadata_gateway_and_titles(gateway);
     let mut request = hydration_test_title("Redirected Movie", tvdb_id);
-    request.external_ids.push(ExternalId {
-        source: "smg".to_string(),
-        value: old_smg_id.to_string(),
-    });
+    request
+        .external_ids
+        .push(ExternalId::new("smg".to_string(), old_smg_id.to_string()));
     let created = app
         .add_title_with_outcome(&user, request)
         .await

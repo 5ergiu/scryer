@@ -2239,15 +2239,15 @@ mod tests {
     #[test]
     fn find_existing_series_title_index_resolves_via_imdb_and_tmdb() {
         let mut imdb_title = build_series_title("series-imdb");
-        imdb_title.external_ids = vec![scryer_domain::ExternalId {
-            source: "imdb".to_string(),
-            value: "tt2222222".to_string(),
-        }];
+        imdb_title.external_ids = vec![scryer_domain::ExternalId::new(
+            "imdb".to_string(),
+            "tt2222222".to_string(),
+        )];
         let mut tmdb_title = build_series_title("series-tmdb");
-        tmdb_title.external_ids = vec![scryer_domain::ExternalId {
-            source: "tmdb".to_string(),
-            value: "55555".to_string(),
-        }];
+        tmdb_title.external_ids = vec![scryer_domain::ExternalId::new(
+            "tmdb".to_string(),
+            "55555".to_string(),
+        )];
         let existing_titles = vec![imdb_title, tmdb_title];
         let (by_name, by_tvdb, by_imdb, by_tmdb) = build_series_title_indexes(&existing_titles);
 
@@ -2491,10 +2491,10 @@ mod tests {
         // folder"); it is a new title. The same-year match and the canonical-id
         // match still map.
         let mut remake_2019 = build_movie_title_named("remade-2019", "Remade Film", Some(2019));
-        remake_2019.external_ids = vec![scryer_domain::ExternalId {
-            source: "tvdb".to_string(),
-            value: "tvdb-2019".to_string(),
-        }];
+        remake_2019.external_ids = vec![scryer_domain::ExternalId::new(
+            "tvdb".to_string(),
+            "tvdb-2019".to_string(),
+        )];
         let existing_titles = vec![remake_2019];
         let (by_name, _by_smg, by_tvdb, _, _) = build_movie_title_indexes(&existing_titles);
         let selected = |tvdb_id: &str, year: Option<i32>| MetadataSearchItem {
@@ -2553,15 +2553,15 @@ mod tests {
     #[test]
     fn movie_metadata_match_prefers_smg_id_before_tvdb_id() {
         let mut smg_title = build_movie_title_named("smg-title", "SMG Title", Some(2020));
-        smg_title.external_ids = vec![scryer_domain::ExternalId {
-            source: "smg".to_string(),
-            value: "901".to_string(),
-        }];
+        smg_title.external_ids = vec![scryer_domain::ExternalId::new(
+            "smg".to_string(),
+            "901".to_string(),
+        )];
         let mut tvdb_title = build_movie_title_named("tvdb-title", "TVDB Title", Some(2020));
-        tvdb_title.external_ids = vec![scryer_domain::ExternalId {
-            source: "tvdb".to_string(),
-            value: "movie-902".to_string(),
-        }];
+        tvdb_title.external_ids = vec![scryer_domain::ExternalId::new(
+            "tvdb".to_string(),
+            "movie-902".to_string(),
+        )];
         let existing_titles = vec![smg_title, tvdb_title];
         let (by_name, by_smg, by_tvdb, by_imdb, by_tmdb) =
             build_movie_title_indexes(&existing_titles);

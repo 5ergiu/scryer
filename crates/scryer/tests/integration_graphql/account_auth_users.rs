@@ -2096,10 +2096,7 @@ async fn delete_media_file_honors_custom_library_permissions_after_library_refac
         monitored: true,
         tags: vec![],
         canonical_tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "998877".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "998877".to_string())],
         root_folder_id: custom_root_id,
         created_by: None,
         created_at: now,
@@ -2466,10 +2463,7 @@ async fn subtitle_search_and_download_require_manage_subtitles() {
         monitored: true,
         tags: vec![],
         canonical_tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "551166".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "551166".to_string())],
         root_folder_id: root_id,
         created_by: None,
         created_at: now,

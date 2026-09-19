@@ -612,18 +612,9 @@ impl RecordingExactIdMetadataGateway {
             return vec![];
         }
         vec![
-            ExternalId {
-                source: "smg".to_string(),
-                value: "5555".to_string(),
-            },
-            ExternalId {
-                source: "tmdb".to_string(),
-                value: "6666".to_string(),
-            },
-            ExternalId {
-                source: "imdb".to_string(),
-                value: "tt0055555".to_string(),
-            },
+            ExternalId::new("smg".to_string(), "5555".to_string()),
+            ExternalId::new("tmdb".to_string(), "6666".to_string()),
+            ExternalId::new("imdb".to_string(), "tt0055555".to_string()),
         ]
     }
 
@@ -722,14 +713,8 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
                         smg_id: Some(7_777),
                         primary_source: Some("tmdb".to_string()),
                         external_ids: vec![
-                            ExternalId {
-                                source: "tmdb".to_string(),
-                                value: tmdb_id,
-                            },
-                            ExternalId {
-                                source: "imdb".to_string(),
-                                value: "tt0077777".to_string(),
-                            },
+                            ExternalId::new("tmdb".to_string(), tmdb_id),
+                            ExternalId::new("imdb".to_string(), "tt0077777".to_string()),
                         ],
                         year: Some(2020),
                         auto_match_safe: true,
@@ -914,10 +899,7 @@ async fn manual_title_create_without_hydration_does_not_fetch_poster() {
                 facet: MediaFacet::Movie,
                 monitored: false,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "1234".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "1234".to_string())],
                 min_availability: None,
                 ..Default::default()
             },
@@ -1024,10 +1006,7 @@ async fn title_scan_returns_error_when_one_off_hydration_fails() {
                 facet: MediaFacet::Movie,
                 monitored: true,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".into(),
-                    value: "900001".into(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb", "900001")],
                 min_availability: None,
                 ..Default::default()
             },
@@ -7116,12 +7095,7 @@ fn pending_import_title_request(
         monitored: true,
         tags: vec!["should-be-cleared".to_string()],
         external_ids: tvdb_id
-            .map(|value| {
-                vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: value.to_string(),
-                }]
-            })
+            .map(|value| vec![ExternalId::new("tvdb".to_string(), value.to_string())])
             .unwrap_or_default(),
         root_folder_id: Some("should-be-cleared".to_string()),
         min_availability: Some("should-be-cleared".to_string()),
@@ -7264,10 +7238,8 @@ async fn pending_import_title_search_annotates_same_library_titles_only() {
     other_library_title.id = "other-library-movie-title".to_string();
     other_library_title.library_id = "other-movie-library".to_string();
     other_library_title.name = "Other Library Movie".to_string();
-    other_library_title.external_ids = vec![ExternalId {
-        source: "tvdb".to_string(),
-        value: "123456".to_string(),
-    }];
+    other_library_title.external_ids =
+        vec![ExternalId::new("tvdb".to_string(), "123456".to_string())];
     {
         let mut store = titles.store.lock().await;
         store.push(other_library_title);
@@ -7275,10 +7247,8 @@ async fn pending_import_title_search_annotates_same_library_titles_only() {
             let mut noise_title = existing_title.title.clone();
             noise_title.id = format!("noise-movie-title-{index}");
             noise_title.name = format!("Noise Movie {index}");
-            noise_title.external_ids = vec![ExternalId {
-                source: "tvdb".to_string(),
-                value: format!("9{index:05}"),
-            }];
+            noise_title.external_ids =
+                vec![ExternalId::new("tvdb".to_string(), format!("9{index:05}"))];
             store.push(noise_title);
         }
     }
@@ -7416,10 +7386,7 @@ async fn resolve_pending_import_creates_unmonitored_movie_title_and_keeps_item_b
         Some("123456"),
         Some(2020),
     );
-    request.external_ids = vec![ExternalId {
-        source: "tmdb".to_string(),
-        value: "5001".to_string(),
-    }];
+    request.external_ids = vec![ExternalId::new("tmdb".to_string(), "5001".to_string())];
     let result = app
         .resolve_pending_import(&user, "movie-resolve-1", request, false)
         .await
@@ -7650,10 +7617,7 @@ async fn hydrate_titles_bulk_updates_title_name_for_selected_metadata_language()
                 facet: MediaFacet::Movie,
                 monitored: true,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
                 root_folder_id: None,
                 min_availability: None,
                 poster_url: None,
@@ -7864,10 +7828,7 @@ async fn resolve_pending_import_rejects_existing_title_in_same_library() {
                 facet: MediaFacet::Movie,
                 monitored: true,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
                 root_folder_id: None,
                 min_availability: None,
                 poster_url: None,
@@ -7996,10 +7957,7 @@ async fn resolve_pending_import_attaches_movie_to_existing_title_in_same_library
                 facet: MediaFacet::Movie,
                 monitored: true,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
                 root_folder_id: None,
                 min_availability: None,
                 poster_url: None,
@@ -8118,10 +8076,7 @@ async fn resolve_pending_import_attaches_series_to_existing_title_in_same_librar
                 name: "Existing Show".to_string(),
                 facet: MediaFacet::Series,
                 monitored: true,
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "654321".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "654321".to_string())],
                 ..NewTitle::default()
             },
         )
@@ -8210,10 +8165,7 @@ async fn resolve_pending_import_attaches_series_folder_to_existing_title() {
                 facet: MediaFacet::Series,
                 monitored: true,
                 year: Some(2026),
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "778899".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "778899".to_string())],
                 ..NewTitle::default()
             },
         )
@@ -8569,10 +8521,7 @@ async fn resolve_pending_movie_attach_keeps_item_when_title_owns_another_folder(
                 name: "Existing Movie".to_string(),
                 facet: MediaFacet::Movie,
                 monitored: true,
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
                 root_folder_id: None,
                 year: Some(2020),
                 ..NewTitle::default()
@@ -8682,10 +8631,7 @@ async fn resolve_pending_movie_directory_retries_until_every_file_is_attached() 
                 name: "Existing Movie".to_string(),
                 facet: MediaFacet::Movie,
                 monitored: true,
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "123456".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
                 root_folder_id: None,
                 year: Some(2020),
                 ..NewTitle::default()
@@ -9079,10 +9025,7 @@ async fn movie_full_scan_heals_an_existing_title_onto_the_root_holding_its_files
                 facet: MediaFacet::Movie,
                 monitored: false,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tmdb".to_string(),
-                    value: "7777".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tmdb".to_string(), "7777".to_string())],
                 min_availability: None,
                 ..Default::default()
             },
