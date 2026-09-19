@@ -546,22 +546,7 @@ impl TransferFixture {
     }
 
     async fn settle(&self, operation_id: &str) -> LocationOperation {
-        timeout(Duration::from_secs(10), async {
-            loop {
-                let operation = self
-                    .app
-                    .location_operation(operation_id)
-                    .await
-                    .expect("read operation")
-                    .expect("operation row exists");
-                if operation.state.is_terminal() {
-                    return operation;
-                }
-                sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the operation reached a terminal state")
+        settle_location_operation(&self.app, operation_id).await
     }
 }
 

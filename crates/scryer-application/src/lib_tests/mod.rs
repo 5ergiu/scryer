@@ -86,6 +86,27 @@ use support_indexers_metadata::*;
 use support_library_show::*;
 use support_settings_scan::*;
 
+/// Location operations run in the background by contract (FR-030): a story
+/// test watches the operation row until it reaches a terminal state, the way
+/// Activity does. Shared by every location story fixture.
+async fn settle_location_operation(
+    app: &AppUseCase,
+    operation_id: &str,
+) -> crate::location::model::LocationOperation {
+    wait_for(
+        "the location operation to reach a terminal state",
+        || async {
+            let operation = app
+                .location_operation(operation_id)
+                .await
+                .expect("read operation")
+                .expect("operation row exists");
+            operation.state.is_terminal().then_some(operation)
+        },
+    )
+    .await
+}
+
 #[derive(Default)]
 pub(super) struct RecordingScopeIndexerCoverageRepo {
     rows: Mutex<Vec<(String, String, String, String)>>,

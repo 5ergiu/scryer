@@ -482,7 +482,7 @@ pub(super) async fn wait_for_title_image_clear_calls(
     repo: &BlockingTitleImageRepo,
     expected: usize,
 ) {
-    timeout(Duration::from_secs(1), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if repo.clear_calls.load(Ordering::SeqCst) >= expected {
                 return;
@@ -495,7 +495,7 @@ pub(super) async fn wait_for_title_image_clear_calls(
 }
 
 pub(super) async fn wait_for_title_image_cache_clear_idle(app: &AppUseCase) {
-    timeout(Duration::from_secs(1), async {
+    timeout(TEST_WAIT_DEADLINE, async {
         loop {
             if !app
                 .runtime

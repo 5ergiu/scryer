@@ -111,9 +111,8 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
         .await
         .expect("batch should append");
 
-    let wake = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    let wake = within_deadline("the notification wake", receiver.recv())
         .await
-        .expect("notification wake should arrive")
         .expect("notification broadcast should stay open");
     assert_eq!(
         wake,
@@ -12248,6 +12247,7 @@ async fn an_interactive_walk_waits_for_a_cycle_that_holds_the_title() {
         .title_walk_locks
         .acquire(&title.id)
         .await;
+    let (labels_tx, mut labels) = tokio::sync::mpsc::unbounded_channel();
     let walk = tokio::spawn({
         let app = app.clone();
         let title_id = title.id.clone();
@@ -12258,24 +12258,33 @@ async fn an_interactive_walk_waits_for_a_cycle_that_holds_the_title() {
                 None,
                 None,
                 tokio_util::sync::CancellationToken::new(),
-                |_| {},
+                move |progress| {
+                    let _ = labels_tx.send(progress.stage_label);
+                },
             )
             .await
         }
     });
 
-    // The walk cannot have queried anything while the lock is held.
-    tokio::task::yield_now().await;
-    sleep(Duration::from_millis(50)).await;
+    // The walk announces the wait right before it parks on the title lock, so
+    // once the label arrives it has reached the contention point and the
+    // empty search log below is a real observation, not an early read.
+    loop {
+        let label = within_deadline("the walk's stage label", labels.recv())
+            .await
+            .expect("the walk reports it is waiting before it finishes");
+        if label.contains("waiting for") {
+            break;
+        }
+    }
     assert!(
         indexer_client.searches.lock().await.is_empty(),
         "the interactive walk waits instead of racing the cycle"
     );
 
     drop(held);
-    let stats = timeout(Duration::from_secs(10), walk)
+    let stats = within_deadline("the walk to resume once the lock is released", walk)
         .await
-        .expect("the walk resumes once the lock is released")
         .expect("walk task")
         .expect("interactive title walk");
     assert!(stats.stages > 0, "the walk ran its stages after waiting");
@@ -12545,9 +12554,8 @@ async fn automatic_search_rechecks_pauses_after_waiting_for_the_title() {
         .await
     });
     loop {
-        let label = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        let label = within_deadline("the walk's stage label", rx.recv())
             .await
-            .unwrap()
             .unwrap();
         if label.contains("waiting for") {
             break;
@@ -12757,18 +12765,18 @@ async fn await_acquisition_search_job(
     actor: &User,
     run_id: &str,
 ) -> AcquisitionSearchJobView {
-    for _ in 0..600 {
-        let view = app
-            .acquisition_search_job(actor, run_id)
-            .await
-            .expect("read the acquisition search job")
-            .expect("the job exists");
-        if view.finished_at.is_some() {
-            return view;
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-    panic!("the acquisition search job never reached a terminal state");
+    wait_for(
+        "the acquisition search job to reach a terminal state",
+        || async {
+            let view = app
+                .acquisition_search_job(actor, run_id)
+                .await
+                .expect("read the acquisition search job")
+                .expect("the job exists");
+            view.finished_at.is_some().then_some(view)
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -13067,12 +13075,9 @@ async fn a_title_walk_holding_the_writer_gate_still_finishes_while_progress_is_w
         .await
         .expect("start the title-scoped acquisition search");
 
-    let view = tokio::time::timeout(
-        Duration::from_secs(20),
-        await_acquisition_search_job(&app, &actor, &run.id),
-    )
-    .await
-    .expect("a progress write must not strand the walk that holds the writer gate");
+    // A progress write must not strand the walk that holds the writer gate;
+    // the helper's hang guard fails the test if it does.
+    let view = await_acquisition_search_job(&app, &actor, &run.id).await;
     assert!(
         view.total > 0,
         "the walk announced its work items: {view:?}"
