@@ -965,6 +965,10 @@ pub fn build_domain_event_list_sql(filter: &DomainEventFilter) -> (String, Vec<S
         where_clauses.push("facet = {}".to_string());
         args.push(SqlArg::Text(facet.as_str().to_string()));
     }
+    if let Some(stream_id) = filter.stream_id.as_ref() {
+        where_clauses.push("stream_id = {}".to_string());
+        args.push(SqlArg::Text(stream_id.clone()));
+    }
     if let Some(after_sequence) = filter.after_sequence {
         where_clauses.push("sequence > {}".to_string());
         args.push(SqlArg::I64(after_sequence));

@@ -1249,8 +1249,9 @@ impl LibraryScanMediaAnalysisPool {
         if reservation.file_count > 0
             && let Some(coordinator) = self.coordinator.as_ref()
         {
-            coordinator.mark_file_failed(reservation.file_count).await;
-            coordinator.publish_progress().await;
+            coordinator
+                .mark_file_failed_and_publish(reservation.file_count)
+                .await;
         }
     }
 
@@ -1385,8 +1386,9 @@ impl LibraryScanMediaAnalysisPool {
                 && self.file_total_mode == LibraryScanFileTotalMode::BackgroundRefreshAggregate
                 && let Some(coordinator) = self.coordinator.as_ref()
             {
-                coordinator.add_file_total(discovered_file_count).await;
-                coordinator.publish_progress().await;
+                coordinator
+                    .add_file_total_and_publish(discovered_file_count)
+                    .await;
             }
             self.analysis_ready
                 .push_back(QueuedLibraryScanTitleAnalysisWork { work, coverage });
@@ -1531,8 +1533,7 @@ impl LibraryScanMediaAnalysisPool {
         }
 
         if let Some(coordinator) = self.coordinator.as_ref() {
-            coordinator.mark_file_total_known().await;
-            coordinator.publish_progress().await;
+            coordinator.mark_file_total_known_and_publish().await;
         }
         self.file_total_known_marked = true;
         Ok(())
@@ -1655,8 +1656,9 @@ async fn hydrate_enumerate_and_walk_title_work(
                     && ctx.file_total_mode == LibraryScanFileTotalMode::BackgroundRefreshAggregate
                     && let Some(coordinator) = ctx.coordinator.as_ref()
                 {
-                    coordinator.add_file_total(known_file_count).await;
-                    coordinator.publish_progress().await;
+                    coordinator
+                        .add_file_total_and_publish(known_file_count)
+                        .await;
                 }
             }
             Err(error) => return (known_file_count, Err(error)),

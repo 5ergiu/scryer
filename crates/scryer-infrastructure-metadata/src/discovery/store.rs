@@ -1058,8 +1058,35 @@ impl DiscoveryRepository for DiscoveryStore {
                     let previous_card_ids =
                         list_title_more_like_this_card_ids_tx(tx, &title_id).await?;
                     delete_title_more_like_this_items_tx(tx, &title_id).await?;
-                    for item in &items {
-                        insert_title_more_like_this_item_tx(tx, &title_id, item, &language).await?;
+                    // Which discovery titles already exist is asked once for the
+                    // whole batch instead of once per item. The loop only ever
+                    // updates rows it finds, and never inserts a discovery title,
+                    // so no iteration can change the answer for a later one --
+                    // the membership this reads up front is the membership each
+                    // per-item probe would have read. Every statement here is
+                    // held under the single-writer gate, so the 23 probes this
+                    // drops come straight off the window the refresh holds it.
+                    let discovery_title_ids = items
+                        .iter()
+                        .map(|item| {
+                            discovery_title_id_for(
+                                &discovery_title_target_key_norm(item),
+                                &normalize_discovery_language(&language),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let existing_discovery_title_ids =
+                        existing_discovery_title_ids_tx(tx, &discovery_title_ids).await?;
+                    for (item, discovery_title_id) in items.iter().zip(&discovery_title_ids) {
+                        insert_title_more_like_this_item_tx(
+                            tx,
+                            &title_id,
+                            item,
+                            &language,
+                            discovery_title_id,
+                            existing_discovery_title_ids.contains(discovery_title_id),
+                        )
+                        .await?;
                     }
                     let deleted_card_ids =
                         delete_orphan_title_recommendation_cards_for_ids_tx(tx, &previous_card_ids)
@@ -4978,7 +5005,11 @@ async fn delete_orphan_title_recommendation_cards_for_ids_tx(
         if orphans.is_empty() {
             continue;
         }
-        let delete_args = orphans.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        let delete_args = orphans
+            .iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
         SqlRuntime::execute(
             SqlExec::Tx(tx),
             &format!(
@@ -5089,24 +5120,41 @@ async fn upsert_title_recommendation_card_tx(
     Ok(())
 }
 
+/// The subset of `discovery_title_ids` that already have a `discovery_titles`
+/// row, read in one statement for a whole recommendation batch.
+async fn existing_discovery_title_ids_tx(
+    tx: &mut SqlTx<'_>,
+    discovery_title_ids: &[String],
+) -> AppResult<HashSet<String>> {
+    let mut existing = HashSet::new();
+    for chunk in discovery_title_ids.chunks(CLEANUP_ID_CHUNK) {
+        let args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        let rows = SqlRuntime::fetch_all(
+            SqlExec::Tx(tx),
+            &format!(
+                "SELECT id FROM discovery_titles WHERE id IN ({})",
+                placeholders(args.len())
+            ),
+            &args,
+        )
+        .await?;
+        for row in &rows {
+            existing.insert(row.text("id")?);
+        }
+    }
+    Ok(existing)
+}
+
 async fn insert_title_more_like_this_item_tx(
     tx: &mut SqlTx<'_>,
     title_id: &str,
     item: &DiscoveryItemRecord,
     language: &str,
+    discovery_title_id: &str,
+    discovery_title_exists: bool,
 ) -> AppResult<()> {
-    let discovery_title_id = discovery_title_id_for(
-        &discovery_title_target_key_norm(item),
-        &normalize_discovery_language(language),
-    );
-    if SqlRuntime::fetch_optional(
-        SqlExec::Tx(tx),
-        "SELECT id FROM discovery_titles WHERE id = {}",
-        &[SqlArg::Text(discovery_title_id.clone())],
-    )
-    .await?
-    .is_some()
-    {
+    let discovery_title_id = discovery_title_id.to_string();
+    if discovery_title_exists {
         upsert_discovery_title_tx(tx, item, language, false, false).await?;
     }
     upsert_title_recommendation_card_tx(tx, &discovery_title_id, item).await?;

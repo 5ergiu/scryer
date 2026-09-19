@@ -4033,14 +4033,28 @@ fn title_catalog_media_size_subquery(dialect: TitleCatalogSqlDialect) -> String 
 
 fn title_catalog_episode_progress_subquery(dialect: TitleCatalogSqlDialect) -> String {
     format!(
+        // Ownership is asked as EXISTS rather than joined through
+        // `file_episode_map`. An episode can map to several files, so the join
+        // fanned each episode out and every count had to be COUNT(DISTINCT
+        // e.id) to undo it -- three temp B-trees over every episode in the
+        // library, on every page of the catalog. Without the fan-out each
+        // surviving episode is one row again: `e.id` is the primary key and
+        // the `collections` join is on its key, so COUNT(*) counts exactly the
+        // episodes COUNT(DISTINCT e.id) did, and an episode is owned exactly
+        // when the join would have found it at least one live primary file.
         "SELECT e.title_id,
-                COUNT(DISTINCT e.id) AS total_episodes,
-                COUNT(DISTINCT CASE WHEN {} THEN e.id END) AS monitored_episodes,
-                COUNT(DISTINCT CASE WHEN mf.id IS NOT NULL THEN e.id END) AS owned_episodes
+                COUNT(*) AS total_episodes,
+                COUNT(CASE WHEN {} THEN 1 END) AS monitored_episodes,
+                COUNT(CASE WHEN EXISTS (
+                         SELECT 1
+                           FROM file_episode_map fem
+                           JOIN media_files mf ON mf.id = fem.file_id
+                          WHERE fem.episode_id = e.id
+                            AND {}
+                            AND mf.role = 'primary'
+                     ) THEN 1 END) AS owned_episodes
            FROM episodes e
           INNER JOIN collections c ON c.id = e.collection_id
-           LEFT JOIN file_episode_map fem ON fem.episode_id = e.id
-           LEFT JOIN media_files mf ON mf.id = fem.file_id AND {} AND mf.role = 'primary'
           WHERE c.collection_type <> 'specials'
             AND c.collection_index <> '0'
             AND trim(COALESCE(e.title, '')) <> ''

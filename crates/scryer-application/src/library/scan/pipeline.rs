@@ -1050,8 +1050,9 @@ async fn handle_candidate_job_event(
             }
             ctx.summary.scanned += 1;
             ctx.summary.skipped += 1;
-            ctx.coordinator.mark_title_match_completed(1).await;
-            ctx.coordinator.publish_progress().await;
+            ctx.coordinator
+                .mark_title_match_completed_and_publish(1)
+                .await;
         }
         ScanCandidateJobEvent::EvidenceDone { .. } => {
             // The coordinator consumes this lifecycle event directly.
@@ -1484,8 +1485,7 @@ async fn dispatch_media_work(
     let counted_files = reservation.file_count();
     if counted_files > 0 {
         *media_file_total_counted = (*media_file_total_counted).saturating_add(counted_files);
-        coordinator.add_file_total(counted_files).await;
-        coordinator.publish_progress().await;
+        coordinator.add_file_total_and_publish(counted_files).await;
     }
 
     match hydration.submit(reservation).await? {
