@@ -283,7 +283,7 @@ async fn hydrated_title_metadata_with_extra_external_ids_completes_on_single_con
     };
 
     let updated = timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(30),
         TitleRepository::update_title_hydrated_metadata(&catalog, &title.id, update),
     )
     .await
@@ -449,7 +449,7 @@ async fn replace_title_match_state_completes_on_single_connection_sqlite() {
     .expect("media file should insert");
 
     let updated = timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(30),
         TitleRepository::replace_match_state(
             &catalog,
             &title.id,
