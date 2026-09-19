@@ -9577,6 +9577,47 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
         library_videos, 2,
         "title folder must hold the primary and exactly one additional copy"
     );
+
+    // A later download that lands at the same source path with the same size
+    // but different bytes is a different file: the sampled proof disagrees, so
+    // it must be imported as a new copy rather than claimed as already imported.
+    // Replace the file rather than rewrite it in place: the test importer
+    // hardlinks when it can, and a real download writes a new inode too.
+    {
+        use std::io::Write as _;
+        std::fs::remove_file(&source_file).expect("remove earlier source video");
+        let mut source = std::fs::File::create(&source_file).expect("create replacement source");
+        source
+            .write_all(b"different bytes at the same size")
+            .expect("write replacement head");
+        source
+            .set_len(51 * 1024 * 1024)
+            .expect("size replacement source");
+    }
+    let third = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("third additional movie import");
+    assert_eq!(
+        third.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{third:?}"
+    );
+    assert_ne!(third.dest_path.as_deref(), Some(first_dest.as_str()));
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files after content change");
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.role == MediaFileRole::Additional)
+            .count(),
+        2,
+        "changed content must produce a second additional row"
+    );
 }
 
 #[tokio::test]
