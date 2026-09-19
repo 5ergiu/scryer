@@ -8323,14 +8323,8 @@ async fn acquisition_cycle_submits_paperman_media_request_candidate() {
                 monitored: true,
                 year: Some(2012),
                 external_ids: vec![
-                    ExternalId {
-                        source: "tvdb".to_string(),
-                        value: "5890".to_string(),
-                    },
-                    ExternalId {
-                        source: "imdb".to_string(),
-                        value: "tt2388725".to_string(),
-                    },
+                    ExternalId::new("tvdb".to_string(), "5890".to_string()),
+                    ExternalId::new("imdb".to_string(), "tt2388725".to_string()),
                 ],
                 content_status: Some("Released".to_string()),
                 min_availability: Some("released".to_string()),
@@ -8420,10 +8414,7 @@ async fn acquisition_cycle_submits_bluey_episode_media_request_candidate() {
                 facet: MediaFacet::Series,
                 monitored: true,
                 year: Some(2018),
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "353546".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "353546".to_string())],
                 content_status: Some("Continuing".to_string()),
                 ..Default::default()
             },
@@ -10043,10 +10034,7 @@ async fn add_and_queue_reuse_reconciles_quality_profile_before_submission() {
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec!["scryer:quality-profile:4k".to_string()],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "765432".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "765432".to_string())],
         ..Default::default()
     };
     let existing = app
@@ -10144,10 +10132,7 @@ async fn rss_reused_add_clears_4k_override_and_blocks_2160p_via_library_1080p() 
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec!["scryer:quality-profile:4k".to_string()],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "975310".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "975310".to_string())],
         year: Some(2024),
         content_status: Some("Released".into()),
         min_availability: Some("announced".into()),

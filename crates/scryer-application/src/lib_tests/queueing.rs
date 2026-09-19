@@ -413,10 +413,7 @@ async fn add_title_with_outcome_returns_pending_and_reuses_existing_tvdb_title()
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "123456".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
         min_availability: None,
         ..Default::default()
     };
@@ -464,10 +461,7 @@ async fn add_title_and_queue_download_with_outcome_reuses_matching_queue_submiss
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "654321".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), "654321".to_string())],
         min_availability: None,
         ..Default::default()
     };
@@ -537,10 +531,7 @@ async fn add_title_and_queue_download_records_accepted_torrent_hash_fingerprint(
         facet: MediaFacet::Movie,
         monitored: true,
         tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tmdb".to_string(),
-            value: "987654".to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tmdb".to_string(), "987654".to_string())],
         min_availability: None,
         ..Default::default()
     };
@@ -584,10 +575,7 @@ async fn queue_existing_title_download_reuses_matching_queue_submission() {
                 facet: MediaFacet::Movie,
                 monitored: true,
                 tags: vec![],
-                external_ids: vec![ExternalId {
-                    source: "tvdb".to_string(),
-                    value: "7654321".to_string(),
-                }],
+                external_ids: vec![ExternalId::new("tvdb".to_string(), "7654321".to_string())],
                 min_availability: None,
                 ..Default::default()
             },

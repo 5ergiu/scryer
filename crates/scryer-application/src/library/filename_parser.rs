@@ -1399,10 +1399,7 @@ mod tests {
             monitored: true,
             tags: vec![],
             canonical_tags: vec![],
-            external_ids: vec![ExternalId {
-                source: "tvdb".into(),
-                value: "12345".into(),
-            }],
+            external_ids: vec![ExternalId::new("tvdb", "12345")],
             created_by: None,
             created_at: Utc::now(),
             year: Some(2024),

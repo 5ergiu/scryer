@@ -3486,10 +3486,10 @@ mod tests {
         let mut title = make_title("native", "静かな夜に遠い空を見上げる物語", Some(2019));
         title.metadata_language = Some("jpn".to_string());
         title.imdb_id = Some("tt1234567".to_string());
-        title.external_ids.push(scryer_domain::ExternalId {
-            source: "tmdb".to_string(),
-            value: "42".to_string(),
-        });
+        title.external_ids.push(scryer_domain::ExternalId::new(
+            "tmdb".to_string(),
+            "42".to_string(),
+        ));
         let bank = build_title_context_bank(std::slice::from_ref(&title));
         let raw = "静かな夜に遠い海を見上げる物語.2019.1080p.WEB.H265-GRP";
         let mut attributes = IndexerResponseAttributes::default();
@@ -4189,10 +4189,10 @@ mod tests {
         // A2(2) on the RSS lane: the release name is the same coin flip, but the
         // indexer asserted the live-action title's own TVDB id.
         let mut live_action = make_series_title("tide-chart-live", "Tide Chart", Some(2023));
-        live_action.external_ids = vec![scryer_domain::ExternalId {
-            source: "tvdb".to_string(),
-            value: "393199".to_string(),
-        }];
+        live_action.external_ids = vec![scryer_domain::ExternalId::new(
+            "tvdb".to_string(),
+            "393199".to_string(),
+        )];
         let mut anime = make_series_title("tide-chart-anime", "Tide Chart", Some(1999));
         anime.facet = MediaFacet::Anime;
         let bank = build_title_context_bank(&[live_action, anime]);

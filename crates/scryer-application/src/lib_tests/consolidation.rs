@@ -429,10 +429,7 @@ impl ConsolidationFixture {
 }
 
 fn external_id(source: &str, value: &str) -> ExternalId {
-    ExternalId {
-        source: source.to_string(),
-        value: value.to_string(),
-    }
+    ExternalId::new(source, value)
 }
 
 fn plan_items(

@@ -2982,10 +2982,7 @@ mod tests {
             monitored: true,
             tags: vec![],
             canonical_tags: vec![],
-            external_ids: vec![ExternalId {
-                source: "tvdb".into(),
-                value: "131313".into(),
-            }],
+            external_ids: vec![ExternalId::new("tvdb", "131313")],
             created_by: None,
             created_at: Utc::now(),
             year: Some(2024),

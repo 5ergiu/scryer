@@ -126,10 +126,7 @@ async fn background_series_refresh_skips_non_relinked_titles_and_completes_job_r
             monitored: false,
             tags: vec![],
             canonical_tags: vec![],
-            external_ids: vec![ExternalId {
-                source: "tvdb".to_string(),
-                value: "345679".to_string(),
-            }],
+            external_ids: vec![ExternalId::new("tvdb".to_string(), "345679".to_string())],
             root_folder_id: series_root_id,
             created_by: None,
             created_at: Utc::now(),

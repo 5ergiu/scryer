@@ -423,14 +423,8 @@ pub(super) fn media_request_input(
         requested_monitor_selection: None,
         requested_lease_days: None,
         external_ids: vec![
-            ExternalId {
-                source: "TVDB".to_string(),
-                value: tvdb_id.to_string(),
-            },
-            ExternalId {
-                source: "imdb".to_string(),
-                value: "tt1234567".to_string(),
-            },
+            ExternalId::new("TVDB".to_string(), tvdb_id.to_string()),
+            ExternalId::new("imdb".to_string(), "tt1234567".to_string()),
         ],
     }
 }
@@ -586,10 +580,7 @@ pub(super) fn make_due_hydration_title(id: &str, facet: MediaFacet, tvdb_id: i64
         monitored: true,
         tags: vec![],
         canonical_tags: vec![],
-        external_ids: vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: tvdb_id.to_string(),
-        }],
+        external_ids: vec![ExternalId::new("tvdb".to_string(), tvdb_id.to_string())],
         created_by: None,
         created_at: chrono::Utc::now(),
         year: Some(2026),

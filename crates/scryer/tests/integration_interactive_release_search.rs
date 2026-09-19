@@ -468,10 +468,7 @@ async fn add_movie(app: &AppUseCase, user: &User, name: &str, imdb: &str) -> Str
             facet: MediaFacet::Movie,
             monitored: true,
             tags: vec![],
-            external_ids: vec![ExternalId {
-                source: "imdb".to_string(),
-                value: imdb.to_string(),
-            }],
+            external_ids: vec![ExternalId::new("imdb".to_string(), imdb.to_string())],
             ..Default::default()
         },
     )

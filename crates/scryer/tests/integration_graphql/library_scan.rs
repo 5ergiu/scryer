@@ -1237,10 +1237,7 @@ async fn library_anime_scan_relinks_existing_hydrated_titles_from_discovered_fol
         &ctx,
         "Existing Anime",
         MediaFacet::Anime,
-        vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "567890".to_string(),
-        }],
+        vec![ExternalId::new("tvdb".to_string(), "567890".to_string())],
         vec![],
         false,
     )
@@ -1364,10 +1361,7 @@ async fn library_series_scan_relinks_existing_hydrated_titles_from_discovered_fo
         &ctx,
         "Existing Series",
         MediaFacet::Series,
-        vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "345678".to_string(),
-        }],
+        vec![ExternalId::new("tvdb".to_string(), "345678".to_string())],
         vec![],
         false,
     )
@@ -1497,10 +1491,7 @@ async fn library_series_scan_existing_unhydrated_title_without_episodes_complete
             monitored: false,
             tags: vec![],
             canonical_tags: vec![],
-            external_ids: vec![ExternalId {
-                source: "tvdb".to_string(),
-                value: "345679".to_string(),
-            }],
+            external_ids: vec![ExternalId::new("tvdb".to_string(), "345679".to_string())],
             root_folder_id: scryer_domain::root_folder_id_for_path("/data/series"),
             created_by: None,
             created_at: Utc::now(),
@@ -1736,10 +1727,7 @@ async fn library_movie_scan_records_owned_folder_conflict_without_rehoming_title
         &ctx,
         "Existing Movie",
         MediaFacet::Movie,
-        vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "123456".to_string(),
-        }],
+        vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
         vec![],
         false,
     )
@@ -1878,10 +1866,7 @@ async fn library_movie_scan_matches_existing_title_from_movie_nfo_when_folder_mi
         &ctx,
         "Existing Movie",
         MediaFacet::Movie,
-        vec![ExternalId {
-            source: "tvdb".to_string(),
-            value: "123456".to_string(),
-        }],
+        vec![ExternalId::new("tvdb".to_string(), "123456".to_string())],
         vec![],
         false,
     )

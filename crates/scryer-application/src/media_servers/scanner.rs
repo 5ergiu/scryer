@@ -606,10 +606,7 @@ fn unique_title_match<'a>(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        ids.push(ExternalId {
-            source: "imdb".into(),
-            value: imdb_id.into(),
-        });
+        ids.push(ExternalId::new("imdb", imdb_id));
     }
     let candidates = catalog
         .iter()
@@ -732,10 +729,7 @@ mod tests {
             provider_item_id: provider_item_id.into(),
             external_ids: external_ids
                 .iter()
-                .map(|(source, value)| ExternalId {
-                    source: (*source).into(),
-                    value: (*value).into(),
-                })
+                .map(|(source, value)| ExternalId::new(*source, *value))
                 .collect(),
             series_provider_item_id: None,
             season_number: None,
@@ -788,14 +782,8 @@ mod tests {
     #[test]
     fn exact_tmdb_matches_are_preferred_over_compatible_ids() {
         let expected = vec![
-            ExternalId {
-                source: "tmdb".into(),
-                value: "tmdb://123".into(),
-            },
-            ExternalId {
-                source: "tvdb".into(),
-                value: "456".into(),
-            },
+            ExternalId::new("tmdb", "tmdb://123"),
+            ExternalId::new("tvdb", "456"),
         ];
         let tmdb = catalog_item(
             MediaServerCatalogItemKind::Series,
@@ -818,10 +806,7 @@ mod tests {
 
     #[test]
     fn ambiguous_exact_matches_are_skipped() {
-        let expected = vec![ExternalId {
-            source: "tmdb".into(),
-            value: "123".into(),
-        }];
+        let expected = vec![ExternalId::new("tmdb", "123")];
         let first = catalog_item(
             MediaServerCatalogItemKind::Movie,
             "provider-one",

@@ -551,10 +551,7 @@ impl TransferFixture {
 }
 
 fn external_id(source: &str, value: &str) -> ExternalId {
-    ExternalId {
-        source: source.to_string(),
-        value: value.to_string(),
-    }
+    ExternalId::new(source, value)
 }
 
 /// Every classified title in a preview, whatever group it landed in.

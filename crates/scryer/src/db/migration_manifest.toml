@@ -2377,3 +2377,20 @@ kind = "sql"
 file = "postgres/migrations/0243_download_state_lookup_indexes.sql"
 engine = "postgres"
 scope = "all"
+
+[[migration]]
+version = 244
+description = "title external id kind"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0244_title_external_id_kind.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0244_title_external_id_kind.sql"
+engine = "postgres"
+scope = "all"
