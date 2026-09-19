@@ -211,6 +211,17 @@ impl DownloadSubmissionGuardTable {
         self.acquire_key(title_id.to_string()).await
     }
 
+    /// Test seam: how many callers hold or are parked on a title's submission
+    /// lock, so a test can tell when a second submission reached contention.
+    #[cfg(test)]
+    pub(crate) async fn title_lock_participants(&self, title_id: &str) -> usize {
+        self.locks
+            .lock()
+            .await
+            .get(title_id)
+            .map_or(0, std::sync::Weak::strong_count)
+    }
+
     pub(crate) async fn acquire_client_snapshot(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.acquire_key("download-client-snapshot".to_string())
             .await

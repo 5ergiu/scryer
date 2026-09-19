@@ -329,6 +329,13 @@ impl LibraryScanTracker {
         rx
     }
 
+    /// Test seam: live subscriptions to the tracker's event stream, so a test
+    /// can tell when a waiter such as [`Self::wait_until_idle`] has parked.
+    #[cfg(test)]
+    pub(crate) fn subscription_count(&self) -> usize {
+        self.broadcast.receiver_count()
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<LibraryScanSession> {
         Self::spawn_subscription(self.broadcast.subscribe(), None)
     }
@@ -1571,7 +1578,9 @@ mod tests {
         assert!(matches!(still_active_error, AppError::Validation(_)));
     }
 
-    #[tokio::test]
+    // The paused clock fires the coalescing flush timer only once every task
+    // is idle, so both events are always in the same window on any runner.
+    #[tokio::test(start_paused = true)]
     async fn subscription_coalesces_concurrent_sessions_independently() {
         let tracker = LibraryScanTracker::new();
         let mut receiver = tracker.subscribe();
@@ -1599,9 +1608,8 @@ mod tests {
         let mut received = Vec::new();
         for _ in 0..2 {
             received.push(
-                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                crate::test_wait::within_deadline("a coalesced session", receiver.recv())
                     .await
-                    .expect("receive coalesced session in time")
                     .expect("subscription remains open"),
             );
         }
@@ -1612,7 +1620,9 @@ mod tests {
         assert_eq!(received[1].found_titles, 7);
     }
 
-    #[tokio::test]
+    // The paused clock fires the coalescing flush timer only once every task
+    // is idle, so both events are always in the same window on any runner.
+    #[tokio::test(start_paused = true)]
     async fn terminal_event_does_not_discard_another_sessions_pending_progress() {
         let tracker = LibraryScanTracker::new();
         let mut receiver = tracker.subscribe();
@@ -1637,14 +1647,13 @@ mod tests {
         tracker.add_found_titles(&second.session_id, 11).await;
         tracker.fail_session(&first.session_id).await;
 
-        let terminal = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        let terminal = crate::test_wait::within_deadline("the terminal session", receiver.recv())
             .await
-            .expect("receive terminal session in time")
             .expect("subscription remains open");
-        let pending = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-            .await
-            .expect("receive other pending session in time")
-            .expect("subscription remains open");
+        let pending =
+            crate::test_wait::within_deadline("the other pending session", receiver.recv())
+                .await
+                .expect("subscription remains open");
 
         assert_eq!(terminal.session_id, first.session_id);
         assert_eq!(terminal.status, LibraryScanStatus::Failed);
@@ -1750,9 +1759,11 @@ mod tests {
     async fn wait_until_idle_returns_immediately_without_sessions() {
         let tracker = LibraryScanTracker::new();
 
-        tokio::time::timeout(Duration::from_millis(100), tracker.wait_until_idle())
-            .await
-            .expect("idle tracker should resolve immediately");
+        let mut waiter = Box::pin(tokio::task::unconstrained(tracker.wait_until_idle()));
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_ready(),
+            "idle tracker should resolve on its first poll"
+        );
     }
 
     #[tokio::test]
@@ -1763,14 +1774,12 @@ mod tests {
             .await
             .expect("start session");
 
-        let waiter = tokio::spawn({
-            let tracker = tracker.clone();
-            async move { tracker.wait_until_idle().await }
-        });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // One unconstrained poll runs the waiter through its active-session
+        // check to its park point, so Pending proves it saw the scan and
+        // blocked rather than merely not having been scheduled yet.
+        let mut waiter = Box::pin(tokio::task::unconstrained(tracker.wait_until_idle()));
         assert!(
-            !waiter.is_finished(),
+            futures_util::poll!(waiter.as_mut()).is_pending(),
             "waiter should block while scan is active"
         );
 
@@ -1779,10 +1788,8 @@ mod tests {
             .await
             .expect("session should fail");
 
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("waiter should resolve once scan finishes")
-            .expect("waiter task should not panic");
+        crate::test_wait::within_deadline("the idle waiter to resolve after the scan ends", waiter)
+            .await;
     }
 
     #[tokio::test]

@@ -42,7 +42,7 @@ impl NotifyingLibraryScanner {
         if self.directory_scan_calls.load(Ordering::SeqCst) > 0 {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.directory_scan_started.notified();
                 if self.directory_scan_calls.load(Ordering::SeqCst) > 0 {
@@ -326,7 +326,7 @@ impl PerDirectoryBlockingLibraryScanner {
         if self.blocked_scan_calls.load(Ordering::SeqCst) > 0 {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.blocked_scan_started.notified();
                 if self.blocked_scan_calls.load(Ordering::SeqCst) > 0 {
@@ -343,7 +343,7 @@ impl PerDirectoryBlockingLibraryScanner {
         if self.blocked_scan_calls.load(Ordering::SeqCst) >= expected {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.blocked_scan_started.notified();
                 if self.blocked_scan_calls.load(Ordering::SeqCst) >= expected {
@@ -454,7 +454,7 @@ impl BlockingMediaAnalyzer {
         if self.analyze_calls.load(Ordering::SeqCst) > 0 {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.analyze_started.notified();
                 if self.analyze_calls.load(Ordering::SeqCst) > 0 {
@@ -471,7 +471,7 @@ impl BlockingMediaAnalyzer {
         if self.active_calls.load(Ordering::SeqCst) >= expected {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.analyze_started.notified();
                 if self.active_calls.load(Ordering::SeqCst) >= expected {
@@ -797,7 +797,7 @@ impl BlockingBulkHydrationMetadataGateway {
         if self.bulk_calls.load(Ordering::SeqCst) >= expected_calls {
             return;
         }
-        timeout(Duration::from_secs(5), async {
+        timeout(TEST_WAIT_DEADLINE, async {
             loop {
                 let notified = self.bulk_started.notified();
                 if self.bulk_calls.load(Ordering::SeqCst) >= expected_calls {
@@ -5285,7 +5285,7 @@ async fn cancel_full_library_scan_with_in_flight_title_walk_drains_executor_perm
         .expect("cancel full library scan");
     assert!(cancel_result.accepted);
 
-    let summary = timeout(Duration::from_secs(5), handle)
+    let summary = timeout(TEST_WAIT_DEADLINE, handle)
         .await
         .expect("scan task should drain after cancellation")
         .expect("join canceled scan task")
@@ -7767,7 +7767,7 @@ async fn background_hydration_completes_without_inline_recommendation_refresh() 
         .await
         .expect("seed due movie title");
     let mut outcome = timeout(
-        Duration::from_secs(2),
+        TEST_WAIT_DEADLINE,
         app.hydrate_titles_bulk(vec![crate::catalog_workflow::HydrationTarget {
             title: title.clone(),
             requested_tvdb_id: None,
@@ -7808,7 +7808,7 @@ async fn interactive_hydration_queues_recommendations_off_the_hydration_path() {
         .expect("seed due movie title");
 
     timeout(
-        Duration::from_secs(2),
+        TEST_WAIT_DEADLINE,
         app.hydrate_titles_bulk(vec![crate::catalog_workflow::HydrationTarget {
             title,
             requested_tvdb_id: None,
@@ -7821,13 +7821,11 @@ async fn interactive_hydration_queues_recommendations_off_the_hydration_path() {
     .expect("interactive hydration should not wait for recommendation refresh")
     .expect("hydrate title");
 
-    timeout(Duration::from_secs(2), async {
-        while recommendation_calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued recommendation refresh should reach the metadata gateway");
+    wait_until(
+        "the queued recommendation refresh to reach the metadata gateway",
+        || async { recommendation_calls.load(Ordering::SeqCst) > 0 },
+    )
+    .await;
     assert_eq!(
         recommendation_calls.load(Ordering::SeqCst),
         1,

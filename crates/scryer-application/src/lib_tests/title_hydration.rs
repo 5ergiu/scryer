@@ -61,22 +61,14 @@ fn hydration_test_tmdb_title(name: &str, tmdb_id: i64) -> NewTitle {
 }
 
 async fn wait_for_title_metadata(app: &AppUseCase, user: &User, title_id: &str) -> Title {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let titles = app
-                .list_titles_unpaged(user, Some(MediaFacet::Movie), None, None)
-                .await
-                .expect("titles should load");
-            if let Some(title) = titles.into_iter().find(|title| title.id == title_id)
-                && title.metadata_fetched_at.is_some()
-            {
-                return title;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
+    wait_for("the title metadata to hydrate", || async {
+        app.list_titles_unpaged(user, Some(MediaFacet::Movie), None, None)
+            .await
+            .expect("titles should load")
+            .into_iter()
+            .find(|title| title.id == title_id && title.metadata_fetched_at.is_some())
     })
     .await
-    .expect("title metadata should hydrate")
 }
 
 async fn assert_title_metadata_pending(app: &AppUseCase, user: &User, title_id: &str) {
@@ -96,19 +88,17 @@ async fn stop_title_hydration_worker(
     handle: tokio::task::JoinHandle<()>,
 ) {
     token.cancel();
-    timeout(Duration::from_secs(1), handle)
+    within_deadline("the title hydration worker to stop", handle)
         .await
-        .expect("title hydration worker should stop")
         .expect("title hydration worker should not panic");
 }
 
 async fn consume_title_hydration_wake(app: &AppUseCase) {
-    timeout(
-        Duration::from_secs(1),
+    within_deadline(
+        "adding a due title to notify the hydration worker",
         app.runtime.catalog.title_hydration_wake.notified(),
     )
-    .await
-    .expect("adding a due title should notify the hydration worker");
+    .await;
 }
 
 #[derive(Default)]
@@ -660,16 +650,10 @@ async fn prompt_title_hydration_worker_hydrates_tmdb_only_movie_by_title_ref() {
         AddTitleHydrationState::Pending
     );
 
-    timeout(Duration::from_secs(2), async {
-        loop {
-            if !gateway.movie_title_calls.lock().await.is_empty() {
-                break;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
+    wait_until("the worker to request TMDB-only movie metadata", || async {
+        !gateway.movie_title_calls.lock().await.is_empty()
     })
-    .await
-    .expect("worker should request TMDB-only movie metadata");
+    .await;
     let hydrated = wait_for_title_metadata(&app, &user, &outcome.title.id).await;
     assert_eq!(
         hydrated.poster_url.as_deref(),
@@ -815,11 +799,33 @@ async fn prompt_title_hydration_worker_yields_to_active_scan_facet() {
         token.clone(),
     ));
 
+    // Let the worker reach its scan-owned yield and park on the tracker, so the
+    // yield counted after the add below comes from a pass that saw the title.
+    let yields = app.runtime.catalog.title_hydration_scan_yields.clone();
+    wait_until(
+        "the hydration worker to park behind the active scan",
+        || async {
+            yields.load(Ordering::SeqCst) > 0
+                && app
+                    .runtime
+                    .library
+                    .library_scan_tracker
+                    .subscription_count()
+                    > 0
+        },
+    )
+    .await;
+    let yields_before_add = yields.load(Ordering::SeqCst);
+
     let outcome = app
         .add_title_with_outcome(&user, hydration_test_title("Scan Blocked Movie", tvdb_id))
         .await
         .expect("add title should succeed");
-    sleep(Duration::from_millis(75)).await;
+    wait_until(
+        "the hydration worker to yield again after the add woke it",
+        || async { yields.load(Ordering::SeqCst) > yields_before_add },
+    )
+    .await;
     assert_title_metadata_pending(&app, &user, &outcome.title.id).await;
 
     app.runtime

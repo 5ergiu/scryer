@@ -325,6 +325,11 @@ pub async fn start_background_title_hydration_loop(
             } else {
                 metrics::counter!("scryer_title_metadata_hydration_scan_owned_yields_total")
                     .increment(1);
+                #[cfg(test)]
+                app.runtime
+                    .catalog
+                    .title_hydration_scan_yields
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 debug!(
                     blocked_facets = ?active_scan_facet_labels(&blocked_facets),
                     "title hydration loop: yielding while library scan owns active facet"
