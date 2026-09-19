@@ -73,25 +73,66 @@ impl LibraryScanCoordinator {
     }
 
     pub(crate) async fn publish_started(&self, session: &LibraryScanSession) {
-        let _ = self
-            .app
-            .append_domain_event(new_library_scan_domain_event(
-                None,
-                session.session_id.clone(),
-                session.facet.clone(),
-                DomainEventPayload::LibraryScanStarted(LibraryScanStartedEventData {
-                    session_id: session.session_id.clone(),
-                    library_id: session.library_id.clone(),
-                    mode: session.mode.as_str().to_string(),
-                }),
-            ))
-            .await;
+        let mut events = self.take_pending_delta_events().await;
+        events.push(new_library_scan_domain_event(
+            None,
+            session.session_id.clone(),
+            session.facet.clone(),
+            DomainEventPayload::LibraryScanStarted(LibraryScanStartedEventData {
+                session_id: session.session_id.clone(),
+                library_id: session.library_id.clone(),
+                mode: session.mode.as_str().to_string(),
+            }),
+        ));
+        let _ = self.app.append_domain_events(events).await;
     }
 
     pub(crate) async fn publish_progress(&self) {
-        if let Some(event) = self.prepare_progress_event().await {
-            let _ = self.app.append_domain_event(event).await;
+        let events = self.prepare_progress_events().await;
+        if events.is_empty() {
+            return;
         }
+        let _ = self.app.append_domain_events(events).await;
+    }
+
+    /// Takes the session's coalesced delta, if one is pending, and builds its
+    /// event. Every path that appends a started/progressed/completed/canceled/
+    /// failed event calls this first, so the flush always lands ahead of the
+    /// event whose ordering depends on it.
+    async fn take_pending_delta_events(&self) -> Vec<NewDomainEvent> {
+        let Some((delta, facet)) = self
+            .app
+            .runtime
+            .library
+            .library_scan_tracker
+            .take_pending_delta(self.session_id())
+            .await
+        else {
+            return Vec::new();
+        };
+
+        trace!(
+            session_id = %self.session_id,
+            title_match_completed_delta = delta.title_match_completed_delta,
+            title_match_failed_delta = delta.title_match_failed_delta,
+            metadata_completed_delta = delta.metadata_completed_delta,
+            metadata_failed_delta = delta.metadata_failed_delta,
+            file_completed_delta = delta.file_completed_delta,
+            file_failed_delta = delta.file_failed_delta,
+            "library scan coordinator flushing coalesced delta"
+        );
+
+        vec![self.scan_event(facet, DomainEventPayload::LibraryScanDeltaRecorded(delta))]
+    }
+
+    /// The flushed coalesced delta, if any, followed by the coalesced progress
+    /// event `publish_progress` would append.
+    async fn prepare_progress_events(&self) -> Vec<NewDomainEvent> {
+        let mut events = self.take_pending_delta_events().await;
+        if let Some(event) = self.prepare_progress_event().await {
+            events.push(event);
+        }
+        events
     }
 
     /// Builds the coalesced progress event `publish_progress` would append,
@@ -144,13 +185,9 @@ impl LibraryScanCoordinator {
     ) {
         let mut events = Vec::with_capacity(deltas.len() + 1);
         for delta in deltas {
-            if let Some(event) = self.prepare_delta_event(delta).await {
-                events.push(event);
-            }
+            events.extend(self.prepare_delta_events(delta).await);
         }
-        if let Some(event) = self.prepare_progress_event().await {
-            events.push(event);
-        }
+        events.extend(self.prepare_progress_events().await);
         if events.is_empty() {
             return;
         }
@@ -345,6 +382,9 @@ impl LibraryScanCoordinator {
     }
 
     pub(crate) async fn maybe_complete(&self) {
+        // Taken before the tracker drops the session, so the coalesced run is
+        // still written even when the session turns out not to be terminal.
+        let mut events = self.take_pending_delta_events().await;
         let Some(session) = self
             .app
             .runtime
@@ -357,16 +397,21 @@ impl LibraryScanCoordinator {
                 session_id = %self.session_id,
                 "library scan coordinator maybe_complete found no terminal session"
             );
+            if !events.is_empty() {
+                let _ = self.app.append_domain_events(events).await;
+            }
             return;
         };
 
         self.app
             .clear_library_scan_cancellation_token(self.session_id())
             .await;
-        publish_coalesced_library_scan_state(&self.app, &session).await;
+        events.push(coalesced_library_scan_state_event(&session));
+        let _ = self.app.append_domain_events(events).await;
     }
 
     pub(crate) async fn fail(&self) {
+        let mut events = self.take_pending_delta_events().await;
         let failed_session = self
             .app
             .runtime
@@ -382,25 +427,27 @@ impl LibraryScanCoordinator {
             None => {
                 let Some(facet) = self.resolve_facet().await else {
                     warn!(session_id = %self.session_id, "failed to resolve facet for library scan failure event");
+                    if !events.is_empty() {
+                        let _ = self.app.append_domain_events(events).await;
+                    }
                     return;
                 };
                 facet
             }
         };
 
-        let _ = self
-            .app
-            .append_domain_event(self.scan_event(
-                facet,
-                DomainEventPayload::LibraryScanFailed(LibraryScanFailedEventData {
-                    session_id: self.session_id.clone(),
-                    error_message: "library scan failed".to_string(),
-                }),
-            ))
-            .await;
+        events.push(self.scan_event(
+            facet,
+            DomainEventPayload::LibraryScanFailed(LibraryScanFailedEventData {
+                session_id: self.session_id.clone(),
+                error_message: "library scan failed".to_string(),
+            }),
+        ));
+        let _ = self.app.append_domain_events(events).await;
     }
 
     pub(crate) async fn cancel(&self) {
+        let mut events = self.take_pending_delta_events().await;
         let canceled_session = self
             .app
             .runtime
@@ -416,16 +463,17 @@ impl LibraryScanCoordinator {
                 session_id = %self.session_id,
                 "library scan coordinator cancel skipped for inactive session"
             );
+            if !events.is_empty() {
+                let _ = self.app.append_domain_events(events).await;
+            }
             return;
         };
 
-        let _ = self
-            .app
-            .append_domain_event(self.scan_event(
-                session.facet.clone(),
-                DomainEventPayload::LibraryScanCanceled(library_scan_canceled_event_data(&session)),
-            ))
-            .await;
+        events.push(self.scan_event(
+            session.facet.clone(),
+            DomainEventPayload::LibraryScanCanceled(library_scan_canceled_event_data(&session)),
+        ));
+        let _ = self.app.append_domain_events(events).await;
     }
 
     fn scan_event(&self, facet: MediaFacet, payload: DomainEventPayload) -> NewDomainEvent {
@@ -433,32 +481,53 @@ impl LibraryScanCoordinator {
     }
 
     async fn record_delta(&self, delta: LibraryScanDeltaRecordedEventData) {
-        if let Some(event) = self.prepare_delta_event(delta).await {
-            let _ = self.app.append_domain_event(event).await;
+        let events = self.prepare_delta_events(delta).await;
+        if events.is_empty() {
+            return;
         }
+        let _ = self.app.append_domain_events(events).await;
     }
 
-    /// Applies `delta` to the tracker and builds the delta event `record_delta`
-    /// would append, without appending it.
-    async fn prepare_delta_event(
+    /// Applies `delta` to the tracker and returns the delta events that have
+    /// to be appended now, without appending them.
+    ///
+    /// The tracker - and therefore live GraphQL progress - always sees the
+    /// delta immediately. The event log does not: a run of per-title counter
+    /// deltas is coalesced into a single record that is written at the next
+    /// flush (a progress publish, a terminal event, or the merge limit), so
+    /// this usually returns nothing. An idle scheduled scan re-probes every
+    /// title and records a delta for each unchanged one; persisting those
+    /// one-by-one added ~12k rows per library per cycle to `domain_events`
+    /// for a library where nothing had changed, and the log only owes callers
+    /// the progress information, not one record per probe.
+    ///
+    /// Trade-off: a crash between a flush and the next one loses the deltas
+    /// merged since that flush, so a replay of the log can land behind the
+    /// live session by up to one flush interval. That is bounded by
+    /// `LIBRARY_SCAN_PENDING_DELTA_MERGE_LIMIT` titles, only affects a run
+    /// that died mid-scan (whose session is abandoned anyway), and every
+    /// progress and terminal event restates the phase counters absolutely, so
+    /// a surviving scan re-converges at its next publish.
+    async fn prepare_delta_events(
         &self,
         delta: LibraryScanDeltaRecordedEventData,
-    ) -> Option<NewDomainEvent> {
+    ) -> Vec<NewDomainEvent> {
         if !delta_has_effect(&delta) {
-            return None;
+            return Vec::new();
         }
 
-        let Some(snapshot) = self
+        let Some(staged) = self
             .app
             .runtime
             .library
             .library_scan_tracker
-            .apply_delta(self.session_id(), &delta)
+            .apply_and_stage_delta(self.session_id(), delta.clone())
             .await
         else {
             warn!(session_id = %self.session_id, "ignored library scan delta for inactive session");
-            return None;
+            return Vec::new();
         };
+        let snapshot = staged.session;
 
         debug!(
             session_id = %self.session_id,
@@ -481,10 +550,16 @@ impl LibraryScanCoordinator {
             "library scan coordinator recording delta"
         );
 
-        Some(self.scan_event(
-            snapshot.facet,
-            DomainEventPayload::LibraryScanDeltaRecorded(delta),
-        ))
+        staged
+            .to_persist
+            .into_iter()
+            .map(|delta| {
+                self.scan_event(
+                    snapshot.facet.clone(),
+                    DomainEventPayload::LibraryScanDeltaRecorded(delta),
+                )
+            })
+            .collect()
     }
 
     async fn resolve_facet(&self) -> Option<MediaFacet> {
@@ -591,12 +666,6 @@ pub(crate) async fn load_projected_library_scan_session(
     LibraryScanProjectionReplay::new(session_id)
         .advance(app)
         .await
-}
-
-async fn publish_coalesced_library_scan_state(app: &AppUseCase, session: &LibraryScanSession) {
-    let _ = app
-        .append_domain_event(coalesced_library_scan_state_event(session))
-        .await;
 }
 
 /// Builds the coalesced progress/completion event for `session`, including the

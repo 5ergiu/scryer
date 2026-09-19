@@ -9585,3 +9585,108 @@ async fn title_scan_unmatched_reconcile_keeps_rows_a_title_still_owns() {
     expected.sort();
     assert_eq!(remaining, expected);
 }
+
+/// An idle scheduled scan re-probes every title and records a delta for each
+/// unchanged one. Those deltas used to be one domain event each (~12k rows per
+/// library per cycle on the load-test library); they must now collapse into a
+/// handful of coalesced records without moving the projected session.
+#[tokio::test]
+async fn unchanged_title_deltas_coalesce_into_few_events_without_moving_projection() {
+    const TITLES: usize = 2_000;
+
+    let (app, _user) = bootstrap();
+    let session_id = "coalesced-delta-session";
+    let tracker = app.runtime.library.library_scan_tracker.clone();
+    let session = tracker
+        .start_session_with_id_for_library(
+            session_id.to_string(),
+            MediaFacet::Movie,
+            Some("library-1".to_string()),
+            LibraryScanMode::Full,
+        )
+        .await
+        .expect("start scan session");
+
+    let coordinator = crate::library_scan_coordinator::LibraryScanCoordinator::with_facet(
+        app.clone(),
+        session_id,
+        MediaFacet::Movie,
+    );
+    coordinator.publish_started(&session).await;
+    coordinator.register_discovery_batch(TITLES, false).await;
+    coordinator.mark_discovery_complete(false).await;
+    coordinator.publish_progress().await;
+
+    let deltas_after_discovery = recorded_library_scan_delta_events(&app).await;
+
+    for index in 0..TITLES {
+        coordinator.mark_title_match_completed(1).await;
+
+        // The live tracker - and therefore GraphQL progress - still sees every
+        // delta the moment it is recorded, coalescing or not.
+        let live = tracker
+            .get_session(session_id)
+            .await
+            .expect("live session during scan");
+        assert_eq!(live.title_match_progress.completed, index + 1);
+    }
+
+    coordinator.mark_metadata_total_known().await;
+    coordinator.mark_file_total_known().await;
+    let summary = LibraryScanSummary {
+        scanned: TITLES,
+        matched: 0,
+        imported: 0,
+        skipped: TITLES,
+        unmatched: 0,
+    };
+    coordinator.set_summary(summary.clone()).await;
+    coordinator.publish_progress().await;
+
+    // The per-event baseline: the live session folded every single delta.
+    let baseline = tracker
+        .get_session(session_id)
+        .await
+        .expect("live session before completion");
+    coordinator.maybe_complete().await;
+
+    let delta_events = recorded_library_scan_delta_events(&app).await;
+    let per_title_delta_events = delta_events - deltas_after_discovery;
+    assert!(
+        per_title_delta_events < TITLES / 100,
+        "expected the {TITLES} unchanged-title deltas to coalesce, got {per_title_delta_events} delta events"
+    );
+    assert!(
+        delta_events < 32,
+        "expected a handful of coalesced delta events, got {delta_events}"
+    );
+
+    let projected =
+        crate::library_scan_coordinator::load_projected_library_scan_session(&app, session_id)
+            .await
+            .expect("projected session")
+            .expect("session snapshot");
+    assert_eq!(projected.status, LibraryScanStatus::Completed);
+    assert_eq!(projected.found_titles, baseline.found_titles);
+    assert_eq!(
+        projected.title_match_progress,
+        baseline.title_match_progress
+    );
+    assert_eq!(projected.metadata_progress, baseline.metadata_progress);
+    assert_eq!(projected.file_progress, baseline.file_progress);
+    assert_eq!(projected.summary, Some(summary));
+}
+
+async fn recorded_library_scan_delta_events(app: &AppUseCase) -> usize {
+    app.services
+        .events
+        .domain_events
+        .list(&DomainEventFilter {
+            event_types: Some(vec![DomainEventType::LibraryScanDeltaRecorded]),
+            limit: 0,
+            ..DomainEventFilter::default()
+        })
+        .await
+        .expect("list delta events")
+        .len()
+}
