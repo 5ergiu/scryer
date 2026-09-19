@@ -4945,32 +4945,32 @@ pub async fn start_background_acquisition_poller(
         });
     }
 
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::PluginRegistryRefresh,
         Utc::now() + chrono::Duration::hours(1),
     )
     .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::HealthChecks,
         Utc::now() + chrono::Duration::seconds(30),
     )
     .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::StagedNzbPrune,
         Utc::now() + chrono::Duration::hours(1),
     )
     .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::FullHashBackfill,
         Utc::now() + chrono::Duration::minutes(15),
     )
     .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::Housekeeping,
         Utc::now() + chrono::Duration::hours(24),
     )
     .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::ProwlarrSync,
         Utc::now() + chrono::Duration::minutes(5),
     )
@@ -4979,9 +4979,9 @@ pub async fn start_background_acquisition_poller(
     // here made the jobs view promise a sweep four minutes before the worker
     // would actually wake for it.
     let rss_sync_tick = crate::acquisition::rss::rss_sync_tick_period();
-    app.set_job_next_run_at(JobKey::RssSync, Utc::now() + rss_sync_next_run_delta(rss_sync_tick))
+    app.advertise_job_next_run_at(JobKey::RssSync, Utc::now() + rss_sync_next_run_delta(rss_sync_tick))
         .await;
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::PendingReleaseProcessing,
         Utc::now() + chrono::Duration::minutes(1),
     )
@@ -5009,7 +5009,7 @@ pub async fn start_background_acquisition_poller(
             std::time::Duration::ZERO
         }
     };
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::MaintenanceRuleEvaluation,
         Utc::now()
             + chrono::Duration::from_std(maintenance_evaluation_offset)
@@ -5032,7 +5032,7 @@ pub async fn start_background_acquisition_poller(
             std::time::Duration::ZERO
         }
     };
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::LifecycleActionHandling,
         Utc::now()
             + chrono::Duration::from_std(lifecycle_action_offset)
@@ -5055,7 +5055,7 @@ pub async fn start_background_acquisition_poller(
             std::time::Duration::ZERO
         }
     };
-    app.set_job_next_run_at(
+    app.advertise_job_next_run_at(
         JobKey::MediaServerSignalSync,
         Utc::now()
             + chrono::Duration::from_std(media_server_signal_offset)
@@ -5220,7 +5220,7 @@ pub async fn start_background_acquisition_poller(
             _ = registry_refresh_interval.tick() => {
                 let app = app.clone();
                 run_task("registry_refresh", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::PluginRegistryRefresh,
                         Utc::now() + chrono::Duration::hours(1),
                     ).await;
@@ -5233,7 +5233,7 @@ pub async fn start_background_acquisition_poller(
             _ = health_check_interval.tick() => {
                 let app = app.clone();
                 run_task("health_check", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::HealthChecks,
                         Utc::now() + chrono::Duration::hours(6),
                     ).await;
@@ -5245,7 +5245,7 @@ pub async fn start_background_acquisition_poller(
             _ = staged_nzb_prune_interval.tick() => {
                 let app = app.clone();
                 run_task("staged_nzb_prune", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::StagedNzbPrune,
                         Utc::now() + chrono::Duration::hours(1),
                     ).await;
@@ -5258,7 +5258,7 @@ pub async fn start_background_acquisition_poller(
             _ = housekeeping_interval.tick() => {
                 let app = app.clone();
                 run_task("housekeeping", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::Housekeeping,
                         Utc::now() + chrono::Duration::hours(24),
                     ).await;
@@ -5271,7 +5271,7 @@ pub async fn start_background_acquisition_poller(
             _ = pending_release_interval.tick() => {
                 let app = app.clone();
                 run_task("pending_releases", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::PendingReleaseProcessing,
                         Utc::now() + chrono::Duration::minutes(1),
                     ).await;
@@ -5284,7 +5284,7 @@ pub async fn start_background_acquisition_poller(
             _ = prowlarr_sync_interval.tick() => {
                 let app = app.clone();
                 run_task("prowlarr_sync", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::ProwlarrSync,
                         Utc::now() + chrono::Duration::minutes(5),
                     ).await;
@@ -5313,7 +5313,7 @@ pub async fn start_background_acquisition_poller(
                 let app = app.clone();
                 let cadence = maintenance_evaluation_cadence;
                 spawn_single_scheduled_task(&mut maintenance_evaluation_tasks, run_task("maintenance_rule_evaluation", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::MaintenanceRuleEvaluation,
                         Utc::now()
                             + chrono::Duration::from_std(cadence)
@@ -5329,7 +5329,7 @@ pub async fn start_background_acquisition_poller(
                 let app = app.clone();
                 let cadence = lifecycle_action_cadence;
                 run_task("lifecycle_action_handling", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::LifecycleActionHandling,
                         Utc::now()
                             + chrono::Duration::from_std(cadence)
@@ -5345,7 +5345,7 @@ pub async fn start_background_acquisition_poller(
                 let app = app.clone();
                 let cadence = media_server_signal_cadence;
                 run_task("media_server_signal_sync", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::MediaServerSignalSync,
                         Utc::now()
                             + chrono::Duration::from_std(cadence)
@@ -5360,7 +5360,7 @@ pub async fn start_background_acquisition_poller(
             _ = rss_sync_interval.tick() => {
                 let app = app.clone();
                 run_task("rss_sync", async move {
-                    app.set_job_next_run_at(
+                    app.advertise_job_next_run_at(
                         JobKey::RssSync,
                         Utc::now() + rss_sync_next_run_delta(rss_sync_tick),
                     ).await;

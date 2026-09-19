@@ -589,6 +589,89 @@ async fn migrations_0222_through_0224_apply_then_validate() {
     let _ = std::fs::remove_file(db);
 }
 
+/// 0248 collapses the duplicate release decisions the append-only write path
+/// left behind, keeping the newest row of each identity — the one every read
+/// path (`ORDER BY created_at DESC`) would already have shown.
+#[tokio::test]
+async fn migration_0248_keeps_only_the_newest_decision_of_each_identity() {
+    let db = std::env::temp_dir().join(format!(
+        "scryer_release_decision_dedupe_migration_{}.db",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    let services = SqliteServices::new(db.to_string_lossy())
+        .await
+        .expect("migrations should apply");
+    let pool = services.pool().clone();
+    // The pass under test is a DELETE over one table; seeding a whole catalog
+    // to satisfy the scope's foreign key would test the fixture, not the SQL.
+    let mut conn = pool.acquire().await.expect("dedupe connection");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .expect("relax foreign keys for the seeded rows");
+
+    sqlx::query("INSERT INTO wanted_items (id, title_id, media_type, status, created_at, updated_at) VALUES ('wanted-dupe', 'title-dupe', 'movie', 'wanted', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
+        .execute(&mut *conn)
+        .await
+        .expect("seed wanted item");
+    for (id, created_at, score) in [
+        ("older", "2026-01-01T00:00:00Z", 1),
+        ("newest", "2026-01-01T00:10:00Z", 3),
+        ("middle", "2026-01-01T00:05:00Z", 2),
+    ] {
+        sqlx::query(
+            "INSERT INTO release_decisions
+             (id, wanted_item_id, title_id, release_title, release_url, release_size_bytes,
+              decision_code, candidate_score, created_at)
+             VALUES (?, 'wanted-dupe', 'title-dupe', 'Repeated Release', NULL, NULL,
+                     'queued_better_or_equal', ?, ?)",
+        )
+        .bind(id)
+        .bind(score)
+        .bind(created_at)
+        .execute(&mut *conn)
+        .await
+        .expect("seed duplicate decision");
+    }
+    // One row that differs only in verdict must survive the pass.
+    sqlx::query(
+        "INSERT INTO release_decisions
+         (id, wanted_item_id, title_id, release_title, release_url, release_size_bytes,
+          decision_code, candidate_score, created_at)
+         VALUES ('other-code', 'wanted-dupe', 'title-dupe', 'Repeated Release', NULL, NULL,
+                 'quality_blocked', 4, '2026-01-01T00:01:00Z')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("seed distinct decision");
+
+    for statement in
+        include_str!("../../../scryer/src/db/migrations/0248_dedupe_release_decisions.sql")
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("0248 should apply");
+    }
+
+    let surviving: Vec<String> = sqlx::query_scalar("SELECT id FROM release_decisions ORDER BY id")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read surviving decisions");
+    assert_eq!(
+        surviving,
+        vec!["newest".to_string(), "other-code".to_string()],
+        "only the newest row of each identity survives, and a different verdict is its own identity"
+    );
+
+    drop(conn);
+    drop(services);
+    let _ = std::fs::remove_file(db);
+}
+
 #[tokio::test]
 async fn migration_0155_allows_emby_external_accounts_and_preserves_legacy_rows() {
     let pool = SqlitePoolOptions::new()

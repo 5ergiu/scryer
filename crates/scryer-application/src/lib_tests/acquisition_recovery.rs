@@ -13634,3 +13634,80 @@ async fn background_acquisition_without_download_clients_skips_the_missing_scope
     assert_eq!(outcome.targets_derived, 0);
     assert_eq!(outcome.titles_walked, 0);
 }
+
+/// A scheduler tick that decides not to run must leave no durable trace: the
+/// acquisition worker wakes far faster than the cadences it serves, and a run
+/// row plus three domain events per refused tick recorded the heartbeat rather
+/// than the work.
+#[tokio::test]
+async fn refused_scheduled_ticks_record_no_run_and_no_events() {
+    let (app, _) = bootstrap();
+    let job_runs = Arc::new(RecordingJobRunRepo::default());
+    let domain_events = Arc::new(MockDomainEventRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_job_runs(job_runs.clone())
+            .with_domain_events(domain_events.clone())
+            .with_pending_releases(pending_releases.clone())
+    });
+
+    // Nothing is parked, so the pending-release job has nothing to report on.
+    app.run_scheduled_job_now(
+        JobKey::PendingReleaseProcessing,
+        JobTriggerSource::ScheduledInterval,
+    )
+    .await
+    .expect("an idle pending-release tick is not a failure");
+
+    // No indexer is configured, so the RSS cycle would return before its
+    // first read.
+    app.run_scheduled_job_now(JobKey::RssSync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("an idle RSS tick is not a failure");
+
+    assert!(
+        job_runs.runs.lock().await.is_empty(),
+        "a refused tick must not create a job run row"
+    );
+    assert!(
+        domain_events.events.lock().await.is_empty(),
+        "a refused tick must not append a domain event"
+    );
+}
+
+/// The gate is about work, not about the job: once something is parked, the
+/// scheduled tick is recorded exactly as before.
+#[tokio::test]
+async fn scheduled_pending_release_tick_with_parked_work_is_recorded() {
+    let (app, _) = bootstrap();
+    let job_runs = Arc::new(RecordingJobRunRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let mut parked = series_pack_anchor_standby(
+        &make_due_hydration_title("title-parked", MediaFacet::Series, 1),
+        "wanted-parked",
+        "Parked Release 1080p",
+    );
+    parked.status = PendingReleaseStatus::Waiting;
+    pending_releases.store.lock().await.push(parked);
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_job_runs(job_runs.clone())
+            .with_pending_releases(pending_releases.clone())
+    });
+
+    app.run_scheduled_job_now(
+        JobKey::PendingReleaseProcessing,
+        JobTriggerSource::ScheduledInterval,
+    )
+    .await
+    .expect("a tick with parked work should run");
+
+    let runs = job_runs.runs.lock().await;
+    assert_eq!(
+        runs.len(),
+        1,
+        "a tick with work to describe still records its run"
+    );
+    assert_eq!(runs[0].job_key, JobKey::PendingReleaseProcessing);
+}
