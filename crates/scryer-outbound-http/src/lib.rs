@@ -2736,7 +2736,9 @@ pub fn parse_retry_after(raw_value: &str) -> Option<(Duration, RetryAfterSource)
     parse_retry_after_at(raw_value, Utc::now())
 }
 
-fn parse_retry_after_at(
+/// [`parse_retry_after`] against a caller-supplied `now`, so an HTTP-date
+/// value resolves to an exact delay.
+pub fn parse_retry_after_at(
     raw_value: &str,
     now: DateTime<Utc>,
 ) -> Option<(Duration, RetryAfterSource)> {
