@@ -3876,7 +3876,10 @@ mod tests {
         assert_eq!(scanner.scan_library_call_count(), 0);
     }
 
-    #[tokio::test]
+    // Paused clock: the gateway, the cancel trigger and the bound are all
+    // virtual timers, so the cancel always lands at 25 ms, before the 150 ms
+    // bound and the 500 ms gateway answer, however loaded the runner is.
+    #[tokio::test(start_paused = true)]
     async fn execute_batch_metadata_searches_returns_quickly_after_cancel() {
         let gateway = Arc::new(DelayedBatchMetadataGateway::new(Duration::from_millis(500)));
         let cancel_token = CancellationToken::new();
