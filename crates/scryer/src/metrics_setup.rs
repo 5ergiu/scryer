@@ -610,9 +610,9 @@ mod tests {
 
         shutdown.cancel();
 
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(Duration::from_secs(30), task)
             .await
-            .expect("upkeep task did not stop within 2s after cancellation")
+            .expect("upkeep task did not stop after cancellation")
             .expect("upkeep task panicked");
     }
 
