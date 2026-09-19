@@ -1158,6 +1158,16 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer(
     (app, user)
 }
 
+/// The mock configuration a scheduled-poller test needs to take away: the
+/// catalog it would load, and the two config stores whose emptiness is supposed
+/// to stop it loading anything at all.
+pub(super) struct AcquisitionBootstrapRepos {
+    pub(super) titles: Arc<MockTitleRepo>,
+    pub(super) indexer_configs: Arc<MockIndexerConfigRepo>,
+    pub(super) download_client_configs: Arc<MockDownloadClientConfigRepo>,
+    pub(super) media_files: Arc<MockMediaFileRepo>,
+}
+
 pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
     download_client: Arc<StubDownloadClient>,
     download_submissions: Arc<TrackingDownloadSubmissionRepo>,
@@ -1165,6 +1175,29 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
     acquisition_scope_states: Arc<TrackingAcquisitionScopeStateRepo>,
     indexer_client: Arc<dyn IndexerClient>,
 ) -> (AppUseCase, User, Arc<MockReleaseAttemptRepo>) {
+    let (app, user, release_attempts, _) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_repos(
+            download_client,
+            download_submissions,
+            pending_releases,
+            acquisition_scope_states,
+            indexer_client,
+        );
+    (app, user, release_attempts)
+}
+
+pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_repos(
+    download_client: Arc<StubDownloadClient>,
+    download_submissions: Arc<TrackingDownloadSubmissionRepo>,
+    pending_releases: Arc<TrackingPendingReleaseRepo>,
+    acquisition_scope_states: Arc<TrackingAcquisitionScopeStateRepo>,
+    indexer_client: Arc<dyn IndexerClient>,
+) -> (
+    AppUseCase,
+    User,
+    Arc<MockReleaseAttemptRepo>,
+    AcquisitionBootstrapRepos,
+) {
     let titles = Arc::new(MockTitleRepo::default());
     let shows = Arc::new(MockShowRepo::default());
     let users = Arc::new(MockUserRepo::default());
@@ -1200,15 +1233,23 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
     let release_attempts = Arc::new(MockReleaseAttemptRepo::default());
     let settings = Arc::new(StoredSettingsRepo::default());
     let quality_profiles = Arc::new(MockQualityProfileRepo);
+    // The background acquisition cursor derives targets from library state.
+    // With mock catalog stores, bridge the derivation to the seeded wanted rows
+    // so `run_background_acquisition_cycle_once` reaches each seeded monitored
+    // scope.
+    let media_files = Arc::new(MockMediaFileRepo::with_missing_scope_source(
+        acquisition_scope_states.clone(),
+        titles.clone(),
+    ));
 
     let services = AppServices::builder(
         titles.clone(),
         shows,
         users.clone(),
-        indexer_configs,
+        indexer_configs.clone(),
         indexer_client,
         download_client,
-        download_client_configs,
+        download_client_configs.clone(),
         release_attempts.clone(),
         settings,
         quality_profiles,
@@ -1222,10 +1263,7 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
     // The background acquisition cursor derives targets from library state.
     // With mock catalog stores, bridge the derivation to the seeded wanted
     // rows so `run_background_acquisition_cycle_once` reaches each seeded monitored scope.
-    .with_media_files(Arc::new(MockMediaFileRepo::with_missing_scope_source(
-        acquisition_scope_states.clone(),
-        titles,
-    )))
+    .with_media_files(media_files.clone())
     .build_partial_for_tests();
 
     let mut registry = FacetRegistry::new();
@@ -1252,7 +1290,17 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_release_attemp
             }))
             .with_acquisition_scope_states(acquisition_scope_states)
     });
-    (app, test_admin_user(), release_attempts)
+    (
+        app,
+        test_admin_user(),
+        release_attempts,
+        AcquisitionBootstrapRepos {
+            titles,
+            indexer_configs,
+            download_client_configs,
+            media_files,
+        },
+    )
 }
 
 pub(super) fn bootstrap_with_scan_unmatched_tracking(
