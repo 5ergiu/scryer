@@ -1961,13 +1961,17 @@ impl<'a> CandidateJobRunner<'a> {
                             .scan_directory(target_str.as_str())
                             .await
                     }
-                    LibraryScanPipelineKind::Series => app
-                        .services
-                        .library
-                        .library_scanner
-                        .scan_directory_for_progress_with_metrics(target_str.as_str())
+                    // An empty inventory is re-verified before it is trusted:
+                    // a shared-folder mount can answer a readdir with an empty
+                    // listing and no error under concurrent scan load.
+                    LibraryScanPipelineKind::Series => {
+                        scan_episodic_title_directory_for_progress_metrics(
+                            app.services.library.library_scanner.clone(),
+                            target.as_path(),
+                        )
                         .await
-                        .map(|scan| scan.files),
+                        .map(|scan| scan.files)
+                    }
                 };
 
                 let event = match result {

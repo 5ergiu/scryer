@@ -2177,7 +2177,8 @@ impl AppUseCase {
             );
         }
 
-        let discovered_files = match pre_scanned_files {
+        let walked_here = pre_scanned_file_count.is_none() && title_dir_present;
+        let mut discovered_files = match pre_scanned_files {
             Some(files) => files,
             None if !title_dir_present => Vec::new(),
             None => {
@@ -2190,15 +2191,51 @@ impl AppUseCase {
                     walk_elapsed.saturating_add(Duration::from_millis(scan_result.walk_ms));
                 stat_elapsed =
                     stat_elapsed.saturating_add(Duration::from_millis(scan_result.stat_ms));
-                if file_total_mode == LibraryScanFileTotalMode::MarkKnownAfterThisWalk
-                    && let Some(coordinator) = session_coordinator.as_ref()
-                {
-                    coordinator.add_file_total(scan_result.files.len()).await;
-                    coordinator.mark_file_total_known().await;
-                }
                 scan_result.files
             }
         };
+
+        // A full-folder scan that ends up with zero files for a directory that
+        // exists has not proved the folder is empty. A shared-folder mount
+        // under concurrent readdir load returns an empty listing with no
+        // error, and the inventory that fed `pre_scanned_files` can have been
+        // built from exactly such a listing. Re-walk once before accepting it.
+        if !scoped_discovered_files && title_dir_present && discovered_files.is_empty() {
+            let scan_result = scan_episodic_title_directory_for_progress_metrics(
+                self.services.library.library_scanner.clone(),
+                &title_dir,
+            )
+            .await?;
+            walk_elapsed = walk_elapsed.saturating_add(Duration::from_millis(scan_result.walk_ms));
+            stat_elapsed = stat_elapsed.saturating_add(Duration::from_millis(scan_result.stat_ms));
+            if !scan_result.files.is_empty() {
+                warn!(
+                    title_id = %title.id,
+                    title_name = %title.name,
+                    title_dir = %title_dir_str,
+                    files = scan_result.files.len(),
+                    "title inventory was empty; a re-walk of the title directory found media files"
+                );
+            }
+            discovered_files = scan_result.files;
+        }
+
+        if walked_here
+            && file_total_mode == LibraryScanFileTotalMode::MarkKnownAfterThisWalk
+            && let Some(coordinator) = session_coordinator.as_ref()
+        {
+            coordinator.add_file_total(discovered_files.len()).await;
+            coordinator.mark_file_total_known().await;
+        }
+
+        if !scoped_discovered_files && title_dir_present && discovered_files.is_empty() {
+            warn!(
+                title_id = %title.id,
+                title_name = %title.name,
+                title_dir = %title_dir_str,
+                "title directory exists but the scan found no media files in it"
+            );
+        }
         let db_started = Instant::now();
         let existing_files = self
             .services
