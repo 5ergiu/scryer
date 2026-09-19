@@ -443,38 +443,16 @@ jobs:
             export CC_x86_64_unknown_linux_musl="musl-gcc"
           fi
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
+          # Whole workspace, every target and feature, so test and feature-gated code is
+          # linted here rather than only in the Windows lane.
           cargo clippy --target x86_64-unknown-linux-musl --locked \
-            -p scryer \
-            -p scryer-application \
-            -p scryer-domain \
-            -p scryer-infrastructure-sql \
-            -p scryer-infrastructure-crypto \
-            -p scryer-infrastructure-library \
-            -p scryer-infrastructure-library-search \
-            -p scryer-infrastructure-workflow \
-            -p scryer-infrastructure-acquisition \
-            -p scryer-infrastructure-metadata \
-            -p scryer-infrastructure-configuration \
-            -p scryer-infrastructure-identity \
-            -p scryer-infrastructure-notifications \
-            -p scryer-infrastructure-datastore \
-            -p scryer-infrastructure-runtime \
-            -p scryer-interface \
-            -p scryer-interface-acquisition \
-            -p scryer-interface-core \
-            -p scryer-interface-import \
-            -p scryer-interface-media \
-            -p scryer-interface-metadata \
-            -p scryer-interface-query \
-            -p scryer-interface-security \
-            -p scryer-interface-settings \
-            -p scryer-interface-subscription \
-            -p scryer-interface-system \
-            -p scryer-mediainfo \
-            -p scryer-outbound-http \
-            -p scryer-plugins \
-            -p scryer-release-parser \
-            -p scryer-rules \
+            --workspace \
+            --exclude xtask \
+            --exclude xtask-migrations \
+            --exclude xtask-release \
+            --exclude xtask-support \
+            --all-targets \
+            --all-features \
             -- -D warnings 2>&1 | tee rust-clippy.log
 
       - name: Show ending disk usage

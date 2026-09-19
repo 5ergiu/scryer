@@ -64,39 +64,6 @@ const SCRYER_PROD_PACKAGES: &[&str] = &[
     "scryer-release-parser",
     "scryer-rules",
 ];
-const SCRYER_CI_CLIPPY_PACKAGES: &[&str] = &[
-    "scryer",
-    "scryer-application",
-    "scryer-domain",
-    "scryer-infrastructure-acquisition",
-    "scryer-infrastructure-configuration",
-    "scryer-infrastructure-crypto",
-    "scryer-infrastructure-datastore",
-    "scryer-infrastructure-identity",
-    "scryer-infrastructure-library",
-    "scryer-infrastructure-library-search",
-    "scryer-infrastructure-metadata",
-    "scryer-infrastructure-notifications",
-    "scryer-infrastructure-runtime",
-    "scryer-infrastructure-sql",
-    "scryer-infrastructure-workflow",
-    "scryer-interface",
-    "scryer-interface-acquisition",
-    "scryer-interface-core",
-    "scryer-interface-import",
-    "scryer-interface-media",
-    "scryer-interface-metadata",
-    "scryer-interface-query",
-    "scryer-interface-security",
-    "scryer-interface-settings",
-    "scryer-interface-subscription",
-    "scryer-interface-system",
-    "scryer-mediainfo",
-    "scryer-outbound-http",
-    "scryer-plugins",
-    "scryer-release-parser",
-    "scryer-rules",
-];
 const RELEASE_DRY_RUN_CACHE_FILE: &str = "tmp/xtask-release-dry-run.json";
 const RELEASE_DRY_RUN_BUILTINS_DIR: &str = "tmp/xtask-release-dry-run-builtins";
 const RELEASE_NOTES_DIR: &str = "release-notes";
@@ -2420,10 +2387,20 @@ fn add_prod_package_args(command: &mut Command) {
     }
 }
 
-fn add_ci_clippy_package_args(command: &mut Command) {
-    for package in SCRYER_CI_CLIPPY_PACKAGES {
-        command.args(["-p", package]);
+/// Matches CI's clippy scope: the whole workspace except the xtask crates, every target
+/// (tests and benches included) and every feature, so test and feature-gated code is linted
+/// here instead of only in the native Windows lane.
+fn ci_clippy_selection_args() -> Vec<&'static str> {
+    let mut args = vec!["--locked", "--workspace"];
+    for package in RELEASE_TEST_EXCLUDED_PACKAGES {
+        args.extend(["--exclude", package]);
     }
+    args.extend(["--all-targets", "--all-features"]);
+    args
+}
+
+fn add_ci_clippy_package_args(command: &mut Command) {
+    command.args(ci_clippy_selection_args());
 }
 
 struct BuiltinAssetPaths {
@@ -3458,9 +3435,10 @@ fn run_clippy_ci(ctx: &TaskContext, args: ClippyArgs) -> Result<()> {
 }
 
 fn ci_clippy_shell() -> String {
-    let package_args = SCRYER_CI_CLIPPY_PACKAGES
+    let package_args = ci_clippy_selection_args()
         .iter()
-        .map(|package| format!(" -p {package}"))
+        .filter(|arg| **arg != "--locked")
+        .map(|arg| format!(" {arg}"))
         .collect::<String>();
     let mut shell = String::from(
         "set -euo pipefail; /usr/local/cargo/bin/rustup component add clippy; toolchain=\"$('/usr/local/cargo/bin/rustup' show active-toolchain | cut -d' ' -f1)\"; toolchain_bin=\"/usr/local/rustup/toolchains/${toolchain}/bin\"; export PATH=\"${toolchain_bin}:$PATH\"; \"${toolchain_bin}/cargo-clippy\" clippy --locked",
@@ -4374,7 +4352,7 @@ fn run_scryer_release_hygiene_validation(ctx: &TaskContext, prefix: &'static str
 fn run_scryer_ci_clippy_validation(ctx: &TaskContext, prefix: &'static str) -> Result<()> {
     prefixed_step(
         prefix,
-        "Running CI-equivalent clippy for scryer production binary packages",
+        "Running CI-equivalent clippy for the whole workspace",
     );
     run_clippy_ci(ctx, ClippyArgs { linux_only: true })?;
     prefixed_ok(prefix, "CI clippy passed");
@@ -4739,9 +4717,29 @@ mod tests {
                 SCRYER_PROD_PACKAGES.contains(&expected),
                 "release Nextest packages must include {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn ci_clippy_selection_matches_workflow() {
+        let workflow = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/scryer.yml"),
+        )
+        .unwrap();
+        let step = workflow
+            .split("cargo clippy --target x86_64-unknown-linux-musl")
+            .nth(1)
+            .expect("workflow runs the Linux clippy lane");
+        let step = &step[..step
+            .find("-- -D warnings")
+            .expect("clippy lane denies warnings")];
+        for arg in ci_clippy_selection_args() {
+            if arg == "--locked" {
+                continue;
+            }
             assert!(
-                SCRYER_CI_CLIPPY_PACKAGES.contains(&expected),
-                "release Clippy packages must include {expected}"
+                step.contains(arg),
+                "Linux clippy lane is missing {arg}; it must match the release dry run"
             );
         }
     }
