@@ -3838,14 +3838,23 @@ async fn process_single_target(
         };
         if !is_allowed {
             // Blocked on quality alone: admission never looked at an incumbent.
-            record_release_decision(app, item, title, candidate, decision_code, None, now).await;
-            app.emit_acquisition_candidate_rejected_event(
-                None,
-                title,
-                candidate.title.clone(),
-                decision_code.as_str().to_string(),
-            )
-            .await;
+            let recorded =
+                record_release_decision(app, item, title, candidate, decision_code, None, now)
+                    .await;
+            // A feed that repeats the same release every cycle would otherwise
+            // repeat its rejection every cycle too — 80 identical rows a
+            // minute on the load test, all of them the same catalogue of
+            // Pokémon releases refused for the same reason. The first refusal
+            // is the fact; a verdict that has not changed is not one.
+            if recorded.is_new_signal() {
+                app.emit_acquisition_candidate_rejected_event(
+                    None,
+                    title,
+                    candidate.title.clone(),
+                    decision_code.as_str().to_string(),
+                )
+                .await;
+            }
             continue;
         }
 
@@ -3879,7 +3888,7 @@ async fn process_single_target(
             skipped_for_failed = true;
         }
 
-        record_release_decision(
+        let recorded = record_release_decision(
             app,
             item,
             title,
@@ -3891,13 +3900,19 @@ async fn process_single_target(
         .await;
 
         if !decision_code.is_eligible() {
-            app.emit_acquisition_candidate_rejected_event(
-                None,
-                title,
-                candidate.title.clone(),
-                decision_code.as_str().to_string(),
-            )
-            .await;
+            // Same rule as the quality-blocked arm above: the rejection is
+            // told once per (scope, release, verdict), and again when the
+            // verdict changes, because the decision code is part of the
+            // ledger identity this asked.
+            if recorded.is_new_signal() {
+                app.emit_acquisition_candidate_rejected_event(
+                    None,
+                    title,
+                    candidate.title.clone(),
+                    decision_code.as_str().to_string(),
+                )
+                .await;
+            }
             // A fact about the *scope*, not about this candidate: the ranked
             // order is (tier, revision, score) and admission compares the same
             // three in the same order, so nothing below a rejected candidate
