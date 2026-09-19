@@ -333,6 +333,39 @@ impl TitleRepository for TitleStore {
         .await
     }
 
+    /// The folder-ownership lookup, in SQL. The port's default reads every
+    /// title in the library and lets the caller sift them; a library scan asks
+    /// this once per folder it touches, so that read was the heaviest
+    /// statement of a scan. `folder_path` is compared against the caller's
+    /// candidate spellings of the folder, which is a narrowing filter — the
+    /// caller still decides with `folder_paths_match`.
+    async fn list_folder_path_owner_candidates(
+        &self,
+        library_id: &str,
+        exclude_title_id: &str,
+        match_candidates: &[String],
+    ) -> AppResult<Vec<Title>> {
+        if match_candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("{}", match_candidates.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {TITLE_COLUMNS} FROM titles \
+             WHERE library_id = {{}} AND id <> {{}} AND folder_path IN ({placeholders}) \
+             ORDER BY LOWER(name), id"
+        );
+        let mut args = vec![
+            SqlArg::Text(library_id.to_string()),
+            SqlArg::Text(exclude_title_id.to_string()),
+        ];
+        args.extend(match_candidates.iter().cloned().map(SqlArg::Text));
+
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+        decode_runtime_title_rows(&rows, PersistedTitleReadMode::Presentation, false)
+    }
+
     /// One scalar, in SQL. The port's default reads every title row in the
     /// library to count them, which is the wrong shape for a fact resolved on
     /// the submit path with the requester waiting.

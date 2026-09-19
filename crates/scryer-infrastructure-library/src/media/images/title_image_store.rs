@@ -17,6 +17,15 @@ use scryer_infrastructure_sql::domain_event_payload::{
 use super::{normalize_title_image_source_url, title_image_blob_digest};
 
 const DOMAIN_EVENT_COLUMNS: &str = "sequence, event_id, occurred_at, actor_kind, actor_user_id, actor_display_name, title_id, facet, correlation_id, causation_id, schema_version, stream_kind, stream_id, event_type, payload_json";
+/// The insert half of an append; `RETURNING {DOMAIN_EVENT_COLUMNS}` is bolted
+/// on so the generated `sequence` comes back from the insert itself rather than
+/// from a follow-up `SELECT ... WHERE event_id = ?`.
+const APPEND_DOMAIN_EVENT_INSERT_SQL: &str = "INSERT INTO domain_events (
+            event_id, occurred_at, actor_kind, actor_user_id, actor_display_name,
+            title_id, facet, correlation_id, causation_id, schema_version,
+            stream_kind, stream_id, event_type, payload_json, import_status,
+            media_file_delete_reason, download_id
+         ) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
 
 #[derive(Clone)]
 pub struct TitleImageStore {
@@ -793,14 +802,14 @@ async fn append_domain_event_tx(
         ))
     })?;
     let projections = derive_domain_event_projections(event_type, &payload);
-    SqlRuntime::execute(
+    let inserted = SqlRuntime::fetch_optional(
         SqlExec::Tx(tx),
-        "INSERT INTO domain_events (
-            event_id, occurred_at, actor_kind, actor_user_id, actor_display_name,
-            title_id, facet, correlation_id, causation_id, schema_version,
-            stream_kind, stream_id, event_type, payload_json, import_status,
-            media_file_delete_reason, download_id
-         ) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        &[
+            APPEND_DOMAIN_EVENT_INSERT_SQL,
+            " RETURNING ",
+            DOMAIN_EVENT_COLUMNS,
+        ]
+        .concat(),
         &[
             SqlArg::Text(event.event_id.clone()),
             SqlArg::Timestamp(event.occurred_at),
@@ -822,23 +831,9 @@ async fn append_domain_event_tx(
         ],
     )
     .await?;
-    fetch_domain_event_by_event_id(SqlExec::Tx(tx), &event.event_id)
-        .await?
-        .ok_or_else(|| AppError::Repository("failed to reload inserted domain event".into()))
-}
-
-async fn fetch_domain_event_by_event_id(
-    exec: SqlExec<'_, '_>,
-    event_id: &str,
-) -> AppResult<Option<DomainEvent>> {
-    SqlRuntime::fetch_optional(
-        exec,
-        &format!("SELECT {DOMAIN_EVENT_COLUMNS} FROM domain_events WHERE event_id = {{}}"),
-        &[SqlArg::Text(event_id.to_string())],
-    )
-    .await?
-    .map(|row| domain_event_from_row(&row))
-    .transpose()
+    let row = inserted
+        .ok_or_else(|| AppError::Repository("failed to reload inserted domain event".into()))?;
+    domain_event_from_row(&row)
 }
 
 fn domain_event_from_row(row: &SqlRow) -> AppResult<DomainEvent> {

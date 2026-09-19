@@ -3192,3 +3192,151 @@ async fn bulk_title_reads_hydrate_canonical_tags_only_when_the_projection_asks()
 
     let _ = std::fs::remove_file(db);
 }
+
+/// The folder-ownership lookup narrows in SQL but has to answer exactly what
+/// reading the whole library and sifting it answered: the other title that
+/// owns the folder, the library's own rows only, and the list order.
+async fn assert_folder_path_owner_candidates(catalog: &TitleStore) -> AppResult<()> {
+    let owned_folder = "/data/movies/Arrival (2016)";
+
+    let mut owner = make_test_title("title-folder-owner", None);
+    owner.name = "Zulu".to_string();
+    owner.folder_path = Some(owned_folder.to_string());
+    TitleRepository::create(catalog, owner.clone()).await?;
+
+    let mut second_owner = make_test_title("title-folder-owner-second", None);
+    second_owner.name = "Alpha".to_string();
+    second_owner.folder_path = Some(owned_folder.to_string());
+    TitleRepository::create(catalog, second_owner.clone()).await?;
+
+    let mut claimant = make_test_title("title-folder-claimant", None);
+    claimant.name = "Mike".to_string();
+    claimant.folder_path = None;
+    TitleRepository::create(catalog, claimant.clone()).await?;
+
+    let mut elsewhere = make_test_title("title-folder-elsewhere", None);
+    elsewhere.name = "Bravo".to_string();
+    elsewhere.folder_path = Some("/data/movies/Dune (2021)".to_string());
+    TitleRepository::create(catalog, elsewhere.clone()).await?;
+
+    let candidates =
+        scryer_application::stored_paths::folder_path_match_candidates(owned_folder);
+    let owners = TitleRepository::list_folder_path_owner_candidates(
+        catalog,
+        &claimant.library_id,
+        &claimant.id,
+        &candidates,
+    )
+    .await?;
+
+    assert_eq!(
+        owners
+            .iter()
+            .map(|title| title.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second_owner.id.as_str(), owner.id.as_str()],
+        "only the folder's owners come back, in LOWER(name), id order"
+    );
+
+    // The excluded title never answers for its own folder.
+    let self_owned = TitleRepository::list_folder_path_owner_candidates(
+        catalog,
+        &owner.library_id,
+        &owner.id,
+        &candidates,
+    )
+    .await?;
+    assert_eq!(
+        self_owned
+            .iter()
+            .map(|title| title.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second_owner.id.as_str()]
+    );
+
+    // A folder nobody owns reads nothing at all.
+    let unowned = TitleRepository::list_folder_path_owner_candidates(
+        catalog,
+        &claimant.library_id,
+        &claimant.id,
+        &scryer_application::stored_paths::folder_path_match_candidates(
+            "/data/movies/Nothing Here",
+        ),
+    )
+    .await?;
+    assert!(unowned.is_empty());
+
+    // A different library shares neither rows nor answers.
+    let other_library = TitleRepository::list_folder_path_owner_candidates(
+        catalog,
+        "library-that-does-not-exist",
+        &claimant.id,
+        &candidates,
+    )
+    .await?;
+    assert!(other_library.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn folder_path_owner_candidates_find_only_the_folder_owners() {
+    let (services, db) = temp_services("scryer_title_folder_owner").await;
+    let catalog = title_store(&services);
+
+    assert_folder_path_owner_candidates(&catalog)
+        .await
+        .expect("folder owner lookup should behave consistently");
+
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn folder_path_owner_candidates_find_only_the_folder_owners_postgres() -> AppResult<()> {
+    let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!(
+            "skipping PostgreSQL folder owner lookup test; SCRYER_TEST_POSTGRES_URL is not set"
+        );
+        return Ok(());
+    };
+
+    let admin_pool = sqlx::PgPool::connect(&raw_url)
+        .await
+        .map_err(|error| AppError::Repository(format!("failed to connect to postgres: {error}")))?;
+    let schema = format!(
+        "scryer_test_{}_{}",
+        std::process::id(),
+        Id::new().0.replace('-', "_")
+    );
+
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin_pool)
+        .await
+        .map_err(|error| AppError::Repository(format!("failed to create schema: {error}")))?;
+
+    let result = async {
+        let mut url = url::Url::parse(&raw_url)
+            .map_err(|error| AppError::Validation(format!("invalid postgres test URL: {error}")))?;
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        let services =
+            crate::PostgresServices::new_with_mode(url.to_string(), crate::MigrationMode::Apply)
+                .await?;
+        let catalog = TitleStore::new(services.datastore());
+        let result = assert_folder_path_owner_candidates(&catalog).await;
+        services.pool().close().await;
+        result
+    }
+    .await;
+
+    let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin_pool)
+        .await;
+    admin_pool.close().await;
+    cleanup.map_err(|error| AppError::Repository(format!("failed to drop schema: {error}")))?;
+    result
+}
