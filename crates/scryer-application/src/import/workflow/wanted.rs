@@ -150,7 +150,24 @@ async fn execute_resolved_episode_import(
             rename_episode_title,
             effective_quality_label.as_deref(),
         );
-        let dest_path = additional_import_dest_path(&canonical_dest_path, &effective_parsed);
+        // Same guard as the movie additional path: a retried import of a
+        // source this title already holds as an additional copy must resolve
+        // that copy as its destination so the duplicate check refuses it,
+        // instead of minting the next " (N)" name and copying again.
+        let prior_additional_file =
+            existing_additional_import_media_file(app, title, source_video, source_size).await?;
+        let dest_path = match prior_additional_file.as_ref() {
+            Some(prior) => PathBuf::from(&prior.file_path),
+            None => additional_import_dest_path(&canonical_dest_path, &effective_parsed),
+        };
+        let existing_files = match prior_additional_file.as_ref() {
+            Some(prior) if !existing_files.iter().any(|file| file.id == prior.id) => {
+                let mut files = existing_files.clone();
+                files.push(prior.clone());
+                files
+            }
+            _ => existing_files.clone(),
+        };
         let import_mode = crate::seeding_gate::resolve_seeding_safe_import_mode(
             app,
             Some(&title.library_id),

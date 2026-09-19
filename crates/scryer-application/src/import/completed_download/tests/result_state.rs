@@ -183,6 +183,94 @@ async fn unavailable_artifact_evidence_keeps_already_present_import_retryable() 
     assert!(td.import_execution_retry.is_some());
 }
 
+/// A pass that imports successfully but cannot yet be verified complete goes
+/// back to ImportPending behind the execution backoff. Passes that make no
+/// progress keep growing that backoff; a pass that imports something new
+/// resets it so a client still delivering files is picked up promptly.
+#[tokio::test]
+async fn apply_result_backs_off_unverified_import_until_progress() {
+    // A season pack with one of two monitored episodes imported never verifies.
+    let app = build_app(
+        vec![build_title("title-1", "Show", MediaFacet::Series)],
+        vec![build_collection("season-1", "title-1", "1")],
+        vec![
+            build_episode("ep-1", "title-1", "season-1", "1", "1", None),
+            build_episode("ep-2", "title-1", "season-1", "1", "2", None),
+        ],
+        vec![build_artifact("dl-1", "ep-1", "Show.S01E01.mkv")],
+    );
+    let mut td = build_tracked_download("title-1", "series", "Show.S01.Complete.1080p.WEB-DL");
+    let base = ImportResult {
+        import_id: "import-1".to_string(),
+        decision: ImportDecision::Imported,
+        skip_reason: None,
+        title_id: Some("title-1".to_string()),
+        source_system: Some("nzbget".to_string()),
+        source_ref: Some("dl-1".to_string()),
+        source_title: Some("Show.S01.Complete.1080p.WEB-DL".to_string()),
+        source_path: "/downloads/Show.S01.Complete.1080p.WEB-DL".to_string(),
+        dest_path: Some("/library/Show/Season 01/Show - S01E01.mkv".to_string()),
+        quality: None,
+        episode_ids: vec!["ep-1".to_string()],
+        file_size_bytes: None,
+        link_type: None,
+        error_message: None,
+        release_burned: false,
+        started_at: Utc::now(),
+        completed_at: Utc::now(),
+    };
+
+    // First pass imported one file: pending, behind the first backoff step.
+    assert!(!apply_import_result(&app, &mut td, base.clone(), 1).await);
+    assert_eq!(td.state, TrackedDownloadState::ImportPending);
+    assert_eq!(td.status, TrackedDownloadStatus::Warning);
+    let retry = td
+        .import_execution_retry
+        .clone()
+        .expect("unverified import schedules a backoff");
+    assert_eq!(retry.attempts, 1);
+    assert!(retry.next_retry_at > Utc::now());
+    assert!(
+        td.status_messages[0].starts_with("Import partially completed"),
+        "{:?}",
+        td.status_messages
+    );
+    assert!(
+        td.status_messages[0].contains("Retrying at"),
+        "{:?}",
+        td.status_messages
+    );
+
+    // A retry that imports nothing new (the source no longer shows a video,
+    // but earlier passes already succeeded) must not reset the backoff; it
+    // grows.
+    let no_progress = ImportResult {
+        decision: ImportDecision::Skipped,
+        skip_reason: Some(ImportSkipReason::NoVideoFiles),
+        dest_path: None,
+        episode_ids: vec![],
+        ..base.clone()
+    };
+    assert!(!apply_import_result(&app, &mut td, no_progress, 0).await);
+    assert_eq!(td.state, TrackedDownloadState::ImportPending);
+    assert_eq!(
+        td.import_execution_retry
+            .as_ref()
+            .map(|retry| retry.attempts),
+        Some(2)
+    );
+
+    // A pass that imported another file is progress: the backoff restarts.
+    assert!(!apply_import_result(&app, &mut td, base, 1).await);
+    assert_eq!(td.state, TrackedDownloadState::ImportPending);
+    assert_eq!(
+        td.import_execution_retry
+            .as_ref()
+            .map(|retry| retry.attempts),
+        Some(1)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn verified_import_mark_retries_without_rolling_back_import() {
     let marker = Arc::new(MarkingDownloadClient::new(3));
