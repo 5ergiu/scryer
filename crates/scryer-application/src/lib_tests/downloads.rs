@@ -9620,6 +9620,154 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     );
 }
 
+/// The episode additional-file path shares the movie path's destination
+/// helper, so it needs the same retry guard: a second import of the same
+/// completed download must reuse the copy it already made.
+#[tokio::test]
+async fn completed_import_retry_reuses_existing_additional_episode_file() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode,
+            library_dir,
+            ..
+        },
+        download_submissions,
+    ) = fail_closed_pack_fixture_with_submissions().await;
+
+    let season_folder = library_dir
+        .path()
+        .join("Fail Closed Pack")
+        .join("Season 01");
+    std::fs::create_dir_all(&season_folder).expect("create season folder");
+    let primary_path = season_folder.join("Fail Closed Pack - S01E01 - 1080p.mkv");
+    std::fs::File::create(&primary_path)
+        .expect("create existing primary")
+        .set_len(80 * 1024 * 1024)
+        .expect("size existing primary");
+    let primary_file_id = app
+        .services
+        .library
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: primary_path.to_string_lossy().into_owned(),
+            size_bytes: 80 * 1024 * 1024,
+            role: MediaFileRole::Primary,
+            quality_label: Some("1080p".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("insert existing primary episode file");
+    app.services
+        .library
+        .media_files
+        .link_file_to_episode(&primary_file_id, &episode.id)
+        .await
+        .expect("link primary file to episode");
+
+    let release = "Fail.Closed.Pack.S01E01.PROPER.720p.WEB-DL.AV1.AAC2.0-GRP";
+    let item_id = "additional-episode-retry-1";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: title.id.clone(),
+            purpose: crate::DownloadSubmissionPurpose::AdditionalFile,
+            facet: "series".to_string(),
+            download_client_id: Some("primary".to_string()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some(release.to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            scope: SubmissionScope::Episode {
+                episode_id: episode.id.clone(),
+            },
+        })
+        .await
+        .expect("record additional episode submission");
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let source_file = write_pack_video(source_dir.path(), &format!("{release}.mkv"));
+    let completed = series_pack_completed_download(item_id, &title.id, release, source_dir.path());
+
+    let first = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("first additional episode import");
+    assert_eq!(
+        first.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{first:?}"
+    );
+    // The series aggregate result carries no single destination; the media
+    // row the first pass created is the copy the retry has to reuse.
+    let first_dest = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files after first import")
+        .into_iter()
+        .find(|file| file.role == MediaFileRole::Additional)
+        .map(|file| file.file_path)
+        .expect("first import created an additional media row");
+    assert!(
+        source_file.exists(),
+        "copy-mode import must leave the source"
+    );
+
+    let second = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("second additional episode import");
+    assert_eq!(
+        second.decision,
+        scryer_domain::ImportDecision::Skipped,
+        "{second:?}"
+    );
+    assert_eq!(
+        second.skip_reason,
+        Some(scryer_domain::ImportSkipReason::AlreadyImported),
+        "{second:?}"
+    );
+
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    let additional_files = files
+        .iter()
+        .filter(|file| file.id != primary_file_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        additional_files.len(),
+        1,
+        "retry must not add a second media row: {additional_files:?}"
+    );
+    assert_eq!(additional_files[0].role, MediaFileRole::Additional);
+    assert_eq!(
+        additional_files[0].episode_id.as_deref(),
+        Some(episode.id.as_str())
+    );
+    assert_eq!(additional_files[0].file_path, first_dest);
+    let suffixed = std::fs::read_dir(Path::new(&first_dest).parent().expect("dest folder"))
+        .expect("read destination folder")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(" (2).mkv"))
+        .count();
+    assert_eq!(suffixed, 0, "no \" (2)\" copy may be minted on retry");
+}
+
 #[tokio::test]
 async fn path_manual_import_can_target_series_movie_link() {
     let download_client = Arc::new(StubDownloadClient::default());
