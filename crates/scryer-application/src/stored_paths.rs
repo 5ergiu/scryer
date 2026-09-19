@@ -437,8 +437,7 @@ mod tests {
         ] {
             assert!(
                 super::folder_path_match_candidates(canonical).contains(&stored.to_string())
-                    || super::folder_path_match_candidates(stored)
-                        .contains(&canonical.to_string()),
+                    || super::folder_path_match_candidates(stored).contains(&canonical.to_string()),
                 "{stored} is not reachable from {canonical}"
             );
         }

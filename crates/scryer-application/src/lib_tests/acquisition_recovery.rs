@@ -13735,7 +13735,8 @@ async fn a_cycle_builds_one_download_client_snapshot_and_reuses_it() {
     let second = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
 
     assert_eq!(
-        *download_client.queue_calls.lock().await, 1,
+        *download_client.queue_calls.lock().await,
+        1,
         "the second subject must reuse the first subject's snapshot"
     );
     assert!(

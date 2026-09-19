@@ -3219,8 +3219,7 @@ async fn assert_folder_path_owner_candidates(catalog: &TitleStore) -> AppResult<
     elsewhere.folder_path = Some("/data/movies/Dune (2021)".to_string());
     TitleRepository::create(catalog, elsewhere.clone()).await?;
 
-    let candidates =
-        scryer_application::stored_paths::folder_path_match_candidates(owned_folder);
+    let candidates = scryer_application::stored_paths::folder_path_match_candidates(owned_folder);
     let owners = TitleRepository::list_folder_path_owner_candidates(
         catalog,
         &claimant.library_id,

@@ -563,11 +563,17 @@ mod title_history_filter_tests {
         let store = store().await;
 
         let first = store
-            .append(event_with_payload("event-a", download_ignored_event().payload))
+            .append(event_with_payload(
+                "event-a",
+                download_ignored_event().payload,
+            ))
             .await
             .expect("event should append");
         let second = store
-            .append(event_with_payload("event-b", download_ignored_event().payload))
+            .append(event_with_payload(
+                "event-b",
+                download_ignored_event().payload,
+            ))
             .await
             .expect("event should append");
 
