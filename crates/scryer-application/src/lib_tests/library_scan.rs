@@ -571,6 +571,43 @@ impl MediaAnalyzer for CountingValidMediaAnalyzer {
     }
 }
 
+/// An analyzer that fails for one path and succeeds for every other, so a
+/// test can prove one file's analysis failure does not take the rest of the
+/// title's files down with it.
+#[derive(Clone)]
+struct FailingPathMediaAnalyzer {
+    failing_path: std::path::PathBuf,
+    analyze_calls: Arc<AtomicUsize>,
+}
+
+impl FailingPathMediaAnalyzer {
+    fn new(failing_path: std::path::PathBuf) -> Self {
+        Self {
+            failing_path,
+            analyze_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn analyze_calls(&self) -> usize {
+        self.analyze_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MediaAnalyzer for FailingPathMediaAnalyzer {
+    async fn analyze_file(&self, path: std::path::PathBuf) -> AppResult<MediaAnalysisOutcome> {
+        self.analyze_calls.fetch_add(1, Ordering::SeqCst);
+        if path == self.failing_path {
+            return Err(AppError::Repository(
+                "simulated transient probe failure".to_string(),
+            ));
+        }
+        Ok(MediaAnalysisOutcome::Valid(Box::new(
+            test_valid_media_analysis(),
+        )))
+    }
+}
+
 type MetadataSearchBatch = (Vec<MetadataSearchQuery>, String, bool);
 
 #[derive(Clone, Default)]
@@ -1605,6 +1642,143 @@ async fn series_title_scan_imports_episode_file_as_primary() {
         media_file_role_for_path(&files, episode_path.as_path()),
         MediaFileRole::Primary
     );
+}
+
+#[tokio::test]
+async fn series_title_scan_isolates_one_files_analysis_failure_from_the_rest_of_the_title() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let title_dir = tempdir.path().join("Fresh Show (2026)");
+    std::fs::create_dir(&title_dir).expect("create series folder");
+    let failing_path = title_dir.join("Fresh Show - 1x01 - Pilot WEBDL-1080p.mkv");
+    let healthy_path = title_dir.join("Fresh Show - 1x02 - Second WEBDL-1080p.mkv");
+    std::fs::write(&failing_path, vec![0_u8; 128]).expect("write first episode file");
+    std::fs::write(&healthy_path, vec![0_u8; 128]).expect("write second episode file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "series.path",
+            tempdir.path().to_string_lossy().as_ref(),
+        )
+        .await;
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(build_test_library_files(&[
+            failing_path.as_path(),
+            healthy_path.as_path(),
+        ]))
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (base_app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
+        settings,
+        library_scanner,
+        unmatched_items,
+        Arc::new(EmptySearchMetadataGateway),
+    );
+    let analyzer = FailingPathMediaAnalyzer::new(failing_path.clone());
+    let app = base_app
+        .with_test_overrides(|builder| builder.with_media_analyzer(Arc::new(analyzer.clone())));
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile series root");
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Fresh Show".into(),
+                facet: MediaFacet::Series,
+                monitored: true,
+                year: Some(2026),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create series title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, title_dir.to_string_lossy().as_ref())
+        .await
+        .expect("set series folder path");
+    let season = app
+        .services
+        .catalog
+        .shows
+        .create_collection(Collection {
+            id: Id::new().0,
+            title_id: title.id.clone(),
+            collection_type: CollectionType::Season,
+            collection_index: "1".to_string(),
+            label: Some("Season 1".to_string()),
+            ordered_path: None,
+            narrative_order: Some("1".to_string()),
+            first_episode_number: Some("1".to_string()),
+            last_episode_number: Some("2".to_string()),
+            monitored: true,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create season");
+    for (number, label, name) in [("1", "S01E01", "Pilot"), ("2", "S01E02", "Second")] {
+        app.services
+            .catalog
+            .shows
+            .create_episode(Episode {
+                id: Id::new().0,
+                title_id: title.id.clone(),
+                collection_id: Some(season.id.clone()),
+                episode_type: scryer_domain::EpisodeType::Standard,
+                episode_number: Some(number.to_string()),
+                season_number: Some("1".to_string()),
+                episode_label: Some(label.to_string()),
+                title: Some(name.to_string()),
+                air_date: Some("2026-01-01".to_string()),
+                duration_seconds: Some(420),
+                has_multi_audio: false,
+                has_subtitle: false,
+                is_filler: false,
+                is_recap: false,
+                absolute_number: None,
+                overview: None,
+                tvdb_id: None,
+                image_url: None,
+                monitored: true,
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("create episode");
+    }
+
+    // The walk must succeed even though one file's analysis failed.
+    app.scan_title_library(&user, &title.id)
+        .await
+        .expect("scan series title");
+
+    assert_eq!(analyzer.analyze_calls(), 2);
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(
+        files.len(),
+        2,
+        "both files stay catalogued when one file's analysis fails"
+    );
+    let failed = files
+        .iter()
+        .find(|file| file.file_path == failing_path.to_string_lossy())
+        .expect("failed file is catalogued");
+    assert_eq!(failed.scan_status, "failed");
+    let healthy = files
+        .iter()
+        .find(|file| file.file_path == healthy_path.to_string_lossy())
+        .expect("healthy file is catalogued");
+    assert_ne!(healthy.scan_status, "failed");
 }
 
 #[tokio::test]

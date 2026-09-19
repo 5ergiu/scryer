@@ -137,9 +137,13 @@ pub(crate) async fn probe_native_catalog(
     operation: crate::media::metrics::ProbeOperation,
 ) -> AppResult<Result<scryer_mediainfo::MediaAnalysis, String>> {
     let source_path = path.clone();
+    // A metadata read that fails is an I/O failure for this file, not
+    // evidence about the file's identity. Folding it into `None` and
+    // comparing made a transient failure read as "the source changed".
+    let source_before = super::discs::MediaSourceVersion::read(&path).await?;
     let key = AnalysisKey {
         path: path.clone(),
-        source: super::discs::MediaSourceVersion::read(&path).await.ok(),
+        source: Some(source_before),
         selection: selection.clone(),
     };
     let flight = NATIVE_PROBE_FLIGHTS.start_with_priority(
@@ -165,11 +169,8 @@ pub(crate) async fn probe_native_catalog(
         },
     );
     let outcome = flight.outcome().await?;
-    if key.source
-        != super::discs::MediaSourceVersion::read(&source_path)
-            .await
-            .ok()
-    {
+    let source_after = super::discs::MediaSourceVersion::read(&source_path).await?;
+    if key.source.as_ref() != Some(&source_after) {
         return Err(AppError::Validation(
             "media source changed during inspection".into(),
         ));

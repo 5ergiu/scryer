@@ -679,13 +679,36 @@ fn deferred_episodic_title_work(
     }
 }
 
+/// Walk a title folder for progress metrics, re-verifying an empty result.
+///
+/// A walk that comes back with no media files is not proof that the folder
+/// holds none: a shared-folder mount under concurrent readdir load answers a
+/// directory read with an empty listing and no error, which silently imported
+/// whole shows with zero files. An empty result is therefore re-walked once
+/// before it is accepted.
 pub(super) async fn scan_episodic_title_directory_for_progress_metrics(
     library_scanner: Arc<dyn LibraryScanner>,
     folder_path: &Path,
 ) -> AppResult<LibraryDirectoryScanResult> {
-    library_scanner
-        .scan_directory_for_progress_with_metrics(path_to_stored_string(folder_path).as_str())
-        .await
+    let target = path_to_stored_string(folder_path);
+    let result = library_scanner
+        .scan_directory_for_progress_with_metrics(target.as_str())
+        .await?;
+    if !result.files.is_empty() {
+        return Ok(result);
+    }
+
+    let verification = library_scanner
+        .scan_directory_for_progress_with_metrics(target.as_str())
+        .await?;
+    if !verification.files.is_empty() {
+        tracing::warn!(
+            path = %target,
+            files = verification.files.len(),
+            "title folder walk reported no media files; a re-walk found some and is used instead"
+        );
+    }
+    Ok(verification)
 }
 
 #[expect(
@@ -2077,7 +2100,79 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use scryer_domain::MediaFacet;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    /// A scanner whose successive progress walks answer from a fixed script,
+    /// so a first walk can report an empty folder the way a shared-folder
+    /// mount does while a later walk reports the real files.
+    #[derive(Clone)]
+    struct SequencedLibraryScanner {
+        responses: Arc<Mutex<VecDeque<Vec<LibraryFile>>>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl SequencedLibraryScanner {
+        fn new(responses: Vec<Vec<LibraryFile>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                calls: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl LibraryScanner for SequencedLibraryScanner {
+        async fn scan_library(&self, _root: &str) -> AppResult<Vec<LibraryFile>> {
+            panic!("unused in test")
+        }
+
+        async fn scan_library_batched(
+            &self,
+            _root: &str,
+            _batch_size: usize,
+        ) -> AppResult<LibraryFileBatchReceiver> {
+            panic!("unused in test")
+        }
+
+        async fn scan_directory_batched(
+            &self,
+            _root: &str,
+            _batch_size: usize,
+        ) -> AppResult<LibraryFileBatchReceiver> {
+            panic!("unused in test")
+        }
+
+        async fn scan_directory_with_metrics(
+            &self,
+            _root: &str,
+        ) -> AppResult<LibraryDirectoryScanResult> {
+            panic!("unused in test")
+        }
+
+        async fn scan_directory_for_progress_with_metrics(
+            &self,
+            _root: &str,
+        ) -> AppResult<LibraryDirectoryScanResult> {
+            *self.calls.lock().unwrap() += 1;
+            let files = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted scan response");
+            Ok(LibraryDirectoryScanResult {
+                files,
+                walk_ms: 1,
+                stat_ms: 0,
+                elapsed_ms: 1,
+            })
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CountingLibraryScanner {
@@ -2689,5 +2784,56 @@ mod tests {
         assert_eq!(result.files[0].path, "/library/Show/Episode.mkv");
         assert!(result.files[0].source_signature_scheme.is_none());
         assert!(result.files[0].source_signature_value.is_none());
+    }
+
+    #[tokio::test]
+    async fn scan_episodic_title_directory_re_walks_an_empty_listing_and_uses_the_real_files() {
+        let scanner = SequencedLibraryScanner::new(vec![
+            Vec::new(),
+            vec![build_library_file("/library/Show/S01E01.mkv")],
+        ]);
+
+        let result = scan_episodic_title_directory_for_progress_metrics(
+            Arc::new(scanner.clone()),
+            Path::new("/library/Show"),
+        )
+        .await
+        .expect("scan episodic title directory");
+
+        assert_eq!(scanner.call_count(), 2);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "/library/Show/S01E01.mkv");
+    }
+
+    #[tokio::test]
+    async fn scan_episodic_title_directory_accepts_a_genuinely_empty_folder_after_one_re_walk() {
+        let scanner = SequencedLibraryScanner::new(vec![Vec::new(), Vec::new(), Vec::new()]);
+
+        let result = scan_episodic_title_directory_for_progress_metrics(
+            Arc::new(scanner.clone()),
+            Path::new("/library/Show"),
+        )
+        .await
+        .expect("scan episodic title directory");
+
+        assert_eq!(scanner.call_count(), 2);
+        assert!(result.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_episodic_title_directory_does_not_re_walk_a_non_empty_listing() {
+        let scanner = SequencedLibraryScanner::new(vec![vec![build_library_file(
+            "/library/Show/S01E01.mkv",
+        )]]);
+
+        let result = scan_episodic_title_directory_for_progress_metrics(
+            Arc::new(scanner.clone()),
+            Path::new("/library/Show"),
+        )
+        .await
+        .expect("scan episodic title directory");
+
+        assert_eq!(scanner.call_count(), 1);
+        assert_eq!(result.files.len(), 1);
     }
 }
