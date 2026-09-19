@@ -13711,3 +13711,282 @@ async fn scheduled_pending_release_tick_with_parked_work_is_recorded() {
     );
     assert_eq!(runs[0].job_key, JobKey::PendingReleaseProcessing);
 }
+
+/// Every search subject used to buy its own client snapshot: on the 12k-title
+/// load test that was a queue listing plus a 100-slot history page about a
+/// hundred times a minute, all describing a queue that had not moved between
+/// two seasons of the same show. One build now answers the whole cycle.
+#[tokio::test]
+async fn a_cycle_builds_one_download_client_snapshot_and_reuses_it() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (app, _user) = bootstrap_with_acquisition_tracking(
+        download_client.clone(),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        Arc::new(TrackingAcquisitionScopeStateRepo::default()),
+    );
+    download_client.queue_items.lock().await.push({
+        let mut item = queue_history_fixture_item("held-job", DownloadQueueState::Downloading, 0);
+        item.title_name = "Snapshot Reuse Fixture".to_string();
+        item
+    });
+
+    let first = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+    let second = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+
+    assert_eq!(
+        *download_client.queue_calls.lock().await, 1,
+        "the second subject must reuse the first subject's snapshot"
+    );
+    assert!(
+        first.is_active("Snapshot Reuse Fixture") && second.is_active("Snapshot Reuse Fixture"),
+        "the reused snapshot must answer the double-submit guard exactly as the built one did"
+    );
+}
+
+/// The reuse is only safe because a grab retires it. A cached snapshot that
+/// outlived the submission this process just made would report a claimed scope
+/// as free, which is the double-submit the guard exists to prevent.
+#[tokio::test]
+async fn a_grab_retires_the_cached_download_client_snapshot() {
+    let release_title = "Paperman.2012.720p.WEB-DL.AV1.AAC2.0-NTb";
+    let download_client = Arc::new(StubDownloadClient::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client.clone(),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        Arc::new(FixedReleaseIndexerClient::new(release_title)),
+    );
+    let title = seed_monitored_movie_for_cycle(&app, &user, &wanted_items, "Paperman", 2012).await;
+
+    // Taken before the grab, and still inside the 30 s reuse window when the
+    // assertions below run.
+    let before = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+    assert!(
+        !before.is_active(&title.name),
+        "nothing is holding the scope yet"
+    );
+    let reads_before = *download_client.queue_calls.lock().await;
+
+    app.run_background_acquisition_cycle_once().await;
+    assert_eq!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .as_slice(),
+        &[release_title.to_string()],
+        "the fixture must reproduce a grab"
+    );
+
+    let after = crate::acquisition_workflow::DownloadClientSnapshot::fetch(&app).await;
+    assert!(
+        *download_client.queue_calls.lock().await > reads_before,
+        "the grab must force the next subject to re-read the clients"
+    );
+    assert!(
+        after.is_active(&title.name),
+        "the snapshot after a grab must see the claim the grab created"
+    );
+}
+
+/// A feed that offers the same unusable release every cycle used to write an
+/// `acquisition_candidate_rejected` row every cycle — 80 a minute on the load
+/// test, all of them the same catalogue refused for the same reason. The
+/// refusal is a fact the first time; a repeat of it is not.
+#[tokio::test]
+async fn a_repeated_rejection_is_recorded_once() {
+    let release_title = "Some.Other.Show.S01E01.1080p.WEB-DL-GRP";
+    let download_client = Arc::new(StubDownloadClient::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client.clone(),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        Arc::new(FixedReleaseIndexerClient::new(release_title)),
+    );
+    let title =
+        seed_monitored_movie_for_cycle(&app, &user, &wanted_items, "Rejection Repeat", 2024).await;
+
+    app.run_background_acquisition_cycle_once().await;
+    let after_first = rejected_candidate_events(&app, &title.id).await;
+    assert_eq!(
+        after_first.len(),
+        1,
+        "the first refusal of a candidate is the fact worth recording"
+    );
+    let decisions_after_first = wanted_items.release_decisions.lock().await.clone();
+    assert_eq!(decisions_after_first.len(), 1);
+
+    reopen_scope_for_another_search(&wanted_items).await;
+    app.run_background_acquisition_cycle_once().await;
+
+    assert_eq!(
+        rejected_candidate_events(&app, &title.id).await.len(),
+        1,
+        "the same verdict about the same release must not be recorded again"
+    );
+    let decisions_after_second = wanted_items.release_decisions.lock().await.clone();
+    assert_eq!(
+        decisions_after_second.len(),
+        1,
+        "the event and the decision ledger must agree on what counts as one outcome"
+    );
+    assert_eq!(
+        decisions_after_second[0].id, decisions_after_first[0].id,
+        "the repeat aged the existing decision row forward"
+    );
+}
+
+/// The identity the ledger dedupes on includes the verdict, so a scope that
+/// changes its mind about a release says so — the suppression is of repetition,
+/// not of news.
+#[tokio::test]
+async fn a_changed_verdict_about_the_same_release_is_recorded_again() {
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let decision = |id: &str, code: &str| ReleaseDecision {
+        id: id.to_string(),
+        wanted_item_id: "wanted-1".to_string(),
+        title_id: "title-1".to_string(),
+        release_title: "Verdict.Change.2024.1080p.WEB-DL-GRP".to_string(),
+        release_url: Some("https://example.invalid/verdict.nzb".to_string()),
+        release_size_bytes: Some(1_024),
+        decision_code: code.to_string(),
+        candidate_score: 10,
+        current_score: None,
+        score_delta: None,
+        explanation_json: None,
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    let first = wanted_items
+        .insert_release_decision(&decision("decision-1", "title_mismatch"))
+        .await
+        .expect("record the first verdict");
+    let repeat = wanted_items
+        .insert_release_decision(&decision("decision-2", "title_mismatch"))
+        .await
+        .expect("record the same verdict again");
+    let changed = wanted_items
+        .insert_release_decision(&decision("decision-3", "upgrade_rejected"))
+        .await
+        .expect("record a changed verdict");
+
+    assert_eq!(first, "decision-1");
+    assert_eq!(
+        repeat, "decision-1",
+        "a repeat must age the row it already has"
+    );
+    assert_eq!(
+        changed, "decision-3",
+        "a changed verdict is a new row, and therefore new signal"
+    );
+    assert!(
+        crate::acquisition_workflow::ReleaseDecisionOutcome::of("decision-1", Some(&first))
+            .is_new_signal()
+    );
+    assert!(
+        !crate::acquisition_workflow::ReleaseDecisionOutcome::of("decision-2", Some(&repeat))
+            .is_new_signal()
+    );
+    assert!(
+        crate::acquisition_workflow::ReleaseDecisionOutcome::of("decision-3", Some(&changed))
+            .is_new_signal()
+    );
+    assert!(
+        crate::acquisition_workflow::ReleaseDecisionOutcome::of("decision-4", None).is_new_signal(),
+        "a ledger that could not answer keeps the pre-dedupe behaviour"
+    );
+}
+
+async fn rejected_candidate_events(app: &AppUseCase, title_id: &str) -> Vec<DomainEvent> {
+    app.services
+        .events
+        .domain_events
+        .list(&DomainEventFilter {
+            event_types: Some(vec![DomainEventType::AcquisitionCandidateRejected]),
+            title_id: Some(title_id.to_string()),
+            facet: None,
+            stream_id: None,
+            after_sequence: Some(0),
+            before_sequence: None,
+            limit: 100,
+        })
+        .await
+        .expect("rejected candidate events should load")
+}
+
+/// Put every seeded scope back where a second cycle will search it again,
+/// which is what an idle instance does every cadence.
+async fn reopen_scope_for_another_search(wanted_items: &Arc<TrackingAcquisitionScopeStateRepo>) {
+    let scopes = wanted_items
+        .list_acquisition_scope_states(AcquisitionScopeStatesQuery::default())
+        .await
+        .expect("list seeded scopes");
+    for mut scope in scopes {
+        scope.last_search_at = Some((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        wanted_items
+            .upsert_acquisition_scope_state(&scope)
+            .await
+            .expect("reopen scope");
+    }
+}
+
+async fn seed_monitored_movie_for_cycle(
+    app: &AppUseCase,
+    user: &User,
+    wanted_items: &Arc<TrackingAcquisitionScopeStateRepo>,
+    name: &str,
+    year: i32,
+) -> Title {
+    let title = app
+        .add_title(
+            user,
+            NewTitle {
+                name: name.to_string(),
+                sort_title: Some(name.to_string()),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                year: Some(year),
+                content_status: Some("Released".to_string()),
+                min_availability: Some("released".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create the monitored movie");
+    wanted_items
+        .remember_title_facet(&title.id, MediaFacet::Movie)
+        .await;
+    wanted_items
+        .upsert_acquisition_scope_state(&AcquisitionScopeState {
+            id: Id::new().0,
+            title_id: title.id.clone(),
+            title_name: Some(title.name.clone()),
+            title_slug: title.slug.clone(),
+            title_facet: Some(MediaFacet::Movie.as_str().to_string()),
+            library_id: Some(title.library_id.clone()),
+            library_name: Some("Movies".to_string()),
+            library_slug: Some("movies".to_string()),
+            episode_id: None,
+            collection_id: None,
+            series_movie_link_id: None,
+            season_number: None,
+            episode_number: None,
+            media_type: "movie".to_string(),
+            last_search_at: None,
+            status: AcquisitionScopeStatus::Wanted,
+            grabbed_release: None,
+            landed_bar: None,
+            latest_release_decision: None,
+            mismatch_recovery_eligible: false,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        })
+        .await
+        .expect("seed the wanted scope");
+    title
+}
