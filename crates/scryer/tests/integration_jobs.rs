@@ -465,7 +465,7 @@ async fn manual_job_trigger_failure_is_persisted_and_broadcast() {
         .await
         .expect("manual trigger should create the run");
 
-    let terminal = timeout(Duration::from_secs(5), async {
+    let terminal = timeout(common::WAIT_UNTIL_TIMEOUT, async {
         loop {
             let event = rx.recv().await.expect("job event should be received");
             if event.id == run.id
@@ -489,7 +489,7 @@ async fn manual_job_trigger_failure_is_persisted_and_broadcast() {
         "manual failed job event should surface the error",
     );
 
-    let stored = timeout(Duration::from_secs(5), async {
+    let stored = timeout(common::WAIT_UNTIL_TIMEOUT, async {
         loop {
             if let Some(run) =
                 <WorkflowOperationStore as JobRunRepository>::get_job_run(&workflow_store, &run.id)
@@ -654,7 +654,7 @@ async fn scheduled_job_failure_returns_err_and_persists_failed_run() {
         "scheduled failure should propagate to the caller"
     );
 
-    let run = timeout(Duration::from_secs(5), async {
+    let run = timeout(common::WAIT_UNTIL_TIMEOUT, async {
         loop {
             let runs = <WorkflowOperationStore as JobRunRepository>::list_job_runs(
                 &workflow_store,

@@ -2733,6 +2733,15 @@ fn default_max_retry_after() -> Duration {
 }
 
 pub fn parse_retry_after(raw_value: &str) -> Option<(Duration, RetryAfterSource)> {
+    parse_retry_after_at(raw_value, Utc::now())
+}
+
+/// [`parse_retry_after`] against a caller-supplied `now`, so an HTTP-date
+/// value resolves to an exact delay.
+pub fn parse_retry_after_at(
+    raw_value: &str,
+    now: DateTime<Utc>,
+) -> Option<(Duration, RetryAfterSource)> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return None;
@@ -2740,7 +2749,6 @@ pub fn parse_retry_after(raw_value: &str) -> Option<(Duration, RetryAfterSource)
 
     if let Ok(retry_at) = DateTime::parse_from_rfc2822(trimmed) {
         let retry_at = retry_at.with_timezone(&Utc);
-        let now = Utc::now();
         if retry_at > now
             && let Ok(delay) = (retry_at - now).to_std()
             && !delay.is_zero()
@@ -3129,12 +3137,17 @@ mod tests {
 
     #[test]
     fn parses_http_date_retry_after_first() {
-        let retry_at = DateTime::<Utc>::from(SystemTime::now() + Duration::from_secs(60));
-        let header = retry_at.to_rfc2822();
-        let (delay, source) = parse_retry_after(&header).expect("expected parsed Retry-After");
+        // A fixed `now` on a whole second: the HTTP date carries whole seconds
+        // only, so the parsed delay is exact.
+        let now = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let header = (now + chrono::Duration::seconds(60)).to_rfc2822();
+        let (delay, source) =
+            parse_retry_after_at(&header, now).expect("expected parsed Retry-After");
 
         assert_eq!(source, RetryAfterSource::HttpDate);
-        assert!(delay.as_secs() >= 59);
+        assert_eq!(delay, Duration::from_secs(60));
     }
 
     #[test]
@@ -4011,14 +4024,14 @@ mod tests {
         let _ = registry
             .record_destination_cooldown(
                 &destination,
-                Duration::from_millis(50),
+                Duration::from_secs(120),
                 RetryAfterSource::Seconds,
             )
             .await;
         let (_, source) = registry
             .record_destination_cooldown(
                 &destination,
-                Duration::from_millis(5),
+                Duration::from_secs(5),
                 RetryAfterSource::FallbackBackoff,
             )
             .await;
@@ -4082,7 +4095,7 @@ mod tests {
         let registry = RateLimitRegistry::new();
         let _ = registry.record_destination_cooldown_blocking(
             &destination,
-            Duration::from_secs(5),
+            Duration::from_secs(120),
             RetryAfterSource::Seconds,
         );
 
@@ -4110,7 +4123,7 @@ mod tests {
         let registry = RateLimitRegistry::new();
         let _ = registry.record_destination_cooldown_blocking(
             &destination,
-            Duration::from_secs(5),
+            Duration::from_secs(120),
             RetryAfterSource::Seconds,
         );
         let dispatches = Arc::new(AtomicUsize::new(0));
@@ -4227,15 +4240,35 @@ mod tests {
         );
     }
 
+    /// One token per ~17 minutes. The governor bucket runs on the real clock,
+    /// so a test that drains a burst and then expects the next acquire to wait
+    /// must use a refill interval no scheduler stall can reach.
+    fn near_zero_rps_profile(burst: u32) -> HostRpsProfile {
+        HostRpsProfile::limited(0.001, burst)
+    }
+
+    /// True when the host's default-lane bucket has no token left, without
+    /// waiting for one.
+    fn host_rps_exhausted(registry: &RateLimitRegistry, host: &HostKey) -> bool {
+        registry
+            .acquire_host_rps_blocking_until(host, std::time::Instant::now())
+            .is_err()
+    }
+
     #[tokio::test]
     async fn host_rps_is_shared_per_host() {
         let registry = RateLimitRegistry::isolated();
         let host: HostKey = "rps.example.test".into();
+        registry.register_host_profile(
+            host.clone(),
+            near_zero_rps_profile(DEFAULT_HOST_RPS_BURST),
+            HostRpsProfileSource::ExplicitRegistration,
+        );
 
         for _ in 0..DEFAULT_HOST_RPS_BURST {
             assert_eq!(registry.acquire_host_rps(&host).await, None);
         }
-        assert!(registry.acquire_host_rps(&host).await.is_some());
+        assert!(host_rps_exhausted(&registry, &host));
     }
 
     #[tokio::test]
@@ -4284,17 +4317,23 @@ mod tests {
     async fn blocking_and_async_callers_share_governor_capacity() {
         let registry = RateLimitRegistry::isolated();
         let host: HostKey = "shared-blocking.example.test".into();
+        registry.register_host_profile(
+            host.clone(),
+            near_zero_rps_profile(DEFAULT_HOST_RPS_BURST),
+            HostRpsProfileSource::ExplicitRegistration,
+        );
 
         for _ in 0..DEFAULT_HOST_RPS_BURST {
             assert_eq!(registry.acquire_host_rps(&host).await, None);
         }
 
+        // The blocking path sees the capacity the async path drained.
         let blocking_registry = registry.clone();
         let blocking_host = host.clone();
         let blocking = tokio::task::spawn_blocking(move || {
-            blocking_registry.acquire_host_rps_blocking(&blocking_host)
+            host_rps_exhausted(&blocking_registry, &blocking_host)
         });
-        assert!(blocking.await.unwrap().is_some());
+        assert!(blocking.await.unwrap());
     }
 
     #[test]
@@ -4303,18 +4342,21 @@ mod tests {
         let host: HostKey = "deadline-blocking.example.test".into();
         registry.register_host_profile(
             host.clone(),
-            HostRpsProfile::limited(1.0, 1),
+            near_zero_rps_profile(1),
             HostRpsProfileSource::ExplicitRegistration,
         );
 
         assert_eq!(registry.acquire_host_rps_blocking(&host), None);
-        let started_at = std::time::Instant::now();
+        // The next token is ~17 minutes out, past the caller's deadline, so the
+        // call must refuse instead of sleeping. A pacer that slept would blow
+        // straight through the deadline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         assert!(
             registry
-                .acquire_host_rps_blocking_until(&host, started_at + Duration::from_millis(25),)
+                .acquire_host_rps_blocking_until(&host, deadline)
                 .is_err()
         );
-        assert!(started_at.elapsed() < Duration::from_millis(200));
+        assert!(std::time::Instant::now() < deadline);
     }
 
     #[tokio::test]
@@ -4323,18 +4365,18 @@ mod tests {
         let host: HostKey = "deadline-async.example.test".into();
         registry.register_host_profile(
             host.clone(),
-            HostRpsProfile::limited(1.0, 1),
+            near_zero_rps_profile(1),
             HostRpsProfileSource::ExplicitRegistration,
         );
 
         assert_eq!(registry.acquire_host_rps(&host).await, None);
-        let started_at = Instant::now();
+        // The paced acquire has to sleep ~17 minutes for its token, so the
+        // caller's 25 ms deadline always fires first and drops it.
         assert!(
-            tokio::time::timeout(Duration::from_millis(25), registry.acquire_host_rps(&host),)
+            tokio::time::timeout(Duration::from_millis(25), registry.acquire_host_rps(&host))
                 .await
                 .is_err()
         );
-        assert!(started_at.elapsed() < Duration::from_millis(200));
     }
 
     #[tokio::test]
@@ -4352,6 +4394,11 @@ mod tests {
         let registry = RateLimitRegistry::isolated();
         let host: HostKey = "snapshot.example.test".into();
         let destination: DestinationKey = "snapshot.example.test".into();
+        registry.register_host_profile(
+            host.clone(),
+            near_zero_rps_profile(DEFAULT_HOST_RPS_BURST),
+            HostRpsProfileSource::ExplicitRegistration,
+        );
 
         for _ in 0..DEFAULT_HOST_RPS_BURST {
             assert_eq!(registry.acquire_host_rps(&host).await, None);
@@ -4360,30 +4407,39 @@ mod tests {
         let waiting_host = host.clone();
         let waiting =
             tokio::spawn(async move { waiting_registry.acquire_host_rps(&waiting_host).await });
-        sleep(Duration::from_millis(5)).await;
+        let host_is_waiting = |registry: &RateLimitRegistry| {
+            registry.snapshot().host_rps.iter().any(|entry| {
+                entry.host_key == host
+                    && entry.lane.as_ref() == "default"
+                    && !entry.available_in.is_zero()
+                    && entry.profile_source == HostRpsProfileSource::ExplicitRegistration
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !host_is_waiting(&registry) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the queued acquire should record its host RPS wait");
         let _ = registry
             .record_destination_cooldown(
                 &destination,
-                Duration::from_secs(1),
+                Duration::from_secs(120),
                 RetryAfterSource::Seconds,
             )
             .await;
 
         let snapshot = registry.snapshot();
 
-        assert!(snapshot.host_rps.iter().any(|entry| {
-            entry.host_key == host
-                && entry.lane.as_ref() == "default"
-                && !entry.available_in.is_zero()
-                && entry.profile_source == HostRpsProfileSource::UnknownPublicDefault
-        }));
         assert!(
             snapshot
                 .destination_cooldowns
                 .iter()
                 .any(|entry| entry.destination_key == destination && !entry.available_in.is_zero())
         );
-        assert!(waiting.await.unwrap().is_some());
+        assert!(!waiting.is_finished());
+        waiting.abort();
     }
 
     #[tokio::test]

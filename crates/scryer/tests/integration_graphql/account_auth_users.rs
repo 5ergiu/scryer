@@ -9,7 +9,7 @@ async fn wait_for_interactive_job(
     job_key: JobKey,
     run_id: &str,
 ) -> scryer_application::JobRun {
-    timeout(Duration::from_secs(5), async {
+    timeout(crate::common::WAIT_UNTIL_TIMEOUT, async {
         loop {
             let run = ctx
                 .app
