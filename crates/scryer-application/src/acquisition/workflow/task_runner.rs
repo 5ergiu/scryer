@@ -182,6 +182,22 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
         }
     };
 
+    // Derivation is the expensive half of this cycle: the missing-scope
+    // anti-join walks every monitored episode in the catalog, and at library
+    // scale that is a multi-second read on every tick — taken here while a
+    // library scan is writing. Nothing downstream can act on a target without
+    // a download client, so the gate that would have thrown the whole set away
+    // runs before the set is built.
+    if !has_enabled_download_clients(app).await {
+        debug!("background acquisition: no enabled download clients configured, skipping cycle");
+        metrics::counter!(
+            "scryer_background_acquisition_cycles_total",
+            "outcome" => "no_clients",
+        )
+        .increment(1);
+        return BackgroundAcquisitionCycleOutcome::default();
+    }
+
     let mut targets = match app.derive_acquisition_targets(&now).await {
         Ok(targets) => targets,
         Err(err) => {
@@ -194,17 +210,6 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     }
     if targets.is_empty() {
         return BackgroundAcquisitionCycleOutcome::default();
-    }
-
-    if !has_enabled_download_clients(app).await {
-        warn!(
-            target_count = targets.len(),
-            "background acquisition: no enabled download clients configured, skipping cycle"
-        );
-        return BackgroundAcquisitionCycleOutcome {
-            targets_derived: targets.len(),
-            ..BackgroundAcquisitionCycleOutcome::default()
-        };
     }
 
     let hot_resume = app.background_acquisition_hot_resume_position().await;

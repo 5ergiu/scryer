@@ -1894,11 +1894,25 @@ impl AppUseCase {
             now,
         )?;
 
-        self.services
+        // Per-title work, so it stays out of the log at INFO. The store write
+        // holds the single writer for its whole transaction; when it grows with
+        // the catalog this histogram is what shows it, without a scan's worth of
+        // log lines.
+        let write_started_at = Instant::now();
+        let outcome = self
+            .services
             .library
             .discovery
             .replace_title_more_like_this_items(&title.id, &language, &records)
-            .await?;
+            .await;
+        metrics::histogram!(
+            "scryer_title_recommendations_store_duration_seconds",
+            "outcome" => if outcome.is_ok() { "ok" } else { "error" },
+        )
+        .record(write_started_at.elapsed().as_secs_f64());
+        metrics::histogram!("scryer_title_recommendations_card_count")
+            .record(records.len() as f64);
+        outcome?;
 
         Ok(())
     }

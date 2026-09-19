@@ -13489,3 +13489,148 @@ async fn a_season_pack_wins_a_tie_against_the_episodes_it_covers() {
         "the covered episode proposals must be set aside, not grabbed too: {submitted:?}"
     );
 }
+
+/// A scheduled poll that cannot reach an indexer must cost nothing.
+///
+/// The due check below the gate deliberately answers "poll" when it knows
+/// nothing — an empty due set with an empty deferred set is indistinguishable
+/// from a scheduler that has not spoken yet — so with no indexer configured at
+/// all the cycle used to run on every tick and load the whole catalog for
+/// matching before finding it had nowhere to send a grab.
+#[tokio::test]
+async fn rss_sync_without_enabled_indexers_never_loads_the_catalog() {
+    let acquisition_scope_states = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, _, repos) = bootstrap_with_acquisition_tracking_and_indexer_and_repos(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        acquisition_scope_states.clone(),
+        Arc::new(MockIndexerClient),
+    );
+    seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &acquisition_scope_states,
+        "Indexerless Cadence",
+        2024,
+    )
+    .await;
+
+    repos.indexer_configs.store.lock().await.clear();
+    let before = repos
+        .titles
+        .list_for_matching_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let report = app
+        .run_scheduled_rss_sync()
+        .await
+        .expect("an indexerless RSS sync should succeed");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert_eq!(
+        repos
+            .titles
+            .list_for_matching_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        before,
+        "a tick with no enabled indexer must not load the catalog for matching"
+    );
+}
+
+/// Same shape one gate further down: an enabled indexer with nowhere to send
+/// what it finds is still a cycle whose whole result would be discarded, so the
+/// download-client check runs before the catalog load rather than after it.
+#[tokio::test]
+async fn rss_sync_without_download_clients_never_loads_the_catalog() {
+    let acquisition_scope_states = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, _, repos) = bootstrap_with_acquisition_tracking_and_indexer_and_repos(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        acquisition_scope_states.clone(),
+        Arc::new(MockIndexerClient),
+    );
+    seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &acquisition_scope_states,
+        "Clientless Cadence",
+        2024,
+    )
+    .await;
+
+    repos.download_client_configs.store.lock().await.clear();
+    let before = repos
+        .titles
+        .list_for_matching_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let report = app
+        .run_scheduled_rss_sync()
+        .await
+        .expect("a clientless RSS sync should succeed");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert_eq!(
+        repos
+            .titles
+            .list_for_matching_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        before,
+        "a tick with no enabled download client must not load the catalog for matching"
+    );
+}
+
+/// The background convergence cycle derives its targets with a catalog-wide
+/// anti-join over every monitored episode. With no download client there is
+/// nothing it can do with the result, so the gate that discards the whole set
+/// runs before the set is built.
+#[tokio::test]
+async fn background_acquisition_without_download_clients_skips_the_missing_scope_sweep() {
+    let acquisition_scope_states = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, _, repos) = bootstrap_with_acquisition_tracking_and_indexer_and_repos(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        acquisition_scope_states.clone(),
+        Arc::new(MockIndexerClient),
+    );
+    seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &acquisition_scope_states,
+        "Clientless Convergence",
+        2024,
+    )
+    .await;
+
+    // Positive control: with a client configured the cycle does sweep.
+    let before = repos
+        .media_files
+        .missing_scope_sweeps
+        .load(std::sync::atomic::Ordering::Relaxed);
+    app.run_background_acquisition_cycle_once().await;
+    let with_client = repos
+        .media_files
+        .missing_scope_sweeps
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        with_client > before,
+        "a cycle with a download client still derives its targets"
+    );
+
+    repos.download_client_configs.store.lock().await.clear();
+    let outcome = app.run_background_acquisition_cycle_once().await;
+
+    assert_eq!(
+        repos
+            .media_files
+            .missing_scope_sweeps
+            .load(std::sync::atomic::Ordering::Relaxed),
+        with_client,
+        "a cycle with no download client must not run the catalog-wide sweep"
+    );
+    assert_eq!(outcome.targets_derived, 0);
+    assert_eq!(outcome.titles_walked, 0);
+}

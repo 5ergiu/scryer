@@ -941,6 +941,32 @@ impl AppUseCase {
         let now = Utc::now();
         let sync_start = std::time::Instant::now();
 
+        // Cheapest gate first, and ahead of every other read this function
+        // makes. With no enabled indexer there is nothing to poll at all, and
+        // the due check below would still say "poll" — an empty due set and an
+        // empty deferred set is indistinguishable from "nothing is known yet",
+        // which deliberately warrants a poll. One config list keeps a tick from
+        // touching the catalog.
+        if !super::acquisition_workflow::has_enabled_indexers(self).await {
+            debug!("RSS sync: no enabled indexers configured, skipping");
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_indexers").increment(1);
+            metrics::histogram!("scryer_rss_sync_duration_seconds")
+                .record(sync_start.elapsed().as_secs_f64());
+            return Ok(RssSyncReport::default());
+        }
+
+        // Nothing an indexer could be asked for can be acted on without a
+        // download client, so the client gate runs before the catalog load
+        // too: it used to sit just after it, which cost a full
+        // `list_for_matching` on every tick of an instance with no clients.
+        if !super::acquisition_workflow::has_enabled_download_clients(self).await {
+            debug!("RSS sync: no enabled download clients configured, skipping indexer search");
+            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_clients").increment(1);
+            metrics::histogram!("scryer_rss_sync_duration_seconds")
+                .record(sync_start.elapsed().as_secs_f64());
+            return Ok(RssSyncReport::default());
+        }
+
         // Nothing to ask an indexer and nothing held back to re-evaluate means
         // this whole cycle — every monitored title, every anime numbering
         // bridge, the context bank built over them — would be assembled only to
@@ -967,13 +993,6 @@ impl AppUseCase {
             .titles
             .list_for_matching(None, None)
             .await?;
-        if !super::acquisition_workflow::has_enabled_download_clients(self).await {
-            warn!("RSS sync: no enabled download clients configured, skipping indexer search");
-            metrics::counter!("scryer_rss_sync_total", "outcome" => "no_clients").increment(1);
-            metrics::histogram!("scryer_rss_sync_duration_seconds")
-                .record(sync_start.elapsed().as_secs_f64());
-            return Ok(RssSyncReport::default());
-        }
 
         // Union each monitored library's effective routing. Its overrides have
         // already replaced facet defaults and must not be re-enabled by them.

@@ -1049,12 +1049,24 @@ impl DiscoveryRepository for DiscoveryStore {
                 let language = language.clone();
                 let items = items.clone();
                 Box::pin(async move {
+                    // Only the cards this title referenced a moment ago can be
+                    // orphaned by this refresh: nothing else loses a reference
+                    // here, and every card the inserts below touch gains one.
+                    // Bounding the sweep to that set keeps the refresh O(k) in
+                    // this title's rows instead of O(catalog) — a full-table
+                    // anti-join per hydrated title is quadratic over a scan.
+                    let previous_card_ids =
+                        list_title_more_like_this_card_ids_tx(tx, &title_id).await?;
                     delete_title_more_like_this_items_tx(tx, &title_id).await?;
                     for item in &items {
                         insert_title_more_like_this_item_tx(tx, &title_id, item, &language).await?;
                     }
-                    delete_orphan_title_recommendation_cards_tx(tx).await?;
-                    delete_unreferenced_discovery_titles_tx(tx).await?;
+                    let deleted_card_ids =
+                        delete_orphan_title_recommendation_cards_for_ids_tx(tx, &previous_card_ids)
+                            .await?;
+                    // A discovery title only becomes unreferenced when a card
+                    // that was holding it alive just went away.
+                    delete_unreferenced_discovery_titles_for_ids_tx(tx, &deleted_card_ids).await?;
                     Ok(())
                 })
             },
@@ -4908,6 +4920,112 @@ async fn delete_title_more_like_this_items_tx(tx: &mut SqlTx<'_>, title_id: &str
     Ok(())
 }
 
+/// How many ids one narrowed cleanup statement binds, matching the chunking
+/// the discovery-item pruner already uses to stay under placeholder limits.
+const CLEANUP_ID_CHUNK: usize = 500;
+
+/// The distinct recommendation cards this title's rows point at right now.
+///
+/// Read before a refresh replaces those rows, so the orphan sweep afterwards
+/// can be bounded to the only ids the refresh could have orphaned.
+async fn list_title_more_like_this_card_ids_tx(
+    tx: &mut SqlTx<'_>,
+    title_id: &str,
+) -> AppResult<Vec<String>> {
+    let rows = SqlRuntime::fetch_all(
+        SqlExec::Tx(tx),
+        "SELECT DISTINCT discovery_title_id
+           FROM title_more_like_this_items
+          WHERE source_title_id = {}",
+        &[SqlArg::Text(title_id.to_string())],
+    )
+    .await?;
+    rows.iter()
+        .map(|row| row.text("discovery_title_id"))
+        .collect()
+}
+
+/// Same predicate as [`delete_orphan_title_recommendation_cards_tx`], narrowed
+/// to `discovery_title_ids`. Returns the ids actually deleted so the caller can
+/// narrow the discovery-title sweep to them in turn.
+async fn delete_orphan_title_recommendation_cards_for_ids_tx(
+    tx: &mut SqlTx<'_>,
+    discovery_title_ids: &[String],
+) -> AppResult<Vec<String>> {
+    let mut deleted = Vec::new();
+    for chunk in discovery_title_ids.chunks(CLEANUP_ID_CHUNK) {
+        let args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        let rows = SqlRuntime::fetch_all(
+            SqlExec::Tx(tx),
+            &format!(
+                "SELECT discovery_title_id
+                   FROM title_recommendation_cards
+                  WHERE discovery_title_id IN ({})
+                    AND NOT EXISTS (
+                       SELECT 1
+                       FROM title_more_like_this_items m
+                       WHERE m.discovery_title_id = title_recommendation_cards.discovery_title_id
+                    )",
+                placeholders(args.len())
+            ),
+            &args,
+        )
+        .await?;
+        let orphans = rows
+            .iter()
+            .map(|row| row.text("discovery_title_id"))
+            .collect::<AppResult<Vec<_>>>()?;
+        if orphans.is_empty() {
+            continue;
+        }
+        let delete_args = orphans.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        SqlRuntime::execute(
+            SqlExec::Tx(tx),
+            &format!(
+                "DELETE FROM title_recommendation_cards WHERE discovery_title_id IN ({})",
+                placeholders(delete_args.len())
+            ),
+            &delete_args,
+        )
+        .await?;
+        deleted.extend(orphans);
+    }
+    Ok(deleted)
+}
+
+/// Same predicate as [`delete_unreferenced_discovery_titles_tx`], narrowed to
+/// `discovery_title_ids`.
+async fn delete_unreferenced_discovery_titles_for_ids_tx(
+    tx: &mut SqlTx<'_>,
+    discovery_title_ids: &[String],
+) -> AppResult<()> {
+    for chunk in discovery_title_ids.chunks(CLEANUP_ID_CHUNK) {
+        let args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        SqlRuntime::execute(
+            SqlExec::Tx(tx),
+            &format!(
+                "DELETE FROM discovery_titles
+                 WHERE id IN ({})
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM discovery_items i
+                    WHERE i.discovery_title_id = discovery_titles.id
+                 )
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM title_recommendation_cards c
+                    WHERE c.discovery_title_id = discovery_titles.id
+                      AND c.payload_blob IS NULL
+                 )",
+                placeholders(args.len())
+            ),
+            &args,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn delete_unreferenced_discovery_titles_tx(tx: &mut SqlTx<'_>) -> AppResult<()> {
     SqlRuntime::execute(
         SqlExec::Tx(tx),
@@ -7744,6 +7862,161 @@ mod tests {
         .i64("count")
         .expect("normalized title count should parse");
         assert_eq!(remaining_cards, 12);
+        assert_eq!(normalized_titles, 0);
+
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// Every live recommendation card id, in a stable order.
+    async fn card_keys(store: &DiscoveryStore) -> Vec<String> {
+        let rows = SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            "SELECT discovery_title_id
+               FROM title_recommendation_cards
+              ORDER BY discovery_title_id",
+            &[],
+        )
+        .await
+        .expect("card ids should query");
+        rows.iter()
+            .map(|row| row.text("discovery_title_id").expect("card id should read"))
+            .collect()
+    }
+
+    /// The card ids one source title's recommendation rows point at, sorted.
+    async fn source_card_keys(store: &DiscoveryStore, source_title_id: &str) -> Vec<String> {
+        let rows = SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            "SELECT DISTINCT discovery_title_id
+               FROM title_more_like_this_items
+              WHERE source_title_id = {}
+              ORDER BY discovery_title_id",
+            &[SqlArg::Text(source_title_id.to_string())],
+        )
+        .await
+        .expect("source card ids should query");
+        rows.iter()
+            .map(|row| row.text("discovery_title_id").expect("card id should read"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sqlite_recommendation_refresh_collects_only_the_cards_it_orphaned() {
+        let db = std::env::temp_dir().join(format!(
+            "scryer_discovery_narrowed_recommendation_cleanup_{}.db",
+            Utc::now().timestamp_micros()
+        ));
+        let services = SqliteServices::new(db.to_string_lossy())
+            .await
+            .expect("sqlite services should initialize");
+        let store = DiscoveryStore::new(services.datastore());
+        let now = Utc::now();
+
+        for source_title_id in ["narrow-title-a", "narrow-title-b"] {
+            SqlRuntime::execute(
+                store.datastore.read_exec(),
+                "INSERT INTO titles (
+                    id, library_id, name, name_normalized, facet, root_folder_id, created_at
+                 )
+                 VALUES ({}, {}, {}, {}, {}, {}, {})",
+                &[
+                    SqlArg::Text(source_title_id.to_string()),
+                    SqlArg::Text("movie_default_library".to_string()),
+                    SqlArg::Text(source_title_id.to_string()),
+                    SqlArg::Text(source_title_id.to_string()),
+                    SqlArg::Text("movie".to_string()),
+                    SqlArg::Text("canonical_root_for_movie_default_library".to_string()),
+                    SqlArg::Timestamp(now),
+                ],
+            )
+            .await
+            .expect("source title should insert");
+        }
+
+        // Six recommendations: 0..3 are shared by both titles, 3..6 belong to
+        // title A alone.
+        let recommendations = (0..6)
+            .map(|index| {
+                let mut item = discovery_prune_item("recommendations", now);
+                item.id = format!("narrow-recommendation-{index}");
+                item.target_key = format!("tmdb:movie:{}", 30_000 + index);
+                item.display_title = format!("Narrow Recommendation {index}");
+                item.sort_title = Some(item.display_title.clone());
+                item.sort_index = index;
+                item
+            })
+            .collect::<Vec<_>>();
+
+        store
+            .replace_title_more_like_this_items("narrow-title-a", "eng", &recommendations)
+            .await
+            .expect("title A recommendations should replace");
+        store
+            .replace_title_more_like_this_items("narrow-title-b", "eng", &recommendations[..3])
+            .await
+            .expect("title B recommendations should replace");
+
+        assert_eq!(card_keys(&store).await.len(), 6, "all six cards are live");
+        let shared = source_card_keys(&store, "narrow-title-b").await;
+        assert_eq!(shared.len(), 3, "title B holds the three shared cards");
+
+        // Refreshing title A down to the shared three must drop exactly the
+        // three cards only it referenced, and keep every shared one.
+        store
+            .replace_title_more_like_this_items("narrow-title-a", "eng", &recommendations[..3])
+            .await
+            .expect("title A recommendations should narrow");
+
+        assert_eq!(
+            card_keys(&store).await,
+            shared,
+            "shared cards survive and unshared cards are collected"
+        );
+
+        // The full-catalog sweep must find nothing left to do: the narrowed
+        // cleanup is equivalent to it for this refresh.
+        SqlRuntime::run_in_transaction(&store.datastore, "sweep", move |tx| {
+            Box::pin(async move {
+                delete_orphan_title_recommendation_cards_tx(tx).await?;
+                delete_unreferenced_discovery_titles_tx(tx).await?;
+                Ok(())
+            })
+        })
+        .await
+        .expect("full sweep should run");
+        assert_eq!(
+            card_keys(&store).await.len(),
+            3,
+            "a full sweep after the narrowed cleanup is a no-op"
+        );
+
+        // Clearing title B leaves the shared cards alive for title A.
+        store
+            .replace_title_more_like_this_items("narrow-title-b", "eng", &[])
+            .await
+            .expect("title B recommendations should clear");
+        assert_eq!(
+            card_keys(&store).await.len(),
+            3,
+            "a card another title still references is never collected"
+        );
+
+        // Clearing title A drops the rest, discovery titles included.
+        store
+            .replace_title_more_like_this_items("narrow-title-a", "eng", &[])
+            .await
+            .expect("title A recommendations should clear");
+        assert!(card_keys(&store).await.is_empty());
+        let normalized_titles = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT COUNT(*) AS count FROM discovery_titles",
+            &[],
+        )
+        .await
+        .expect("normalized title count should query")
+        .expect("normalized title count should exist")
+        .i64("count")
+        .expect("normalized title count should parse");
         assert_eq!(normalized_titles, 0);
 
         let _ = std::fs::remove_file(db);
