@@ -1499,6 +1499,75 @@ fn placeholders(count: usize) -> String {
     (0..count).map(|_| "{}").collect::<Vec<_>>().join(", ")
 }
 
+/// Leading common table expression that exposes the caller's excluded
+/// discovery identity keys as rows.
+///
+/// The exclusion list is derived in the application layer from every owned
+/// title's external ids (with source/value alias and facet expansion), so a
+/// 12k-title library produces tens of thousands of keys. Binding one
+/// parameter per key blew past SQLite's 32,766 bound-variable ceiling and made
+/// the catalog discovery query fail outright. Binding the whole list as a
+/// single JSON array parameter keeps the statement at one bind no matter how
+/// large the library grows, and `MATERIALIZED` makes the array expand once per
+/// statement instead of once per candidate row.
+///
+/// The CTE always contains the same non-null strings the `NOT IN (...)` list
+/// used to hold, so `NOT EXISTS` over it is an exact substitute: the compared
+/// identity expression is built from `discovery_titles.target_key` and
+/// `discovery_items.id`, both `NOT NULL`, so the `NOT IN` form could never
+/// produce the `UNKNOWN` result that would distinguish the two.
+fn excluded_identity_keys_cte(datastore: &StoreDatastore) -> &'static str {
+    match datastore {
+        StoreDatastore::Sqlite { .. } => {
+            "excluded_identity_keys(identity_key) AS MATERIALIZED (
+                SELECT value FROM json_each({}) AS excluded_identity
+             )"
+        }
+        StoreDatastore::Postgres { .. } => {
+            "excluded_identity_keys(identity_key) AS MATERIALIZED (
+                SELECT excluded_identity.value
+                FROM jsonb_array_elements_text(CAST({} AS JSONB)) AS excluded_identity(value)
+             )"
+        }
+    }
+}
+
+/// Binds the exclusion list as one JSON array argument.
+fn excluded_identity_keys_arg(excluded_identity_keys: &[String]) -> SqlArg {
+    SqlArg::Json(JsonValue::Array(
+        excluded_identity_keys
+            .iter()
+            .map(|key| JsonValue::String(key.clone()))
+            .collect(),
+    ))
+}
+
+/// Anti-join predicate replacing `<value_expression> NOT IN (<keys>)`.
+fn excluded_identity_keys_clause(value_expression: &str) -> String {
+    format!(
+        "NOT EXISTS (
+            SELECT 1
+            FROM excluded_identity_keys excluded
+            WHERE excluded.identity_key = {value_expression}
+         )"
+    )
+}
+
+/// Renders the leading `WITH` fragment (including its trailing comma) for the
+/// exclusion CTE, pushing the JSON argument at the head of `args` so it lines
+/// up with the first `{}` in the rendered statement.
+fn prepend_excluded_identity_keys_cte(
+    datastore: &StoreDatastore,
+    args: &mut Vec<SqlArg>,
+    excluded_identity_keys: &[String],
+) -> String {
+    if excluded_identity_keys.is_empty() {
+        return String::new();
+    }
+    args.insert(0, excluded_identity_keys_arg(excluded_identity_keys));
+    format!("{},\n         ", excluded_identity_keys_cte(datastore))
+}
+
 fn source_identifier_title_clause(datastore: &StoreDatastore, value_expression: &str) -> String {
     match datastore {
         StoreDatastore::Sqlite { .. } => {
@@ -2315,10 +2384,8 @@ async fn fetch_discovery_home_top_rated_candidates(
             ));
         }
         if !excluded_identity_keys.is_empty() {
-            let placeholders = placeholders(excluded_identity_keys.len());
-            args.extend(excluded_identity_keys.iter().cloned().map(SqlArg::Text));
-            clauses.push(format!(
-                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END NOT IN ({placeholders})"
+            clauses.push(excluded_identity_keys_clause(
+                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END",
             ));
         }
         append_discovery_home_filters(&mut clauses, &mut args, filters);
@@ -2383,10 +2450,8 @@ async fn fetch_discovery_home_top_rated_candidates(
             ));
         }
         if !excluded_identity_keys.is_empty() {
-            let placeholders = placeholders(excluded_identity_keys.len());
-            args.extend(excluded_identity_keys.iter().cloned().map(SqlArg::Text));
-            clauses.push(format!(
-                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END NOT IN ({placeholders})"
+            clauses.push(excluded_identity_keys_clause(
+                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END",
             ));
         }
         append_discovery_home_filters(&mut clauses, &mut args, filters);
@@ -2421,8 +2486,10 @@ async fn fetch_discovery_home_top_rated_candidates(
     }
 
     args.push(SqlArg::I64(limit));
+    let leading_cte =
+        prepend_excluded_identity_keys_cte(datastore, &mut args, excluded_identity_keys);
     let sql = format!(
-        "WITH candidates AS (
+        "WITH {leading_cte}candidates AS (
             {}
          ),
          ranked AS (
@@ -2643,14 +2710,17 @@ async fn fetch_catalog_public_items(
     let excluded_identity_clause = if excluded_identity_keys.is_empty() {
         String::new()
     } else {
-        let placeholders = placeholders(excluded_identity_keys.len());
-        args.extend(excluded_identity_keys.iter().cloned().map(SqlArg::Text));
         format!(
-            " AND CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END NOT IN ({placeholders})"
+            " AND {}",
+            excluded_identity_keys_clause(
+                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END",
+            )
         )
     };
+    let leading_cte =
+        prepend_excluded_identity_keys_cte(datastore, &mut args, excluded_identity_keys);
     let sql = format!(
-        "WITH candidates AS (
+        "WITH {leading_cte}candidates AS (
             SELECT {}, s.sort_index AS section_sort_index, si.sort_index AS section_item_sort_index,
                    ROW_NUMBER() OVER (
                        PARTITION BY CASE WHEN TRIM(t.target_key) = '' THEN i.id ELSE t.target_key END
@@ -2732,14 +2802,17 @@ async fn fetch_catalog_public_sections(
     let excluded_identity_clause = if excluded_identity_keys.is_empty() {
         String::new()
     } else {
-        let placeholders = placeholders(excluded_identity_keys.len());
-        args.extend(excluded_identity_keys.iter().cloned().map(SqlArg::Text));
         format!(
-            " AND CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END NOT IN ({placeholders})"
+            " AND {}",
+            excluded_identity_keys_clause(
+                "CASE WHEN TRIM(t.target_key) = '' THEN LOWER(i.id) ELSE LOWER(TRIM(t.target_key)) END",
+            )
         )
     };
+    let leading_cte =
+        prepend_excluded_identity_keys_cte(datastore, &mut args, excluded_identity_keys);
     let sql = format!(
-        "WITH candidates AS (
+        "WITH {leading_cte}candidates AS (
             SELECT {}, s.section_id AS result_section_id,
                    s.section_type AS result_section_type,
                    s.title AS result_section_title,
@@ -6464,6 +6537,161 @@ mod tests {
             .map(|item| item.target_key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(catalog_target_keys, vec!["tmdb:movie:1", "tvdb:movie:5"]);
+
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// A 12k-title library expands to tens of thousands of excluded identity
+    /// keys. Binding one parameter per key used to exceed SQLite's 32,766
+    /// bound-variable ceiling and fail the whole catalog discovery query, so
+    /// this asserts a very large list both succeeds and excludes exactly what
+    /// the equivalent small list excludes.
+    #[tokio::test]
+    async fn sqlite_catalog_public_items_accept_oversized_exclusion_lists() {
+        let db = std::env::temp_dir().join(format!(
+            "scryer_discovery_exclusion_overflow_{}.db",
+            Utc::now().timestamp_micros()
+        ));
+        let services = SqliteServices::new(db.to_string_lossy())
+            .await
+            .expect("sqlite services should initialize");
+        let store = DiscoveryStore::new(services.datastore());
+        let now = Utc::now();
+        let run_id = "run-exclusion-overflow";
+
+        store
+            .upsert_discovery_sync_run(&discovery_prune_run(run_id, "public_feed", "complete", now))
+            .await
+            .expect("run should upsert");
+        store
+            .replace_discovery_sections(
+                run_id,
+                &[DiscoverySectionRecord {
+                    id: "section-row-exclusion".to_string(),
+                    run_id: run_id.to_string(),
+                    section_id: "popular".to_string(),
+                    section_type: "POPULAR_RIGHT_NOW".to_string(),
+                    surface: "public".to_string(),
+                    title: "Popular Right Now".to_string(),
+                    sort_index: 0,
+                    created_at: now,
+                    updated_at: now,
+                }],
+            )
+            .await
+            .expect("section should replace");
+
+        let make_item = |id: &str, sort_index: i32, target_key: &str, display_title: &str| {
+            let mut item = discovery_prune_item(run_id, now);
+            item.id = id.to_string();
+            item.source_run_kind = "public_feed".to_string();
+            item.section_id = Some("popular".to_string());
+            item.sort_index = sort_index;
+            item.target_key = target_key.to_string();
+            item.target_kind = "movie".to_string();
+            item.resolved = true;
+            item.display_title = display_title.to_string();
+            item.sort_title = Some(display_title.to_string());
+            item.poster_url = Some(format!("https://images.example.test/{id}.jpg"));
+            item.content_type = Some("movie".to_string());
+            item
+        };
+        store
+            .replace_discovery_items(
+                run_id,
+                &[
+                    make_item("item-first", 0, "tmdb:movie:1", "First Movie"),
+                    make_item("item-second", 1, "tmdb:movie:2", "Second Movie"),
+                    make_item("item-third", 2, "tmdb:movie:3", "Third Movie"),
+                ],
+            )
+            .await
+            .expect("items should replace");
+
+        let target_keys = |record: &CatalogDiscoveryCandidatesRecord| {
+            record
+                .items
+                .iter()
+                .map(|item| item.target_key.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let unfiltered = store
+            .list_catalog_public_discovery_items(run_id, &[], &[], "movie", true, 10)
+            .await
+            .expect("unfiltered catalog items should list");
+        assert_eq!(
+            target_keys(&unfiltered),
+            vec![
+                "tmdb:movie:1".to_string(),
+                "tmdb:movie:2".to_string(),
+                "tmdb:movie:3".to_string(),
+            ]
+        );
+
+        let small_exclusion = vec!["tmdb:movie:2".to_string()];
+        // Comfortably past SQLite's 32,766 bound-variable limit.
+        let mut large_exclusion = small_exclusion.clone();
+        large_exclusion.extend((0..40_000).map(|index| format!("tmdb:movie:filler-{index}")));
+
+        let small = store
+            .list_catalog_public_discovery_items(run_id, &[], &small_exclusion, "movie", true, 10)
+            .await
+            .expect("small exclusion list should list");
+        assert_eq!(
+            target_keys(&small),
+            vec!["tmdb:movie:1".to_string(), "tmdb:movie:3".to_string()]
+        );
+
+        let large = store
+            .list_catalog_public_discovery_items(run_id, &[], &large_exclusion, "movie", true, 10)
+            .await
+            .expect("oversized exclusion list should list");
+        assert_eq!(target_keys(&large), target_keys(&small));
+        assert_eq!(large.total_count, small.total_count);
+
+        let large_sections = store
+            .list_catalog_public_discovery_sections(
+                run_id,
+                &[],
+                &large_exclusion,
+                "movie",
+                true,
+                10,
+            )
+            .await
+            .expect("oversized exclusion list should list sections");
+        assert_eq!(large_sections.len(), 1);
+        assert_eq!(
+            large_sections[0]
+                .items
+                .iter()
+                .map(|item| item.target_key.clone())
+                .collect::<Vec<_>>(),
+            target_keys(&small)
+        );
+
+        let large_home = store
+            .list_discovery_home_top_rated_items(
+                Some(run_id),
+                None,
+                &[],
+                &["movie".to_string()],
+                &[],
+                &large_exclusion,
+                true,
+                &DiscoveryHomeFilters::default(),
+                10,
+            )
+            .await
+            .expect("oversized exclusion list should list home top rated items");
+        assert_eq!(
+            large_home
+                .iter()
+                .map(|candidate| candidate.item.target_key.clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["tmdb:movie:1".to_string(), "tmdb:movie:3".to_string()])
+        );
 
         let _ = std::fs::remove_file(db);
     }
