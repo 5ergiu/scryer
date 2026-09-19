@@ -21,6 +21,7 @@ These notes cover what's changed since **0.21.4**.
 
 ## Included fixes
 
+- **Import:** a finished movie download that included a sample video could be imported again on every check, adding another numbered copy of the movie to your library each time. One download produced 189 copies. A movie download now counts as imported once its main video is in the library, and a repeat import of the same file is recognised and skipped. Extra copies already made are left in place for you to remove.
 - **Discovery:** the discovery page, public catalog sections and the home page's top-rated list no longer fail with a "too many SQL variables" error on libraries with more than about 16,000 titles.
 - **Metadata:** a movie and a series that share the same number at a metadata provider are no longer treated as the same title. Before, this made loading a title's metadata fail, and all of the metadata fetched for it was thrown away. When a title does claim an id that another title already owns, Scryer now skips only that id, logs which title owns it, and keeps the rest of the metadata.
 - **Metadata:** for anime that has a movie or special listed as season 0, Scryer now links the series to its regular seasons instead of the special, so it no longer claims an id that belongs to another title.
