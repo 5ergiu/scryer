@@ -1690,11 +1690,12 @@ mod import_execution_coordinator_tests {
         assert_parked!(waiting, "a second extraction must wait");
 
         drop(first);
-        within_deadline(
+        let second = within_deadline(
             "the second extraction to acquire after the first completes",
             waiting,
         )
         .await;
+        drop(second);
     }
 }
 
