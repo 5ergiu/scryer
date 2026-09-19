@@ -4650,6 +4650,12 @@ pub struct DomainEventFilter {
     pub event_types: Option<Vec<DomainEventType>>,
     pub title_id: Option<String>,
     pub facet: Option<MediaFacet>,
+    /// Scope the read to one event stream, matching `DomainEventStream::id`
+    /// (a library-scan session id, a title id, a download id, ...). A stream
+    /// reader that already knows which stream it wants sets this so the
+    /// database narrows to that stream instead of handing every stored event
+    /// of those types to the caller to filter in memory.
+    pub stream_id: Option<String>,
     pub after_sequence: Option<i64>,
     pub before_sequence: Option<i64>,
     pub limit: usize,

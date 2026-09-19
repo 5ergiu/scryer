@@ -152,6 +152,7 @@ pub(super) async fn title_updated_events(app: &AppUseCase, title_id: &str) -> Ve
             event_types: Some(vec![DomainEventType::TitleUpdated]),
             title_id: Some(title_id.to_string()),
             facet: None,
+            stream_id: None,
             after_sequence: Some(0),
             before_sequence: None,
             limit: 100,

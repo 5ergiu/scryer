@@ -89,6 +89,15 @@ impl LibraryScanCoordinator {
     }
 
     pub(crate) async fn publish_progress(&self) {
+        if let Some(event) = self.prepare_progress_event().await {
+            let _ = self.app.append_domain_event(event).await;
+        }
+    }
+
+    /// Builds the coalesced progress event `publish_progress` would append,
+    /// without appending it, so a caller that just recorded deltas can put
+    /// every event of one flush into a single transaction.
+    async fn prepare_progress_event(&self) -> Option<NewDomainEvent> {
         let Some(session) = self
             .app
             .runtime
@@ -101,7 +110,7 @@ impl LibraryScanCoordinator {
                 session_id = %self.session_id,
                 "library scan coordinator publish_progress skipped for inactive session"
             );
-            return;
+            return None;
         };
 
         if session.is_ready_to_complete() {
@@ -109,10 +118,43 @@ impl LibraryScanCoordinator {
                 session_id = %self.session_id,
                 "library scan coordinator publish_progress deferred to completion path"
             );
-            return;
+            return None;
         }
 
-        publish_coalesced_library_scan_state(&self.app, &session).await;
+        Some(coalesced_library_scan_state_event(&session))
+    }
+
+    /// Records `delta` and publishes the coalesced progress state, appending
+    /// both events in one transaction. Same events, same contents, same order
+    /// as `record_delta` followed by `publish_progress`; only the commit
+    /// boundary between them is removed.
+    pub(crate) async fn record_delta_and_publish_progress(
+        &self,
+        delta: LibraryScanDeltaRecordedEventData,
+    ) {
+        self.record_deltas_and_publish_progress(vec![delta]).await;
+    }
+
+    /// Batch form of [`Self::record_delta_and_publish_progress`]. Deltas are
+    /// applied to the tracker in the given order, exactly as the equivalent
+    /// sequence of `record_delta` calls would.
+    pub(crate) async fn record_deltas_and_publish_progress(
+        &self,
+        deltas: Vec<LibraryScanDeltaRecordedEventData>,
+    ) {
+        let mut events = Vec::with_capacity(deltas.len() + 1);
+        for delta in deltas {
+            if let Some(event) = self.prepare_delta_event(delta).await {
+                events.push(event);
+            }
+        }
+        if let Some(event) = self.prepare_progress_event().await {
+            events.push(event);
+        }
+        if events.is_empty() {
+            return;
+        }
+        let _ = self.app.append_domain_events(events).await;
     }
 
     pub(crate) async fn register_discovery_batch(
@@ -202,6 +244,79 @@ impl LibraryScanCoordinator {
         let mut delta = empty_scan_delta(self.session_id.clone());
         delta.file_failed_delta = additional as i64;
         self.record_delta(delta).await;
+    }
+
+    /// Records the per-file completion/failure deltas of one flush and the
+    /// coalesced progress state in a single transaction. Equivalent to
+    /// `mark_file_completed` then `mark_file_failed` then `publish_progress`.
+    pub(crate) async fn mark_file_progress_and_publish(&self, completed: usize, failed: usize) {
+        let mut deltas = Vec::with_capacity(2);
+        if completed > 0 {
+            let mut delta = empty_scan_delta(self.session_id.clone());
+            delta.file_completed_delta = completed as i64;
+            deltas.push(delta);
+        }
+        if failed > 0 {
+            let mut delta = empty_scan_delta(self.session_id.clone());
+            delta.file_failed_delta = failed as i64;
+            deltas.push(delta);
+        }
+        self.record_deltas_and_publish_progress(deltas).await;
+    }
+
+    /// `mark_file_failed` followed by `publish_progress`, in one transaction.
+    pub(crate) async fn mark_file_failed_and_publish(&self, additional: usize) {
+        if additional == 0 {
+            self.publish_progress().await;
+            return;
+        }
+
+        let mut delta = empty_scan_delta(self.session_id.clone());
+        delta.file_failed_delta = additional as i64;
+        self.record_delta_and_publish_progress(delta).await;
+    }
+
+    /// `add_file_total` followed by `publish_progress`, in one transaction.
+    pub(crate) async fn add_file_total_and_publish(&self, additional: usize) {
+        if additional == 0 {
+            self.publish_progress().await;
+            return;
+        }
+
+        let mut delta = empty_scan_delta(self.session_id.clone());
+        delta.file_total_delta = additional as i64;
+        self.record_delta_and_publish_progress(delta).await;
+    }
+
+    /// `mark_file_total_known` followed by `publish_progress`, in one transaction.
+    pub(crate) async fn mark_file_total_known_and_publish(&self) {
+        let mut delta = empty_scan_delta(self.session_id.clone());
+        delta.file_total_known = Some(true);
+        self.record_delta_and_publish_progress(delta).await;
+    }
+
+    /// `mark_metadata_completed` followed by `publish_progress`, in one transaction.
+    pub(crate) async fn mark_metadata_completed_and_publish(&self, additional: usize) {
+        if additional == 0 {
+            self.publish_progress().await;
+            return;
+        }
+
+        let mut delta = empty_scan_delta(self.session_id.clone());
+        delta.metadata_completed_delta = additional as i64;
+        self.record_delta_and_publish_progress(delta).await;
+    }
+
+    /// `mark_title_match_completed` followed by `publish_progress`, in one transaction.
+    pub(crate) async fn mark_title_match_completed_and_publish(&self, additional: usize) {
+        if additional == 0 {
+            self.publish_progress().await;
+            return;
+        }
+
+        let mut delta = empty_scan_delta(self.session_id.clone());
+        delta.title_match_completed_delta = additional as i64;
+        self.record_delta_and_publish_progress(delta).await;
     }
 
     pub(crate) async fn mark_discovery_complete(&self, track_file_total: bool) {
@@ -318,8 +433,19 @@ impl LibraryScanCoordinator {
     }
 
     async fn record_delta(&self, delta: LibraryScanDeltaRecordedEventData) {
+        if let Some(event) = self.prepare_delta_event(delta).await {
+            let _ = self.app.append_domain_event(event).await;
+        }
+    }
+
+    /// Applies `delta` to the tracker and builds the delta event `record_delta`
+    /// would append, without appending it.
+    async fn prepare_delta_event(
+        &self,
+        delta: LibraryScanDeltaRecordedEventData,
+    ) -> Option<NewDomainEvent> {
         if !delta_has_effect(&delta) {
-            return;
+            return None;
         }
 
         let Some(snapshot) = self
@@ -331,7 +457,7 @@ impl LibraryScanCoordinator {
             .await
         else {
             warn!(session_id = %self.session_id, "ignored library scan delta for inactive session");
-            return;
+            return None;
         };
 
         debug!(
@@ -355,13 +481,10 @@ impl LibraryScanCoordinator {
             "library scan coordinator recording delta"
         );
 
-        let _ = self
-            .app
-            .append_domain_event(self.scan_event(
-                snapshot.facet,
-                DomainEventPayload::LibraryScanDeltaRecorded(delta),
-            ))
-            .await;
+        Some(self.scan_event(
+            snapshot.facet,
+            DomainEventPayload::LibraryScanDeltaRecorded(delta),
+        ))
     }
 
     async fn resolve_facet(&self) -> Option<MediaFacet> {
@@ -384,49 +507,101 @@ impl LibraryScanCoordinator {
     }
 }
 
+/// A resumable fold of the stored library-scan events for one session.
+///
+/// [`load_projected_library_scan_session`] is a one-shot fold from sequence 0.
+/// A caller that polls the same session in a loop keeps one of these instead
+/// and folds only the events appended since its previous pass: the projection
+/// is a left fold over a prefix-extending event sequence, so folding
+/// `[0..a]` then `[a..b]` lands on exactly the state a fresh fold over
+/// `[0..b]` produces, and the returned snapshot is the same value.
+///
+/// Replaying from 0 on every pass is what made a running scan quadratic: each
+/// coalesced progress publish woke the waiter, and the waiter re-read every
+/// scan event the run had emitted so far.
+pub(crate) struct LibraryScanProjectionReplay {
+    session_id: String,
+    after_sequence: i64,
+    sessions: std::collections::HashMap<String, LibraryScanSession>,
+    last_snapshot: Option<LibraryScanSession>,
+}
+
+impl LibraryScanProjectionReplay {
+    pub(crate) fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            after_sequence: 0,
+            sessions: std::collections::HashMap::new(),
+            last_snapshot: None,
+        }
+    }
+
+    /// Fold every event appended since the last call and return the session
+    /// snapshot as of now, or `None` while nothing has projected one yet.
+    pub(crate) async fn advance(
+        &mut self,
+        app: &AppUseCase,
+    ) -> AppResult<Option<LibraryScanSession>> {
+        loop {
+            let batch = app
+                .services
+                .events
+                .domain_events
+                .list(&DomainEventFilter {
+                    event_types: Some(LIBRARY_SCAN_TRACKER_EVENT_TYPES.to_vec()),
+                    // Every library-scan event is written to the stream named
+                    // by its own session id (`new_library_scan_domain_event`),
+                    // so this is the same scoping the `library_scan_event_session_id`
+                    // check below applies - just done by the database instead
+                    // of after reading every other session's events off disk.
+                    stream_id: Some(self.session_id.clone()),
+                    after_sequence: Some(self.after_sequence),
+                    limit: 500,
+                    ..DomainEventFilter::default()
+                })
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+
+            self.after_sequence = batch
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(self.after_sequence);
+            let count = batch.len();
+            for event in batch {
+                if library_scan_event_session_id(&event.payload) == Some(self.session_id.as_str()) {
+                    self.last_snapshot =
+                        reduce_library_scan_projection_event(&mut self.sessions, &event);
+                }
+            }
+            if count < 500 {
+                break;
+            }
+        }
+
+        Ok(self.last_snapshot.clone())
+    }
+}
+
 pub(crate) async fn load_projected_library_scan_session(
     app: &AppUseCase,
     session_id: &str,
 ) -> AppResult<Option<LibraryScanSession>> {
-    let mut after_sequence = 0i64;
-    let mut sessions = std::collections::HashMap::new();
-    let mut last_snapshot = None;
-
-    loop {
-        let batch = app
-            .services
-            .events
-            .domain_events
-            .list(&DomainEventFilter {
-                event_types: Some(LIBRARY_SCAN_TRACKER_EVENT_TYPES.to_vec()),
-                after_sequence: Some(after_sequence),
-                limit: 500,
-                ..DomainEventFilter::default()
-            })
-            .await?;
-        if batch.is_empty() {
-            break;
-        }
-
-        after_sequence = batch
-            .last()
-            .map(|event| event.sequence)
-            .unwrap_or(after_sequence);
-        let count = batch.len();
-        for event in batch {
-            if library_scan_event_session_id(&event.payload) == Some(session_id) {
-                last_snapshot = reduce_library_scan_projection_event(&mut sessions, &event);
-            }
-        }
-        if count < 500 {
-            break;
-        }
-    }
-
-    Ok(last_snapshot)
+    LibraryScanProjectionReplay::new(session_id)
+        .advance(app)
+        .await
 }
 
 async fn publish_coalesced_library_scan_state(app: &AppUseCase, session: &LibraryScanSession) {
+    let _ = app
+        .append_domain_event(coalesced_library_scan_state_event(session))
+        .await;
+}
+
+/// Builds the coalesced progress/completion event for `session`, including the
+/// diagnostic logging the publishing path emits, without appending it.
+fn coalesced_library_scan_state_event(session: &LibraryScanSession) -> NewDomainEvent {
     let ready_to_complete = session.is_ready_to_complete();
     if ready_to_complete {
         debug!(
@@ -478,14 +653,12 @@ async fn publish_coalesced_library_scan_state(app: &AppUseCase, session: &Librar
         DomainEventPayload::LibraryScanProgressed(library_scan_progressed_event_data(session))
     };
 
-    let _ = app
-        .append_domain_event(new_library_scan_domain_event(
-            None,
-            session.session_id.clone(),
-            session.facet.clone(),
-            payload,
-        ))
-        .await;
+    new_library_scan_domain_event(
+        None,
+        session.session_id.clone(),
+        session.facet.clone(),
+        payload,
+    )
 }
 
 async fn load_library_scan_session_facet(app: &AppUseCase, session_id: &str) -> Option<MediaFacet> {
@@ -498,6 +671,7 @@ async fn load_library_scan_session_facet(app: &AppUseCase, session_id: &str) -> 
             .domain_events
             .list(&DomainEventFilter {
                 event_types: Some(LIBRARY_SCAN_TRACKER_EVENT_TYPES.to_vec()),
+                stream_id: Some(session_id.to_string()),
                 after_sequence: Some(after_sequence),
                 limit: 500,
                 ..DomainEventFilter::default()

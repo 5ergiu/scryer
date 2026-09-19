@@ -5546,6 +5546,8 @@ version = "0.21.4"
 dependencies = [
  "blake3",
  "chrono",
+ "metrics",
+ "metrics-util",
  "scryer-application",
  "serde",
  "serde_json",
@@ -5818,6 +5820,7 @@ dependencies = [
  "metrics-util",
  "reqwest",
  "rustls",
+ "rustls-platform-verifier",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

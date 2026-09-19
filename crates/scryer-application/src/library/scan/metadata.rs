@@ -952,9 +952,8 @@ where
                 count_candidates_with_metadata_lookup(&ready_candidates, candidate_keys)?;
             if ready_lookup_count > 0 {
                 coordinator
-                    .mark_metadata_completed(ready_lookup_count)
+                    .mark_metadata_completed_and_publish(ready_lookup_count)
                     .await;
-                coordinator.publish_progress().await;
             }
             ready_batches.push(ready_candidates);
             continue;
