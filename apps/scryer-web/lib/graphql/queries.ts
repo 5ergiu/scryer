@@ -1356,6 +1356,7 @@ export const TITLE_LIST_FIELDS = `
     createdAt`;
 
 export type TitleCatalogTitleProjection = {
+  includeSettings?: boolean;
   library?: boolean;
   quality?: boolean;
   profile?: boolean;
@@ -1388,17 +1389,11 @@ const TITLE_CATALOG_BASE_FIELDS = `
     backgroundSourceUrl
     contentStatus
     metadataLanguage
-    metadataLanguageOverride
-    effectiveMetadataLanguage
-    inheritsMetadataLanguage
     metadataFetchedAt
     qualityProfileId
     rootFolderId
     monitorType
     useSeasonFolders
-    useSeasonFoldersOverride
-    effectiveUseSeasonFolders
-    inheritsUseSeasonFolders
     monitorSpecials
     interSeasonMovies
     fillerPolicy
@@ -1407,6 +1402,16 @@ const TITLE_CATALOG_BASE_FIELDS = `
 
 function titleCatalogListFields(projection: TitleCatalogTitleProjection = {}) {
   const fields = [TITLE_CATALOG_BASE_FIELDS];
+  if (projection.includeSettings !== false) {
+    fields.push(`
+    metadataLanguageOverride
+    effectiveMetadataLanguage
+    inheritsMetadataLanguage
+    useSeasonFoldersOverride
+    effectiveUseSeasonFolders
+    inheritsUseSeasonFolders
+    `);
+  }
   if (projection.library) {
     fields.push(`
     libraryName

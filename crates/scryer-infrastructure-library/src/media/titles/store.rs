@@ -879,7 +879,7 @@ impl TitleRepository for TitleStore {
         sort: TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
+        projection: scryer_application::TitleListProjection,
         aggregates: scryer_application::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
@@ -948,9 +948,11 @@ impl TitleRepository for TitleStore {
         let mut items = decode_runtime_title_rows(
             &rows,
             PersistedTitleReadMode::Presentation,
-            include_external_ids,
+            projection.include_external_ids,
         )?;
-        attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut items).await?;
+        if projection.include_canonical_tags {
+            attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut items).await?;
+        }
 
         Ok(TitleCatalogResult {
             items,
@@ -5169,7 +5171,7 @@ mod tests {
                     TitleCatalogSort::default(),
                     0,
                     0,
-                    false,
+                    TitleListProjection::without_canonical_tags().without_external_ids(),
                     selection,
                 )
                 .await
