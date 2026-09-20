@@ -890,7 +890,6 @@ fn relaxed_release_matches_title_evidence(
 ) -> Option<TitleEvidenceMatch> {
     let (forms, neutral) =
         crate::title_matching::relaxed::neutral_spelling_forms(&parsed.raw_title);
-    let anchors = forms.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
     let raw_ids = evidence.spelling_identity.parsed_ids(&neutral);
     let ids = match (asserted_ids, raw_ids) {
         (Some(false), _) | (_, Some(false)) => Some(false),
@@ -898,7 +897,7 @@ fn relaxed_release_matches_title_evidence(
         _ => None,
     };
     let matched = crate::title_matching::relaxed::find_spelling_match(
-        &anchors,
+        &forms,
         &evidence.spelling_identity,
         evidence.ambiguity.spelling_index.as_deref(),
         neutral.year,

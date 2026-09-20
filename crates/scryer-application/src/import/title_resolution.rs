@@ -316,7 +316,7 @@ impl MonitoredTitleMatcher {
 
         if any_matches.is_empty() {
             let (anchors, _) =
-                crate::title_matching::relaxed::neutral_spelling_anchors(&parsed.raw_title);
+                crate::title_matching::relaxed::neutral_spelling_forms(&parsed.raw_title);
             let ids = self.spelling_index.candidates(&anchors, None);
             for title in self
                 .titles

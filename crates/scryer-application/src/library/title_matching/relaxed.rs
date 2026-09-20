@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(crate) struct SpellingName {
     pub key: String,
     pub text: String,
+    /// The name as the catalog wrote it. Only the numbers guard reads this:
+    /// `title_numbers` decides `Rocky II` from letter case, which `key` and
+    /// `text` have already lowercased away.
+    pub raw: String,
     pub language: Option<String>,
     pub year: Option<i32>,
 }
@@ -64,6 +68,7 @@ impl SpellingIdentity {
                     } else {
                         key.clone()
                     },
+                    raw: name.to_string(),
                     key,
                     language: language.map(str::to_string),
                     year: explicit_year.or(title.year),
@@ -247,6 +252,10 @@ pub(crate) struct SpellingIndex {
 /// The numbers guard, owned by the domain so the persisted projection can key
 /// a column on exactly what this compares. Volume II must not become Volume I
 /// through a typo allowance.
+///
+/// Takes the spelling as written on both sides — the catalog name's `raw` and
+/// the release's observed segment — because the Roman-numeral rule reads
+/// letter case.
 pub(crate) fn numbers(value: &str) -> Vec<String> {
     scryer_domain::title_spelling::title_numbers(value)
 }
@@ -262,7 +271,7 @@ impl SpellingIndex {
                     .entry((
                         identity.facet.clone(),
                         title_script(&name.text),
-                        numbers(&name.text),
+                        numbers(&name.raw),
                     ))
                     .or_default()
                     .insert(IndexedName {
@@ -276,20 +285,25 @@ impl SpellingIndex {
 
     /// Discovery only. Full-title matching, corroboration and collisions are
     /// still checked before any returned identity can be selected.
-    pub fn candidates(&self, anchors: &[String], facet: Option<&str>) -> HashSet<String> {
+    ///
+    /// Anchors are `(lookup key, observed spelling)`: the key drives every
+    /// equality and distance test, the observed spelling only the numbers
+    /// guard, which reads letter case.
+    pub fn candidates(&self, anchors: &[(String, String)], facet: Option<&str>) -> HashSet<String> {
         let mut ids = HashSet::new();
-        for anchor in anchors {
+        for (anchor, observed_raw) in anchors {
             for kind in ["movie", "series", "anime"] {
                 if facet.is_some_and(|facet| facet != kind) {
                     continue;
                 }
-                if let Some(bucket) =
-                    self.buckets
-                        .get(&(kind.to_string(), title_script(anchor), numbers(anchor)))
-                {
+                if let Some(bucket) = self.buckets.get(&(
+                    kind.to_string(),
+                    title_script(anchor),
+                    numbers(observed_raw),
+                )) {
                     for index in bucket.possible_matches(anchor, None) {
                         let entry = &bucket.names[index];
-                        if spelling_distance(anchor, &entry.name, None).is_some() {
+                        if spelling_distance(anchor, observed_raw, &entry.name, None).is_some() {
                             ids.insert(entry.identity.clone());
                         }
                     }
@@ -303,13 +317,14 @@ impl SpellingIndex {
         &self,
         identity: &SpellingIdentity,
         observed: &str,
+        observed_raw: &str,
         year: Option<i32>,
         distance: usize,
     ) -> bool {
         let Some(bucket) = self.buckets.get(&(
             identity.facet.clone(),
             title_script(observed),
-            numbers(observed),
+            numbers(observed_raw),
         )) else {
             return false;
         };
@@ -323,7 +338,7 @@ impl SpellingIndex {
                     && !year
                         .zip(entry.name.year)
                         .is_some_and(|(left, right)| left != right)
-                    && spelling_distance(observed, &entry.name, Some(bound)).is_some()
+                    && spelling_distance(observed, observed_raw, &entry.name, Some(bound)).is_some()
             })
     }
 }
@@ -339,10 +354,11 @@ pub(crate) struct SpellingMatch {
 
 fn spelling_distance(
     observed: &str,
+    observed_raw: &str,
     name: &SpellingName,
     rival_bound: Option<usize>,
 ) -> Option<(usize, Option<&'static str>)> {
-    if numbers(observed) != numbers(&name.text) {
+    if numbers(observed_raw) != numbers(&name.raw) {
         return None;
     }
     match compare_title_spelling(observed, &name.text, name.language.as_deref())? {
@@ -372,8 +388,12 @@ fn spelling_distance(
     bounded_levenshtein_distance(observed, &name.text, bound).map(|distance| (distance, None))
 }
 
+/// `anchors` are `(lookup key, observed spelling)` pairs, as
+/// [`neutral_spelling_forms`] returns them. The key drives every equality and
+/// distance test; the observed spelling feeds the numbers guard, which reads
+/// letter case and so cannot work from the lowercased key.
 pub(crate) fn find_spelling_match(
-    anchors: &[String],
+    anchors: &[(String, String)],
     identity: &SpellingIdentity,
     index: Option<&SpellingIndex>,
     year: Option<i32>,
@@ -385,7 +405,7 @@ pub(crate) fn find_spelling_match(
     }
     let mut best = None;
     let episode_year_matches = year.is_some_and(|year| episode_years.contains(&year));
-    for observed in anchors {
+    for (observed, observed_raw) in anchors {
         for name in &identity.names {
             if year
                 .zip(name.year)
@@ -394,7 +414,8 @@ pub(crate) fn find_spelling_match(
             {
                 continue;
             }
-            let Some((distance, locale)) = spelling_distance(observed, name, None) else {
+            let Some((distance, locale)) = spelling_distance(observed, observed_raw, name, None)
+            else {
                 continue;
             };
             let literally_exact = observed == &name.text;
@@ -431,7 +452,8 @@ pub(crate) fn find_spelling_match(
                 // An episode air year cannot eliminate a competing series
                 // merely because that series started in another year.
                 let collision_year = if episode_year_matches { None } else { year };
-                if index.has_competitor(identity, observed, collision_year, distance) {
+                if index.has_competitor(identity, observed, observed_raw, collision_year, distance)
+                {
                     tracing::debug!(
                         title_id = identity.id,
                         observed,
@@ -505,6 +527,7 @@ mod tests {
             name: SpellingName {
                 text: key.clone(),
                 key,
+                raw: text.to_string(),
                 language: Some(language.into()),
                 year: Some(2019),
             },
@@ -562,7 +585,7 @@ mod tests {
             for bound in [None, Some(1), Some(2), Some(3), Some(4)] {
                 let possible = bucket.possible_matches(&observed, bound);
                 for (index, entry) in bucket.names.iter().enumerate() {
-                    if spelling_distance(&observed, &entry.name, bound).is_some() {
+                    if spelling_distance(&observed, &observed, &entry.name, bound).is_some() {
                         assert!(
                             possible.contains(&index),
                             "lost {observed:?} / {:?}, bound {bound:?}",

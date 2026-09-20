@@ -724,7 +724,7 @@ fn match_release_to_title_context<'a>(
         }
     }
     let (spelling_anchors, _) =
-        crate::title_matching::relaxed::neutral_spelling_anchors(release_title);
+        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
     let spelling_ids = context_bank
         .spelling_index
         .candidates(&spelling_anchors, None);

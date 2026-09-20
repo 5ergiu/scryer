@@ -454,7 +454,9 @@ fn spelling_facts(raw_term: &str, language: Option<&str>) -> SpellingFacts {
     SpellingFacts {
         stripped_year_key: title_spelling::strip_trailing_year(&literal).to_string(),
         script: title_spelling::title_script(&literal).as_str(),
-        numbers_key: title_spelling::title_numbers_key(&literal),
+        // From the term as written, not the lowercased literal: the
+        // Roman-numeral rule reads letter case.
+        numbers_key: title_spelling::title_numbers_key(raw_term),
         romanization_key: title_spelling::japanese_romanization_key(&literal, language),
         collation_keys,
         literal,
