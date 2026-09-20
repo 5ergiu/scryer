@@ -27,11 +27,12 @@ mod jemalloc_prof;
 /// the process a handful of threads (22 → 25 at startup).
 ///
 /// `background_thread` is a runtime-writable mallctl, so this needs no
-/// `MALLOC_CONF`. Not every platform implements it — notably macOS, where
-/// jemalloc builds without background-thread support — so a refusal is
-/// expected there and is deliberately ignored rather than logged: at this
-/// point in startup the tracing subscriber does not exist yet.
-#[cfg(not(target_os = "windows"))]
+/// `MALLOC_CONF`. Linux only: jemalloc builds without background-thread
+/// support on macOS, where the write would be refused, so it is not attempted
+/// there at all. jemalloc is still the allocator on macOS; it just purges
+/// inline. A refusal on Linux is ignored rather than logged: at this point in
+/// startup the tracing subscriber does not exist yet.
+#[cfg(target_os = "linux")]
 fn configure_jemalloc() {
     // SAFETY: `background_thread` is a `bool` mallctl. Writing the wrong type
     // to a mallctl is the unsoundness this `unsafe` guards against, and the
@@ -39,11 +40,10 @@ fn configure_jemalloc() {
     let _ = unsafe { tikv_jemalloc_ctl::raw::write::<bool>(b"background_thread\0", true) };
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(all(test, target_os = "linux"))]
 mod jemalloc_configuration_tests {
-    /// The call must be harmless on every platform, including the ones that
-    /// refuse the option, and must stay harmless when the process has already
-    /// enabled background threads.
+    /// The call must be harmless and must stay harmless when the process has
+    /// already enabled background threads.
     #[test]
     fn enabling_background_threads_is_idempotent_and_never_panics() {
         super::configure_jemalloc();
@@ -673,7 +673,7 @@ fn install_panic_logging_hook() {
 fn main() {
     #[cfg(target_os = "windows")]
     configure_mimalloc();
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     configure_jemalloc();
     if std::env::args().nth(1).as_deref() == Some("__import-file-worker") {
         std::process::exit(
