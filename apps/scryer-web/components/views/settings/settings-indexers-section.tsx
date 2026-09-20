@@ -5,8 +5,6 @@ import {
   Logs,
   Lock,
   Plus,
-  Power,
-  PowerOff,
   RefreshCw,
   Trash2,
 } from "lucide-react";
@@ -37,7 +35,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { RenderBooleanIcon } from "@/components/common/boolean-icon";
 import {
   Table,
   TableBody,
@@ -131,7 +128,15 @@ type SettingsIndexersSectionProps = {
     nextValue: Partial<IndexerCategoryRoutingSettings>,
   ) => Promise<void> | void;
   editIndexer: (indexer: IndexerRecord) => void;
-  toggleIndexerEnabled: (indexer: IndexerRecord) => Promise<void> | void;
+  updateIndexerToggles: (
+    indexer: IndexerRecord,
+    nextValue: Partial<
+      Pick<
+        IndexerRecord,
+        "isEnabled" | "enableInteractiveSearch" | "enableAutoSearch"
+      >
+    >,
+  ) => Promise<void> | void;
   deleteIndexer: (indexer: IndexerRecord) => Promise<void> | void;
   syncIndexer: (indexer: IndexerRecord) => Promise<void> | void;
   providerTypes: ProviderTypeInfo[];
@@ -976,7 +981,7 @@ export function SettingsIndexersSection({
   loadIndexerRouting,
   updateIndexerRoutingForScope,
   editIndexer,
-  toggleIndexerEnabled,
+  updateIndexerToggles,
   deleteIndexer,
   syncIndexer,
   providerTypes,
@@ -1445,9 +1450,20 @@ export function SettingsIndexersSection({
                               INDEXER_NARROW_CELL_CLASS,
                             )}
                           >
-                            <RenderBooleanIcon
-                              value={indexer.isEnabled}
-                              label={`${t("label.enabled")}: ${indexer.name}`}
+                            <Checkbox
+                              id={selectorId(
+                                "settings-indexer-enabled",
+                                indexer.id,
+                              )}
+                              size="large"
+                              checked={indexer.isEnabled}
+                              disabled={mutatingIndexerId === indexer.id}
+                              aria-label={`${t("label.enabled")}: ${indexer.name}`}
+                              onCheckedChange={(checked) =>
+                                void updateIndexerToggles(indexer, {
+                                  isEnabled: checked === true,
+                                })
+                              }
                             />
                           </TableCell>
                           <TableCell
@@ -1465,9 +1481,20 @@ export function SettingsIndexersSection({
                                 —
                               </span>
                             ) : (
-                              <RenderBooleanIcon
-                                value={indexer.enableInteractiveSearch}
-                                label={`${t("settings.indexerInteractiveSearch")}: ${indexer.name}`}
+                              <Checkbox
+                                id={selectorId(
+                                  "settings-indexer-interactive-search",
+                                  indexer.id,
+                                )}
+                                size="large"
+                                checked={indexer.enableInteractiveSearch}
+                                disabled={mutatingIndexerId === indexer.id}
+                                aria-label={`${t("settings.indexerInteractiveSearch")}: ${indexer.name}`}
+                                onCheckedChange={(checked) =>
+                                  void updateIndexerToggles(indexer, {
+                                    enableInteractiveSearch: checked === true,
+                                  })
+                                }
                               />
                             )}
                           </TableCell>
@@ -1486,9 +1513,20 @@ export function SettingsIndexersSection({
                                 —
                               </span>
                             ) : (
-                              <RenderBooleanIcon
-                                value={indexer.enableAutoSearch}
-                                label={`${t("settings.indexerAutoSearch")}: ${indexer.name}`}
+                              <Checkbox
+                                id={selectorId(
+                                  "settings-indexer-auto-search",
+                                  indexer.id,
+                                )}
+                                size="large"
+                                checked={indexer.enableAutoSearch}
+                                disabled={mutatingIndexerId === indexer.id}
+                                aria-label={`${t("settings.indexerAutoSearch")}: ${indexer.name}`}
+                                onCheckedChange={(checked) =>
+                                  void updateIndexerToggles(indexer, {
+                                    enableAutoSearch: checked === true,
+                                  })
+                                }
                               />
                             )}
                           </TableCell>
@@ -1549,30 +1587,6 @@ export function SettingsIndexersSection({
                                   )}
                                 </IndexerActionButton>
                               ) : null}
-                              <IndexerActionButton
-                                id={selectorId(
-                                  "settings-indexer-toggle",
-                                  indexer.name,
-                                )}
-                                tone={
-                                  indexer.isEnabled ? "disabled" : "enabled"
-                                }
-                                onClick={() =>
-                                  void toggleIndexerEnabled(indexer)
-                                }
-                                disabled={mutatingIndexerId === indexer.id}
-                                label={
-                                  indexer.isEnabled
-                                    ? t("label.disable")
-                                    : t("label.enable")
-                                }
-                              >
-                                {indexer.isEnabled ? (
-                                  <PowerOff className="h-4 w-4" />
-                                ) : (
-                                  <Power className="h-4 w-4" />
-                                )}
-                              </IndexerActionButton>
                               {indexer.isManaged ? (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
                                   <Lock className="h-3 w-3" />

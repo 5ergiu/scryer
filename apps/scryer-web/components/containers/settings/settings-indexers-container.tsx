@@ -1104,16 +1104,23 @@ export function SettingsIndexersContainer({
     [client, refreshIndexers, setGlobalStatus, settingsIndexers, t],
   );
 
-  const toggleIndexerEnabled = useCallback(
-    async (indexer: IndexerRecord) => {
-      const nextIsEnabled = !indexer.isEnabled;
+  const updateIndexerToggles = useCallback(
+    async (
+      indexer: IndexerRecord,
+      nextValue: Partial<
+        Pick<
+          IndexerRecord,
+          "isEnabled" | "enableInteractiveSearch" | "enableAutoSearch"
+        >
+      >,
+    ) => {
       setMutatingIndexerId(indexer.id);
       try {
         const { error } = await client
           .mutation(updateIndexerMutation, {
             input: {
               id: indexer.id,
-              isEnabled: nextIsEnabled,
+              ...nextValue,
             },
           })
           .toPromise();
@@ -1294,7 +1301,7 @@ export function SettingsIndexersContainer({
         setIndexerProxyAssignment={setIndexerProxyAssignment}
         proxyConfigs={proxyConfigs}
         editIndexer={requestEditIndexer}
-        toggleIndexerEnabled={toggleIndexerEnabled}
+        updateIndexerToggles={updateIndexerToggles}
         deleteIndexer={deleteIndexer}
         syncIndexer={syncIndexer}
         providerTypes={providerTypes}
