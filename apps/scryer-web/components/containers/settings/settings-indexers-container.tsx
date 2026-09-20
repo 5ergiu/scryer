@@ -267,6 +267,9 @@ export function SettingsIndexersContainer({
     mutatingIndexerSeedingProfileIds,
     setMutatingIndexerSeedingProfileIds,
   ] = useState<Set<string>>(() => new Set());
+  const [mutatingIndexerProxyIds, setMutatingIndexerProxyIds] = useState<
+    Set<string>
+  >(() => new Set());
   const [proxyConfigs, setProxyConfigs] = useState<
     ProxyRecord[]
   >([]);
@@ -898,6 +901,49 @@ export function SettingsIndexersContainer({
     [client, setGlobalStatus, settingsIndexers, t],
   );
 
+  const setIndexerProxyAssignment = useCallback(
+    async (indexerId: string, proxyConfigId: string | null) => {
+      const indexer = settingsIndexers.find((entry) => entry.id === indexerId);
+      const previousProxyConfigId = indexer?.proxyConfigId ?? null;
+
+      setMutatingIndexerProxyIds((previous) =>
+        updatePendingIndexerMappingIds(previous, indexerId, true),
+      );
+      setSettingsIndexers((previous) =>
+        previous.map((entry) =>
+          entry.id === indexerId ? { ...entry, proxyConfigId } : entry,
+        ),
+      );
+
+      try {
+        const { error } = await client
+          .mutation(updateIndexerMutation, {
+            input: { id: indexerId, proxyConfigId },
+          })
+          .toPromise();
+        if (error) throw error;
+        setGlobalStatus(t("status.indexerUpdated"));
+        await refreshIndexers();
+      } catch (error) {
+        setSettingsIndexers((previous) =>
+          previous.map((entry) =>
+            entry.id === indexerId
+              ? { ...entry, proxyConfigId: previousProxyConfigId }
+              : entry,
+          ),
+        );
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")),
+        );
+      } finally {
+        setMutatingIndexerProxyIds((previous) =>
+          updatePendingIndexerMappingIds(previous, indexerId, false),
+        );
+      }
+    },
+    [client, refreshIndexers, setGlobalStatus, settingsIndexers, t],
+  );
+
   const toggleIndexerEnabled = useCallback(
     async (indexer: IndexerRecord) => {
       const nextIsEnabled = !indexer.isEnabled;
@@ -1082,6 +1128,8 @@ export function SettingsIndexersContainer({
         seedingProfileOptions={seedingProfileOptions}
         mutatingIndexerSeedingProfileIds={mutatingIndexerSeedingProfileIds}
         setIndexerSeedingProfile={setIndexerSeedingProfile}
+        mutatingIndexerProxyIds={mutatingIndexerProxyIds}
+        setIndexerProxyAssignment={setIndexerProxyAssignment}
         proxyConfigs={proxyConfigs}
         editIndexer={requestEditIndexer}
         toggleIndexerEnabled={toggleIndexerEnabled}

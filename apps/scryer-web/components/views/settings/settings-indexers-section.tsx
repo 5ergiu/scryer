@@ -109,6 +109,11 @@ type SettingsIndexersSectionProps = {
     indexerId: string,
     seedingProfileId: string | null,
   ) => Promise<void> | void;
+  mutatingIndexerProxyIds: ReadonlySet<string>;
+  setIndexerProxyAssignment: (
+    indexerId: string,
+    proxyConfigId: string | null,
+  ) => Promise<void> | void;
   proxyConfigs: ProxyRecord[];
   editIndexer: (indexer: IndexerRecord) => void;
   toggleIndexerEnabled: (indexer: IndexerRecord) => Promise<void> | void;
@@ -787,6 +792,8 @@ export function SettingsIndexersSection({
   seedingProfileOptions,
   mutatingIndexerSeedingProfileIds,
   setIndexerSeedingProfile,
+  mutatingIndexerProxyIds,
+  setIndexerProxyAssignment,
   proxyConfigs,
   editIndexer,
   toggleIndexerEnabled,
@@ -806,6 +813,7 @@ export function SettingsIndexersSection({
   const isManagedSyncProvider = normalizedProviderType === "prowlarr";
   const isEditing = editorMode === "edit";
   const isSavingEditor = mutatingIndexerId === (editingIndexerId ?? "new");
+  const showProxyColumn = proxyConfigs.length > 0;
   const indexersById = React.useMemo(() => {
     return new Map(settingsIndexers.map((indexer) => [indexer.id, indexer]));
   }, [settingsIndexers]);
@@ -821,9 +829,6 @@ export function SettingsIndexersSection({
     }
     return counts;
   }, [settingsIndexers]);
-  const proxiesById = React.useMemo(() => {
-    return new Map(proxyConfigs.map((proxy) => [proxy.id, proxy]));
-  }, [proxyConfigs]);
   React.useEffect(() => {
     if (!isManagedSyncProvider || !indexerDraft.proxyConfigId) {
       return;
@@ -1017,22 +1022,24 @@ export function SettingsIndexersSection({
             className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
           >
             <colgroup>
-              <col className="w-[13%]" />
-              <col className="w-[10%]" />
-              <col className="w-[7%]" />
-              <col className="w-[16%]" />
-              <col className="w-[16%]" />
+              <col className={showProxyColumn ? "w-[13%]" : "w-[15%]"} />
+              <col className={showProxyColumn ? "w-[10%]" : "w-[11%]"} />
+              {showProxyColumn ? <col className="w-[7%]" /> : null}
+              <col className={showProxyColumn ? "w-[16%]" : "w-[20%]"} />
+              <col className={showProxyColumn ? "w-[16%]" : "w-[19%]"} />
               <col className="w-[5%]" />
               <col className="w-[6%]" />
               <col className="w-[4%]" />
               <col className="w-[10%]" />
-              <col className="w-[13%]" />
+              <col className={showProxyColumn ? "w-[13%]" : "w-[10%]"} />
             </colgroup>
             <TableHeader>
               <TableRow>
                 <TableHead>{t("label.name")}</TableHead>
                 <TableHead>{t("settings.indexerProvider")}</TableHead>
-                <TableHead>{t("settings.proxyAssignment")}</TableHead>
+                {showProxyColumn ? (
+                  <TableHead>{t("settings.proxyAssignment")}</TableHead>
+                ) : null}
                 <TableHead>
                   {t("settings.indexerDownloadClient")}
                 </TableHead>
@@ -1060,9 +1067,6 @@ export function SettingsIndexersSection({
                   ? indexersById.get(indexer.managedParentConfigId)?.name
                   : null;
                 const managedChildCount = managedChildCounts.get(indexer.id) ?? 0;
-                const assignedProxy = indexer.proxyConfigId
-                  ? proxiesById.get(indexer.proxyConfigId) ?? null
-                  : null;
                 return (
                 <TableRow
                   data-ui="settings-table-row"
@@ -1108,30 +1112,35 @@ export function SettingsIndexersSection({
                       providerType={indexer.providerType}
                     />
                   </TableCell>
-                  <TableCell
-                    data-label={t("settings.proxyAssignment")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    {assignedProxy ? (
-                      <span
-                        className={cn(
-                          "font-medium",
-                          !assignedProxy.isEnabled &&
-                            "text-[var(--scry-warning-text)]",
+                  {showProxyColumn ? (
+                    <TableCell
+                      data-label={t("settings.proxyAssignment")}
+                      className={INDEXER_NARROW_CELL_CLASS}
+                    >
+                      <ProxyAssignmentSelect
+                        selectId={selectorId(
+                          "settings-indexer-proxy",
+                          indexer.name,
                         )}
-                      >
-                        {assignedProxy.name}
-                      </span>
-                    ) : indexer.proxyConfigId ? (
-                      <span className="text-[var(--scry-warning-text)]">
-                        {t("settings.proxyMissing")}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">
-                        {t("settings.proxyDirect")}
-                      </span>
-                    )}
-                  </TableCell>
+                        label={t("settings.proxyAssignment")}
+                        proxies={proxyConfigs}
+                        value={indexer.proxyConfigId ?? null}
+                        disabled={
+                          indexer.isManaged ||
+                          mutatingIndexerProxyIds.has(indexer.id) ||
+                          (editingIndexerId === indexer.id && isEditorOpen)
+                        }
+                        showLabel={false}
+                        compact
+                        onChange={(proxyConfigId) =>
+                          void setIndexerProxyAssignment(
+                            indexer.id,
+                            proxyConfigId,
+                          )
+                        }
+                      />
+                    </TableCell>
+                  ) : null}
                   <TableCell
                     data-label={t("settings.indexerDownloadClient")}
                     className={INDEXER_NARROW_CELL_CLASS}
@@ -1310,7 +1319,10 @@ export function SettingsIndexersSection({
               })}
               {settingsIndexers.length === 0 ? (
                 <TableRow id="settings-indexers-empty-row">
-                  <TableCell colSpan={11} className="text-muted-foreground">
+                  <TableCell
+                    colSpan={showProxyColumn ? 10 : 9}
+                    className="text-muted-foreground"
+                  >
                     {t("settings.noIndexersFound")}
                   </TableCell>
                 </TableRow>
