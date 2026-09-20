@@ -7,6 +7,18 @@ const RECOVERY_ADMIN_USERNAME: &str = "recovery-admin";
 const ANONYMOUS_AUDIT_USERNAME: &str = "anonymous";
 
 impl AppUseCase {
+    pub async fn dashboard_summary(
+        &self,
+        actor: &User,
+    ) -> AppResult<(crate::TitleCounts, Vec<crate::IndexerQueryStats>)> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        Ok((
+            self.services.catalog.titles.title_counts().await?,
+            self.services.integrations.indexer_stats.all_stats(),
+        ))
+    }
+
     fn required_startup_admin_app_permissions() -> scryer_domain::AppPermissionMask {
         scryer_domain::UserAuthorization::full_admin().app
     }
@@ -72,40 +84,11 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
-        // System health only counts titles by facet and monitored flag, so this
-        // all-title read skips the canonical-tag hydration.
-        let titles = self
-            .services
-            .catalog
-            .titles
-            .list_with_projection(
-                None,
-                None,
-                None,
-                crate::TitleListProjection::without_canonical_tags(),
-            )
-            .await?;
+        let counts = self.services.catalog.titles.title_counts().await?;
         let users = self.services.identity.users.list_all().await?;
         let recent_activity = self.recent_activity_page(12, 0).await?;
 
-        let mut titles_movie = 0usize;
-        let mut titles_series = 0usize;
-        let mut titles_anime = 0usize;
-        let titles_other = 0usize;
-        let mut monitored_titles = 0usize;
         let mut recent_event_preview = Vec::with_capacity(std::cmp::min(3, recent_activity.len()));
-
-        for title in &titles {
-            if title.monitored {
-                monitored_titles += 1;
-            }
-
-            match title.facet {
-                MediaFacet::Movie => titles_movie += 1,
-                MediaFacet::Series => titles_series += 1,
-                MediaFacet::Anime => titles_anime += 1,
-            }
-        }
 
         for event in recent_activity.iter().take(3) {
             recent_event_preview.push(event.message.clone());
@@ -126,13 +109,13 @@ impl AppUseCase {
             datastore_engine,
             datastore_migration_key: db_migration_version.clone(),
             runtime_path_style: RuntimePathStyle::current(),
-            total_titles: titles.len(),
-            monitored_titles,
+            total_titles: counts.total,
+            monitored_titles: counts.monitored,
             total_users: users.len(),
-            titles_movie,
-            titles_series,
-            titles_anime,
-            titles_other,
+            titles_movie: counts.movie,
+            titles_series: counts.series,
+            titles_anime: counts.anime,
+            titles_other: 0,
             recent_events: recent_activity.len(),
             recent_event_preview,
             db_migration_version,

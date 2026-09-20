@@ -1071,3 +1071,6 @@ impl AppError {
 pub(crate) mod lib_tests;
 #[cfg(test)]
 pub(crate) mod test_wait;
+
+pub use ports::TitleCounts;
+pub use types::{DashboardImportEvidence, DashboardImportKind, DashboardRecentImport};

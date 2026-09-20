@@ -948,8 +948,31 @@ impl TitleListProjection {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TitleCounts {
+    pub total: usize,
+    pub monitored: usize,
+    pub movie: usize,
+    pub series: usize,
+    pub anime: usize,
+}
+
 #[async_trait]
 pub trait TitleRepository: Send + Sync {
+    /// Aggregate counts without hydrating catalog records. SQL stores override this.
+    async fn title_counts(&self) -> AppResult<TitleCounts> {
+        let mut counts = TitleCounts::default();
+        for title in self.list(None, None).await? {
+            counts.total += 1;
+            counts.monitored += usize::from(title.monitored);
+            match title.facet {
+                MediaFacet::Movie => counts.movie += 1,
+                MediaFacet::Series => counts.series += 1,
+                MediaFacet::Anime => counts.anime += 1,
+            }
+        }
+        Ok(counts)
+    }
     async fn list(&self, facet: Option<MediaFacet>, query: Option<String>)
     -> AppResult<Vec<Title>>;
     /// Counts titles whose quality-profile structured tag resolves to the
@@ -3747,6 +3770,18 @@ pub trait TotpRepository: Send + Sync {
 
 #[async_trait]
 pub trait DomainEventRepository: Send + Sync {
+    /// A library-scoped, count-free page of import facts, newest sequence first.
+    async fn recent_import_events(
+        &self,
+        _library_ids: &[String],
+        _before_sequence: Option<i64>,
+        _limit: usize,
+    ) -> AppResult<Vec<DomainEvent>> {
+        Err(AppError::Repository(
+            "recent import preview is not configured".into(),
+        ))
+    }
+
     async fn append(&self, event: NewDomainEvent) -> AppResult<DomainEvent>;
     /// Append by stable event ID, returning the original event on replay.
     async fn append_once(&self, _event: NewDomainEvent) -> AppResult<DomainEvent> {
@@ -5077,6 +5112,14 @@ pub trait DownloadSubmissionRepository: Send + Sync {
 
 #[async_trait]
 pub trait ImportArtifactRepository: Send + Sync {
+    async fn dashboard_import_artifacts(
+        &self,
+        _import_ids: &[String],
+        _episode_ids: &[String],
+    ) -> AppResult<Vec<crate::DashboardImportEvidence>> {
+        Ok(Vec::new())
+    }
+
     async fn insert_artifact(&self, artifact: ImportArtifact) -> AppResult<()>;
 
     /// Canonical-aware artifact writer for a completed download already

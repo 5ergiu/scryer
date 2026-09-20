@@ -304,16 +304,22 @@ function formatAirDateLabel(airDate: string | null): string | null {
 
 export function CalendarEventHoverCard({
   preview,
+  posterFallbackUrl,
   onMouseEnter,
   onMouseLeave,
 }: {
   preview: CalendarHoverPreview;
+  posterFallbackUrl?: string | null;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
   const t = useTranslate();
   const { episode, anchor } = preview;
-  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+  const [failedImages, setFailedImages] = useState<string[]>([]);
+  const imageUrl = episode.imageUrl && !failedImages.includes(episode.imageUrl)
+    ? episode.imageUrl
+    : posterFallbackUrl && !failedImages.includes(posterFallbackUrl) ? posterFallbackUrl : null;
+  const isPoster = imageUrl === posterFallbackUrl || episode.titleFacet === "movie";
 
   if (typeof document === "undefined") return null;
 
@@ -358,12 +364,13 @@ export function CalendarEventHoverCard({
           className="fc-scryer-hover-card-image-wrap"
           style={artworkFallbackStyle(episode.id || episode.titleId, fallbackTone)}
         >
-          {episode.imageUrl && failedImageUrl !== episode.imageUrl ? (
+          {imageUrl ? (
             <img
-              src={episode.imageUrl}
+              src={imageUrl}
               alt=""
               className="fc-scryer-hover-card-image"
-              onError={() => setFailedImageUrl(episode.imageUrl)}
+              style={isPoster ? { objectFit: "contain", objectPosition: "center" } : undefined}
+              onError={() => setFailedImages((urls) => [...urls, imageUrl])}
             />
           ) : null}
         </div>
