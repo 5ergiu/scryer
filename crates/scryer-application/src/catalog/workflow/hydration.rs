@@ -620,6 +620,10 @@ impl AppUseCase {
         self.apply_title_monitor_selection_patch(&created.title, &options_patch)
             .await?;
         if !created.reused_existing {
+            // A brand new title is a new matcher identity. Done here as well
+            // as through `TitleAdded` so the guarantee does not depend on the
+            // event append succeeding. A reused row changed no matcher input.
+            self.invalidate_monitored_title_matcher().await;
             self.append_domain_event(new_title_domain_event(
                 actor,
                 &created.title,
@@ -660,6 +664,10 @@ impl AppUseCase {
             .create_or_get_existing_and_bind_pending_import(title, pending_import_id)
             .await?;
         if !created.reused_existing {
+            // A brand new title is a new matcher identity. Done here as well
+            // as through `TitleAdded` so the guarantee does not depend on the
+            // event append succeeding. A reused row changed no matcher input.
+            self.invalidate_monitored_title_matcher().await;
             self.append_domain_event(new_title_domain_event(
                 actor,
                 &created.title,
@@ -816,21 +824,26 @@ impl AppUseCase {
             .apply_hydration_result(target.title.clone(), result, target.source)
             .await?;
 
-        if let (Some(movie_smg_id), Some(redirected_from)) = (movie_smg_id, redirected_from)
-            && let Err(error) = self
+        if let (Some(movie_smg_id), Some(redirected_from)) = (movie_smg_id, redirected_from) {
+            match self
                 .services
                 .catalog
                 .titles
                 .persist_smg_id(&hydrated.id, movie_smg_id, Some(redirected_from))
                 .await
-        {
-            warn!(
-                title_id = %hydrated.id,
-                smg_id = movie_smg_id,
-                redirected_from,
-                error = %error,
-                "failed to persist redirected movie SMG title id"
-            );
+            {
+                // An SMG id is an external id the matcher indexes.
+                Ok(()) => self.invalidate_monitored_title_matcher().await,
+                Err(error) => {
+                    warn!(
+                        title_id = %hydrated.id,
+                        smg_id = movie_smg_id,
+                        redirected_from,
+                        error = %error,
+                        "failed to persist redirected movie SMG title id"
+                    );
+                }
+            }
         }
 
         self.complete_title_hydration(
@@ -1312,7 +1325,7 @@ impl AppUseCase {
     /// `Official` pin still clears it, an anime community bridge is still
     /// cleared when SMG stops supplying one, and a hydration that did carry
     /// orders still clears a row whose alternate order no longer differs.
-    async fn replace_numbering_bridge_after_hydration(
+    pub(crate) async fn replace_numbering_bridge_after_hydration(
         &self,
         title: &Title,
         bridge: Option<&scryer_domain::AnimeNumberingBridge>,
@@ -1358,6 +1371,10 @@ impl AppUseCase {
             );
             return;
         }
+        // A cour's own name reaches the matcher only through the bridge
+        // (`title_with_bridge_cour_titles`), so replacing the bridge changes
+        // the names the cached matcher was built over.
+        self.invalidate_monitored_title_matcher().await;
         if let Some(bridge) = bridge {
             debug!(
                 title_id = %title.id,
@@ -1419,6 +1436,10 @@ impl AppUseCase {
                         error = %error,
                         "failed to clear a numbering bridge the new release numbering setting does not read"
                     );
+                } else {
+                    // Cour names just left the catalog; see
+                    // `replace_numbering_bridge_after_hydration`.
+                    self.invalidate_monitored_title_matcher().await;
                 }
             }
             Ok(_) => {}
@@ -1522,7 +1543,13 @@ impl AppUseCase {
             .update_title_hydrated_metadata(&title.id, metadata_update)
             .await
         {
-            Ok(updated) => updated,
+            Ok(updated) => {
+                // Hydration is the main writer of names, aliases, year and
+                // external ids; without this the matcher would keep serving
+                // pre-hydration identities until some other write dirtied it.
+                self.invalidate_monitored_title_matcher().await;
+                updated
+            }
             Err(err) => {
                 warn!(
                     hydration_source = source.as_str(),
@@ -1987,6 +2014,9 @@ impl AppUseCase {
             .titles
             .clear_metadata_language_for_all()
             .await?;
+        // `metadata_language` is the language the matcher tags every untagged
+        // name with, so clearing it catalog-wide reshapes every identity.
+        self.invalidate_monitored_title_matcher().await;
         let discovery_app = self.clone();
         let discovery_language = language.clone();
         tokio::spawn(async move {

@@ -3332,7 +3332,11 @@ impl RootMoveCatalog for AppUseCaseRootMoveCatalog {
                 converted_facet.cloned(),
                 drop_tag_prefixes,
             )
-            .await
+            .await?;
+        // A library transfer can convert the facet, and the matcher buckets
+        // candidates by facet.
+        self.app.invalidate_monitored_title_matcher().await;
+        Ok(())
     }
 }
 
@@ -3357,6 +3361,10 @@ struct AppUseCaseMergedSourceRetirer {
 #[async_trait::async_trait]
 impl MergedSourceRetirer for AppUseCaseMergedSourceRetirer {
     async fn retire_merged_source(&self, request: MergedSourceRetirement) -> AppResult<()> {
+        // The merge transaction removed the source `titles` row without going
+        // through `delete_title_row`, so this is the only place the matcher
+        // learns that identity is gone.
+        self.app.invalidate_monitored_title_matcher().await;
         self.app
             .purge_title_dependent_records(
                 &request.source_title_id,

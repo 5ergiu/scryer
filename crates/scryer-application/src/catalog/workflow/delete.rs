@@ -663,6 +663,10 @@ impl AppUseCase {
         let title_id = title.id.as_str();
 
         self.services.catalog.titles.delete(title_id).await?;
+        // Unconditional: `append_title_deleted_event` is false on the paths
+        // that fold the delete into another event, and the row is gone either
+        // way.
+        self.invalidate_monitored_title_matcher().await;
 
         if append_title_deleted_event {
             let _ = self

@@ -64,11 +64,11 @@ async fn the_import_matcher_answers_to_anime_bridge_cour_names() {
     );
 }
 
-/// The matcher is cached as fresh for a minute once built. A bridge read that
-/// failed transiently used to look exactly like "this title has no bridge", so
-/// that whole minute of scanning ran against a title bank missing every cour
-/// alias — and a cour-named file belonged to nobody. The rebuild has to fail
-/// instead, so the scan retries once the store is back.
+/// The matcher is cached until a write dirties it. A bridge read that failed
+/// transiently used to look exactly like "this title has no bridge", so every
+/// scan until the next catalog write ran against a title bank missing every
+/// cour alias — and a cour-named file belonged to nobody. The rebuild has to
+/// fail instead, so the scan retries once the store is back.
 #[tokio::test]
 async fn a_failed_bridge_read_fails_the_matcher_rebuild_instead_of_caching_it() {
     let shows = std::sync::Arc::new(super::support_library_show::MockShowRepo::default());

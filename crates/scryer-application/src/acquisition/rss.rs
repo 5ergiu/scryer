@@ -532,21 +532,25 @@ fn scope_polls_any_rss_indexer(
 /// The unscoped bank: every monitored title is a candidate.
 #[cfg(test)]
 fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
-    build_scoped_title_context_bank(titles, |_| true)
+    let shared = crate::import_title_resolution::MonitoredTitleMatcher::new(titles.to_vec());
+    build_scoped_title_context_bank(titles, |_| true, &shared)
 }
 
 /// The bank, with its candidate set restricted to titles `in_scope` accepts.
 ///
-/// Only the candidates narrow. The spelling index and the collision guard are
-/// built over every title given, because ambiguity is a property of the whole
-/// catalog: a title that RSS will never grab still makes another title's name
-/// ambiguous, and dropping it would silently turn an ambiguous match into a
-/// confident one.
+/// Only the candidates narrow. The spelling index and the collision guard come
+/// from `shared`, the process-wide monitored-title matcher, because ambiguity
+/// is a property of the whole catalog: a title that RSS will never grab still
+/// makes another title's name ambiguous, and dropping it would silently turn
+/// an ambiguous match into a confident one. Taking both from the shared
+/// matcher also means an RSS cycle no longer builds a second catalog-sized
+/// spelling index per poll.
 fn build_scoped_title_context_bank(
     titles: &[Title],
     in_scope: impl Fn(&Title) -> bool,
+    shared: &crate::import_title_resolution::MonitoredTitleMatcher,
 ) -> TitleContextBank {
-    let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
+    let spelling_index = shared.spelling_index();
     let mut candidates = titles
         .iter()
         .filter(|title| title.monitored && in_scope(title))
@@ -562,47 +566,23 @@ fn build_scoped_title_context_bank(
         })
         .collect::<Vec<_>>();
 
-    // Pillar A tier 0 on the RSS path: collisions are grouped over ALL input
+    // Pillar A tier 0 on the RSS path: collisions are grouped over ALL catalog
     // titles (an unmonitored collider is still a collider) on the
     // year-stripped key shape, so `Tide Chart` and `Tide Chart (2023)` collide.
-    // The bank itself stays monitored-only — no extra queries either way.
-    let mut titles_per_stripped_key: HashMap<&str, HashSet<&str>> = HashMap::new();
-    let all_title_keys = titles
-        .iter()
-        .map(crate::acquisition_release_search::canonical_title_lookup_keys)
-        .collect::<Vec<_>>();
-    for (title, keys) in titles.iter().zip(&all_title_keys) {
-        for key in keys {
-            titles_per_stripped_key
-                .entry(crate::import_title_resolution::strip_trailing_year_key(key))
-                .or_default()
-                .insert(title.id.as_str());
+    // The grouping lives in the shared matcher's ambiguity index, so it is
+    // computed once per catalog change instead of once per RSS poll; the bank
+    // itself stays monitored-only.
+    for candidate in &mut candidates {
+        let shared_keys =
+            shared.shared_lookup_keys(&candidate.info.title_id, &candidate.evidence.lookup_keys);
+        if shared_keys.is_empty() {
+            continue;
         }
-    }
-    let shared_stripped_keys = titles_per_stripped_key
-        .into_iter()
-        .filter(|(_, title_ids)| title_ids.len() >= 2)
-        .map(|(key, _)| key.to_string())
-        .collect::<HashSet<_>>();
-
-    if !shared_stripped_keys.is_empty() {
-        for candidate in &mut candidates {
-            candidate.evidence = candidate.evidence.clone().with_ambiguity(
-                crate::acquisition_release_search::TitleIdentityAmbiguity::from_shared_keys(
-                    candidate
-                        .evidence
-                        .lookup_keys
-                        .iter()
-                        .filter(|key| {
-                            shared_stripped_keys.contains(
-                                crate::import_title_resolution::strip_trailing_year_key(key),
-                            )
-                        })
-                        .cloned()
-                        .collect(),
-                ),
-            );
-        }
+        candidate.evidence = candidate.evidence.clone().with_ambiguity(
+            crate::acquisition_release_search::TitleIdentityAmbiguity::from_shared_keys(
+                shared_keys,
+            ),
+        );
     }
 
     let mut key_index = HashMap::<String, Vec<usize>>::new();
@@ -1112,8 +1092,9 @@ impl AppUseCase {
         // Candidates are scoped; the collision guard and the spelling index
         // stay global, because an out-of-scope title is still a collider and
         // still a near-spelling of an in-scope one.
+        let shared_matcher = self.monitored_title_matcher().await?;
         let title_context_bank =
-            build_scoped_title_context_bank(&bridged_titles, title_is_rss_covered);
+            build_scoped_title_context_bank(&bridged_titles, title_is_rss_covered, &shared_matcher);
 
         if title_context_bank.is_empty() {
             debug!("RSS sync: no monitored titles in an RSS-routed scope, skipping");
@@ -3910,7 +3891,8 @@ mod tests {
         out_of_scope.library_id = "library-out-of-scope".to_string();
 
         let titles = vec![covered.clone(), out_of_scope.clone()];
-        let bank = build_scoped_title_context_bank(&titles, |title| title.id == "t1");
+        let shared = crate::import_title_resolution::MonitoredTitleMatcher::new(titles.clone());
+        let bank = build_scoped_title_context_bank(&titles, |title| title.id == "t1", &shared);
 
         assert_eq!(bank.len(), 1, "an unrouted scope contributes no candidate");
         assert_eq!(bank[0].info.title_id, "t1");

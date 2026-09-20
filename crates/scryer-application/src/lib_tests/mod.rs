@@ -60,6 +60,7 @@ mod series_metadata;
 mod subtitle_permissions;
 mod title_hydration;
 mod title_image_cache;
+mod title_matcher_invalidation;
 mod title_updates;
 mod user_permissions;
 mod users_admin_titles;

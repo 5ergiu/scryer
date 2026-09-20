@@ -18,11 +18,6 @@ pub(crate) struct MonitoredTitleMatcherCache {
     /// invalidation raced the build, so a mid-build title change is never
     /// silently absorbed into a "clean" stale matcher.
     pub generation: u64,
-    /// When the cached matcher was built. Title renames, alias updates, and
-    /// monitor toggles do not reliably reach the event-driven invalidation
-    /// (`TitleUpdated` has no production emitter), so age alone also dirties
-    /// the cache and bounds staleness.
-    pub built_at: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -109,6 +104,13 @@ impl MonitoredTitleMatcher {
         }
 
         matcher
+    }
+
+    /// The catalog-wide spelling index, shared with every consumer that needs
+    /// relaxed candidate discovery. Handed out rather than rebuilt so the RSS
+    /// cycle does not construct a second copy of it per poll.
+    pub(crate) fn spelling_index(&self) -> Arc<crate::title_matching::relaxed::SpellingIndex> {
+        self.spelling_index.clone()
     }
 
     /// Pillar A tier 0: the subset of `keys` that at least one *other* library
