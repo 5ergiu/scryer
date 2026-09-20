@@ -5694,6 +5694,116 @@ async fn migration_0242_attributes_single_client_bindings_and_ends_the_rest() {
     );
 }
 
+/// Migration 0252 finishes the canonical downloads a deleted client config
+/// left behind.
+///
+/// `terminal_at` had no writer before this change, so deleting a client ended
+/// its bindings and left the downloads live. Re-adding the same physical client
+/// gives it a new config id while the client still lists the same native items
+/// carrying the old tokens, which the resolver could only report as a conflict
+/// — the same row, every poll, forever. The resolver now rebinds an ended
+/// binding whose download is still live, so these rows must be marked finished
+/// or they would be re-adopted instead.
+#[tokio::test]
+async fn migration_0252_terminalises_downloads_whose_client_config_is_gone() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("migration test database should open");
+    sqlx::raw_sql(
+        "CREATE TABLE download_clients (id TEXT PRIMARY KEY, client_type TEXT NOT NULL);
+         CREATE TABLE downloads (
+             id TEXT PRIMARY KEY,
+             origin TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             terminal_at TEXT
+         );
+         CREATE TABLE download_client_bindings (
+             download_id TEXT PRIMARY KEY,
+             client_config_id TEXT,
+             client_type_snapshot TEXT,
+             native_item_id TEXT,
+             created_at TEXT NOT NULL,
+             ended_at TEXT
+         );
+         INSERT INTO download_clients (id, client_type) VALUES ('client-live', 'weaver');
+         INSERT INTO downloads (id, origin, created_at, terminal_at) VALUES
+             ('download-orphan', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-live-client', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-active', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-blank-config', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-already-done', 'scryer_submission', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+         INSERT INTO download_client_bindings
+             (download_id, client_config_id, client_type_snapshot, native_item_id, created_at, ended_at)
+         VALUES
+             -- The load-test shape: ended, and its config no longer exists.
+             ('download-orphan', 'client-gone', 'weaver', '10000', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             -- Ended, but the config is still configured: the user may re-enable
+             -- or re-observe it, so this is not ours to finish.
+             ('download-live-client', 'client-live', 'weaver', '10001', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             -- Still actively bound: live, whatever else is true.
+             ('download-active', 'client-gone', 'weaver', '10002', '2026-01-01T00:00:00Z', NULL),
+             -- Migration 0242 ends unattributable bindings without a config id;
+             -- those name no client, so they are not evidence of a deleted one.
+             ('download-blank-config', '', 'weaver', '10003', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             ('download-already-done', 'client-gone', 'weaver', '10004', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
+    )
+    .execute(&pool)
+    .await
+    .expect("orphaned-download fixture should initialize");
+
+    let apply = || async {
+        sqlx::raw_sql(include_str!(
+            "../../../scryer/src/db/migrations/0252_terminalise_client_less_downloads.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("migration 0252 should apply");
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("downloads should load");
+        rows
+    };
+
+    let after = apply().await;
+    let terminal_at = |wanted: &str| {
+        after
+            .iter()
+            .find(|(id, _)| id == wanted)
+            .expect("seeded download")
+            .1
+            .clone()
+    };
+
+    assert!(
+        terminal_at("download-orphan").is_some(),
+        "an ended binding naming a config that is gone means Scryer is done with it"
+    );
+    assert!(
+        terminal_at("download-live-client").is_none(),
+        "the client is still configured, so this download is not ours to finish"
+    );
+    assert!(
+        terminal_at("download-active").is_none(),
+        "a download some client still reports actively stays live"
+    );
+    assert!(
+        terminal_at("download-blank-config").is_none(),
+        "a binding that names no client is not evidence of a deleted one"
+    );
+    assert_eq!(
+        terminal_at("download-already-done").as_deref(),
+        Some("2026-01-02T00:00:00Z"),
+        "an already-finished download keeps its original timestamp"
+    );
+
+    // Idempotent: a second application changes nothing.
+    assert_eq!(apply().await, after, "migration 0252 must be re-runnable");
+}
+
 #[tokio::test]
 async fn migration_0244_splits_the_external_id_key_by_entity_kind() {
     crate::spellfix::register_spellfix_auto_extension()
