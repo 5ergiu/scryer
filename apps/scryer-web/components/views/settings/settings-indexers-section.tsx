@@ -1639,7 +1639,7 @@ export function SettingsIndexersSection({
                               className="bg-muted/20 p-3 max-[1279px]:block"
                             >
                               {indexerRoutingLoaded ? (
-                                <div className="w-full max-w-4xl">
+                                <div className="mx-auto w-full max-w-4xl">
                                   <IndexerRoutingDisclosure
                                     indexer={indexer}
                                     routingByScope={indexerRoutingByScope}
