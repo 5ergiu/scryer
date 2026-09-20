@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "settings.trustedProxiesTitle": "Trusted proxies for rate limiting",
+  "settings.trustedProxiesHelp": "Trust X-Forwarded-For only from these proxy addresses when identifying clients for rate limiting. This does not change login rules, local access, or rate-limit bypasses. Changes apply immediately.",
+  "settings.trustedProxiesAddresses": "IPv4, IPv6, or CIDR addresses (one per line or comma-separated)",
+  "settings.trustedProxiesEmptyHelp": "Saving an empty list trusts no proxies. Saved settings override SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS.",
+  "settings.trustedProxiesSavedSource": "Source: saved settings",
+  "settings.trustedProxiesEnvironmentSource": "Source: environment (defaults to no trusted proxies)",
+  "settings.trustedProxiesReset": "Use environment/default",
+  "settings.trustedProxiesSaved": "Trusted proxy policy applied.",
+  "settings.trustedProxiesLoadError": "Unable to load trusted proxy settings.",
+  "settings.trustedProxiesSaveError": "Unable to save trusted proxy settings.",
   "mediaInfo.discIntactImport": "The disc image is imported as one file. Map each authored title explicitly for episodes.",
   "mediaInfo.discReviewRequired": "Disc analysis needs review",
   "mediaInfo.discImportMovie": "Import movie",

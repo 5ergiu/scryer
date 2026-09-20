@@ -1288,7 +1288,10 @@ const libraryPathsFieldSelection = `
 
 const serviceSettingsFieldSelection = `
     tlsCertPath
-    tlsKeyPath`;
+    tlsKeyPath
+    trustedProxyIps
+    trustedProxyOverride
+    trustedProxySource`;
 
 export const saveQualityProfileSettingsMutation = `mutation SaveQualityProfileSettings($input: SaveQualityProfileSettingsInput!) {
   saveQualityProfileSettings(input: $input) {${qualityProfileSettingsFieldSelection}

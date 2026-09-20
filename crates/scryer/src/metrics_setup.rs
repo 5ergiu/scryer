@@ -687,7 +687,7 @@ mod tests {
                 // default administrator for an anonymous request everywhere else. The
                 // metrics route must still refuse it.
                 auth_runtime: context.auth_runtime.clone(),
-                rate_limiter: ScryerRateLimiter::from_env(),
+                rate_limiter: ScryerRateLimiter::from_env(Default::default()),
                 ws_origin_policy: WebSocketOriginPolicy::default(),
                 authless_web_client_proof: AuthlessWebClientProofState::new(),
             },

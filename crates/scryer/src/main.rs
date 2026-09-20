@@ -11,6 +11,7 @@ mod base_path;
 mod bundle_relaunch;
 #[cfg(any(debug_assertions, test, feature = "e2e-harness"))]
 mod dev_api_keys;
+mod environment_file;
 mod http_error;
 mod http_metrics;
 mod indexer_search_routes;
@@ -606,6 +607,10 @@ fn main() {
             std::process::exit(1);
         }
     }
+    if let Err(error) = load_startup_environment() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     run_application();
 }
 
@@ -662,8 +667,6 @@ async fn run_application() {
         eprintln!("failed to initialize required WASM plugin cache: {error}");
         std::process::exit(1);
     }
-
-    load_env_file(Some(&data_dir), false);
 
     let configured_log_format = normalize_env_option(LOG_FORMAT_ENV);
     let invalid_log_format = invalid_log_format(configured_log_format.as_deref());
@@ -788,7 +791,11 @@ async fn run_application() {
             }
         };
 
-    load_env_file(Some(&data_dir), true);
+    let secrets_path = data_dir.join("instance-secrets.env");
+    if secrets_path.exists() && dotenvy::from_path_override(&secrets_path).is_err() {
+        tracing::error!("cannot load managed instance secrets");
+        std::process::exit(1);
+    }
 
     let datastore_config = match resolve_datastore_config_from_env(data_dir.clone(), migration_mode)
     {
@@ -2001,7 +2008,16 @@ async fn bootstrap_application(
     ));
     app_use_case.wake_title_image_loops();
 
-    let rate_limiter = ScryerRateLimiter::from_env();
+    if let Err(error) = app_use_case
+        .initialize_trusted_proxy_policy(
+            &std::env::var("SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS").unwrap_or_default(),
+        )
+        .await
+    {
+        tracing::error!(%error, "failed to load trusted proxy configuration");
+        std::process::exit(1);
+    }
+    let rate_limiter = ScryerRateLimiter::from_env(app_use_case.trusted_proxy_runtime());
     let authless_access_policy = AuthlessAccessPolicy {
         allow_unauthenticated_public_access: auth_mode.allow_unauthenticated_public_access,
     };
@@ -2527,36 +2543,55 @@ fn default_windows_log_file_path() -> Option<PathBuf> {
     }
 }
 
-fn load_env_file(data_dir: Option<&Path>, include_managed_instance_secrets: bool) {
-    // Load in reverse priority order: dotenvy skips vars already set, so the
-    // last file loaded has lowest priority.  Load the crate-local file first
-    // (highest priority), then cwd .env, then data-dir .env (lowest priority).
-    let candidates = ["crates/scryer/.env", ".env"];
-    let mut loaded = false;
-    for candidate in candidates {
-        if Path::new(candidate).exists() {
-            let _ = dotenvy::from_path(candidate);
-            loaded = true;
-        }
+fn load_startup_environment() -> Result<(), String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    let data_dir = extract_data_dir(&mut args)?;
+    extract_log_file(&mut args)?;
+    // Subcommands have their own configuration. The desktop supervisor parses
+    // only its profile file and supplies the fully validated child environment.
+    if args.len() != 1 || std::env::var("SCRYER_TRAY_SUPERVISED").as_deref() == Ok("1") {
+        return Ok(());
     }
-    // Also load .env from the data directory (lowest priority).
-    if let Some(dir) = data_dir {
-        let env_path = dir.join(".env");
-        if env_path.exists() {
-            let _ = dotenvy::from_path(env_path);
-            loaded = true;
-        }
-        if include_managed_instance_secrets {
-            let secrets_path = dir.join("instance-secrets.env");
-            if secrets_path.exists() {
-                let _ = dotenvy::from_path_override(secrets_path);
-                loaded = true;
+    let profile = resolve_data_dir(data_dir.as_deref());
+    let mut candidates = vec![
+        PathBuf::from("crates/scryer/.env"),
+        PathBuf::from(".env"),
+        profile.join(".env"),
+    ];
+    if !candidates.iter().any(|path| path.exists()) {
+        for parent in std::env::current_dir()
+            .map_err(|_| "cannot resolve working directory")?
+            .ancestors()
+            .skip(1)
+        {
+            let candidate = parent.join(".env");
+            if candidate.exists() {
+                candidates.push(candidate);
+                break;
             }
         }
     }
-    if !loaded {
-        let _ = dotenvy::dotenv();
+    let mut configured = std::collections::BTreeMap::new();
+    for path in candidates {
+        let values = if configured.is_empty() {
+            environment_file::read(&path)?
+        } else {
+            environment_file::read_with_context(&path, &configured)?
+        };
+        for (name, value) in values {
+            configured.entry(name).or_insert(value);
+        }
     }
+    for (name, value) in configured {
+        if std::env::var_os(&name).is_none() {
+            // SAFETY: main calls this before creating the async runtime or
+            // starting application threads. Parsing has completed successfully.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Open the user's default browser when running natively (not in Docker).

@@ -275,6 +275,9 @@ pub fn from_library_paths_settings(settings: LibraryPathsSettings) -> LibraryPat
 
 pub fn from_service_settings(settings: ServiceSettings) -> ServiceSettingsPayload {
     ServiceSettingsPayload {
+        trusted_proxy_ips: settings.trusted_proxy_ips,
+        trusted_proxy_override: settings.trusted_proxy_override,
+        trusted_proxy_source: settings.trusted_proxy_source,
         tls_cert_path: settings.tls_cert_path,
         tls_key_path: settings.tls_key_path,
     }

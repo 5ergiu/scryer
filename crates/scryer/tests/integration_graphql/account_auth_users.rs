@@ -877,6 +877,12 @@ async fn graphql_settings_mutations_require_config_step_up() {
 
     let cases = vec![
         (
+            "updateServiceSettings",
+            "updateServiceSettings",
+            r#"mutation($input: UpdateServiceSettingsInput!) { updateServiceSettings(input: $input) { trustedProxyIps } }"#,
+            json!({ "input": { "trustedProxyIps": ["127.0.0.1"] } }),
+        ),
+        (
             "createRuleSet",
             "createRuleSet",
             r#"mutation($input: CreateRuleSetInput!) { createRuleSet(input: $input) { id } }"#,
