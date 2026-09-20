@@ -87,7 +87,12 @@ impl AppUseCase {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    async fn invalidate_monitored_title_matcher(&self) {
+    /// Dirty the cached matcher. Every catalog write that can change a name,
+    /// alias, tagged alias, facet, year, external id, or monitored flag calls
+    /// this (directly, or via the `Title*` domain events); there is no longer
+    /// a time-based fallback behind it, so a missed call is a correctness bug
+    /// and not a one-minute delay.
+    pub(crate) async fn invalidate_monitored_title_matcher(&self) {
         let mut state = self.runtime.catalog.monitored_title_matcher.write().await;
         state.dirty = true;
         state.generation = state.generation.wrapping_add(1);
@@ -96,15 +101,9 @@ impl AppUseCase {
     pub(crate) async fn monitored_title_matcher(
         &self,
     ) -> AppResult<Arc<crate::import_title_resolution::MonitoredTitleMatcher>> {
-        const MATCHER_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
-
         let observed_generation = {
             let state = self.runtime.catalog.monitored_title_matcher.read().await;
-            let fresh = state
-                .built_at
-                .is_some_and(|built_at| built_at.elapsed() <= MATCHER_MAX_AGE);
             if !state.dirty
-                && fresh
                 && let Some(matcher) = state.matcher.clone()
             {
                 return Ok(matcher);
@@ -127,10 +126,10 @@ impl AppUseCase {
             let bridge = if title.facet == scryer_domain::MediaFacet::Anime {
                 // Propagated, not swallowed: a transient read failure here
                 // used to look exactly like "this title has no bridge", and
-                // the incomplete matcher was then cached as fresh for a
-                // minute. A cour-named file would belong to nobody for that
-                // whole window. Failing the rebuild lets the scan retry once
-                // the store recovers.
+                // the incomplete matcher was then cached as clean. A
+                // cour-named file would belong to nobody until the next write
+                // dirtied the cache. Failing the rebuild lets the scan retry
+                // once the store recovers.
                 self.services
                     .catalog
                     .shows
@@ -152,7 +151,6 @@ impl AppUseCase {
 
         let mut state = self.runtime.catalog.monitored_title_matcher.write().await;
         state.matcher = Some(matcher.clone());
-        state.built_at = Some(std::time::Instant::now());
         // Only clear dirty when no invalidation raced the rebuild; a bumped
         // generation means this matcher may already be stale, so the next
         // caller rebuilds again rather than trusting it.

@@ -159,7 +159,11 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
                 result = app.services.catalog.titles.persist_smg_id(&title.id, smg_id, resolution.redirected_from) => result,
             };
             match persisted {
-                Ok(()) => summary.linked += 1,
+                Ok(()) => {
+                    summary.linked += 1;
+                    // An SMG id is an external id the matcher indexes.
+                    app.invalidate_monitored_title_matcher().await;
+                }
                 Err(error) => {
                     summary.errors += 1;
                     warn!(
