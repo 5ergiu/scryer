@@ -193,6 +193,14 @@ function normalizeDownloadClientRoutingPriority(value: string): string {
     : "normal";
 }
 
+function supportsDownloadClientRoutingSeedingProfile(
+  clientType: string,
+): boolean {
+  return ["qbittorrent", "deluge", "transmission", "rtorrent"].includes(
+    clientType.trim().toLowerCase(),
+  );
+}
+
 function DownloadClientRoutingDisclosure({
   downloadClient,
   routingByScope,
@@ -213,6 +221,9 @@ function DownloadClientRoutingDisclosure({
 }) {
   const t = useTranslate();
   const { options: seedingProfileOptions } = useSeedingProfileOptions();
+  const supportsSeedingProfile = supportsDownloadClientRoutingSeedingProfile(
+    downloadClient.clientType,
+  );
 
   return (
     <Table
@@ -241,9 +252,11 @@ function DownloadClientRoutingDisclosure({
           <TableHead className="w-28 text-center">
             {t("settings.downloadClientRemoveFailed")}
           </TableHead>
-          <TableHead className="w-44">
-            {t("settings.seedingProfileColumn")}
-          </TableHead>
+          {supportsSeedingProfile ? (
+            <TableHead className="w-44">
+              {t("settings.seedingProfileColumn")}
+            </TableHead>
+          ) : null}
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -402,51 +415,53 @@ function DownloadClientRoutingDisclosure({
                   }
                 />
               </TableCell>
-              <TableCell>
-                <Select
-                  value={seedingProfileSelectValue(routing.seedingProfileId)}
-                  disabled={isPending}
-                  onValueChange={(value) =>
-                    void onChange(scope, downloadClient.id, {
-                      seedingProfileId: seedingProfileSelectValueToId(value),
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    id={selectorId(
-                      "settings-download-client-routing-seeding-profile",
-                      downloadClient.id,
-                      scope,
-                    )}
-                    className="w-full"
-                    aria-label={t("settings.seedingProfileRoutingLabel", {
-                      name: `${downloadClient.name} ${facetLabel}`,
-                    })}
+              {supportsSeedingProfile ? (
+                <TableCell>
+                  <Select
+                    value={seedingProfileSelectValue(routing.seedingProfileId)}
+                    disabled={isPending}
+                    onValueChange={(value) =>
+                      void onChange(scope, downloadClient.id, {
+                        seedingProfileId: seedingProfileSelectValueToId(value),
+                      })
+                    }
                   >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={SEEDING_PROFILE_INHERIT_VALUE}>
-                      {t("settings.seedingProfileRoutingInherit")}
-                    </SelectItem>
-                    {routing.seedingProfileId &&
-                    !seedingProfileOptions.some(
-                      (option) => option.id === routing.seedingProfileId,
-                    ) ? (
-                      <SelectItem value={routing.seedingProfileId}>
-                        {t("settings.seedingProfileMissing", {
-                          id: routing.seedingProfileId,
-                        })}
+                    <SelectTrigger
+                      id={selectorId(
+                        "settings-download-client-routing-seeding-profile",
+                        downloadClient.id,
+                        scope,
+                      )}
+                      className="w-full"
+                      aria-label={t("settings.seedingProfileRoutingLabel", {
+                        name: `${downloadClient.name} ${facetLabel}`,
+                      })}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={SEEDING_PROFILE_INHERIT_VALUE}>
+                        {t("settings.seedingProfileRoutingInherit")}
                       </SelectItem>
-                    ) : null}
-                    {seedingProfileOptions.map((option) => (
-                      <SelectItem key={option.id} value={option.id}>
-                        {option.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </TableCell>
+                      {routing.seedingProfileId &&
+                      !seedingProfileOptions.some(
+                        (option) => option.id === routing.seedingProfileId,
+                      ) ? (
+                        <SelectItem value={routing.seedingProfileId}>
+                          {t("settings.seedingProfileMissing", {
+                            id: routing.seedingProfileId,
+                          })}
+                        </SelectItem>
+                      ) : null}
+                      {seedingProfileOptions.map((option) => (
+                        <SelectItem key={option.id} value={option.id}>
+                          {option.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+              ) : null}
             </TableRow>
           );
         })}
