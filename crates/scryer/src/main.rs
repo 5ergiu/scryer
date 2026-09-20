@@ -1,13 +1,47 @@
 // async-graphql schema expansion exceeded the default macro recursion depth.
 #![recursion_limit = "256"]
 
-// Opt-in for allocator experiments (load tests, benchmarks); off by default.
-#[cfg(feature = "jemalloc-prof")]
+// Scryer never uses the system allocator: glibc's does not plateau on a large
+// library (§15 of the load-test report: ~3 GB and still climbing after 30
+// minutes of idle, against ~503 MB on jemalloc). jemalloc everywhere it
+// exists, mimalloc on Windows, which has no jemalloc.
+#[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(feature = "jemalloc-prof", not(target_os = "windows")))]
 mod jemalloc_prof;
+
+/// Switches mimalloc's purging from decommit to reset.
+///
+/// On Windows decommit hands the pages back to the OS and forces a zero-fill
+/// fault when the allocator next touches that address; reset keeps the mapping
+/// and lets the OS reclaim only under pressure. Measured on Linux in §14 of the
+/// load-test report, where the decommit purge cost 2,587 minor faults/s at 53%
+/// idle CPU and turning it off cut that to 49 faults/s at 38% — the same
+/// mechanism applies to Windows' decommit.
+///
+/// Called first thing in `main`. Rust's runtime has already allocated by then,
+/// so this is not literally before mimalloc's first allocation; it is before
+/// any of Scryer's own work, and the option governs later purges rather than
+/// past ones.
+#[cfg(target_os = "windows")]
+fn configure_mimalloc() {
+    // `mi_option_set` is index-based and libmimalloc-sys 0.1 does not export a
+    // constant for this one. The index is read off the vendored headers, where
+    // both versions agree: `mi_option_purge_decommits` is the sixth member of
+    // `mi_option_e` in c_src/mimalloc/v2/include/mimalloc.h and in
+    // c_src/mimalloc/v3/include/mimalloc.h. Re-check it when the crate moves.
+    const MI_OPTION_PURGE_DECOMMITS: libmimalloc_sys::mi_option_t = 5;
+    // SAFETY: setting a mimalloc option by its documented index; the call is
+    // thread-safe and has no preconditions beyond mimalloc being linked in,
+    // which it is, because it is this target's global allocator.
+    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DECOMMITS, 0) };
+}
 
 mod application_upgrade_evidence;
 mod application_upgrade_helper;
@@ -602,6 +636,8 @@ fn install_panic_logging_hook() {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    configure_mimalloc();
     if std::env::args().nth(1).as_deref() == Some("__import-file-worker") {
         std::process::exit(
             scryer_infrastructure_workflow::workflow::file_importer::run_import_file_worker(),
@@ -619,7 +655,7 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
-    #[cfg(feature = "jemalloc-prof")]
+    #[cfg(all(feature = "jemalloc-prof", not(target_os = "windows")))]
     jemalloc_prof::spawn_dump_thread();
     run_application();
 }

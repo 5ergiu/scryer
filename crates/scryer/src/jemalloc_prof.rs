@@ -1,10 +1,16 @@
 //! Opt-in jemalloc heap profiling for load-test / benchmark images.
 //!
-//! Compiled only under the `jemalloc-prof` feature, which also selects
-//! jemalloc as the global allocator. jemalloc itself is configured through the
-//! `MALLOC_CONF` environment variable (the crate is built with
+//! jemalloc is the global allocator on every non-Windows target and its
+//! sampling profiler and stats are compiled in unconditionally; this module,
+//! gated behind the `jemalloc-prof` feature, adds the background thread that
+//! dumps profiles on a timer. jemalloc itself is configured through the
+//! `MALLOC_CONF` environment variable (the allocator crate is built with
 //! `unprefixed_malloc_on_supported_platforms`, so the unprefixed name works),
-//! e.g. `prof:true,prof_active:true,lg_prof_sample:19`.
+//! e.g. `prof:true,prof_active:true,prof_accum:true,lg_prof_sample:19` — a
+//! 512 KiB sampling interval. `prof_accum:true` matters: jemalloc defaults it
+//! to false, and without it every dump's cumulative counts are zero, so
+//! `jeprof --alloc_space` (allocation churn, as opposed to what is still live)
+//! returns an empty profile.
 //!
 //! When `SCRYER_JEMALLOC_PROF_DUMP_SECS` is set, a background thread writes a
 //! timestamped heap profile into `SCRYER_JEMALLOC_PROF_DIR` every N seconds and
