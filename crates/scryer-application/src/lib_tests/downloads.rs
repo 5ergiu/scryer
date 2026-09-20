@@ -16326,6 +16326,68 @@ async fn tracking_unchanged_client_rows_resolves_each_observation_once() {
     );
 }
 
+/// A conflict is a fact about the registry's generation, like any other
+/// resolution, so it is memoized.
+///
+/// Before this, `Conflict` was the one resolution the memo refused to hold, on
+/// the reasoning that a later tick might heal it. A later tick heals nothing by
+/// itself, so the exclusion cost a `resolve_observation` write transaction per
+/// conflicting row per call site per tick, forever — a load-test instance with
+/// 961 conflicting rows ran ~1,100 of them a second and logged ~1,650 WARN
+/// lines a second, indefinitely.
+#[tokio::test]
+async fn tracking_memoizes_a_conflicting_row_until_the_registry_moves() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry {
+        strict_conflicts: true,
+        ..Default::default()
+    });
+    let resolutions = registry.resolutions.clone();
+    let mut item = foreign_client_history_item("conflict-row");
+    let locator = ClientJobLocator::new(
+        Some(item.client_id.as_str()),
+        item.client_type.as_str(),
+        item.download_client_item_id.as_str(),
+    );
+    // The locator is already held by one download; the row reports another.
+    registry
+        .bind(
+            locator,
+            scryer_domain::download_identity::DownloadId::new(),
+        )
+        .await;
+    item.download_id = Some(scryer_domain::download_identity::DownloadId::new().to_wire());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+
+    tracker.track(&app, item.clone()).await;
+    let after_first = resolutions.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(after_first, 1, "the first sighting must reach the store");
+
+    // Steady state: the same conflicting row costs no further store call.
+    for _ in 0..5 {
+        tracker.track(&app, item.clone()).await;
+    }
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        after_first,
+        "a memoized conflict must not re-enter the registry every tick"
+    );
+
+    // A registry write is the only thing that can heal a conflict, and every
+    // registry write bumps the generation — which retires the memo.
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
+    tracker.track(&app, item).await;
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        after_first + 1,
+        "a generation bump must make the conflict re-resolve"
+    );
+}
+
 /// A row whose client-reported identity moved is a different sighting.
 #[tokio::test]
 async fn tracking_re_resolves_a_row_whose_client_token_changed() {
