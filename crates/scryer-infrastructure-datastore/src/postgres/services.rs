@@ -90,6 +90,12 @@ impl PostgresServices {
             },
         )
         .await?;
+        if matches!(migration_mode, MigrationMode::Apply) {
+            // Same contract as SQLite: rebuild when the projection is empty or
+            // was stamped with different collation data than this build
+            // produces.
+            crate::queries::title_search::seed_title_search_projection_if_stale_pg(&pool).await?;
+        }
 
         Ok(Self {
             pool,

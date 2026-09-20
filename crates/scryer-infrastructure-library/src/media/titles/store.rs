@@ -4910,6 +4910,20 @@ mod tests {
             .execute(&pool)
             .await
             .expect("title_search_spellfix table should be created");
+        // The projection's collation keys hang off a term row; deleting a
+        // title clears them explicitly rather than trusting SQLite foreign-key
+        // enforcement, which is not guaranteed to be on.
+        sqlx::query(
+            "CREATE TABLE title_search_collation_keys (
+                term_id INTEGER NOT NULL,
+                profile TEXT NOT NULL,
+                collation_key BLOB NOT NULL,
+                PRIMARY KEY (term_id, profile)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("title_search_collation_keys table should be created");
         sqlx::query(
             "CREATE TABLE indexer_search_learning (
                 indexer_id TEXT NOT NULL,

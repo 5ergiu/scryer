@@ -494,6 +494,19 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         table: "title_search_spellfix",
         classification: BackupTableClassification::Rebuild,
     },
+    // ICU sort keys for the projection rows above. They are only comparable
+    // within one collation-data version, so exporting them would carry the
+    // exporting build's collation into an importing build that may disagree.
+    BackupTableCatalogEntry {
+        table: "title_search_collation_keys",
+        classification: BackupTableClassification::Rebuild,
+    },
+    // Holds the collation-data fingerprint the projection rows were written
+    // with. The rebuild restamps it with the running build's fingerprint.
+    BackupTableCatalogEntry {
+        table: "title_search_meta",
+        classification: BackupTableClassification::Rebuild,
+    },
     BackupTableCatalogEntry {
         table: "blocklist",
         classification: BackupTableClassification::Export,

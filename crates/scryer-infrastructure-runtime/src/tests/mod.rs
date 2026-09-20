@@ -56,6 +56,7 @@ mod sql_runtime_gated_write;
 mod sqlite_write_batching;
 mod stores_migrations_regressions;
 mod title_images;
+mod title_search_projection;
 mod title_tags;
 mod titles_metadata;
 mod wanted_items_and_search;

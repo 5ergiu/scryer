@@ -244,24 +244,11 @@ pub(crate) struct SpellingIndex {
     buckets: HashMap<Bucket, SpellingBucket>,
 }
 
+/// The numbers guard, owned by the domain so the persisted projection can key
+/// a column on exactly what this compares. Volume II must not become Volume I
+/// through a typo allowance.
 pub(crate) fn numbers(value: &str) -> Vec<String> {
-    static ROMAN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
-            .expect("valid Roman numeral pattern")
-    });
-    value
-        .split(|ch: char| !ch.is_numeric())
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        // Volume II must not become Volume I through a typo allowance. NFKC
-        // also puts Unicode Roman numerals into this same spelling.
-        .chain(
-            value
-                .split_whitespace()
-                .filter(|part| ROMAN.is_match(part))
-                .map(|part| format!("roman:{part}")),
-        )
-        .collect()
+    scryer_domain::title_spelling::title_numbers(value)
 }
 
 impl SpellingIndex {

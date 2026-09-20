@@ -39,15 +39,7 @@ pub(crate) struct MonitoredTitleMatcher {
 /// collision purposes: the matching loop bridges the two shapes, so the
 /// collision detector must too or a year-suffixed alias reads as "unique".
 pub(crate) fn strip_trailing_year_key(key: &str) -> &str {
-    if let Some((head, tail)) = key.rsplit_once(' ')
-        && tail.len() == 4
-        && tail.chars().all(|c| c.is_ascii_digit())
-        && (tail.starts_with("19") || tail.starts_with("20"))
-        && !head.is_empty()
-    {
-        return head;
-    }
-    key
+    scryer_domain::title_spelling::strip_trailing_year(key)
 }
 
 impl MonitoredTitleMatcher {

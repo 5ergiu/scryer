@@ -189,7 +189,7 @@ impl SqliteServices {
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
         if matches!(migration_mode, MigrationMode::Apply) {
-            crate::queries::title_search::seed_title_search_projection_if_empty(&pool).await?;
+            crate::queries::title_search::seed_title_search_projection_if_stale(&pool).await?;
         }
 
         Ok(Self {
