@@ -40,8 +40,11 @@ import {
   movieSidePanelTitleQuery,
   titleReleaseBlocklistQuery,
   titleCatalogFilterOptionsQuery,
+  titleCatalogCountsQuery,
+  titleCatalogManagedBytesQuery,
   buildTitlesQuery,
 } from "@/lib/graphql/queries";
+import { createCatalogSummaryLoader } from "@/lib/utils/catalog-summary-loader";
 import { mergePreferLoadedImageFields } from "@/lib/utils/catalog-title-merge";
 import { selectedOverviewUsesMovieRecord } from "@/lib/utils/selected-overview-policy";
 import {
@@ -1979,6 +1982,128 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     },
     [activeFacet, client, refreshRuleSets, ruleSets, setGlobalStatus, t],
   );
+  const summaryLoaders = React.useMemo(
+    () => ({
+      counts: createCatalogSummaryLoader((error) =>
+        console.error("[catalog-counts] refresh failed:", error),
+      ),
+      bytes: createCatalogSummaryLoader((error) =>
+        console.error("[catalog-bytes] refresh failed:", error),
+      ),
+    }),
+    [],
+  );
+  const summaryScopesRef = React.useRef({
+    counts: "",
+    bytes: "",
+    countsReady: false,
+  });
+  React.useEffect(() => {
+    if (!shouldLoadCatalogTitles) return;
+    summaryLoaders.counts.activate();
+    summaryLoaders.bytes.activate();
+    summaryScopesRef.current = { counts: "", bytes: "", countsReady: false };
+    return () => {
+      summaryLoaders.counts.dispose();
+      summaryLoaders.bytes.dispose();
+    };
+  }, [client, authorizationSignature, shouldLoadCatalogTitles, summaryLoaders]);
+
+  const refreshCatalogSummaries = React.useCallback(
+    (
+      query: string,
+      libraryIds: string[],
+      advancedFilters: TitleCatalogAdvancedFilters,
+      invalidate = false,
+    ) => {
+      const {
+        facet,
+        filter,
+        libraryIds: scopedIds,
+      } = buildTitleCatalogQueryVariables({
+        facet: activeFacet,
+        libraryIds,
+        query,
+        filters: effectiveTitleQuickFilters,
+        advancedFilters,
+        sort: defaultTitleCatalogSortState,
+        limit: 0,
+        offset: 0,
+      });
+      const scope = { facet, libraryIds: [...(scopedIds ?? [])].sort() };
+      const countVariables = { ...scope, query, filter };
+      const countKey = JSON.stringify(countVariables);
+      const bytesKey = JSON.stringify(scope);
+      if (summaryScopesRef.current.counts !== countKey) {
+        summaryScopesRef.current.counts = countKey;
+        summaryScopesRef.current.countsReady = false;
+        setCatalogPaginationState((current) => ({
+          ...current,
+          totalCount: 0,
+          filterCounts: emptyTitleCatalogState.filterCounts,
+        }));
+      }
+      if (summaryScopesRef.current.bytes !== bytesKey) {
+        summaryScopesRef.current.bytes = bytesKey;
+        setCatalogPaginationState((current) => ({
+          ...current,
+          managedBytes: 0,
+        }));
+      }
+      void summaryLoaders.counts.run(
+        countKey,
+        async () => {
+          const { data, error } = await client
+            .query(titleCatalogCountsQuery, countVariables, {
+              requestPolicy: "network-only",
+            })
+            .toPromise();
+          if (error) throw error;
+          const page = data?.titles;
+          if (!page) throw new Error("Missing catalog counts");
+          return () => {
+            summaryScopesRef.current.countsReady = true;
+            setCatalogPaginationState((current) => ({
+              ...current,
+              totalCount: page.totalCount,
+              filterCounts: titleCatalogFilterCountsFromPage(page),
+            }));
+            setTitleStatus(
+              t("title.statusTemplate", { count: page.totalCount }),
+            );
+          };
+        },
+        invalidate,
+      );
+      void summaryLoaders.bytes.run(
+        bytesKey,
+        async () => {
+          const { data, error } = await client
+            .query(titleCatalogManagedBytesQuery, scope, {
+              requestPolicy: "network-only",
+            })
+            .toPromise();
+          if (error) throw error;
+          if (!data?.titles) throw new Error("Missing catalog size");
+          return () =>
+            setCatalogPaginationState((current) => ({
+              ...current,
+              managedBytes: data.titles.managedBytes,
+            }));
+        },
+        invalidate,
+      );
+    },
+    [
+      activeFacet,
+      client,
+      effectiveTitleQuickFilters,
+      setTitleStatus,
+      summaryLoaders,
+      t,
+    ],
+  );
+
   const reloadTitles = React.useCallback(
     async (
       queryOverride?: string,
@@ -2012,14 +2137,28 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       catalogPageLoadInFlightRef.current = true;
       catalogQueryKeyRef.current = queryKey;
       if (isInitial) {
-        setCatalogPaginationState({ ...emptyTitleCatalogState, queryKey });
+        setCatalogPaginationState((current) => ({
+          ...current,
+          queryKey,
+          hasMore: false,
+          nextOffset: 0,
+          loadingMore: false,
+        }));
       }
 
+      refreshCatalogSummaries(
+        query,
+        libraryIds,
+        advancedFilters,
+        options.mode === undefined,
+      );
       try {
         markCatalogTiming("request-dispatch");
         const { data, error } = await client
           .query(
-            buildTitlesQuery(titleCatalogProjection),
+            buildTitlesQuery(titleCatalogProjection, {
+              includeAggregates: false,
+            }),
             buildTitleCatalogQueryVariables({
               facet: activeFacet,
               libraryIds,
@@ -2046,31 +2185,19 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
 
         const page = data?.titles ?? {};
         const nextTitles = (page.items ?? []) as TitleRecord[];
-        const filterCounts = titleCatalogFilterCountsFromPage(page);
         setMonitoredTitles((current) =>
           mergeCatalogTitlesPreservingImages(current, nextTitles),
         );
-        setCatalogPaginationState({
+        setCatalogPaginationState((current) => ({
+          ...current,
           queryKey,
           hasMore: Boolean(page.hasMore),
           nextOffset: nextTitles.length,
-          totalCount:
-            typeof page.totalCount === "number"
-              ? page.totalCount
-              : nextTitles.length,
-          managedBytes:
-            typeof page.managedBytes === "number" ? page.managedBytes : 0,
-          filterCounts,
           loadingMore: false,
-        });
-        if (isInitial) {
+        }));
+        if (isInitial && !summaryScopesRef.current.countsReady) {
           setTitleStatus(
-            t("title.statusTemplate", {
-              count:
-                typeof page.totalCount === "number"
-                  ? page.totalCount
-                  : nextTitles.length,
-            }),
+            t("title.statusTemplate", { count: nextTitles.length }),
           );
         }
         markCatalogTiming("page-commit");
@@ -2108,6 +2235,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       setTitleStatus,
       t,
       titleCatalogProjection,
+      refreshCatalogSummaries,
     ],
   );
 
@@ -2246,7 +2374,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     try {
       const { data, error } = await client
         .query(
-          buildTitlesQuery(titleCatalogProjection),
+          buildTitlesQuery(titleCatalogProjection, { includeAggregates: false }),
           buildTitleCatalogQueryVariables({
             facet: activeFacet,
             libraryIds: selectedLibraryIds,
@@ -2272,28 +2400,13 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
 
       const page = data?.titles ?? {};
       const nextTitles = (page.items ?? []) as TitleRecord[];
-      const filterCounts = titleCatalogFilterCountsFromPage(
-        page,
-        catalogPaginationState.filterCounts,
-      );
       setMonitoredTitles((current) =>
         appendCatalogTitlesPreservingImages(current, nextTitles),
       );
-      setCatalogPaginationState({
-        queryKey,
-        hasMore: Boolean(page.hasMore),
-        nextOffset: offset + nextTitles.length,
-        totalCount:
-          typeof page.totalCount === "number"
-            ? page.totalCount
-            : catalogPaginationState.totalCount,
-        managedBytes:
-          typeof page.managedBytes === "number"
-            ? page.managedBytes
-            : catalogPaginationState.managedBytes,
-        filterCounts,
-        loadingMore: false,
-      });
+      setCatalogPaginationState((current) => ({
+        ...current, queryKey, hasMore: Boolean(page.hasMore),
+        nextOffset: offset + nextTitles.length, loadingMore: false,
+      }));
     } catch (error) {
       if (
         requestSeq === catalogTitleRequestSeqRef.current &&
@@ -2318,12 +2431,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   }, [
     activeFacet,
     catalogPaginationState.hasMore,
-    catalogPaginationState.filterCounts,
     catalogPaginationState.loadingMore,
     catalogPaginationState.nextOffset,
     catalogPaginationState.queryKey,
-    catalogPaginationState.totalCount,
-    catalogPaginationState.managedBytes,
     client,
     effectiveAdvancedTitleFilters,
     effectiveTitleQuickFilters,
@@ -2339,6 +2449,10 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   const refreshLoadedCatalogTitlesQuietly = React.useCallback(async ({
     firstPageOnly = false,
   }: { firstPageOnly?: boolean } = {}) => {
+    if (shouldLoadCatalogTitles) {
+      refreshCatalogSummaries(activeCatalogQueryRef.current.trim(), selectedLibraryIds,
+        effectiveAdvancedTitleFilters, true);
+    }
     if (
       !shouldLoadCatalogTitles ||
       titleLoading ||
@@ -2374,7 +2488,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     try {
       const { data, error } = await client
         .query(
-          buildTitlesQuery(titleCatalogProjection, { includePageMetadata }),
+          buildTitlesQuery(titleCatalogProjection, { includePageMetadata, includeAggregates: false }),
           buildTitleCatalogQueryVariables({
             facet: activeFacet,
             libraryIds: selectedLibraryIds,
@@ -2400,12 +2514,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
 
       const page = data?.titles ?? {};
       const nextTitles = (page.items ?? []) as TitleRecord[];
-      const filterCounts = includePageMetadata
-        ? titleCatalogFilterCountsFromPage(
-            page,
-            catalogPaginationState.filterCounts,
-          )
-        : catalogPaginationState.filterCounts;
       setMonitoredTitles((current) =>
         mergeCatalogTitlesPreservingImages(current, nextTitles),
       );
@@ -2417,15 +2525,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           ...current,
           hasMore: includePageMetadata ? Boolean(page.hasMore) : current.hasMore,
           nextOffset: includePageMetadata ? nextTitles.length : current.nextOffset,
-          totalCount:
-            includePageMetadata && typeof page.totalCount === "number"
-              ? page.totalCount
-              : current.totalCount,
-          managedBytes:
-            includePageMetadata && typeof page.managedBytes === "number"
-              ? page.managedBytes
-              : current.managedBytes,
-          filterCounts,
         };
       });
     } catch (error) {
@@ -2433,7 +2532,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     }
   }, [
     activeFacet,
-    catalogPaginationState.filterCounts,
     catalogPaginationState.nextOffset,
     catalogPaginationState.queryKey,
     client,
@@ -2445,6 +2543,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     shouldLoadCatalogTitles,
     titleCatalogProjection,
     titleLoading,
+    refreshCatalogSummaries,
   ]);
 
   const recordCriticalCatalogMutation = React.useCallback(() => {
@@ -2803,7 +2902,11 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     facet: activeFacet,
     pause: !shouldLoadCatalogTitles,
     projection: titleCatalogProjection,
-    onTitleRefreshed: applyRefreshedTitleRecord,
+    onTitleRefreshed: (titleId, title, requestEpoch) => {
+      refreshCatalogSummaries(activeCatalogQueryRef.current.trim(), selectedLibraryIds,
+        effectiveAdvancedTitleFilters, true);
+      applyRefreshedTitleRecord(titleId, title, requestEpoch);
+    },
   });
 
   React.useEffect(() => {
@@ -4874,7 +4977,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           projection: titleCatalogProjection,
         })
       ) {
-        void reloadTitles(debouncedTitleFilter);
+        void reloadTitles(debouncedTitleFilter, undefined, { mode: "background" });
       }
       setRoutingInitLoading(false);
       return;

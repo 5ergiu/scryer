@@ -865,7 +865,7 @@ impl TitleRepository for TitleStore {
         limit: usize,
         offset: usize,
         include_external_ids: bool,
-        include_catalog_counts: bool,
+        aggregates: scryer_application::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
             return Ok(TitleCatalogResult {
@@ -880,7 +880,7 @@ impl TitleRepository for TitleStore {
         }
 
         let query = query.as_deref();
-        let filter_counts = if include_catalog_counts {
+        let filter_counts = if aggregates.filter_counts {
             fetch_title_catalog_filter_counts(
                 &self.datastore,
                 facet.clone(),
@@ -892,19 +892,19 @@ impl TitleRepository for TitleStore {
         } else {
             TitleCatalogFilterCounts::default()
         };
-        let total_count = if include_catalog_counts {
+        let total_count = if aggregates.total_count {
             fetch_title_catalog_count(&self.datastore, facet.clone(), library_ids, query, &filter)
                 .await?
         } else {
             0
         };
-        let managed_bytes = if include_catalog_counts {
+        let managed_bytes = if aggregates.managed_bytes {
             fetch_title_catalog_managed_bytes(&self.datastore, facet.clone(), library_ids).await?
         } else {
             0
         };
 
-        if limit == 0 || (include_catalog_counts && total_count == 0) {
+        if limit == 0 {
             return Ok(TitleCatalogResult {
                 items: Vec::new(),
                 limit,
@@ -922,18 +922,20 @@ impl TitleRepository for TitleStore {
             query,
             &filter,
             sort,
-            limit,
+            limit.saturating_add(1),
             offset,
             title_catalog_dialect_for_datastore(&self.datastore),
         );
-        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &page_sql, &page_args).await?;
+        let mut rows =
+            SqlRuntime::fetch_all(self.datastore.read_exec(), &page_sql, &page_args).await?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
         let mut items = decode_runtime_title_rows(
             &rows,
             PersistedTitleReadMode::Presentation,
             include_external_ids,
         )?;
         attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut items).await?;
-        let has_more = include_catalog_counts && offset.saturating_add(items.len()) < total_count;
 
         Ok(TitleCatalogResult {
             items,
@@ -3114,13 +3116,14 @@ async fn fetch_title_catalog_managed_bytes(
     }
 
     let (scope_sql, args) = build_title_catalog_options_scope_sql(facet, library_ids, &[]);
-    let media_size_sql =
-        title_catalog_media_size_subquery(title_catalog_dialect_for_datastore(datastore));
+    let media_size_sql = title_catalog_media_size_subquery_scoped(
+        title_catalog_dialect_for_datastore(datastore),
+        "JOIN scoped_titles ON scoped_titles.id = mf.title_id",
+    );
     let sql = format!(
-        "SELECT CAST(COALESCE(SUM(COALESCE(catalog_media_size.total_size_bytes, 0)), 0) AS BIGINT) AS managed_bytes \
-           FROM titles \
-      LEFT JOIN ({media_size_sql}) catalog_media_size ON catalog_media_size.title_id = titles.id \
-          WHERE {scope_sql}"
+        "WITH scoped_titles AS (SELECT id FROM titles WHERE {scope_sql}) \
+         SELECT CAST(COALESCE(SUM(catalog_media_size.total_size_bytes), 0) AS BIGINT) AS managed_bytes \
+           FROM ({media_size_sql}) catalog_media_size"
     );
 
     Ok(
@@ -4053,6 +4056,13 @@ fn title_catalog_movie_media_subquery(dialect: TitleCatalogSqlDialect) -> String
 }
 
 fn title_catalog_media_size_subquery(dialect: TitleCatalogSqlDialect) -> String {
+    title_catalog_media_size_subquery_scoped(dialect, "")
+}
+
+fn title_catalog_media_size_subquery_scoped(
+    dialect: TitleCatalogSqlDialect,
+    scope_join: &str,
+) -> String {
     let total_size_expression =
         title_catalog_total_size_sum_expression(dialect, "matched.size_bytes");
     format!(
@@ -4066,6 +4076,7 @@ fn title_catalog_media_size_subquery(dialect: TitleCatalogSqlDialect) -> String 
                            ELSE 0
                        END AS size_bytes
                   FROM media_files mf
+                  {scope_join}
              LEFT JOIN file_episode_map fem
                     ON fem.file_id = mf.id
              LEFT JOIN collections c
@@ -4871,6 +4882,57 @@ mod tests {
     use super::*;
 
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn catalog_aggregate_selection_skips_unrequested_tables_and_page_hydration() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Deliberately omit all hydration, media, monitored, and status columns.
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, library_id TEXT, facet TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO titles VALUES ('a','visible','movie'), ('b','hidden','movie')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = TitleStore::new(StoreDatastore::Sqlite {
+            pool,
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        });
+        for (selection, expected) in [
+            (scryer_application::TitleCatalogAggregates::default(), 0),
+            (
+                scryer_application::TitleCatalogAggregates {
+                    total_count: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+        ] {
+            let result = store
+                .list_for_libraries_catalog(
+                    Some(MediaFacet::Movie),
+                    &["visible".into()],
+                    None,
+                    TitleCatalogFilter::default(),
+                    TitleCatalogSort::default(),
+                    0,
+                    0,
+                    false,
+                    selection,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.total_count, expected);
+            assert!(result.items.is_empty());
+            assert!(!result.has_more);
+            assert_eq!(result.managed_bytes, 0);
+        }
+    }
 
     #[tokio::test]
     async fn dashboard_counts_need_only_facet_and_monitored_columns() {

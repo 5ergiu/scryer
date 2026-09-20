@@ -1367,6 +1367,7 @@ export type TitleCatalogTitleProjection = {
 
 export type TitleCatalogQueryBuildOptions = {
   includePageMetadata?: boolean;
+  includeAggregates?: boolean;
 };
 
 const TITLE_CATALOG_BASE_FIELDS = `
@@ -1649,7 +1650,7 @@ export function buildTitlesQuery(
   const includePageMetadata = options.includePageMetadata ?? true;
   const pageMetadataFields = includePageMetadata
     ? `
-    hasMore
+    hasMore${options.includeAggregates === false ? "" : `
     totalCount
     managedBytes
     filterCounts {
@@ -1658,7 +1659,7 @@ export function buildTitlesQuery(
       unmonitored
       continuing
       ended
-    }`
+    }`}`
     : "";
   return `query Titles(
   $facet: MediaFacetValue,
@@ -1685,6 +1686,22 @@ ${pageMetadataFields}
   }
 }`;
 }
+
+export const titleCatalogCountsQuery = `query TitleCatalogCounts(
+  $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
+  $filter: TitleCatalogFilterInput
+) {
+  titles(facet: $facet, libraryIds: $libraryIds, query: $query, filter: $filter) {
+    totalCount
+    filterCounts { all monitored unmonitored continuing ended }
+  }
+}`;
+
+export const titleCatalogManagedBytesQuery = `query TitleCatalogManagedBytes(
+  $facet: MediaFacetValue, $libraryIds: [ID!]
+) {
+  titles(facet: $facet, libraryIds: $libraryIds) { managedBytes }
+}`;
 
 export const titlesQuery = buildTitlesQuery();
 
