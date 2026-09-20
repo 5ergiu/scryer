@@ -1,6 +1,83 @@
 // async-graphql schema expansion exceeded the default macro recursion depth.
 #![recursion_limit = "256"]
 
+// Scryer never uses the system allocator: glibc's does not plateau on a large
+// library (§15 of the load-test report: ~3 GB and still climbing after 30
+// minutes of idle, against ~503 MB on jemalloc). jemalloc everywhere it
+// exists, mimalloc on Windows, which has no jemalloc.
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(feature = "jemalloc-prof", not(target_os = "windows")))]
+mod jemalloc_prof;
+
+/// Moves jemalloc's decay work onto jemalloc's own threads.
+///
+/// jemalloc purges a dirty extent ~10 s after its last use, and with no
+/// background thread that purge, and the page faults for re-faulting the pages
+/// afterwards, land on whichever application thread happens to allocate next.
+/// Measured on the 111k-item load-test library (§14b of the load-test report),
+/// same image and same live workload, only this option differing: **7,022 →
+/// 3,462 minor faults/s, 58.5% → 50.4% CPU, 687 → 532 MB mean RSS**. It costs
+/// the process a handful of threads (22 → 25 at startup).
+///
+/// `background_thread` is a runtime-writable mallctl, so this needs no
+/// `MALLOC_CONF`. Linux only: jemalloc builds without background-thread
+/// support on macOS, where the write would be refused, so it is not attempted
+/// there at all. jemalloc is still the allocator on macOS; it just purges
+/// inline. A refusal on Linux is ignored rather than logged: at this point in
+/// startup the tracing subscriber does not exist yet.
+#[cfg(target_os = "linux")]
+fn configure_jemalloc() {
+    // SAFETY: `background_thread` is a `bool` mallctl. Writing the wrong type
+    // to a mallctl is the unsoundness this `unsafe` guards against, and the
+    // name and type are both from jemalloc's documented option list.
+    let _ = unsafe { tikv_jemalloc_ctl::raw::write::<bool>(b"background_thread\0", true) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod jemalloc_configuration_tests {
+    /// The call must be harmless and must stay harmless when the process has
+    /// already enabled background threads.
+    #[test]
+    fn enabling_background_threads_is_idempotent_and_never_panics() {
+        super::configure_jemalloc();
+        super::configure_jemalloc();
+    }
+}
+
+/// Switches mimalloc's purging from decommit to reset.
+///
+/// On Windows decommit hands the pages back to the OS and forces a zero-fill
+/// fault when the allocator next touches that address; reset keeps the mapping
+/// and lets the OS reclaim only under pressure. Measured on Linux in §14 of the
+/// load-test report, where the decommit purge cost 2,587 minor faults/s at 53%
+/// idle CPU and turning it off cut that to 49 faults/s at 38% — the same
+/// mechanism applies to Windows' decommit.
+///
+/// Called first thing in `main`. Rust's runtime has already allocated by then,
+/// so this is not literally before mimalloc's first allocation; it is before
+/// any of Scryer's own work, and the option governs later purges rather than
+/// past ones.
+#[cfg(target_os = "windows")]
+fn configure_mimalloc() {
+    // `mi_option_set` is index-based and libmimalloc-sys 0.1 does not export a
+    // constant for this one. The index is read off the vendored headers, where
+    // both versions agree: `mi_option_purge_decommits` is the sixth member of
+    // `mi_option_e` in c_src/mimalloc/v2/include/mimalloc.h and in
+    // c_src/mimalloc/v3/include/mimalloc.h. Re-check it when the crate moves.
+    const MI_OPTION_PURGE_DECOMMITS: libmimalloc_sys::mi_option_t = 5;
+    // SAFETY: setting a mimalloc option by its documented index; the call is
+    // thread-safe and has no preconditions beyond mimalloc being linked in,
+    // which it is, because it is this target's global allocator.
+    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DECOMMITS, 0) };
+}
+
 mod application_upgrade_evidence;
 mod application_upgrade_helper;
 mod backup_routes;
@@ -594,6 +671,10 @@ fn install_panic_logging_hook() {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    configure_mimalloc();
+    #[cfg(target_os = "linux")]
+    configure_jemalloc();
     if std::env::args().nth(1).as_deref() == Some("__import-file-worker") {
         std::process::exit(
             scryer_infrastructure_workflow::workflow::file_importer::run_import_file_worker(),
@@ -611,6 +692,8 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+    #[cfg(all(feature = "jemalloc-prof", not(target_os = "windows")))]
+    jemalloc_prof::spawn_dump_thread();
     run_application();
 }
 
