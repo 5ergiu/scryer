@@ -11,6 +11,7 @@ import type { IndexerCapsCategory } from "@/lib/types/indexers";
 import { ChevronDown } from "lucide-react";
 
 export type ViewCategoryId = "MOVIE" | "SERIES" | "ANIME";
+type CategoryPickerScope = ViewCategoryId | "RAW";
 
 export type IndexerCategoryDefinition = {
   code: string;
@@ -96,12 +97,13 @@ export const INDEXER_CATEGORY_DEFINITIONS: Record<string, IndexerCategoryGroupDe
 };
 
 export const INDEXER_CATEGORY_GROUPS_BY_SCOPE: Record<
-  ViewCategoryId,
+  CategoryPickerScope,
   Array<"movies" | "series" | "other">
 > = {
   MOVIE: ["movies", "other"],
   SERIES: ["series", "other"],
   ANIME: ["series", "other"],
+  RAW: ["movies", "series", "other"],
 };
 
 export function sortCategoryCodes(values: string[]): string[] {
@@ -144,7 +146,7 @@ export function formatCategoryCodeList(codes: string[]): string {
   return formatTagsInput(sortCategoryCodes(normalizeCategoryCodes(codes)));
 }
 
-export function getSortedCategoryCodesByScope(scope: ViewCategoryId, values: string[]) {
+export function getSortedCategoryCodesByScope(scope: CategoryPickerScope, values: string[]) {
   const normalized = normalizeCategoryCodes(values);
   const scopeGroups = INDEXER_CATEGORY_GROUPS_BY_SCOPE[scope]
     .map((groupKey) => {
@@ -157,7 +159,7 @@ export function getSortedCategoryCodesByScope(scope: ViewCategoryId, values: str
   return [...orderedKnownCodes, ...unknownCodes];
 }
 
-function knownCategoryCodesForScope(scope: ViewCategoryId): Set<string> {
+function knownCategoryCodesForScope(scope: CategoryPickerScope): Set<string> {
   return new Set(
     INDEXER_CATEGORY_GROUPS_BY_SCOPE[scope].flatMap((groupKey) => {
       const group = INDEXER_CATEGORY_DEFINITIONS[groupKey];
@@ -172,7 +174,7 @@ function knownCategoryCodesForScope(scope: ViewCategoryId): Set<string> {
  * stale ones the indexer no longer advertises.
  */
 export function customCategoryCodes(
-  scope: ViewCategoryId,
+  scope: CategoryPickerScope,
   values: string[],
   offeredCodes: ReadonlySet<string> = new Set(),
 ): string[] {
@@ -198,7 +200,7 @@ export function parseCustomCategoryCode(raw: string): string | null {
 
 type IndexerCategoryPickerProps = {
   value: string[];
-  scope: ViewCategoryId;
+  scope: CategoryPickerScope;
   disabled: boolean;
   /** Categories the indexer advertises in its caps document, if known. */
   capsCategories?: readonly IndexerCapsCategory[];

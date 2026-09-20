@@ -231,11 +231,12 @@ type SettingsIndexersContainerProps = {
   refreshIndexerDownloadClientMappingCatalog: () => Promise<void>;
 };
 
-const EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG: IndexerDownloadClientMappingCatalog = {
-  clients: [],
-  indexers: [],
-  providerCompatibility: [],
-};
+const EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG: IndexerDownloadClientMappingCatalog =
+  {
+    clients: [],
+    indexers: [],
+    providerCompatibility: [],
+  };
 
 type PendingIndexerEditorAction =
   | { type: "create" }
@@ -286,9 +287,9 @@ export function SettingsIndexersContainer({
   const indexerDownloadClientMappingCatalog =
     indexerDownloadClientMappingCatalogResource.catalog ??
     EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG;
-  const [mutatingIndexerMappingIds, setMutatingIndexerMappingIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [mutatingIndexerMappingIds, setMutatingIndexerMappingIds] = useState<
+    Set<string>
+  >(() => new Set());
   const { options: seedingProfileOptions } = useSeedingProfileOptions();
   const [
     mutatingIndexerSeedingProfileIds,
@@ -369,11 +370,15 @@ export function SettingsIndexersContainer({
   const refreshIndexers = useCallback(async () => {
     try {
       const { data, error } = await client
-        .query(indexersQuery, {
-          providerType: settingsIndexerFilter || undefined,
-        }, {
-          requestPolicy: "network-only",
-        })
+        .query(
+          indexersQuery,
+          {
+            providerType: settingsIndexerFilter || undefined,
+          },
+          {
+            requestPolicy: "network-only",
+          },
+        )
         .toPromise();
       if (error) throw error;
       setSettingsIndexers(data.indexers || []);
@@ -672,9 +677,12 @@ export function SettingsIndexersContainer({
 
   const submitIndexer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
+    const normalizedProviderType = indexerDraft.providerType
+      .trim()
+      .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ?? null;
+      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
+      null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so
@@ -713,7 +721,9 @@ export function SettingsIndexersContainer({
     }
 
     if (missingRequiredConfigField) {
-      setGlobalStatus(`${missingRequiredConfigField.label}: ${t("setup.required")}`);
+      setGlobalStatus(
+        `${missingRequiredConfigField.label}: ${t("setup.required")}`,
+      );
       return;
     }
 
@@ -740,7 +750,8 @@ export function SettingsIndexersContainer({
         const existingIndexer = settingsIndexers.find(
           (indexer) => indexer.id === editingIndexerId,
         );
-        const existingDownloadClientId = existingIndexer?.downloadClientId ?? null;
+        const existingDownloadClientId =
+          existingIndexer?.downloadClientId ?? null;
         const { error } = await client
           .mutation(updateIndexerMutation, {
             input: {
@@ -763,7 +774,8 @@ export function SettingsIndexersContainer({
         // through its own mutation so the torrent-capability check stays
         // single-sourced server-side.
         if (
-          payload.seedingProfileId !== (existingIndexer?.seedingProfileId ?? null)
+          payload.seedingProfileId !==
+          (existingIndexer?.seedingProfileId ?? null)
         ) {
           await applyIndexerSeedingProfile(
             editingIndexerId,
@@ -788,8 +800,7 @@ export function SettingsIndexersContainer({
           .toPromise();
         if (error) throw error;
         const createdIndexerId = data?.createIndexerConfig?.id as
-          | string
-          | undefined;
+          string | undefined;
         if (payload.seedingProfileId && createdIndexerId) {
           await applyIndexerSeedingProfile(
             createdIndexerId,
@@ -815,43 +826,50 @@ export function SettingsIndexersContainer({
     }
   };
 
-  const editIndexer = useCallback((indexer: IndexerRecord) => {
-    if (indexer.isManaged) {
-      setGlobalStatus(t("settings.managedIndexerReadOnly"));
-      return;
-    }
-    const selectedProvider =
-      providerTypes.find(
-        (providerType) =>
-          providerType.providerType === indexer.providerType.trim().toLowerCase(),
-      ) ?? null;
-    const parsedConfigValues = providerConfigValuesToRecord(indexer.config);
-    setEditingIndexerId(indexer.id);
-    setIndexerDraft({
-      name: indexer.name,
-      providerType: indexer.providerType,
-      proxyConfigId: indexer.proxyConfigId ?? null,
-      downloadClientId: indexer.downloadClientId ?? null,
-      seedingProfileId: indexer.seedingProfileId ?? null,
-      storedSecretKeys: indexer.storedSecretKeys,
-      isEnabled: indexer.isEnabled,
-      enableInteractiveSearch: indexer.enableInteractiveSearch,
-      enableAutoSearch: indexer.enableAutoSearch,
-      configValues: buildDraftConfigValues(
-        selectedProvider?.configFields ?? [],
-        parsedConfigValues,
-        indexer.storedSecretKeys,
-      ),
-    });
-    setGlobalStatus(t("status.editingIndexer", { name: indexer.name }));
-  }, [providerTypes, setGlobalStatus, t]);
+  const editIndexer = useCallback(
+    (indexer: IndexerRecord) => {
+      if (indexer.isManaged) {
+        setGlobalStatus(t("settings.managedIndexerReadOnly"));
+        return;
+      }
+      const selectedProvider =
+        providerTypes.find(
+          (providerType) =>
+            providerType.providerType ===
+            indexer.providerType.trim().toLowerCase(),
+        ) ?? null;
+      const parsedConfigValues = providerConfigValuesToRecord(indexer.config);
+      setEditingIndexerId(indexer.id);
+      setIndexerDraft({
+        name: indexer.name,
+        providerType: indexer.providerType,
+        proxyConfigId: indexer.proxyConfigId ?? null,
+        downloadClientId: indexer.downloadClientId ?? null,
+        seedingProfileId: indexer.seedingProfileId ?? null,
+        storedSecretKeys: indexer.storedSecretKeys,
+        isEnabled: indexer.isEnabled,
+        enableInteractiveSearch: indexer.enableInteractiveSearch,
+        enableAutoSearch: indexer.enableAutoSearch,
+        configValues: buildDraftConfigValues(
+          selectedProvider?.configFields ?? [],
+          parsedConfigValues,
+          indexer.storedSecretKeys,
+        ),
+      });
+      setGlobalStatus(t("status.editingIndexer", { name: indexer.name }));
+    },
+    [providerTypes, setGlobalStatus, t],
+  );
 
-  const openEditEditor = useCallback((indexer: IndexerRecord) => {
-    editIndexer(indexer);
-    setEditorMode("edit");
-    setIsEditorOpen(true);
-    setAwaitingBaselineSync(true);
-  }, [editIndexer]);
+  const openEditEditor = useCallback(
+    (indexer: IndexerRecord) => {
+      editIndexer(indexer);
+      setEditorMode("edit");
+      setIsEditorOpen(true);
+      setAwaitingBaselineSync(true);
+    },
+    [editIndexer],
+  );
 
   const requestCreateEditor = useCallback(() => {
     if (!isEditorOpen || !isDraftDirty) {
@@ -862,14 +880,17 @@ export function SettingsIndexersContainer({
     setPendingEditorAction({ type: "create" });
   }, [isDraftDirty, isEditorOpen, openCreateEditor]);
 
-  const requestEditIndexer = useCallback((indexer: IndexerRecord) => {
-    if (!isEditorOpen || !isDraftDirty) {
-      openEditEditor(indexer);
-      return;
-    }
+  const requestEditIndexer = useCallback(
+    (indexer: IndexerRecord) => {
+      if (!isEditorOpen || !isDraftDirty) {
+        openEditEditor(indexer);
+        return;
+      }
 
-    setPendingEditorAction({ type: "edit", indexer });
-  }, [isDraftDirty, isEditorOpen, openEditEditor]);
+      setPendingEditorAction({ type: "edit", indexer });
+    },
+    [isDraftDirty, isEditorOpen, openEditEditor],
+  );
 
   const requestCloseEditor = useCallback(() => {
     if (!isEditorOpen) {
@@ -904,7 +925,12 @@ export function SettingsIndexersContainer({
     }
 
     setPendingEditorAction(null);
-  }, [openCreateEditor, openEditEditor, pendingEditorAction, resetIndexerDraft]);
+  }, [
+    openCreateEditor,
+    openEditEditor,
+    pendingEditorAction,
+    resetIndexerDraft,
+  ]);
 
   const deleteIndexer = async (indexer: IndexerRecord) => {
     if (indexer.isManaged) {
@@ -922,7 +948,8 @@ export function SettingsIndexersContainer({
       const previousMapping = indexerDownloadClientMappingCatalog.indexers.find(
         (entry) => entry.id === indexerId,
       );
-      const previousDownloadClientId = previousMapping?.downloadClientId ?? null;
+      const previousDownloadClientId =
+        previousMapping?.downloadClientId ?? null;
       const selectedClient = downloadClientId
         ? indexerDownloadClientMappingCatalog.clients.find(
             (clientRecord) => clientRecord.id === downloadClientId,
@@ -933,7 +960,11 @@ export function SettingsIndexersContainer({
         updatePendingIndexerMappingIds(previous, indexerId, true),
       );
       updateIndexerDownloadClientMappingCatalog((previous) =>
-        updateIndexerDownloadClientMapping(previous, indexerId, downloadClientId),
+        updateIndexerDownloadClientMapping(
+          previous,
+          indexerId,
+          downloadClientId,
+        ),
       );
       if (selectedClient?.isEnabled === false) {
         setGlobalStatus(
@@ -957,7 +988,7 @@ export function SettingsIndexersContainer({
 
         const response = data?.setIndexerDownloadClientMapping;
         const resolvedDownloadClientId = response
-          ? response.downloadClientId ?? null
+          ? (response.downloadClientId ?? null)
           : downloadClientId;
         updateIndexerDownloadClientMappingCatalog((previous) =>
           updateIndexerDownloadClientMapping(
@@ -1196,9 +1227,12 @@ export function SettingsIndexersContainer({
   };
 
   const testIndexerConnection = async () => {
-    const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
+    const normalizedProviderType = indexerDraft.providerType
+      .trim()
+      .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ?? null;
+      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
+      null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so

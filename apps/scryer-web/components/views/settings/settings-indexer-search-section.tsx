@@ -11,7 +11,6 @@ import {
   Download,
   ExternalLink,
   FileDown,
-  FolderTree,
   Funnel,
   RefreshCw,
   ScanSearch,
@@ -21,6 +20,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { IndexerCategoryPicker } from "@/components/views/media-content/indexer-category-picker";
 import { Checkbox } from "@/components/ui/checkbox";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
@@ -140,6 +140,7 @@ const SORT_KEYS: IndexerSearchSortKey[] = SORT_COLUMNS.flatMap((column) =>
 const HEALTH_DOT_CLASS: Record<IndexerHealthTone, string> = {
   ok: "bg-[var(--scry-success-solid)]",
   slow: "bg-[var(--scry-warning-solid)]",
+  partial: "bg-[var(--scry-warning-solid)]",
   failed: "bg-[var(--scry-danger-solid)]",
   skipped: "bg-[var(--scry-faint3)]",
   pending: "bg-[var(--scry-faint4)]",
@@ -148,6 +149,7 @@ const HEALTH_DOT_CLASS: Record<IndexerHealthTone, string> = {
 const HEALTH_COUNT_CLASS: Record<IndexerHealthTone, string> = {
   ok: "text-[var(--scry-ink2)]",
   slow: "text-[var(--scry-ink2)]",
+  partial: "text-[var(--scry-warning-text)]",
   failed: "text-[var(--scry-danger-text-soft)]",
   skipped: "text-[var(--scry-muted3)]",
   pending: "text-[var(--scry-muted3)]",
@@ -169,7 +171,7 @@ const BADGE_TONE_CLASS: Record<BadgeTone, string> = {
 };
 
 const RESULT_GRID_CLASS =
-  "grid grid-cols-[34px_1fr_140px_92px_80px_112px_74px] items-center gap-2.5 px-4";
+  "grid grid-cols-[34px_minmax(0,1fr)_140px_92px_80px_112px_112px] items-center gap-2.5 px-4";
 
 /** At most three badges per row; the rest live in the expanded detail. */
 const MAX_ROW_BADGES = 3;
@@ -423,42 +425,18 @@ function QueryCard({
             </span>
           }
         />
-        <Popover>
-          <PopoverTrigger asChild>
-            <button
-              id="indexer-search-scope-categories"
-              type="button"
-              className={chipClassName}
-            >
-              <FolderTree className="h-3.5 w-3.5 text-[var(--scry-faint)]" />
-              <span className="text-[var(--scry-faint2)]">
-                {t("indexerSearch.scope.categories")}
-              </span>
-              {categories.trim()
-                ? categories.trim()
-                : t("indexerSearch.scope.categoriesDefault")}
-              <ChevronDown className="h-3.5 w-3.5 text-[var(--scry-faint3)]" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-[280px] space-y-2 p-3">
-            <label
-              htmlFor="indexer-search-categories-input"
-              className="block text-[12px] font-semibold text-[var(--scry-ink2)]"
-            >
-              {t("indexerSearch.scope.categories")}
-            </label>
-            <Input
-              id="indexer-search-categories-input"
-              value={categories}
-              inputMode="numeric"
-              placeholder={t("indexerSearch.scope.categoriesDefault")}
-              onChange={(event) => onCategoriesChange(event.target.value)}
-            />
-            <p className="text-[11px] text-[var(--scry-faint2)]">
-              {t("indexerSearch.scope.categoriesHelp")}
-            </p>
-          </PopoverContent>
-        </Popover>
+        <div className="flex h-8 w-[240px] max-w-full [&>div>button]:h-8 [&>div>button]:py-0">
+          <IndexerCategoryPicker
+            triggerId="indexer-search-scope-categories"
+            panelId="indexer-search-category-options"
+            categoryIdPrefix="indexer-search-category"
+            categoriesLabel={t("indexerSearch.scope.categories")}
+            scope="RAW"
+            value={categories.split(/[\s,]+/).filter(Boolean)}
+            disabled={false}
+            onChange={(values) => onCategoriesChange(values.join(","))}
+          />
+        </div>
         <div className="min-w-2 flex-1" />
         <button
           id="indexer-search-advanced-toggle"
@@ -668,7 +646,9 @@ function HealthLine({
               />
               {entry.name}
               <span className={cn("tabular-nums", HEALTH_COUNT_CLASS[tone])}>
-                {tone === "failed"
+                {tone === "partial"
+                  ? t("indexerSearch.health.partial", { count: entry.resultCount })
+                  : tone === "failed"
                   ? t("indexerSearch.health.failed")
                   : tone === "skipped"
                     ? t("indexerSearch.health.skipped")

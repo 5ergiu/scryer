@@ -337,6 +337,13 @@ test("health tones read slowness from elapsed time, not from a status", () => {
   );
 });
 
+test("incomplete searches with results are partial and remain retryable", () => {
+  const entry = indexer({ name: "partial", status: "FAILED", resultCount: 50 });
+  assert.equal(indexerHealthTone(entry), "partial");
+  assert.equal(indexerHealthTone({ ...entry, resultCount: 0 }), "failed");
+  assert.deepEqual(summarizeIndexerHealth([entry]).failedIndexerIds, [entry.indexerId]);
+});
+
 test("the health summary counts what is still outstanding", () => {
   const summary = summarizeIndexerHealth([
     indexer({ name: "a", elapsedMs: 400 }),
