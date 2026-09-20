@@ -1326,6 +1326,49 @@ export const updateServiceSettingsMutation = `mutation UpdateServiceSettings($in
   }
 }`;
 
+export const queueIndexerSearchAssignmentMutation = `mutation QueueIndexerSearchAssignment($input: QueueDownloadInput!, $routing: IndexerGrabSelectionInput!, $replacement: Boolean!) {
+  queueIndexerSearchAssignment(input: $input, routing: $routing, replacement: $replacement) {
+    status
+    jobId
+    titleId
+    titleName
+    sourceTitle
+    sourceKind
+    conflict {
+      titleId
+      titleName
+      downloadClientId
+      downloadClientType
+      downloadClientItemId
+      sourceTitle
+      sourceKind
+      state
+      replaceable
+      scope {
+        __typename
+        ... on EpisodeScopePayload {
+          episodeId
+        }
+        ... on EpisodeSetScopePayload {
+          episodeIds
+        }
+        ... on SeriesMovieScopePayload {
+          seriesMovieLinkId
+        }
+        ... on CollectionScopePayload {
+          collectionId
+        }
+        ... on TitleScopePayload {
+          wholeTitle
+        }
+        ... on OrphanScopePayload {
+          orphaned
+        }
+      }
+    }
+  }
+}`;
+
 export const queueExistingMutation = `mutation QueueExisting($input: QueueDownloadInput!) {
   queueExistingTitleDownload(input: $input) {
     status

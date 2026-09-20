@@ -86,6 +86,71 @@ pub(crate) fn queue_download_conflict_payload(
 impl DownloadMutations {
     /// Queue the release represented by a signed candidate token for an existing title.
     /// Returns a job id when accepted or a conflict payload when the submission scope is busy.
+    async fn queue_indexer_search_assignment(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "Signed candidate token and submission options; the token supplies the release identity."
+        )]
+        input: QueueDownloadInput,
+        #[graphql(desc = "Operator-selected client and optional category override.")]
+        routing: IndexerGrabSelectionInput,
+        #[graphql(desc = "Whether this release replaces existing owned media.")]
+        replacement: bool,
+    ) -> GqlResult<QueueDownloadPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let QueueDownloadInput {
+            title_id,
+            candidate_token,
+            size_bytes,
+            scope: _,
+            replace_in_progress,
+            purpose: _,
+        } = input;
+        let title_id = title_id.to_string();
+        let outcome = app
+            .queue_indexer_search_assignment(
+                &actor, &title_id, &candidate_token, size_bytes.map(i64::from),
+                SubmissionConflictPolicy::from_replace_flag(replace_in_progress.unwrap_or(false)),
+                replacement,
+                scryer_application::IndexerGrabSelection { client_id: routing.client_id.to_string(), category: routing.category },
+            )
+            .await
+            .map_err(to_gql_error)?;
+        let title = app
+            .get_title_for_download_actions(&actor, &title_id)
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| to_gql_error(AppError::NotFound(format!("title {title_id}"))))?;
+
+        Ok(match outcome {
+            QueueDownloadOutcome::Queued(queued) => QueueDownloadPayload {
+                status: QueueDownloadResultStatusValue::Queued,
+                job_id: Some(queued.job_id.into()),
+                title_id: title.id.into(),
+                title_name: title.name,
+                source_title: queued.queued_release.source_title,
+                source_kind: queued
+                    .queued_release
+                    .source_kind
+                    .map(DownloadSourceKindValue::from_application),
+                conflict: None,
+            },
+            QueueDownloadOutcome::Conflict(conflict) => QueueDownloadPayload {
+                status: QueueDownloadResultStatusValue::Conflict,
+                job_id: None,
+                title_id: title.id.into(),
+                title_name: title.name,
+                source_title: None,
+                source_kind: None,
+                conflict: Some(queue_download_conflict_payload(conflict)),
+            },
+        })
+    }
+
+    /// Queue the release represented by a signed candidate token for an existing title.
+    /// Returns a job id when accepted or a conflict payload when the submission scope is busy.
     async fn queue_existing_title_download(
         &self,
         ctx: &Context<'_>,
