@@ -1205,10 +1205,17 @@ impl CatalogQueries {
         let selection = TitlePayloadSelection::from_ctx(ctx);
         let lookahead = ctx.look_ahead();
         let catalog_filter = title_catalog_filter_from_input(filter).map_err(to_gql_error)?;
-        let include_catalog_counts = lookahead.field("hasMore").exists()
-            || lookahead.field("totalCount").exists()
-            || lookahead.field("filterCounts").exists()
-            || lookahead.field("managedBytes").exists();
+        let aggregates = scryer_application::TitleCatalogAggregates {
+            total_count: lookahead.field("totalCount").exists(),
+            filter_counts: lookahead.field("filterCounts").exists(),
+            managed_bytes: lookahead.field("managedBytes").exists(),
+        };
+        let page_limit = if lookahead.field("items").exists() || lookahead.field("hasMore").exists()
+        {
+            title_catalog_page_limit(limit)
+        } else {
+            0
+        };
         let page = app
             .list_titles(
                 &actor,
@@ -1217,10 +1224,10 @@ impl CatalogQueries {
                 query,
                 catalog_filter,
                 title_catalog_sort_from_input(sort),
-                title_catalog_page_limit(limit),
+                page_limit,
                 title_catalog_page_offset(offset),
                 selection.include_external_ids,
-                include_catalog_counts,
+                aggregates,
             )
             .await
             .map_err(to_gql_error)?;

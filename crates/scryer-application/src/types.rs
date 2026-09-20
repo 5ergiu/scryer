@@ -1222,6 +1222,13 @@ pub enum TitleCatalogContentStatus {
     Ended,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TitleCatalogAggregates {
+    pub total_count: bool,
+    pub filter_counts: bool,
+    pub managed_bytes: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TitleCatalogResult {
     pub items: Vec<Title>,

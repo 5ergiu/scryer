@@ -1,5 +1,71 @@
 use super::*;
 
+#[tokio::test]
+async fn graphql_catalog_scroll_has_more_without_aggregates() {
+    let ctx = TestContext::new().await;
+    for (index, facet) in ["MOVIE", "SERIES", "ANIME"].into_iter().enumerate() {
+        add_test_title_with_tvdb_id(
+            &ctx,
+            &format!("First {facet}"),
+            facet,
+            &(910000 + index * 2).to_string(),
+        )
+        .await;
+        add_test_title_with_tvdb_id(
+            &ctx,
+            &format!("Second {facet}"),
+            facet,
+            &(910001 + index * 2).to_string(),
+        )
+        .await;
+        for (offset, expected_len, expected_more) in [(0, 1, true), (1, 1, false), (2, 0, false)] {
+            let body = gql(
+                &ctx,
+                r#"query($facet: MediaFacetValue, $offset: Int) {
+                titles(facet: $facet, limit: 1, offset: $offset) { hasMore items { id } }
+            }"#,
+                json!({"facet": facet, "offset": offset}),
+            )
+            .await;
+            assert_no_errors(&body);
+            assert_eq!(body["data"]["titles"]["hasMore"], expected_more);
+            assert_eq!(
+                body["data"]["titles"]["items"].as_array().unwrap().len(),
+                expected_len
+            );
+        }
+        let body = gql(
+            &ctx,
+            r#"query($facet: MediaFacetValue) {
+            counts: titles(facet: $facet) { totalCount }
+            filters: titles(facet: $facet) { filterCounts { all } }
+            bytes: titles(facet: $facet) { managedBytes }
+            page: titles(facet: $facet, limit: 2) { items { id } hasMore }
+            moreOnly: titles(facet: $facet, limit: 1) { hasMore }
+            itemsOnly: titles(facet: $facet, limit: 1) { items { id } }
+            filtered: titles(facet: $facet, query: "First", limit: 1) { hasMore items { id } }
+        }"#,
+            json!({"facet": facet}),
+        )
+        .await;
+        assert_no_errors(&body);
+        assert_eq!(body["data"]["counts"]["totalCount"], 2);
+        assert_eq!(body["data"]["filters"]["filterCounts"]["all"], 2);
+        assert_eq!(body["data"]["bytes"]["managedBytes"], 0);
+        assert_eq!(body["data"]["page"]["hasMore"], false);
+        assert_eq!(body["data"]["moreOnly"]["hasMore"], true);
+        assert_eq!(
+            body["data"]["itemsOnly"]["items"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(body["data"]["filtered"]["hasMore"], false);
+        assert_eq!(
+            body["data"]["filtered"]["items"].as_array().unwrap().len(),
+            1
+        );
+    }
+}
+
 async fn create_title_catalog_library(
     ctx: &TestContext,
     facet: &str,
