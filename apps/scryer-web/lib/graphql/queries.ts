@@ -3037,6 +3037,15 @@ export const downloadClientRoutingQuery = `query DownloadClientRouting($scopeId:
   }
 }`;
 
+export const downloadClientRoutingAllScopesQuery = `query DownloadClientRoutingAllScopes {
+  movie: downloadClientRouting(scope: MOVIE) {${downloadClientRoutingFieldSelection}
+  }
+  series: downloadClientRouting(scope: SERIES) {${downloadClientRoutingFieldSelection}
+  }
+  anime: downloadClientRouting(scope: ANIME) {${downloadClientRoutingFieldSelection}
+  }
+}`;
+
 // Batched query for indexer routing: 2 requests → 1
 export const indexerRoutingInitQuery = `query IndexerRoutingInit($scopeId: ContentScopeValue!) {
   indexers {${indexerFieldSelection}

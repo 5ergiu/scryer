@@ -1,6 +1,13 @@
 
 import * as React from "react";
-import { ChevronDown, ChevronUp, Edit, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Edit,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { AddNewButton } from "@/components/common/add-new-button";
 import { DownloadClientConfigField } from "@/components/common/download-client-config-field";
 import { DownloadClientRemotePathMappingsField } from "@/components/common/download-client-remote-path-mappings-field";
@@ -34,9 +41,20 @@ import { useTranslate } from "@/lib/context/translate-context";
 import type {
   DownloadClientRecord,
   DownloadClientDraft,
+  DownloadClientRoutingSettings,
+  DownloadClientRoutingSettingsByScope,
   DownloadClientTypeOption,
   ProxyRecord,
 } from "@/lib/types";
+import type { ViewCategoryId } from "@/lib/types/quality-profiles";
+import { DOWNLOAD_CLIENT_ROUTING_EMPTY } from "@/lib/constants/nzbget";
+import { LoadingMark } from "@/components/common/loading-mark";
+import { useSeedingProfileOptions } from "@/lib/hooks/use-seeding-profile-options";
+import {
+  SEEDING_PROFILE_INHERIT_VALUE,
+  seedingProfileSelectValue,
+  seedingProfileSelectValueToId,
+} from "@/lib/utils/seeding-profiles";
 import { cn } from "@/lib/utils";
 import { selectorId } from "@/lib/utils/dom-ids";
 import type { BoxedActionButtonTone } from "@/lib/utils/action-button-styles";
@@ -50,7 +68,7 @@ function DownloadClientActionButton({
   ...props
 }: Omit<React.ComponentProps<typeof IconButton>, "tone"> & {
   label: string;
-  tone: Extract<BoxedActionButtonTone, "edit" | "enabled" | "disabled" | "delete">;
+  tone: Extract<BoxedActionButtonTone, "edit" | "delete">;
 }) {
   return (
     <IconButton label={label} tone={tone} className={className} {...props}>
@@ -148,6 +166,295 @@ function DownloadClientProxyCell({
   );
 }
 
+const DOWNLOAD_CLIENT_ROUTING_FACETS: Array<{
+  scope: ViewCategoryId;
+  labelKey: "search.facetMovie" | "search.facetSeries" | "search.facetAnime";
+}> = [
+  { scope: "MOVIE", labelKey: "search.facetMovie" },
+  { scope: "SERIES", labelKey: "search.facetSeries" },
+  { scope: "ANIME", labelKey: "search.facetAnime" },
+];
+
+const DOWNLOAD_CLIENT_PRIORITY_OPTIONS = [
+  { value: "force", label: "settings.downloadClientPriorityForce" },
+  { value: "very high", label: "settings.downloadClientPriorityVeryHigh" },
+  { value: "high", label: "settings.downloadClientPriorityHigh" },
+  { value: "normal", label: "settings.downloadClientPriorityNormal" },
+  { value: "low", label: "settings.downloadClientPriorityLow" },
+  { value: "very low", label: "settings.downloadClientPriorityVeryLow" },
+] as const;
+
+function normalizeDownloadClientRoutingPriority(value: string): string {
+  const normalized = value.trim().toLowerCase().replaceAll("_", " ");
+  return DOWNLOAD_CLIENT_PRIORITY_OPTIONS.some(
+    (option) => option.value === normalized,
+  )
+    ? normalized
+    : "normal";
+}
+
+function DownloadClientRoutingDisclosure({
+  downloadClient,
+  routingByScope,
+  isLoading,
+  mutatingScopes,
+  onChange,
+}: {
+  downloadClient: DownloadClientRecord;
+  routingByScope: DownloadClientRoutingSettingsByScope;
+  isLoading: boolean;
+  mutatingScopes: ReadonlySet<ViewCategoryId>;
+  onChange: (
+    scope: ViewCategoryId,
+    clientId: string,
+    nextValue: Partial<DownloadClientRoutingSettings>,
+    options?: { save?: boolean },
+  ) => Promise<void> | void;
+}) {
+  const t = useTranslate();
+  const { options: seedingProfileOptions } = useSeedingProfileOptions();
+
+  return (
+    <Table
+      overflow="auto"
+      layout="fixed"
+      density="dense"
+      wrapperClassName="rounded-[14px] border border-[var(--scry-border2)] bg-[var(--scry-surfC)]"
+      className="min-w-[1080px] [&_td]:align-middle [&_th]:align-middle"
+    >
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-28">{t("label.name")}</TableHead>
+          <TableHead className="w-24 text-center">
+            {t("settings.downloadClientRoutingEnabled")}
+          </TableHead>
+          <TableHead>{t("settings.downloadClientCategory")}</TableHead>
+          <TableHead className="w-36">
+            {t("settings.downloadClientRecentPriority")}
+          </TableHead>
+          <TableHead className="w-36">
+            {t("settings.downloadClientOlderPriority")}
+          </TableHead>
+          <TableHead className="w-28 text-center">
+            {t("settings.downloadClientRemoveCompleted")}
+          </TableHead>
+          <TableHead className="w-28 text-center">
+            {t("settings.downloadClientRemoveFailed")}
+          </TableHead>
+          <TableHead className="w-44">
+            {t("settings.seedingProfileColumn")}
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {DOWNLOAD_CLIENT_ROUTING_FACETS.map(({ scope, labelKey }) => {
+          const routing =
+            routingByScope[scope]?.[downloadClient.id] ??
+            DOWNLOAD_CLIENT_ROUTING_EMPTY;
+          const isPending = isLoading || mutatingScopes.has(scope);
+          const facetLabel = t(labelKey);
+
+          return (
+            <TableRow
+              key={scope}
+              data-ui="settings-table-row"
+              data-subtable-row="download-client-routing"
+            >
+              <TableCell className="font-medium">{facetLabel}</TableCell>
+              <TableCell className="text-center">
+                <Checkbox
+                  id={selectorId(
+                    "settings-download-client-routing-enabled",
+                    downloadClient.id,
+                    scope,
+                  )}
+                  size="large"
+                  checked={routing.enabled}
+                  disabled={isPending}
+                  aria-label={`${t("settings.downloadClientRoutingEnabled")}: ${facetLabel}`}
+                  onCheckedChange={(checked) =>
+                    void onChange(scope, downloadClient.id, {
+                      enabled: checked === true,
+                    })
+                  }
+                />
+              </TableCell>
+              <TableCell>
+                <Input
+                  id={selectorId(
+                    "settings-download-client-routing-category",
+                    downloadClient.id,
+                    scope,
+                  )}
+                  value={routing.category}
+                  disabled={isPending}
+                  placeholder={t("settings.downloadClientCategoryPlaceholder")}
+                  onChange={(event) =>
+                    void onChange(
+                      scope,
+                      downloadClient.id,
+                      { category: event.target.value },
+                      { save: false },
+                    )
+                  }
+                  onBlur={(event) =>
+                    void onChange(scope, downloadClient.id, {
+                      category: event.target.value,
+                    })
+                  }
+                />
+              </TableCell>
+              <TableCell>
+                <Select
+                  value={normalizeDownloadClientRoutingPriority(
+                    routing.recentQueuePriority,
+                  )}
+                  disabled={isPending}
+                  onValueChange={(value) =>
+                    void onChange(scope, downloadClient.id, {
+                      recentQueuePriority: value,
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    id={selectorId(
+                      "settings-download-client-routing-recent-priority",
+                      downloadClient.id,
+                      scope,
+                    )}
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DOWNLOAD_CLIENT_PRIORITY_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {t(option.label)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </TableCell>
+              <TableCell>
+                <Select
+                  value={normalizeDownloadClientRoutingPriority(
+                    routing.olderQueuePriority,
+                  )}
+                  disabled={isPending}
+                  onValueChange={(value) =>
+                    void onChange(scope, downloadClient.id, {
+                      olderQueuePriority: value,
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    id={selectorId(
+                      "settings-download-client-routing-older-priority",
+                      downloadClient.id,
+                      scope,
+                    )}
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DOWNLOAD_CLIENT_PRIORITY_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {t(option.label)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </TableCell>
+              <TableCell className="text-center">
+                <Checkbox
+                  id={selectorId(
+                    "settings-download-client-routing-remove-completed",
+                    downloadClient.id,
+                    scope,
+                  )}
+                  size="large"
+                  checked={routing.removeCompleted}
+                  disabled={isPending}
+                  aria-label={`${t("settings.downloadClientRemoveCompleted")}: ${facetLabel}`}
+                  onCheckedChange={(checked) =>
+                    void onChange(scope, downloadClient.id, {
+                      removeCompleted: checked === true,
+                    })
+                  }
+                />
+              </TableCell>
+              <TableCell className="text-center">
+                <Checkbox
+                  id={selectorId(
+                    "settings-download-client-routing-remove-failed",
+                    downloadClient.id,
+                    scope,
+                  )}
+                  size="large"
+                  checked={routing.removeFailed}
+                  disabled={isPending}
+                  aria-label={`${t("settings.downloadClientRemoveFailed")}: ${facetLabel}`}
+                  onCheckedChange={(checked) =>
+                    void onChange(scope, downloadClient.id, {
+                      removeFailed: checked === true,
+                    })
+                  }
+                />
+              </TableCell>
+              <TableCell>
+                <Select
+                  value={seedingProfileSelectValue(routing.seedingProfileId)}
+                  disabled={isPending}
+                  onValueChange={(value) =>
+                    void onChange(scope, downloadClient.id, {
+                      seedingProfileId: seedingProfileSelectValueToId(value),
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    id={selectorId(
+                      "settings-download-client-routing-seeding-profile",
+                      downloadClient.id,
+                      scope,
+                    )}
+                    className="w-full"
+                    aria-label={t("settings.seedingProfileRoutingLabel", {
+                      name: `${downloadClient.name} ${facetLabel}`,
+                    })}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={SEEDING_PROFILE_INHERIT_VALUE}>
+                      {t("settings.seedingProfileRoutingInherit")}
+                    </SelectItem>
+                    {routing.seedingProfileId &&
+                    !seedingProfileOptions.some(
+                      (option) => option.id === routing.seedingProfileId,
+                    ) ? (
+                      <SelectItem value={routing.seedingProfileId}>
+                        {t("settings.seedingProfileMissing", {
+                          id: routing.seedingProfileId,
+                        })}
+                      </SelectItem>
+                    ) : null}
+                    {seedingProfileOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
+}
+
 export type SettingsDownloadClientsSectionProps = {
   editingDownloadClientId: string | null;
   downloadClientTypeOptions: DownloadClientTypeOption[];
@@ -160,6 +467,17 @@ export type SettingsDownloadClientsSectionProps = {
   mutatingDownloadClientId: string | null;
   resetDownloadClientDraft: () => void;
   settingsDownloadClients: DownloadClientRecord[];
+  downloadClientRoutingByScope: DownloadClientRoutingSettingsByScope;
+  downloadClientRoutingLoaded: boolean;
+  downloadClientRoutingLoading: boolean;
+  mutatingDownloadClientRoutingScopes: ReadonlySet<ViewCategoryId>;
+  loadDownloadClientRouting: () => Promise<void> | void;
+  updateDownloadClientRoutingForScope: (
+    scope: ViewCategoryId,
+    clientId: string,
+    nextValue: Partial<DownloadClientRoutingSettings>,
+    options?: { save?: boolean },
+  ) => Promise<void> | void;
   editDownloadClient: (downloadClient: DownloadClientRecord) => void;
   toggleDownloadClientEnabled: (downloadClient: DownloadClientRecord) => Promise<void>;
   deleteDownloadClient: (downloadClient: DownloadClientRecord) => Promise<void>;
@@ -203,6 +521,12 @@ export function SettingsDownloadClientsSection({
   mutatingDownloadClientId,
   resetDownloadClientDraft,
   settingsDownloadClients,
+  downloadClientRoutingByScope,
+  downloadClientRoutingLoaded,
+  downloadClientRoutingLoading,
+  mutatingDownloadClientRoutingScopes,
+  loadDownloadClientRouting,
+  updateDownloadClientRoutingForScope,
   editDownloadClient,
   toggleDownloadClientEnabled,
   deleteDownloadClient,
@@ -243,6 +567,26 @@ export function SettingsDownloadClientsSection({
       normalizedClientType === "sabnzbd");
   const weaverApiKeyUrl =
     normalizedClientType === "weaver" ? buildWeaverApiKeyUrl(downloadClientDraft) : "";
+  const [expandedDownloadClientRoutingIds, setExpandedDownloadClientRoutingIds] =
+    React.useState<Set<string>>(() => new Set());
+  const toggleDownloadClientRouting = React.useCallback(
+    (clientId: string) => {
+      const isOpening = !expandedDownloadClientRoutingIds.has(clientId);
+      setExpandedDownloadClientRoutingIds((previous) => {
+        const next = new Set(previous);
+        if (isOpening) {
+          next.add(clientId);
+        } else {
+          next.delete(clientId);
+        }
+        return next;
+      });
+      if (isOpening) {
+        void loadDownloadClientRouting();
+      }
+    },
+    [expandedDownloadClientRoutingIds, loadDownloadClientRouting],
+  );
 
   const clientById = React.useMemo(
     () => Object.fromEntries(settingsDownloadClients.map((c) => [c.id, c])),
@@ -362,14 +706,49 @@ export function SettingsDownloadClientsSection({
             </TableHeader>
             <TableBody>
               {orderedClients.map((client, index) => {
+                const isRoutingExpanded = expandedDownloadClientRoutingIds.has(
+                  client.id,
+                );
                 return (
-                  <TableRow
-                    data-ui="settings-table-row"
-                    key={client.id}
-                    id={selectorId("settings-download-client-row", client.name)}
-                  >
+                  <React.Fragment key={client.id}>
+                    <TableRow
+                      data-ui="settings-table-row"
+                      id={selectorId("settings-download-client-row", client.name)}
+                      className="cursor-pointer"
+                      onClick={(event) => {
+                        if (
+                          event.target instanceof Element &&
+                          event.target.closest(
+                            "button, a, input, select, textarea, [role='button']",
+                          )
+                        ) {
+                          return;
+                        }
+                        toggleDownloadClientRouting(client.id);
+                      }}
+                    >
                   <TableCell>
                     <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        aria-label={t("settings.downloadClientRoutingScope", {
+                          scope: client.name,
+                        })}
+                        aria-controls={selectorId(
+                          "settings-download-client-routing",
+                          client.id,
+                        )}
+                        aria-expanded={isRoutingExpanded}
+                        onClick={() => toggleDownloadClientRouting(client.id)}
+                      >
+                        <ChevronRight
+                          className={cn(
+                            "h-4 w-4 transition-transform",
+                            isRoutingExpanded && "rotate-90",
+                          )}
+                        />
+                      </button>
                       <span className="w-4 text-center text-muted-foreground">{index + 1}</span>
                       <Button
                         id={selectorId("settings-download-client-move-up", client.name)}
@@ -451,7 +830,36 @@ export function SettingsDownloadClientsSection({
                       </DownloadClientActionButton>
                     </div>
                   </TableCell>
-                  </TableRow>
+                    </TableRow>
+                    {isRoutingExpanded ? (
+                      <TableRow
+                        id={selectorId(
+                          "settings-download-client-routing",
+                          client.id,
+                        )}
+                      >
+                        <TableCell colSpan={8} className="bg-muted/20 p-3">
+                          {downloadClientRoutingLoaded ? (
+                            <div className="mx-auto w-full max-w-6xl">
+                              <DownloadClientRoutingDisclosure
+                                downloadClient={client}
+                                routingByScope={downloadClientRoutingByScope}
+                                isLoading={downloadClientRoutingLoading}
+                                mutatingScopes={
+                                  mutatingDownloadClientRoutingScopes
+                                }
+                                onChange={updateDownloadClientRoutingForScope}
+                              />
+                            </div>
+                          ) : (
+                            <div className="flex min-h-24 items-center justify-center">
+                              <LoadingMark className="h-5 w-5" />
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
+                  </React.Fragment>
                 );
               })}
               {orderedClients.length === 0 ? (
