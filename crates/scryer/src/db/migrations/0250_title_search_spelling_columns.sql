@@ -1,7 +1,9 @@
 -- One multilingual normalizer for both consumers.
 --
 -- `title_search_terms` carried only the diacritic-stripped UI form. Release and
--- import resolution key on the diacritic-preserving lookup form, its script,
+-- import resolution key on the diacritic-preserving lookup form, the match form
+-- it is compared in (`match_term`, the lookup form minus a name's own trailing
+-- year, with `match_year` the year that name then asserts), its script,
 -- its numbers guard and its collation keys, all of which lived only in an
 -- in-memory index rebuilt per process. These columns persist them so both
 -- consumers read one projection.
@@ -14,6 +16,8 @@
 
 ALTER TABLE title_search_terms ADD COLUMN literal_term TEXT NOT NULL DEFAULT '';
 ALTER TABLE title_search_terms ADD COLUMN stripped_year_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE title_search_terms ADD COLUMN match_term TEXT NOT NULL DEFAULT '';
+ALTER TABLE title_search_terms ADD COLUMN match_year INTEGER;
 ALTER TABLE title_search_terms ADD COLUMN script TEXT NOT NULL DEFAULT 'other';
 ALTER TABLE title_search_terms ADD COLUMN numbers_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE title_search_terms ADD COLUMN char_length INTEGER NOT NULL DEFAULT 0;
@@ -47,6 +51,11 @@ CREATE INDEX IF NOT EXISTS idx_title_search_terms_bucket
 
 CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_literal
     ON title_search_terms(facet, literal_term);
+
+-- The spelling lane compares the match form, which drops a name's own trailing
+-- year; the literal lane above keeps it.
+CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_match_term
+    ON title_search_terms(facet, match_term);
 
 CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_romanization
     ON title_search_terms(facet, romanization_key);

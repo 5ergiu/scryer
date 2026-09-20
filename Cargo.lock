@@ -5459,6 +5459,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tracing",
  "unicode-normalization",
 ]
 

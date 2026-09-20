@@ -508,7 +508,17 @@ pub(super) async fn completed_download_proves_assigned_title(
         }
     };
     let mut evidence = crate::acquisition_release_search::canonical_title_evidence(&title);
-    evidence.ambiguity = matcher.identity_ambiguity(&title);
+    evidence.ambiguity = match matcher.evidence_ambiguity(&title).await {
+        Ok(ambiguity) => ambiguity,
+        Err(error) => {
+            tracing::warn!(
+                title_id,
+                error = %error,
+                "completed download identity gate could not read title ambiguity"
+            );
+            return AssignedTitleProof::Unknown;
+        }
+    };
 
     // A series movie is searched and grabbed under the *movie's* identity —
     // `series_movie_search_title` swaps in the movie's name, facet, year and
@@ -529,7 +539,17 @@ pub(super) async fn completed_download_proves_assigned_title(
                     crate::acquisition_release_search::series_movie_search_title(&title, &link);
                 let mut link_evidence =
                     crate::acquisition_release_search::canonical_title_evidence(&link_title);
-                link_evidence.ambiguity = matcher.identity_ambiguity(&link_title);
+                link_evidence.ambiguity = match matcher.evidence_ambiguity(&link_title).await {
+                    Ok(ambiguity) => ambiguity,
+                    Err(error) => {
+                        tracing::warn!(
+                            title_id,
+                            error = %error,
+                            "completed download identity gate could not read link ambiguity"
+                        );
+                        return AssignedTitleProof::Unknown;
+                    }
+                };
                 proof_subjects.push((link_title, link_evidence));
             }
         }
@@ -606,10 +626,25 @@ pub(super) async fn completed_download_proves_assigned_title(
     // the provisional match: a completion name that positively asserts a
     // *different* library title's identity — and not the assigned one — is a
     // contradiction, not obfuscation, and disproves the assignment outright.
-    let completion_contradicts_assignment = completion_sources.iter().any(|raw_title| {
+    let mut completion_contradicts_assignment = false;
+    for raw_title in &completion_sources {
         let anchor_keys =
             crate::acquisition_release_search::context_free_identity_anchor_keys(raw_title);
-        matcher.keys_name_another_title(title_id, &anchor_keys)
+        let names_another = match matcher
+            .keys_name_another_title(title_id, &anchor_keys)
+            .await
+        {
+            Ok(names_another) => names_another,
+            Err(error) => {
+                tracing::warn!(
+                    title_id,
+                    error = %error,
+                    "completed download identity gate could not read colliding titles"
+                );
+                return AssignedTitleProof::Unknown;
+            }
+        };
+        let contradicts = names_another
             && !proof_subjects.iter().any(|(_, evidence)| {
                 anchor_keys.iter().any(|anchor_key| {
                     crate::acquisition_release_search::evidence_key_for_normalized(
@@ -617,8 +652,12 @@ pub(super) async fn completed_download_proves_assigned_title(
                     )
                     .is_some()
                 })
-            })
-    });
+            });
+        if contradicts {
+            completion_contradicts_assignment = true;
+            break;
+        }
+    }
     if completion_contradicts_assignment {
         return AssignedTitleProof::Disproven;
     }

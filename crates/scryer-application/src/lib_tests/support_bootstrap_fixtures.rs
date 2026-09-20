@@ -218,7 +218,10 @@ fn bootstrap_with_services(
     indexer_stats: Option<Arc<RecordingIndexerStatsTracker>>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
     let release_attempts = Arc::new(MockReleaseAttemptRepo::default());
@@ -297,7 +300,10 @@ pub(super) struct MediaRequestTestHarness {
 
 pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -521,7 +527,10 @@ pub(super) fn bootstrap_with_metadata_gateway_settings_and_titles(
     settings: Arc<dyn SettingsRepository>,
 ) -> (AppUseCase, User, Arc<MockTitleRepo>) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -662,7 +671,10 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_queue_commands(
     download_queue_commands: Arc<TrackingDownloadQueueCommandRepo>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -721,7 +733,10 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_tracked_handle(
     tracked_download_handle: crate::tracked_downloads::TrackedDownloadHandle,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -780,7 +795,10 @@ pub(super) fn bootstrap_with_cleanup_tracking_and_indexer(
     indexer_client: Arc<dyn IndexerClient>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -863,7 +881,10 @@ pub(super) fn bootstrap_with_search_settings_indexer_configs_and_management(
     management_client: Option<Arc<dyn IndexerManagementClient>>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo {
         store: Arc::new(Mutex::new(configs)),
@@ -936,7 +957,10 @@ pub(super) fn bootstrap_with_settings_repo_and_profiles_and_libraries(
     libraries: Arc<dyn LibraryRepository>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -1020,7 +1044,10 @@ pub(super) fn bootstrap_with_cutoff_projection_state(
     media_files: Arc<MockMediaFileRepo>,
 ) -> (AppUseCase, User, Arc<MockTitleRepo>) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -1071,7 +1098,10 @@ pub(super) fn bootstrap_with_delete_queue(
     download_queue_commands: Arc<TrackingDownloadQueueCommandRepo>,
 ) -> (AppUseCase, User) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -1191,7 +1221,10 @@ pub(super) fn bootstrap_with_acquisition_tracking_and_indexer_and_repos(
     AcquisitionBootstrapRepos,
 ) {
     let titles = Arc::new(MockTitleRepo::default());
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     // The convergence cursor only searches a scope's routed
     // indexers, so a background cycle needs at least one enabled indexer routed
@@ -1317,7 +1350,10 @@ pub(super) fn bootstrap_with_library_delete_repositories(
     housekeeping: Arc<dyn HousekeepingRepository>,
     pending_releases: Arc<dyn PendingReleaseRepository>,
 ) -> (AppUseCase, User) {
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());
@@ -1414,7 +1450,10 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
         pending_import_items: Some(unmatched_items.items.clone()),
         ..Default::default()
     });
-    let shows = Arc::new(MockShowRepo::default());
+    let shows = Arc::new(MockShowRepo {
+        titles: Some(titles.clone()),
+        ..MockShowRepo::default()
+    });
     let users = Arc::new(MockUserRepo::default());
     let indexer_configs = Arc::new(MockIndexerConfigRepo::default());
     let download_client_configs = Arc::new(MockDownloadClientConfigRepo::default());

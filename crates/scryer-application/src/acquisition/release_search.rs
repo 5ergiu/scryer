@@ -45,7 +45,11 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TitleIdentityAmbiguity {
     pub(crate) shared_lookup_keys: Vec<String>,
-    pub(crate) spelling_index: Option<Arc<crate::title_matching::relaxed::SpellingIndex>>,
+    /// The names fetched for this release's anchors. The collision guard needs
+    /// them to prove a spelling names only one library identity; it is `None`
+    /// when nothing has fetched them, and the guard then refuses the match
+    /// rather than guessing.
+    pub(crate) spelling_index: Option<Arc<crate::title_matching::relaxed::SpellingCandidates>>,
 }
 
 impl TitleIdentityAmbiguity {
@@ -54,6 +58,14 @@ impl TitleIdentityAmbiguity {
             shared_lookup_keys,
             spelling_index: None,
         }
+    }
+
+    pub(crate) fn with_spelling_candidates(
+        mut self,
+        candidates: Arc<crate::title_matching::relaxed::SpellingCandidates>,
+    ) -> Self {
+        self.spelling_index = Some(candidates);
+        self
     }
 
     fn from_year_qualified_canonical_key(canonical_key: &str, title_year: Option<i32>) -> Self {
@@ -387,21 +399,9 @@ pub fn release_strategy_kind_for_label(label: &str, is_rss_request: bool) -> Rel
     }
 }
 
+/// One definition, shared with the persisted projection's exact lane.
 pub(crate) fn canonical_title_lookup_keys(title: &Title) -> Vec<String> {
-    let mut keys = Vec::new();
-    let mut seen = HashSet::new();
-
-    for candidate in std::iter::once(title.name.as_str())
-        .chain(title.aliases.iter().map(String::as_str))
-        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
-    {
-        let normalized = crate::title_matching::canonical_lookup_key(candidate);
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            keys.push(normalized);
-        }
-    }
-
-    keys
+    crate::ports::title_lookup_forms(title)
 }
 
 /// Present a title's anime numbering bridge cour names as tagged aliases.
@@ -426,22 +426,11 @@ pub(crate) fn title_with_bridge_cour_titles(
         .map(crate::title_matching::canonical_lookup_key)
         .collect::<HashSet<_>>();
     let mut bridged = title.clone();
-    for name in bridge.seasons.iter().flat_map(|season| &season.titles) {
-        let key = crate::title_matching::canonical_lookup_key(name);
-        if key.is_empty() || !seen.insert(key) {
+    for alias in bridge.cour_title_aliases() {
+        if !seen.insert(crate::title_matching::canonical_lookup_key(&alias.name)) {
             continue;
         }
-        // Bridge cour names are the upstream anime dataset's, so a Latin one is
-        // a romanization; tagging it as such is what lets the relaxed matcher
-        // treat `Gassho o` and `Gasshou wo` as one spelling.
-        let language = match scryer_domain::title_spelling::title_script(name) {
-            scryer_domain::title_spelling::TitleScript::Latin => "x-jat",
-            _ => "ja",
-        };
-        bridged.tagged_aliases.push(scryer_domain::TaggedAlias {
-            name: name.clone(),
-            language: language.to_string(),
-        });
+        bridged.tagged_aliases.push(alias);
     }
     bridged
 }
@@ -2016,15 +2005,20 @@ fn preferred_scoped_external_id(ids: &[ScopedExternalId], source: &str) -> Optio
 }
 
 impl AppUseCase {
-    /// Library-local identity ambiguity for a search subject.
-    /// Reads the cached monitored-title matcher, whose normalized-title index is
-    /// already built from `canonical_title_lookup_keys`, so a convergence cycle
-    /// pays for one index build instead of a query per subject. Falls back to
-    /// "not ambiguous" when the index cannot be loaded; the import gate still
-    /// catches the mismatch.
+    /// Library-local identity ambiguity for a search subject: one grouped
+    /// count over the persisted lookup-key column. Falls back to "not
+    /// ambiguous" when the read fails; the import gate still catches the
+    /// mismatch.
     pub(crate) async fn title_identity_ambiguity(&self, title: &Title) -> TitleIdentityAmbiguity {
-        match self.monitored_title_matcher().await {
-            Ok(matcher) => matcher.identity_ambiguity(title),
+        match async {
+            self.monitored_title_matcher()
+                .await?
+                .evidence_ambiguity(title)
+                .await
+        }
+        .await
+        {
+            Ok(ambiguity) => ambiguity,
             Err(error) => {
                 tracing::debug!(
                     title_id = title.id.as_str(),
@@ -2871,18 +2865,20 @@ mod tests {
         title
     }
 
-    fn spelling_evidence(title: &Title, library: &[Title]) -> CanonicalTitleEvidence {
-        let matcher = crate::import_title_resolution::MonitoredTitleMatcher::new(library.to_vec());
-        canonical_title_evidence(title).with_ambiguity(matcher.identity_ambiguity(title))
+    async fn spelling_evidence(title: &Title, library: &[Title]) -> CanonicalTitleEvidence {
+        let matcher =
+            crate::import_title_resolution::MonitoredTitleMatcher::over_titles(library.to_vec());
+        canonical_title_evidence(title)
+            .with_ambiguity(matcher.evidence_ambiguity(title).await.expect("ambiguity"))
     }
 
-    #[test]
-    fn multilingual_spelling_preserves_roman_volume_identity() {
+    #[tokio::test]
+    async fn multilingual_spelling_preserves_roman_volume_identity() {
         let mut title = spelling_title("Nymphomaniac Volume I", "eng");
         title.year = Some(2013);
-        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         let matcher =
-            crate::import_title_resolution::MonitoredTitleMatcher::new(vec![title.clone()]);
+            crate::import_title_resolution::MonitoredTitleMatcher::over_titles(vec![title.clone()]);
         for numeral in ["II", "Ⅱ", "IV"] {
             let raw = format!("Nymphomaniac.Volume.{numeral}.2013.1080p.BluRay.x264-GROUP");
             let mut candidate = make_candidate(&raw, None);
@@ -2893,6 +2889,8 @@ mod tests {
             assert!(
                 matcher
                     .resolve_movie(&crate::parse_release_metadata(&raw))
+                    .await
+                    .expect("resolve movie")
                     .is_none()
             );
             candidate.response_attributes.imdb_id = title.imdb_id.clone();
@@ -2910,12 +2908,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multilingual_spelling_raw_ids_survive_automatic_eligibility() {
+    #[tokio::test]
+    async fn multilingual_spelling_raw_ids_survive_automatic_eligibility() {
         let title = spelling_title("Die zwei Päpste", "deu");
         let mut subject = numbering_scoped_subject(&title, None, None);
         subject.subject_kind = ReleaseSearchSubjectKind::Title;
-        subject.title_evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        subject.title_evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         let mut candidate =
             make_candidate("Die.zwei.Paepste.1080p.WEB.H265.IMDB.tt8404614-GRP", None);
         candidate.quality_profile_decision = Some(allowed_quality_decision(479));
@@ -2938,8 +2936,8 @@ mod tests {
         assert!(candidate_title_match(&candidate, &subject.title_evidence).is_none());
     }
 
-    #[test]
-    fn multilingual_spelling_uses_only_the_requested_episode_air_year() {
+    #[tokio::test]
+    async fn multilingual_spelling_uses_only_the_requested_episode_air_year() {
         let mut title = spelling_title("Die Höhle der Löwen", "deu");
         title.facet = MediaFacet::Series;
         title.year = Some(2014);
@@ -2966,9 +2964,9 @@ mod tests {
             created_at: Utc::now(),
         };
         let matcher =
-            crate::import_title_resolution::MonitoredTitleMatcher::new(vec![title.clone()]);
+            crate::import_title_resolution::MonitoredTitleMatcher::over_titles(vec![title.clone()]);
         let evidence = canonical_title_evidence_for_episode(&title, Some(&episode))
-            .with_ambiguity(matcher.identity_ambiguity(&title));
+            .with_ambiguity(matcher.evidence_ambiguity(&title).await.expect("ambiguity"));
         let mut subject = numbering_scoped_subject(&title, Some(16), Some(1));
         subject.title_evidence = evidence.clone();
         for spelling in ["Die.Höhle.der.Löwen", "Die.Hoehle.der.Loewen"] {
@@ -2990,7 +2988,7 @@ mod tests {
         assert!(
             candidate_title_match(
                 &make_candidate(raw, None),
-                &spelling_evidence(&title, std::slice::from_ref(&title))
+                &spelling_evidence(&title, std::slice::from_ref(&title)).await
             )
             .is_none()
         );
@@ -3001,22 +2999,24 @@ mod tests {
         rival.name = "Die Hoehle der Loewen".into();
         rival.year = Some(2020);
         rival.monitored = false;
-        let matcher =
-            crate::import_title_resolution::MonitoredTitleMatcher::new(vec![title.clone(), rival]);
+        let matcher = crate::import_title_resolution::MonitoredTitleMatcher::over_titles(vec![
+            title.clone(),
+            rival,
+        ]);
         let colliding = canonical_title_evidence_for_episode(&title, Some(&episode))
-            .with_ambiguity(matcher.identity_ambiguity(&title));
+            .with_ambiguity(matcher.evidence_ambiguity(&title).await.expect("ambiguity"));
         assert!(candidate_title_match(&make_candidate(raw, None), &colliding).is_none());
     }
 
-    #[test]
-    fn multilingual_spelling_accepts_both_reported_releases_at_grab_and_import() {
+    #[tokio::test]
+    async fn multilingual_spelling_accepts_both_reported_releases_at_grab_and_import() {
         let title = spelling_title("Die zwei Päpste", "deu");
         let library = vec![title.clone()];
-        let evidence = spelling_evidence(&title, &library);
+        let evidence = spelling_evidence(&title, &library).await;
         let mut subject = numbering_scoped_subject(&title, None, None);
         subject.subject_kind = ReleaseSearchSubjectKind::Title;
         subject.title_evidence = evidence.clone();
-        let matcher = crate::import_title_resolution::MonitoredTitleMatcher::new(library);
+        let matcher = crate::import_title_resolution::MonitoredTitleMatcher::over_titles(library);
         for raw in [
             "Die.zwei.Paepste.2019.GERMAN.DL.1080p.HDR.WEB.H265-TSCC",
             "Die.zwei.Paepste.2019.GERMAN.DL.iNTERNAL.HDR.1080p.WEB.h265-TMSF",
@@ -3037,6 +3037,8 @@ mod tests {
             assert_eq!(
                 matcher
                     .resolve_movie(&parsed)
+                    .await
+                    .expect("resolve movie")
                     .expect("import match")
                     .title
                     .id,
@@ -3050,8 +3052,8 @@ mod tests {
     /// the RSS path uses. An anime episode name carries no year and the
     /// indexer asserts no id here, so only the romanization equivalence can
     /// prove the identity.
-    #[test]
-    fn romanized_search_result_matches_the_tagged_romaji_alias() {
+    #[tokio::test]
+    async fn romanized_search_result_matches_the_tagged_romaji_alias() {
         let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
         title.facet = MediaFacet::Anime;
         title.year = None;
@@ -3061,7 +3063,7 @@ mod tests {
                 .into(),
             language: "x-jat".into(),
         }];
-        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
 
         let candidate = make_candidate(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
@@ -3087,8 +3089,8 @@ mod tests {
 
     /// A romanization equivalence must not rescue an identity that a second
     /// library title answers to just as well.
-    #[test]
-    fn romanized_search_result_stays_unmatched_against_a_competing_identity() {
+    #[tokio::test]
+    async fn romanized_search_result_stays_unmatched_against_a_competing_identity() {
         let mut title = spelling_title("Fullmetal Alchemist Brotherhood", "eng");
         title.facet = MediaFacet::Anime;
         title.year = None;
@@ -3106,7 +3108,7 @@ mod tests {
                 .into(),
             language: "x-jat".into(),
         }];
-        let evidence = spelling_evidence(&title, &[title.clone(), rival]);
+        let evidence = spelling_evidence(&title, &[title.clone(), rival]).await;
 
         let candidate = make_candidate(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
@@ -3118,10 +3120,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multilingual_spelling_requires_corroboration_and_available_collision_index() {
+    #[tokio::test]
+    async fn multilingual_spelling_requires_corroboration_and_available_collision_index() {
         let title = spelling_title("Die zwei Päpste", "deu");
-        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         for raw in [
             "Die.zwei.Paepste.1080p.WEB.H265-GRP",
             "Die.zwei.Paepste.2020.1080p.WEB.H265-GRP",
@@ -3148,13 +3150,13 @@ mod tests {
         assert!(candidate_title_match(&candidate, &evidence).is_none());
     }
 
-    #[test]
-    fn multilingual_spelling_rejects_unmonitored_competitors_and_near_ties() {
+    #[tokio::test]
+    async fn multilingual_spelling_rejects_unmonitored_competitors_and_near_ties() {
         let title = spelling_title("The Silver Harbor", "eng");
         let mut rival = spelling_title("The Silver Harbour", "eng");
         rival.id = "rival".to_string();
         rival.monitored = false;
-        let evidence = spelling_evidence(&title, &[title.clone(), rival]);
+        let evidence = spelling_evidence(&title, &[title.clone(), rival]).await;
         assert!(
             candidate_title_match(
                 &make_candidate("The.Silver.Harbour.2019.1080p.WEB.H265-GRP", None),
@@ -3169,7 +3171,7 @@ mod tests {
             )
             .is_none()
         );
-        let alone = spelling_evidence(&title, std::slice::from_ref(&title));
+        let alone = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         assert!(
             candidate_title_match(
                 &make_candidate("The.Silver.Harbour.2019.1080p.WEB.H265-GRP", None),
@@ -3179,8 +3181,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multilingual_spelling_native_cjk_typos_require_ids_and_minimum_length() {
+    #[tokio::test]
+    async fn multilingual_spelling_native_cjk_typos_require_ids_and_minimum_length() {
         for (language, expected, observed) in [
             (
                 "jpn",
@@ -3199,7 +3201,7 @@ mod tests {
             ),
         ] {
             let title = spelling_title(expected, language);
-            let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+            let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
             let mut candidate =
                 make_candidate(&format!("{observed}.2019.1080p.WEB.H265-GRP"), None);
             assert!(
@@ -3213,7 +3215,7 @@ mod tests {
             );
         }
         let title = spelling_title("大地", "zho");
-        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         let mut candidate = make_candidate("天地.2019.1080p.WEB.H265-GRP", None);
         candidate.response_attributes.imdb_id = title.imdb_id.clone();
         assert!(candidate_title_match(&candidate, &evidence).is_none());
@@ -3247,8 +3249,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn multilingual_spelling_recovers_locale_forms_and_cyrillic_typos() {
+    #[tokio::test]
+    async fn multilingual_spelling_recovers_locale_forms_and_cyrillic_typos() {
         for (language, expected, observed) in [
             ("fra", "Le cœur de Chloé", "Le.coeur.de.Chloe"),
             ("spa", "El último día", "El.ultimo.dia"),
@@ -3258,7 +3260,7 @@ mod tests {
             ("rus", "Далёкий тихий берег", "Далекий.тихий.берег"),
         ] {
             let title = spelling_title(expected, language);
-            let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+            let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
             let raw = format!("{observed}.2019.1080p.WEB.H265-GRP");
             assert!(
                 candidate_title_match(&make_candidate(&raw, None), &evidence).is_some(),
@@ -3271,7 +3273,7 @@ mod tests {
             name: "Die zwei Päpste".to_string(),
             language: "deu".to_string(),
         });
-        let evidence = spelling_evidence(&title, std::slice::from_ref(&title));
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         assert_eq!(
             evidence
                 .spelling_identity
@@ -4351,14 +4353,18 @@ mod tests {
 
     /// Tier 0 ambiguity exactly as the acquisition paths derive it: from the
     /// monitored-title index over the library, with no schema or SMG input.
-    fn library_local_ambiguity(subject: &Title, library: &[Title]) -> TitleIdentityAmbiguity {
-        let matcher = crate::import_title_resolution::MonitoredTitleMatcher::new(library.to_vec());
+    async fn library_local_ambiguity(subject: &Title, library: &[Title]) -> TitleIdentityAmbiguity {
+        let matcher =
+            crate::import_title_resolution::MonitoredTitleMatcher::over_titles(library.to_vec());
         TitleIdentityAmbiguity::from_shared_keys(
-            matcher.shared_lookup_keys(&subject.id, &canonical_title_lookup_keys(subject)),
+            matcher
+                .shared_lookup_keys(&subject.id, &canonical_title_lookup_keys(subject))
+                .await
+                .expect("shared lookup keys"),
         )
     }
 
-    fn ambiguous_episode_subject(
+    async fn ambiguous_episode_subject(
         title: &Title,
         library: &[Title],
         season: Option<u32>,
@@ -4367,7 +4373,7 @@ mod tests {
         let mut subject = numbering_scoped_subject(title, season, episode);
         subject.title_evidence = subject
             .title_evidence
-            .with_ambiguity(library_local_ambiguity(title, library));
+            .with_ambiguity(library_local_ambiguity(title, library).await);
         subject
     }
 
@@ -4479,10 +4485,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn library_local_collision_flags_shared_bare_key() {
+    #[tokio::test]
+    async fn library_local_collision_flags_shared_bare_key() {
         let (live_action, library) = tide_chart_library(vec!["Tide Chart Live Action".to_string()]);
-        let ambiguity = library_local_ambiguity(&live_action, &library);
+        let ambiguity = library_local_ambiguity(&live_action, &library).await;
 
         assert!(ambiguity.requires_disambiguator());
         assert_eq!(ambiguity.shared_lookup_keys, vec!["tide chart".to_string()]);
@@ -4490,12 +4496,12 @@ mod tests {
         assert!(ambiguity.key_is_unique_to_title("tide chart live action"));
     }
 
-    #[test]
-    fn ambiguous_title_rejects_bare_candidate_without_disambiguator() {
+    #[tokio::test]
+    async fn ambiguous_title_rejects_bare_candidate_without_disambiguator() {
         // The driving incident: a bare `Tide.Chart.S02E01` names both library
         // titles equally well, so it is not identity evidence for either.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = make_candidate("Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP", None);
 
         assert_eq!(
@@ -4504,12 +4510,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_title_accepts_year_disambiguator() {
+    #[tokio::test]
+    async fn ambiguous_title_accepts_year_disambiguator() {
         // The release carries the live-action title's year, so it names one of
         // the two colliding titles and clears the identity gate.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = make_candidate("Tide.Chart.2023.S02E01.1080p.WEB-DL.x264-GRP", None);
 
         assert_eq!(
@@ -4518,11 +4524,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_title_accepts_unique_alias_disambiguator() {
+    #[tokio::test]
+    async fn ambiguous_title_accepts_unique_alias_disambiguator() {
         // The matched key is an alias only the live-action title claims.
         let (live_action, library) = tide_chart_library(vec!["Tide Chart Live Action".to_string()]);
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = make_candidate("Tide.Chart.Live.Action.S02E01.1080p.WEB-DL.x264-GRP", None);
 
         assert_eq!(
@@ -4531,10 +4537,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_title_rejects_upstream_provenance_without_release_id() {
+    #[tokio::test]
+    async fn ambiguous_title_rejects_upstream_provenance_without_release_id() {
         let (live_action, library) = tide_chart_library(Vec::new());
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = make_candidate(
             "Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP",
             Some(ReleaseCandidateProvenance {
@@ -4686,8 +4692,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn year_suffixed_title_pair_still_collides_and_bare_release_is_ambiguous() {
+    #[tokio::test]
+    async fn year_suffixed_title_pair_still_collides_and_bare_release_is_ambiguous() {
         // Adversarial-review regression: `Tide Chart` vs `Tide Chart (2023)` is
         // the commonest real collision shape; byte-equality collision
         // detection missed it, and the with_year matching bridge then
@@ -4697,7 +4703,7 @@ mod tests {
         live_action.name = "Tide Chart (2023)".to_string();
         library[0] = live_action.clone();
 
-        let ambiguity = library_local_ambiguity(&live_action, &library);
+        let ambiguity = library_local_ambiguity(&live_action, &library).await;
         assert!(
             ambiguity.requires_disambiguator(),
             "year-suffixed pair must collide: {ambiguity:?}"
@@ -4713,12 +4719,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn blocklisted_release_reports_blocklisted_not_ambiguous() {
+    #[tokio::test]
+    async fn blocklisted_release_reports_blocklisted_not_ambiguous() {
         // A burned release must never be re-parked for review: DbBlocklisted
         // outranks AmbiguousIdentity in the decision order.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = make_candidate("Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP", None);
 
         let profile = QualityProfile::default();
@@ -4757,8 +4763,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unambiguous_title_demands_no_disambiguator() {
+    #[tokio::test]
+    async fn unambiguous_title_demands_no_disambiguator() {
         // Pals is alone on its canonical key, so a bare scene release keeps
         // clearing the identity gate untouched.
         let mut title = make_title();
@@ -4769,7 +4775,7 @@ mod tests {
         title.aliases = Vec::new();
         title.tagged_aliases = Vec::new();
         let library = vec![title.clone()];
-        let subject = ambiguous_episode_subject(&title, &library, Some(9), Some(23));
+        let subject = ambiguous_episode_subject(&title, &library, Some(9), Some(23)).await;
         assert!(!subject.title_evidence.ambiguity.requires_disambiguator());
 
         let candidate = make_candidate("Pals.S09E23E24.1080p.BluRay.x264-TENEIGHTY", None);
@@ -4837,12 +4843,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_title_accepts_response_id_disambiguator() {
+    #[tokio::test]
+    async fn ambiguous_title_accepts_response_id_disambiguator() {
         // The indexer asserts the live-action title's own TVDB id, which
         // suffices on its own for a bare release name.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let mut subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let mut subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         subject.tvdb_id = Some("393199".to_string());
         let candidate = series_episode_candidate(
             "Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP",
@@ -4858,12 +4864,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_title_without_response_ids_stays_ambiguous() {
+    #[tokio::test]
+    async fn ambiguous_title_without_response_ids_stays_ambiguous() {
         // Same subject, same release name — only the indexer's id assertion is
         // missing, and absence is not a disambiguator.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let mut subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let mut subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         subject.tvdb_id = Some("393199".to_string());
         let candidate = make_candidate("Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP", None);
 
@@ -4873,13 +4879,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn category_contradiction_outranks_identity_ambiguity() {
+    #[tokio::test]
+    async fn category_contradiction_outranks_identity_ambiguity() {
         // The incident release is both anime-categorized and identity-ambiguous.
         // The category is the sharper, more actionable reason, so it reports
         // first.
         let (live_action, library) = tide_chart_library(Vec::new());
-        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1));
+        let subject = ambiguous_episode_subject(&live_action, &library, Some(2), Some(1)).await;
         let candidate = series_episode_candidate(
             "Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP",
             response_categories(&["5070"]),

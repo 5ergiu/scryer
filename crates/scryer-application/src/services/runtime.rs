@@ -50,8 +50,15 @@ pub struct AppRuntimeCatalogState {
     /// separate processes or replicas; multi-process profile mutations require
     /// a shared database advisory/transaction lock before they are supported.
     pub quality_profile_reference_lock: Arc<tokio::sync::Mutex<()>>,
-    pub(crate) monitored_title_matcher:
-        Arc<RwLock<crate::import_title_resolution::MonitoredTitleMatcherCache>>,
+    /// Bumped by every catalog write that can change a name, alias, tagged
+    /// alias, facet, year, external id or monitored flag.
+    ///
+    /// Title resolution reads the persisted projection and so needs no
+    /// invalidation of its own; this counter survives for the one consumer
+    /// that still asks "has the catalog changed since I last resolved this?" —
+    /// the tracked-download sweep, which re-resolves an unmatched download
+    /// when the answer is yes.
+    pub(crate) catalog_generation: Arc<std::sync::atomic::AtomicU64>,
     pub poster_wake: Arc<tokio::sync::Notify>,
     pub fanart_wake: Arc<tokio::sync::Notify>,
     pub(crate) title_hydration_wake: Arc<tokio::sync::Notify>,
@@ -2402,9 +2409,7 @@ impl AppRuntimeState {
             },
             catalog: AppRuntimeCatalogState {
                 quality_profile_reference_lock: Arc::new(tokio::sync::Mutex::new(())),
-                monitored_title_matcher: Arc::new(RwLock::new(
-                    crate::import_title_resolution::MonitoredTitleMatcherCache::default(),
-                )),
+                catalog_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 poster_wake: Arc::new(tokio::sync::Notify::new()),
                 fanart_wake: Arc::new(tokio::sync::Notify::new()),
                 title_hydration_wake: Arc::new(tokio::sync::Notify::new()),

@@ -885,13 +885,16 @@ pub(super) async fn maybe_resolve_title_from_completed_download(
     for release_title in crate::import_workflow::completed_download_release_claims(completed) {
         let parsed = crate::parse_release_metadata(&release_title);
         let resolved = if parsed.episode.is_some() {
-            matcher.resolve_episode(
-                &parsed,
-                td.client_item.facet.as_deref().or(td.facet.as_deref()),
-            )
+            matcher
+                .resolve_episode(
+                    &parsed,
+                    td.client_item.facet.as_deref().or(td.facet.as_deref()),
+                )
+                .await
         } else {
-            matcher.resolve_movie(&parsed)
-        };
+            matcher.resolve_movie(&parsed).await
+        }
+        .unwrap_or_default();
 
         if let Some(resolved) = resolved {
             if td.match_type == TitleMatchType::IdOnly

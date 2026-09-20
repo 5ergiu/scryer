@@ -4,6 +4,8 @@
 
 ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS literal_term TEXT NOT NULL DEFAULT '';
 ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS stripped_year_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS match_term TEXT NOT NULL DEFAULT '';
+ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS match_year BIGINT;
 ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS script TEXT NOT NULL DEFAULT 'other';
 ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS numbers_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE title_search_terms ADD COLUMN IF NOT EXISTS char_length BIGINT NOT NULL DEFAULT 0;
@@ -37,6 +39,9 @@ CREATE INDEX IF NOT EXISTS idx_title_search_terms_bucket
 
 CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_literal
     ON title_search_terms USING btree (facet, literal_term);
+
+CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_match_term
+    ON title_search_terms USING btree (facet, match_term);
 
 CREATE INDEX IF NOT EXISTS idx_title_search_terms_facet_romanization
     ON title_search_terms USING btree (facet, romanization_key);

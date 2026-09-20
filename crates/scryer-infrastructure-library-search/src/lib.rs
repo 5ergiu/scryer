@@ -52,6 +52,11 @@ pub struct TitleSearchTerm {
     /// counting groups on this, so `Tide Chart` and `Tide Chart 2023` are one
     /// identity shape.
     pub stripped_year_key: String,
+    /// The form the spelling lane compares: the lookup form without a name's
+    /// own trailing year. `match_year` is the year that name then asserts,
+    /// falling back to the title's.
+    pub match_term: String,
+    pub match_year: Option<i32>,
     pub script: &'static str,
     pub numbers_key: String,
     pub char_length: i64,
@@ -95,6 +100,17 @@ impl From<&Title> for TitleSearchProjectionSource {
             metadata_language: title.metadata_language.clone(),
             year: title.year,
         }
+    }
+}
+
+impl TitleSearchProjectionSource {
+    /// The same source with more tagged aliases — the cour names a numbering
+    /// bridge carries. `build_title_search_terms` deduplicates, so a cour name
+    /// the title already answers to costs nothing here.
+    fn with_tagged_aliases(&self, extra: Vec<TaggedAlias>) -> Self {
+        let mut source = self.clone();
+        source.tagged_aliases.extend(extra);
+        source
     }
 }
 
@@ -443,21 +459,25 @@ struct SpellingFacts {
     collation_keys: Vec<(&'static str, Vec<u8>)>,
 }
 
-fn spelling_facts(raw_term: &str, language: Option<&str>) -> SpellingFacts {
+/// `match_term` is the form the spelling lane compares (see
+/// [`title_spelling::title_match_form`]); the equality keys are computed from
+/// it, not from the literal, because a name that dates itself is compared
+/// without its year.
+fn spelling_facts(raw_term: &str, language: Option<&str>, match_term: &str) -> SpellingFacts {
     let literal = title_spelling::title_lookup_form(raw_term);
-    let collation_keys = title_spelling::title_spelling_profiles(&literal, language)
+    let collation_keys = title_spelling::title_spelling_profiles(match_term, language)
         .into_iter()
         .filter_map(|profile| {
-            title_spelling::title_spelling_key(&literal, profile).map(|key| (profile, key))
+            title_spelling::title_spelling_key(match_term, profile).map(|key| (profile, key))
         })
         .collect();
     SpellingFacts {
         stripped_year_key: title_spelling::strip_trailing_year(&literal).to_string(),
-        script: title_spelling::title_script(&literal).as_str(),
+        script: title_spelling::title_script(match_term).as_str(),
         // From the term as written, not the lowercased literal: the
         // Roman-numeral rule reads letter case.
         numbers_key: title_spelling::title_numbers_key(raw_term),
-        romanization_key: title_spelling::japanese_romanization_key(&literal, language),
+        romanization_key: title_spelling::japanese_romanization_key(match_term, language),
         collation_keys,
         literal,
     }
@@ -472,6 +492,7 @@ fn push_term_with_tokens(
     weight: i64,
     raw_term: &str,
     language: Option<&str>,
+    title_name: &str,
     year: Option<i32>,
 ) {
     let raw_term = raw_term.trim();
@@ -484,7 +505,8 @@ fn push_term_with_tokens(
         return;
     }
 
-    let facts = spelling_facts(raw_term, language);
+    let (match_term, match_year) = title_spelling::title_match_form(raw_term, title_name, year);
+    let facts = spelling_facts(raw_term, language, &match_term);
 
     if seen.insert((term_kind, normalized_term.clone())) {
         terms.push(TitleSearchTerm {
@@ -492,10 +514,12 @@ fn push_term_with_tokens(
             raw_term: raw_term.to_string(),
             normalized_term: normalized_term.clone(),
             literal_term: facts.literal.clone(),
+            match_term: match_term.clone(),
+            match_year,
             stripped_year_key: facts.stripped_year_key.clone(),
             script: facts.script,
             numbers_key: facts.numbers_key.clone(),
-            char_length: facts.literal.chars().count() as i64,
+            char_length: match_term.chars().count() as i64,
             romanization_key: facts.romanization_key.clone(),
             language_tag: language.map(str::to_string),
             collation_keys: facts.collation_keys.clone(),
@@ -515,11 +539,13 @@ fn push_term_with_tokens(
         if !seen.insert((token_term_kind, token.clone())) {
             continue;
         }
-        let token_facts = spelling_facts(&token, language);
+        let token_facts = spelling_facts(&token, language, &token);
         terms.push(TitleSearchTerm {
             term_kind: token_term_kind,
             raw_term: token.clone(),
             literal_term: token_facts.literal.clone(),
+            match_term: token_facts.literal.clone(),
+            match_year: None,
             stripped_year_key: token_facts.stripped_year_key,
             script: token_facts.script,
             numbers_key: token_facts.numbers_key,
@@ -547,6 +573,7 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
         TERM_WEIGHT_NAME,
         &source.name,
         language,
+        &source.name,
         source.year,
     );
 
@@ -559,6 +586,7 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_WEIGHT_SORT_TITLE,
             sort_title,
             language,
+            &source.name,
             source.year,
         );
     }
@@ -572,6 +600,7 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_WEIGHT_SLUG,
             slug,
             language,
+            &source.name,
             source.year,
         );
     }
@@ -585,6 +614,7 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_WEIGHT_ALIAS,
             alias,
             language,
+            &source.name,
             source.year,
         );
     }
@@ -600,6 +630,7 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_WEIGHT_TAGGED_ALIAS,
             &tagged_alias.name,
             Some(tagged_alias.language.as_str()),
+            &source.name,
             source.year,
         );
     }
@@ -660,6 +691,66 @@ async fn delete_title_search_projection_on_connection(
     Ok(())
 }
 
+/// Cour names the title's numbering bridge carries, as tagged aliases.
+///
+/// A release or an import can be named after a cour rather than after the
+/// title, so those names have to be in the projection: it is the one place the
+/// resolver looks. The matcher used to fold them in per process, which cost a
+/// bridge read per anime title on every rebuild of a catalog-sized index.
+///
+/// A bridge whose payload no longer parses is treated as absent, matching
+/// `get_anime_numbering_bridge`: the bridge is a cache, and refusing to project
+/// a title because a stored blob went stale would be worse than projecting it
+/// without its cour names.
+fn bridge_cour_aliases_from_json(title_id: &str, seasons_json: Option<String>) -> Vec<TaggedAlias> {
+    let Some(seasons_json) = seasons_json else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<scryer_domain::AnimeCommunitySeason>>(&seasons_json) {
+        Ok(seasons) => scryer_domain::AnimeNumberingBridge {
+            seasons,
+            ..Default::default()
+        }
+        .cour_title_aliases(),
+        Err(error) => {
+            tracing::warn!(
+                title_id,
+                error = %error,
+                "stored anime numbering bridge is unreadable; projecting without its cour names"
+            );
+            Vec::new()
+        }
+    }
+}
+
+async fn bridge_cour_aliases(
+    connection: &mut sqlx::SqliteConnection,
+    title_id: &str,
+) -> AppResult<Vec<TaggedAlias>> {
+    let seasons_json: Option<String> = sqlx::query_scalar(
+        "SELECT seasons_json FROM title_anime_numbering_bridges WHERE title_id = ?",
+    )
+    .bind(title_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(bridge_cour_aliases_from_json(title_id, seasons_json))
+}
+
+async fn bridge_cour_aliases_pg(
+    connection: &mut sqlx::PgConnection,
+    title_id: &str,
+) -> AppResult<Vec<TaggedAlias>> {
+    let seasons_json: Option<String> = sqlx::query_scalar(
+        "SELECT seasons_json FROM title_anime_numbering_bridges WHERE title_id = $1",
+    )
+    .bind(title_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(bridge_cour_aliases_from_json(title_id, seasons_json))
+}
+
 pub async fn replace_title_search_projection_tx(
     tx: &mut Transaction<'_, Sqlite>,
     title: &Title,
@@ -701,18 +792,24 @@ async fn replace_title_search_projection_pg_on_connection(
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
 
+    let bridged = source
+        .with_tagged_aliases(bridge_cour_aliases_pg(&mut *connection, &source.title_id).await?);
+
     let facet = source.facet.as_str();
-    for term in build_title_search_terms(source) {
+    for term in build_title_search_terms(&bridged) {
         let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
              (title_id, facet, term_kind, raw_term, normalized_term, weight,
-              literal_term, stripped_year_key, script, numbers_key, char_length,
-              romanization_key, language_tag, title_year)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+              literal_term, match_term, match_year, stripped_year_key, script,
+              numbers_key, char_length, romanization_key, language_tag, title_year)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                     $15, $16)
              ON CONFLICT (title_id, term_kind, normalized_term) DO UPDATE SET
                 raw_term = EXCLUDED.raw_term,
                 weight = EXCLUDED.weight,
                 literal_term = EXCLUDED.literal_term,
+                match_term = EXCLUDED.match_term,
+                match_year = EXCLUDED.match_year,
                 stripped_year_key = EXCLUDED.stripped_year_key,
                 script = EXCLUDED.script,
                 numbers_key = EXCLUDED.numbers_key,
@@ -729,6 +826,8 @@ async fn replace_title_search_projection_pg_on_connection(
         .bind(&term.normalized_term)
         .bind(term.weight)
         .bind(&term.literal_term)
+        .bind(&term.match_term)
+        .bind(term.match_year.map(i64::from))
         .bind(&term.stripped_year_key)
         .bind(term.script)
         .bind(&term.numbers_key)
@@ -765,16 +864,19 @@ async fn replace_title_search_projection_source_tx(
 ) -> AppResult<()> {
     delete_title_search_projection_on_connection(connection, &source.title_id).await?;
 
+    let bridged =
+        source.with_tagged_aliases(bridge_cour_aliases(&mut *connection, &source.title_id).await?);
+
     let facet = source.facet.as_str();
     let langid = facet_langid(&source.facet);
 
-    for term in build_title_search_terms(source) {
+    for term in build_title_search_terms(&bridged) {
         let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
              (title_id, facet, term_kind, raw_term, normalized_term, weight,
-              literal_term, stripped_year_key, script, numbers_key, char_length,
-              romanization_key, language_tag, title_year)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              literal_term, match_term, match_year, stripped_year_key, script,
+              numbers_key, char_length, romanization_key, language_tag, title_year)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING term_id",
         )
         .bind(&source.title_id)
@@ -784,6 +886,8 @@ async fn replace_title_search_projection_source_tx(
         .bind(&term.normalized_term)
         .bind(term.weight)
         .bind(&term.literal_term)
+        .bind(&term.match_term)
+        .bind(term.match_year.map(i64::from))
         .bind(&term.stripped_year_key)
         .bind(term.script)
         .bind(&term.numbers_key)

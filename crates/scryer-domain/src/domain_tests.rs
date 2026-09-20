@@ -255,55 +255,6 @@ fn missing_query_param_disables_query_facets() {
     assert!(!caps.supports_query_for_facet("movie"));
 }
 
-// ── match_fuzzy ───────────────────────────────────────────────────────────
-
-#[test]
-fn fuzzy_exact_match() {
-    assert!(match_fuzzy("Velvet Comet", "velvet comet"));
-}
-
-#[test]
-fn fuzzy_partial_match_beginning() {
-    assert!(match_fuzzy("Velvet Comet", "vel"));
-}
-
-#[test]
-fn fuzzy_partial_match_middle() {
-    assert!(match_fuzzy("Velvet Comet", "vet co"));
-}
-
-#[test]
-fn fuzzy_partial_match_end() {
-    assert!(match_fuzzy("Velvet Comet", "comet"));
-}
-
-#[test]
-fn fuzzy_case_insensitive() {
-    assert!(match_fuzzy("Velvet Comet", "VELVET"));
-    assert!(match_fuzzy("velvet comet", "COMET"));
-}
-
-#[test]
-fn fuzzy_no_match() {
-    assert!(!match_fuzzy("Velvet Comet", "solara"));
-}
-
-#[test]
-fn fuzzy_empty_query_matches_everything() {
-    assert!(match_fuzzy("Velvet Comet", ""));
-    assert!(match_fuzzy("", ""));
-}
-
-#[test]
-fn fuzzy_empty_candidate_no_match() {
-    assert!(!match_fuzzy("", "cowboy"));
-}
-
-#[test]
-fn fuzzy_whitespace_query() {
-    assert!(match_fuzzy("Velvet Comet", "  "));
-}
-
 // ── normalize_tags ────────────────────────────────────────────────────────
 
 #[test]

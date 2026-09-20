@@ -36,8 +36,6 @@ pub(crate) struct SpellingIdentity {
 impl SpellingIdentity {
     pub fn new(title: &Title) -> Self {
         let mut seen = HashSet::new();
-        let canonical = canonical_lookup_key(&title.name);
-        let canonical_shape = crate::import_title_resolution::strip_trailing_year_key(&canonical);
         let names = title
             .tagged_aliases
             .iter()
@@ -53,25 +51,14 @@ impl SpellingIdentity {
                     .map(|name| (name.as_str(), title.metadata_language.as_deref())),
             )
             .map(|(name, language)| {
-                let key = canonical_lookup_key(name);
-                let stripped = crate::import_title_resolution::strip_trailing_year_key(&key);
-                let explicit_year = (stripped != key)
-                    .then(|| key.rsplit_once(' ').and_then(|(_, year)| year.parse().ok()))
-                    .flatten()
-                    .filter(|year| {
-                        Some(*year) == title.year
-                            || (key != canonical && stripped != canonical_shape)
-                    });
+                let (text, year) =
+                    scryer_domain::title_spelling::title_match_form(name, &title.name, title.year);
                 SpellingName {
-                    text: if explicit_year.is_some() {
-                        stripped.to_string()
-                    } else {
-                        key.clone()
-                    },
+                    text,
                     raw: name.to_string(),
-                    key,
+                    key: canonical_lookup_key(name),
                     language: language.map(str::to_string),
-                    year: explicit_year.or(title.year),
+                    year,
                 }
             })
             .filter(|name| !name.text.is_empty() && seen.insert(name.key.clone()))
@@ -242,12 +229,32 @@ impl SpellingBucket {
     }
 }
 
-type Bucket = (String, TitleScript, Vec<String>);
+type Bucket = (String, TitleScript, String);
 
+/// The slice of the persisted name index one release's anchors touch.
+///
+/// This used to be `SpellingIndex`: every name in the library, bucketed in
+/// memory and rebuilt whenever the catalog changed. It now holds only the
+/// buckets a single matching operation asked for, fetched from
+/// `title_search_terms`. The comparison below is unchanged — what changed is
+/// where the names come from and how many of them are ever resident.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SpellingIndex {
+pub(crate) struct SpellingCandidates {
     buckets: HashMap<Bucket, SpellingBucket>,
 }
+
+/// How many names one bucket's typo lane may fetch. A common bucket in a large
+/// library is unbounded, and the typo lane is a length band, not a key: the cap
+/// is what keeps a single release from reading the catalog. The equality lanes
+/// are never capped.
+const BUCKET_FETCH_LIMIT: i64 = 2_000;
+
+/// The widest edit distance any comparison below admits, plus the one extra
+/// character a competitor check allows itself. Fetching this band once serves
+/// both discovery and the collision guard.
+const MAX_BUCKET_LENGTH_SPREAD: i64 = 4;
+/// The band a subject-anchored fetch needs: see [`SpellingCandidates::load_for_title`].
+const MAX_SUBJECT_LENGTH_SPREAD: i64 = 2 * MAX_BUCKET_LENGTH_SPREAD;
 
 /// The numbers guard, owned by the domain so the persisted projection can key
 /// a column on exactly what this compares. Volume II must not become Volume I
@@ -260,27 +267,138 @@ pub(crate) fn numbers(value: &str) -> Vec<String> {
     scryer_domain::title_spelling::title_numbers(value)
 }
 
-impl SpellingIndex {
-    pub fn new(titles: &[Title]) -> Self {
+/// The same guard as [`numbers`], in the single-string form the projection
+/// stores and buckets on.
+fn numbers_key(value: &str) -> String {
+    scryer_domain::title_spelling::title_numbers_key(value)
+}
+
+impl SpellingCandidates {
+    /// Every name of an explicitly supplied set of titles.
+    ///
+    /// The set is the caller's, never the catalog: one title under test, or a
+    /// fixture. Repository-backed callers use [`Self::load`], which reads the
+    /// same names out of the projection.
+    pub fn from_titles(titles: &[Title]) -> Self {
         let mut index = Self::default();
         for title in titles {
             let identity = SpellingIdentity::new(title);
             for name in identity.names {
-                index
-                    .buckets
-                    .entry((
-                        identity.facet.clone(),
-                        title_script(&name.text),
-                        numbers(&name.raw),
-                    ))
-                    .or_default()
-                    .insert(IndexedName {
-                        identity: identity.id.clone(),
-                        name,
-                    });
+                index.insert(&identity.facet, &identity.id, name);
             }
         }
         index
+    }
+
+    /// Fetch the buckets `anchors` touch from the persisted projection.
+    ///
+    /// One bucket per (anchor, facet): the same key the in-memory index
+    /// bucketed on. `facet` narrows to a single one when the release names it.
+    pub async fn load(
+        titles: &dyn crate::ports::TitleRepository,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
+    ) -> crate::AppResult<Self> {
+        Self::load_with_spread(titles, anchors, facet, MAX_BUCKET_LENGTH_SPREAD).await
+    }
+
+    /// The buckets a *subject's own names* touch, for evidence built before
+    /// any release is in hand (the acquisition lane builds it once per search
+    /// subject and reuses it for every candidate).
+    ///
+    /// The observed spelling is not known yet, so the band has to be wider
+    /// than the release-anchored one: a competitor sits within `distance + 1`
+    /// of an observed spelling that is itself within `distance` of the name,
+    /// so it can be `2 * distance + 1` characters from the name that anchors
+    /// this fetch. Narrowing it would drop a collider and turn an ambiguous
+    /// match into a confident one.
+    pub async fn load_for_title(
+        titles: &dyn crate::ports::TitleRepository,
+        title: &Title,
+    ) -> crate::AppResult<Self> {
+        let identity = SpellingIdentity::new(title);
+        let anchors = identity
+            .names
+            .iter()
+            .map(|name| (name.text.clone(), name.raw.clone()))
+            .collect::<Vec<_>>();
+        Self::load_with_spread(
+            titles,
+            &anchors,
+            Some(identity.facet.as_str()),
+            MAX_SUBJECT_LENGTH_SPREAD,
+        )
+        .await
+    }
+
+    async fn load_with_spread(
+        titles: &dyn crate::ports::TitleRepository,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
+        length_spread: i64,
+    ) -> crate::AppResult<Self> {
+        let mut index = Self::default();
+        for (anchor, observed_raw) in anchors {
+            if anchor.is_empty() {
+                continue;
+            }
+            let numbers_key = scryer_domain::title_spelling::title_numbers_key(observed_raw);
+            let collation_keys = scryer_domain::title_spelling::COLLATION_PROFILES
+                .iter()
+                .filter_map(|profile| {
+                    title_spelling_key(anchor, profile).map(|key| (*profile, key))
+                })
+                .collect::<Vec<_>>();
+            let length = anchor.chars().count() as i64;
+            for candidate_facet in ["movie", "series", "anime"] {
+                if facet.is_some_and(|facet| facet != candidate_facet) {
+                    continue;
+                }
+                let rows = titles
+                    .find_title_name_candidates(crate::ports::TitleNameBucketQuery {
+                        facet: Some(candidate_facet),
+                        script: title_script(anchor).as_str(),
+                        numbers_key: &numbers_key,
+                        length_band: Some((
+                            (length - length_spread).max(0),
+                            length + length_spread,
+                        )),
+                        match_term: anchor,
+                        romanization_key: japanese_romanization_key(anchor, Some("ja")).as_deref(),
+                        collation_keys: &collation_keys,
+                        limit: BUCKET_FETCH_LIMIT,
+                    })
+                    .await?;
+                for row in rows {
+                    index.insert(
+                        &row.facet,
+                        &row.title_id,
+                        SpellingName {
+                            key: row.literal_term,
+                            text: row.match_term,
+                            raw: row.raw_term,
+                            language: row.language_tag,
+                            year: row.match_year,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(index)
+    }
+
+    fn insert(&mut self, facet: &str, title_id: &str, name: SpellingName) {
+        self.buckets
+            .entry((
+                facet.to_string(),
+                title_script(&name.text),
+                numbers_key(&name.raw),
+            ))
+            .or_default()
+            .insert(IndexedName {
+                identity: title_id.to_string(),
+                name,
+            });
     }
 
     /// Discovery only. Full-title matching, corroboration and collisions are
@@ -299,7 +417,7 @@ impl SpellingIndex {
                 if let Some(bucket) = self.buckets.get(&(
                     kind.to_string(),
                     title_script(anchor),
-                    numbers(observed_raw),
+                    numbers_key(observed_raw),
                 )) {
                     for index in bucket.possible_matches(anchor, None) {
                         let entry = &bucket.names[index];
@@ -324,7 +442,7 @@ impl SpellingIndex {
         let Some(bucket) = self.buckets.get(&(
             identity.facet.clone(),
             title_script(observed),
-            numbers(observed_raw),
+            numbers_key(observed_raw),
         )) else {
             return false;
         };
@@ -395,7 +513,7 @@ fn spelling_distance(
 pub(crate) fn find_spelling_match(
     anchors: &[(String, String)],
     identity: &SpellingIdentity,
-    index: Option<&SpellingIndex>,
+    index: Option<&SpellingCandidates>,
     year: Option<i32>,
     ids: Option<bool>,
     episode_years: &HashSet<i32>,

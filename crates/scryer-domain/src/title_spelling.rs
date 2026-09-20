@@ -63,6 +63,39 @@ pub fn strip_trailing_year(key: &str) -> &str {
     key
 }
 
+/// The form a name is *compared* in, and the year it then carries.
+///
+/// A name that ends in its own year (`Tide Chart 2023`) is compared without it
+/// and asserts that year; every other name is compared whole and inherits the
+/// title's year. The trailing four digits are only read as a year when they
+/// agree with the title's own year, or when the name is not simply the title's
+/// name with a year glued on — otherwise `Blade Runner 2049` would lose its
+/// number.
+///
+/// One function because two places need the same answer: the persisted search
+/// projection stores this form, and the matcher compares against it. A
+/// disagreement between them is a silent lookup miss.
+pub fn title_match_form(
+    name: &str,
+    title_name: &str,
+    title_year: Option<i32>,
+) -> (String, Option<i32>) {
+    let key = title_lookup_form(name);
+    let stripped = strip_trailing_year(&key);
+    let canonical = title_lookup_form(title_name);
+    let canonical_shape = strip_trailing_year(&canonical);
+    let explicit_year = (stripped != key)
+        .then(|| key.rsplit_once(' ').and_then(|(_, year)| year.parse().ok()))
+        .flatten()
+        .filter(|year| {
+            Some(*year) == title_year || (key != canonical && stripped != canonical_shape)
+        });
+    match explicit_year {
+        Some(year) => (stripped.to_string(), Some(year)),
+        None => (key, title_year),
+    }
+}
+
 pub fn title_script(value: &str) -> TitleScript {
     let mut script = None;
     for ch in value.chars().filter(|ch| ch.is_alphabetic()) {
