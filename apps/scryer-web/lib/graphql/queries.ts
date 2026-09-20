@@ -1,4 +1,7 @@
-import { MEDIA_ANALYSIS_FIELDS, MEDIA_DISC_FIELDS } from "../types/media-analysis.ts";
+import {
+  MEDIA_ANALYSIS_FIELDS,
+  MEDIA_DISC_FIELDS,
+} from "../types/media-analysis.ts";
 
 export const DISCOVERY_ITEM_FIELDS = `
     id
@@ -1402,9 +1405,7 @@ const TITLE_CATALOG_BASE_FIELDS = `
     recapPolicy
     createdAt`;
 
-function titleCatalogListFields(
-  projection: TitleCatalogTitleProjection = {},
-) {
+function titleCatalogListFields(projection: TitleCatalogTitleProjection = {}) {
   const fields = [TITLE_CATALOG_BASE_FIELDS];
   if (projection.library) {
     fields.push(`
@@ -1650,7 +1651,10 @@ export function buildTitlesQuery(
   const includePageMetadata = options.includePageMetadata ?? true;
   const pageMetadataFields = includePageMetadata
     ? `
-    hasMore${options.includeAggregates === false ? "" : `
+    hasMore${
+      options.includeAggregates === false
+        ? ""
+        : `
     totalCount
     managedBytes
     filterCounts {
@@ -1659,7 +1663,8 @@ export function buildTitlesQuery(
       unmonitored
       continuing
       ended
-    }`}`
+    }`
+    }`
     : "";
   return `query Titles(
   $facet: MediaFacetValue,
@@ -3037,6 +3042,18 @@ export const indexerRoutingInitQuery = `query IndexerRoutingInit($scopeId: Conte
   indexers {${indexerFieldSelection}
   }
   indexerRouting(scope: $scopeId) {${indexerRoutingFieldSelection}
+  }
+}`;
+
+export const indexerRoutingAllScopesQuery = `query IndexerRoutingAllScopes {
+  indexers {
+    id
+  }
+  movie: indexerRouting(scope: MOVIE) {${indexerRoutingFieldSelection}
+  }
+  series: indexerRouting(scope: SERIES) {${indexerRoutingFieldSelection}
+  }
+  anime: indexerRouting(scope: ANIME) {${indexerRoutingFieldSelection}
   }
 }`;
 

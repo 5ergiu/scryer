@@ -18,6 +18,7 @@ import {
 } from "@/components/common/indexer-error-history-modal";
 import { PluginVisualLabel } from "@/components/common/plugin-visual";
 import { ProxyAssignmentSelect } from "@/components/common/proxy-assignment-select";
+import { IndexerCategoryPicker } from "@/components/views/media-content/indexer-category-picker";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,7 +56,10 @@ import type {
   ConfigFieldDef,
   IndexerDownloadClientMappingCatalog,
   IndexerDownloadClientMappingCatalogResource,
+  IndexerCategoryRoutingSettings,
+  IndexerRoutingSettingsByScope,
 } from "@/lib/types";
+import type { ViewCategoryId } from "@/lib/types/quality-profiles";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
   resolveConfigFieldsForValues,
@@ -81,6 +85,7 @@ import {
   supportsSeedingProfileAssignment,
 } from "@/lib/utils/seeding-profiles";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 
 type SettingsIndexersSectionProps = {
   /// Which pane of the Indexers page to render; the page's rail owns the choice.
@@ -115,6 +120,16 @@ type SettingsIndexersSectionProps = {
     proxyConfigId: string | null,
   ) => Promise<void> | void;
   proxyConfigs: ProxyRecord[];
+  indexerRoutingByScope: IndexerRoutingSettingsByScope;
+  indexerRoutingLoaded: boolean;
+  indexerRoutingLoading: boolean;
+  mutatingIndexerRoutingScopes: ReadonlySet<ViewCategoryId>;
+  loadIndexerRouting: () => Promise<void> | void;
+  updateIndexerRoutingForScope: (
+    scope: ViewCategoryId,
+    indexerId: string,
+    nextValue: Partial<IndexerCategoryRoutingSettings>,
+  ) => Promise<void> | void;
   editIndexer: (indexer: IndexerRecord) => void;
   toggleIndexerEnabled: (indexer: IndexerRecord) => Promise<void> | void;
   deleteIndexer: (indexer: IndexerRecord) => Promise<void> | void;
@@ -399,7 +414,7 @@ function IndexerDownloadClientSelect({
     ? t("settings.indexerDownloadClientInvalidOption", {
         name: selectedOption?.name ?? model.selectedId,
       })
-    : selectedOption?.name ?? t("settings.indexerDownloadClientAutomatic");
+    : (selectedOption?.name ?? t("settings.indexerDownloadClientAutomatic"));
 
   if (model.isNotApplicable) {
     return (
@@ -416,9 +431,12 @@ function IndexerDownloadClientSelect({
   }
 
   const invalidMessage = model.invalidReason
-    ? t(`settings.indexerDownloadClientInvalid${
-        model.invalidReason.charAt(0).toUpperCase() + model.invalidReason.slice(1)
-      }`)
+    ? t(
+        `settings.indexerDownloadClientInvalid${
+          model.invalidReason.charAt(0).toUpperCase() +
+          model.invalidReason.slice(1)
+        }`,
+      )
     : null;
 
   return (
@@ -437,7 +455,9 @@ function IndexerDownloadClientSelect({
           data-testid={selectId}
           className={compact ? "w-full max-w-48" : "w-full"}
           disabled={isPending || disabled}
-          aria-describedby={model.isInvalid || model.isDisabled ? statusId : undefined}
+          aria-describedby={
+            model.isInvalid || model.isDisabled ? statusId : undefined
+          }
           aria-busy={isPending}
         >
           <SelectValue>{selectedLabel}</SelectValue>
@@ -451,7 +471,13 @@ function IndexerDownloadClientSelect({
           </SelectItem>
           {model.options.map((option) => (
             <SelectItem key={option.id} value={option.id}>
-              <span className={cn(option.isCurrent && model.isInvalid && "text-[var(--scry-danger-text-soft)]")}>
+              <span
+                className={cn(
+                  option.isCurrent &&
+                    model.isInvalid &&
+                    "text-[var(--scry-danger-text-soft)]",
+                )}
+              >
                 {option.isCurrent && model.isInvalid
                   ? t("settings.indexerDownloadClientInvalidOption", {
                       name: option.name,
@@ -511,7 +537,11 @@ function IndexerDownloadClientSelect({
           ) : null}
         </div>
       ) : isPending ? (
-        <p id={statusId} role="status" className="text-xs text-muted-foreground">
+        <p
+          id={statusId}
+          role="status"
+          className="text-xs text-muted-foreground"
+        >
           {t("status.indexerDownloadClientMappingSaving")}
         </p>
       ) : null}
@@ -579,7 +609,9 @@ function IndexerDownloadClientCell({
 }) {
   const t = useTranslate();
   const selectId = selectorId("settings-indexer-download-client", indexer.id);
-  const label = t("settings.indexerDownloadClientLabel", { name: indexer.name });
+  const label = t("settings.indexerDownloadClientLabel", {
+    name: indexer.name,
+  });
   if (!resource.catalog) {
     return (
       <IndexerDownloadClientCatalogPlaceholder
@@ -592,7 +624,10 @@ function IndexerDownloadClientCell({
   }
   return (
     <IndexerDownloadClientSelect
-      model={getIndexerDownloadClientMappingViewModel(indexer, resource.catalog)}
+      model={getIndexerDownloadClientMappingViewModel(
+        indexer,
+        resource.catalog,
+      )}
       selectId={selectId}
       label={label}
       isPending={isPending}
@@ -622,6 +657,7 @@ function IndexerSeedingProfileSelect({
   isPending,
   disabled = false,
   showLabel = false,
+  compact = false,
   onChange,
 }: {
   selectId: string;
@@ -639,6 +675,7 @@ function IndexerSeedingProfileSelect({
   isPending: boolean;
   disabled?: boolean;
   showLabel?: boolean;
+  compact?: boolean;
   onChange: (seedingProfileId: string | null) => Promise<void> | void;
 }) {
   const t = useTranslate();
@@ -667,7 +704,7 @@ function IndexerSeedingProfileSelect({
   );
 
   return (
-    <div className="min-w-0 space-y-1.5">
+    <div className={compact ? "min-w-0" : "min-w-0 space-y-1.5"}>
       <Label className={showLabel ? "block" : "sr-only"} htmlFor={selectId}>
         {label}
       </Label>
@@ -686,14 +723,17 @@ function IndexerSeedingProfileSelect({
           data-prowlarr-minimum-seeders={
             prowlarrMinimum === null ? undefined : String(prowlarrMinimum)
           }
-          className="w-full"
+          className={compact ? "w-full max-w-48" : "w-full"}
           disabled={isPending || disabled}
           aria-describedby={isMissing ? statusId : undefined}
           aria-busy={isPending}
         >
           <SelectValue />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent
+          position="popper"
+          className="w-80 max-w-[var(--radix-select-content-available-width)]"
+        >
           <SelectItem
             value={SEEDING_PROFILE_INHERIT_VALUE}
             data-testid={`${selectId}-inherit`}
@@ -728,7 +768,11 @@ function IndexerSeedingProfileSelect({
           {t("settings.seedingProfileMissing", { id: value })}
         </p>
       ) : isPending ? (
-        <p id={statusId} role="status" className="text-xs text-muted-foreground">
+        <p
+          id={statusId}
+          role="status"
+          className="text-xs text-muted-foreground"
+        >
           {t("status.indexerSeedingProfileSaving")}
         </p>
       ) : null}
@@ -742,6 +786,7 @@ function IndexerSeedingProfileCell({
   options,
   isPending,
   disabled,
+  compact = false,
   onChange,
 }: {
   indexer: IndexerRecord;
@@ -749,13 +794,17 @@ function IndexerSeedingProfileCell({
   options: SeedingProfileOption[];
   isPending: boolean;
   disabled: boolean;
+  compact?: boolean;
   onChange: (seedingProfileId: string | null) => Promise<void> | void;
 }) {
   const t = useTranslate();
   const selectId = selectorId("settings-indexer-seeding-profile", indexer.id);
   if (!catalog) {
     return (
-      <span className="text-muted-foreground" data-testid={`${selectId}-loading`}>
+      <span
+        className="text-muted-foreground"
+        data-testid={`${selectId}-loading`}
+      >
         {t("label.loading")}
       </span>
     );
@@ -777,8 +826,116 @@ function IndexerSeedingProfileCell({
       }
       isPending={isPending}
       disabled={disabled}
+      compact={compact}
       onChange={onChange}
     />
+  );
+}
+
+const INDEXER_ROUTING_FACETS: Array<{
+  scope: ViewCategoryId;
+  labelKey: "search.facetMovie" | "search.facetSeries" | "search.facetAnime";
+}> = [
+  { scope: "MOVIE", labelKey: "search.facetMovie" },
+  { scope: "SERIES", labelKey: "search.facetSeries" },
+  { scope: "ANIME", labelKey: "search.facetAnime" },
+];
+
+function IndexerRoutingDisclosure({
+  indexer,
+  routingByScope,
+  isLoading,
+  mutatingScopes,
+  onChange,
+}: {
+  indexer: IndexerRecord;
+  routingByScope: IndexerRoutingSettingsByScope;
+  isLoading: boolean;
+  mutatingScopes: ReadonlySet<ViewCategoryId>;
+  onChange: (
+    scope: ViewCategoryId,
+    indexerId: string,
+    nextValue: Partial<IndexerCategoryRoutingSettings>,
+  ) => Promise<void> | void;
+}) {
+  const t = useTranslate();
+
+  return (
+    <Table
+      layout="fixed"
+      density="dense"
+      className="border border-border/60 bg-background/35"
+    >
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-32">{t("label.name")}</TableHead>
+          <TableHead>{t("settings.indexerRoutingCategories")}</TableHead>
+          <TableHead className="w-24 text-center">
+            {t("settings.indexerRoutingEnabled")}
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {INDEXER_ROUTING_FACETS.map(({ scope, labelKey }) => {
+          const routing =
+            routingByScope[scope]?.[indexer.id] ??
+            getDefaultIndexerRouting(scope);
+          const isPending = isLoading || mutatingScopes.has(scope);
+          const facetLabel = t(labelKey);
+          const enabledId = selectorId(
+            "settings-indexer-routing-enabled",
+            indexer.id,
+            scope,
+          );
+
+          return (
+            <TableRow key={scope} data-ui="settings-indexer-routing-row">
+              <TableCell className="font-medium">{facetLabel}</TableCell>
+              <TableCell>
+                <IndexerCategoryPicker
+                  triggerId={selectorId(
+                    "settings-indexer-routing-categories",
+                    indexer.id,
+                    scope,
+                  )}
+                  panelId={selectorId(
+                    "settings-indexer-routing-categories-panel",
+                    indexer.id,
+                    scope,
+                  )}
+                  categoryIdPrefix={selectorId(
+                    "settings-indexer-routing-category",
+                    indexer.id,
+                    scope,
+                  )}
+                  value={routing.categories}
+                  scope={scope}
+                  capsCategories={indexer.capsCategories}
+                  disabled={isPending}
+                  categoriesLabel={`${t("settings.indexerRoutingCategories")} (${facetLabel})`}
+                  onChange={(categories) =>
+                    void onChange(scope, indexer.id, { categories })
+                  }
+                />
+              </TableCell>
+              <TableCell className="text-center">
+                <Checkbox
+                  id={enabledId}
+                  checked={routing.enabled}
+                  disabled={isPending}
+                  aria-label={`${t("settings.indexerRoutingEnabled")}: ${facetLabel}`}
+                  onCheckedChange={(checked) =>
+                    void onChange(scope, indexer.id, {
+                      enabled: checked === true,
+                    })
+                  }
+                />
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -803,6 +960,12 @@ export function SettingsIndexersSection({
   mutatingIndexerProxyIds,
   setIndexerProxyAssignment,
   proxyConfigs,
+  indexerRoutingByScope,
+  indexerRoutingLoaded,
+  indexerRoutingLoading,
+  mutatingIndexerRoutingScopes,
+  loadIndexerRouting,
+  updateIndexerRoutingForScope,
   editIndexer,
   toggleIndexerEnabled,
   deleteIndexer,
@@ -817,11 +980,31 @@ export function SettingsIndexersSection({
   const t = useTranslate();
   const [errorHistoryIndexer, setErrorHistoryIndexer] =
     React.useState<IndexerErrorHistoryScope | null>(null);
+  const [expandedRoutingIndexerIds, setExpandedRoutingIndexerIds] =
+    React.useState<Set<string>>(() => new Set());
   const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
   const isManagedSyncProvider = normalizedProviderType === "prowlarr";
   const isEditing = editorMode === "edit";
   const isSavingEditor = mutatingIndexerId === (editingIndexerId ?? "new");
   const showProxyColumn = proxyConfigs.length > 0;
+  const toggleIndexerRouting = React.useCallback(
+    (indexerId: string) => {
+      const isOpening = !expandedRoutingIndexerIds.has(indexerId);
+      setExpandedRoutingIndexerIds((previous) => {
+        const next = new Set(previous);
+        if (isOpening) {
+          next.add(indexerId);
+        } else {
+          next.delete(indexerId);
+        }
+        return next;
+      });
+      if (isOpening) {
+        void loadIndexerRouting();
+      }
+    },
+    [expandedRoutingIndexerIds, loadIndexerRouting],
+  );
   const indexersById = React.useMemo(() => {
     return new Map(settingsIndexers.map((indexer) => [indexer.id, indexer]));
   }, [settingsIndexers]);
@@ -853,7 +1036,10 @@ export function SettingsIndexersSection({
         (entry) =>
           entry.providerType.trim().toLowerCase() === normalizedProviderType,
       )?.protocolFamilies ?? [],
-    [indexerDownloadClientMappingCatalogResource.catalog, normalizedProviderType],
+    [
+      indexerDownloadClientMappingCatalogResource.catalog,
+      normalizedProviderType,
+    ],
   );
 
   // Build provider type options from loaded plugins, falling back to hardcoded list
@@ -890,8 +1076,7 @@ export function SettingsIndexersSection({
   }, [normalizedProviderType, providerTypes]);
 
   const selectedProviderFields = React.useMemo(
-    () =>
-      visibleIndexerConfigFields(selectedProvider?.configFields ?? []),
+    () => visibleIndexerConfigFields(selectedProvider?.configFields ?? []),
     [selectedProvider],
   );
 
@@ -907,7 +1092,7 @@ export function SettingsIndexersSection({
           ),
         ),
       [indexerDraft.configValues, selectedProviderFields],
-  );
+    );
   const [advancedConfigOpen, setAdvancedConfigOpen] = React.useState(false);
   const [hasCustomizedName, setHasCustomizedName] = React.useState(false);
   const wasEditorOpen = React.useRef(false);
@@ -968,7 +1153,7 @@ export function SettingsIndexersSection({
       const nextMappingCompatibility =
         indexerDownloadClientMappingCatalogResource.catalog?.providerCompatibility.find(
           (provider) => provider.providerType === nextProviderType,
-      );
+        );
       setIndexerDraft((prev: IndexerDraft) => {
         const nextConfigValues: Record<string, string> = {};
         for (const field of nextProvider?.configFields ?? []) {
@@ -1007,649 +1192,793 @@ export function SettingsIndexersSection({
   return (
     <div id="settings-indexers-section" className="flex flex-col gap-4 text-sm">
       {showIndexers ? (
-      <>
-      <div id="settings-indexers-table-card" className="rounded border border-border">
-        <div className="flex items-center justify-between border-b border-border px-3 py-2">
-          <CardTitle className="text-base">
-            {t("settings.existingIndexers")}
-          </CardTitle>
-          <Input
-            id="settings-indexers-filter"
-            value={settingsIndexerFilter}
-            onChange={(event) => setSettingsIndexerFilter(event.target.value)}
-            placeholder={t("settings.indexerFilterPlaceholder")}
-            className="max-w-64"
-          />
-        </div>
-        <div className="min-w-0">
-          <Table
-            id="settings-indexers-table"
-            overflow="clip"
-            layout="fixed"
-            density="dense"
-            className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
-          >
-            <colgroup>
-              <col className={showProxyColumn ? "w-[12%]" : "w-[15%]"} />
-              <col className={showProxyColumn ? "w-[9%]" : "w-[11%]"} />
-              {showProxyColumn ? <col className="w-[10%]" /> : null}
-              <col className="w-[14%]" />
-              <col className={showProxyColumn ? "w-[15%]" : "w-[20%]"} />
-              <col className="w-[5%]" />
-              <col className="w-[6%]" />
-              <col className="w-[4%]" />
-              <col className="w-[10%]" />
-              <col className="w-[15%]" />
-            </colgroup>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t("label.name")}</TableHead>
-                <TableHead>{t("settings.indexerProvider")}</TableHead>
-                {showProxyColumn ? (
-                  <TableHead>{t("settings.proxyAssignment")}</TableHead>
-                ) : null}
-                <TableHead>
-                  {t("settings.indexerDownloadClient")}
-                </TableHead>
-                <TableHead>
-                  {t("settings.seedingProfileColumn")}
-                </TableHead>
-                <TableHead className="text-center">
-                  {t("label.enabled")}
-                </TableHead>
-                <TableHead className="text-center">
-                  {t("settings.indexerInteractiveSearch")}
-                </TableHead>
-                <TableHead className="text-center">
-                  {t("settings.indexerAutoSearch")}
-                </TableHead>
-                <TableHead>{t("settings.indexerStatus")}</TableHead>
-                <TableHead className="whitespace-nowrap text-right">
-                  {t("label.actions")}
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {settingsIndexers.map((indexer) => {
-                const parentName = indexer.managedParentConfigId
-                  ? indexersById.get(indexer.managedParentConfigId)?.name
-                  : null;
-                const managedChildCount = managedChildCounts.get(indexer.id) ?? 0;
-                return (
-                <TableRow
-                  data-ui="settings-table-row"
-                  key={indexer.id}
-                  id={selectorId("settings-indexer-row", indexer.name)}
-                  className={cn(
-                    indexer.isManaged && "bg-muted/25",
-                    "max-[1279px]:mb-3 max-[1279px]:block max-[1279px]:overflow-hidden max-[1279px]:rounded-lg max-[1279px]:border max-[1279px]:border-border",
-                  )}
-                >
-                  <TableCell
-                    data-label={t("label.name")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    <div className="space-y-1">
-                      <div className="font-medium">{indexer.name}</div>
-                      {indexer.isManaged ? (
-                        <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-2 py-0.5 font-medium text-[var(--scry-warning-text)]">
-                            <Lock className="h-3 w-3" />
-                            {t("settings.managedIndexerBadge")}
-                          </span>
-                          <span>
-                            {parentName
-                              ? t("settings.managedByIndexer", { name: parentName })
-                              : t("settings.managedByParent")}
-                          </span>
-                        </div>
-                      ) : managedChildCount > 0 ? (
-                        <div className="text-xs text-muted-foreground">
-                          {t("settings.managesIndexerCount", {
-                            count: managedChildCount,
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell
-                    data-label={t("settings.indexerProvider")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    <IndexerProviderTypeCell
-                      providerType={indexer.providerType}
-                    />
-                  </TableCell>
-                  {showProxyColumn ? (
-                    <TableCell
-                      data-label={t("settings.proxyAssignment")}
-                      className={INDEXER_NARROW_CELL_CLASS}
-                    >
-                      <ProxyAssignmentSelect
-                        selectId={selectorId(
-                          "settings-indexer-proxy",
-                          indexer.name,
-                        )}
-                        label={t("settings.proxyAssignment")}
-                        proxies={proxyConfigs}
-                        value={indexer.proxyConfigId ?? null}
-                        disabled={
-                          indexer.isManaged ||
-                          mutatingIndexerProxyIds.has(indexer.id) ||
-                          (editingIndexerId === indexer.id && isEditorOpen)
-                        }
-                        showLabel={false}
-                        compact
-                        onChange={(proxyConfigId) =>
-                          void setIndexerProxyAssignment(
-                            indexer.id,
-                            proxyConfigId,
-                          )
-                        }
-                      />
-                    </TableCell>
-                  ) : null}
-                  <TableCell
-                    data-label={t("settings.indexerDownloadClient")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    <IndexerDownloadClientCell
-                      indexer={indexer}
-                      resource={indexerDownloadClientMappingCatalogResource}
-                      isPending={mutatingIndexerMappingIds.has(indexer.id)}
-                      disabled={editingIndexerId === indexer.id && isEditorOpen}
-                      compact
-                      onRetry={refreshIndexerDownloadClientMappingCatalog}
-                      onChange={(downloadClientId) =>
-                        setIndexerDownloadClientMapping(indexer.id, downloadClientId)
-                      }
-                    />
-                  </TableCell>
-                  <TableCell
-                    data-label={t("settings.seedingProfileColumn")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    <IndexerSeedingProfileCell
-                      indexer={indexer}
-                      catalog={indexerDownloadClientMappingCatalogResource.catalog}
-                      options={seedingProfileOptions}
-                      isPending={mutatingIndexerSeedingProfileIds.has(indexer.id)}
-                      disabled={editingIndexerId === indexer.id && isEditorOpen}
-                      onChange={(seedingProfileId) =>
-                        setIndexerSeedingProfile(indexer.id, seedingProfileId)
-                      }
-                    />
-                  </TableCell>
-                  <TableCell
-                    data-label={t("label.enabled")}
-                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
-                  >
-                    <RenderBooleanIcon
-                      value={indexer.isEnabled}
-                      label={`${t("label.enabled")}: ${indexer.name}`}
-                    />
-                  </TableCell>
-                  <TableCell
-                    data-label={t("settings.indexerInteractiveSearch")}
-                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
-                  >
-                    {indexer.supportsManagedChildrenSync ? (
-                      <span
-                        className="text-muted-foreground"
-                        title={t("settings.indexerManagedParentHint")}
-                      >
-                        —
-                      </span>
-                    ) : (
-                      <RenderBooleanIcon
-                        value={indexer.enableInteractiveSearch}
-                        label={`${t("settings.indexerInteractiveSearch")}: ${indexer.name}`}
-                      />
-                    )}
-                  </TableCell>
-                  <TableCell
-                    data-label={t("settings.indexerAutoSearch")}
-                    className={cn("text-center", INDEXER_NARROW_CELL_CLASS)}
-                  >
-                    {indexer.supportsManagedChildrenSync ? (
-                      <span
-                        className="text-muted-foreground"
-                        title={t("settings.indexerManagedParentHint")}
-                      >
-                        —
-                      </span>
-                    ) : (
-                      <RenderBooleanIcon
-                        value={indexer.enableAutoSearch}
-                        label={`${t("settings.indexerAutoSearch")}: ${indexer.name}`}
-                      />
-                    )}
-                  </TableCell>
-                  <TableCell
-                    data-label={t("settings.indexerStatus")}
-                    className={INDEXER_NARROW_CELL_CLASS}
-                  >
-                    <IndexerStatusCell
-                      indexer={indexer}
-                      onOpenErrorHistory={() => setErrorHistoryIndexer({
-                        id: indexer.id,
-                        name: indexer.name,
-                      })}
-                    />
-                  </TableCell>
-                  <TableCell
-                    data-label={t("label.actions")}
-                    className={cn("text-right", INDEXER_NARROW_CELL_CLASS)}
-                  >
-                    <div className="flex flex-nowrap justify-end gap-2">
-                      <IndexerActionButton
-                        id={selectorId("settings-indexer-error-history", indexer.name)}
-                        tone="search"
-                        onClick={() => setErrorHistoryIndexer({
-                          id: indexer.id,
-                          name: indexer.name,
-                        })}
-                        label={t("indexerErrors.history")}
-                      >
-                        <Logs className="h-4 w-4" />
-                      </IndexerActionButton>
-                      {!indexer.isManaged && indexer.supportsManagedChildrenSync ? (
-                        <IndexerActionButton
-                          id={selectorId("settings-indexer-sync", indexer.name)}
-                          tone="search"
-                          onClick={() => void syncIndexer(indexer)}
-                          disabled={mutatingIndexerId === indexer.id}
-                          label={t("settings.indexerSyncNow")}
-                        >
-                          {mutatingIndexerId === indexer.id ? (
-                            <LoadingMark className="h-4 w-4" />
-                          ) : (
-                            <RefreshCw className="h-4 w-4" />
-                          )}
-                        </IndexerActionButton>
-                      ) : null}
-                      <IndexerActionButton
-                        id={selectorId(
-                          "settings-indexer-toggle",
-                          indexer.name,
-                        )}
-                        tone={indexer.isEnabled ? "disabled" : "enabled"}
-                        onClick={() => void toggleIndexerEnabled(indexer)}
-                        disabled={mutatingIndexerId === indexer.id}
-                        label={
-                          indexer.isEnabled
-                            ? t("label.disable")
-                            : t("label.enable")
-                        }
-                      >
-                        {indexer.isEnabled ? (
-                          <PowerOff className="h-4 w-4" />
-                        ) : (
-                          <Power className="h-4 w-4" />
-                        )}
-                      </IndexerActionButton>
-                      {indexer.isManaged ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
-                          <Lock className="h-3 w-3" />
-                          {t("settings.managedIndexerBadge")}
-                        </span>
-                      ) : (
-                        <>
-                          <IndexerActionButton
-                            id={selectorId("settings-indexer-edit", indexer.name)}
-                            tone="edit"
-                            onClick={() => editIndexer(indexer)}
-                            label={t("label.edit")}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </IndexerActionButton>
-                          <IndexerActionButton
-                            id={selectorId(
-                              "settings-indexer-delete",
-                              indexer.name,
-                            )}
-                            tone="delete"
-                            onClick={() => void deleteIndexer(indexer)}
-                            disabled={mutatingIndexerId === indexer.id}
-                            label={
-                              mutatingIndexerId === indexer.id
-                                ? t("label.deleting")
-                                : t("label.delete")
-                            }
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </IndexerActionButton>
-                        </>
-                      )}
-                    </div>
-                  </TableCell>
-                </TableRow>
-                );
-              })}
-              {settingsIndexers.length === 0 ? (
-                <TableRow id="settings-indexers-empty-row">
-                  <TableCell
-                    colSpan={showProxyColumn ? 10 : 9}
-                    className="text-muted-foreground"
-                  >
-                    {t("settings.noIndexersFound")}
-                  </TableCell>
-                </TableRow>
-              ) : null}
-            </TableBody>
-          </Table>
-        </div>
-      </div>
-
-      {isEditorOpen ? (
         <>
-          <div className="relative overflow-hidden rounded-xl">
-            <Card aria-busy={isSavingEditor}>
-            <CardHeader className="flex items-center justify-between gap-3">
+          <div
+            id="settings-indexers-table-card"
+            className="rounded border border-border"
+          >
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
               <CardTitle className="text-base">
-                {editingIndexerId
-                  ? t("settings.indexerUpdate")
-                  : t("settings.indexerCreate")}
+                {t("settings.existingIndexers")}
               </CardTitle>
-              <label className="flex shrink-0 items-center gap-3">
-                <Checkbox
-                  id="settings-indexer-enabled"
-                  size="large"
-                  checked={indexerDraft.isEnabled}
-                  disabled={mutatingIndexerId !== null}
-                  onCheckedChange={(checked) =>
-                    setIndexerDraft((prev) => ({
-                      ...prev,
-                      isEnabled: checked === true,
-                    }))
-                  }
-                />
-                <span className="text-sm font-medium">{t("label.enabled")}</span>
-              </label>
-            </CardHeader>
-            <CardContent>
-              <form id="settings-indexer-form" className="space-y-3" onSubmit={submitIndexer}>
-            <div className="grid gap-3 md:grid-cols-2">
-              <label>
-                <Label className="mb-2 block" htmlFor="settings-indexer-provider-type">
-                  {t("form.providerTypePlaceholder")}
-                </Label>
-                <Select
-                  value={normalizedProviderType || undefined}
-                  onValueChange={handleProviderTypeChange}
-                >
-                  <SelectTrigger id="settings-indexer-provider-type" className="w-full">
-                    <SelectValue
-                      placeholder={t("form.providerTypePlaceholder")}
-                    >
-                      {normalizedProviderType ? (
-                        <PluginVisualLabel
-                          providerType={normalizedProviderType}
-                          pluginType="indexer"
-                          label={
-                            providerTypeOptions.find(
-                              (option) => option.value === normalizedProviderType,
-                            )?.label ?? formatIndexerProviderTypeLabel(normalizedProviderType, t)
-                          }
-                        />
-                      ) : null}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providerTypeOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        <PluginVisualLabel
-                          providerType={opt.value}
-                          pluginType="indexer"
-                          label={opt.label}
-                        />
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </label>
-              <label>
-                <Label className="mb-2 block" htmlFor="settings-indexer-name">{t("label.name")}</Label>
-                <Input
-                  id="settings-indexer-name"
-                  value={indexerDraft.name}
-                  onChange={(event) => {
-                    setHasCustomizedName(true);
-                    setIndexerDraft((prev: IndexerDraft) => ({
-                      ...prev,
-                      name: event.target.value,
-                    }));
-                  }}
-                  required
-                  placeholder={t("form.indexerNamePlaceholder")}
-                />
-              </label>
+              <Input
+                id="settings-indexers-filter"
+                value={settingsIndexerFilter}
+                onChange={(event) =>
+                  setSettingsIndexerFilter(event.target.value)
+                }
+                placeholder={t("settings.indexerFilterPlaceholder")}
+                className="max-w-64"
+              />
             </div>
-
-            <div className="grid gap-3 md:grid-cols-2">
-            {!isManagedSyncProvider ? (
-              <ProxyAssignmentSelect
-                selectId="settings-indexer-proxy-select"
-                label={t("settings.proxyAssignment")}
-                proxies={proxyConfigs}
-                value={indexerDraft.proxyConfigId}
-                onChange={(proxyConfigId) =>
-                  setIndexerDraft((prev: IndexerDraft) => ({
-                    ...prev,
-                    proxyConfigId,
-                  }))
-                }
-              />
-            ) : null}
-            {indexerDownloadClientMappingCatalogResource.catalog ? (
-              <IndexerDownloadClientSelect
-                model={getIndexerDownloadClientDraftMappingViewModel(
-                  normalizedProviderType,
-                  indexerDraft.downloadClientId,
-                  indexerDownloadClientMappingCatalogResource.catalog,
-                )}
-                selectId="settings-indexer-download-client-form"
-                label={t("settings.indexerDownloadClient")}
-                isPending={mutatingIndexerId !== null}
-                showLabel
-                catalogError={
-                  indexerDownloadClientMappingCatalogResource.status === "error"
-                    ? indexerDownloadClientMappingCatalogResource.error
-                    : null
-                }
-                onRetry={refreshIndexerDownloadClientMappingCatalog}
-                onChange={(downloadClientId) =>
-                  setIndexerDraft((previous) => ({
-                    ...previous,
-                    downloadClientId,
-                  }))
-                }
-              />
-            ) : (
-              <IndexerDownloadClientCatalogPlaceholder
-                resource={indexerDownloadClientMappingCatalogResource}
-                selectId="settings-indexer-download-client-form"
-                label={t("settings.indexerDownloadClient")}
-                showLabel
-                onRetry={refreshIndexerDownloadClientMappingCatalog}
-              />
-            )}
-            {indexerDownloadClientMappingCatalogResource.catalog &&
-            !isManagedSyncProvider &&
-            supportsSeedingProfileAssignment(draftProtocolFamilies) ? (
-              <IndexerSeedingProfileSelect
-                selectId="settings-indexer-seeding-profile-form"
-                label={t("settings.seedingProfileColumn")}
-                value={indexerDraft.seedingProfileId}
-                options={seedingProfileOptions}
-                supported
-                isPending={mutatingIndexerId !== null}
-                showLabel
-                onChange={(seedingProfileId) =>
-                  setIndexerDraft((previous) => ({
-                    ...previous,
-                    seedingProfileId,
-                  }))
-                }
-              />
-            ) : null}
-            </div>
-
-            {selectedProviderFields.length > 0 ? (
-              <div className="space-y-3">
-                <Label className="text-sm font-medium">
-                  {t("settings.indexerConfig")}
-                </Label>
-                <ProviderConfigFieldGroup
-                  fields={standardProviderFields}
-                  draft={indexerDraft}
-                  onChange={handleConfigValueChange}
-                />
-                {advancedProviderFields.length > 0 ? (
-                  <Collapsible
-                    open={advancedConfigOpen}
-                    onOpenChange={setAdvancedConfigOpen}
-                  >
-                    <CollapsibleTrigger asChild>
-                      <button
-                        id="settings-indexer-advanced-toggle"
-                        type="button"
-                        className="flex items-center gap-1.5 rounded-[8px] py-1 text-sm font-medium text-[var(--scry-muted)] transition-colors hover:text-[var(--scry-ink2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <ChevronRight
+            <div className="min-w-0">
+              <Table
+                id="settings-indexers-table"
+                overflow="clip"
+                layout="fixed"
+                density="dense"
+                className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
+              >
+                <colgroup>
+                  <col className={showProxyColumn ? "w-[12%]" : "w-[15%]"} />
+                  <col className={showProxyColumn ? "w-[9%]" : "w-[11%]"} />
+                  {showProxyColumn ? <col className="w-[10%]" /> : null}
+                  <col className="w-[14%]" />
+                  <col className={showProxyColumn ? "w-[15%]" : "w-[20%]"} />
+                  <col className="w-[5%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[4%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[15%]" />
+                </colgroup>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("label.name")}</TableHead>
+                    <TableHead>{t("settings.indexerProvider")}</TableHead>
+                    {showProxyColumn ? (
+                      <TableHead>{t("settings.proxyAssignment")}</TableHead>
+                    ) : null}
+                    <TableHead>{t("settings.indexerDownloadClient")}</TableHead>
+                    <TableHead>{t("settings.seedingProfileColumn")}</TableHead>
+                    <TableHead className="text-center">
+                      {t("label.enabled")}
+                    </TableHead>
+                    <TableHead className="text-center">
+                      {t("settings.indexerInteractiveSearch")}
+                    </TableHead>
+                    <TableHead className="text-center">
+                      {t("settings.indexerAutoSearch")}
+                    </TableHead>
+                    <TableHead>{t("settings.indexerStatus")}</TableHead>
+                    <TableHead className="whitespace-nowrap text-right">
+                      {t("label.actions")}
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {settingsIndexers.map((indexer) => {
+                    const parentName = indexer.managedParentConfigId
+                      ? indexersById.get(indexer.managedParentConfigId)?.name
+                      : null;
+                    const managedChildCount =
+                      managedChildCounts.get(indexer.id) ?? 0;
+                    const isRoutingExpanded = expandedRoutingIndexerIds.has(
+                      indexer.id,
+                    );
+                    return (
+                      <React.Fragment key={indexer.id}>
+                        <TableRow
+                          data-ui="settings-table-row"
+                          id={selectorId("settings-indexer-row", indexer.name)}
                           className={cn(
-                            "h-4 w-4 transition-transform",
-                            advancedConfigOpen && "rotate-90",
+                            indexer.isManaged && "bg-muted/25",
+                            "max-[1279px]:mb-3 max-[1279px]:block max-[1279px]:overflow-hidden max-[1279px]:rounded-lg max-[1279px]:border max-[1279px]:border-border",
                           )}
-                        />
-                        {t("settings.advancedConfig")}
-                        <span className="text-[var(--scry-faint)]">
-                          ({advancedProviderFields.length})
-                        </span>
-                      </button>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent className="pt-3">
-                      <ProviderConfigFieldGroup
-                        fields={advancedProviderFields}
-                        draft={indexerDraft}
-                        onChange={handleConfigValueChange}
+                        >
+                          <TableCell
+                            data-label={t("label.name")}
+                            className={INDEXER_NARROW_CELL_CLASS}
+                          >
+                            <div className="flex items-start gap-1">
+                              <button
+                                type="button"
+                                className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                aria-label={t("settings.indexerRoutingScope", {
+                                  scope: indexer.name,
+                                })}
+                                aria-controls={selectorId(
+                                  "settings-indexer-routing",
+                                  indexer.id,
+                                )}
+                                aria-expanded={isRoutingExpanded}
+                                onClick={() => toggleIndexerRouting(indexer.id)}
+                              >
+                                <ChevronRight
+                                  className={cn(
+                                    "h-4 w-4 transition-transform",
+                                    isRoutingExpanded && "rotate-90",
+                                  )}
+                                />
+                              </button>
+                              <div className="min-w-0 space-y-1">
+                                <div className="font-medium">
+                                  {indexer.name}
+                                </div>
+                                {indexer.isManaged ? (
+                                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                                    <span className="inline-flex items-center gap-1 rounded-full border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-2 py-0.5 font-medium text-[var(--scry-warning-text)]">
+                                      <Lock className="h-3 w-3" />
+                                      {t("settings.managedIndexerBadge")}
+                                    </span>
+                                    <span>
+                                      {parentName
+                                        ? t("settings.managedByIndexer", {
+                                            name: parentName,
+                                          })
+                                        : t("settings.managedByParent")}
+                                    </span>
+                                  </div>
+                                ) : managedChildCount > 0 ? (
+                                  <div className="text-xs text-muted-foreground">
+                                    {t("settings.managesIndexerCount", {
+                                      count: managedChildCount,
+                                    })}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell
+                            data-label={t("settings.indexerProvider")}
+                            className={INDEXER_NARROW_CELL_CLASS}
+                          >
+                            <IndexerProviderTypeCell
+                              providerType={indexer.providerType}
+                            />
+                          </TableCell>
+                          {showProxyColumn ? (
+                            <TableCell
+                              data-label={t("settings.proxyAssignment")}
+                              className={INDEXER_NARROW_CELL_CLASS}
+                            >
+                              <ProxyAssignmentSelect
+                                selectId={selectorId(
+                                  "settings-indexer-proxy",
+                                  indexer.name,
+                                )}
+                                label={t("settings.proxyAssignment")}
+                                proxies={proxyConfigs}
+                                value={indexer.proxyConfigId ?? null}
+                                disabled={
+                                  indexer.isManaged ||
+                                  mutatingIndexerProxyIds.has(indexer.id) ||
+                                  (editingIndexerId === indexer.id &&
+                                    isEditorOpen)
+                                }
+                                showLabel={false}
+                                compact
+                                onChange={(proxyConfigId) =>
+                                  void setIndexerProxyAssignment(
+                                    indexer.id,
+                                    proxyConfigId,
+                                  )
+                                }
+                              />
+                            </TableCell>
+                          ) : null}
+                          <TableCell
+                            data-label={t("settings.indexerDownloadClient")}
+                            className={INDEXER_NARROW_CELL_CLASS}
+                          >
+                            <IndexerDownloadClientCell
+                              indexer={indexer}
+                              resource={
+                                indexerDownloadClientMappingCatalogResource
+                              }
+                              isPending={mutatingIndexerMappingIds.has(
+                                indexer.id,
+                              )}
+                              disabled={
+                                editingIndexerId === indexer.id && isEditorOpen
+                              }
+                              compact
+                              onRetry={
+                                refreshIndexerDownloadClientMappingCatalog
+                              }
+                              onChange={(downloadClientId) =>
+                                setIndexerDownloadClientMapping(
+                                  indexer.id,
+                                  downloadClientId,
+                                )
+                              }
+                            />
+                          </TableCell>
+                          <TableCell
+                            data-label={t("settings.seedingProfileColumn")}
+                            className={INDEXER_NARROW_CELL_CLASS}
+                          >
+                            <IndexerSeedingProfileCell
+                              indexer={indexer}
+                              catalog={
+                                indexerDownloadClientMappingCatalogResource.catalog
+                              }
+                              options={seedingProfileOptions}
+                              isPending={mutatingIndexerSeedingProfileIds.has(
+                                indexer.id,
+                              )}
+                              disabled={
+                                editingIndexerId === indexer.id && isEditorOpen
+                              }
+                              compact
+                              onChange={(seedingProfileId) =>
+                                setIndexerSeedingProfile(
+                                  indexer.id,
+                                  seedingProfileId,
+                                )
+                              }
+                            />
+                          </TableCell>
+                          <TableCell
+                            data-label={t("label.enabled")}
+                            className={cn(
+                              "text-center",
+                              INDEXER_NARROW_CELL_CLASS,
+                            )}
+                          >
+                            <RenderBooleanIcon
+                              value={indexer.isEnabled}
+                              label={`${t("label.enabled")}: ${indexer.name}`}
+                            />
+                          </TableCell>
+                          <TableCell
+                            data-label={t("settings.indexerInteractiveSearch")}
+                            className={cn(
+                              "text-center",
+                              INDEXER_NARROW_CELL_CLASS,
+                            )}
+                          >
+                            {indexer.supportsManagedChildrenSync ? (
+                              <span
+                                className="text-muted-foreground"
+                                title={t("settings.indexerManagedParentHint")}
+                              >
+                                —
+                              </span>
+                            ) : (
+                              <RenderBooleanIcon
+                                value={indexer.enableInteractiveSearch}
+                                label={`${t("settings.indexerInteractiveSearch")}: ${indexer.name}`}
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell
+                            data-label={t("settings.indexerAutoSearch")}
+                            className={cn(
+                              "text-center",
+                              INDEXER_NARROW_CELL_CLASS,
+                            )}
+                          >
+                            {indexer.supportsManagedChildrenSync ? (
+                              <span
+                                className="text-muted-foreground"
+                                title={t("settings.indexerManagedParentHint")}
+                              >
+                                —
+                              </span>
+                            ) : (
+                              <RenderBooleanIcon
+                                value={indexer.enableAutoSearch}
+                                label={`${t("settings.indexerAutoSearch")}: ${indexer.name}`}
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell
+                            data-label={t("settings.indexerStatus")}
+                            className={INDEXER_NARROW_CELL_CLASS}
+                          >
+                            <IndexerStatusCell
+                              indexer={indexer}
+                              onOpenErrorHistory={() =>
+                                setErrorHistoryIndexer({
+                                  id: indexer.id,
+                                  name: indexer.name,
+                                })
+                              }
+                            />
+                          </TableCell>
+                          <TableCell
+                            data-label={t("label.actions")}
+                            className={cn(
+                              "text-right",
+                              INDEXER_NARROW_CELL_CLASS,
+                            )}
+                          >
+                            <div className="flex flex-nowrap justify-end gap-2">
+                              <IndexerActionButton
+                                id={selectorId(
+                                  "settings-indexer-error-history",
+                                  indexer.name,
+                                )}
+                                tone="search"
+                                onClick={() =>
+                                  setErrorHistoryIndexer({
+                                    id: indexer.id,
+                                    name: indexer.name,
+                                  })
+                                }
+                                label={t("indexerErrors.history")}
+                              >
+                                <Logs className="h-4 w-4" />
+                              </IndexerActionButton>
+                              {!indexer.isManaged &&
+                              indexer.supportsManagedChildrenSync ? (
+                                <IndexerActionButton
+                                  id={selectorId(
+                                    "settings-indexer-sync",
+                                    indexer.name,
+                                  )}
+                                  tone="search"
+                                  onClick={() => void syncIndexer(indexer)}
+                                  disabled={mutatingIndexerId === indexer.id}
+                                  label={t("settings.indexerSyncNow")}
+                                >
+                                  {mutatingIndexerId === indexer.id ? (
+                                    <LoadingMark className="h-4 w-4" />
+                                  ) : (
+                                    <RefreshCw className="h-4 w-4" />
+                                  )}
+                                </IndexerActionButton>
+                              ) : null}
+                              <IndexerActionButton
+                                id={selectorId(
+                                  "settings-indexer-toggle",
+                                  indexer.name,
+                                )}
+                                tone={
+                                  indexer.isEnabled ? "disabled" : "enabled"
+                                }
+                                onClick={() =>
+                                  void toggleIndexerEnabled(indexer)
+                                }
+                                disabled={mutatingIndexerId === indexer.id}
+                                label={
+                                  indexer.isEnabled
+                                    ? t("label.disable")
+                                    : t("label.enable")
+                                }
+                              >
+                                {indexer.isEnabled ? (
+                                  <PowerOff className="h-4 w-4" />
+                                ) : (
+                                  <Power className="h-4 w-4" />
+                                )}
+                              </IndexerActionButton>
+                              {indexer.isManaged ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
+                                  <Lock className="h-3 w-3" />
+                                  {t("settings.managedIndexerBadge")}
+                                </span>
+                              ) : (
+                                <>
+                                  <IndexerActionButton
+                                    id={selectorId(
+                                      "settings-indexer-edit",
+                                      indexer.name,
+                                    )}
+                                    tone="edit"
+                                    onClick={() => editIndexer(indexer)}
+                                    label={t("label.edit")}
+                                  >
+                                    <Edit className="h-4 w-4" />
+                                  </IndexerActionButton>
+                                  <IndexerActionButton
+                                    id={selectorId(
+                                      "settings-indexer-delete",
+                                      indexer.name,
+                                    )}
+                                    tone="delete"
+                                    onClick={() => void deleteIndexer(indexer)}
+                                    disabled={mutatingIndexerId === indexer.id}
+                                    label={
+                                      mutatingIndexerId === indexer.id
+                                        ? t("label.deleting")
+                                        : t("label.delete")
+                                    }
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </IndexerActionButton>
+                                </>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                        {isRoutingExpanded ? (
+                          <TableRow
+                            id={selectorId(
+                              "settings-indexer-routing",
+                              indexer.id,
+                            )}
+                            className="max-[1279px]:block"
+                          >
+                            <TableCell
+                              colSpan={showProxyColumn ? 10 : 9}
+                              className="bg-muted/20 p-3 max-[1279px]:block"
+                            >
+                              {indexerRoutingLoaded ? (
+                                <IndexerRoutingDisclosure
+                                  indexer={indexer}
+                                  routingByScope={indexerRoutingByScope}
+                                  isLoading={indexerRoutingLoading}
+                                  mutatingScopes={mutatingIndexerRoutingScopes}
+                                  onChange={updateIndexerRoutingForScope}
+                                />
+                              ) : (
+                                <div className="flex min-h-24 items-center justify-center">
+                                  <LoadingMark className="h-5 w-5" />
+                                </div>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ) : null}
+                      </React.Fragment>
+                    );
+                  })}
+                  {settingsIndexers.length === 0 ? (
+                    <TableRow id="settings-indexers-empty-row">
+                      <TableCell
+                        colSpan={showProxyColumn ? 10 : 9}
+                        className="text-muted-foreground"
+                      >
+                        {t("settings.noIndexersFound")}
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          {isEditorOpen ? (
+            <>
+              <div className="relative overflow-hidden rounded-xl">
+                <Card aria-busy={isSavingEditor}>
+                  <CardHeader className="flex items-center justify-between gap-3">
+                    <CardTitle className="text-base">
+                      {editingIndexerId
+                        ? t("settings.indexerUpdate")
+                        : t("settings.indexerCreate")}
+                    </CardTitle>
+                    <label className="flex shrink-0 items-center gap-3">
+                      <Checkbox
+                        id="settings-indexer-enabled"
+                        size="large"
+                        checked={indexerDraft.isEnabled}
+                        disabled={mutatingIndexerId !== null}
+                        onCheckedChange={(checked) =>
+                          setIndexerDraft((prev) => ({
+                            ...prev,
+                            isEnabled: checked === true,
+                          }))
+                        }
                       />
-                    </CollapsibleContent>
-                  </Collapsible>
+                      <span className="text-sm font-medium">
+                        {t("label.enabled")}
+                      </span>
+                    </label>
+                  </CardHeader>
+                  <CardContent>
+                    <form
+                      id="settings-indexer-form"
+                      className="space-y-3"
+                      onSubmit={submitIndexer}
+                    >
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label>
+                          <Label
+                            className="mb-2 block"
+                            htmlFor="settings-indexer-provider-type"
+                          >
+                            {t("form.providerTypePlaceholder")}
+                          </Label>
+                          <Select
+                            value={normalizedProviderType || undefined}
+                            onValueChange={handleProviderTypeChange}
+                          >
+                            <SelectTrigger
+                              id="settings-indexer-provider-type"
+                              className="w-full"
+                            >
+                              <SelectValue
+                                placeholder={t("form.providerTypePlaceholder")}
+                              >
+                                {normalizedProviderType ? (
+                                  <PluginVisualLabel
+                                    providerType={normalizedProviderType}
+                                    pluginType="indexer"
+                                    label={
+                                      providerTypeOptions.find(
+                                        (option) =>
+                                          option.value ===
+                                          normalizedProviderType,
+                                      )?.label ??
+                                      formatIndexerProviderTypeLabel(
+                                        normalizedProviderType,
+                                        t,
+                                      )
+                                    }
+                                  />
+                                ) : null}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              {providerTypeOptions.map((opt) => (
+                                <SelectItem key={opt.value} value={opt.value}>
+                                  <PluginVisualLabel
+                                    providerType={opt.value}
+                                    pluginType="indexer"
+                                    label={opt.label}
+                                  />
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </label>
+                        <label>
+                          <Label
+                            className="mb-2 block"
+                            htmlFor="settings-indexer-name"
+                          >
+                            {t("label.name")}
+                          </Label>
+                          <Input
+                            id="settings-indexer-name"
+                            value={indexerDraft.name}
+                            onChange={(event) => {
+                              setHasCustomizedName(true);
+                              setIndexerDraft((prev: IndexerDraft) => ({
+                                ...prev,
+                                name: event.target.value,
+                              }));
+                            }}
+                            required
+                            placeholder={t("form.indexerNamePlaceholder")}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {!isManagedSyncProvider ? (
+                          <ProxyAssignmentSelect
+                            selectId="settings-indexer-proxy-select"
+                            label={t("settings.proxyAssignment")}
+                            proxies={proxyConfigs}
+                            value={indexerDraft.proxyConfigId}
+                            onChange={(proxyConfigId) =>
+                              setIndexerDraft((prev: IndexerDraft) => ({
+                                ...prev,
+                                proxyConfigId,
+                              }))
+                            }
+                          />
+                        ) : null}
+                        {indexerDownloadClientMappingCatalogResource.catalog ? (
+                          <IndexerDownloadClientSelect
+                            model={getIndexerDownloadClientDraftMappingViewModel(
+                              normalizedProviderType,
+                              indexerDraft.downloadClientId,
+                              indexerDownloadClientMappingCatalogResource.catalog,
+                            )}
+                            selectId="settings-indexer-download-client-form"
+                            label={t("settings.indexerDownloadClient")}
+                            isPending={mutatingIndexerId !== null}
+                            showLabel
+                            catalogError={
+                              indexerDownloadClientMappingCatalogResource.status ===
+                              "error"
+                                ? indexerDownloadClientMappingCatalogResource.error
+                                : null
+                            }
+                            onRetry={refreshIndexerDownloadClientMappingCatalog}
+                            onChange={(downloadClientId) =>
+                              setIndexerDraft((previous) => ({
+                                ...previous,
+                                downloadClientId,
+                              }))
+                            }
+                          />
+                        ) : (
+                          <IndexerDownloadClientCatalogPlaceholder
+                            resource={
+                              indexerDownloadClientMappingCatalogResource
+                            }
+                            selectId="settings-indexer-download-client-form"
+                            label={t("settings.indexerDownloadClient")}
+                            showLabel
+                            onRetry={refreshIndexerDownloadClientMappingCatalog}
+                          />
+                        )}
+                        {indexerDownloadClientMappingCatalogResource.catalog &&
+                        !isManagedSyncProvider &&
+                        supportsSeedingProfileAssignment(
+                          draftProtocolFamilies,
+                        ) ? (
+                          <IndexerSeedingProfileSelect
+                            selectId="settings-indexer-seeding-profile-form"
+                            label={t("settings.seedingProfileColumn")}
+                            value={indexerDraft.seedingProfileId}
+                            options={seedingProfileOptions}
+                            supported
+                            isPending={mutatingIndexerId !== null}
+                            showLabel
+                            onChange={(seedingProfileId) =>
+                              setIndexerDraft((previous) => ({
+                                ...previous,
+                                seedingProfileId,
+                              }))
+                            }
+                          />
+                        ) : null}
+                      </div>
+
+                      {selectedProviderFields.length > 0 ? (
+                        <div className="space-y-3">
+                          <Label className="text-sm font-medium">
+                            {t("settings.indexerConfig")}
+                          </Label>
+                          <ProviderConfigFieldGroup
+                            fields={standardProviderFields}
+                            draft={indexerDraft}
+                            onChange={handleConfigValueChange}
+                          />
+                          {advancedProviderFields.length > 0 ? (
+                            <Collapsible
+                              open={advancedConfigOpen}
+                              onOpenChange={setAdvancedConfigOpen}
+                            >
+                              <CollapsibleTrigger asChild>
+                                <button
+                                  id="settings-indexer-advanced-toggle"
+                                  type="button"
+                                  className="flex items-center gap-1.5 rounded-[8px] py-1 text-sm font-medium text-[var(--scry-muted)] transition-colors hover:text-[var(--scry-ink2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                >
+                                  <ChevronRight
+                                    className={cn(
+                                      "h-4 w-4 transition-transform",
+                                      advancedConfigOpen && "rotate-90",
+                                    )}
+                                  />
+                                  {t("settings.advancedConfig")}
+                                  <span className="text-[var(--scry-faint)]">
+                                    ({advancedProviderFields.length})
+                                  </span>
+                                </button>
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="pt-3">
+                                <ProviderConfigFieldGroup
+                                  fields={advancedProviderFields}
+                                  draft={indexerDraft}
+                                  onChange={handleConfigValueChange}
+                                />
+                              </CollapsibleContent>
+                            </Collapsible>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {isManagedSyncProvider ? (
+                        <p className="text-sm text-muted-foreground">
+                          {t("settings.indexerManagedParentHint")}
+                        </p>
+                      ) : null}
+                      {!isManagedSyncProvider ? (
+                        <div className="flex flex-wrap items-center gap-6">
+                          <label className="flex items-center gap-3">
+                            <Checkbox
+                              id="settings-indexer-enable-interactive-search"
+                              size="large"
+                              checked={indexerDraft.enableInteractiveSearch}
+                              disabled={mutatingIndexerId !== null}
+                              onCheckedChange={(value) =>
+                                setIndexerDraft((prev: IndexerDraft) => ({
+                                  ...prev,
+                                  enableInteractiveSearch: value === true,
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">
+                              {t("settings.indexerInteractiveSearch")}
+                            </span>
+                          </label>
+                          <label className="flex items-center gap-3">
+                            <Checkbox
+                              id="settings-indexer-enable-auto-search"
+                              size="large"
+                              checked={indexerDraft.enableAutoSearch}
+                              disabled={mutatingIndexerId !== null}
+                              onCheckedChange={(value) =>
+                                setIndexerDraft((prev: IndexerDraft) => ({
+                                  ...prev,
+                                  enableAutoSearch: value === true,
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">
+                              {t("settings.indexerAutoSearch")}
+                            </span>
+                          </label>
+                        </div>
+                      ) : null}
+                      <div className="flex gap-2">
+                        <Button
+                          id="settings-indexer-save"
+                          type="submit"
+                          disabled={isSavingEditor}
+                        >
+                          {isSavingEditor
+                            ? t("label.saving")
+                            : editingIndexerId
+                              ? t("settings.indexerUpdate")
+                              : t("settings.indexerCreate")}
+                        </Button>
+                        <Button
+                          id="settings-indexer-test-connection"
+                          type="button"
+                          variant="outline"
+                          onClick={() => void testIndexerConnection()}
+                          disabled={isTestingConnection}
+                        >
+                          {isTestingConnection
+                            ? t("status.testingIndexerConnection")
+                            : t("label.testConnection")}
+                        </Button>
+                        <Button
+                          id="settings-indexer-cancel"
+                          type="button"
+                          variant="outline"
+                          onClick={resetIndexerDraft}
+                        >
+                          {t("label.cancel")}
+                        </Button>
+                      </div>
+                    </form>
+                  </CardContent>
+                </Card>
+                {isSavingEditor ? (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="absolute inset-0 z-10 flex items-center justify-center bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
+                  >
+                    <div className="flex items-center gap-2 rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-surf)] px-4 py-3 text-sm font-medium text-[var(--scry-ink2)] shadow-[0_12px_28px_rgba(2,6,23,0.28)]">
+                      <LoadingMark className="h-4 w-4" />
+                      {t("label.saving")}
+                    </div>
+                  </div>
                 ) : null}
               </div>
-            ) : null}
-
-            {isManagedSyncProvider ? (
-              <p className="text-sm text-muted-foreground">
-                {t("settings.indexerManagedParentHint")}
-              </p>
-            ) : null}
-            {!isManagedSyncProvider ? (
-              <div className="flex flex-wrap items-center gap-6">
-                <label className="flex items-center gap-3">
-                  <Checkbox
-                    id="settings-indexer-enable-interactive-search"
-                    size="large"
-                    checked={indexerDraft.enableInteractiveSearch}
+              {isEditing ? (
+                <div className="flex justify-center">
+                  <AddNewButton
+                    id="settings-indexer-create"
+                    icon={Plus}
+                    label={t("settings.indexerCreateNew")}
+                    onClick={startCreateIndexer}
                     disabled={mutatingIndexerId !== null}
-                    onCheckedChange={(value) =>
-                      setIndexerDraft((prev: IndexerDraft) => ({
-                        ...prev,
-                        enableInteractiveSearch: value === true,
-                      }))
-                    }
                   />
-                  <span className="text-sm font-medium">
-                    {t("settings.indexerInteractiveSearch")}
-                  </span>
-                </label>
-                <label className="flex items-center gap-3">
-                  <Checkbox
-                    id="settings-indexer-enable-auto-search"
-                    size="large"
-                    checked={indexerDraft.enableAutoSearch}
-                    disabled={mutatingIndexerId !== null}
-                    onCheckedChange={(value) =>
-                      setIndexerDraft((prev: IndexerDraft) => ({
-                        ...prev,
-                        enableAutoSearch: value === true,
-                      }))
-                    }
-                  />
-                  <span className="text-sm font-medium">
-                    {t("settings.indexerAutoSearch")}
-                  </span>
-                </label>
-              </div>
-            ) : null}
-            <div className="flex gap-2">
-              <Button id="settings-indexer-save" type="submit" disabled={isSavingEditor}>
-                {isSavingEditor
-                  ? t("label.saving")
-                  : editingIndexerId
-                    ? t("settings.indexerUpdate")
-                    : t("settings.indexerCreate")}
-              </Button>
-              <Button
-                id="settings-indexer-test-connection"
-                type="button"
-                variant="outline"
-                onClick={() => void testIndexerConnection()}
-                disabled={isTestingConnection}
-              >
-                {isTestingConnection
-                  ? t("status.testingIndexerConnection")
-                  : t("label.testConnection")}
-              </Button>
-              <Button
-                id="settings-indexer-cancel"
-                type="button"
-                variant="outline"
-                onClick={resetIndexerDraft}
-              >
-                {t("label.cancel")}
-              </Button>
-            </div>
-              </form>
-            </CardContent>
-            </Card>
-            {isSavingEditor ? (
-              <div
-                role="status"
-                aria-live="polite"
-                className="absolute inset-0 z-10 flex items-center justify-center bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
-              >
-                <div className="flex items-center gap-2 rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-surf)] px-4 py-3 text-sm font-medium text-[var(--scry-ink2)] shadow-[0_12px_28px_rgba(2,6,23,0.28)]">
-                  <LoadingMark className="h-4 w-4" />
-                  {t("label.saving")}
                 </div>
-              </div>
-            ) : null}
-          </div>
-          {isEditing ? (
+              ) : null}
+            </>
+          ) : (
             <div className="flex justify-center">
               <AddNewButton
                 id="settings-indexer-create"
                 icon={Plus}
                 label={t("settings.indexerCreateNew")}
                 onClick={startCreateIndexer}
-                disabled={mutatingIndexerId !== null}
               />
             </div>
-          ) : null}
+          )}
         </>
-      ) : (
-        <div className="flex justify-center">
-          <AddNewButton
-            id="settings-indexer-create"
-            icon={Plus}
-            label={t("settings.indexerCreateNew")}
-            onClick={startCreateIndexer}
-          />
-        </div>
-      )}
-      </>
       ) : null}
       <IndexerErrorHistoryModal
         open={errorHistoryIndexer != null}

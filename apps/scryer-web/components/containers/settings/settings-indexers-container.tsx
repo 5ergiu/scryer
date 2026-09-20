@@ -23,7 +23,12 @@ import type {
   ProviderTypeInfo,
   IndexerDownloadClientMappingCatalog,
   IndexerDownloadClientMappingCatalogResource,
+  IndexerCategoryRoutingSettings,
+  IndexerRoutingEntry,
+  IndexerRoutingSettingsByIndexer,
+  IndexerRoutingSettingsByScope,
 } from "@/lib/types";
+import type { ViewCategoryId } from "@/lib/types/quality-profiles";
 import {
   isConfigFieldRequired,
   isConfigFieldVisible,
@@ -41,6 +46,7 @@ import {
   proxyConfigsQuery,
   indexersInitQuery,
   indexersQuery,
+  indexerRoutingAllScopesQuery,
 } from "@/lib/graphql/queries";
 import {
   createIndexerMutation,
@@ -50,12 +56,14 @@ import {
   setIndexerSeedingProfileMutation,
   testIndexerConnectionMutation,
   updateIndexerMutation,
+  updateIndexerRoutingMutation,
 } from "@/lib/graphql/mutations";
 import {
   providerConfigRecordToValues,
   providerConfigValuesToRecord,
 } from "@/lib/utils/provider-config";
 import { useSeedingProfileOptions } from "@/lib/hooks/use-seeding-profile-options";
+import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 
 type SettingsIndexersSectionProps = ComponentProps<
   typeof SettingsIndexersSection
@@ -235,6 +243,25 @@ type PendingIndexerEditorAction =
   | { type: "close" }
   | null;
 
+function emptyIndexerRoutingByScope(): IndexerRoutingSettingsByScope {
+  return { MOVIE: {}, SERIES: {}, ANIME: {} };
+}
+
+function indexerRoutingEntriesToMap(
+  entries: IndexerRoutingEntry[] | null | undefined,
+): IndexerRoutingSettingsByIndexer {
+  return Object.fromEntries(
+    (entries ?? []).map((entry) => [
+      entry.indexerId,
+      {
+        categories: entry.categories,
+        enabled: entry.enabled,
+        priority: entry.priority,
+      },
+    ]),
+  ) as IndexerRoutingSettingsByIndexer;
+}
+
 function cloneIndexerDraft(
   draft: SettingsIndexersSectionProps["indexerDraft"],
 ): SettingsIndexersSectionProps["indexerDraft"] {
@@ -270,9 +297,17 @@ export function SettingsIndexersContainer({
   const [mutatingIndexerProxyIds, setMutatingIndexerProxyIds] = useState<
     Set<string>
   >(() => new Set());
-  const [proxyConfigs, setProxyConfigs] = useState<
-    ProxyRecord[]
+  const [proxyConfigs, setProxyConfigs] = useState<ProxyRecord[]>([]);
+  const [indexerRoutingByScope, setIndexerRoutingByScope] =
+    useState<IndexerRoutingSettingsByScope>(emptyIndexerRoutingByScope);
+  const [indexerRoutingIndexerIds, setIndexerRoutingIndexerIds] = useState<
+    string[]
   >([]);
+  const [indexerRoutingLoaded, setIndexerRoutingLoaded] = useState(false);
+  const [indexerRoutingLoading, setIndexerRoutingLoading] = useState(false);
+  const [mutatingIndexerRoutingScopes, setMutatingIndexerRoutingScopes] =
+    useState<Set<ViewCategoryId>>(() => new Set());
+  const indexerRoutingLoadPromiseRef = useRef<Promise<void> | null>(null);
   const [settingsIndexerFilter, setSettingsIndexerFilter] = useState("");
   const [mutatingIndexerId, setMutatingIndexerId] = useState<string | null>(
     null,
@@ -362,6 +397,131 @@ export function SettingsIndexersContainer({
       );
     }
   }, [client, setGlobalStatus, t]);
+
+  const loadIndexerRouting = useCallback(async () => {
+    if (indexerRoutingLoaded) {
+      return;
+    }
+    if (indexerRoutingLoadPromiseRef.current) {
+      return indexerRoutingLoadPromiseRef.current;
+    }
+
+    setIndexerRoutingLoading(true);
+    const request = (async () => {
+      try {
+        const { data, error } = await client
+          .query(
+            indexerRoutingAllScopesQuery,
+            {},
+            { requestPolicy: "network-only" },
+          )
+          .toPromise();
+        if (error) throw error;
+
+        setIndexerRoutingByScope({
+          MOVIE: indexerRoutingEntriesToMap(data?.movie),
+          SERIES: indexerRoutingEntriesToMap(data?.series),
+          ANIME: indexerRoutingEntriesToMap(data?.anime),
+        });
+        setIndexerRoutingIndexerIds(
+          (data?.indexers ?? []).map((indexer: { id: string }) => indexer.id),
+        );
+        setIndexerRoutingLoaded(true);
+      } catch (error) {
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToLoad")),
+        );
+      } finally {
+        setIndexerRoutingLoading(false);
+        indexerRoutingLoadPromiseRef.current = null;
+      }
+    })();
+    indexerRoutingLoadPromiseRef.current = request;
+    return request;
+  }, [client, indexerRoutingLoaded, setGlobalStatus, t]);
+
+  const updateIndexerRoutingForScope = useCallback(
+    async (
+      scope: ViewCategoryId,
+      indexerId: string,
+      nextValue: Partial<IndexerCategoryRoutingSettings>,
+    ) => {
+      const previousScopeRouting = indexerRoutingByScope[scope] ?? {};
+      const currentRouting =
+        previousScopeRouting[indexerId] ?? getDefaultIndexerRouting(scope);
+      const nextRouting = { ...currentRouting, ...nextValue };
+      const nextScopeRouting = {
+        ...previousScopeRouting,
+        [indexerId]: nextRouting,
+      };
+
+      setIndexerRoutingByScope((previous) => ({
+        ...previous,
+        [scope]: nextScopeRouting,
+      }));
+      setMutatingIndexerRoutingScopes((previous) => {
+        const next = new Set(previous);
+        next.add(scope);
+        return next;
+      });
+
+      try {
+        const indexerIds = new Set([
+          ...indexerRoutingIndexerIds,
+          ...settingsIndexers.map((indexer) => indexer.id),
+        ]);
+        const { data, error } = await client
+          .mutation(updateIndexerRoutingMutation, {
+            input: {
+              scope,
+              entries: Array.from(indexerIds, (id) => {
+                const routing =
+                  id === indexerId
+                    ? nextRouting
+                    : (nextScopeRouting[id] ?? getDefaultIndexerRouting(scope));
+                return {
+                  indexerId: id,
+                  enabled: routing.enabled,
+                  categories: routing.categories,
+                  // Inline changes intentionally retain the server's priority.
+                  priority: routing.priority,
+                };
+              }),
+            },
+          })
+          .toPromise();
+        if (error) throw error;
+
+        setIndexerRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: indexerRoutingEntriesToMap(data?.updateIndexerRouting),
+        }));
+        setGlobalStatus(t("settings.qualitySettingsSaved"));
+      } catch (error) {
+        setIndexerRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: previousScopeRouting,
+        }));
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")),
+        );
+      } finally {
+        setMutatingIndexerRoutingScopes((previous) => {
+          const next = new Set(previous);
+          next.delete(scope);
+          return next;
+        });
+      }
+    },
+    [
+      client,
+      indexerRoutingByScope,
+      indexerRoutingIndexerIds,
+      setGlobalStatus,
+      settingsIndexers,
+      t,
+    ],
+  );
 
   const refreshProviderTypes = useCallback(async () => {
     const { data, error } = await client
@@ -1064,7 +1224,9 @@ export function SettingsIndexersContainer({
       return;
     }
     if (missingRequiredConfigField) {
-      setGlobalStatus(`${missingRequiredConfigField.label}: ${t("setup.required")}`);
+      setGlobalStatus(
+        `${missingRequiredConfigField.label}: ${t("setup.required")}`,
+      );
       return;
     }
     setIsTestingConnection(true);
