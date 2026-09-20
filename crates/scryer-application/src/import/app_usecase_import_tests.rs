@@ -209,8 +209,8 @@ fn normalize_imdb_id_no_digits() {
 
 // ── movie title resolution ───────────────────────────────────────────────────
 
-#[test]
-fn find_monitored_movie_title_from_release_matches_alias_variant() {
+#[tokio::test]
+async fn find_monitored_movie_title_from_release_matches_alias_variant() {
     let titles = vec![test_movie_title_with_aliases_and_ids(
         "movie-1",
         "My Lighthouse",
@@ -223,13 +223,14 @@ fn find_monitored_movie_title_from_release_matches_alias_variant() {
         crate::parse_release_metadata("Mon.Phare.A.K.A.My.Lighthouse.2020.1080p.BluRay.x264-GRP");
 
     let matched = find_monitored_movie_title_from_release(&titles, &parsed)
+        .await
         .expect("movie should resolve through alias/title variants");
 
     assert_eq!(matched.id, "movie-1");
 }
 
-#[test]
-fn find_monitored_movie_title_from_release_matches_tagged_alias_variant() {
+#[tokio::test]
+async fn find_monitored_movie_title_from_release_matches_tagged_alias_variant() {
     let mut title =
         test_movie_title_with_aliases_and_ids("movie-1", "Nightfall!!", Some(2022), vec![], vec![]);
     title.tagged_aliases = vec![scryer_domain::TaggedAlias {
@@ -241,13 +242,14 @@ fn find_monitored_movie_title_from_release_matches_tagged_alias_variant() {
         crate::parse_release_metadata("NIGHTFALL.Heavy.Chorus.Dark.Lantern.2022.1080p.WEB-DL");
 
     let matched = find_monitored_movie_title_from_release(&[title], &parsed)
+        .await
         .expect("movie should resolve through tagged alias variants");
 
     assert_eq!(matched.id, "movie-1");
 }
 
-#[test]
-fn find_monitored_movie_title_from_release_prefers_imdb_id() {
+#[tokio::test]
+async fn find_monitored_movie_title_from_release_prefers_imdb_id() {
     let titles = vec![
         test_movie_title_with_aliases_and_ids(
             "movie-1",
@@ -270,6 +272,7 @@ fn find_monitored_movie_title_from_release_prefers_imdb_id() {
     );
 
     let matched = find_monitored_movie_title_from_release(&titles, &parsed)
+        .await
         .expect("movie should resolve by embedded IDs");
 
     assert_eq!(matched.id, "movie-2");
@@ -1723,8 +1726,8 @@ fn preserved_import_filename_sanitizes_trailing_bad_chars() {
     );
 }
 
-#[test]
-fn find_video_files_filters_samples_when_flag_set() {
+#[tokio::test]
+async fn find_video_files_filters_samples_when_flag_set() {
     use std::io::{Seek, SeekFrom, Write};
     let dir = tempfile::tempdir().expect("tempdir");
 
@@ -2819,7 +2822,7 @@ type TrackedDownloadImportRequests = Arc<
     >,
 >;
 
-fn scripted_tracked_download_runtime(
+async fn scripted_tracked_download_runtime(
     script: Vec<(
         &'static str,
         Vec<crate::tracked_downloads::ManualImportRecoveryOutcome>,
@@ -2891,7 +2894,8 @@ async fn completed_manual_import_recovery_decides_each_record_once_and_only_mark
         // info-hash both come back unchanged; neither may be acted on again.
         ("hash-already", vec![ManualImportRecoveryOutcome::Unchanged]),
         ("hash-fresh", vec![ManualImportRecoveryOutcome::Unchanged]),
-    ]);
+    ])
+    .await;
     let app = build_manual_import_cleanup_app(
         Vec::new(),
         Arc::new(ManualImportCleanupDownloadClient::default()),
@@ -3011,7 +3015,8 @@ async fn completed_manual_import_recovery_retries_busy_and_untracked_sources_on_
                 ManualImportRecoveryOutcome::Marked,
             ],
         ),
-    ]);
+    ])
+    .await;
     let app = build_manual_import_cleanup_app(
         Vec::new(),
         Arc::new(ManualImportCleanupDownloadClient::default()),

@@ -63,6 +63,39 @@ pub fn strip_trailing_year(key: &str) -> &str {
     key
 }
 
+/// The form a name is *compared* in, and the year it then carries.
+///
+/// A name that ends in its own year (`Tide Chart 2023`) is compared without it
+/// and asserts that year; every other name is compared whole and inherits the
+/// title's year. The trailing four digits are only read as a year when they
+/// agree with the title's own year, or when the name is not simply the title's
+/// name with a year glued on — otherwise `Blade Runner 2049` would lose its
+/// number.
+///
+/// One function because two places need the same answer: the persisted search
+/// projection stores this form, and the matcher compares against it. A
+/// disagreement between them is a silent lookup miss.
+pub fn title_match_form(
+    name: &str,
+    title_name: &str,
+    title_year: Option<i32>,
+) -> (String, Option<i32>) {
+    let key = title_lookup_form(name);
+    let stripped = strip_trailing_year(&key);
+    let canonical = title_lookup_form(title_name);
+    let canonical_shape = strip_trailing_year(&canonical);
+    let explicit_year = (stripped != key)
+        .then(|| key.rsplit_once(' ').and_then(|(_, year)| year.parse().ok()))
+        .flatten()
+        .filter(|year| {
+            Some(*year) == title_year || (key != canonical && stripped != canonical_shape)
+        });
+    match explicit_year {
+        Some(year) => (stripped.to_string(), Some(year)),
+        None => (key, title_year),
+    }
+}
+
 pub fn title_script(value: &str) -> TitleScript {
     let mut script = None;
     for ch in value.chars().filter(|ch| ch.is_alphabetic()) {
@@ -182,12 +215,16 @@ pub fn title_lookup_form(value: &str) -> String {
 /// [`normalize_title_spelling`] with diacritics folded away and two
 /// affordances a keyboard needs.
 ///
-/// Three deliberate differences from [`title_lookup_form`]:
+/// The deliberate differences from [`title_lookup_form`]:
 ///
 /// * Combining marks are dropped (NFD, then discard), so `muller` finds
 ///   `Müller` without the typist reaching for an umlaut. The lookup form keeps
 ///   them, because `ano` and `año` are different words and identity matching
 ///   must not conflate them.
+/// * `ß` becomes `ss`. NFD leaves it alone — it has no decomposition — so a
+///   searcher typing `Strasse` would otherwise never reach `Straße` in this
+///   lane. The lookup form keeps `ß`; the German phonebook collation key is
+///   what equates the two spellings for identity matching.
 /// * `&` becomes the word `and`, because that is what people type.
 /// * Every other symbol the normalizer does not list as a separator (`#`,
 ///   `%`, `@`, …) becomes a space rather than vanishing, so `Title#2` is two
@@ -209,10 +246,19 @@ pub fn title_search_lenient_form(value: &str) -> String {
             widened.push(' ');
         }
     }
-    let stripped = normalize_title_spelling(&widened)
+    let mut stripped = String::with_capacity(widened.len());
+    for ch in normalize_title_spelling(&widened)
         .nfd()
         .filter(|ch| !is_combining_mark(*ch))
-        .collect::<String>();
+    {
+        // `normalize_title_spelling` has already lowercased, so `ẞ` arrives
+        // here as `ß`.
+        if ch == 'ß' {
+            stripped.push_str("ss");
+        } else {
+            stripped.push(ch);
+        }
+    }
     collapse_initialisms(&stripped)
 }
 
@@ -242,32 +288,84 @@ fn collapse_initialisms(raw: &str) -> String {
     collapsed.join(" ")
 }
 
+/// Words that introduce a lower-case Roman numeral in a title.
+const NUMERAL_CONTEXT_WORDS: &[&str] = &["part", "season", "chapter", "vol"];
+
 /// Every number a name carries, in the shape the resolver guards on: bare
 /// digit runs, plus Roman numerals tagged so `II` cannot be edited into `I`.
 ///
+/// **Pass the name as written.** The Roman-numeral rule reads letter case, so
+/// a lowercased lookup form answers differently from the source spelling, and
+/// the two sides of one comparison must be fed the same way. The digit half
+/// is case-free, so it does not care.
+///
+/// A token counts as a Roman numeral only when the Roman pattern matches *and*
+/// one of these holds:
+///
+/// * every letter in it is upper case in the source — `Rocky II`, `Part III`;
+/// * it is a run of one `i`, `v` or `x` directly after `part`, `season`,
+///   `chapter` or `vol` — `part ii`, `season iv` is not a run and is caught by
+///   the upper-case rule instead when written `IV`.
+///
+/// Without that, the pattern alone reads ordinary words as numerals: `mix` is
+/// a valid Roman numeral (1009), and a spurious number in the guard splits a
+/// title from its own aliases. Known residue: a name shouted in full upper
+/// case (`MIX`) still reads as a numeral, because at that point the source
+/// carries no signal to tell the two apart.
+///
 /// NFKC has already folded Unicode Roman numerals into the ASCII spelling by
-/// the time a lookup form reaches this.
+/// the time a name reaches this.
 pub fn title_numbers(value: &str) -> Vec<String> {
     static ROMAN: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
             .expect("valid Roman numeral pattern")
     });
+
+    fn word(token: &str) -> &str {
+        token.trim_matches(|ch: char| !ch.is_alphanumeric())
+    }
+
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let mut romans = Vec::new();
+    for (position, token) in tokens.iter().enumerate() {
+        let token = word(token);
+        if token.is_empty() {
+            continue;
+        }
+        let lowered = token.to_lowercase();
+        if !ROMAN.is_match(&lowered) {
+            continue;
+        }
+        let shouted = token
+            .chars()
+            .all(|ch| !ch.is_alphabetic() || ch.is_uppercase());
+        let repeated_letter = lowered
+            .chars()
+            .next()
+            .is_some_and(|first| matches!(first, 'i' | 'v' | 'x'))
+            && lowered.chars().all(|ch| Some(ch) == lowered.chars().next());
+        let after_context = position > 0
+            && NUMERAL_CONTEXT_WORDS
+                .iter()
+                .any(|marker| word(tokens[position - 1]).eq_ignore_ascii_case(marker));
+        if shouted || (repeated_letter && after_context) {
+            romans.push(format!("roman:{lowered}"));
+        }
+    }
+
     value
         .split(|ch: char| !ch.is_numeric())
         .filter(|part| !part.is_empty())
         .map(str::to_string)
-        .chain(
-            value
-                .split_whitespace()
-                .filter(|part| ROMAN.is_match(part))
-                .map(|part| format!("roman:{part}")),
-        )
+        .chain(romans)
         .collect()
 }
 
 /// [`title_numbers`] as one comparable string, for a persisted column and an
 /// index. Order follows [`title_numbers`], which is the order the in-memory
 /// guard compares, so equality of this key is equality of that guard.
+///
+/// Takes the name as written, for the reason [`title_numbers`] gives.
 pub fn title_numbers_key(value: &str) -> String {
     title_numbers(value).join("\u{1f}")
 }
@@ -286,6 +384,14 @@ pub fn title_numbers_key(value: &str) -> String {
 /// This is what makes persisting [`title_spelling_key`] output sound: the
 /// keys are stored *with* this stamp, and a mismatch is a rebuild rather than
 /// a silent miss.
+///
+/// Limitation: the probes are a sample, so a data change that leaves every
+/// probe's key byte-identical while moving some other name's key is not
+/// detected. The dependency versions below narrow that: the build script
+/// reads `icu_collator` and `icu_collator_data` out of `Cargo.lock` and they
+/// go into the hash, so a crate bump moves the fingerprint whether or not the
+/// probes notice. What neither covers is a data change with no version change,
+/// which the registry does not permit for a published crate.
 pub fn title_collation_data_version() -> &'static str {
     static VERSION: LazyLock<String> = LazyLock::new(|| {
         const PROBES: &[&str] = &[
@@ -302,6 +408,7 @@ pub fn title_collation_data_version() -> &'static str {
         ];
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"title-spelling-collation-v1");
+        hasher.update(env!("SCRYER_ICU_COLLATOR_VERSIONS").as_bytes());
         for tag in COLLATION_PROFILES {
             hasher.update(tag.as_bytes());
             for probe in PROBES {
@@ -547,6 +654,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn roman_numerals_are_read_from_the_source_spelling() {
+        // Upper case in the source is the signal.
+        assert_eq!(title_numbers("Rocky II"), vec!["roman:ii".to_string()]);
+        assert_eq!(title_numbers("Part III"), vec!["roman:iii".to_string()]);
+        assert_eq!(title_numbers("Season IV"), vec!["roman:iv".to_string()]);
+        // Lower case needs a counting word in front of a single-letter run.
+        assert_eq!(title_numbers("part ii"), vec!["roman:ii".to_string()]);
+        assert_eq!(title_numbers("vol iii"), vec!["roman:iii".to_string()]);
+        assert_eq!(title_numbers("chapter x"), vec!["roman:x".to_string()]);
+        // Ordinary words are not numerals, whatever the pattern says. `mix`
+        // parses as 1009 and used to poison the guard.
+        for word in [
+            "Mix",
+            "Did",
+            "Mid",
+            "Dim",
+            "Civil",
+            "The Mix Tape",
+            "A Civil Action",
+        ] {
+            assert!(
+                title_numbers(word).is_empty(),
+                "{word} must not read as a numeral"
+            );
+        }
+        // Neither is a lower-case numeral with no counting word.
+        assert!(title_numbers("rocky ii").is_empty());
+        // Digits never depend on case.
+        assert_eq!(title_numbers("Rocky 4"), vec!["4".to_string()]);
+        assert_eq!(title_numbers("Blade Runner 2049"), vec!["2049".to_string()]);
+        // The guard that started all this: II cannot be edited into I.
+        assert_ne!(title_numbers("Rocky II"), title_numbers("Rocky I"));
+    }
+
+    #[test]
+    fn the_lenient_form_folds_eszett_and_the_lookup_form_keeps_it() {
+        assert_eq!(title_search_lenient_form("Straße"), "strasse");
+        assert_eq!(title_search_lenient_form("Strasse"), "strasse");
+        assert_eq!(title_lookup_form("Straße"), "straße");
+        assert_ne!(title_lookup_form("Strasse"), title_lookup_form("Straße"));
+        // Folding is confined to ß; other German spellings stay distinct in
+        // the lookup form and are equated by the phonebook collation instead.
+        assert_eq!(title_search_lenient_form("Grüße"), "grusse");
     }
 
     #[test]

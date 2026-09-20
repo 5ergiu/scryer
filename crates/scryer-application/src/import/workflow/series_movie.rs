@@ -431,7 +431,7 @@ async fn try_match_titleless_archive_from_inner_video(
         .collect();
     for candidate in title_evidence_candidates_from_video_files(&probe_files) {
         if let Some(title) =
-            resolve_title_from_release_candidate(&titles, &candidate, Some(facet.as_str()))
+            resolve_title_from_release_candidate(&titles, &candidate, Some(facet.as_str())).await
         {
             let destination =
                 match archive_extraction_destination_for_title(app, import_id, &title).await {
@@ -548,7 +548,8 @@ async fn resolve_completed_import_target(
                 &titles,
                 &parsed_release_title,
                 release_evidence.facet(),
-            );
+            )
+            .await;
         }
     }
 
@@ -614,7 +615,9 @@ async fn resolve_completed_import_target(
                         &titles,
                         &candidate,
                         release_evidence.facet(),
-                    ) {
+                    )
+                    .await
+                    {
                         title = Some(matched);
                         break;
                     }

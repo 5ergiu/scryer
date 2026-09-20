@@ -287,6 +287,14 @@ pub(super) struct MockShowRepo {
     pub(super) series_movie_links: Arc<Mutex<Vec<scryer_domain::SeriesMovieLink>>>,
     pub(super) collection_external_ids: Arc<Mutex<Vec<ScopedExternalId>>>,
     pub(super) episode_external_ids: Arc<Mutex<Vec<ScopedExternalId>>>,
+    /// The title store this show store shares a database with, when the
+    /// fixture wires one. The real store refreshes a title's search names in
+    /// the same transaction that writes its numbering bridge, so a fake that
+    /// keeps the bridge to itself would hide every cour name from matching.
+    pub(super) titles: Option<Arc<super::support_catalog::MockTitleRepo>>,
+    /// The names the last bridge write contributed, per title, so the next one
+    /// can replace exactly those.
+    pub(super) bridge_alias_names: Mutex<HashMap<String, Vec<String>>>,
 }
 
 #[async_trait]
@@ -318,6 +326,34 @@ impl ShowRepository for MockShowRepo {
             bridges.insert(title_id.to_string(), bridge.clone());
         } else {
             bridges.remove(title_id);
+        }
+        drop(bridges);
+        // Mirror `refresh_title_search_projection_tx`: the bridge's cour names
+        // become names the title answers to, and clearing the bridge takes
+        // them away again.
+        if let Some(titles) = &self.titles {
+            let aliases = bridge
+                .map(scryer_domain::AnimeNumberingBridge::cour_title_aliases)
+                .unwrap_or_default();
+            let previous = self
+                .bridge_alias_names
+                .lock()
+                .await
+                .insert(
+                    title_id.to_string(),
+                    aliases
+                        .iter()
+                        .map(|alias| alias.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_default();
+            let mut store = titles.store.lock().await;
+            if let Some(title) = store.iter_mut().find(|title| title.id == title_id) {
+                title
+                    .tagged_aliases
+                    .retain(|alias| !previous.contains(&alias.name));
+                title.tagged_aliases.extend(aliases);
+            }
         }
         Ok(())
     }

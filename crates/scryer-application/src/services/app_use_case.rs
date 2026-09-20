@@ -87,77 +87,30 @@ impl AppUseCase {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Dirty the cached matcher. Every catalog write that can change a name,
-    /// alias, tagged alias, facet, year, external id, or monitored flag calls
-    /// this (directly, or via the `Title*` domain events); there is no longer
-    /// a time-based fallback behind it, so a missed call is a correctness bug
-    /// and not a one-minute delay.
+    /// Record that the catalog changed.
+    ///
+    /// The matcher no longer caches anything — resolution reads the persisted
+    /// projection, which the same transaction that writes a title updates — so
+    /// there is nothing to invalidate. What remains is the generation counter
+    /// the tracked-download sweep compares against, so a download that matched
+    /// nothing is re-resolved after a catalog change.
     pub(crate) async fn invalidate_monitored_title_matcher(&self) {
-        let mut state = self.runtime.catalog.monitored_title_matcher.write().await;
-        state.dirty = true;
-        state.generation = state.generation.wrapping_add(1);
+        self.runtime
+            .catalog
+            .catalog_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// A matcher over the title repository. Cheap: it holds a handle, not a
+    /// catalog, so it is built per use rather than cached and invalidated.
     pub(crate) async fn monitored_title_matcher(
         &self,
     ) -> AppResult<Arc<crate::import_title_resolution::MonitoredTitleMatcher>> {
-        let observed_generation = {
-            let state = self.runtime.catalog.monitored_title_matcher.read().await;
-            if !state.dirty
-                && let Some(matcher) = state.matcher.clone()
-            {
-                return Ok(matcher);
-            }
-            state.generation
-        };
-
-        let titles = self
-            .services
-            .catalog
-            .titles
-            .list_for_matching(None, None)
-            .await?;
-        // An imported file is named by the same release groups the indexers
-        // carry, so it can arrive under an anime cour's own name. That name
-        // lives only in the numbering bridge, so it has to be folded in before
-        // the matcher indexes the title, or the file belongs to nobody.
-        let mut bridged_titles = Vec::with_capacity(titles.len());
-        for title in &titles {
-            let bridge = if title.facet == scryer_domain::MediaFacet::Anime {
-                // Propagated, not swallowed: a transient read failure here
-                // used to look exactly like "this title has no bridge", and
-                // the incomplete matcher was then cached as clean. A
-                // cour-named file would belong to nobody until the next write
-                // dirtied the cache. Failing the rebuild lets the scan retry
-                // once the store recovers.
-                self.services
-                    .catalog
-                    .shows
-                    .get_anime_numbering_bridge(&title.id)
-                    .await?
-            } else {
-                None
-            };
-            bridged_titles.push(
-                crate::acquisition_release_search::title_with_bridge_cour_titles(
-                    title,
-                    bridge.as_ref(),
-                ),
-            );
-        }
-        let matcher = Arc::new(crate::import_title_resolution::MonitoredTitleMatcher::new(
-            bridged_titles,
-        ));
-
-        let mut state = self.runtime.catalog.monitored_title_matcher.write().await;
-        state.matcher = Some(matcher.clone());
-        // Only clear dirty when no invalidation raced the rebuild; a bumped
-        // generation means this matcher may already be stale, so the next
-        // caller rebuilds again rather than trusting it.
-        if state.generation == observed_generation {
-            state.dirty = false;
-        }
-        Ok(matcher)
+        Ok(Arc::new(
+            crate::import_title_resolution::MonitoredTitleMatcher::new(
+                self.services.catalog.titles.clone(),
+            ),
+        ))
     }
 
     pub fn runtime_build_lane(&self) -> BinaryLane {

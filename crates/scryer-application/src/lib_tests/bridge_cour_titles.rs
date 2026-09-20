@@ -55,7 +55,10 @@ async fn the_import_matcher_answers_to_anime_bridge_cour_names() {
         .await
         .expect("build the monitored title matcher");
     let parsed = crate::release_parser::parse_release_metadata(ROMANIZED_COUR_RELEASE);
-    let resolved = matcher.resolve_episode(&parsed, Some("anime"));
+    let resolved = matcher
+        .resolve_episode(&parsed, Some("anime"))
+        .await
+        .expect("resolve episode");
 
     assert_eq!(
         resolved.map(|resolved| resolved.title.id.clone()),
@@ -64,13 +67,17 @@ async fn the_import_matcher_answers_to_anime_bridge_cour_names() {
     );
 }
 
-/// The matcher is cached until a write dirties it. A bridge read that failed
-/// transiently used to look exactly like "this title has no bridge", so every
-/// scan until the next catalog write ran against a title bank missing every
-/// cour alias — and a cour-named file belonged to nobody. The rebuild has to
-/// fail instead, so the scan retries once the store is back.
+/// The matcher used to be rebuilt by walking the catalog and reading every
+/// title's anime numbering bridge. A bridge read that failed transiently then
+/// looked exactly like "this title has no bridge", so every scan until the
+/// next catalog write ran against a title bank missing every cour alias — and
+/// a cour-named file belonged to nobody.
+///
+/// Cour names are now written into the persisted title index when the bridge
+/// itself is written, so the matching lane never reads the shows store: a
+/// bridge-read outage cannot reach title matching at all.
 #[tokio::test]
-async fn a_failed_bridge_read_fails_the_matcher_rebuild_instead_of_caching_it() {
+async fn a_bridge_read_outage_cannot_reach_title_matching() {
     let shows = std::sync::Arc::new(super::support_library_show::MockShowRepo::default());
     let (app, user) = bootstrap();
     let app = app.with_test_overrides({
@@ -92,19 +99,35 @@ async fn a_failed_bridge_read_fails_the_matcher_rebuild_instead_of_caching_it() 
     assert_eq!(title.facet, MediaFacet::Anime);
 
     *shows.fail_anime_bridge.lock().await = true;
+    // The outage is live: the shows store itself still fails.
     let error = app
-        .monitored_title_matcher()
+        .services
+        .catalog
+        .shows
+        .get_anime_numbering_bridge(&title.id)
         .await
-        .expect_err("a failed bridge read must fail the rebuild");
+        .expect_err("the bridge read must fail while the store is down");
     assert!(
         error.to_string().contains("anime numbering bridge"),
         "the store's own failure is what surfaces: {error}"
     );
 
-    // And nothing incomplete was cached: once the store recovers, the very
-    // next caller gets a matcher.
-    *shows.fail_anime_bridge.lock().await = false;
-    app.monitored_title_matcher()
+    // Matching is unaffected: no bridge read stands between a release and its
+    // title.
+    let matcher = app
+        .monitored_title_matcher()
         .await
-        .expect("the rebuild succeeds once the store recovers");
+        .expect("a bridge outage must not fail the matcher");
+    let parsed = crate::release_parser::parse_release_metadata(
+        "Synthetic.Alchemy.Chronicle.S01E01.1080p.WEB-DL.H264-GRP",
+    );
+    let resolved = matcher
+        .resolve_episode(&parsed, Some("anime"))
+        .await
+        .expect("resolve episode");
+    assert_eq!(
+        resolved.map(|resolved| resolved.title.id.clone()),
+        Some(title.id.clone()),
+        "a title still resolves by its own name during a bridge outage"
+    );
 }

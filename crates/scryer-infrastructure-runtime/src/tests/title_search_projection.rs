@@ -182,10 +182,12 @@ async fn assert_multilingual_projection(
     .await?;
     let terms = projected_terms(datastore, "de-strasse").await?;
 
-    let name = term(&terms, "name", "die muller straße");
+    // The lenient form a UI query is matched against: `ü` folded to `u` and
+    // `ß` spelled `ss`, so someone typing `Muller Strasse` reaches this row.
+    let name = term(&terms, "name", "die muller strasse");
     assert_eq!(name.raw_term, "Die Müller Straße");
-    // The literal form keeps every diacritic: it is what release and import
-    // resolution key on. Only the lenient form folds them, for UI typing.
+    // The literal form keeps every diacritic and the ß: it is what release
+    // and import resolution key on. Only the lenient form folds them.
     assert_eq!(name.literal_term, "die müller straße");
     assert_eq!(name.stripped_year_key, "die müller straße");
     assert_eq!(name.script, "latin");
@@ -199,9 +201,16 @@ async fn assert_multilingual_projection(
         vec!["de".to_string(), "de-u-co-phonebk".to_string()]
     );
 
-    let alias = term(&terms, "alias", "gruße aus berlin");
+    let alias = term(&terms, "alias", "grusse aus berlin");
     assert_eq!(alias.literal_term, "grüße aus berlin");
     assert_eq!(alias.title_year, Some(1998));
+
+    // The per-word typo lane carries the same fold, so a query typed
+    // `Strasse` reaches the token row of a title written `Straße`.
+    assert_eq!(
+        term(&terms, "name_token", "strasse").literal_term,
+        "strasse"
+    );
 
     // A word inside a name does not date the name.
     let token = term(&terms, "name_token", "muller");
@@ -383,6 +392,42 @@ async fn assert_multilingual_projection(
     assert_ne!(
         roman.numbers_key, arabic.numbers_key,
         "the numbers guard separates sequels; it is not a spelling"
+    );
+
+    // Ordinary words that the Roman-numeral pattern accepts must not land in
+    // the numbers guard: `Mix` parses as 1009, and a spurious number there
+    // splits a title from its own aliases.
+    for (id, name) in [
+        ("en-mix", "Mix"),
+        ("en-did", "Did"),
+        ("en-mid", "Mid"),
+        ("en-dim", "Dim"),
+        ("en-civil", "Civil"),
+    ] {
+        TitleRepository::create(
+            catalog,
+            multilingual_title(id, name, Some("en"), None, &[], &[]),
+        )
+        .await?;
+        let terms = projected_terms(datastore, id).await?;
+        let lowered = name.to_lowercase();
+        assert_eq!(
+            term(&terms, "name", &lowered).numbers_key,
+            "",
+            "{name} must not read as a Roman numeral"
+        );
+    }
+
+    // A lower-case numeral counts only behind a counting word.
+    TitleRepository::create(
+        catalog,
+        multilingual_title("en-part-ii", "Harbour part ii", Some("en"), None, &[], &[]),
+    )
+    .await?;
+    let terms = projected_terms(datastore, "en-part-ii").await?;
+    assert_eq!(
+        term(&terms, "name", "harbour part ii").numbers_key,
+        "roman:ii"
     );
 
     // A trailing year is stripped for collision counting but kept in the

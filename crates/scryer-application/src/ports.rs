@@ -957,6 +957,214 @@ pub struct TitleCounts {
     pub anime: usize,
 }
 
+/// One projected name, as the relaxed spelling lane compares it.
+///
+/// These rows are the persisted replacement for the per-process spelling
+/// index: every name the catalog answers to, with the forms the comparison
+/// needs already computed.
+#[derive(Clone, Debug)]
+pub struct TitleNameCandidate {
+    pub title_id: String,
+    pub facet: String,
+    /// The name as the catalog wrote it. Only the numbers guard reads this:
+    /// the Roman-numeral rule decides `Rocky II` from letter case, which the
+    /// forms below have lowercased away.
+    pub raw_term: String,
+    /// The full lookup form, a trailing year included.
+    pub literal_term: String,
+    /// The form the spelling lane compares: the lookup form without a name's
+    /// own trailing year.
+    pub match_term: String,
+    /// The year this name asserts, its own or the title's.
+    pub match_year: Option<i32>,
+    pub language_tag: Option<String>,
+}
+
+/// One bucket of the persisted name index: a single facet, script and numbers
+/// guard, which is exactly the key the in-memory index bucketed on.
+#[derive(Clone, Debug)]
+pub struct TitleNameBucketQuery<'a> {
+    /// `None` searches every facet, as the matcher does when no facet hint
+    /// narrows the release.
+    pub facet: Option<&'a str>,
+    pub script: &'a str,
+    pub numbers_key: &'a str,
+    /// Inclusive character-length band for the typo lane. `None` asks for the
+    /// equality lanes only.
+    pub length_band: Option<(i64, i64)>,
+    /// Equality lanes. No length band bounds these: a romanization or a
+    /// locale-equal spelling can differ from the observed name by any number
+    /// of characters, so they are fetched by key.
+    pub match_term: &'a str,
+    pub romanization_key: Option<&'a str>,
+    pub collation_keys: &'a [(&'static str, Vec<u8>)],
+    /// Cap on the typo lane. The equality lanes are never capped.
+    pub limit: i64,
+}
+
+/// Name, aliases and tagged aliases in their lookup form, deduplicated. This
+/// is what the persisted projection keys its exact lane on.
+pub fn title_lookup_forms(title: &Title) -> Vec<String> {
+    let mut forms = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for name in std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+    {
+        let form = scryer_domain::title_spelling::title_lookup_form(name);
+        if !form.is_empty() && seen.insert(form.clone()) {
+            forms.push(form);
+        }
+    }
+    forms
+}
+
+/// The projection rows a title would produce, derived in memory.
+///
+/// The SQL store reads these from `title_search_terms`; this is the same
+/// derivation for repositories that have no projection behind them, and the
+/// reason both agree is that the forms come from one place in the domain.
+pub fn title_name_candidates(title: &Title) -> Vec<TitleNameCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    title
+        .tagged_aliases
+        .iter()
+        .map(|alias| (alias.name.as_str(), Some(alias.language.as_str())))
+        .chain(std::iter::once((
+            title.name.as_str(),
+            title.metadata_language.as_deref(),
+        )))
+        .chain(
+            title
+                .aliases
+                .iter()
+                .map(|name| (name.as_str(), title.metadata_language.as_deref())),
+        )
+        .filter_map(|(name, language)| {
+            let literal_term = scryer_domain::title_spelling::title_lookup_form(name);
+            if literal_term.is_empty() || !seen.insert(literal_term.clone()) {
+                return None;
+            }
+            let (match_term, match_year) =
+                scryer_domain::title_spelling::title_match_form(name, &title.name, title.year);
+            (!match_term.is_empty()).then(|| TitleNameCandidate {
+                title_id: title.id.clone(),
+                facet: title.facet.as_str().to_string(),
+                raw_term: name.to_string(),
+                literal_term,
+                match_term,
+                match_year,
+                language_tag: language.map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// The in-memory half of the candidate-discovery port.
+///
+/// Repositories with no projection behind them — the null repository, the test
+/// fakes, a matcher over an explicitly supplied set of titles — answer from
+/// these, and the SQL store answers the same questions with indexed queries.
+/// One derivation, two readers.
+pub fn titles_matching_lookup_keys(titles: Vec<Title>, keys: &[String]) -> Vec<Title> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let wanted = keys.iter().collect::<std::collections::HashSet<_>>();
+    titles
+        .into_iter()
+        .filter(|title| {
+            title_lookup_forms(title)
+                .iter()
+                .any(|form| wanted.contains(form))
+        })
+        .collect()
+}
+
+/// Like [`titles_matching_lookup_keys`], but a name matches when either its
+/// lookup form or its year-stripped shape is asked for: an RSS anchor of
+/// `tide chart` has to reach a catalog name of `Tide Chart 2023`.
+pub fn titles_matching_lookup_key_shapes(titles: Vec<Title>, keys: &[String]) -> Vec<Title> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let wanted = keys.iter().collect::<std::collections::HashSet<_>>();
+    titles
+        .into_iter()
+        .filter(|title| {
+            title_lookup_forms(title).iter().any(|form| {
+                wanted.contains(form)
+                    || wanted.contains(
+                        &scryer_domain::title_spelling::strip_trailing_year(form).to_string(),
+                    )
+            })
+        })
+        .collect()
+}
+
+pub fn titles_matching_external_id(titles: Vec<Title>, source: &str, value: &str) -> Vec<Title> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    titles
+        .into_iter()
+        .filter(|title| {
+            title.external_ids.iter().any(|external_id| {
+                external_id.source.eq_ignore_ascii_case(source)
+                    && external_id.value.trim().eq_ignore_ascii_case(value)
+            })
+        })
+        .collect()
+}
+
+pub fn lookup_keys_claimed_by_others(
+    titles: &[Title],
+    title_id: &str,
+    keys: &[String],
+) -> Vec<String> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let mut claimed = std::collections::HashSet::new();
+    for title in titles.iter().filter(|title| title.id != title_id) {
+        for form in title_lookup_forms(title) {
+            claimed.insert(scryer_domain::title_spelling::strip_trailing_year(&form).to_string());
+        }
+    }
+    keys.iter()
+        .filter(|key| claimed.contains(scryer_domain::title_spelling::strip_trailing_year(key)))
+        .cloned()
+        .collect()
+}
+
+/// The whole bucket, uncapped: an in-memory set is the caller's own and is
+/// never the catalog, so there is nothing to bound it against.
+pub fn name_candidates_in_bucket(
+    titles: &[Title],
+    query: &TitleNameBucketQuery<'_>,
+) -> Vec<TitleNameCandidate> {
+    let mut candidates = Vec::new();
+    for title in titles {
+        if query
+            .facet
+            .is_some_and(|facet| facet != title.facet.as_str())
+        {
+            continue;
+        }
+        for candidate in title_name_candidates(title) {
+            let script =
+                scryer_domain::title_spelling::title_script(&candidate.match_term).as_str();
+            let numbers_key = scryer_domain::title_spelling::title_numbers_key(&candidate.raw_term);
+            if script != query.script || numbers_key != query.numbers_key {
+                continue;
+            }
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
 #[async_trait]
 pub trait TitleRepository: Send + Sync {
     /// Aggregate counts without hydrating catalog records. SQL stores override this.
@@ -1482,6 +1690,98 @@ pub trait TitleRepository: Send + Sync {
         facet: Option<MediaFacet>,
         query: Option<String>,
     ) -> AppResult<Vec<Title>>;
+
+    /// Titles that answer to any of `keys`, compared on the persisted lookup
+    /// form of their name, aliases and tagged aliases.
+    ///
+    /// This is the exact lane of release and import resolution. It used to be
+    /// a `HashMap` rebuilt from the whole catalog per process; the SQL store
+    /// answers it from the title-search projection instead, so nothing the
+    /// size of the library is ever resident. The default below is the
+    /// in-memory derivation, for repositories with no projection behind them.
+    async fn find_titles_by_lookup_keys(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(titles_matching_lookup_keys(
+            self.list_for_matching(None, None).await?,
+            keys,
+        ))
+    }
+
+    /// Titles answering to any of `keys` on either their lookup form or its
+    /// year-stripped shape. The RSS cycle's anchor probe: a release named
+    /// `Tide Chart` has to reach a catalog title named `Tide Chart 2023`.
+    async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(titles_matching_lookup_key_shapes(
+            self.list_for_matching(None, None).await?,
+            keys,
+        ))
+    }
+
+    /// The distinct (library, facet) scopes that hold at least one monitored
+    /// title. The RSS cycle resolves indexer routing per scope, and used to
+    /// derive them by reading every title row in the catalog.
+    async fn monitored_library_scopes(&self) -> AppResult<Vec<(String, String)>> {
+        let mut scopes = self
+            .list_for_matching(None, None)
+            .await?
+            .into_iter()
+            .filter(|title| title.monitored)
+            .map(|title| (title.library_id.clone(), title.facet.as_str().to_string()))
+            .collect::<Vec<_>>();
+        scopes.sort();
+        scopes.dedup();
+        Ok(scopes)
+    }
+
+    /// Titles carrying `value` for external id `source` (`imdb`, `tmdb`).
+    async fn find_titles_by_external_id(&self, source: &str, value: &str) -> AppResult<Vec<Title>> {
+        Ok(titles_matching_external_id(
+            self.list_for_matching(None, None).await?,
+            source,
+            value,
+        ))
+    }
+
+    /// The subset of `keys` that some title other than `title_id` also claims,
+    /// compared on the year-stripped shape so `X` collides with `X <year>`.
+    ///
+    /// A grouped count over one indexed column in the SQL store, not a
+    /// catalog-wide collision map held in memory.
+    async fn lookup_keys_claimed_by_other_titles(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(lookup_keys_claimed_by_others(
+            &self.list_for_matching(None, None).await?,
+            title_id,
+            keys,
+        ))
+    }
+
+    /// One bucket of the persisted name index, for the relaxed spelling lane.
+    ///
+    /// The equality lanes (same match form, same romanization, equal under a
+    /// collation profile) are exhaustive; the length band is the typo lane and
+    /// is capped, because a common bucket in a large library is unbounded.
+    async fn find_title_name_candidates(
+        &self,
+        query: TitleNameBucketQuery<'_>,
+    ) -> AppResult<Vec<TitleNameCandidate>> {
+        Ok(name_candidates_in_bucket(
+            &self.list_for_matching(None, None).await?,
+            &query,
+        ))
+    }
+
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>>;
     async fn get_by_id_without_external_ids(&self, id: &str) -> AppResult<Option<Title>> {
         self.get_by_id(id).await
@@ -9320,9 +9620,14 @@ impl IndexerGrabSelection {
         if self.client_id.trim().is_empty() {
             return Err(AppError::Validation("select a download client".into()));
         }
-        if self.category.as_ref().is_some_and(|category|
-            category.len() > 255 || category.chars().any(char::is_control)) {
-            return Err(AppError::Validation("category must be at most 255 bytes without control characters".into()));
+        if self
+            .category
+            .as_ref()
+            .is_some_and(|category| category.len() > 255 || category.chars().any(char::is_control))
+        {
+            return Err(AppError::Validation(
+                "category must be at most 255 bytes without control characters".into(),
+            ));
         }
         Ok(())
     }
@@ -9336,7 +9641,9 @@ pub trait DownloadClient: Send + Sync {
         _indexer_id: Option<&str>,
         _source_kind: DownloadSourceKind,
     ) -> AppResult<Vec<IndexerGrabClient>> {
-        Err(AppError::Validation("client routing discovery is unsupported".into()))
+        Err(AppError::Validation(
+            "client routing discovery is unsupported".into(),
+        ))
     }
 
     /// None explicitly denotes unsupported discovery; an empty list is supported.

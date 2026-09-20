@@ -1,38 +1,38 @@
 use crate::ParsedReleaseMetadata;
 use scryer_domain::{MediaFacet, Title, TitleMatchType};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const CONTEXT_CANDIDATE_LIMIT: usize = 8;
 
-pub(crate) struct ResolvedMonitoredTitle<'a> {
-    pub title: &'a Title,
+pub(crate) struct ResolvedMonitoredTitle {
+    pub title: Title,
     pub match_type: TitleMatchType,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct MonitoredTitleMatcherCache {
-    pub matcher: Option<Arc<MonitoredTitleMatcher>>,
-    pub dirty: bool,
-    /// Bumped on every invalidation; a rebuild only clears `dirty` when no
-    /// invalidation raced the build, so a mid-build title change is never
-    /// silently absorbed into a "clean" stale matcher.
-    pub generation: u64,
+/// Release and import title resolution, answered from the persisted title
+/// index.
+///
+/// Nothing here is sized by the catalog. The matcher used to hold every
+/// monitored title, four maps over them and a spelling index over every name
+/// in the library, rebuilt whenever anything in the catalog changed; it now
+/// holds a repository handle and asks it for the few names a release can
+/// possibly mean.
+#[derive(Clone)]
+pub(crate) struct MonitoredTitleMatcher {
+    titles: TitleSource,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MonitoredTitleMatcher {
-    spelling_index: Arc<crate::title_matching::relaxed::SpellingIndex>,
-    titles: Vec<Title>,
-    normalized_title_index: HashMap<String, Vec<usize>>,
-    imdb_index: HashMap<String, Vec<usize>>,
-    tmdb_index: HashMap<String, Vec<usize>>,
-    /// Pillar A tier 0 collision index over ALL library titles (monitored or
-    /// not — an unmonitored collider is still a collider), keyed by the
-    /// year-stripped lookup key so `tide chart` and `tide chart 2023` are the
-    /// same identity shape. Values are title ids, not `titles` indexes,
-    /// because unmonitored titles are not resolvable and live only here.
-    ambiguity_index: HashMap<String, Vec<String>>,
+/// Where a matcher's candidates come from.
+///
+/// `Repository` is the real path: every question below is an indexed query.
+/// `Fixed` is a set the caller supplied — one title under test, a fixture —
+/// and never the catalog; it answers with the same derivation the projection
+/// is written from, so the two agree name for name.
+#[derive(Clone)]
+enum TitleSource {
+    Repository(Arc<dyn crate::ports::TitleRepository>),
+    Fixed(Arc<Vec<Title>>),
 }
 
 /// `Title (Year)` and bare `Title` are the same canonical identity for
@@ -43,381 +43,491 @@ pub(crate) fn strip_trailing_year_key(key: &str) -> &str {
 }
 
 impl MonitoredTitleMatcher {
-    pub(crate) fn new(titles: Vec<Title>) -> Self {
-        let mut matcher = Self {
-            spelling_index: Arc::new(crate::title_matching::relaxed::SpellingIndex::new(&titles)),
-            ..Self::default()
-        };
-
-        for title in &titles {
-            for normalized in crate::acquisition_release_search::canonical_title_lookup_keys(title)
-            {
-                let stripped = strip_trailing_year_key(&normalized);
-                let entry = matcher
-                    .ambiguity_index
-                    .entry(stripped.to_string())
-                    .or_default();
-                if !entry.contains(&title.id) {
-                    entry.push(title.id.clone());
-                }
-            }
+    pub(crate) fn new(titles: Arc<dyn crate::ports::TitleRepository>) -> Self {
+        Self {
+            titles: TitleSource::Repository(titles),
         }
-
-        for title in titles.into_iter().filter(|title| title.monitored) {
-            let index = matcher.titles.len();
-
-            for normalized in crate::acquisition_release_search::canonical_title_lookup_keys(&title)
-            {
-                matcher
-                    .normalized_title_index
-                    .entry(normalized)
-                    .or_default()
-                    .push(index);
-            }
-
-            for external_id in &title.external_ids {
-                if external_id.source.eq_ignore_ascii_case("imdb") {
-                    if let Some(imdb_id) = normalize_imdb_id(&external_id.value) {
-                        matcher.imdb_index.entry(imdb_id).or_default().push(index);
-                    }
-                } else if external_id.source.eq_ignore_ascii_case("tmdb") {
-                    let tmdb_id = external_id.value.trim();
-                    if !tmdb_id.is_empty() {
-                        matcher
-                            .tmdb_index
-                            .entry(tmdb_id.to_string())
-                            .or_default()
-                            .push(index);
-                    }
-                }
-            }
-
-            matcher.titles.push(title);
-        }
-
-        matcher
     }
 
-    /// The catalog-wide spelling index, shared with every consumer that needs
-    /// relaxed candidate discovery. Handed out rather than rebuilt so the RSS
-    /// cycle does not construct a second copy of it per poll.
-    pub(crate) fn spelling_index(&self) -> Arc<crate::title_matching::relaxed::SpellingIndex> {
-        self.spelling_index.clone()
+    /// A matcher over an explicitly supplied set of titles.
+    ///
+    /// The set is the caller's — one title under test, a fixture, a request's
+    /// own candidates — and never the catalog. It answers from the same
+    /// derivation the projection is written with, so it agrees with the
+    /// repository-backed matcher name for name.
+    pub(crate) fn over_titles(titles: Vec<Title>) -> Self {
+        Self {
+            titles: TitleSource::Fixed(Arc::new(titles)),
+        }
     }
 
     /// Pillar A tier 0: the subset of `keys` that at least one *other* library
     /// title (monitored or not — an unmonitored collider is still a collider)
     /// also claims, compared on the year-stripped shape so `X` collides with
-    /// `X <year>`. Index lookups only — no extra repository work.
-    pub(crate) fn shared_lookup_keys(&self, title_id: &str, keys: &[String]) -> Vec<String> {
-        keys.iter()
-            .filter(|key| {
-                self.ambiguity_index
-                    .get(strip_trailing_year_key(key))
-                    .is_some_and(|ids| ids.iter().any(|id| id != title_id))
-            })
-            .cloned()
-            .collect()
+    /// `X <year>`.
+    pub(crate) async fn shared_lookup_keys(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> crate::AppResult<Vec<String>> {
+        match &self.titles {
+            TitleSource::Repository(titles) => {
+                titles
+                    .lookup_keys_claimed_by_other_titles(title_id, keys)
+                    .await
+            }
+            TitleSource::Fixed(titles) => Ok(crate::ports::lookup_keys_claimed_by_others(
+                titles, title_id, keys,
+            )),
+        }
     }
 
     /// True when any of `keys` is a lookup key some *other* library title owns
     /// — the raw name those keys came from positively asserts a different
     /// subject's identity. Year-suffix bridged like
     /// [`Self::shared_lookup_keys`].
-    pub(crate) fn keys_name_another_title(&self, title_id: &str, keys: &[String]) -> bool {
-        keys.iter().any(|key| {
-            self.ambiguity_index
-                .get(strip_trailing_year_key(key))
-                .is_some_and(|ids| ids.iter().any(|id| id != title_id))
-        })
+    pub(crate) async fn keys_name_another_title(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> crate::AppResult<bool> {
+        Ok(!self.shared_lookup_keys(title_id, keys).await?.is_empty())
     }
 
-    pub(crate) fn identity_ambiguity(
+    pub(crate) async fn identity_ambiguity(
         &self,
         title: &Title,
-    ) -> crate::acquisition_release_search::TitleIdentityAmbiguity {
-        crate::acquisition_release_search::TitleIdentityAmbiguity {
-            shared_lookup_keys: self.shared_lookup_keys(
-                &title.id,
-                &crate::acquisition_release_search::canonical_title_lookup_keys(title),
+    ) -> crate::AppResult<crate::acquisition_release_search::TitleIdentityAmbiguity> {
+        Ok(
+            crate::acquisition_release_search::TitleIdentityAmbiguity::from_shared_keys(
+                self.shared_lookup_keys(
+                    &title.id,
+                    &crate::acquisition_release_search::canonical_title_lookup_keys(title),
+                )
+                .await?,
             ),
-            spelling_index: Some(self.spelling_index.clone()),
+        )
+    }
+
+    /// Identity ambiguity plus the spelling candidates the subject's own names
+    /// touch — the evidence shape the acquisition lane builds once per search
+    /// subject, before any release is in hand.
+    ///
+    /// The candidates are what the relaxed lane proves a recovered spelling
+    /// against: without them every non-exact spelling is refused outright, so
+    /// this and [`Self::identity_ambiguity`] must not be confused.
+    pub(crate) async fn evidence_ambiguity(
+        &self,
+        title: &Title,
+    ) -> crate::AppResult<crate::acquisition_release_search::TitleIdentityAmbiguity> {
+        let ambiguity = self.identity_ambiguity(title).await?;
+        Ok(ambiguity.with_spelling_candidates(self.title_spelling_candidates(title).await?))
+    }
+
+    /// The spelling candidates a single subject's own names touch.
+    pub(crate) async fn title_spelling_candidates(
+        &self,
+        title: &Title,
+    ) -> crate::AppResult<Arc<crate::title_matching::relaxed::SpellingCandidates>> {
+        Ok(Arc::new(match &self.titles {
+            TitleSource::Repository(titles) => {
+                crate::title_matching::relaxed::SpellingCandidates::load_for_title(
+                    titles.as_ref(),
+                    title,
+                )
+                .await?
+            }
+            TitleSource::Fixed(titles) => {
+                crate::title_matching::relaxed::SpellingCandidates::from_titles(titles)
+            }
+        }))
+    }
+
+    /// The spelling candidates a release's anchors touch. Bounded by the
+    /// anchors, not by the library.
+    pub(crate) async fn spelling_candidates(
+        &self,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
+    ) -> crate::AppResult<Arc<crate::title_matching::relaxed::SpellingCandidates>> {
+        Ok(Arc::new(match &self.titles {
+            TitleSource::Repository(titles) => {
+                crate::title_matching::relaxed::SpellingCandidates::load(
+                    titles.as_ref(),
+                    anchors,
+                    facet,
+                )
+                .await?
+            }
+            TitleSource::Fixed(titles) => {
+                crate::title_matching::relaxed::SpellingCandidates::from_titles(titles)
+            }
+        }))
+    }
+
+    /// Titles answering to any of `keys` on their lookup form or its
+    /// year-stripped shape.
+    pub(crate) async fn titles_naming_key_shapes(
+        &self,
+        keys: &[String],
+    ) -> crate::AppResult<Vec<Title>> {
+        match &self.titles {
+            TitleSource::Repository(titles) => titles.find_titles_by_lookup_key_shapes(keys).await,
+            TitleSource::Fixed(titles) => Ok(crate::ports::titles_matching_lookup_key_shapes(
+                titles.as_ref().clone(),
+                keys,
+            )),
         }
     }
 
-    pub(crate) fn resolve_movie<'a>(
-        &'a self,
-        parsed: &ParsedReleaseMetadata,
-    ) -> Option<ResolvedMonitoredTitle<'a>> {
-        parsed
-            .imdb_id
-            .as_deref()
-            .and_then(normalize_imdb_id)
-            .and_then(|imdb_id| {
-                lookup_unique_title(
-                    self.imdb_index.get(&imdb_id).map(Vec::as_slice),
-                    &self.titles,
-                    |title| title.facet == MediaFacet::Movie,
-                )
-            })
-            .map(|title| ResolvedMonitoredTitle {
-                title,
-                match_type: TitleMatchType::IdOnly,
-            })
-            .or_else(|| {
-                parsed
-                    .tmdb_id
-                    .as_deref()
-                    .and_then(|tmdb_id| {
-                        lookup_unique_title(
-                            self.tmdb_index.get(tmdb_id).map(Vec::as_slice),
-                            &self.titles,
-                            |title| title.facet == MediaFacet::Movie,
-                        )
-                    })
-                    .map(|title| ResolvedMonitoredTitle {
-                        title,
-                        match_type: TitleMatchType::IdOnly,
-                    })
-            })
-            .or_else(|| {
-                let (year_matches, any_matches) =
-                    self.collect_name_matches(parsed, |title| title.facet == MediaFacet::Movie);
-
-                if year_matches.len() == 1 {
-                    return Some(ResolvedMonitoredTitle {
-                        title: year_matches[0],
-                        match_type: TitleMatchType::TitleParse,
-                    });
-                }
-
-                if any_matches.len() == 1 {
-                    return Some(ResolvedMonitoredTitle {
-                        title: any_matches[0],
-                        match_type: TitleMatchType::TitleParse,
-                    });
-                }
-
-                contextual_candidate_bank_match(
-                    if !year_matches.is_empty() {
-                        &year_matches
-                    } else {
-                        &any_matches
-                    },
-                    parsed,
-                    Some("movie"),
-                )
-                .map(|title| ResolvedMonitoredTitle {
-                    title,
-                    match_type: TitleMatchType::TitleParse,
-                })
-            })
+    pub(crate) async fn titles_by_ids(&self, ids: &[String]) -> crate::AppResult<Vec<Title>> {
+        match &self.titles {
+            TitleSource::Repository(titles) => titles.get_by_ids(ids).await,
+            TitleSource::Fixed(titles) => Ok(titles
+                .iter()
+                .filter(|title| ids.contains(&title.id))
+                .cloned()
+                .collect()),
+        }
     }
 
-    pub(crate) fn resolve_episode<'a>(
-        &'a self,
-        parsed: &ParsedReleaseMetadata,
-        facet_hint: Option<&str>,
-    ) -> Option<ResolvedMonitoredTitle<'a>> {
-        let mut external_matches = HashSet::new();
+    /// Monitored titles carrying `value` for `source`, exposed for the RSS
+    /// cycle's indexer-asserted id lane.
+    pub(crate) async fn monitored_titles_by_external_id(
+        &self,
+        source: &str,
+        value: &str,
+    ) -> crate::AppResult<Vec<Title>> {
+        self.monitored_by_external_id(source, value).await
+    }
 
-        if let Some(imdb_id) = parsed.imdb_id.as_deref().and_then(normalize_imdb_id) {
-            for index in self.imdb_index.get(&imdb_id).into_iter().flatten().copied() {
-                if self.titles.get(index).is_some_and(|title| {
-                    episodic_facet_matches_hint(title.facet.clone(), facet_hint)
-                }) {
-                    external_matches.insert(index);
+    /// Monitored titles carrying `value` for `source`, compared as the
+    /// in-memory index compared them: normalized for IMDb, trimmed for TMDB.
+    async fn monitored_by_external_id(
+        &self,
+        source: &str,
+        value: &str,
+    ) -> crate::AppResult<Vec<Title>> {
+        let (queries, expected) = if source.eq_ignore_ascii_case("imdb") {
+            let Some(normalized) = normalize_imdb_id(value) else {
+                return Ok(Vec::new());
+            };
+            let bare = normalized.trim_start_matches("tt").to_string();
+            (vec![normalized.clone(), bare], normalized)
+        } else {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Ok(Vec::new());
+            }
+            (vec![trimmed.clone()], trimmed)
+        };
+
+        let mut titles = Vec::new();
+        let mut seen = HashSet::new();
+        for query in queries {
+            let found = match &self.titles {
+                TitleSource::Repository(titles) => {
+                    titles.find_titles_by_external_id(source, &query).await?
+                }
+                TitleSource::Fixed(titles) => crate::ports::titles_matching_external_id(
+                    titles.as_ref().clone(),
+                    source,
+                    &query,
+                ),
+            };
+            for title in found {
+                if !title.monitored || !seen.insert(title.id.clone()) {
+                    continue;
+                }
+                let claims = title.external_ids.iter().any(|external_id| {
+                    if !external_id.source.eq_ignore_ascii_case(source) {
+                        return false;
+                    }
+                    if source.eq_ignore_ascii_case("imdb") {
+                        normalize_imdb_id(&external_id.value).as_deref() == Some(&expected)
+                    } else {
+                        external_id.value.trim() == expected
+                    }
+                });
+                if claims {
+                    titles.push(title);
                 }
             }
         }
+        Ok(titles)
+    }
 
-        if let Some(tmdb_id) = parsed.tmdb_id.as_deref() {
-            for index in self.tmdb_index.get(tmdb_id).into_iter().flatten().copied() {
-                if self.titles.get(index).is_some_and(|title| {
-                    episodic_facet_matches_hint(title.facet.clone(), facet_hint)
-                }) {
-                    external_matches.insert(index);
+    pub(crate) async fn resolve_movie(
+        &self,
+        parsed: &ParsedReleaseMetadata,
+    ) -> crate::AppResult<Option<ResolvedMonitoredTitle>> {
+        for (source, value) in [
+            ("imdb", parsed.imdb_id.as_deref()),
+            ("tmdb", parsed.tmdb_id.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            let mut matches = self
+                .monitored_by_external_id(source, value)
+                .await?
+                .into_iter()
+                .filter(|title| title.facet == MediaFacet::Movie)
+                .collect::<Vec<_>>();
+            if matches.len() == 1
+                && let Some(title) = matches.pop()
+            {
+                return Ok(Some(ResolvedMonitoredTitle {
+                    title,
+                    match_type: TitleMatchType::IdOnly,
+                }));
+            }
+        }
+
+        let (year_matches, any_matches) = self
+            .collect_name_matches(parsed, None, |title| title.facet == MediaFacet::Movie)
+            .await?;
+
+        if year_matches.len() == 1 {
+            return Ok(Some(ResolvedMonitoredTitle {
+                title: year_matches.into_iter().next().expect("one match"),
+                match_type: TitleMatchType::TitleParse,
+            }));
+        }
+
+        if any_matches.len() == 1 {
+            return Ok(Some(ResolvedMonitoredTitle {
+                title: any_matches.into_iter().next().expect("one match"),
+                match_type: TitleMatchType::TitleParse,
+            }));
+        }
+
+        let pool = if year_matches.is_empty() {
+            &any_matches
+        } else {
+            &year_matches
+        };
+        Ok(
+            contextual_candidate_bank_match(
+                &pool.iter().collect::<Vec<_>>(),
+                parsed,
+                Some("movie"),
+            )
+            .cloned()
+            .map(|title| ResolvedMonitoredTitle {
+                title,
+                match_type: TitleMatchType::TitleParse,
+            }),
+        )
+    }
+
+    pub(crate) async fn resolve_episode(
+        &self,
+        parsed: &ParsedReleaseMetadata,
+        facet_hint: Option<&str>,
+    ) -> crate::AppResult<Option<ResolvedMonitoredTitle>> {
+        let mut external_matches = Vec::new();
+        let mut seen = HashSet::new();
+        for (source, value) in [
+            ("imdb", parsed.imdb_id.as_deref()),
+            ("tmdb", parsed.tmdb_id.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            for title in self.monitored_by_external_id(source, value).await? {
+                if episodic_facet_matches_hint(title.facet.clone(), facet_hint)
+                    && seen.insert(title.id.clone())
+                {
+                    external_matches.push(title);
                 }
             }
         }
 
         if external_matches.len() == 1
-            && let Some(index) = external_matches.into_iter().next()
-            && let Some(title) = self.titles.get(index)
+            && let Some(title) = external_matches.pop()
         {
-            return Some(ResolvedMonitoredTitle {
+            return Ok(Some(ResolvedMonitoredTitle {
                 title,
                 match_type: TitleMatchType::IdOnly,
-            });
+            }));
         }
 
-        let (year_matches, any_matches) = self.collect_name_matches(parsed, |title| {
-            episodic_facet_matches_hint(title.facet.clone(), facet_hint)
-        });
+        let (year_matches, any_matches) = self
+            .collect_name_matches(parsed, facet_hint, |title| {
+                episodic_facet_matches_hint(title.facet.clone(), facet_hint)
+            })
+            .await?;
 
         if year_matches.len() == 1 {
-            return Some(ResolvedMonitoredTitle {
-                title: year_matches[0],
+            return Ok(Some(ResolvedMonitoredTitle {
+                title: year_matches.into_iter().next().expect("one match"),
                 match_type: TitleMatchType::TitleParse,
-            });
+            }));
         }
 
-        (any_matches.len() == 1).then(|| ResolvedMonitoredTitle {
-            title: any_matches[0],
+        Ok((any_matches.len() == 1).then(|| ResolvedMonitoredTitle {
+            title: any_matches.into_iter().next().expect("one match"),
             match_type: TitleMatchType::TitleParse,
-        })
+        }))
     }
 
-    fn collect_name_matches<'a, F>(
-        &'a self,
+    /// The exact lane, then the guarded spelling lane when it finds nothing.
+    /// Both read the persisted index; neither materializes the catalog.
+    async fn collect_name_matches<F>(
+        &self,
         parsed: &ParsedReleaseMetadata,
+        facet_hint: Option<&str>,
         filter: F,
-    ) -> (Vec<&'a Title>, Vec<&'a Title>)
+    ) -> crate::AppResult<(Vec<Title>, Vec<Title>)>
     where
         F: Fn(&Title) -> bool,
     {
         let candidates = normalized_release_title_candidates(parsed);
         if candidates.is_empty() {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
-        let mut year_matches = Vec::<&Title>::new();
-        let mut any_matches = Vec::<&Title>::new();
-        let mut seen = HashSet::<usize>::new();
-        let mut seen_year = HashSet::<usize>::new();
+        let mut year_matches = Vec::<Title>::new();
+        let mut any_matches = Vec::<Title>::new();
+        let mut seen = HashSet::<String>::new();
+        let mut seen_year = HashSet::<String>::new();
 
-        for candidate in candidates {
-            for index in self
-                .normalized_title_index
-                .get(&candidate)
-                .into_iter()
-                .flatten()
-                .copied()
-            {
-                let Some(title) = self.titles.get(index) else {
-                    continue;
-                };
-                if !filter(title) {
-                    continue;
+        let by_key = match &self.titles {
+            TitleSource::Repository(titles) => {
+                titles.find_titles_by_lookup_keys(&candidates).await?
+            }
+            TitleSource::Fixed(titles) => {
+                crate::ports::titles_matching_lookup_keys(titles.as_ref().clone(), &candidates)
+            }
+        };
+        for title in by_key {
+            if !title.monitored || !filter(&title) {
+                continue;
+            }
+            let year_match = parsed.year.is_some() && title.year == parsed.year;
+            if seen.insert(title.id.clone()) {
+                if year_match && seen_year.insert(title.id.clone()) {
+                    year_matches.push(title.clone());
                 }
-
-                if seen.insert(index) {
-                    any_matches.push(title);
-                }
-
-                if let Some(year) = parsed.year
-                    && title.year == Some(year)
-                    && seen_year.insert(index)
-                {
-                    year_matches.push(title);
-                }
+                any_matches.push(title);
             }
         }
 
-        if any_matches.is_empty() {
-            let (anchors, _) =
-                crate::title_matching::relaxed::neutral_spelling_anchors(&parsed.raw_title);
-            let ids = self.spelling_index.candidates(&anchors, None);
-            for title in self
-                .titles
+        if !any_matches.is_empty() {
+            return Ok((year_matches, any_matches));
+        }
+
+        let (anchors, _) =
+            crate::title_matching::relaxed::neutral_spelling_forms(&parsed.raw_title);
+        let facet = facet_hint.and_then(canonical_facet_hint);
+        let spelling = self.spelling_candidates(&anchors, facet).await?;
+        let ids = spelling
+            .candidates(&anchors, facet)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let discovered = match &self.titles {
+            TitleSource::Repository(titles) => titles.get_by_ids(&ids).await?,
+            TitleSource::Fixed(titles) => titles
                 .iter()
-                .filter(|title| ids.contains(&title.id) && filter(title))
+                .filter(|title| ids.contains(&title.id))
+                .cloned()
+                .collect(),
+        };
+        for title in discovered {
+            if !title.monitored || !filter(&title) {
+                continue;
+            }
+            let evidence = crate::acquisition_release_search::canonical_title_evidence(&title)
+                .with_ambiguity(
+                    self.identity_ambiguity(&title)
+                        .await?
+                        .with_spelling_candidates(spelling.clone()),
+                );
+            if crate::acquisition_release_search::match_parsed_release_to_title_evidence(
+                parsed, &evidence,
+            )
+            .is_some()
             {
-                let evidence = crate::acquisition_release_search::canonical_title_evidence(title)
-                    .with_ambiguity(self.identity_ambiguity(title));
-                if crate::acquisition_release_search::match_parsed_release_to_title_evidence(
-                    parsed, &evidence,
-                )
-                .is_some()
-                {
-                    any_matches.push(title);
-                    if parsed.year.is_some() && parsed.year == title.year {
-                        year_matches.push(title);
-                    }
+                if parsed.year.is_some() && parsed.year == title.year {
+                    year_matches.push(title.clone());
                 }
+                any_matches.push(title);
             }
         }
-        (year_matches, any_matches)
+        Ok((year_matches, any_matches))
     }
 }
 
-fn lookup_unique_title<'a, F>(
-    indexes: Option<&[usize]>,
-    titles: &'a [Title],
-    filter: F,
-) -> Option<&'a Title>
-where
-    F: Fn(&Title) -> bool,
-{
-    let mut matches = indexes
-        .into_iter()
-        .flatten()
-        .copied()
-        .filter_map(|index| titles.get(index))
-        .filter(|title| filter(title))
-        .collect::<Vec<_>>();
-    (matches.len() == 1).then(|| matches.pop()).flatten()
+/// The facet a hint names, when it names exactly one. `None` searches all
+/// three, which is what an unhinted release gets.
+fn canonical_facet_hint(hint: &str) -> Option<&'static str> {
+    match hint.trim().to_ascii_lowercase().as_str() {
+        "anime" => Some("anime"),
+        "series" | "tv" => Some("series"),
+        "movie" => Some("movie"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
-pub(crate) fn find_monitored_movie_title_from_release(
+pub(crate) async fn find_monitored_movie_title_from_release(
     titles: &[Title],
     parsed: &ParsedReleaseMetadata,
 ) -> Option<Title> {
     resolve_monitored_movie_title_from_release(titles, parsed)
-        .map(|resolved| resolved.title.clone())
+        .await
+        .map(|resolved| resolved.title)
 }
 
 #[cfg(test)]
-pub(crate) fn find_monitored_episode_title_from_release(
+pub(crate) async fn find_monitored_episode_title_from_release(
     titles: &[Title],
     parsed: &ParsedReleaseMetadata,
     facet_hint: Option<&str>,
 ) -> Option<Title> {
     resolve_monitored_episode_title_from_release(titles, parsed, facet_hint)
-        .map(|resolved| resolved.title.clone())
+        .await
+        .map(|resolved| resolved.title)
 }
 
-pub(crate) fn resolve_monitored_movie_title_from_release<'a>(
-    titles: &'a [Title],
+/// Resolution over an explicitly supplied set of titles.
+///
+/// The set is the caller's; the matcher fallback stays inside it rather than
+/// reaching for the catalog.
+pub(crate) async fn resolve_monitored_movie_title_from_release(
+    titles: &[Title],
     parsed: &ParsedReleaseMetadata,
-) -> Option<ResolvedMonitoredTitle<'a>> {
+) -> Option<ResolvedMonitoredTitle> {
     let monitored_movies = titles
         .iter()
         .filter(|title| title.monitored && title.facet == MediaFacet::Movie)
         .collect::<Vec<_>>();
 
-    find_title_by_external_ids(&monitored_movies, parsed)
-        .map(|title| ResolvedMonitoredTitle {
-            title,
+    if let Some(title) = find_title_by_external_ids(&monitored_movies, parsed) {
+        return Some(ResolvedMonitoredTitle {
+            title: title.clone(),
             match_type: TitleMatchType::IdOnly,
-        })
-        .or_else(|| {
-            find_movie_title_by_name(&monitored_movies, parsed).map(|title| {
-                ResolvedMonitoredTitle {
-                    title,
-                    match_type: TitleMatchType::TitleParse,
-                }
-            })
-        })
-        .or_else(|| {
-            let matcher = MonitoredTitleMatcher::new(titles.to_vec());
-            let resolved = matcher.resolve_movie(parsed)?;
-            titles
-                .iter()
-                .find(|title| title.id == resolved.title.id)
-                .map(|title| ResolvedMonitoredTitle {
-                    title,
-                    match_type: resolved.match_type,
-                })
-        })
+        });
+    }
+    if let Some(title) = find_movie_title_by_name(&monitored_movies, parsed) {
+        return Some(ResolvedMonitoredTitle {
+            title: title.clone(),
+            match_type: TitleMatchType::TitleParse,
+        });
+    }
+    MonitoredTitleMatcher::over_titles(titles.to_vec())
+        .resolve_movie(parsed)
+        .await
+        .ok()
+        .flatten()
 }
 
-pub(crate) fn resolve_monitored_episode_title_from_release<'a>(
-    titles: &'a [Title],
+pub(crate) async fn resolve_monitored_episode_title_from_release(
+    titles: &[Title],
     parsed: &ParsedReleaseMetadata,
     facet_hint: Option<&str>,
-) -> Option<ResolvedMonitoredTitle<'a>> {
+) -> Option<ResolvedMonitoredTitle> {
     let monitored_episodes = titles
         .iter()
         .filter(|title| {
@@ -425,30 +535,23 @@ pub(crate) fn resolve_monitored_episode_title_from_release<'a>(
         })
         .collect::<Vec<_>>();
 
-    find_unique_title_by_external_ids(&monitored_episodes, parsed)
-        .map(|title| ResolvedMonitoredTitle {
-            title,
+    if let Some(title) = find_unique_title_by_external_ids(&monitored_episodes, parsed) {
+        return Some(ResolvedMonitoredTitle {
+            title: title.clone(),
             match_type: TitleMatchType::IdOnly,
-        })
-        .or_else(|| {
-            find_unique_title_by_name(&monitored_episodes, parsed).map(|title| {
-                ResolvedMonitoredTitle {
-                    title,
-                    match_type: TitleMatchType::TitleParse,
-                }
-            })
-        })
-        .or_else(|| {
-            let matcher = MonitoredTitleMatcher::new(titles.to_vec());
-            let resolved = matcher.resolve_episode(parsed, facet_hint)?;
-            titles
-                .iter()
-                .find(|title| title.id == resolved.title.id)
-                .map(|title| ResolvedMonitoredTitle {
-                    title,
-                    match_type: resolved.match_type,
-                })
-        })
+        });
+    }
+    if let Some(title) = find_unique_title_by_name(&monitored_episodes, parsed) {
+        return Some(ResolvedMonitoredTitle {
+            title: title.clone(),
+            match_type: TitleMatchType::TitleParse,
+        });
+    }
+    MonitoredTitleMatcher::over_titles(titles.to_vec())
+        .resolve_episode(parsed, facet_hint)
+        .await
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn normalize_imdb_id(raw_imdb_id: &str) -> Option<String> {
@@ -739,8 +842,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn finds_unique_episodic_title_from_release_name() {
+    #[tokio::test]
+    async fn finds_unique_episodic_title_from_release_name() {
         let titles = vec![test_title(
             "RAVENCOURT The Last Regent",
             MediaFacet::Anime,
@@ -751,13 +854,14 @@ mod tests {
             crate::parse_release_metadata("RAVENCOURT.The.Last.Regent.S01E18.1080p.WEB-DL");
 
         let matched = find_monitored_episode_title_from_release(&titles, &parsed, Some("anime"))
+            .await
             .expect("matched title");
 
         assert_eq!(matched.name, titles[0].name);
     }
 
-    #[test]
-    fn finds_episodic_title_by_alias() {
+    #[tokio::test]
+    async fn finds_episodic_title_by_alias() {
         let titles = vec![test_title(
             "House of Ravens",
             MediaFacet::Anime,
@@ -768,26 +872,27 @@ mod tests {
             crate::parse_release_metadata("RAVENCOURT.The.Last.Regent.S01E18.1080p.WEB-DL");
 
         let matched = find_monitored_episode_title_from_release(&titles, &parsed, Some("anime"))
+            .await
             .expect("matched title by alias");
 
         assert_eq!(matched.id, titles[0].id);
     }
 
-    #[test]
-    fn does_not_match_ambiguous_episodic_titles() {
+    #[tokio::test]
+    async fn does_not_match_ambiguous_episodic_titles() {
         let titles = vec![
             test_title("Farwander", MediaFacet::Series, Some(2014), &[]),
             test_title("Farwander", MediaFacet::Anime, Some(2000), &[]),
         ];
         let parsed = crate::parse_release_metadata("Farwander.S08E05.1080p.WEB-DL");
 
-        let matched = find_monitored_episode_title_from_release(&titles, &parsed, None);
+        let matched = find_monitored_episode_title_from_release(&titles, &parsed, None).await;
 
         assert!(matched.is_none());
     }
 
-    #[test]
-    fn does_not_match_ambiguous_movie_titles_without_year() {
+    #[tokio::test]
+    async fn does_not_match_ambiguous_movie_titles_without_year() {
         let titles = vec![
             test_title("Cold Relic", MediaFacet::Movie, Some(1982), &[]),
             test_title("Cold Relic", MediaFacet::Movie, Some(2011), &[]),
@@ -795,13 +900,13 @@ mod tests {
         let mut parsed = crate::parse_release_metadata("Cold.Relic.1080p.WEB-DL");
         parsed.year = None;
 
-        let matched = find_monitored_movie_title_from_release(&titles, &parsed);
+        let matched = find_monitored_movie_title_from_release(&titles, &parsed).await;
 
         assert!(matched.is_none());
     }
 
-    #[test]
-    fn matches_unique_episodic_title_by_imdb_id() {
+    #[tokio::test]
+    async fn matches_unique_episodic_title_by_imdb_id() {
         let mut title = test_title("Completely Different Name", MediaFacet::Series, None, &[]);
         title
             .external_ids
@@ -810,13 +915,14 @@ mod tests {
         let parsed = crate::parse_release_metadata("Farwander.S08E05.[tt0944947].1080p.WEB-DL");
 
         let matched = find_monitored_episode_title_from_release(&titles, &parsed, Some("series"))
+            .await
             .expect("matched title by imdb id");
 
         assert_eq!(matched.id, title.id);
     }
 
-    #[test]
-    fn resolve_monitored_episode_title_marks_external_id_matches_as_id_only() {
+    #[tokio::test]
+    async fn resolve_monitored_episode_title_marks_external_id_matches_as_id_only() {
         let mut title = test_title("Completely Different Name", MediaFacet::Series, None, &[]);
         title
             .external_ids
@@ -826,14 +932,15 @@ mod tests {
 
         let matched =
             resolve_monitored_episode_title_from_release(&titles, &parsed, Some("series"))
+                .await
                 .expect("matched title by imdb id");
 
         assert_eq!(matched.title.id, title.id);
         assert_eq!(matched.match_type, TitleMatchType::IdOnly);
     }
 
-    #[test]
-    fn resolve_monitored_episode_title_marks_name_matches_as_title_parse() {
+    #[tokio::test]
+    async fn resolve_monitored_episode_title_marks_name_matches_as_title_parse() {
         let titles = vec![test_title(
             "RAVENCOURT The Last Regent",
             MediaFacet::Anime,
@@ -844,6 +951,7 @@ mod tests {
             crate::parse_release_metadata("RAVENCOURT.The.Last.Regent.S01E18.1080p.WEB-DL");
 
         let matched = resolve_monitored_episode_title_from_release(&titles, &parsed, Some("anime"))
+            .await
             .expect("matched title by name");
 
         assert_eq!(matched.title.id, titles[0].id);
@@ -876,8 +984,8 @@ mod tests {
     /// `collect_name_matches`, which falls back to the same canonical relaxed
     /// matcher acquisition uses. A downloaded file named in romaji must
     /// resolve to the title whose romanized alias spells the name another way.
-    #[test]
-    fn resolves_a_romanized_file_name_to_the_tagged_romaji_alias() {
+    #[tokio::test]
+    async fn resolves_a_romanized_file_name_to_the_tagged_romaji_alias() {
         let mut title = test_title(
             "Fullmetal Alchemist Brotherhood",
             MediaFacet::Anime,
@@ -891,13 +999,15 @@ mod tests {
             language: "x-jat".into(),
         }];
         let title_id = title.id.clone();
-        let matcher = MonitoredTitleMatcher::new(vec![title]);
+        let matcher = MonitoredTitleMatcher::over_titles(vec![title]);
         let parsed = crate::parse_release_metadata(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
         );
 
         let matched = matcher
             .resolve_episode(&parsed, Some("anime"))
+            .await
+            .expect("resolve episode")
             .expect("a romanized file name must resolve to the romaji alias");
         assert_eq!(matched.title.id, title_id);
     }
@@ -914,8 +1024,8 @@ mod tests {
         assert_eq!(strip_trailing_year_key("area 5150"), "area 5150");
     }
 
-    #[test]
-    fn shared_lookup_keys_bridges_year_suffixed_titles_and_sees_unmonitored_colliders() {
+    #[tokio::test]
+    async fn shared_lookup_keys_bridges_year_suffixed_titles_and_sees_unmonitored_colliders() {
         let mut anime = test_title("Tide Chart", MediaFacet::Anime, Some(1999), &[]);
         anime.monitored = false;
         let live_action = test_title(
@@ -924,10 +1034,13 @@ mod tests {
             Some(2023),
             &["Tide Chart (2023)"],
         );
-        let matcher = MonitoredTitleMatcher::new(vec![anime, live_action.clone()]);
+        let matcher = MonitoredTitleMatcher::over_titles(vec![anime, live_action.clone()]);
 
         let keys = crate::acquisition_release_search::canonical_title_lookup_keys(&live_action);
-        let shared = matcher.shared_lookup_keys(&live_action.id, &keys);
+        let shared = matcher
+            .shared_lookup_keys(&live_action.id, &keys)
+            .await
+            .expect("shared lookup keys");
         assert!(
             !shared.is_empty(),
             "live-action keys must collide with the bare (unmonitored) anime: {keys:?}"

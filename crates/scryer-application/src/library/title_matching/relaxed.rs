@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(crate) struct SpellingName {
     pub key: String,
     pub text: String,
+    /// The name as the catalog wrote it. Only the numbers guard reads this:
+    /// `title_numbers` decides `Rocky II` from letter case, which `key` and
+    /// `text` have already lowercased away.
+    pub raw: String,
     pub language: Option<String>,
     pub year: Option<i32>,
 }
@@ -32,8 +36,6 @@ pub(crate) struct SpellingIdentity {
 impl SpellingIdentity {
     pub fn new(title: &Title) -> Self {
         let mut seen = HashSet::new();
-        let canonical = canonical_lookup_key(&title.name);
-        let canonical_shape = crate::import_title_resolution::strip_trailing_year_key(&canonical);
         let names = title
             .tagged_aliases
             .iter()
@@ -49,24 +51,14 @@ impl SpellingIdentity {
                     .map(|name| (name.as_str(), title.metadata_language.as_deref())),
             )
             .map(|(name, language)| {
-                let key = canonical_lookup_key(name);
-                let stripped = crate::import_title_resolution::strip_trailing_year_key(&key);
-                let explicit_year = (stripped != key)
-                    .then(|| key.rsplit_once(' ').and_then(|(_, year)| year.parse().ok()))
-                    .flatten()
-                    .filter(|year| {
-                        Some(*year) == title.year
-                            || (key != canonical && stripped != canonical_shape)
-                    });
+                let (text, year) =
+                    scryer_domain::title_spelling::title_match_form(name, &title.name, title.year);
                 SpellingName {
-                    text: if explicit_year.is_some() {
-                        stripped.to_string()
-                    } else {
-                        key.clone()
-                    },
-                    key,
+                    text,
+                    raw: name.to_string(),
+                    key: canonical_lookup_key(name),
                     language: language.map(str::to_string),
-                    year: explicit_year.or(title.year),
+                    year,
                 }
             })
             .filter(|name| !name.text.is_empty() && seen.insert(name.key.clone()))
@@ -237,59 +229,199 @@ impl SpellingBucket {
     }
 }
 
-type Bucket = (String, TitleScript, Vec<String>);
+type Bucket = (String, TitleScript, String);
 
+/// The slice of the persisted name index one release's anchors touch.
+///
+/// This used to be `SpellingIndex`: every name in the library, bucketed in
+/// memory and rebuilt whenever the catalog changed. It now holds only the
+/// buckets a single matching operation asked for, fetched from
+/// `title_search_terms`. The comparison below is unchanged — what changed is
+/// where the names come from and how many of them are ever resident.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SpellingIndex {
+pub(crate) struct SpellingCandidates {
     buckets: HashMap<Bucket, SpellingBucket>,
 }
+
+/// How many names one bucket's typo lane may fetch. A common bucket in a large
+/// library is unbounded, and the typo lane is a length band, not a key: the cap
+/// is what keeps a single release from reading the catalog. The equality lanes
+/// are never capped.
+const BUCKET_FETCH_LIMIT: i64 = 2_000;
+
+/// The widest edit distance any comparison below admits, plus the one extra
+/// character a competitor check allows itself. Fetching this band once serves
+/// both discovery and the collision guard.
+const MAX_BUCKET_LENGTH_SPREAD: i64 = 4;
+/// The band a subject-anchored fetch needs: see [`SpellingCandidates::load_for_title`].
+const MAX_SUBJECT_LENGTH_SPREAD: i64 = 2 * MAX_BUCKET_LENGTH_SPREAD;
 
 /// The numbers guard, owned by the domain so the persisted projection can key
 /// a column on exactly what this compares. Volume II must not become Volume I
 /// through a typo allowance.
+///
+/// Takes the spelling as written on both sides — the catalog name's `raw` and
+/// the release's observed segment — because the Roman-numeral rule reads
+/// letter case.
 pub(crate) fn numbers(value: &str) -> Vec<String> {
     scryer_domain::title_spelling::title_numbers(value)
 }
 
-impl SpellingIndex {
-    pub fn new(titles: &[Title]) -> Self {
+/// The same guard as [`numbers`], in the single-string form the projection
+/// stores and buckets on.
+fn numbers_key(value: &str) -> String {
+    scryer_domain::title_spelling::title_numbers_key(value)
+}
+
+impl SpellingCandidates {
+    /// Every name of an explicitly supplied set of titles.
+    ///
+    /// The set is the caller's, never the catalog: one title under test, or a
+    /// fixture. Repository-backed callers use [`Self::load`], which reads the
+    /// same names out of the projection.
+    pub fn from_titles(titles: &[Title]) -> Self {
         let mut index = Self::default();
         for title in titles {
             let identity = SpellingIdentity::new(title);
             for name in identity.names {
-                index
-                    .buckets
-                    .entry((
-                        identity.facet.clone(),
-                        title_script(&name.text),
-                        numbers(&name.text),
-                    ))
-                    .or_default()
-                    .insert(IndexedName {
-                        identity: identity.id.clone(),
-                        name,
-                    });
+                index.insert(&identity.facet, &identity.id, name);
             }
         }
         index
     }
 
+    /// Fetch the buckets `anchors` touch from the persisted projection.
+    ///
+    /// One bucket per (anchor, facet): the same key the in-memory index
+    /// bucketed on. `facet` narrows to a single one when the release names it.
+    pub async fn load(
+        titles: &dyn crate::ports::TitleRepository,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
+    ) -> crate::AppResult<Self> {
+        Self::load_with_spread(titles, anchors, facet, MAX_BUCKET_LENGTH_SPREAD).await
+    }
+
+    /// The buckets a *subject's own names* touch, for evidence built before
+    /// any release is in hand (the acquisition lane builds it once per search
+    /// subject and reuses it for every candidate).
+    ///
+    /// The observed spelling is not known yet, so the band has to be wider
+    /// than the release-anchored one: a competitor sits within `distance + 1`
+    /// of an observed spelling that is itself within `distance` of the name,
+    /// so it can be `2 * distance + 1` characters from the name that anchors
+    /// this fetch. Narrowing it would drop a collider and turn an ambiguous
+    /// match into a confident one.
+    pub async fn load_for_title(
+        titles: &dyn crate::ports::TitleRepository,
+        title: &Title,
+    ) -> crate::AppResult<Self> {
+        let identity = SpellingIdentity::new(title);
+        let anchors = identity
+            .names
+            .iter()
+            .map(|name| (name.text.clone(), name.raw.clone()))
+            .collect::<Vec<_>>();
+        Self::load_with_spread(
+            titles,
+            &anchors,
+            Some(identity.facet.as_str()),
+            MAX_SUBJECT_LENGTH_SPREAD,
+        )
+        .await
+    }
+
+    async fn load_with_spread(
+        titles: &dyn crate::ports::TitleRepository,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
+        length_spread: i64,
+    ) -> crate::AppResult<Self> {
+        let mut index = Self::default();
+        for (anchor, observed_raw) in anchors {
+            if anchor.is_empty() {
+                continue;
+            }
+            let numbers_key = scryer_domain::title_spelling::title_numbers_key(observed_raw);
+            let collation_keys = scryer_domain::title_spelling::COLLATION_PROFILES
+                .iter()
+                .filter_map(|profile| {
+                    title_spelling_key(anchor, profile).map(|key| (*profile, key))
+                })
+                .collect::<Vec<_>>();
+            let length = anchor.chars().count() as i64;
+            for candidate_facet in ["movie", "series", "anime"] {
+                if facet.is_some_and(|facet| facet != candidate_facet) {
+                    continue;
+                }
+                let rows = titles
+                    .find_title_name_candidates(crate::ports::TitleNameBucketQuery {
+                        facet: Some(candidate_facet),
+                        script: title_script(anchor).as_str(),
+                        numbers_key: &numbers_key,
+                        length_band: Some((
+                            (length - length_spread).max(0),
+                            length + length_spread,
+                        )),
+                        match_term: anchor,
+                        romanization_key: japanese_romanization_key(anchor, Some("ja")).as_deref(),
+                        collation_keys: &collation_keys,
+                        limit: BUCKET_FETCH_LIMIT,
+                    })
+                    .await?;
+                for row in rows {
+                    index.insert(
+                        &row.facet,
+                        &row.title_id,
+                        SpellingName {
+                            key: row.literal_term,
+                            text: row.match_term,
+                            raw: row.raw_term,
+                            language: row.language_tag,
+                            year: row.match_year,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(index)
+    }
+
+    fn insert(&mut self, facet: &str, title_id: &str, name: SpellingName) {
+        self.buckets
+            .entry((
+                facet.to_string(),
+                title_script(&name.text),
+                numbers_key(&name.raw),
+            ))
+            .or_default()
+            .insert(IndexedName {
+                identity: title_id.to_string(),
+                name,
+            });
+    }
+
     /// Discovery only. Full-title matching, corroboration and collisions are
     /// still checked before any returned identity can be selected.
-    pub fn candidates(&self, anchors: &[String], facet: Option<&str>) -> HashSet<String> {
+    ///
+    /// Anchors are `(lookup key, observed spelling)`: the key drives every
+    /// equality and distance test, the observed spelling only the numbers
+    /// guard, which reads letter case.
+    pub fn candidates(&self, anchors: &[(String, String)], facet: Option<&str>) -> HashSet<String> {
         let mut ids = HashSet::new();
-        for anchor in anchors {
+        for (anchor, observed_raw) in anchors {
             for kind in ["movie", "series", "anime"] {
                 if facet.is_some_and(|facet| facet != kind) {
                     continue;
                 }
-                if let Some(bucket) =
-                    self.buckets
-                        .get(&(kind.to_string(), title_script(anchor), numbers(anchor)))
-                {
+                if let Some(bucket) = self.buckets.get(&(
+                    kind.to_string(),
+                    title_script(anchor),
+                    numbers_key(observed_raw),
+                )) {
                     for index in bucket.possible_matches(anchor, None) {
                         let entry = &bucket.names[index];
-                        if spelling_distance(anchor, &entry.name, None).is_some() {
+                        if spelling_distance(anchor, observed_raw, &entry.name, None).is_some() {
                             ids.insert(entry.identity.clone());
                         }
                     }
@@ -303,13 +435,14 @@ impl SpellingIndex {
         &self,
         identity: &SpellingIdentity,
         observed: &str,
+        observed_raw: &str,
         year: Option<i32>,
         distance: usize,
     ) -> bool {
         let Some(bucket) = self.buckets.get(&(
             identity.facet.clone(),
             title_script(observed),
-            numbers(observed),
+            numbers_key(observed_raw),
         )) else {
             return false;
         };
@@ -323,7 +456,7 @@ impl SpellingIndex {
                     && !year
                         .zip(entry.name.year)
                         .is_some_and(|(left, right)| left != right)
-                    && spelling_distance(observed, &entry.name, Some(bound)).is_some()
+                    && spelling_distance(observed, observed_raw, &entry.name, Some(bound)).is_some()
             })
     }
 }
@@ -339,10 +472,11 @@ pub(crate) struct SpellingMatch {
 
 fn spelling_distance(
     observed: &str,
+    observed_raw: &str,
     name: &SpellingName,
     rival_bound: Option<usize>,
 ) -> Option<(usize, Option<&'static str>)> {
-    if numbers(observed) != numbers(&name.text) {
+    if numbers(observed_raw) != numbers(&name.raw) {
         return None;
     }
     match compare_title_spelling(observed, &name.text, name.language.as_deref())? {
@@ -372,10 +506,14 @@ fn spelling_distance(
     bounded_levenshtein_distance(observed, &name.text, bound).map(|distance| (distance, None))
 }
 
+/// `anchors` are `(lookup key, observed spelling)` pairs, as
+/// [`neutral_spelling_forms`] returns them. The key drives every equality and
+/// distance test; the observed spelling feeds the numbers guard, which reads
+/// letter case and so cannot work from the lowercased key.
 pub(crate) fn find_spelling_match(
-    anchors: &[String],
+    anchors: &[(String, String)],
     identity: &SpellingIdentity,
-    index: Option<&SpellingIndex>,
+    index: Option<&SpellingCandidates>,
     year: Option<i32>,
     ids: Option<bool>,
     episode_years: &HashSet<i32>,
@@ -385,7 +523,7 @@ pub(crate) fn find_spelling_match(
     }
     let mut best = None;
     let episode_year_matches = year.is_some_and(|year| episode_years.contains(&year));
-    for observed in anchors {
+    for (observed, observed_raw) in anchors {
         for name in &identity.names {
             if year
                 .zip(name.year)
@@ -394,7 +532,8 @@ pub(crate) fn find_spelling_match(
             {
                 continue;
             }
-            let Some((distance, locale)) = spelling_distance(observed, name, None) else {
+            let Some((distance, locale)) = spelling_distance(observed, observed_raw, name, None)
+            else {
                 continue;
             };
             let literally_exact = observed == &name.text;
@@ -431,7 +570,8 @@ pub(crate) fn find_spelling_match(
                 // An episode air year cannot eliminate a competing series
                 // merely because that series started in another year.
                 let collision_year = if episode_year_matches { None } else { year };
-                if index.has_competitor(identity, observed, collision_year, distance) {
+                if index.has_competitor(identity, observed, observed_raw, collision_year, distance)
+                {
                     tracing::debug!(
                         title_id = identity.id,
                         observed,
@@ -505,6 +645,7 @@ mod tests {
             name: SpellingName {
                 text: key.clone(),
                 key,
+                raw: text.to_string(),
                 language: Some(language.into()),
                 year: Some(2019),
             },
@@ -562,7 +703,7 @@ mod tests {
             for bound in [None, Some(1), Some(2), Some(3), Some(4)] {
                 let possible = bucket.possible_matches(&observed, bound);
                 for (index, entry) in bucket.names.iter().enumerate() {
-                    if spelling_distance(&observed, &entry.name, bound).is_some() {
+                    if spelling_distance(&observed, &observed, &entry.name, bound).is_some() {
                         assert!(
                             possible.contains(&index),
                             "lost {observed:?} / {:?}, bound {bound:?}",

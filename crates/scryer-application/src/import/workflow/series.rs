@@ -2534,7 +2534,10 @@ async fn write_series_sidecars(
 ) {
     if nfo_enabled {
         let tvshow_nfo_path = title_folder_path.join("tvshow.nfo");
-        if !tokio::fs::try_exists(&tvshow_nfo_path).await.unwrap_or(false) {
+        if !tokio::fs::try_exists(&tvshow_nfo_path)
+            .await
+            .unwrap_or(false)
+        {
             let ratings = app
                 .services
                 .catalog
@@ -2733,7 +2736,7 @@ pub(crate) fn is_sample_file(path: &Path) -> bool {
         .map(|m| m.len() < SAMPLE_SIZE_THRESHOLD)
         .unwrap_or(false)
 }
-fn resolve_title_from_release_candidate(
+async fn resolve_title_from_release_candidate(
     titles: &[Title],
     candidate: &ParsedReleaseMetadata,
     facet_hint: Option<&str>,
@@ -2742,12 +2745,14 @@ fn resolve_title_from_release_candidate(
         crate::import_title_resolution::resolve_monitored_episode_title_from_release(
             titles, candidate, facet_hint,
         )
-        .map(|resolved| resolved.title.clone())
+        .await
+        .map(|resolved| resolved.title)
     } else {
         crate::import_title_resolution::resolve_monitored_movie_title_from_release(
             titles, candidate,
         )
-        .map(|resolved| resolved.title.clone())
+        .await
+        .map(|resolved| resolved.title)
     }
 }
 /// Canonical import-time release metadata for an episode file: the release
