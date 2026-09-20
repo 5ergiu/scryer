@@ -1091,8 +1091,9 @@ const ja: LocaleDictionary = {
     "このダウンロードをキューから削除しますか？この操作は元に戻せません。",
   "queue.manualUnavailableForResult":
     "この結果では手動キューイングを利用できません。",
-  "importHistory.retry": "再試行",
-  "importHistory.retryWithPassword": "パスワード付きで再試行",
+  "importHistory.retry": "インポートを再試行",
+  "importHistory.retryHelp": "ダウンロード済みのファイルを現在の割り当てと品質プロファイルで再評価します。再ダウンロードは行いません。",
+  "importHistory.retryWithPassword": "パスワードを指定してインポートを再試行",
   "importHistory.passwordRequired": "パスワードが必要です",
   "importHistory.passwordPlaceholder": "アーカイブのパスワード",
   "importHistory.retrySuccess": "インポートの再試行を開始しました",

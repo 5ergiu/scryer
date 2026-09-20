@@ -1517,8 +1517,9 @@ const nl: LocaleDictionary = {
   "queue.belowMinimumSeeders":
     "Te weinig seeders voor het minimum van deze indexer.",
 
-  "importHistory.retry": "Opnieuw proberen",
-  "importHistory.retryWithPassword": "Opnieuw proberen met wachtwoord",
+  "importHistory.retry": "Import opnieuw proberen",
+  "importHistory.retryHelp": "Beoordeelt de bestaande gedownloade bestanden opnieuw met de huidige toewijzing en het huidige kwaliteitsprofiel. Start geen nieuwe download.",
+  "importHistory.retryWithPassword": "Import opnieuw proberen met wachtwoord",
   "importHistory.passwordRequired": "Wachtwoord vereist",
   "importHistory.passwordPlaceholder": "Archiefwachtwoord",
   "importHistory.retrySuccess": "Import opnieuw gestart",

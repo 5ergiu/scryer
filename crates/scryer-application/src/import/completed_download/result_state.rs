@@ -242,7 +242,7 @@ pub(super) async fn apply_import_result(
     apply_import_result_with_completed(app, td, result, files_imported_this_pass, None, None).await
 }
 
-pub(super) async fn apply_import_result_with_completed(
+pub(crate) async fn apply_import_result_with_completed(
     app: &AppUseCase,
     td: &mut TrackedDownload,
     result: ImportResult,

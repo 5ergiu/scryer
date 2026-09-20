@@ -1747,8 +1747,9 @@ const en: LocaleDictionary = {
   "queue.belowMinimumSeeders":
     "Too few seeders for this indexer's minimum.",
 
-  "importHistory.retry": "Retry",
-  "importHistory.retryWithPassword": "Retry with Password",
+  "importHistory.retry": "Retry import",
+  "importHistory.retryHelp": "Reevaluate existing downloaded files using the current title and quality profile.",
+  "importHistory.retryWithPassword": "Retry import with password",
   "importHistory.passwordRequired": "Password Required",
   "importHistory.passwordPlaceholder": "Archive password",
   "importHistory.retrySuccess": "Import retry started",
@@ -2434,6 +2435,11 @@ const en: LocaleDictionary = {
   "qualityProfile.profileNameLabel": "Profile name",
   "qualityProfile.qualityTiersAndArchival":
     "Quality tiers and archival quality",
+  "qualityProfile.qualityPreference": "Quality preference",
+  "qualityProfile.qualityPreferenceHelp": "Highest preference first. Tier preference takes priority over score. New tiers are added at the lowest preference.",
+  "qualityProfile.moveQualityTierUp": "Move {{value}} up",
+  "qualityProfile.moveQualityTierDown": "Move {{value}} down",
+  "qualityProfile.dragQualityTier": "Drag to reorder {{value}}",
   "qualityProfile.allowedQualityTiers": "Allowed quality tiers (selected)",
   "qualityProfile.noQualityTiersSelected": "No quality tiers selected.",
   "qualityProfile.removeQualityTier": "Remove {{value}} quality tier",

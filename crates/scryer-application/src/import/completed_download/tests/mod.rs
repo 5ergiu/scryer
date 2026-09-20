@@ -526,6 +526,10 @@ type ImportStatusUpdates = Arc<Mutex<Vec<(String, ImportStatus, Option<String>)>
 /// listing, like the store), status updates are recorded per import id.
 #[derive(Default)]
 struct TestImportRepo {
+    retry_download_id: std::sync::OnceLock<scryer_domain::download_identity::DownloadId>,
+    retry_claims: Mutex<HashMap<String, crate::ImportRetryClaim>>,
+    retry_finish_fail: std::sync::atomic::AtomicBool,
+    retry_finished_states: Mutex<Vec<TrackedDownloadState>>,
     records: Arc<Mutex<Vec<scryer_domain::ImportRecord>>>,
     status_updates: ImportStatusUpdates,
     /// When set, `queue_import_request` fails with a repository error — the
@@ -536,6 +540,10 @@ struct TestImportRepo {
 impl TestImportRepo {
     fn with_records(records: Vec<scryer_domain::ImportRecord>) -> Self {
         Self {
+            retry_download_id: Default::default(),
+            retry_claims: Default::default(),
+            retry_finish_fail: Default::default(),
+            retry_finished_states: Default::default(),
             records: Arc::new(Mutex::new(records)),
             status_updates: Arc::new(Mutex::new(Vec::new())),
             fail_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -604,6 +612,88 @@ fn test_import_record(
 
 #[async_trait]
 impl crate::ImportRepository for TestImportRepo {
+    async fn canonical_download_id_for_import(
+        &self,
+        _: &str,
+    ) -> AppResult<Option<scryer_domain::download_identity::DownloadId>> {
+        Ok(Some(*self.retry_download_id.get_or_init(
+            scryer_domain::download_identity::DownloadId::new,
+        )))
+    }
+
+    async fn claim_import_retry(
+        &self,
+        claim: &crate::ImportRetryClaim,
+        _: chrono::DateTime<Utc>,
+        payload_json: &str,
+    ) -> AppResult<crate::ImportRetryClaimOutcome> {
+        let mut claims = self.retry_claims.lock().await;
+        if claims.contains_key(&claim.import_id) {
+            return Ok(crate::ImportRetryClaimOutcome::Busy);
+        }
+        let mut records = self.records.lock().await;
+        let record = records
+            .iter_mut()
+            .find(|r| r.id == claim.import_id)
+            .unwrap();
+        if !matches!(record.status, ImportStatus::Failed | ImportStatus::Skipped) {
+            return Ok(crate::ImportRetryClaimOutcome::Busy);
+        }
+        record.status = ImportStatus::Processing;
+        record.result_json = None;
+        record.payload_json = payload_json.to_owned();
+        claims.insert(claim.import_id.clone(), claim.clone());
+        Ok(crate::ImportRetryClaimOutcome::Claimed)
+    }
+
+    async fn finish_import_retry(
+        &self,
+        claim: &crate::ImportRetryClaim,
+        state: TrackedDownloadState,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> AppResult<crate::ImportRetryFinishOutcome> {
+        if self
+            .retry_finish_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository(
+                "injected retry reconciliation failure".into(),
+            ));
+        }
+        let mut claims = self.retry_claims.lock().await;
+        if !claims
+            .get(&claim.import_id)
+            .is_some_and(|stored| stored.attempt_id == claim.attempt_id)
+        {
+            return Ok(crate::ImportRetryFinishOutcome::Superseded);
+        }
+        claims.remove(&claim.import_id);
+        self.retry_finished_states.lock().await.push(state);
+        Ok(crate::ImportRetryFinishOutcome::Finalized)
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Option<crate::ImportRetryClaim>> {
+        Ok(self
+            .retry_claims
+            .lock()
+            .await
+            .values()
+            .find(|claim| &claim.download_id == id)
+            .cloned())
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        _: Option<&scryer_domain::download_identity::DownloadId>,
+        _: usize,
+    ) -> AppResult<Vec<crate::ImportRetryClaim>> {
+        Ok(self.retry_claims.lock().await.values().cloned().collect())
+    }
+
     async fn queue_import_request(
         &self,
         source_identity: ClientJobLocator,
@@ -793,6 +883,7 @@ struct TestDownloadSubmissionRepo {
     tracked_states: Arc<Mutex<Vec<(ClientJobLocator, String)>>>,
     identity_tracked_states: Arc<Mutex<Vec<(String, String)>>>,
     canonical_identity_tracked_state_reasons: Arc<Mutex<Vec<(String, String)>>>,
+    canonical_identity_tracked_state_details: Mutex<Vec<(String, String)>>,
 }
 
 fn test_tracked_state_key(
@@ -940,9 +1031,23 @@ impl DownloadSubmissionRepository for TestDownloadSubmissionRepo {
             detail,
         )
         .await?;
-        if let (Some(download_id), Some(reason)) = (canonical_download_id, reason) {
+        if let Some(download_id) = canonical_download_id {
             let download_id = download_id.to_string();
+            let key = format!("canonical:{download_id}");
+            let mut states = self.identity_tracked_states.lock().await;
+            states.retain(|(stored, _)| stored != &key);
+            states.push((key, tracked_state.to_string()));
+            drop(states);
+            let mut details = self.canonical_identity_tracked_state_details.lock().await;
+            details.retain(|(stored, _)| stored != &download_id);
+            if let Some(detail) = detail {
+                details.push((download_id.clone(), detail.to_string()));
+            }
             let mut reasons = self.canonical_identity_tracked_state_reasons.lock().await;
+            let Some(reason) = reason else {
+                reasons.retain(|(stored, _)| stored != &download_id);
+                return Ok(());
+            };
             if let Some((_, stored_reason)) = reasons
                 .iter_mut()
                 .find(|(stored_id, _)| stored_id == &download_id)
@@ -970,6 +1075,46 @@ impl DownloadSubmissionRepository for TestDownloadSubmissionRepo {
             .iter()
             .find(|(stored_key, _)| stored_key == &key)
             .map(|(_, state)| state.clone()))
+    }
+
+    async fn get_identity_tracked_state_for_download(
+        &self,
+        canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+        identity: &DownloadSubmissionIdentity,
+        source_identity: Option<&ClientJobLocator>,
+    ) -> AppResult<Option<String>> {
+        if let Some(id) = canonical_download_id {
+            let key = format!("canonical:{id}");
+            if let Some((_, state)) = self
+                .identity_tracked_states
+                .lock()
+                .await
+                .iter()
+                .find(|(stored, _)| stored == &key)
+            {
+                return Ok(Some(state.clone()));
+            }
+        }
+        self.get_identity_tracked_state(identity, source_identity)
+            .await
+    }
+
+    async fn get_identity_tracked_state_detail_for_download(
+        &self,
+        canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+        _identity: &DownloadSubmissionIdentity,
+        _source_identity: Option<&ClientJobLocator>,
+    ) -> AppResult<Option<String>> {
+        let Some(id) = canonical_download_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .canonical_identity_tracked_state_details
+            .lock()
+            .await
+            .iter()
+            .find(|(stored, _)| stored == &id.to_string())
+            .map(|(_, detail)| detail.clone()))
     }
 
     async fn get_identity_tracked_state_reason_for_download(

@@ -5535,6 +5535,61 @@ impl LocationOwnershipOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportRetryClaimOutcome {
+    Claimed,
+    Busy,
+}
+impl ImportRetryClaimOutcome {
+    pub fn is_claimed(self) -> bool {
+        self == Self::Claimed
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportRetryFinishOutcome {
+    Finalized,
+    Superseded,
+}
+impl ImportRetryFinishOutcome {
+    pub fn is_finalized(self) -> bool {
+        self == Self::Finalized
+    }
+}
+
+/// Durable ownership of a completed-source retry, retained until reconciliation finishes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportRetryClaim {
+    pub download_id: DownloadId,
+    pub import_id: String,
+    pub attempt_id: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(with = "import_retry_locator")]
+    pub source: ClientJobLocator,
+    pub previous_result_json: Option<String>,
+}
+
+mod import_retry_locator {
+    use super::ClientJobLocator;
+    use serde::{Deserialize, Serialize};
+
+    pub fn serialize<S: serde::Serializer>(
+        source: &ClientJobLocator,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (&source.client_id, &source.client_type, &source.item_id).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ClientJobLocator, D::Error> {
+        let (client, kind, item) = <(Option<String>, String, String)>::deserialize(deserializer)?;
+        Ok(ClientJobLocator::new(client.as_deref(), &kind, &item))
+    }
+}
+
+pub const IMPORT_RETRY_TRACKED_STATE_REASON: &str = "import_retry_recovery";
+
 #[async_trait]
 pub trait ImportRepository: Send + Sync {
     async fn queue_import_request(
@@ -5581,6 +5636,46 @@ pub trait ImportRepository: Send + Sync {
     /// one was available while it was queued.
     async fn canonical_download_id_for_import(&self, _id: &str) -> AppResult<Option<DownloadId>> {
         Ok(None)
+    }
+
+    /// Atomically reserve an eligible attempt and its canonical download against cleanup.
+    async fn claim_import_retry(
+        &self,
+        _claim: &ImportRetryClaim,
+        _expected_updated_at: DateTime<Utc>,
+        _payload_json: &str,
+    ) -> AppResult<ImportRetryClaimOutcome> {
+        Err(AppError::Repository(
+            "durable import retry is unavailable".into(),
+        ))
+    }
+
+    /// Finalize only the attempt that still owns the durable recovery marker.
+    async fn finish_import_retry(
+        &self,
+        _claim: &ImportRetryClaim,
+        _state: scryer_domain::TrackedDownloadState,
+        _reason: Option<&str>,
+        _detail: Option<&str>,
+    ) -> AppResult<ImportRetryFinishOutcome> {
+        Err(AppError::Repository(
+            "durable import retry is unavailable".into(),
+        ))
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        _download_id: &DownloadId,
+    ) -> AppResult<Option<ImportRetryClaim>> {
+        Ok(None)
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        _after_download_id: Option<&DownloadId>,
+        _limit: usize,
+    ) -> AppResult<Vec<ImportRetryClaim>> {
+        Ok(Vec::new())
     }
 
     async fn update_import_status(

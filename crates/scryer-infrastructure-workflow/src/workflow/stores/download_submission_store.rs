@@ -1096,6 +1096,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let reason = reason.clone();
                 let detail = detail.clone();
                 Box::pin(async move {
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id).await?;
                     let now = Utc::now();
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
@@ -1333,6 +1334,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let reason = reason.clone();
                 let detail = detail.clone();
                 Box::pin(async move {
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id).await?;
                     let previous = SqlRuntime::fetch_optional(
                         SqlExec::Tx(tx),
                         "SELECT tracked_state
@@ -1745,6 +1747,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 Box::pin(async move {
                     let canonical_download_id =
                         claim_or_create_binding_download_id_tx(tx, &identity, claim).await?;
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id.to_string()).await?;
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
                         "INSERT INTO download_submissions

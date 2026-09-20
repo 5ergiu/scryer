@@ -1107,8 +1107,9 @@ const pt_BR: LocaleDictionary = {
     "Remover este download do downloader? Ele será ignorado quando o downloader confirmar a remoção.",
   "queue.manualUnavailableForResult":
     "A fila manual não está disponível para este resultado.",
-  "importHistory.retry": "Tentar novamente",
-  "importHistory.retryWithPassword": "Tentar com senha",
+  "importHistory.retry": "Tentar importação novamente",
+  "importHistory.retryHelp": "Reavalia os arquivos já baixados com a atribuição e o perfil de qualidade atuais. Não inicia um novo download.",
+  "importHistory.retryWithPassword": "Tentar importação novamente com senha",
   "importHistory.passwordRequired": "Senha necessária",
   "importHistory.passwordPlaceholder": "Senha do arquivo",
   "importHistory.retrySuccess": "Reimportação iniciada",

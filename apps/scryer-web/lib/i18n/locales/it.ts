@@ -1105,8 +1105,9 @@ const it: LocaleDictionary = {
     "Rimuovere questo download dal downloader? Verrà ignorato quando il downloader conferma la rimozione.",
   "queue.manualUnavailableForResult":
     "L'accodamento manuale non è disponibile per questo risultato.",
-  "importHistory.retry": "Riprova",
-  "importHistory.retryWithPassword": "Riprova con password",
+  "importHistory.retry": "Riprova importazione",
+  "importHistory.retryHelp": "Rivaluta i file già scaricati con l’assegnazione e il profilo di qualità attuali. Non avvia un nuovo download.",
+  "importHistory.retryWithPassword": "Riprova importazione con password",
   "importHistory.passwordRequired": "Password richiesta",
   "importHistory.passwordPlaceholder": "Password dell'archivio",
   "importHistory.retrySuccess": "Reimportazione avviata",

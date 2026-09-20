@@ -1115,8 +1115,9 @@ const es: LocaleDictionary = {
     "¿Eliminar esta descarga del descargador? Se ignorará cuando el descargador confirme la eliminación.",
   "queue.manualUnavailableForResult":
     "La cola manual no está disponible para este resultado.",
-  "importHistory.retry": "Reintentar",
-  "importHistory.retryWithPassword": "Reintentar con contraseña",
+  "importHistory.retry": "Reintentar importación",
+  "importHistory.retryHelp": "Vuelve a evaluar los archivos descargados con la asignación y el perfil de calidad actuales. No vuelve a descargarlos.",
+  "importHistory.retryWithPassword": "Reintentar importación con contraseña",
   "importHistory.passwordRequired": "Contraseña requerida",
   "importHistory.passwordPlaceholder": "Contraseña del archivo",
   "importHistory.retrySuccess": "Reintento de importación iniciado",

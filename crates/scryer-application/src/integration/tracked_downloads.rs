@@ -1169,7 +1169,18 @@ impl TrackedDownloadService {
             // `ImportedSeeding` is not terminal but must still survive a
             // restart: re-deriving it would re-import the payload and then
             // remove a torrent that is still working off its seeding goal.
-            && (state.is_import_settled() || state == TrackedDownloadState::ImportBlocked)
+            && (state.is_import_settled()
+                || state == TrackedDownloadState::ImportBlocked
+                || (state == TrackedDownloadState::Importing
+                    && app
+                        .services
+                        .workflow
+                        .imports
+                        .get_import_retry_claim(&td.download_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()))
         {
             td.state = state;
             let terminal_failure_reason = if state == TrackedDownloadState::Failed {
@@ -1209,6 +1220,8 @@ impl TrackedDownloadService {
                     .flatten();
                 td.status = TrackedDownloadStatus::Error;
                 td.status_messages = detail.into_iter().collect();
+            } else if state == TrackedDownloadState::Importing {
+                td.status_messages = vec!["Import retry is awaiting recovery".into()];
             } else if state == TrackedDownloadState::ImportBlocked {
                 let detail = app
                     .services
@@ -1640,6 +1653,19 @@ pub enum TrackedDownloadCommand {
         id: String,
         reply: oneshot::Sender<AppResult<()>>,
     },
+    BeginHistoryRetry {
+        id: String,
+        reply: oneshot::Sender<AppResult<Option<TrackedDownload>>>,
+    },
+    PublishHistoryRetry {
+        id: String,
+        reply: oneshot::Sender<AppResult<()>>,
+    },
+    FinishHistoryRetry {
+        id: String,
+        finished: Option<Box<TrackedDownload>>,
+        reply: oneshot::Sender<AppResult<()>>,
+    },
     AssignTitle {
         id: String,
         title: Box<Title>,
@@ -1912,6 +1938,56 @@ impl TrackedDownloadHandle {
                 crate::AppError::Repository("tracked download service unavailable".into())
             })?;
         reply_rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn begin_history_retry(
+        &self,
+        id: String,
+    ) -> AppResult<Option<TrackedDownload>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::BeginHistoryRetry { id, reply })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn publish_history_retry(&self, id: String) -> AppResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::PublishHistoryRetry { id, reply })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn finish_history_retry(
+        &self,
+        id: String,
+        finished: Option<Box<TrackedDownload>>,
+    ) -> AppResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::FinishHistoryRetry {
+                id,
+                finished,
+                reply,
+            })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
             crate::AppError::Repository("tracked download service dropped reply".into())
         })?
     }

@@ -1118,8 +1118,9 @@ const fr: LocaleDictionary = {
     "Supprimer ce téléchargement du téléchargeur ? Il sera ignoré une fois la suppression confirmée par le téléchargeur.",
   "queue.manualUnavailableForResult":
     "La mise en file manuelle n’est pas disponible pour ce résultat.",
-  "importHistory.retry": "Réessayer",
-  "importHistory.retryWithPassword": "Réessayer avec mot de passe",
+  "importHistory.retry": "Réessayer l’importation",
+  "importHistory.retryHelp": "Réévalue les fichiers déjà téléchargés avec l’affectation et le profil de qualité actuels. Ne relance pas le téléchargement.",
+  "importHistory.retryWithPassword": "Réessayer l’importation avec un mot de passe",
   "importHistory.passwordRequired": "Mot de passe requis",
   "importHistory.passwordPlaceholder": "Mot de passe de l'archive",
   "importHistory.retrySuccess": "Réimportation lancée",

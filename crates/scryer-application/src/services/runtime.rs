@@ -1469,6 +1469,14 @@ const MAX_CONCURRENT_IMPORT_FINALIZATIONS: usize = 8;
 
 #[derive(Clone)]
 pub(crate) struct ImportExecutionCoordinator {
+    pub(crate) retry_recovery_cursor:
+        Arc<tokio::sync::Mutex<Option<scryer_domain::download_identity::DownloadId>>>,
+    source_permits: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    >,
+
     destination_permits: Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
@@ -1482,6 +1490,8 @@ pub(crate) struct ImportExecutionCoordinator {
 impl Default for ImportExecutionCoordinator {
     fn default() -> Self {
         Self {
+            retry_recovery_cursor: Arc::new(tokio::sync::Mutex::new(None)),
+            source_permits: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             destination_permits: Arc::new(
                 tokio::sync::Mutex::new(std::collections::HashMap::new()),
             ),
@@ -1499,6 +1509,31 @@ impl Default for ImportExecutionCoordinator {
 }
 
 impl ImportExecutionCoordinator {
+    pub(crate) async fn try_acquire_source(
+        &self,
+        completed: &scryer_domain::CompletedDownload,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let key = serde_json::to_string(&(
+            &completed.client_id,
+            &completed.client_type,
+            &completed.download_client_item_id,
+        ))
+        .expect("source identity serializes");
+        let permit = {
+            let mut permits = self.source_permits.lock().await;
+            permits.retain(|_, permit| permit.strong_count() > 0);
+            match permits.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(permit) => permit,
+                None => {
+                    let permit = Arc::new(tokio::sync::Mutex::new(()));
+                    permits.insert(key, Arc::downgrade(&permit));
+                    permit
+                }
+            }
+        };
+        permit.try_lock_owned().ok()
+    }
+
     pub(crate) async fn acquire_destination(
         &self,
         destination: &std::path::Path,

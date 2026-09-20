@@ -1553,6 +1553,7 @@ pub async fn start_download_queue_poller_with_options(
                 }
             }
             _ = interval.tick() => {
+                crate::import_workflow::schedule_import_retry_recovery(&app);
                 let active_bridged_client_types = bridged_client_types.snapshot();
                 remove_ended_bridge_projections(
                     &mut runtime,
@@ -1805,6 +1806,49 @@ async fn handle_tracked_download_command(
     use scryer_domain::{TrackedDownloadState, TrackedDownloadStatus};
 
     match command {
+        TrackedDownloadCommand::BeginHistoryRetry { id, reply } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            if tracked_work_in_flight.contains(&id) {
+                let _ = reply.send(Err(AppError::Validation(
+                    "this download is already being processed".into(),
+                )));
+                return;
+            }
+            let snapshot = tracker.find(&id).cloned();
+            if snapshot.is_some() {
+                tracked_work_in_flight.insert(id.clone());
+            }
+            if reply.send(Ok(snapshot)).is_err() {
+                tracked_work_in_flight.remove(&id);
+            }
+        }
+        TrackedDownloadCommand::PublishHistoryRetry { id, reply } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            if let Some(td) = tracker.find_mut(&id) {
+                td.reset_for_import_retry();
+                td.state = TrackedDownloadState::Importing;
+                td.status_messages = vec!["Retrying import from the completed source".into()];
+            }
+            let item = tracker.find(&id).map(tracked_download_activity_queue_item);
+            publish_runtime_tracked_download_and_activity_item(app, tracker, item).await;
+            let _ = reply.send(Ok(()));
+        }
+        TrackedDownloadCommand::FinishHistoryRetry {
+            id,
+            finished,
+            reply,
+        } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            tracked_work_in_flight.remove(&id);
+            if let Some(finished) = finished {
+                if let Some(td) = tracker.find_mut(&id) {
+                    merge_tracked_download_background_work_state(td, *finished);
+                }
+                let item = tracker.find(&id).map(tracked_download_activity_queue_item);
+                publish_runtime_tracked_download_and_activity_item(app, tracker, item).await;
+            }
+            let _ = reply.send(Ok(()));
+        }
         TrackedDownloadCommand::ReconcileManualImport {
             id,
             canonical_download_id,
@@ -2097,20 +2141,19 @@ async fn handle_tracked_download_command(
                 ))));
                 return;
             }
-            let result = if let Some(td) = tracker.find_mut(&id) {
-                td.reset_for_import_retry();
-                Ok(())
-            } else {
-                Err(AppError::NotFound(format!(
+            let Some(td) = tracker.find(&id).cloned() else {
+                let _ = reply.send(Err(AppError::NotFound(format!(
                     "tracked download {requested_id}"
-                )))
+                ))));
+                return;
             };
-            if result.is_ok() {
-                let activity_item = tracker.find(&id).map(tracked_download_activity_queue_item);
-                publish_runtime_tracked_download_and_activity_item(app, tracker, activity_item)
-                    .await;
-            }
-            let _ = reply.send(result);
+            let app = app.clone();
+            let actor = actor.clone();
+            // Execute outside the command loop: the common retry path reserves this tracker.
+            tokio::spawn(async move {
+                let result = crate::import_workflow::retry_tracked_import(&app, &actor, &td).await;
+                let _ = reply.send(result.map(|_| ()));
+            });
         }
         TrackedDownloadCommand::AssignTitle {
             id,

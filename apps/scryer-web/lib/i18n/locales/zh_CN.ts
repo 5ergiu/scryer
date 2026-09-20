@@ -1031,8 +1031,9 @@ const zh_CN: LocaleDictionary = {
   "queue.deleteConfirmDescription":
     "确定要从队列中移除此下载吗？此操作无法撤销。",
   "queue.manualUnavailableForResult": "此结果不支持手动入队。",
-  "importHistory.retry": "重试",
-  "importHistory.retryWithPassword": "使用密码重试",
+  "importHistory.retry": "重试导入",
+  "importHistory.retryHelp": "使用当前分配和质量配置重新评估已下载的文件，不会重新下载。",
+  "importHistory.retryWithPassword": "使用密码重试导入",
   "importHistory.passwordRequired": "需要密码",
   "importHistory.passwordPlaceholder": "压缩包密码",
   "importHistory.retrySuccess": "已开始重新导入",

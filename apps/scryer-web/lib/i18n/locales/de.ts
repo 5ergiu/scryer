@@ -1106,8 +1106,9 @@ const de: LocaleDictionary = {
     "Diesen Download aus dem Downloader entfernen? Er wird ignoriert, sobald der Downloader die Entfernung bestätigt.",
   "queue.manualUnavailableForResult":
     "Manuelles Queueing ist für dieses Ergebnis nicht verfügbar.",
-  "importHistory.retry": "Wiederholen",
-  "importHistory.retryWithPassword": "Mit Passwort wiederholen",
+  "importHistory.retry": "Import erneut versuchen",
+  "importHistory.retryHelp": "Prüft bereits heruntergeladene Dateien erneut anhand der aktuellen Zuordnung und des aktuellen Qualitätsprofils. Startet keinen neuen Download.",
+  "importHistory.retryWithPassword": "Import mit Passwort erneut versuchen",
   "importHistory.passwordRequired": "Passwort erforderlich",
   "importHistory.passwordPlaceholder": "Archiv-Passwort",
   "importHistory.retrySuccess": "Import-Wiederholung gestartet",

@@ -12073,12 +12073,10 @@ async fn primary_movie_files(fixture: &DispositionFixture) -> Vec<crate::TitleMe
         .collect()
 }
 
-/// **`Blocklist`.** The release advertised 1080p and the file measures 720p, in
-/// a profile that ranks 1080P above 720P and a scope that already holds a 1080p
-/// file. The release lied, so it is burned and the scope re-opened to look for
-/// a different candidate.
+/// A resolution mismatch holds the source without burning the release or
+/// replacing the existing higher-quality file.
 #[tokio::test]
-async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reopened() {
+async fn a_release_quality_mismatch_is_held_without_blocklisting_or_reopening() {
     let release_title = "Quality Lie Movie.2026.1080p.WEB-DL.x264-GRP";
     let fixture = disposition_fixture("Quality Lie Movie", release_title).await;
     let incumbent_id =
@@ -12097,29 +12095,23 @@ async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reop
         },
     );
 
-    let result = crate::import_workflow::import_completed_download(
-        &fixture.app,
-        &fixture.user,
-        &fixture.completed,
-    )
-    .await
-    .expect("the import runs to a decision");
-
-    assert_eq!(
-        result.decision,
-        scryer_domain::ImportDecision::Rejected,
-        "{result:?}"
-    );
-    let expected = crate::normalize_release_name(Some(release_title)).unwrap_or_default();
+    let mut tracked = fixture.tracked_import_pending();
     assert!(
-        fixture.blocklisted_titles().await.contains(&expected),
-        "a proven quality lie must be blocklisted, got {:?}",
-        fixture.blocklisted_titles().await
+        !crate::completed_download_handler::import(&fixture.app, &fixture.user, &mut tracked).await
     );
+    let result = fixture.latest_import_result().await;
+    assert_eq!(result.decision, scryer_domain::ImportDecision::Skipped);
+    assert!(!result.release_burned, "{result:?}");
+    assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+    assert!(fixture.blocklisted_titles().await.is_empty());
     assert_eq!(
         fixture.scope_status().await,
-        AcquisitionScopeStatus::Wanted,
-        "the scope must reopen so convergence looks for a different release"
+        AcquisitionScopeStatus::Grabbed
+    );
+    assert!(
+        PathBuf::from(&fixture.completed.dest_dir)
+            .join(format!("{release_title}.mkv"))
+            .exists()
     );
     let primaries = primary_movie_files(&fixture).await;
     assert_eq!(
@@ -12128,6 +12120,106 @@ async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reop
         "the incumbent must stand alone: {primaries:?}"
     );
     assert_eq!(primaries[0].id, incumbent_id);
+}
+
+#[tokio::test]
+async fn quality_mismatch_retry_uses_the_current_profile_and_fresh_probe() {
+    let release_title = "Profile Retry Movie.2026.2160p.WEB-DL.x264-GRP";
+    let mut fixture = disposition_fixture("Profile Retry Movie", release_title).await;
+    let profiles = Arc::new(StoredQualityProfileRepo::default());
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let mut profile = crate::builtin_default_quality_profile();
+    profile.criteria.quality_tiers = vec!["2160P".into(), "1080P".into()];
+    profiles.set_profiles(vec![profile.clone()]).await;
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            QUALITY_PROFILE_ID_KEY,
+            &serde_json::to_string(&profile.id).unwrap(),
+        )
+        .await;
+    fixture.app.services.config.quality_profiles = profiles.clone();
+    fixture.app.services.config.settings = settings;
+    let source = PathBuf::from(&fixture.completed.dest_dir).join(format!("{release_title}.mkv"));
+    let unrelated = PathBuf::from(&fixture.completed.dest_dir).join("operator-note.txt");
+    std::fs::write(&unrelated, "preserve this").unwrap();
+    let mut tracked = fixture.tracked_import_pending();
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        assert!(
+            !crate::completed_download_handler::import(&fixture.app, &fixture.user, &mut tracked)
+                .await
+        );
+    }
+    let held = fixture.latest_import_result().await;
+    assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+    assert!(!held.release_burned);
+    assert!(source.exists());
+    assert!(fixture.blocklisted_titles().await.is_empty());
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        let still_held = crate::import_workflow::retry_failed_import(
+            &fixture.app,
+            &fixture.user,
+            &held.import_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(still_held.decision, scryer_domain::ImportDecision::Skipped);
+        assert!(!still_held.release_burned);
+        assert!(source.exists());
+    }
+    profile.criteria.quality_tiers.push("1440P".into());
+    profiles.set_profiles(vec![profile]).await;
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        fixture
+            .import_repo
+            .retry_finish_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = crate::import_workflow::retry_failed_import(
+            &fixture.app,
+            &fixture.user,
+            &held.import_id,
+            None,
+        )
+        .await
+        .expect_err("inject failure after file import but before finalization");
+        assert!(error.to_string().contains("finalization failure"));
+        let imported = fixture.latest_import_result().await;
+        assert_eq!(
+            imported.decision,
+            scryer_domain::ImportDecision::Imported,
+            "{imported:?}"
+        );
+    }
+    let before_recovery = primary_movie_files(&fixture).await;
+    assert_eq!(before_recovery.len(), 1);
+    let claim = fixture
+        .import_repo
+        .retry_claims
+        .lock()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    fixture
+        .import_repo
+        .retry_finish_fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    fixture.app.runtime.imports.execution_coordinator = Default::default();
+    crate::import_workflow::recover_import_retry(&fixture.app, &claim)
+        .await
+        .unwrap();
+    assert!(fixture.import_repo.retry_claims.lock().await.is_empty());
+    assert_eq!(
+        primary_movie_files(&fixture).await[0].id,
+        before_recovery[0].id
+    );
+    assert_eq!(primary_movie_files(&fixture).await.len(), 1);
+    assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "preserve this");
 }
 
 /// A file rule the operator wrote vetoes the file over something the release name

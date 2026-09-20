@@ -11,6 +11,8 @@ use scryer_domain::{ImportRecord, ImportStatus, ImportTransferPhase, ImportType}
 
 use crate::queries::sql_runtime::{SqlArg, SqlExec, SqlRuntime, StoreDatastore};
 
+include!("import_retry.rs");
+
 #[derive(Clone)]
 pub struct ImportStore {
     datastore: StoreDatastore,
@@ -127,6 +129,54 @@ impl ImportRepository for ImportStore {
             .flatten()
             .as_deref()
             .and_then(scryer_domain::download_identity::DownloadId::parse))
+    }
+
+    async fn claim_import_retry(
+        &self,
+        claim: &scryer_application::ImportRetryClaim,
+        expected_updated_at: chrono::DateTime<Utc>,
+        payload_json: &str,
+    ) -> AppResult<scryer_application::ImportRetryClaimOutcome> {
+        self.claim_retry(claim, expected_updated_at, payload_json)
+            .await
+    }
+
+    async fn finish_import_retry(
+        &self,
+        claim: &scryer_application::ImportRetryClaim,
+        state: scryer_domain::TrackedDownloadState,
+        reason: Option<&str>,
+        detail: Option<&str>,
+    ) -> AppResult<scryer_application::ImportRetryFinishOutcome> {
+        self.finish_retry(claim, state, reason, detail).await
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Option<scryer_application::ImportRetryClaim>> {
+        let row = SqlRuntime::fetch_optional(
+            self.datastore.read_exec(),
+            "SELECT detail FROM download_identity_states WHERE identity_key = {} AND reason = {}",
+            &[
+                SqlArg::Text(format!("download:{download_id}")),
+                SqlArg::Text(IMPORT_RETRY_TRACKED_STATE_REASON.into()),
+            ],
+        )
+        .await?;
+        row.map(|row| {
+            serde_json::from_str(&row.text("detail")?)
+                .map_err(|e| AppError::Repository(format!("invalid import retry marker: {e}")))
+        })
+        .transpose()
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        after_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+        limit: usize,
+    ) -> AppResult<Vec<scryer_application::ImportRetryClaim>> {
+        self.retry_recovery(after_download_id, limit).await
     }
 
     async fn update_import_status(
@@ -963,6 +1013,7 @@ impl ImportArtifactRepository for ImportStore {
 
 #[cfg(test)]
 mod tests {
+    include!("import_retry_tests.rs");
     use std::sync::Arc;
 
     use scryer_application::{ImportArtifactRepository, ImportRepository};

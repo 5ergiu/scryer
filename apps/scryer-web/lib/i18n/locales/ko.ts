@@ -1073,8 +1073,9 @@ const ko: LocaleDictionary = {
     "이 다운로드를 대기열에서 제거하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
   "queue.manualUnavailableForResult":
     "이 결과는 수동 대기열 추가를 지원하지 않습니다.",
-  "importHistory.retry": "재시도",
-  "importHistory.retryWithPassword": "비밀번호로 재시도",
+  "importHistory.retry": "가져오기 재시도",
+  "importHistory.retryHelp": "이미 다운로드한 파일을 현재 할당 및 품질 프로필로 다시 평가합니다. 다시 다운로드하지 않습니다.",
+  "importHistory.retryWithPassword": "비밀번호로 가져오기 재시도",
   "importHistory.passwordRequired": "비밀번호 필요",
   "importHistory.passwordPlaceholder": "아카이브 비밀번호",
   "importHistory.retrySuccess": "가져오기 재시도가 시작되었습니다",

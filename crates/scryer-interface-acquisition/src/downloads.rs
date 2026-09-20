@@ -389,12 +389,12 @@ impl DownloadMutations {
         })
     }
 
-    /// Retry a previously failed import, optionally with an archive password.
+    /// Reevaluate a failed or skipped import from an existing completed download.
     async fn retry_import(
         &self,
         ctx: &Context<'_>,
         #[graphql(
-            desc = "Failed import identity and optional archive password used for the retry."
+            desc = "Failed or skipped import identity and optional archive password. Rechecks existing files using current policy; does not retry the download."
         )]
         input: RetryImportInput,
     ) -> GqlResult<ImportResultPayload> {
