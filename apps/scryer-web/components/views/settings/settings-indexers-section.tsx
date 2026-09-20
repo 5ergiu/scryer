@@ -1322,10 +1322,8 @@ export function SettingsIndexersSection({
 
       {isEditorOpen ? (
         <>
-          <Card
-            className="relative overflow-hidden"
-            aria-busy={isSavingEditor}
-          >
+          <div className="relative overflow-hidden rounded-xl">
+            <Card aria-busy={isSavingEditor}>
             <CardHeader className="flex items-center justify-between gap-3">
               <CardTitle className="text-base">
                 {editingIndexerId
@@ -1594,11 +1592,12 @@ export function SettingsIndexersSection({
             </div>
               </form>
             </CardContent>
+            </Card>
             {isSavingEditor ? (
               <div
                 role="status"
                 aria-live="polite"
-                className="absolute inset-0 z-10 flex items-center justify-center rounded-[inherit] bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
+                className="absolute inset-0 z-10 flex items-center justify-center bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
               >
                 <div className="flex items-center gap-2 rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-surf)] px-4 py-3 text-sm font-medium text-[var(--scry-ink2)] shadow-[0_12px_28px_rgba(2,6,23,0.28)]">
                   <LoadingMark className="h-4 w-4" />
@@ -1606,7 +1605,7 @@ export function SettingsIndexersSection({
                 </div>
               </div>
             ) : null}
-          </Card>
+          </div>
           {isEditing ? (
             <div className="flex justify-center">
               <AddNewButton
