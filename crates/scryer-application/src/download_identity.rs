@@ -595,6 +595,25 @@ pub(crate) async fn resolve_observed_client_job(
             }
             ObservedClientJobResolution::Resolved(download_id)
         }
+        Ok(ObservationResolution::Rebound { download_id }) => {
+            // The binding row moved, so every memoized resolution taken against
+            // the previous registry state is retired. That also means this INFO
+            // is logged once and not again: the next tick resolves the item
+            // normally and memoizes it.
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            tracing::info!(
+                target: "download_identity_resolver",
+                token,
+                config_id,
+                client_type,
+                native_item_id,
+                download_id = %download_id,
+                "rebound an ended download binding onto the client now reporting it"
+            );
+            ObservedClientJobResolution::Resolved(download_id)
+        }
         Ok(ObservationResolution::Conflict {
             token_id,
             binding_download_id,
