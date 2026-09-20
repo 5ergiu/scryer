@@ -264,7 +264,7 @@ impl AppUseCase {
         mut sort: crate::TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
+        projection: crate::TitleListProjection,
         aggregates: crate::TitleCatalogAggregates,
     ) -> AppResult<crate::TitleCatalogResult> {
         let mut library_ids = self
@@ -298,7 +298,7 @@ impl AppUseCase {
                 sort,
                 limit,
                 offset,
-                include_external_ids,
+                projection,
                 aggregates,
             )
             .await

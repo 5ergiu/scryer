@@ -75,11 +75,16 @@ test("poster pages for all facets request no table enrichment or catalog aggrega
       sort: { key: "name", direction: "asc" },
     });
     assert.ok(Object.values(projection).every((value) => !value));
-    const query = buildTitlesQuery(projection, { includeAggregates: false });
+    const query = buildTitlesQuery(
+      { ...projection, includeSettings: false },
+      { includeAggregates: false },
+    );
     assert.match(query, /hasMore/);
+    assert.match(query, /tags/);
+    assert.match(buildTitlesQuery(projection), /effectiveUseSeasonFolders/);
     assert.doesNotMatch(
       query,
-      /totalCount|filterCounts|managedBytes|episodesOwned|sizeBytes|currentQualityTier/,
+      /totalCount|filterCounts|managedBytes|episodesOwned|sizeBytes|currentQualityTier|effectiveMetadataLanguage|metadataLanguageOverride|inheritsMetadataLanguage|effectiveUseSeasonFolders|inheritsUseSeasonFolders|useSeasonFoldersOverride/,
     );
   }
   assert.doesNotMatch(titleCatalogCountsQuery, /items|hasMore|managedBytes/);

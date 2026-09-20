@@ -1466,7 +1466,7 @@ pub trait TitleRepository: Send + Sync {
         sort: TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
+        projection: crate::TitleListProjection,
         aggregates: crate::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
@@ -1481,7 +1481,7 @@ pub trait TitleRepository: Send + Sync {
             });
         }
 
-        let mut titles = if include_external_ids {
+        let mut titles = if projection.include_external_ids {
             self.list_for_libraries(facet, library_ids, query).await?
         } else {
             self.list_for_libraries_without_external_ids(facet, library_ids, query)
@@ -1501,12 +1501,17 @@ pub trait TitleRepository: Send + Sync {
             0
         };
         let has_more = limit > 0 && titles.len().saturating_sub(offset) > limit;
-        let items = titles
+        let mut items = titles
             .into_iter()
             .skip(offset)
             .take(limit)
             .collect::<Vec<_>>();
 
+        if !projection.include_canonical_tags {
+            for title in &mut items {
+                title.canonical_tags.clear();
+            }
+        }
         Ok(TitleCatalogResult {
             items,
             limit,

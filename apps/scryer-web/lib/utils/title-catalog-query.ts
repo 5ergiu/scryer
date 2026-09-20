@@ -29,6 +29,7 @@ export type TitleCatalogSortStateLike = {
 };
 
 export type TitleCatalogProjection = {
+  includeSettings?: boolean;
   library: boolean;
   quality: boolean;
   profile: boolean;
@@ -220,6 +221,7 @@ export function titleCatalogProjectionSignature(
 ) {
   const normalized = projection ?? EMPTY_TITLE_CATALOG_PROJECTION;
   return [
+    normalized.includeSettings === false && "poster",
     normalized.library && "library",
     normalized.quality && "quality",
     normalized.profile && "profile",
