@@ -1,13 +1,12 @@
 
 import * as React from "react";
-import { ChevronDown, ChevronUp, Edit, Plus, Power, PowerOff, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Edit, Plus, Trash2 } from "lucide-react";
 import { AddNewButton } from "@/components/common/add-new-button";
 import { DownloadClientConfigField } from "@/components/common/download-client-config-field";
 import { DownloadClientRemotePathMappingsField } from "@/components/common/download-client-remote-path-mappings-field";
 import { PluginLogo, PluginVisualLabel } from "@/components/common/plugin-visual";
 import { InfoHelp } from "@/components/common/info-help";
 import { ProxyAssignmentSelect } from "@/components/common/proxy-assignment-select";
-import { RenderBooleanIcon } from "@/components/common/boolean-icon";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -417,9 +416,15 @@ export function SettingsDownloadClientsSection({
                     />
                   </TableCell>
                   <TableCell className="text-center">
-                    <RenderBooleanIcon
-                      value={client.isEnabled}
-                      label={`${t("label.enabled")}: ${client.name}`}
+                    <Checkbox
+                      id={selectorId("settings-download-client-enabled", client.id)}
+                      size="large"
+                      checked={client.isEnabled}
+                      disabled={mutatingDownloadClientId === client.id}
+                      aria-label={`${t("label.enabled")}: ${client.name}`}
+                      onCheckedChange={() =>
+                        void toggleDownloadClientEnabled(client)
+                      }
                     />
                   </TableCell>
                   <TableCell>
@@ -427,19 +432,6 @@ export function SettingsDownloadClientsSection({
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-2">
-                      <DownloadClientActionButton
-                        id={selectorId("settings-download-client-toggle", client.name)}
-                        tone={client.isEnabled ? "disabled" : "enabled"}
-                        onClick={() => void toggleDownloadClientEnabled(client)}
-                        disabled={mutatingDownloadClientId === client.id}
-                        label={client.isEnabled ? t("label.disable") : t("label.enable")}
-                      >
-                        {client.isEnabled ? (
-                          <PowerOff className="h-4 w-4" />
-                        ) : (
-                          <Power className="h-4 w-4" />
-                        )}
-                      </DownloadClientActionButton>
                       <DownloadClientActionButton
                         id={selectorId("settings-download-client-edit", client.name)}
                         tone="edit"
