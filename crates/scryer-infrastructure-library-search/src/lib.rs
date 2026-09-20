@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 
 use scryer_application::{AppError, AppResult};
-use scryer_domain::{MediaFacet, TaggedAlias, Title};
+use scryer_domain::{MediaFacet, TaggedAlias, Title, title_spelling};
 use sqlx::{Postgres, QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const TERM_KIND_NAME: &str = "name";
 const TERM_KIND_ALIAS: &str = "alias";
@@ -37,12 +36,35 @@ pub struct TitleSearchPlan {
     facets: Vec<MediaFacet>,
 }
 
+/// One projected name. `normalized_term` is the lenient (diacritic-folded)
+/// form the UI query builder matches against; `literal_term` is the
+/// diacritic-preserving lookup form release and import resolution key on.
+/// Everything else is what the in-memory resolver index used to compute per
+/// process: the bucket key (facet is on the row, script and numbers here), the
+/// length band, and the equality keys that are not bounded edit distances.
 #[derive(Clone, Debug)]
 pub struct TitleSearchTerm {
     pub term_kind: &'static str,
     pub raw_term: String,
     pub normalized_term: String,
+    pub literal_term: String,
+    /// `literal_term` with a trailing `19xx`/`20xx` removed. Collision
+    /// counting groups on this, so `Tide Chart` and `Tide Chart 2023` are one
+    /// identity shape.
+    pub stripped_year_key: String,
+    pub script: &'static str,
+    pub numbers_key: String,
+    pub char_length: i64,
+    /// Romanization variance is not a bounded edit distance, so a
+    /// Levenshtein-shaped filter can miss it; it needs its own equality key.
+    pub romanization_key: Option<String>,
+    pub language_tag: Option<String>,
+    /// ICU sort keys, one per collation profile the name qualifies for. Only
+    /// comparable against keys written by the same collation-data version,
+    /// which `title_search_meta.collation_version` records.
+    pub collation_keys: Vec<(&'static str, Vec<u8>)>,
     pub weight: i64,
+    pub title_year: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +76,10 @@ pub struct TitleSearchProjectionSource {
     pub slug: Option<String>,
     pub aliases: Vec<String>,
     pub tagged_aliases: Vec<TaggedAlias>,
+    /// The language the untagged names are in. Tagged aliases carry their own,
+    /// and the collation profile and the romanization key both depend on it.
+    pub metadata_language: Option<String>,
+    pub year: Option<i32>,
 }
 
 impl From<&Title> for TitleSearchProjectionSource {
@@ -66,6 +92,8 @@ impl From<&Title> for TitleSearchProjectionSource {
             slug: title.slug.clone(),
             aliases: title.aliases.clone(),
             tagged_aliases: title.tagged_aliases.clone(),
+            metadata_language: title.metadata_language.clone(),
+            year: title.year,
         }
     }
 }
@@ -87,70 +115,14 @@ impl DirectLane {
     }
 }
 
+/// The UI's lenient form. One normalizer: this is
+/// [`scryer_domain::title_spelling::title_search_lenient_form`], which is
+/// `normalize_title_spelling` with diacritics folded away, `&` spelled out,
+/// stray symbols treated as separators and initialisms joined. The projection
+/// stores it beside the diacritic-preserving literal that release and import
+/// resolution key on, so both consumers see one normalization of a name.
 pub fn normalize_title_search_text(raw: &str) -> String {
-    let mut normalized = String::new();
-    let mut last_was_space = true;
-
-    for ch in raw.nfd().flat_map(char::to_lowercase) {
-        if is_combining_mark(ch) {
-            continue;
-        }
-        if ch.is_alphanumeric() {
-            normalized.push(ch);
-            last_was_space = false;
-            continue;
-        }
-        if ch == '&' {
-            if !last_was_space && !normalized.is_empty() {
-                normalized.push(' ');
-            }
-            normalized.push_str("and");
-            normalized.push(' ');
-            last_was_space = true;
-            continue;
-        }
-        if !last_was_space && !normalized.is_empty() {
-            normalized.push(' ');
-            last_was_space = true;
-        }
-    }
-
-    collapse_title_initialisms(&normalized.split_whitespace().collect::<Vec<_>>().join(" "))
-}
-
-fn collapse_title_initialisms(raw: &str) -> String {
-    let tokens = raw.split_whitespace().collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return String::new();
-    }
-
-    let mut collapsed = Vec::with_capacity(tokens.len());
-    let mut index = 0usize;
-    while index < tokens.len() {
-        let is_initial = |token: &str| {
-            token.chars().count() == 1
-                && token.chars().next().is_some_and(|ch| ch.is_alphanumeric())
-        };
-
-        if !is_initial(tokens[index]) {
-            collapsed.push(tokens[index].to_string());
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        while index < tokens.len() && is_initial(tokens[index]) {
-            index += 1;
-        }
-
-        if index - start >= 2 {
-            collapsed.push(tokens[start..index].join(""));
-        } else {
-            collapsed.push(tokens[start].to_string());
-        }
-    }
-
-    collapsed.join(" ")
+    scryer_domain::title_spelling::title_search_lenient_form(raw)
 }
 
 fn facet_langid(facet: &MediaFacet) -> i64 {
@@ -460,6 +432,36 @@ fn push_facet_filter(builder: &mut QueryBuilder<Sqlite>, facets: &[MediaFacet]) 
     separated.push_unseparated(")");
 }
 
+/// One row's spelling facts, computed once from the raw name and shared by
+/// the full-name row and its token rows.
+struct SpellingFacts {
+    literal: String,
+    stripped_year_key: String,
+    script: &'static str,
+    numbers_key: String,
+    romanization_key: Option<String>,
+    collation_keys: Vec<(&'static str, Vec<u8>)>,
+}
+
+fn spelling_facts(raw_term: &str, language: Option<&str>) -> SpellingFacts {
+    let literal = title_spelling::title_lookup_form(raw_term);
+    let collation_keys = title_spelling::title_spelling_profiles(&literal, language)
+        .into_iter()
+        .filter_map(|profile| {
+            title_spelling::title_spelling_key(&literal, profile).map(|key| (profile, key))
+        })
+        .collect();
+    SpellingFacts {
+        stripped_year_key: title_spelling::strip_trailing_year(&literal).to_string(),
+        script: title_spelling::title_script(&literal).as_str(),
+        numbers_key: title_spelling::title_numbers_key(&literal),
+        romanization_key: title_spelling::japanese_romanization_key(&literal, language),
+        collation_keys,
+        literal,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_term_with_tokens(
     terms: &mut Vec<TitleSearchTerm>,
     seen: &mut HashSet<(&'static str, String)>,
@@ -467,6 +469,8 @@ fn push_term_with_tokens(
     token_term_kind: &'static str,
     weight: i64,
     raw_term: &str,
+    language: Option<&str>,
+    year: Option<i32>,
 ) {
     let raw_term = raw_term.trim();
     if raw_term.is_empty() {
@@ -478,15 +482,29 @@ fn push_term_with_tokens(
         return;
     }
 
+    let facts = spelling_facts(raw_term, language);
+
     if seen.insert((term_kind, normalized_term.clone())) {
         terms.push(TitleSearchTerm {
             term_kind,
             raw_term: raw_term.to_string(),
             normalized_term: normalized_term.clone(),
+            literal_term: facts.literal.clone(),
+            stripped_year_key: facts.stripped_year_key.clone(),
+            script: facts.script,
+            numbers_key: facts.numbers_key.clone(),
+            char_length: facts.literal.chars().count() as i64,
+            romanization_key: facts.romanization_key.clone(),
+            language_tag: language.map(str::to_string),
+            collation_keys: facts.collation_keys.clone(),
             weight,
+            title_year: year,
         });
     }
 
+    // Token rows exist for the UI's per-word typo lane. They are words, not
+    // identities, so they carry the token's own spelling facts and never a
+    // year: a word inside a name does not date the name.
     for token in normalized_term
         .split_whitespace()
         .filter(|token| token.chars().count() >= 4)
@@ -495,11 +513,21 @@ fn push_term_with_tokens(
         if !seen.insert((token_term_kind, token.clone())) {
             continue;
         }
+        let token_facts = spelling_facts(&token, language);
         terms.push(TitleSearchTerm {
             term_kind: token_term_kind,
             raw_term: token.clone(),
+            literal_term: token_facts.literal.clone(),
+            stripped_year_key: token_facts.stripped_year_key,
+            script: token_facts.script,
+            numbers_key: token_facts.numbers_key,
+            char_length: token_facts.literal.chars().count() as i64,
+            romanization_key: token_facts.romanization_key,
+            language_tag: language.map(str::to_string),
+            collation_keys: token_facts.collation_keys,
             normalized_term: token,
             weight,
+            title_year: None,
         });
     }
 }
@@ -507,6 +535,7 @@ fn push_term_with_tokens(
 pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<TitleSearchTerm> {
     let mut seen = HashSet::<(&'static str, String)>::new();
     let mut terms = Vec::new();
+    let language = source.metadata_language.as_deref();
 
     push_term_with_tokens(
         &mut terms,
@@ -515,6 +544,8 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
         TERM_KIND_NAME_TOKEN,
         TERM_WEIGHT_NAME,
         &source.name,
+        language,
+        source.year,
     );
 
     if let Some(sort_title) = source.sort_title.as_deref() {
@@ -525,6 +556,8 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_KIND_SORT_TITLE_TOKEN,
             TERM_WEIGHT_SORT_TITLE,
             sort_title,
+            language,
+            source.year,
         );
     }
 
@@ -536,6 +569,8 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_KIND_SLUG_TOKEN,
             TERM_WEIGHT_SLUG,
             slug,
+            language,
+            source.year,
         );
     }
 
@@ -547,9 +582,13 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_KIND_ALIAS_TOKEN,
             TERM_WEIGHT_ALIAS,
             alias,
+            language,
+            source.year,
         );
     }
 
+    // A tagged alias carries its own language, which is the whole point of the
+    // tag: `x-jat` is what makes a Latin-script name a Japanese romanization.
     for tagged_alias in &source.tagged_aliases {
         push_term_with_tokens(
             &mut terms,
@@ -558,11 +597,17 @@ pub fn build_title_search_terms(source: &TitleSearchProjectionSource) -> Vec<Tit
             TERM_KIND_TAGGED_ALIAS_TOKEN,
             TERM_WEIGHT_TAGGED_ALIAS,
             &tagged_alias.name,
+            Some(tagged_alias.language.as_str()),
+            source.year,
         );
     }
 
     terms
 }
+
+/// How many titles one rebuild page reads. The catalog is never loaded whole:
+/// a rebuild on a large library used to materialize every title row at once.
+const REBUILD_PAGE_SIZE: i64 = 500;
 
 pub async fn delete_title_search_projection_tx(
     tx: &mut Transaction<'_, Sqlite>,
@@ -578,6 +623,22 @@ async fn delete_title_search_projection_on_connection(
     sqlx::query(
         "DELETE FROM title_search_spellfix
          WHERE rowid IN (
+             SELECT term_id
+             FROM title_search_terms
+             WHERE title_id = ?
+         )",
+    )
+    .bind(title_id)
+    .execute(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+
+    // The collation keys cascade from the term rows, but SQLite only enforces
+    // that when foreign keys are on for this connection, which is not
+    // guaranteed for every caller. Deleting them by hand costs one statement.
+    sqlx::query(
+        "DELETE FROM title_search_collation_keys
+         WHERE term_id IN (
              SELECT term_id
              FROM title_search_terms
              WHERE title_id = ?
@@ -616,21 +677,48 @@ pub async fn replace_title_search_projection_pg_source_tx(
     tx: &mut Transaction<'_, Postgres>,
     source: &TitleSearchProjectionSource,
 ) -> AppResult<()> {
+    replace_title_search_projection_pg_on_connection(&mut *tx, source).await
+}
+
+async fn replace_title_search_projection_pg_on_connection(
+    connection: &mut sqlx::PgConnection,
+    source: &TitleSearchProjectionSource,
+) -> AppResult<()> {
+    sqlx::query(
+        "DELETE FROM title_search_collation_keys
+         WHERE term_id IN (SELECT term_id FROM title_search_terms WHERE title_id = $1)",
+    )
+    .bind(&source.title_id)
+    .execute(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+
     sqlx::query("DELETE FROM title_search_terms WHERE title_id = $1")
         .bind(&source.title_id)
-        .execute(&mut **tx)
+        .execute(&mut *connection)
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
 
     let facet = source.facet.as_str();
     for term in build_title_search_terms(source) {
-        sqlx::query(
+        let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
-             (title_id, facet, term_kind, raw_term, normalized_term, weight)
-             VALUES ($1, $2, $3, $4, $5, $6)
+             (title_id, facet, term_kind, raw_term, normalized_term, weight,
+              literal_term, stripped_year_key, script, numbers_key, char_length,
+              romanization_key, language_tag, title_year)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (title_id, term_kind, normalized_term) DO UPDATE SET
                 raw_term = EXCLUDED.raw_term,
-                weight = EXCLUDED.weight",
+                weight = EXCLUDED.weight,
+                literal_term = EXCLUDED.literal_term,
+                stripped_year_key = EXCLUDED.stripped_year_key,
+                script = EXCLUDED.script,
+                numbers_key = EXCLUDED.numbers_key,
+                char_length = EXCLUDED.char_length,
+                romanization_key = EXCLUDED.romanization_key,
+                language_tag = EXCLUDED.language_tag,
+                title_year = EXCLUDED.title_year
+             RETURNING term_id",
         )
         .bind(&source.title_id)
         .bind(facet)
@@ -638,9 +726,32 @@ pub async fn replace_title_search_projection_pg_source_tx(
         .bind(&term.raw_term)
         .bind(&term.normalized_term)
         .bind(term.weight)
-        .execute(&mut **tx)
+        .bind(&term.literal_term)
+        .bind(&term.stripped_year_key)
+        .bind(term.script)
+        .bind(&term.numbers_key)
+        .bind(term.char_length)
+        .bind(&term.romanization_key)
+        .bind(&term.language_tag)
+        .bind(term.title_year.map(i64::from))
+        .fetch_one(&mut *connection)
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
+
+        for (profile, key) in &term.collation_keys {
+            sqlx::query(
+                "INSERT INTO title_search_collation_keys (term_id, profile, collation_key)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (term_id, profile) DO UPDATE SET
+                    collation_key = EXCLUDED.collation_key",
+            )
+            .bind(term_id)
+            .bind(*profile)
+            .bind(key.as_slice())
+            .execute(&mut *connection)
+            .await
+            .map_err(|err| AppError::Repository(err.to_string()))?;
+        }
     }
 
     Ok(())
@@ -658,8 +769,10 @@ async fn replace_title_search_projection_source_tx(
     for term in build_title_search_terms(source) {
         let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
-             (title_id, facet, term_kind, raw_term, normalized_term, weight)
-             VALUES (?, ?, ?, ?, ?, ?)
+             (title_id, facet, term_kind, raw_term, normalized_term, weight,
+              literal_term, stripped_year_key, script, numbers_key, char_length,
+              romanization_key, language_tag, title_year)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING term_id",
         )
         .bind(&source.title_id)
@@ -668,9 +781,31 @@ async fn replace_title_search_projection_source_tx(
         .bind(&term.raw_term)
         .bind(&term.normalized_term)
         .bind(term.weight)
+        .bind(&term.literal_term)
+        .bind(&term.stripped_year_key)
+        .bind(term.script)
+        .bind(&term.numbers_key)
+        .bind(term.char_length)
+        .bind(&term.romanization_key)
+        .bind(&term.language_tag)
+        .bind(term.title_year.map(i64::from))
         .fetch_one(&mut *connection)
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
+
+        for (profile, key) in &term.collation_keys {
+            sqlx::query(
+                "INSERT OR REPLACE INTO title_search_collation_keys
+                 (term_id, profile, collation_key)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(term_id)
+            .bind(*profile)
+            .bind(key.as_slice())
+            .execute(&mut *connection)
+            .await
+            .map_err(|err| AppError::Repository(err.to_string()))?;
+        }
 
         sqlx::query(
             "INSERT INTO title_search_spellfix(rowid, word, rank, langid)
@@ -688,16 +823,53 @@ async fn replace_title_search_projection_source_tx(
     Ok(())
 }
 
-pub async fn seed_title_search_projection_if_empty(pool: &SqlitePool) -> AppResult<()> {
+/// Rebuild when the projection is empty, or when it was written with different
+/// collation data than this build produces.
+///
+/// The second case is what lets the projection persist ICU sort keys at all: a
+/// key written by one collation-data version is not comparable against a key
+/// computed by another, and the mismatch is silent — the lookup simply stops
+/// finding rows. Stamping the version and rebuilding on a difference turns
+/// that into a one-off cost at start instead of a matching outage.
+pub async fn seed_title_search_projection_if_stale(pool: &SqlitePool) -> AppResult<()> {
+    let stored_version: Option<String> =
+        sqlx::query_scalar("SELECT collation_version FROM title_search_meta WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| AppError::Repository(err.to_string()))?;
     let existing_term_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM title_search_terms")
         .fetch_one(pool)
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
-    if existing_term_count != 0 {
+
+    if existing_term_count != 0
+        && stored_version.as_deref() == Some(title_spelling::title_collation_data_version())
+    {
         return Ok(());
     }
 
     rebuild_title_search_projection(pool).await
+}
+
+/// PostgreSQL half of [`seed_title_search_projection_if_stale`].
+pub async fn seed_title_search_projection_if_stale_pg(pool: &sqlx::PgPool) -> AppResult<()> {
+    let stored_version: Option<String> =
+        sqlx::query_scalar("SELECT collation_version FROM title_search_meta WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| AppError::Repository(err.to_string()))?;
+    let existing_term_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM title_search_terms")
+        .fetch_one(pool)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+
+    if existing_term_count != 0
+        && stored_version.as_deref() == Some(title_spelling::title_collation_data_version())
+    {
+        return Ok(());
+    }
+
+    rebuild_title_search_projection_pg(pool).await
 }
 
 pub async fn rebuild_title_search_projection(pool: &SqlitePool) -> AppResult<()> {
@@ -711,20 +883,30 @@ pub async fn rebuild_title_search_projection(pool: &SqlitePool) -> AppResult<()>
         .map_err(|err| AppError::Repository(err.to_string()))
 }
 
+pub async fn rebuild_title_search_projection_pg(pool: &sqlx::PgPool) -> AppResult<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    rebuild_title_search_projection_pg_on_connection(&mut tx).await?;
+    tx.commit()
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))
+}
+
 /// Rebuild on the caller's active transaction, including the catalog read.
 /// The caller must commit or roll back this connection; restore uses its
 /// existing BEGIN IMMEDIATE transaction so the catalog and index stay atomic.
+///
+/// The catalog is read in pages of [`REBUILD_PAGE_SIZE`] keyed on the last id
+/// seen, never with one `fetch_all` of every title.
 pub async fn rebuild_title_search_projection_on_connection(
     connection: &mut sqlx::SqliteConnection,
 ) -> AppResult<()> {
-    let rows = sqlx::query(
-        "SELECT id, name, facet, sort_title, slug, aliases, tagged_aliases_json
-         FROM titles
-         ORDER BY id ASC",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|err| AppError::Repository(err.to_string()))?;
+    sqlx::query("DELETE FROM title_search_collation_keys")
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
 
     sqlx::query("DELETE FROM title_search_terms")
         .execute(&mut *connection)
@@ -736,33 +918,172 @@ pub async fn rebuild_title_search_projection_on_connection(
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
 
-    for row in rows {
-        let facet_raw: String = row
-            .try_get("facet")
-            .map_err(|err| AppError::Repository(err.to_string()))?;
-        let aliases_json: String = row.try_get("aliases").unwrap_or_else(|_| "[]".to_string());
-        let tagged_aliases_json: String = row
-            .try_get("tagged_aliases_json")
-            .unwrap_or_else(|_| "[]".to_string());
+    let mut after_id = String::new();
+    loop {
+        let rows = sqlx::query(
+            "SELECT id, name, facet, sort_title, slug, aliases, tagged_aliases_json,
+                    metadata_language, year
+             FROM titles
+             WHERE id > ?
+             ORDER BY id ASC
+             LIMIT ?",
+        )
+        .bind(&after_id)
+        .bind(REBUILD_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
 
-        let source = TitleSearchProjectionSource {
-            title_id: row
-                .try_get("id")
-                .map_err(|err| AppError::Repository(err.to_string()))?,
-            facet: MediaFacet::parse(&facet_raw).unwrap_or_default(),
-            name: row
-                .try_get("name")
-                .map_err(|err| AppError::Repository(err.to_string()))?,
-            sort_title: row.try_get("sort_title").unwrap_or(None),
-            slug: row.try_get("slug").unwrap_or(None),
-            aliases: serde_json::from_str(&aliases_json)
-                .map_err(|err| AppError::Repository(err.to_string()))?,
-            tagged_aliases: serde_json::from_str(&tagged_aliases_json)
-                .map_err(|err| AppError::Repository(err.to_string()))?,
-        };
+        if rows.is_empty() {
+            break;
+        }
 
-        replace_title_search_projection_source_tx(connection, &source).await?;
+        for row in &rows {
+            let source = projection_source_from_row(row)?;
+            after_id = source.title_id.clone();
+            replace_title_search_projection_source_tx(connection, &source).await?;
+        }
     }
 
+    stamp_collation_version_sqlite(connection).await
+}
+
+/// PostgreSQL half of [`rebuild_title_search_projection_on_connection`].
+pub async fn rebuild_title_search_projection_pg_on_connection(
+    connection: &mut sqlx::PgConnection,
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM title_search_collation_keys")
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+
+    sqlx::query("DELETE FROM title_search_terms")
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+
+    let mut after_id = String::new();
+    loop {
+        let rows = sqlx::query(
+            "SELECT id, name, facet, sort_title, slug, aliases, tagged_aliases_json,
+                    metadata_language, year
+             FROM titles
+             WHERE id > $1
+             ORDER BY id ASC
+             LIMIT $2",
+        )
+        .bind(&after_id)
+        .bind(REBUILD_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for row in &rows {
+            let source = projection_source_from_pg_row(row)?;
+            after_id = source.title_id.clone();
+            replace_title_search_projection_pg_on_connection(connection, &source).await?;
+        }
+    }
+
+    stamp_collation_version_pg(connection).await
+}
+
+async fn stamp_collation_version_sqlite(connection: &mut sqlx::SqliteConnection) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO title_search_meta (id, collation_version, projection_generation)
+         VALUES (1, ?, 1)
+         ON CONFLICT(id) DO UPDATE SET
+            collation_version = excluded.collation_version,
+            projection_generation = title_search_meta.projection_generation + 1",
+    )
+    .bind(title_spelling::title_collation_data_version())
+    .execute(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
     Ok(())
+}
+
+async fn stamp_collation_version_pg(connection: &mut sqlx::PgConnection) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO title_search_meta (id, collation_version, projection_generation)
+         VALUES (1, $1, 1)
+         ON CONFLICT (id) DO UPDATE SET
+            collation_version = EXCLUDED.collation_version,
+            projection_generation = title_search_meta.projection_generation + 1",
+    )
+    .bind(title_spelling::title_collation_data_version())
+    .execute(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(())
+}
+
+fn projection_source_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> AppResult<TitleSearchProjectionSource> {
+    let facet_raw: String = row
+        .try_get("facet")
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    let aliases_json: String = row.try_get("aliases").unwrap_or_else(|_| "[]".to_string());
+    let tagged_aliases_json: String = row
+        .try_get("tagged_aliases_json")
+        .unwrap_or_else(|_| "[]".to_string());
+
+    Ok(TitleSearchProjectionSource {
+        title_id: row
+            .try_get("id")
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        facet: MediaFacet::parse(&facet_raw).unwrap_or_default(),
+        name: row
+            .try_get("name")
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        sort_title: row.try_get("sort_title").unwrap_or(None),
+        slug: row.try_get("slug").unwrap_or(None),
+        aliases: serde_json::from_str(&aliases_json)
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        tagged_aliases: serde_json::from_str(&tagged_aliases_json)
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        metadata_language: row.try_get("metadata_language").unwrap_or(None),
+        year: row.try_get("year").unwrap_or(None),
+    })
+}
+
+/// PostgreSQL keeps `aliases` and `tagged_aliases_json` as `jsonb`, so they
+/// decode as a JSON value rather than as a string.
+fn pg_json_column<T: serde::de::DeserializeOwned + Default>(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> AppResult<T> {
+    let Ok(value) = row.try_get::<serde_json::Value, _>(column) else {
+        return Ok(T::default());
+    };
+    serde_json::from_value(value).map_err(|err| AppError::Repository(err.to_string()))
+}
+
+fn projection_source_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<TitleSearchProjectionSource> {
+    let facet_raw: String = row
+        .try_get("facet")
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+
+    Ok(TitleSearchProjectionSource {
+        title_id: row
+            .try_get("id")
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        facet: MediaFacet::parse(&facet_raw).unwrap_or_default(),
+        name: row
+            .try_get("name")
+            .map_err(|err| AppError::Repository(err.to_string()))?,
+        sort_title: row.try_get("sort_title").unwrap_or(None),
+        slug: row.try_get("slug").unwrap_or(None),
+        aliases: pg_json_column(row, "aliases")?,
+        tagged_aliases: pg_json_column(row, "tagged_aliases_json")?,
+        metadata_language: row.try_get("metadata_language").unwrap_or(None),
+        year: row.try_get("year").unwrap_or(None),
+    })
 }

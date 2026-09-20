@@ -25,6 +25,44 @@ pub enum TitleScript {
     Other,
 }
 
+impl TitleScript {
+    /// Stable spelling for a persisted column. Parsed back by
+    /// [`TitleScript::parse`], so the two must move together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Latin => "latin",
+            Self::Cyrillic => "cyrillic",
+            Self::Cjk => "cjk",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "latin" => Self::Latin,
+            "cyrillic" => Self::Cyrillic,
+            "cjk" => Self::Cjk,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// `Title (Year)` and bare `Title` are the same identity for collision
+/// purposes: the matching loop bridges the two shapes, so the collision
+/// detector and the persisted collision key must too, or a year-suffixed
+/// alias reads as "unique".
+pub fn strip_trailing_year(key: &str) -> &str {
+    if let Some((head, tail)) = key.rsplit_once(' ')
+        && tail.len() == 4
+        && tail.chars().all(|c| c.is_ascii_digit())
+        && (tail.starts_with("19") || tail.starts_with("20"))
+        && !head.is_empty()
+    {
+        return head;
+    }
+    key
+}
+
 pub fn title_script(value: &str) -> TitleScript {
     let mut script = None;
     for ch in value.chars().filter(|ch| ch.is_alphabetic()) {
@@ -104,6 +142,202 @@ pub fn normalize_title_spelling(value: &str) -> String {
     result.trim().to_string()
 }
 
+/// Articles a catalog writes at the end of a name (`Lantern, The`). The
+/// lookup form moves them back to the front so both spellings are one key.
+const TRAILING_ARTICLES: &[&str] = &["a", "an", "the"];
+
+/// The catalog's lookup form for one name: [`normalize_title_spelling`] with a
+/// trailing article moved to the front.
+///
+/// This is *the* normalizer. Release/import resolution keys its identities on
+/// this form, the persisted search projection stores it verbatim, and the UI's
+/// lenient form ([`title_search_lenient_form`]) is derived from it rather than
+/// computed by a second routine. Diacritics and native letters survive: two
+/// spellings that differ only by an accent are equated by collation, not by
+/// throwing the accent away.
+///
+/// Distinct from `catalog_sort_key`, which *drops* leading articles for
+/// display ordering. Reordering is reversible and identity-preserving;
+/// dropping is not.
+pub fn title_lookup_form(value: &str) -> String {
+    let mut tokens = normalize_title_spelling(value)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return tokens.join(" ");
+    }
+    if let Some(article) = tokens.last().cloned()
+        && TRAILING_ARTICLES.contains(&article.as_str())
+    {
+        tokens.pop();
+        let mut reordered = vec![article];
+        reordered.extend(tokens);
+        return reordered.join(" ");
+    }
+    tokens.join(" ")
+}
+
+/// The form a person typing into the library search box is matched against:
+/// [`normalize_title_spelling`] with diacritics folded away and two
+/// affordances a keyboard needs.
+///
+/// Three deliberate differences from [`title_lookup_form`]:
+///
+/// * Combining marks are dropped (NFD, then discard), so `muller` finds
+///   `Müller` without the typist reaching for an umlaut. The lookup form keeps
+///   them, because `ano` and `año` are different words and identity matching
+///   must not conflate them.
+/// * `&` becomes the word `and`, because that is what people type.
+/// * Every other symbol the normalizer does not list as a separator (`#`,
+///   `%`, `@`, …) becomes a space rather than vanishing, so `Title#2` is two
+///   tokens to a searcher. The lookup form leaves them out entirely; changing
+///   that would move every resolver key.
+/// * Runs of single characters are joined (`s h i e l d` -> `shield`), so an
+///   initialism typed either way finds the title.
+///
+/// No article reordering: a searcher typing `lantern` expects a prefix hit on
+/// `Lantern, The`, and reordering would demote it to a substring hit.
+pub fn title_search_lenient_form(value: &str) -> String {
+    let mut widened = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == '&' {
+            widened.push_str(" and ");
+        } else if ch.is_alphanumeric() || is_combining_mark(ch) || ch.is_whitespace() {
+            widened.push(ch);
+        } else {
+            widened.push(' ');
+        }
+    }
+    let stripped = normalize_title_spelling(&widened)
+        .nfd()
+        .filter(|ch| !is_combining_mark(*ch))
+        .collect::<String>();
+    collapse_initialisms(&stripped)
+}
+
+fn collapse_initialisms(raw: &str) -> String {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let is_initial = |token: &str| {
+        token.chars().count() == 1 && token.chars().next().is_some_and(char::is_alphanumeric)
+    };
+    let mut collapsed: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if !is_initial(tokens[index]) {
+            collapsed.push(tokens[index].to_string());
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < tokens.len() && is_initial(tokens[index]) {
+            index += 1;
+        }
+        if index - start >= 2 {
+            collapsed.push(tokens[start..index].concat());
+        } else {
+            collapsed.push(tokens[start].to_string());
+        }
+    }
+    collapsed.join(" ")
+}
+
+/// Every number a name carries, in the shape the resolver guards on: bare
+/// digit runs, plus Roman numerals tagged so `II` cannot be edited into `I`.
+///
+/// NFKC has already folded Unicode Roman numerals into the ASCII spelling by
+/// the time a lookup form reaches this.
+pub fn title_numbers(value: &str) -> Vec<String> {
+    static ROMAN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
+            .expect("valid Roman numeral pattern")
+    });
+    value
+        .split(|ch: char| !ch.is_numeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .chain(
+            value
+                .split_whitespace()
+                .filter(|part| ROMAN.is_match(part))
+                .map(|part| format!("roman:{part}")),
+        )
+        .collect()
+}
+
+/// [`title_numbers`] as one comparable string, for a persisted column and an
+/// index. Order follows [`title_numbers`], which is the order the in-memory
+/// guard compares, so equality of this key is equality of that guard.
+pub fn title_numbers_key(value: &str) -> String {
+    title_numbers(value).join("\u{1f}")
+}
+
+/// Fingerprint of the collation data this build will produce sort keys with.
+///
+/// Persisting [`title_spelling_key`] output is only sound while the ICU/CLDR
+/// data behind it is unchanged: an `icu_collator` bump can silently move every
+/// stored key, and a lookup computed with new data would then miss rows
+/// written with the old. Rather than trusting a hand-maintained constant, this
+/// hashes the actual sort keys of a probe corpus across every profile the
+/// catalog uses. Any change to the data, the strength options, or the profile
+/// list moves the fingerprint, and the consumer that stamped its rows with the
+/// old one rebuilds them.
+///
+/// This is what makes persisting [`title_spelling_key`] output sound: the
+/// keys are stored *with* this stamp, and a mismatch is a rebuild rather than
+/// a silent miss.
+pub fn title_collation_data_version() -> &'static str {
+    static VERSION: LazyLock<String> = LazyLock::new(|| {
+        const PROBES: &[&str] = &[
+            "muller",
+            "müller",
+            "strasse",
+            "straße",
+            "grüße",
+            "le cœur de chloé",
+            "майский вечер",
+            "流浪地球2",
+            "ガラスの城",
+            "한글",
+        ];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"title-spelling-collation-v1");
+        for tag in COLLATION_PROFILES {
+            hasher.update(tag.as_bytes());
+            for probe in PROBES {
+                match title_spelling_key(probe, tag) {
+                    Some(key) => {
+                        hasher.update(&(key.len() as u32).to_le_bytes());
+                        hasher.update(&key);
+                    }
+                    None => {
+                        hasher.update(b"\xff");
+                    }
+                }
+            }
+        }
+        hasher.finalize().to_hex()[..16].to_string()
+    });
+    VERSION.as_str()
+}
+
+/// Every profile tag [`title_spelling_profiles`] can return. Kept next to it:
+/// a new tag there must be added here or the fingerprint stops covering it.
+pub const COLLATION_PROFILES: &[&str] = &[
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "ru",
+    "ja",
+    "ko",
+    "zh",
+    "und",
+    "de-u-co-phonebk",
+];
+
 type MatchCollator = Arc<CollatorBorrowed<'static>>;
 static COLLATOR_CACHE: LazyLock<Mutex<HashMap<&'static str, MatchCollator>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -167,8 +401,15 @@ pub fn title_spelling_profiles(value: &str, language: Option<&str>) -> Vec<&'sta
     profiles
 }
 
-/// Ephemeral lookup key for spelling discovery. Never persist these keys or
-/// use catalog-sort keys, whose article handling has different semantics.
+/// Lookup key for spelling discovery. Never use catalog-sort keys here: their
+/// article handling has different semantics.
+///
+/// These bytes are only comparable against keys written by the same collation
+/// data. Persisting them is sound only alongside
+/// [`title_collation_data_version`], which fingerprints that data so a
+/// projection written by another build is rebuilt rather than silently
+/// mis-compared; `title_search_meta.collation_version` is where the projection
+/// records it.
 pub fn title_spelling_key(value: &str, profile: &'static str) -> Option<Vec<u8>> {
     let mut key = Vec::new();
     collator(profile)?.write_sort_key_to(value, &mut key).ok()?;
