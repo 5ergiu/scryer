@@ -16,6 +16,41 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(all(feature = "jemalloc-prof", not(target_os = "windows")))]
 mod jemalloc_prof;
 
+/// Moves jemalloc's decay work onto jemalloc's own threads.
+///
+/// jemalloc purges a dirty extent ~10 s after its last use, and with no
+/// background thread that purge, and the page faults for re-faulting the pages
+/// afterwards, land on whichever application thread happens to allocate next.
+/// Measured on the 111k-item load-test library (§14b of the load-test report),
+/// same image and same live workload, only this option differing: **7,022 →
+/// 3,462 minor faults/s, 58.5% → 50.4% CPU, 687 → 532 MB mean RSS**. It costs
+/// the process a handful of threads (22 → 25 at startup).
+///
+/// `background_thread` is a runtime-writable mallctl, so this needs no
+/// `MALLOC_CONF`. Not every platform implements it — notably macOS, where
+/// jemalloc builds without background-thread support — so a refusal is
+/// expected there and is deliberately ignored rather than logged: at this
+/// point in startup the tracing subscriber does not exist yet.
+#[cfg(not(target_os = "windows"))]
+fn configure_jemalloc() {
+    // SAFETY: `background_thread` is a `bool` mallctl. Writing the wrong type
+    // to a mallctl is the unsoundness this `unsafe` guards against, and the
+    // name and type are both from jemalloc's documented option list.
+    let _ = unsafe { tikv_jemalloc_ctl::raw::write::<bool>(b"background_thread\0", true) };
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod jemalloc_configuration_tests {
+    /// The call must be harmless on every platform, including the ones that
+    /// refuse the option, and must stay harmless when the process has already
+    /// enabled background threads.
+    #[test]
+    fn enabling_background_threads_is_idempotent_and_never_panics() {
+        super::configure_jemalloc();
+        super::configure_jemalloc();
+    }
+}
+
 /// Switches mimalloc's purging from decommit to reset.
 ///
 /// On Windows decommit hands the pages back to the OS and forces a zero-fill
@@ -638,6 +673,8 @@ fn install_panic_logging_hook() {
 fn main() {
     #[cfg(target_os = "windows")]
     configure_mimalloc();
+    #[cfg(not(target_os = "windows"))]
+    configure_jemalloc();
     if std::env::args().nth(1).as_deref() == Some("__import-file-worker") {
         std::process::exit(
             scryer_infrastructure_workflow::workflow::file_importer::run_import_file_worker(),
