@@ -566,6 +566,26 @@ fn scope_polls_any_rss_indexer(
     })
 }
 
+/// The RSS lane's own answer to "which title is this feed item", over the
+/// catalog, for tests that need the lane rather than a stand-in for it. The
+/// poll builds exactly this bank; only the scope test is simplified, because
+/// a test's titles are all in scope.
+#[cfg(test)]
+pub(crate) async fn match_rss_release_to_catalog_title(
+    titles: std::sync::Arc<dyn crate::ports::TitleRepository>,
+    release_title: &str,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(
+        crate::import_title_resolution::MonitoredTitleMatcher::new(titles),
+        |_| true,
+    );
+    Ok(
+        match_release_to_title_context(release_title, &IndexerResponseAttributes::default(), &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
+}
+
 /// A bank over an explicitly supplied set of titles. The set is the caller's,
 /// never the catalog.
 #[cfg(test)]

@@ -98,6 +98,39 @@ pub struct LibraryProbeStore {
 #[derive(Clone)]
 pub struct WantedStore {
     datastore: StoreDatastore,
+    /// The bounded-distance lane for the wanted view's title filter. Absent
+    /// in fixtures and while the index rebuilds, which costs typo tolerance
+    /// and nothing else.
+    fuzzy: Option<Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>>,
+}
+
+impl WantedStore {
+    pub fn new(datastore: StoreDatastore) -> Self {
+        Self {
+            datastore,
+            fuzzy: None,
+        }
+    }
+
+    pub fn with_fuzzy_index(
+        mut self,
+        index: Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>,
+    ) -> Self {
+        self.fuzzy = Some(index);
+        self
+    }
+
+    async fn typo_ranks(&self, query: &AcquisitionScopeStatesQuery) -> Vec<(String, i64)> {
+        let Some(plan) = query
+            .title_search
+            .as_deref()
+            .and_then(|search| crate::queries::title_search::build_title_search_plan(None, search))
+        else {
+            return Vec::new();
+        };
+        scryer_infrastructure_library_search::resolve_typo_title_ranks(self.fuzzy.as_deref(), &plan)
+            .await
+    }
 }
 
 #[derive(Clone)]
@@ -132,7 +165,6 @@ macro_rules! impl_store_new {
 }
 
 impl_store_new!(LibraryProbeStore);
-impl_store_new!(WantedStore);
 impl_store_new!(BlocklistStore);
 impl_store_new!(SubtitleDownloadStore);
 impl_store_new!(HousekeepingStore);
@@ -625,7 +657,7 @@ fn append_wanted_query_filters(
     );
 }
 
-fn sqlite_title_search_requires_spellfix(query: &AcquisitionScopeStatesQuery) -> bool {
+fn sqlite_title_search_has_text(query: &AcquisitionScopeStatesQuery) -> bool {
     query
         .title_search
         .as_deref()
@@ -1166,9 +1198,11 @@ impl AcquisitionScopeStateRepository for WantedStore {
         query: AcquisitionScopeStatesQuery,
     ) -> AppResult<Vec<AcquisitionScopeState>> {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
-            && sqlite_title_search_requires_spellfix(&query)
+            && sqlite_title_search_has_text(&query)
         {
-            return crate::queries::wanted::list_wanted_items_query(pool, &query).await;
+            let typo_ranks = self.typo_ranks(&query).await;
+            return crate::queries::wanted::list_wanted_items_query(pool, &query, &typo_ranks)
+                .await;
         }
 
         let mut sql = wanted_item_select_sql().to_string();
@@ -1191,9 +1225,11 @@ impl AcquisitionScopeStateRepository for WantedStore {
         query: AcquisitionScopeStatesQuery,
     ) -> AppResult<i64> {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
-            && sqlite_title_search_requires_spellfix(&query)
+            && sqlite_title_search_has_text(&query)
         {
-            return crate::queries::wanted::count_wanted_items_query(pool, &query).await;
+            let typo_ranks = self.typo_ranks(&query).await;
+            return crate::queries::wanted::count_wanted_items_query(pool, &query, &typo_ranks)
+                .await;
         }
 
         let mut sql = String::from(

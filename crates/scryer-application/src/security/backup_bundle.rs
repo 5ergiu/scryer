@@ -490,8 +490,10 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         table: "title_search_terms",
         classification: BackupTableClassification::Rebuild,
     },
+    // The fuzzy lane's catch-up queue. Rebuild rather than export: an
+    // imported queue would name titles of the exporting library.
     BackupTableCatalogEntry {
-        table: "title_search_spellfix",
+        table: "title_search_index_queue",
         classification: BackupTableClassification::Rebuild,
     },
     // ICU sort keys for the projection rows above. They are only comparable

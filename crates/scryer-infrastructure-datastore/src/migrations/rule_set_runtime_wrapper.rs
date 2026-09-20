@@ -309,8 +309,6 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_upgrade_runs_the_registered_runtime_wrapper_hook() {
-        crate::spellfix::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before the migration fixture");
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

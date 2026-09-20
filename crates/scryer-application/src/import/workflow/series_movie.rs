@@ -415,12 +415,6 @@ async fn try_match_titleless_archive_from_inner_video(
         return Ok(None);
     }
 
-    let titles = app
-        .services
-        .catalog
-        .titles
-        .list_for_matching(None, None)
-        .await?;
     // The titleless-archive probe predates filename recovery and is untouched
     // by it: SAB and NZBGet unpack before Scryer sees the download, so the
     // gated clients never reach this path.
@@ -430,8 +424,12 @@ async fn try_match_titleless_archive_from_inner_video(
         .map(ImportVideoFile::physical)
         .collect();
     for candidate in title_evidence_candidates_from_video_files(&probe_files) {
-        if let Some(title) =
-            resolve_title_from_release_candidate(&titles, &candidate, Some(facet.as_str())).await
+        if let Some(title) = resolve_title_from_release_candidate_via_port(
+            &app.services.catalog.titles,
+            &candidate,
+            Some(facet.as_str()),
+        )
+        .await
         {
             let destination =
                 match archive_extraction_destination_for_title(app, import_id, &title).await {
@@ -525,12 +523,6 @@ async fn resolve_completed_import_target(
     }
 
     if title.is_none() {
-        let titles = app
-            .services
-            .catalog
-            .titles
-            .list_for_matching(None, None)
-            .await?;
         // Without a client-reported release name the largest non-sample video
         // (never an arbitrary first file) is the release claim.
         let release_title = release_evidence.release_title(None).or_else(|| {
@@ -544,8 +536,8 @@ async fn resolve_completed_import_target(
         if let Some(release_title) = release_title {
             let parsed_release_title =
                 normalize_release_title_signal(parse_release_metadata(&release_title));
-            title = resolve_title_from_release_candidate(
-                &titles,
+            title = resolve_title_from_release_candidate_via_port(
+                &app.services.catalog.titles,
                 &parsed_release_title,
                 release_evidence.facet(),
             )
@@ -604,15 +596,9 @@ async fn resolve_completed_import_target(
             // has to speak for itself.
             let enriched = srrdb.enrich(app, completed, probe_files, true).await;
             if enriched.iter().any(|file| file.logical_name.is_some()) {
-                let titles = app
-                    .services
-                    .catalog
-                    .titles
-                    .list_for_matching(None, None)
-                    .await?;
                 for candidate in title_evidence_candidates_from_video_files(&enriched) {
-                    if let Some(matched) = resolve_title_from_release_candidate(
-                        &titles,
+                    if let Some(matched) = resolve_title_from_release_candidate_via_port(
+                        &app.services.catalog.titles,
                         &candidate,
                         release_evidence.facet(),
                     )

@@ -77,11 +77,6 @@ pub(crate) mod migration_assets {
 }
 
 #[cfg(test)]
-pub(crate) mod spellfix {
-    pub(crate) use scryer_infrastructure_datastore::spellfix::*;
-}
-
-#[cfg(test)]
 pub(crate) mod types {
     pub(crate) use scryer_infrastructure_sql::types::*;
 }

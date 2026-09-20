@@ -177,7 +177,6 @@ async fn replay_catalog_into_fresh_db_with_context(
     enable_baselines: bool,
     hook_context: &MigrationHookContext,
 ) -> AppResult<()> {
-    crate::spellfix::register_spellfix_auto_extension()?;
     ensure_migration_ledger_shape(pool).await?;
 
     let applied = load_applied_migrations(pool).await?;
@@ -186,6 +185,12 @@ async fn replay_catalog_into_fresh_db_with_context(
             "replay_catalog_into_fresh_db requires an empty database".to_string(),
         ));
     }
+
+    // After the emptiness check, because this leaves an object behind: the
+    // plain stand-in that lets the already-checksummed spellfix statements in
+    // migrations 0092 and 0236 replay without the module. Migration 0252
+    // drops it again.
+    crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
 
     let target_version = through_version.unwrap_or_else(|| catalog.max_version());
     if target_version <= 0 {
@@ -257,6 +262,12 @@ pub async fn run_migrations_with_hook_context(
             .await?;
         }
         MigrationInstallKind::Upgrade => {
+            // An upgrade from before the fuzzy lane moved to tantivy still
+            // has the spellfix1 virtual table in its schema, and the
+            // migrations between here and 0252 still reference it. Retire
+            // the module-backed object and stand a plain table in for it
+            // before a single one of them runs.
+            crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
             apply_version_range(
                 pool,
                 &catalog,

@@ -569,8 +569,6 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn test_store() -> LibraryStore {
-        scryer_infrastructure_datastore::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before migrations");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

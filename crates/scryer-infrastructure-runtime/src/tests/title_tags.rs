@@ -200,7 +200,11 @@ async fn assert_title_tag_registry_behaviour(
         50,
         0,
         false,
-        true,
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await?;
     assert_eq!(filtered.total_count, 1);
@@ -219,7 +223,11 @@ async fn assert_title_tag_registry_behaviour(
         50,
         0,
         false,
-        true,
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await?;
     assert_eq!(

@@ -2513,3 +2513,20 @@ kind = "sql"
 file = "postgres/migrations/0251_dashboard_import_artifact_index.sql"
 engine = "postgres"
 scope = "all"
+
+[[migration]]
+version = 252
+description = "title fuzzy index queue and spellfix retirement"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0252_title_fuzzy_index_queue.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0252_title_fuzzy_index_queue.sql"
+engine = "postgres"
+scope = "all"

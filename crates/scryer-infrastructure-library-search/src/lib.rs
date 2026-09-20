@@ -1,3 +1,7 @@
+pub mod fuzzy;
+
+pub use fuzzy::{TitleFuzzyIndex, UiFuzzyHit};
+
 use std::collections::HashSet;
 
 use scryer_application::{AppError, AppResult};
@@ -34,6 +38,17 @@ pub struct TitleSearchPlan {
     normalized_query: String,
     query_tokens: Vec<String>,
     facets: Vec<MediaFacet>,
+}
+
+impl TitleSearchPlan {
+    /// The tokens the typo lane asks the fuzzy index about.
+    pub fn query_tokens(&self) -> &[String] {
+        &self.query_tokens
+    }
+
+    pub fn facet_names(&self) -> Vec<&'static str> {
+        self.facets.iter().map(MediaFacet::as_str).collect()
+    }
 }
 
 /// One projected name. `normalized_term` is the lenient (diacritic-folded)
@@ -141,14 +156,6 @@ pub fn normalize_title_search_text(raw: &str) -> String {
     scryer_domain::title_spelling::title_search_lenient_form(raw)
 }
 
-fn facet_langid(facet: &MediaFacet) -> i64 {
-    match facet {
-        MediaFacet::Movie => 1,
-        MediaFacet::Series => 2,
-        MediaFacet::Anime => 3,
-    }
-}
-
 fn truncate_chars(value: String, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value;
@@ -156,12 +163,22 @@ fn truncate_chars(value: String, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// How many edits the typo lane tolerates for a token of this length, on the
+/// hundredths-of-an-edit scale the rank arithmetic multiplies.
 fn max_typo_distance(query_char_count: usize) -> i64 {
     match query_char_count {
         0..=5 => 100,
         6..=10 => 150,
         _ => 200,
     }
+}
+
+/// The automaton the fuzzy index runs counts whole edits, so the band above
+/// rounds up: a token allowed 1.5 edits is asked for 2 and the exact
+/// measurement below throws the half away.
+pub fn fuzzy_typo_distance(query_char_count: usize) -> u8 {
+    max_typo_distance(query_char_count).div_euclid(100).max(1) as u8
+        + u8::from(max_typo_distance(query_char_count) % 100 != 0)
 }
 
 fn max_typo_length_delta(query_char_count: usize) -> i64 {
@@ -172,29 +189,45 @@ fn max_typo_length_delta(query_char_count: usize) -> i64 {
     }
 }
 
-fn typo_scope(query_char_count: usize) -> i64 {
-    match query_char_count {
-        0..=8 => 3,
-        _ => 2,
-    }
-}
-
-fn spellfix_rank_for_weight(weight: i64) -> i64 {
-    match weight {
-        TERM_WEIGHT_NAME => 10_000,
-        TERM_WEIGHT_ALIAS => 5_000,
-        TERM_WEIGHT_TAGGED_ALIAS => 4_000,
-        TERM_WEIGHT_SORT_TITLE => 2_000,
-        TERM_WEIGHT_SLUG => 1_000,
-        _ => 1,
-    }
-}
-
+/// The first character of a short token, and its last, have to survive the
+/// typo: without this a four-character query reaches every four-character
+/// name in the library. This was a SQL predicate on the projected token and
+/// is now applied to the token the index returned; the rule is unchanged.
 fn typo_boundary_chars(query_token: &str) -> Option<(String, String)> {
     let mut chars = query_token.chars();
     let first = chars.next()?;
     let last = query_token.chars().last()?;
     Some((first.to_string(), last.to_string()))
+}
+
+/// Levenshtein distance with transpositions, given up on once it exceeds
+/// `bound`. Only ever run against the handful of candidates the index
+/// returned, never across the projection.
+fn bounded_edit_distance(left: &str, right: &str, bound: usize) -> Option<usize> {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.len().abs_diff(right.len()) > bound {
+        return None;
+    }
+    let mut previous_previous: Vec<usize> = Vec::new();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0usize; right.len() + 1];
+    for (i, left_char) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right.iter().enumerate() {
+            let substitution = previous[j] + usize::from(left_char != right_char);
+            let mut best = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+            if i > 0 && j > 0 && left[i] == right[j - 1] && left[i - 1] == *right_char {
+                best = best.min(previous_previous[j - 1] + 1);
+            }
+            current[j + 1] = best;
+        }
+        if current.iter().min().copied().unwrap_or(usize::MAX) > bound {
+            return None;
+        }
+        previous_previous = std::mem::replace(&mut previous, current.clone());
+    }
+    Some(previous[right.len()]).filter(|distance| *distance <= bound)
 }
 
 pub fn build_title_search_plan(facet: Option<MediaFacet>, query: &str) -> Option<TitleSearchPlan> {
@@ -223,7 +256,18 @@ pub fn build_title_search_plan(facet: Option<MediaFacet>, query: &str) -> Option
     })
 }
 
-pub fn push_ranked_title_matches_cte(builder: &mut QueryBuilder<Sqlite>, plan: &TitleSearchPlan) {
+/// The ranking query for the UI library search.
+///
+/// `typo_ranks` is the bounded-distance lane, resolved by the fuzzy index and
+/// aggregated by [`typo_title_ranks`] before it gets here. It arrives as
+/// values rather than as a join because the lane is no longer expressible in
+/// SQL: `spellfix1` and its `editdist3` are gone, and an index that can
+/// answer "within n edits of" is not a SQL index.
+pub fn push_ranked_title_matches_cte(
+    builder: &mut QueryBuilder<Sqlite>,
+    plan: &TitleSearchPlan,
+    typo_ranks: &[(String, i64)],
+) {
     builder.push("WITH direct_title_matches(title_id, rank) AS (");
     push_direct_match_select(
         builder,
@@ -245,29 +289,22 @@ pub fn push_ranked_title_matches_cte(builder: &mut QueryBuilder<Sqlite>, plan: &
         DirectLane::Contains,
         format!("%{}%", plan.normalized_query),
     );
-    builder.push(
-        "), typo_candidate_matches(title_id, token_key, candidate_weight, candidate_distance) AS (",
-    );
-    push_typo_candidate_matches(builder, plan);
-    builder.push("), typo_token_matches(title_id, token_key, best_weight, best_distance) AS (");
-    push_typo_token_matches(builder, plan);
-    builder.push(
-        "), typo_title_matches(title_id, rank) AS (
-             SELECT title_id,
-                    ",
-    );
-    builder.push_bind(TYPO_BASE_RANK);
-    builder.push(" + (");
-    builder.push_bind(plan.query_tokens.len() as i64);
-    builder.push(
-        " - COUNT(DISTINCT token_key)) * 50
-                    + SUM(best_distance) * 100
-                    + MIN(best_weight) AS rank
-             FROM typo_token_matches
-             GROUP BY title_id
-             HAVING COUNT(DISTINCT token_key) >= ",
-    );
-    builder.push_bind(required_typo_token_matches(plan.query_tokens.len()));
+    builder.push("), typo_title_matches(title_id, rank) AS (");
+    if typo_ranks.is_empty() {
+        builder.push("SELECT NULL, NULL WHERE 0");
+    } else {
+        let mut first = true;
+        for (title_id, rank) in typo_ranks {
+            if !first {
+                builder.push(" UNION ALL ");
+            }
+            first = false;
+            builder.push("SELECT ");
+            builder.push_bind(title_id.clone());
+            builder.push(", ");
+            builder.push_bind(*rank);
+        }
+    }
     builder.push(
         "), ranked_title_matches(title_id, rank) AS (
              SELECT title_id, MIN(rank) AS rank
@@ -279,10 +316,6 @@ pub fn push_ranked_title_matches_cte(builder: &mut QueryBuilder<Sqlite>, plan: &
              GROUP BY title_id
          ) ",
     );
-}
-
-fn required_typo_token_matches(token_count: usize) -> i64 {
-    if token_count <= 1 { 1 } else { 2 }
 }
 
 fn push_direct_match_select(
@@ -311,128 +344,117 @@ fn push_direct_match_select(
     builder.push(" GROUP BY title_id");
 }
 
-fn push_typo_token_matches(builder: &mut QueryBuilder<Sqlite>, plan: &TitleSearchPlan) {
+fn required_typo_token_matches(token_count: usize) -> i64 {
+    if token_count <= 1 { 1 } else { 2 }
+}
+
+/// Turn raw fuzzy hits into one rank per title.
+///
+/// This is the precision half of the typo lane, and it is deliberately the
+/// same arithmetic and the same guards the SQL lane applied: the index only
+/// replaced candidate generation. A hit has to survive the length band, the
+/// boundary characters and an exact bounded edit distance before it counts,
+/// and a multi-token query still needs two distinct tokens to match.
+pub fn typo_title_ranks(plan: &TitleSearchPlan, hits: &[UiFuzzyHit]) -> Vec<(String, i64)> {
     if plan.query_tokens.is_empty() || plan.normalized_query.chars().count() < 4 {
-        builder.push("SELECT NULL, NULL, NULL, NULL WHERE 0");
-        return;
+        return Vec::new();
     }
-
-    builder.push(
-        "SELECT title_id,
-                token_key,
-                MIN(candidate_weight) AS best_weight,
-                MIN(candidate_distance) AS best_distance
-         FROM typo_candidate_matches
-         GROUP BY title_id, token_key",
-    );
-}
-
-fn push_typo_candidate_matches(builder: &mut QueryBuilder<Sqlite>, plan: &TitleSearchPlan) {
-    if plan.query_tokens.is_empty() {
-        builder.push("SELECT NULL, NULL, NULL, NULL WHERE 0");
-        return;
-    }
-
-    let mut first = true;
-    for query_token in &plan.query_tokens {
-        for facet in &plan.facets {
-            if !first {
-                builder.push(" UNION ALL ");
+    // (title, token) -> (best weight, best distance)
+    let mut best: std::collections::HashMap<(String, String), (i64, i64)> =
+        std::collections::HashMap::new();
+    for hit in hits {
+        let token_chars = hit.token_key.chars().count();
+        let matched_chars = hit.matched_term.chars().count();
+        if (matched_chars as i64 - token_chars as i64).abs() > max_typo_length_delta(token_chars) {
+            continue;
+        }
+        if let Some((first_char, last_char)) = typo_boundary_chars(&hit.token_key) {
+            if !hit.matched_term.starts_with(&first_char) {
+                continue;
             }
-            first = false;
-            push_spellfix_token_candidate_select(builder, plan, query_token, facet);
-            builder.push(" UNION ALL ");
-            push_edit_distance_token_candidate_select(builder, plan, query_token, facet);
+            if (token_chars <= 5 || plan.query_tokens.len() == 1)
+                && !hit.matched_term.ends_with(&last_char)
+            {
+                continue;
+            }
         }
+        let bound = max_typo_distance(token_chars);
+        let Some(distance) = bounded_edit_distance(
+            &hit.matched_term,
+            &hit.token_key,
+            bound.div_euclid(100) as usize,
+        ) else {
+            continue;
+        };
+        let distance = (distance as i64) * 100;
+        if distance > bound {
+            continue;
+        }
+        let key = (hit.title_id.clone(), hit.token_key.clone());
+        let entry = best.entry(key).or_insert((hit.weight, distance));
+        entry.0 = entry.0.min(hit.weight);
+        entry.1 = entry.1.min(distance);
     }
+
+    let mut per_title: std::collections::HashMap<String, (i64, i64, i64)> =
+        std::collections::HashMap::new();
+    for ((title_id, _token), (weight, distance)) in best {
+        let entry = per_title.entry(title_id).or_insert((0, 0, i64::MAX));
+        entry.0 += 1;
+        entry.1 += distance;
+        entry.2 = entry.2.min(weight);
+    }
+
+    let required = required_typo_token_matches(plan.query_tokens.len());
+    let token_count = plan.query_tokens.len() as i64;
+    let mut ranks = per_title
+        .into_iter()
+        .filter(|(_title, (matched, _sum, _weight))| *matched >= required)
+        .map(|(title_id, (matched, distance_sum, weight))| {
+            (
+                title_id,
+                TYPO_BASE_RANK + (token_count - matched) * 50 + distance_sum * 100 + weight,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranks.sort();
+    ranks
 }
 
-fn push_spellfix_token_candidate_select(
-    builder: &mut QueryBuilder<Sqlite>,
+/// The typo lane end to end: ask the index, then apply the precision rules.
+///
+/// `None` — no index attached, or one that is missing, stale, corrupt or
+/// rebuilding — yields no typo candidates, and the direct lanes answer the
+/// search on their own. That is the documented degraded mode, not an error.
+pub async fn resolve_typo_title_ranks(
+    index: Option<&fuzzy::TitleFuzzyIndex>,
     plan: &TitleSearchPlan,
-    query_token: &str,
-    facet: &MediaFacet,
-) {
-    builder.push(
-        "SELECT terms.title_id AS title_id,
-                ",
-    );
-    builder.push_bind(query_token.to_string());
-    builder.push(
-        " AS token_key,
-                MIN(terms.weight) AS candidate_weight,
-                MIN(spellfix.distance) AS candidate_distance
-         FROM title_search_spellfix spellfix
-         JOIN title_search_terms terms ON terms.term_id = spellfix.rowid
-         WHERE spellfix.word MATCH ",
-    );
-    builder.push_bind(query_token.to_string());
-    builder.push(" AND spellfix.top = ");
-    builder.push_bind(TYPO_TOP_LIMIT);
-    builder.push(" AND spellfix.scope = ");
-    builder.push_bind(typo_scope(query_token.chars().count()));
-    builder.push(" AND spellfix.distance <= ");
-    builder.push_bind(max_typo_distance(query_token.chars().count()));
-    builder.push(" AND ABS(length(terms.normalized_term) - ");
-    builder.push_bind(query_token.chars().count() as i64);
-    builder.push(") <= ");
-    builder.push_bind(max_typo_length_delta(query_token.chars().count()));
-    if let Some((first_char, last_char)) = typo_boundary_chars(query_token) {
-        builder.push(" AND substr(terms.normalized_term, 1, 1) = ");
-        builder.push_bind(first_char);
-        if query_token.chars().count() <= 5 || plan.query_tokens.len() == 1 {
-            builder.push(" AND substr(terms.normalized_term, -1, 1) = ");
-            builder.push_bind(last_char);
-        }
-    }
-    builder.push(" AND spellfix.langid = ");
-    builder.push_bind(facet_langid(facet));
-    builder.push(" AND terms.facet = ");
-    builder.push_bind(facet.as_str());
-    builder.push(" AND terms.term_kind LIKE '%_token' GROUP BY terms.title_id");
+) -> Vec<(String, i64)> {
+    let Some(index) = index else {
+        return Vec::new();
+    };
+    typo_title_ranks(plan, &fuzzy_typo_hits(index, plan).await)
 }
 
-fn push_edit_distance_token_candidate_select(
-    builder: &mut QueryBuilder<Sqlite>,
+/// Ask the fuzzy index for this plan's typo candidates.
+pub async fn fuzzy_typo_hits(
+    index: &fuzzy::TitleFuzzyIndex,
     plan: &TitleSearchPlan,
-    query_token: &str,
-    facet: &MediaFacet,
-) {
-    builder.push(
-        "SELECT terms.title_id AS title_id,
-                ",
-    );
-    builder.push_bind(query_token.to_string());
-    builder.push(
-        " AS token_key,
-                MIN(terms.weight) AS candidate_weight,
-                MIN(editdist3(terms.normalized_term, ",
-    );
-    builder.push_bind(query_token.to_string());
-    builder.push(
-        ")) AS candidate_distance
-         FROM title_search_terms terms
-         WHERE terms.facet = ",
-    );
-    builder.push_bind(facet.as_str());
-    builder.push(" AND terms.term_kind LIKE '%_token'");
-    builder.push(" AND ABS(length(terms.normalized_term) - ");
-    builder.push_bind(query_token.chars().count() as i64);
-    builder.push(") <= ");
-    builder.push_bind(max_typo_length_delta(query_token.chars().count()));
-    if let Some((first_char, last_char)) = typo_boundary_chars(query_token) {
-        builder.push(" AND substr(terms.normalized_term, 1, 1) = ");
-        builder.push_bind(first_char);
-        if query_token.chars().count() <= 5 || plan.query_tokens.len() == 1 {
-            builder.push(" AND substr(terms.normalized_term, -1, 1) = ");
-            builder.push_bind(last_char);
-        }
+) -> Vec<UiFuzzyHit> {
+    if plan.query_tokens.is_empty() || plan.normalized_query.chars().count() < 4 {
+        return Vec::new();
     }
-    builder.push(" AND editdist3(terms.normalized_term, ");
-    builder.push_bind(query_token.to_string());
-    builder.push(") <= ");
-    builder.push_bind(max_typo_distance(query_token.chars().count()));
-    builder.push(" GROUP BY terms.title_id");
+    if let Err(error) = index.sync().await {
+        tracing::debug!(%error, "title fuzzy index sync failed before a ui search");
+    }
+    index
+        .ui_candidates(
+            &plan.query_tokens,
+            &plan.facet_names(),
+            fuzzy_typo_distance,
+            TYPO_TOP_LIMIT as usize,
+        )
+        .await
 }
 
 fn push_facet_filter(builder: &mut QueryBuilder<Sqlite>, facets: &[MediaFacet]) {
@@ -653,18 +675,7 @@ async fn delete_title_search_projection_on_connection(
     connection: &mut sqlx::SqliteConnection,
     title_id: &str,
 ) -> AppResult<()> {
-    sqlx::query(
-        "DELETE FROM title_search_spellfix
-         WHERE rowid IN (
-             SELECT term_id
-             FROM title_search_terms
-             WHERE title_id = ?
-         )",
-    )
-    .bind(title_id)
-    .execute(&mut *connection)
-    .await
-    .map_err(|err| AppError::Repository(err.to_string()))?;
+    enqueue_title_for_fuzzy_index(&mut *connection, title_id).await?;
 
     // The collation keys cascade from the term rows, but SQLite only enforces
     // that when foreign keys are on for this connection, which is not
@@ -792,6 +803,8 @@ async fn replace_title_search_projection_pg_on_connection(
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
 
+    enqueue_title_for_fuzzy_index_pg(&mut *connection, &source.title_id).await?;
+
     let bridged = source
         .with_tagged_aliases(bridge_cour_aliases_pg(&mut *connection, &source.title_id).await?);
 
@@ -868,7 +881,6 @@ async fn replace_title_search_projection_source_tx(
         source.with_tagged_aliases(bridge_cour_aliases(&mut *connection, &source.title_id).await?);
 
     let facet = source.facet.as_str();
-    let langid = facet_langid(&source.facet);
 
     for term in build_title_search_terms(&bridged) {
         let term_id: i64 = sqlx::query_scalar(
@@ -912,18 +924,6 @@ async fn replace_title_search_projection_source_tx(
             .await
             .map_err(|err| AppError::Repository(err.to_string()))?;
         }
-
-        sqlx::query(
-            "INSERT INTO title_search_spellfix(rowid, word, rank, langid)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(term_id)
-        .bind(&term.normalized_term)
-        .bind(spellfix_rank_for_weight(term.weight))
-        .bind(langid)
-        .execute(&mut *connection)
-        .await
-        .map_err(|err| AppError::Repository(err.to_string()))?;
     }
 
     Ok(())
@@ -1019,11 +1019,6 @@ pub async fn rebuild_title_search_projection_on_connection(
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
 
-    sqlx::query("DELETE FROM title_search_spellfix")
-        .execute(&mut *connection)
-        .await
-        .map_err(|err| AppError::Repository(err.to_string()))?;
-
     let mut after_id = String::new();
     loop {
         let rows = sqlx::query(
@@ -1051,6 +1046,10 @@ pub async fn rebuild_title_search_projection_on_connection(
         }
     }
 
+    // Per-title enqueues from the loop above are noise: the stamp bump below
+    // invalidates the fuzzy index wholesale, and it rebuilds from the
+    // projection this transaction just wrote.
+    clear_fuzzy_index_queue_sqlite(connection).await?;
     stamp_collation_version_sqlite(connection).await
 }
 
@@ -1095,7 +1094,54 @@ pub async fn rebuild_title_search_projection_pg_on_connection(
         }
     }
 
+    clear_fuzzy_index_queue_pg(connection).await?;
     stamp_collation_version_pg(connection).await
+}
+
+/// Claim a title for the fuzzy index, inside the caller's transaction.
+///
+/// The queue row and the projection rows commit or roll back together, which
+/// is the whole point: the index can then be brought up to date from the
+/// queue alone, and a write that never landed never claims anything.
+async fn enqueue_title_for_fuzzy_index(
+    connection: &mut sqlx::SqliteConnection,
+    title_id: &str,
+) -> AppResult<()> {
+    sqlx::query("INSERT INTO title_search_index_queue (title_id) VALUES (?)")
+        .bind(title_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(())
+}
+
+/// PostgreSQL half of [`enqueue_title_for_fuzzy_index`].
+async fn enqueue_title_for_fuzzy_index_pg(
+    connection: &mut sqlx::PgConnection,
+    title_id: &str,
+) -> AppResult<()> {
+    sqlx::query("INSERT INTO title_search_index_queue (title_id) VALUES ($1)")
+        .bind(title_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(())
+}
+
+async fn clear_fuzzy_index_queue_sqlite(connection: &mut sqlx::SqliteConnection) -> AppResult<()> {
+    sqlx::query("DELETE FROM title_search_index_queue")
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(())
+}
+
+async fn clear_fuzzy_index_queue_pg(connection: &mut sqlx::PgConnection) -> AppResult<()> {
+    sqlx::query("DELETE FROM title_search_index_queue")
+        .execute(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(())
 }
 
 async fn stamp_collation_version_sqlite(connection: &mut sqlx::SqliteConnection) -> AppResult<()> {

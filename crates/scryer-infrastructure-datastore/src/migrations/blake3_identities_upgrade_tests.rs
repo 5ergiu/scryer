@@ -19,8 +19,6 @@ const PRE_UPGRADE_VERSION: i64 = 191;
 const LEGACY_SHA256: &str = "9f2c4e1a7b3d5f80a1c2e3d4f5061728394a5b6c7d8e9f00112233445566778899";
 
 async fn pre_upgrade_pool() -> SqlitePool {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix extension should register before the migration fixture");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -368,8 +366,6 @@ async fn the_hook_is_idempotent_when_run_twice_over_the_same_database() {
 
 #[tokio::test]
 async fn a_fresh_install_applies_the_whole_catalog_including_0192() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix extension should register");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")

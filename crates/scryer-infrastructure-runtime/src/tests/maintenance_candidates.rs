@@ -2019,7 +2019,6 @@ async fn maintenance_scope_candidates_and_exclusions_have_independent_subject_id
 
 #[tokio::test]
 async fn action_sequence_migration_preserves_pre_0232_in_flight_legacy_rows() {
-    crate::spellfix::register_spellfix_auto_extension().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("legacy.db");
     let pool = SqlitePoolOptions::new()
