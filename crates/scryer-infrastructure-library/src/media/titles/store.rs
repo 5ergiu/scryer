@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use scryer_application::{
@@ -140,11 +142,27 @@ enum TitleCatalogSqlDialect {
 #[derive(Clone)]
 pub struct TitleStore {
     datastore: StoreDatastore,
+    /// The bounded-distance lane, shared with the UI search. `None` is the
+    /// documented degraded mode: the exact lanes below are exhaustive on
+    /// their own and a missing index costs typo tolerance, never a wrong
+    /// answer.
+    fuzzy: Option<Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>>,
 }
 
 impl TitleStore {
     pub fn new(datastore: StoreDatastore) -> Self {
-        Self { datastore }
+        Self {
+            datastore,
+            fuzzy: None,
+        }
+    }
+
+    pub fn with_fuzzy_index(
+        mut self,
+        index: Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>,
+    ) -> Self {
+        self.fuzzy = Some(index);
+        self
     }
 
     async fn find_existing_title_after_unique_conflict(
@@ -269,6 +287,7 @@ impl TitleStore {
                             facet,
                             query,
                             include_external_ids,
+                            self.fuzzy.as_deref(),
                         )
                         .await?;
                         if include_canonical_tags {
@@ -278,7 +297,20 @@ impl TitleStore {
                         return Ok(titles);
                     }
                     StoreDatastore::Postgres { .. } => {
-                        let (sql, args) = build_ranked_title_list_sql(facet, None, query);
+                        // Same lane, same index, same ranks: the typo
+                        // tolerance is not a SQLite-only feature any more.
+                        let typo_ranks = match build_title_search_plan(facet.clone(), query) {
+                            Some(plan) => {
+                                scryer_infrastructure_library_search::resolve_typo_title_ranks(
+                                    self.fuzzy.as_deref(),
+                                    &plan,
+                                )
+                                .await
+                            }
+                            None => Vec::new(),
+                        };
+                        let (sql, args) =
+                            build_ranked_title_list_sql(facet, None, query, &typo_ranks);
                         SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?
                     }
                 }
@@ -1271,36 +1303,46 @@ impl TitleRepository for TitleStore {
         );
         let mut rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
 
-        // Then the typo lane, which is a length band over a bucket that can be
-        // large in a big library, so it is capped.
-        if let Some((low, high)) = query.length_band {
-            let mut band_args = vec![
-                SqlArg::Text(query.script.to_string()),
-                SqlArg::Text(query.numbers_key.to_string()),
-            ];
-            if let Some(facet) = query.facet {
-                band_args.push(SqlArg::Text(facet.to_string()));
+        // Then the bounded-distance lane, which is not SQL at all: the fuzzy
+        // index answers "within n edits of" and hands back term ids, and the
+        // candidate columns are read from the same projection row the
+        // equality lanes read, so a candidate is the same thing whichever
+        // lane found it. No index, or one that is rebuilding, means no typo
+        // candidates and the equality lanes answer alone.
+        if let (Some(distance), Some(fuzzy)) = (query.typo_distance, self.fuzzy.as_deref()) {
+            if let Err(error) = fuzzy.sync().await {
+                tracing::debug!(%error, "title fuzzy index sync failed before a resolver lookup");
             }
-            band_args.push(SqlArg::I64(low));
-            band_args.push(SqlArg::I64(high));
-            band_args.push(SqlArg::I64(query.limit));
-            let band_sql = format!(
-                "SELECT {CANDIDATE_COLUMNS} FROM title_search_terms \
-                 WHERE {bucket} AND char_length BETWEEN {{}} AND {{}} \
-                 ORDER BY char_length, term_id LIMIT {{}}"
-            );
-            let band =
-                SqlRuntime::fetch_all(self.datastore.read_exec(), &band_sql, &band_args).await?;
-            if band.len() as i64 >= query.limit {
-                tracing::debug!(
-                    script = query.script,
-                    numbers_key = query.numbers_key,
-                    facet = query.facet,
-                    limit = query.limit,
-                    "title name bucket fetch hit its cap"
+            let term_ids = fuzzy
+                .resolver_candidates(
+                    scryer_infrastructure_library_search::fuzzy::ResolverFuzzyQuery {
+                        facet: query.facet,
+                        script: query.script,
+                        numbers_key: query.numbers_key,
+                        match_term: query.match_term,
+                        distance,
+                        limit: query.limit.max(0) as usize,
+                    },
+                )
+                .await;
+            if !term_ids.is_empty() {
+                let placeholders = std::iter::repeat_n("{}", term_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let hydrate_sql = format!(
+                    "SELECT {CANDIDATE_COLUMNS} FROM title_search_terms \
+                     WHERE term_id IN ({placeholders})"
+                );
+                let hydrate_args = term_ids
+                    .iter()
+                    .copied()
+                    .map(SqlArg::I64)
+                    .collect::<Vec<_>>();
+                rows.extend(
+                    SqlRuntime::fetch_all(self.datastore.read_exec(), &hydrate_sql, &hydrate_args)
+                        .await?,
                 );
             }
-            rows.extend(band);
         }
 
         let mut seen = std::collections::HashSet::new();
@@ -2497,13 +2539,16 @@ async fn list_titles_via_sqlite_title_search_query(
     facet: Option<MediaFacet>,
     query: &str,
     include_external_ids: bool,
+    fuzzy: Option<&scryer_infrastructure_library_search::TitleFuzzyIndex>,
 ) -> AppResult<Vec<Title>> {
     let Some(search_plan) = build_title_search_plan(facet, query) else {
         return Ok(Vec::new());
     };
 
+    let typo_ranks =
+        scryer_infrastructure_library_search::resolve_typo_title_ranks(fuzzy, &search_plan).await;
     let mut builder = QueryBuilder::<Sqlite>::new("");
-    push_ranked_title_matches_cte(&mut builder, &search_plan);
+    push_ranked_title_matches_cte(&mut builder, &search_plan, &typo_ranks);
     builder.push(format!(
         "SELECT {TITLE_COLUMNS} FROM ranked_title_matches
          JOIN titles ON titles.id = ranked_title_matches.title_id
@@ -4378,12 +4423,14 @@ fn build_ranked_title_list_sql(
     facet: Option<MediaFacet>,
     library_ids: Option<&[String]>,
     query: &str,
+    typo_ranks: &[(String, i64)],
 ) -> (String, Vec<SqlArg>) {
     let normalized = normalize_title_search_text(query);
     let mut sql = format!(
         "SELECT {TITLE_COLUMNS}
            FROM titles
            JOIN (
+                SELECT title_id, MIN(rank) AS rank FROM (
                 SELECT title_id,
                        MIN(
                            CASE
@@ -4412,8 +4459,15 @@ fn build_ranked_title_list_sql(
 
     sql.push_str(" WHERE ");
     sql.push_str(&where_clauses.join(" AND "));
+    sql.push_str(" GROUP BY title_id");
+    for (title_id, rank) in typo_ranks {
+        sql.push_str(" UNION ALL SELECT {} AS title_id, {} AS rank");
+        args.push(SqlArg::Text(title_id.clone()));
+        args.push(SqlArg::I64(*rank));
+    }
     sql.push_str(
-        " GROUP BY title_id
+        " ) combined_title_matches
+           GROUP BY title_id
            ) ranked_titles ON ranked_titles.title_id = titles.id",
     );
 
@@ -5271,10 +5325,17 @@ mod tests {
         .execute(&pool)
         .await
         .expect("title_search_terms table should be created");
-        sqlx::query("CREATE TABLE title_search_spellfix (term TEXT)")
-            .execute(&pool)
-            .await
-            .expect("title_search_spellfix table should be created");
+        // Deleting a projection claims the title for the fuzzy index in the
+        // same transaction, so the queue has to exist for the delete to run.
+        sqlx::query(
+            "CREATE TABLE title_search_index_queue (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                title_id TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("title_search_index_queue table should be created");
         // The projection's collation keys hang off a term row; deleting a
         // title clears them explicitly rather than trusting SQLite foreign-key
         // enforcement, which is not guaranteed to be on.
@@ -5387,8 +5448,6 @@ mod tests {
 
     #[tokio::test]
     async fn persist_smg_id_replaces_a_redirected_value_and_rebuilds_external_id_lookups() {
-        scryer_infrastructure_datastore::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before migrations");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -5510,8 +5569,6 @@ mod tests {
     }
 
     async fn migrated_test_store() -> (TitleStore, sqlx::SqlitePool) {
-        scryer_infrastructure_datastore::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before migrations");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

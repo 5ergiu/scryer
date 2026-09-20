@@ -2000,7 +2000,7 @@ async fn title_queries_get_by_facet_libraries_and_slug_trim_input_and_reject_dup
 }
 
 #[tokio::test]
-async fn title_query_modes_keep_spellfix_search_scoped_to_presentation_sqlite() {
+async fn title_query_modes_keep_fuzzy_search_scoped_to_presentation_sqlite() {
     let (services, db) = temp_services("scryer_title_query_mode_search_scope").await;
     let catalog = title_store(&services);
 

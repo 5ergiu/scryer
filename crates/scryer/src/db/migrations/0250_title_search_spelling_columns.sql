@@ -68,5 +68,4 @@ CREATE INDEX IF NOT EXISTS idx_title_search_terms_stripped_year_key
 -- in SQL: they need ICU collation and Unicode normalization. Emptying the
 -- projection makes the maintainer's "rebuild when empty or stamped with a
 -- different collation version" check fire on the next start.
-DELETE FROM title_search_spellfix;
 DELETE FROM title_search_terms;

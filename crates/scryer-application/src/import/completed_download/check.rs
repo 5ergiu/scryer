@@ -563,6 +563,52 @@ pub(super) async fn completed_download_proves_assigned_title(
         }
     }
 
+    // The client-reported release name, else the media file names (non-sample,
+    // largest first) — the same claims the completion-time re-resolution used.
+    let completion_sources = crate::import_workflow::completed_download_release_claims(completed);
+
+    // Each subject's evidence was built from the subject's own names. The
+    // names actually on disk are what it will be compared against, so they
+    // get a candidate fetch of their own, at the same distance: without it
+    // the collision guard has no competitor to find and a rival spelling
+    // passes the gate as a confident match.
+    {
+        let mut anchors = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for raw_title in &completion_sources {
+            let (forms, _) = crate::title_matching::relaxed::neutral_spelling_forms(raw_title);
+            for (key, raw) in forms {
+                if seen.insert(key.clone()) {
+                    anchors.push((key, raw));
+                }
+            }
+        }
+        if !anchors.is_empty() {
+            for (_, evidence) in proof_subjects.iter_mut() {
+                let Some(existing) = evidence.ambiguity.spelling_index.as_ref() else {
+                    continue;
+                };
+                let mut index = existing.as_ref().clone();
+                match matcher
+                    .extend_spelling_candidates(&mut index, &anchors)
+                    .await
+                {
+                    Ok(()) => {
+                        evidence.ambiguity.spelling_index = Some(std::sync::Arc::new(index));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            title_id,
+                            error = %error,
+                            "completed download identity gate could not read release-name candidates"
+                        );
+                        return AssignedTitleProof::Unknown;
+                    }
+                }
+            }
+        }
+    }
+
     let proves_assigned_title = |raw_title: &str| -> bool {
         proof_subjects.iter().any(|(subject_title, evidence)| {
             let parsed =
@@ -617,10 +663,6 @@ pub(super) async fn completed_download_proves_assigned_title(
             true
         })
     };
-
-    // The client-reported release name, else the media file names (non-sample,
-    // largest first) — the same claims the completion-time re-resolution used.
-    let completion_sources = crate::import_workflow::completed_download_release_claims(completed);
 
     // For a parse-matched observation, what actually finished on disk outranks
     // the provisional match: a completion name that positively asserts a

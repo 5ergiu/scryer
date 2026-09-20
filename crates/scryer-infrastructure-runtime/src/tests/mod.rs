@@ -55,6 +55,7 @@ mod settings_and_writer;
 mod sql_runtime_gated_write;
 mod sqlite_write_batching;
 mod stores_migrations_regressions;
+mod title_fuzzy_index;
 mod title_images;
 mod title_name_candidates;
 mod title_search_projection;
@@ -420,6 +421,52 @@ fn title_store(services: &SqliteServices) -> TitleStore {
     TitleStore::new(services.datastore())
 }
 
+/// A real tantivy index over this fixture's projection rows.
+///
+/// The fuzzy lane is the only bounded-distance lane there is, so a test that
+/// asserts anything about typos, romanization distance or near-miss
+/// candidates has to run against an actual index rather than against a store
+/// that quietly has none. The returned directory must be held for as long as
+/// the index is used: it is an mmap directory like the production one.
+async fn fuzzy_test_index(
+    services: &SqliteServices,
+) -> (
+    Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("fuzzy index directory should be created");
+    let source = Arc::new(
+        scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+            services.datastore(),
+        ),
+    );
+    let index =
+        scryer_infrastructure_library_search::TitleFuzzyIndex::open(dir.path(), source.clone())
+            .await;
+    // Production opens the index and lets the first rebuild finish in the
+    // background while the exact lanes serve. A test that raced that window
+    // would be asserting on the degraded path by accident, so the rebuild is
+    // awaited here instead.
+    {
+        use scryer_infrastructure_library_search::fuzzy::TitleTermSource;
+        let stamp = source
+            .projection_stamp()
+            .await
+            .expect("the projection stamp should load");
+        index.rebuild(stamp).await.expect("rebuild should succeed");
+    }
+    (index, dir)
+}
+
+/// The store the search tests use: the same one production assembles, index
+/// and all.
+async fn title_store_with_fuzzy_index(
+    services: &SqliteServices,
+) -> (TitleStore, tempfile::TempDir) {
+    let (index, dir) = fuzzy_test_index(services).await;
+    (title_store(services).with_fuzzy_index(index), dir)
+}
+
 fn show_store(services: &SqliteServices) -> ShowStore {
     ShowStore::new(services.datastore())
 }
@@ -432,8 +479,16 @@ fn oauth_store(services: &SqliteServices) -> OAuthStore {
     OAuthStore::new(services.datastore())
 }
 
-fn wanted_store(services: &SqliteServices) -> WantedStore {
-    WantedStore::new(services.datastore())
+/// The title and wanted stores over one shared index, which is how the
+/// runtime assembles them: both read the same fuzzy lane, so a search that
+/// finds a title must find its wanted rows too.
+async fn search_stores(services: &SqliteServices) -> (TitleStore, WantedStore, tempfile::TempDir) {
+    let (index, dir) = fuzzy_test_index(services).await;
+    (
+        title_store(services).with_fuzzy_index(index.clone()),
+        WantedStore::new(services.datastore()).with_fuzzy_index(index),
+        dir,
+    )
 }
 
 fn housekeeping_store(services: &SqliteServices) -> HousekeepingStore {
@@ -497,9 +552,6 @@ fn rolled_up_migration_section<'a>(rollup: &'a str, original_file: &str) -> &'a 
 }
 
 async fn single_connection_services(name: &str) -> (SqliteServices, std::path::PathBuf) {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register before migrations");
-
     let db = std::env::temp_dir().join(format!(
         "{}_{}.db",
         name,

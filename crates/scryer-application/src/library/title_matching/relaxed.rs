@@ -250,11 +250,16 @@ pub(crate) struct SpellingCandidates {
 const BUCKET_FETCH_LIMIT: i64 = 2_000;
 
 /// The widest edit distance any comparison below admits, plus the one extra
-/// character a competitor check allows itself. Fetching this band once serves
-/// both discovery and the collision guard.
-const MAX_BUCKET_LENGTH_SPREAD: i64 = 4;
-/// The band a subject-anchored fetch needs: see [`SpellingCandidates::load_for_title`].
-const MAX_SUBJECT_LENGTH_SPREAD: i64 = 2 * MAX_BUCKET_LENGTH_SPREAD;
+/// edit a competitor check allows itself.
+///
+/// [`spelling_distance`] never admits more than three edits, and
+/// [`SpellingCandidates::has_competitor`] asks for one more than the winning
+/// distance, so nothing this module compares can be further than this from
+/// the anchor. Fetching at this distance once therefore serves both discovery
+/// and the collision guard, and no consumer needs a wider one: a subject's
+/// own names are anchors like any other, because the release that will be
+/// compared against them is itself loaded as an anchor.
+const MAX_SPELLING_DISTANCE: u8 = 4;
 
 /// The numbers guard, owned by the domain so the persisted projection can key
 /// a column on exactly what this compares. Volume II must not become Volume I
@@ -299,19 +304,17 @@ impl SpellingCandidates {
         anchors: &[(String, String)],
         facet: Option<&str>,
     ) -> crate::AppResult<Self> {
-        Self::load_with_spread(titles, anchors, facet, MAX_BUCKET_LENGTH_SPREAD).await
+        Self::load_anchored(titles, anchors, facet).await
     }
 
-    /// The buckets a *subject's own names* touch, for evidence built before
-    /// any release is in hand (the acquisition lane builds it once per search
-    /// subject and reuses it for every candidate).
+    /// The buckets a *subject's own names* touch.
     ///
-    /// The observed spelling is not known yet, so the band has to be wider
-    /// than the release-anchored one: a competitor sits within `distance + 1`
-    /// of an observed spelling that is itself within `distance` of the name,
-    /// so it can be `2 * distance + 1` characters from the name that anchors
-    /// this fetch. Narrowing it would drop a collider and turn an ambiguous
-    /// match into a confident one.
+    /// Evidence built from a subject — the acquisition lane's search subject,
+    /// the identity gate's linked title — starts here and is then widened per
+    /// release by [`Self::extend_for_anchors`], so the observed spelling gets
+    /// a fetch of its own at the same distance every other anchor gets. There
+    /// is no wider band and no approximation: the subject's names and the
+    /// release's name are both anchors.
     pub async fn load_for_title(
         titles: &dyn crate::ports::TitleRepository,
         title: &Title,
@@ -322,20 +325,32 @@ impl SpellingCandidates {
             .iter()
             .map(|name| (name.text.clone(), name.raw.clone()))
             .collect::<Vec<_>>();
-        Self::load_with_spread(
-            titles,
-            &anchors,
-            Some(identity.facet.as_str()),
-            MAX_SUBJECT_LENGTH_SPREAD,
-        )
-        .await
+        Self::load_anchored(titles, &anchors, Some(identity.facet.as_str())).await
     }
 
-    async fn load_with_spread(
+    /// Fold the buckets `anchors` touch into an index that already holds
+    /// some. Cheap and idempotent: a name already present is inserted into
+    /// the same bucket and deduplicated there.
+    pub async fn extend_for_anchors(
+        &mut self,
         titles: &dyn crate::ports::TitleRepository,
         anchors: &[(String, String)],
         facet: Option<&str>,
-        length_spread: i64,
+    ) -> crate::AppResult<()> {
+        let fetched = Self::load_anchored(titles, anchors, facet).await?;
+        for (key, bucket) in fetched.buckets {
+            let target = self.buckets.entry(key).or_default();
+            for indexed in bucket.names {
+                target.insert(indexed);
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_anchored(
+        titles: &dyn crate::ports::TitleRepository,
+        anchors: &[(String, String)],
+        facet: Option<&str>,
     ) -> crate::AppResult<Self> {
         let mut index = Self::default();
         for (anchor, observed_raw) in anchors {
@@ -349,7 +364,6 @@ impl SpellingCandidates {
                     title_spelling_key(anchor, profile).map(|key| (*profile, key))
                 })
                 .collect::<Vec<_>>();
-            let length = anchor.chars().count() as i64;
             for candidate_facet in ["movie", "series", "anime"] {
                 if facet.is_some_and(|facet| facet != candidate_facet) {
                     continue;
@@ -359,10 +373,7 @@ impl SpellingCandidates {
                         facet: Some(candidate_facet),
                         script: title_script(anchor).as_str(),
                         numbers_key: &numbers_key,
-                        length_band: Some((
-                            (length - length_spread).max(0),
-                            length + length_spread,
-                        )),
+                        typo_distance: Some(MAX_SPELLING_DISTANCE),
                         match_term: anchor,
                         romanization_key: japanese_romanization_key(anchor, Some("ja")).as_deref(),
                         collation_keys: &collation_keys,
