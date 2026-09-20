@@ -217,6 +217,21 @@ fn schedule_import_verification_retry(td: &mut TrackedDownload) {
     });
 }
 
+/// A successful pass whose result could not be verified as complete goes back
+/// to `ImportPending` behind the execution backoff, never straight back onto
+/// the next poll. Progress (a pass that imported something new) resets the
+/// backoff at the call site, so a client still delivering files is picked up
+/// promptly while a download that can never verify settles at the 15 minute
+/// cap instead of re-running its import every cycle.
+fn schedule_partial_import_retry(td: &mut TrackedDownload) {
+    td.schedule_import_execution_retry(Utc::now(), |_, next_retry_at| {
+        format!(
+            "Import partially completed; waiting for remaining files or verification. Retrying at {}.",
+            next_retry_at.to_rfc3339()
+        )
+    });
+}
+
 #[cfg(test)]
 pub(super) async fn apply_import_result(
     app: &AppUseCase,
@@ -245,7 +260,13 @@ pub(super) async fn apply_import_result_with_completed(
     {
         if result.decision == ImportDecision::Imported || already_imported {
             td.clear_no_video_import_retry();
-            td.clear_import_execution_retry();
+            // Only progress resets the execution backoff. A pass that imported
+            // nothing new (a duplicate refusal, a re-verification) must keep
+            // growing the delay, or an unverifiable download re-runs its import
+            // on every poll forever.
+            if files_imported_this_pass > 0 {
+                td.clear_import_execution_retry();
+            }
         }
         let verification = if intentionally_ignored_aggregate {
             verify_skipped_import_with_release_evidence(
@@ -285,12 +306,7 @@ pub(super) async fn apply_import_result_with_completed(
         }
 
         if result.decision == ImportDecision::Imported {
-            td.state = TrackedDownloadState::ImportPending;
-            td.status = TrackedDownloadStatus::Warning;
-            td.status_messages = vec![
-                "Import partially completed; waiting for remaining files or verification."
-                    .to_string(),
-            ];
+            schedule_partial_import_retry(td);
             return false;
         }
     }
@@ -431,12 +447,7 @@ pub(super) async fn apply_import_result_with_completed(
                         schedule_non_destructive_import_mark(app, td, &result, completed);
                         return true;
                     }
-                    td.state = TrackedDownloadState::ImportPending;
-                    td.status = TrackedDownloadStatus::Warning;
-                    td.status_messages = vec![
-                        "Import partially completed; waiting for remaining files or verification."
-                            .to_string(),
-                    ];
+                    schedule_partial_import_retry(td);
                     return false;
                 }
             }

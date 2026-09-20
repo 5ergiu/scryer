@@ -778,15 +778,27 @@ fn require_app_release_branch(branch: &str, version: &Version) -> Result<()> {
     Ok(())
 }
 
+/// The tag workflow's `verify-release-trust` job rejects any tag that does not contain the
+/// current `origin/main` tip, so check against a freshly fetched `origin/main`, never the
+/// local `main` ref, which can lag behind merged pull requests.
 fn require_main_merged(ctx: &TaskContext) -> Result<()> {
+    let mut fetch = ctx.command_in("git", &ctx.repo_root);
+    fetch.args(["fetch", "--quiet", "origin", "main"]);
+    run_checked(&mut fetch).context("fetching origin/main for the release ancestry check")?;
+    require_ref_merged(ctx, "origin/main")
+}
+
+fn require_ref_merged(ctx: &TaskContext, base: &str) -> Result<()> {
     let mut command = ctx.command_in("git", &ctx.repo_root);
-    command.args(["merge-base", "--is-ancestor", "main", "HEAD"]);
+    command.args(["merge-base", "--is-ancestor", base, "HEAD"]);
     let status = command.status()?;
     if status.success() {
         return Ok(());
     }
     bail!(
-        "release branch does not contain main; merge main into the release branch before running a release dry run"
+        "the release branch does not contain {base}. The tag's verify-release-trust job rejects \
+         a tag that is missing the {base} tip, and nothing would be published. Merge {base} \
+         into the release branch, then run the release again."
     );
 }
 
@@ -1145,8 +1157,7 @@ fn release_notes_authoring_instructions(
     let retry = if dry_run {
         "  5. Re-run the same `cargo xtask release --dry-run` command."
     } else {
-        "  5. Re-run `cargo xtask release --dry-run` with the same release selection, then retry \
-         this release."
+        "  5. Re-run the same `cargo xtask release` command."
     };
 
     format!(
@@ -3507,7 +3518,7 @@ fn run_release(ctx: &TaskContext, args: ReleaseArgs) -> Result<()> {
     println!("   Next tag   : {tag_name}");
     println!("   Validation : {}", validation_scope.label());
     if args.dry_run {
-        println!("   {YELLOW}(dry run — no commits, tags, or pushes){RESET}");
+        println!("   {YELLOW}(dry run — no version bump, tag, or push){RESET}");
     }
 
     step("Pre-flight checks");
@@ -3590,7 +3601,7 @@ fn run_release(ctx: &TaskContext, args: ReleaseArgs) -> Result<()> {
         )?;
     } else if expected_release_notes_sha256.is_none() {
         bail!(
-            "release notes are missing for {tag_name}; run `cargo xtask release --dry-run` first"
+            "release notes are missing for {tag_name}; write them, then run `cargo xtask release` again"
         );
     } else if worktree_clean_at_start && release_dry_run_cache_path(ctx).is_file() {
         match load_release_dry_run_cache(ctx) {
@@ -3644,8 +3655,9 @@ fn run_release(ctx: &TaskContext, args: ReleaseArgs) -> Result<()> {
     }
 
     if !args.dry_run && !reused_dry_run_cache {
-        bail!(
-            "release requires a successful dry run cache with matching release notes; run `cargo xtask release --dry-run` first"
+        println!(
+            "   {YELLOW}No matching dry run; running the full release validation now, then \
+             continuing to the version bump, tag, and push{RESET}"
         );
     }
 
@@ -3728,94 +3740,92 @@ fn run_release(ctx: &TaskContext, args: ReleaseArgs) -> Result<()> {
             }
         };
 
-        if args.dry_run {
-            match validation_result {
-                Ok((refreshed_builtins, validated_steps)) => {
-                    step("Validating release notes");
-                    let release_notes_path = require_release_notes(
-                        ctx,
-                        latest_tag.as_deref(),
-                        &tag_name,
-                        &next_version,
-                        args.dry_run,
-                    )?;
-                    let release_notes_sha256 = release_notes_sha256(&release_notes_path)?;
-                    let release_notes_path_relative =
-                        relative_to_repo_root(ctx, &release_notes_path)?;
-                    ok(format!("Using {release_notes_path_relative}"));
+        let (refreshed_builtins, validated_steps) = validation_result?;
+        step("Validating release notes");
+        let release_notes_path = require_release_notes(
+            ctx,
+            latest_tag.as_deref(),
+            &tag_name,
+            &next_version,
+            args.dry_run,
+        )?;
+        let release_notes_sha256 = release_notes_sha256(&release_notes_path)?;
+        let release_notes_path_relative = relative_to_repo_root(ctx, &release_notes_path)?;
+        ok(format!("Using {release_notes_path_relative}"));
 
-                    let mut prep_changed_paths = git_tracked_dirty_paths(ctx)?;
-                    maybe_add_changed_graphql_schema_artifact(ctx, &mut prep_changed_paths)?;
-                    if changed_file(ctx, &release_notes_path)?
-                        && !prep_changed_paths
-                            .iter()
-                            .any(|path| path == &release_notes_path)
-                    {
-                        prep_changed_paths.push(release_notes_path);
-                    }
-                    let final_git_commit = if !prep_changed_paths.is_empty() {
-                        step("Committing release-prep changes");
-                        let committed = commit_tracked_changes(
-                            ctx,
-                            &prep_changed_paths,
-                            &format!("release: prep scryer {next_version}"),
-                        )?
-                        .expect("non-empty tracked changes should produce a commit");
-                        ok(format!("Committed release-prep changes in {committed}"));
-                        committed
-                    } else {
-                        ok("No release-prep changes to commit");
-                        git_commit.clone()
-                    };
-                    let final_cache_dir = release_dry_run_cache_dir(
-                        ctx,
-                        &final_git_commit,
-                        &release_args,
-                        latest_tag.as_deref(),
-                        &next_version,
-                        &tag_name,
-                    );
-                    let final_cache_dir_relative = relative_to_repo_root(ctx, &final_cache_dir)?;
-                    cache_builtin_artifacts(&final_cache_dir, &refreshed_builtins.paths)?;
-                    write_release_dry_run_cache(
-                        ctx,
-                        &ReleaseDryRunCache {
-                            success: true,
-                            created_at: Utc::now().to_rfc3339(),
-                            git_commit: final_git_commit,
-                            branch: branch.clone(),
-                            worktree_clean_at_start,
-                            release_args: release_args.clone(),
-                            latest_tag_seen: latest_tag.clone(),
-                            next_version: next_version.to_string(),
-                            tag_name: tag_name.clone(),
-                            catalog_url: catalog_url.clone(),
-                            validated_steps,
-                            cached_builtins_dir: Some(final_cache_dir_relative),
-                            release_notes_path: Some(release_notes_path_relative),
-                            release_notes_sha256: Some(release_notes_sha256),
-                            catalog_builtin_wasm_blake3: refreshed_builtins.catalog_wasm_blake3,
-                            failure_message: None,
-                        },
-                    )?;
-                    println!(
-                        "\n{YELLOW}{BOLD}Dry run complete — stopping before commit/tag/push.{RESET}"
-                    );
-                    println!("  Version {next_version} validated OK.");
-                    println!(
-                        "  Dry-run cache: {}",
-                        release_dry_run_cache_path(ctx).display()
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(error);
-                }
-            }
+        let mut prep_changed_paths = git_tracked_dirty_paths(ctx)?;
+        maybe_add_changed_graphql_schema_artifact(ctx, &mut prep_changed_paths)?;
+        if changed_file(ctx, &release_notes_path)?
+            && !prep_changed_paths
+                .iter()
+                .any(|path| path == &release_notes_path)
+        {
+            prep_changed_paths.push(release_notes_path);
         }
+        let final_git_commit = if !prep_changed_paths.is_empty() {
+            step("Committing release-prep changes");
+            let committed = commit_tracked_changes(
+                ctx,
+                &prep_changed_paths,
+                &format!("release: prep scryer {next_version}"),
+            )?
+            .expect("non-empty tracked changes should produce a commit");
+            ok(format!("Committed release-prep changes in {committed}"));
+            committed
+        } else {
+            ok("No release-prep changes to commit");
+            git_commit.clone()
+        };
 
-        let _ = validation_result?;
+        if args.dry_run {
+            let final_cache_dir = release_dry_run_cache_dir(
+                ctx,
+                &final_git_commit,
+                &release_args,
+                latest_tag.as_deref(),
+                &next_version,
+                &tag_name,
+            );
+            let final_cache_dir_relative = relative_to_repo_root(ctx, &final_cache_dir)?;
+            cache_builtin_artifacts(&final_cache_dir, &refreshed_builtins.paths)?;
+            write_release_dry_run_cache(
+                ctx,
+                &ReleaseDryRunCache {
+                    success: true,
+                    created_at: Utc::now().to_rfc3339(),
+                    git_commit: final_git_commit,
+                    branch: branch.clone(),
+                    worktree_clean_at_start,
+                    release_args: release_args.clone(),
+                    latest_tag_seen: latest_tag.clone(),
+                    next_version: next_version.to_string(),
+                    tag_name: tag_name.clone(),
+                    catalog_url: catalog_url.clone(),
+                    validated_steps,
+                    cached_builtins_dir: Some(final_cache_dir_relative),
+                    release_notes_path: Some(release_notes_path_relative),
+                    release_notes_sha256: Some(release_notes_sha256),
+                    catalog_builtin_wasm_blake3: refreshed_builtins.catalog_wasm_blake3,
+                    failure_message: None,
+                },
+            )?;
+            println!(
+                "\n{YELLOW}{BOLD}Dry run complete — stopping before version bump/tag/push.{RESET}"
+            );
+            println!("  Version {next_version} validated OK.");
+            println!(
+                "  Dry-run cache: {}",
+                release_dry_run_cache_path(ctx).display()
+            );
+            return Ok(());
+        }
+        ok("Release validation passed; continuing to the version bump");
     }
+
+    // origin/main can move while validation runs; re-check before anything is bumped or tagged.
+    step("Re-checking the release branch contains origin/main");
+    require_main_merged(ctx)?;
+    ok("Release branch contains origin/main");
 
     let workspace_tomls = scryer_release_member_tomls(ctx)?;
     if workspace_tomls.is_empty() {
@@ -4371,15 +4381,44 @@ fn run_scryer_ci_clippy_validation(ctx: &TaskContext, prefix: &'static str) -> R
     Ok(())
 }
 
+/// Workspace packages CI's nextest matrix skips (`EXCLUDED` in
+/// `.github/scripts/nextest_matrix.py`). Every other workspace package is tested.
+const RELEASE_TEST_EXCLUDED_PACKAGES: &[&str] = &[
+    "xtask",
+    "xtask-migrations",
+    "xtask-release",
+    "xtask-support",
+];
+
+/// Matches CI's nextest coverage: every workspace test target with all features enabled.
+fn nextest_release_args() -> Vec<&'static str> {
+    let mut args = vec!["nextest", "run", "--workspace"];
+    for package in RELEASE_TEST_EXCLUDED_PACKAGES {
+        args.extend(["--exclude", package]);
+    }
+    args.extend(["--all-features", "--locked", "--no-fail-fast"]);
+    args
+}
+
 fn run_scryer_nextest_validation(ctx: &TaskContext, prefix: &'static str) -> Result<()> {
     prefixed_step(
         prefix,
         "Running Rust tests for scryer production binary packages",
     );
     let mut nextest = ctx.release_command_in("cargo", &ctx.repo_root);
-    nextest.args(["nextest", "run"]);
-    add_prod_package_args(&mut nextest);
-    nextest.arg("--locked");
+    nextest.args(nextest_release_args());
+    // CI's nextest lanes deny warnings, including ones only test code triggers.
+    nextest.env("CARGO_BUILD_WARNINGS", "deny");
+    if cfg!(target_os = "macos") {
+        // ld64 reports "__eh_frame section too large" for the largest test binaries as a
+        // linker message; CI links with mold on Linux and never sees it.
+        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-A linker-messages");
+        nextest.env("RUSTFLAGS", rustflags);
+    }
     run_streaming(&mut nextest, prefix)?;
     prefixed_ok(prefix, "Rust tests passed");
     Ok(())
@@ -4708,12 +4747,101 @@ mod tests {
     }
 
     #[test]
+    fn release_nextest_excludes_match_ci_matrix() {
+        let script = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/scripts/nextest_matrix.py"),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.starts_with("EXCLUDED = {"))
+            .expect("nextest_matrix.py defines EXCLUDED");
+        let mut ci: Vec<&str> = line
+            .trim_start_matches("EXCLUDED = {")
+            .trim_end_matches('}')
+            .split(',')
+            .map(|name| name.trim().trim_matches('"'))
+            .collect();
+        ci.sort_unstable();
+        assert_eq!(ci, RELEASE_TEST_EXCLUDED_PACKAGES);
+
+        let args = nextest_release_args();
+        assert!(args.contains(&"--workspace"));
+        assert!(args.contains(&"--all-features"));
+    }
+
+    #[test]
     fn app_release_branch_must_match_target_version() {
         let version = Version::parse("0.17.4").unwrap();
         assert!(require_app_release_branch("release-0.17.4", &version).is_ok());
 
         let error = require_app_release_branch("main", &version).unwrap_err();
         assert!(error.to_string().contains("release-0.17.4"));
+    }
+
+    fn fast_import_repo(stream: &str) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], stdin: Option<&str>| {
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            if let Some(input) = stdin {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(input.as_bytes())
+                    .unwrap();
+            }
+            assert!(child.wait().unwrap().success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"], None);
+        git(&["fast-import", "--quiet"], Some(stream));
+        git(&["checkout", "--quiet", "release"], None);
+        temp
+    }
+
+    const MAIN_MERGED_STREAM: &str = "commit refs/heads/release
+mark :1
+committer Test <test@example.invalid> 0 +0000
+data 4
+base
+commit refs/remotes/origin/main
+mark :2
+committer Test <test@example.invalid> 1 +0000
+data 4
+main
+from :1
+";
+
+    #[test]
+    fn release_branch_missing_main_tip_is_rejected() {
+        let repo = fast_import_repo(MAIN_MERGED_STREAM);
+        let ctx = TaskContext::with_repo_root(repo.path().to_path_buf());
+
+        let error = require_ref_merged(&ctx, "origin/main").unwrap_err();
+        assert!(error.to_string().contains("verify-release-trust"));
+    }
+
+    #[test]
+    fn release_branch_containing_main_tip_passes() {
+        let stream = format!(
+            "{MAIN_MERGED_STREAM}commit refs/heads/release
+mark :3
+committer Test <test@example.invalid> 2 +0000
+data 5
+merge
+from :1
+merge :2
+"
+        );
+        let repo = fast_import_repo(&stream);
+        let ctx = TaskContext::with_repo_root(repo.path().to_path_buf());
+
+        require_ref_merged(&ctx, "origin/main").unwrap();
     }
 
     #[test]
