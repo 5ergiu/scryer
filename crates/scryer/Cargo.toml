@@ -8,6 +8,10 @@ default = []
 # Test-harness images only: sync SCRYER_DEV_API_KEYS in a binary built without
 # debug assertions. Never enable this for a shipped build.
 e2e-harness = []
+# Load-test / benchmark images only: jemalloc as the global allocator with its
+# sampling heap profiler compiled in. Configure jemalloc through MALLOC_CONF,
+# e.g. `prof:true,prof_active:true,lg_prof_sample:19`.
+jemalloc-prof = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [dependencies]
 application-updater = { git = "https://github.com/scryer-media/application-updater.git", tag = "v0.1.0" }
@@ -62,6 +66,12 @@ open = "5"
 governor = { workspace = true }
 webauthn-rs = { workspace = true }
 url = "2"
+# Allocator experiments (load tests, benchmarks) only; off by default.
+tikv-jemallocator = { version = "0.6", features = [
+    "profiling",
+    "unprefixed_malloc_on_supported_platforms",
+], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std"], optional = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

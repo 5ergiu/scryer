@@ -1,6 +1,14 @@
 // async-graphql schema expansion exceeded the default macro recursion depth.
 #![recursion_limit = "256"]
 
+// Opt-in for allocator experiments (load tests, benchmarks); off by default.
+#[cfg(feature = "jemalloc-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc-prof")]
+mod jemalloc_prof;
+
 mod application_upgrade_evidence;
 mod application_upgrade_helper;
 mod backup_routes;
@@ -611,6 +619,8 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+    #[cfg(feature = "jemalloc-prof")]
+    jemalloc_prof::spawn_dump_thread();
     run_application();
 }
 
