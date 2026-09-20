@@ -1300,6 +1300,12 @@ export function SettingsIndexersContainer({
         mutatingIndexerProxyIds={mutatingIndexerProxyIds}
         setIndexerProxyAssignment={setIndexerProxyAssignment}
         proxyConfigs={proxyConfigs}
+        indexerRoutingByScope={indexerRoutingByScope}
+        indexerRoutingLoaded={indexerRoutingLoaded}
+        indexerRoutingLoading={indexerRoutingLoading}
+        mutatingIndexerRoutingScopes={mutatingIndexerRoutingScopes}
+        loadIndexerRouting={loadIndexerRouting}
+        updateIndexerRoutingForScope={updateIndexerRoutingForScope}
         editIndexer={requestEditIndexer}
         updateIndexerToggles={updateIndexerToggles}
         deleteIndexer={deleteIndexer}
