@@ -2958,9 +2958,117 @@ impl JobAndDownloadQueries {
     }
 }
 
+#[derive(SimpleObject)]
+struct DashboardSummaryPayload {
+    titles_movie: i32,
+    titles_series: i32,
+    titles_anime: i32,
+    indexer_stats: Vec<DashboardIndexerStatsPayload>,
+}
+
+#[derive(SimpleObject)]
+struct DashboardIndexerStatsPayload {
+    indexer_id: ID,
+    indexer_name: String,
+    queries_last_24h: i32,
+    failed_last_24h: i32,
+    grabs_last_24h: i32,
+    api_current: Option<i32>,
+    api_max: Option<i32>,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+enum DashboardImportKindValue {
+    Imported,
+    NewImport,
+    Upgrade,
+}
+
+#[derive(SimpleObject)]
+struct DashboardRecentImportPayload {
+    id: ID,
+    title_id: Option<ID>,
+    title_name: Option<String>,
+    library_id: Option<ID>,
+    facet: Option<MediaFacetValue>,
+    poster_url: Option<String>,
+    episode: Option<EpisodePayload>,
+    kind: DashboardImportKindValue,
+    quality: Option<String>,
+    size_bytes: Option<Long>,
+    occurred_at: DateTime<Utc>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[Object]
 impl SystemQueries {
+    async fn dashboard_summary(&self, ctx: &Context<'_>) -> GqlResult<DashboardSummaryPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let (counts, stats) = app.dashboard_summary(&actor).await.map_err(to_gql_error)?;
+        Ok(DashboardSummaryPayload {
+            titles_movie: counts.movie as i32,
+            titles_series: counts.series as i32,
+            titles_anime: counts.anime as i32,
+            indexer_stats: stats
+                .into_iter()
+                .map(|s| DashboardIndexerStatsPayload {
+                    indexer_id: s.indexer_id.into(),
+                    indexer_name: s.indexer_name,
+                    queries_last_24h: s.queries_last_24h as i32,
+                    failed_last_24h: s.failed_last_24h as i32,
+                    grabs_last_24h: s.grabs_last_24h as i32,
+                    api_current: s.api_current.map(|v| v as i32),
+                    api_max: s.api_max.map(|v| v as i32),
+                })
+                .collect(),
+        })
+    }
+
+    async fn dashboard_recent_imports(
+        &self,
+        ctx: &Context<'_>,
+        limit: Option<i32>,
+    ) -> GqlResult<Vec<DashboardRecentImportPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let items = app
+            .dashboard_recent_imports(&actor, limit.unwrap_or(15).clamp(1, 50) as usize)
+            .await
+            .map_err(to_gql_error)?;
+        items
+            .into_iter()
+            .map(|item| {
+                let r = item.record;
+                Ok(DashboardRecentImportPayload {
+                    id: r.id.into(),
+                    title_id: r.title_id.map(Into::into),
+                    title_name: r.title_name,
+                    library_id: r.library_id.map(Into::into),
+                    facet: r.facet.map(MediaFacetValue::from_domain),
+                    poster_url: r.poster_url,
+                    episode: item.episode.map(|episode| from_episode(&app, episode)),
+                    kind: match item.kind {
+                        scryer_application::DashboardImportKind::Imported => {
+                            DashboardImportKindValue::Imported
+                        }
+                        scryer_application::DashboardImportKind::NewImport => {
+                            DashboardImportKindValue::NewImport
+                        }
+                        scryer_application::DashboardImportKind::Upgrade => {
+                            DashboardImportKindValue::Upgrade
+                        }
+                    },
+                    quality: r.quality,
+                    size_bytes: r.size_bytes.map(Long::from),
+                    occurred_at: DateTime::parse_from_rfc3339(&r.occurred_at)
+                        .map_err(|_| async_graphql::Error::new("Invalid import event timestamp"))?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect()
+    }
+
     /// Return the path style supported by the running service.
     async fn runtime_info(&self, ctx: &Context<'_>) -> GqlResult<RuntimeInfoPayload> {
         let _actor = actor_from_ctx(ctx)?;

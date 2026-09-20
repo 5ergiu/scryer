@@ -4617,7 +4617,7 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
       anime
     }
   }
-  systemHealth {
+  dashboardSummary {
     titlesMovie
     titlesSeries
     titlesAnime
@@ -4663,6 +4663,9 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
     lastError
     lastSeenAt
   }
+}`;
+
+export const dashboardStorageQuery = `query DashboardStorage {
   storageRoots {
     path
     libraryId
@@ -4700,22 +4703,9 @@ export const dashboardPendingRequestsQuery = `query DashboardPendingRequests {
 }`;
 
 export const dashboardRecentImportsQuery = `query DashboardRecentImports($limit: Int!) {
-  titleHistory(
-    filter: { eventTypes: [IMPORTED, FILE_UPGRADED], limit: $limit }
-  ) {
-    totalCount
-    items {
-      id
-      titleId
-      titleName
-      posterUrl
-      facet
-      libraryId
-      eventType
-      quality
-      sizeBytes
-      occurredAt
-    }
+  dashboardRecentImports(limit: $limit) {
+    id titleId titleName posterUrl facet libraryId kind quality sizeBytes occurredAt
+    episode { id seasonNumber episodeNumber title overview imageUrl airDate }
   }
 }`;
 

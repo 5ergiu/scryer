@@ -2496,3 +2496,20 @@ kind = "sql"
 file = "postgres/migrations/0250_title_search_spelling_columns.sql"
 engine = "postgres"
 scope = "all"
+
+[[migration]]
+version = 251
+description = "index dashboard import evidence"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0251_dashboard_import_artifact_index.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0251_dashboard_import_artifact_index.sql"
+engine = "postgres"
+scope = "all"

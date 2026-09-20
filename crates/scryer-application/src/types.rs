@@ -3691,6 +3691,29 @@ mod runtime_path_style_tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DashboardImportKind {
+    Imported,
+    NewImport,
+    Upgrade,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardImportEvidence {
+    pub import_id: Option<String>,
+    pub title_id: Option<String>,
+    pub episode_id: Option<String>,
+    pub is_upgrade: bool,
+    pub imported_media_file_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardRecentImport {
+    pub record: scryer_domain::TitleHistoryRecord,
+    pub episode: Option<scryer_domain::Episode>,
+    pub kind: DashboardImportKind,
+}
+
 #[derive(Clone, Debug)]
 pub struct SystemHealth {
     pub service_ready: bool,

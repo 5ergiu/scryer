@@ -317,6 +317,27 @@ const SET_TITLES_MONITORED_BIND_CHUNK: usize = 900;
 
 #[async_trait]
 impl TitleRepository for TitleStore {
+    async fn title_counts(&self) -> AppResult<scryer_application::TitleCounts> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT facet, COUNT(*) AS total, SUM(CASE WHEN monitored THEN 1 ELSE 0 END) AS monitored FROM titles GROUP BY facet",
+            &[],
+        ).await?;
+        let mut counts = scryer_application::TitleCounts::default();
+        for row in rows {
+            let total = row.i64("total")? as usize;
+            counts.total += total;
+            counts.monitored += row.i64("monitored")? as usize;
+            match row.text("facet")?.as_str() {
+                "movie" => counts.movie += total,
+                "series" => counts.series += total,
+                "anime" => counts.anime += total,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
+
     async fn list(
         &self,
         facet: Option<MediaFacet>,
@@ -4850,6 +4871,41 @@ mod tests {
     use super::*;
 
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn dashboard_counts_need_only_facet_and_monitored_columns() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE titles (facet TEXT NOT NULL, monitored INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = TitleStore::new(StoreDatastore::Sqlite {
+            pool: pool.clone(),
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        });
+        assert_eq!(store.title_counts().await.unwrap().total, 0);
+        sqlx::query(
+            "INSERT INTO titles VALUES ('movie', 1), ('movie', 0), ('series', 1), ('anime', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let counts = store.title_counts().await.unwrap();
+        assert_eq!(
+            (
+                counts.total,
+                counts.monitored,
+                counts.movie,
+                counts.series,
+                counts.anime
+            ),
+            (4, 2, 2, 1, 1)
+        );
+    }
 
     fn hydration_identity(source: &str, value: &str) -> Vec<ExternalId> {
         vec![ExternalId::new(source.to_string(), value.to_string())]
