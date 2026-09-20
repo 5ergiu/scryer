@@ -374,6 +374,7 @@ function IndexerDownloadClientSelect({
   isPending,
   disabled = false,
   showLabel = false,
+  compact = false,
   catalogError = null,
   onRetry,
   onChange,
@@ -384,6 +385,7 @@ function IndexerDownloadClientSelect({
   isPending: boolean;
   disabled?: boolean;
   showLabel?: boolean;
+  compact?: boolean;
   catalogError?: string | null;
   onRetry?: () => Promise<void> | void;
   onChange: (downloadClientId: string | null) => Promise<void> | void;
@@ -420,7 +422,7 @@ function IndexerDownloadClientSelect({
     : null;
 
   return (
-    <div className="min-w-0 space-y-1.5">
+    <div className={compact ? "min-w-0" : "min-w-0 space-y-1.5"}>
       <Label className={showLabel ? "block" : "sr-only"} htmlFor={selectId}>
         {label}
       </Label>
@@ -433,14 +435,17 @@ function IndexerDownloadClientSelect({
         <SelectTrigger
           id={selectId}
           data-testid={selectId}
-          className="w-full"
+          className={compact ? "w-full max-w-48" : "w-full"}
           disabled={isPending || disabled}
           aria-describedby={model.isInvalid || model.isDisabled ? statusId : undefined}
           aria-busy={isPending}
         >
           <SelectValue>{selectedLabel}</SelectValue>
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent
+          position="popper"
+          className="w-80 max-w-[var(--radix-select-content-available-width)]"
+        >
           <SelectItem value={AUTOMATIC_DOWNLOAD_CLIENT_ID}>
             {t("settings.indexerDownloadClientAutomatic")}
           </SelectItem>
@@ -560,6 +565,7 @@ function IndexerDownloadClientCell({
   resource,
   isPending,
   disabled,
+  compact = false,
   onRetry,
   onChange,
 }: {
@@ -567,6 +573,7 @@ function IndexerDownloadClientCell({
   resource: IndexerDownloadClientMappingCatalogResource;
   isPending: boolean;
   disabled: boolean;
+  compact?: boolean;
   onRetry: () => Promise<void> | void;
   onChange: (downloadClientId: string | null) => Promise<void> | void;
 }) {
@@ -590,6 +597,7 @@ function IndexerDownloadClientCell({
       label={label}
       isPending={isPending}
       disabled={disabled}
+      compact={compact}
       catalogError={resource.status === "error" ? resource.error : null}
       onRetry={onRetry}
       onChange={onChange}
@@ -1022,16 +1030,16 @@ export function SettingsIndexersSection({
             className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
           >
             <colgroup>
-              <col className={showProxyColumn ? "w-[13%]" : "w-[15%]"} />
-              <col className={showProxyColumn ? "w-[10%]" : "w-[11%]"} />
-              {showProxyColumn ? <col className="w-[7%]" /> : null}
-              <col className={showProxyColumn ? "w-[16%]" : "w-[20%]"} />
-              <col className={showProxyColumn ? "w-[16%]" : "w-[19%]"} />
+              <col className={showProxyColumn ? "w-[12%]" : "w-[15%]"} />
+              <col className={showProxyColumn ? "w-[9%]" : "w-[11%]"} />
+              {showProxyColumn ? <col className="w-[10%]" /> : null}
+              <col className="w-[14%]" />
+              <col className={showProxyColumn ? "w-[15%]" : "w-[20%]"} />
               <col className="w-[5%]" />
               <col className="w-[6%]" />
               <col className="w-[4%]" />
               <col className="w-[10%]" />
-              <col className={showProxyColumn ? "w-[13%]" : "w-[10%]"} />
+              <col className="w-[15%]" />
             </colgroup>
             <TableHeader>
               <TableRow>
@@ -1056,7 +1064,7 @@ export function SettingsIndexersSection({
                   {t("settings.indexerAutoSearch")}
                 </TableHead>
                 <TableHead>{t("settings.indexerStatus")}</TableHead>
-                <TableHead className="text-right">
+                <TableHead className="whitespace-nowrap text-right">
                   {t("label.actions")}
                 </TableHead>
               </TableRow>
@@ -1150,6 +1158,7 @@ export function SettingsIndexersSection({
                       resource={indexerDownloadClientMappingCatalogResource}
                       isPending={mutatingIndexerMappingIds.has(indexer.id)}
                       disabled={editingIndexerId === indexer.id && isEditorOpen}
+                      compact
                       onRetry={refreshIndexerDownloadClientMappingCatalog}
                       onChange={(downloadClientId) =>
                         setIndexerDownloadClientMapping(indexer.id, downloadClientId)
@@ -1232,7 +1241,7 @@ export function SettingsIndexersSection({
                     data-label={t("label.actions")}
                     className={cn("text-right", INDEXER_NARROW_CELL_CLASS)}
                   >
-                    <div className="flex flex-wrap justify-end gap-2">
+                    <div className="flex flex-nowrap justify-end gap-2">
                       <IndexerActionButton
                         id={selectorId("settings-indexer-error-history", indexer.name)}
                         tone="search"

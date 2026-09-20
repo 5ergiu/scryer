@@ -76,10 +76,16 @@ export function ProxyAssignmentSelect({
           onChange(next === NO_PROXY_VALUE ? null : next)
         }
       >
-        <SelectTrigger id={selectId} className="w-full">
+        <SelectTrigger
+          id={selectId}
+          className={compact ? "w-full max-w-36" : "w-full"}
+        >
           <SelectValue placeholder={t("settings.proxyDirect")} />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent
+          position="popper"
+          className="w-80 max-w-[var(--radix-select-content-available-width)]"
+        >
           <SelectItem value={NO_PROXY_VALUE}>{t("settings.proxyDirect")}</SelectItem>
           {isMissing ? (
             <SelectItem value={value ?? "missing"} disabled>
