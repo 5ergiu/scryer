@@ -1874,6 +1874,15 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 is_sensitive: false,
                 validation_json: None,
             },
+            SettingDefinitionSeed {
+                category: "service".into(),
+                scope: "system".into(),
+                key_name: scryer_application::rate_limit_proxy_policy::TRUSTED_PROXIES_KEY.into(),
+                data_type: "json".into(),
+                default_value_json: "null".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
         ])
         .await
         .expect("settings definitions should seed");

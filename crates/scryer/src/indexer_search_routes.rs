@@ -196,7 +196,7 @@ mod tests {
                     epoch: 1,
                 },
             ),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: AuthlessWebClientProofState::new(),
         };

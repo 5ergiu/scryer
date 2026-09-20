@@ -2,6 +2,9 @@
 pub struct ServiceSettings {
     pub tls_cert_path: String,
     pub tls_key_path: String,
+    pub trusted_proxy_ips: Vec<String>,
+    pub trusted_proxy_override: Option<Vec<String>>,
+    pub trusted_proxy_source: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecuritySettings {
@@ -31,8 +34,40 @@ pub struct UpdateSecuritySettings {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateServiceSettings {
-    pub tls_cert_path: String,
-    pub tls_key_path: String,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
+    pub trusted_proxy_ips: Option<Vec<String>>,
+    pub reset_trusted_proxy_ips: bool,
+}
+impl AppUseCase {
+    pub fn trusted_proxy_runtime(&self) -> crate::rate_limit_proxy_policy::TrustedProxyRuntime {
+        self.runtime.security.trusted_proxies.clone()
+    }
+
+    pub async fn initialize_trusted_proxy_policy(&self, environment: &str) -> AppResult<()> {
+        use crate::rate_limit_proxy_policy::{IpMatcher, TRUSTED_PROXIES_KEY, TrustedProxyPolicy};
+        let _guard = self.runtime.security.service_settings_lock.lock().await;
+        let environment = environment
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter_map(|value| {
+                if IpMatcher::parse(value).is_some() {
+                    Some(value.to_string())
+                } else {
+                    tracing::warn!("ignoring invalid SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS entry");
+                    None
+                }
+            })
+            .collect();
+        let saved = self
+            .read_setting_json_value::<Option<Vec<String>>>(TRUSTED_PROXIES_KEY, None)
+            .await?
+            .flatten();
+        let policy = TrustedProxyPolicy::new(environment, saved).map_err(AppError::Validation)?;
+        self.runtime.security.trusted_proxies.replace(policy);
+        Ok(())
+    }
 }
 impl AppUseCase {
     pub(crate) async fn load_security_settings(&self) -> AppResult<SecuritySettings> {
@@ -149,7 +184,16 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
+        let policy = self.runtime.security.trusted_proxies.snapshot();
         Ok(ServiceSettings {
+            trusted_proxy_ips: policy.addresses.clone(),
+            trusted_proxy_override: policy.override_addresses.clone(),
+            trusted_proxy_source: if policy.override_addresses.is_some() {
+                "settings"
+            } else {
+                "environment"
+            }
+            .to_string(),
             tls_cert_path: self
                 .read_setting_string_value(TLS_CERT_PATH_KEY, None)
                 .await?
@@ -340,41 +384,58 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
 
-        let tls_cert_path = input.tls_cert_path.trim().to_string();
-        let tls_key_path = input.tls_key_path.trim().to_string();
-
-        self.services
-            .config
-            .settings
-            .upsert_setting_json(
-                SETTINGS_SCOPE_SYSTEM,
-                TLS_CERT_PATH_KEY,
-                None,
-                encode_setting_json(&tls_cert_path)?,
-                SETTINGS_SOURCE_TYPED_GRAPHQL,
+        use crate::rate_limit_proxy_policy::{TRUSTED_PROXIES_KEY, TrustedProxyPolicy};
+        let _guard = self.runtime.security.service_settings_lock.lock().await;
+        if input.reset_trusted_proxy_ips && input.trusted_proxy_ips.is_some() {
+            return Err(AppError::Validation(
+                "cannot save and reset trusted proxies together".into(),
+            ));
+        }
+        let policy = if input.reset_trusted_proxy_ips || input.trusted_proxy_ips.is_some() {
+            let saved = input.trusted_proxy_ips.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| value.trim().to_string())
+                    .collect()
+            });
+            Some(
+                TrustedProxyPolicy::new(
+                    self.runtime
+                        .security
+                        .trusted_proxies
+                        .snapshot()
+                        .environment_addresses
+                        .clone(),
+                    saved,
+                )
+                .map_err(AppError::Validation)?,
+            )
+        } else {
+            None
+        };
+        let mut saved_keys = Vec::new();
+        for (key, value) in [
+            (TLS_CERT_PATH_KEY, input.tls_cert_path),
+            (TLS_KEY_PATH_KEY, input.tls_key_path),
+        ] {
+            if let Some(value) = value {
+                self.upsert_system_setting_json(key, &value.trim(), Some(actor.id.clone()))
+                    .await?;
+                saved_keys.push(key.to_string());
+            }
+        }
+        if let Some(policy) = policy {
+            self.upsert_system_setting_json(
+                TRUSTED_PROXIES_KEY,
+                &policy.override_addresses,
                 Some(actor.id.clone()),
             )
             .await?;
-        self.services
-            .config
-            .settings
-            .upsert_setting_json(
-                SETTINGS_SCOPE_SYSTEM,
-                TLS_KEY_PATH_KEY,
-                None,
-                encode_setting_json(&tls_key_path)?,
-                SETTINGS_SOURCE_TYPED_GRAPHQL,
-                Some(actor.id.clone()),
-            )
-            .await?;
-
-        self.emit_settings_saved(
-            actor,
-            "service_settings",
-            None,
-            vec![TLS_CERT_PATH_KEY.to_string(), TLS_KEY_PATH_KEY.to_string()],
-        )
-        .await;
+            self.runtime.security.trusted_proxies.replace(policy);
+            saved_keys.push(TRUSTED_PROXIES_KEY.to_string());
+        }
+        self.emit_settings_saved(actor, "service_settings", None, saved_keys)
+            .await;
 
         self.get_service_settings(actor).await
     }

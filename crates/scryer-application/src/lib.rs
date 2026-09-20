@@ -1,5 +1,6 @@
 mod acquisition;
 mod api_keys;
+pub mod rate_limit_proxy_policy;
 pub mod application_upgrade;
 mod authorization;
 mod catalog;

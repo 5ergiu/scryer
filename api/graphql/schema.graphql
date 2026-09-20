@@ -24383,6 +24383,18 @@ type ServiceSettingsPayload {
 	Filesystem path to the TLS private key.
 	"""
 	tlsKeyPath: String!
+	"""
+	Effective trusted proxy addresses for rate limiting only.
+	"""
+	trustedProxyIps: [String!]!
+	"""
+	Saved override; null uses environment, an empty list trusts nobody.
+	"""
+	trustedProxyOverride: [String!]
+	"""
+	Whether the effective policy comes from settings or environment.
+	"""
+	trustedProxySource: String!
 }
 
 """
@@ -28880,13 +28892,21 @@ TLS certificate and private-key filesystem paths.
 """
 input UpdateServiceSettingsInput {
 	"""
-	Absolute TLS certificate path.
+	Absolute TLS certificate path. Omission preserves the saved path.
 	"""
-	tlsCertPath: String!
+	tlsCertPath: String
 	"""
-	Absolute TLS private-key path.
+	Absolute TLS private-key path. Omission preserves the saved path.
 	"""
-	tlsKeyPath: String!
+	tlsKeyPath: String
+	"""
+	Save a trusted-proxy override. Omission preserves the existing policy.
+	"""
+	trustedProxyIps: [String!]
+	"""
+	Clear the saved override and use environment configuration.
+	"""
+	resetTrustedProxyIps: Boolean
 }
 
 """

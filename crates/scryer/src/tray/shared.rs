@@ -10,7 +10,8 @@
     reason = "the Windows and macOS wrappers each use a subset of this module, and neither is compiled on other platforms"
 )]
 
-use std::ffi::OsStr;
+#[path = "../environment_file.rs"]
+mod environment_file;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -50,48 +51,45 @@ const SERVER_EXECUTABLE: &str = "scryer";
 #[cfg(not(windows))]
 const WRAPPER_EXECUTABLE: &str = "scryer-tray";
 
-/// Environment the desktop server must not inherit.
-///
-/// A desktop profile must not pick up a portable or container instance's
-/// database, credentials, bind address, base path, or any other `SCRYER_*`
-/// runtime configuration that happens to be set in the session the user
-/// launched the tray from.
-const SCRYER_ENV_PREFIX: &str = "SCRYER_";
-const AUTH_ENABLED_ENV: &str = "SCRYER_AUTH_ENABLED";
-
-/// Whether an inherited environment variable is scrubbed from the supervised
-/// server's environment.
-///
-/// Everything `SCRYER_*` goes, with one exception: an inherited
-/// `SCRYER_AUTH_ENABLED` that *enables* auth is kept, because dropping it would
-/// silently weaken the instance the user asked for. An override that disables
-/// auth is dropped like the rest.
-pub(crate) fn should_remove_inherited_scryer_env(name: &OsStr, value: &OsStr) -> bool {
-    let name = name.to_string_lossy();
-    let is_scryer_env = name
-        .get(..SCRYER_ENV_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SCRYER_ENV_PREFIX));
-    if !is_scryer_env {
-        return false;
-    }
-
-    if !name.eq_ignore_ascii_case(AUTH_ENABLED_ENV) {
-        return true;
-    }
-
-    !value.to_str().is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "y" | "on"
+fn configure_environment(
+    command: &mut Command,
+    profile: &Path,
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<(), String> {
+    let inherited: Vec<_> = inherited.into_iter().collect();
+    let configured = environment_file::read(&profile.join(".env"))?;
+    for name in inherited
+        .iter()
+        .map(|(name, _)| name.to_string_lossy())
+        .chain(
+            configured
+                .iter()
+                .map(|(name, _)| std::borrow::Cow::Borrowed(name.as_str())),
         )
-    })
+    {
+        if environment_file::desktop_owned(&name) {
+            return Err(format!(
+                "{name} is managed by the desktop app; remove this override or run the standalone server"
+            ));
+        }
+    }
+    for (name, value) in configured {
+        if !inherited.iter().any(|(key, _)| {
+            if cfg!(windows) {
+                key.to_string_lossy().eq_ignore_ascii_case(&name)
+            } else {
+                key == name.as_str()
+            }
+        }) {
+            command.env(name, value);
+        }
+    }
+    Ok(())
 }
 
 /// The origin the app window is allowed to stay inside.
 ///
-/// The supervised server is started with every `SCRYER_*` variable scrubbed,
-/// `SCRYER_BASE_PATH` included, so the desktop server always serves from the
-/// root and the wrapper never has to discover a prefix.
+/// The wrapper owns the loopback listener and root base path.
 pub(crate) fn app_origin(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
@@ -679,15 +677,7 @@ impl ServerSupervisor {
         let log_file = self.log_file();
         self.log_offset = std::fs::metadata(&log_file).map_or(0, |metadata| metadata.len());
         let mut command = Command::new(&server_executable);
-        // A desktop profile must not inherit a portable/server instance's
-        // database, credentials, bind address, or other SCRYER_* runtime
-        // configuration. Preserve a security-strengthening auth override so the
-        // tray cannot silently disable auth.
-        for (name, value) in std::env::vars_os() {
-            if should_remove_inherited_scryer_env(&name, &value) {
-                command.env_remove(name);
-            }
-        }
+        configure_environment(&mut command, &self.profile_dir, std::env::vars_os())?;
         command
             .arg("--data-dir")
             .arg(&self.profile_dir)
@@ -1097,48 +1087,112 @@ mod tests {
 
     use super::{
         HttpResponse, PROFILE_PRODUCT_DIR, PROFILE_VENDOR_DIR, PopoverContent, PopoverRow,
-        SMOKE_BODY, SMOKE_RESPONSE, app_origin, app_url, decode_chunked, desktop_profile_dir_from,
-        http_origin, is_scryer_document, last_logged_error, logged_error_message,
-        opens_in_external_browser, parse_http_response, popover_content_from_health,
-        remove_desktop_profile, row_detail, should_remove_inherited_scryer_env,
+        SMOKE_BODY, SMOKE_RESPONSE, app_origin, app_url, configure_environment, decode_chunked,
+        desktop_profile_dir_from, http_origin, is_scryer_document, last_logged_error,
+        logged_error_message, opens_in_external_browser, parse_http_response,
+        popover_content_from_health, remove_desktop_profile, row_detail,
     };
 
     // -- the environment the supervised server is not allowed to inherit ------
 
     #[test]
-    fn preserves_security_strengthening_auth_override() {
-        for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
-            assert!(!should_remove_inherited_scryer_env(
-                OsStr::new("scryer_auth_enabled"),
-                OsStr::new(value)
-            ));
+    fn desktop_environment_child() {
+        if std::env::var("SCRYER_TEST_DESKTOP_ENV_CHILD").as_deref() != Ok("1") {
+            return;
         }
+        assert_eq!(
+            std::env::var("SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS").unwrap(),
+            "127.0.0.1"
+        );
+        assert_eq!(std::env::var("SCRYER_AUTH_ENABLED").unwrap(), "true");
+        println!("desktop-environment-child: verified");
+    }
+
+    #[tokio::test]
+    async fn desktop_environment_reaches_the_child_process() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS=127.0.0.1\nSCRYER_AUTH_ENABLED=false\n",
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "shared::tests::desktop_environment_child",
+                "--nocapture",
+            ])
+            .env("SCRYER_TEST_DESKTOP_ENV_CHILD", "1")
+            .env("SCRYER_AUTH_ENABLED", "true");
+        configure_environment(
+            &mut command,
+            dir.path(),
+            vec![("SCRYER_AUTH_ENABLED".into(), "true".into())],
+        )
+        .unwrap();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tokio::process::Command::from(command)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("desktop-environment-child: verified")
+        );
     }
 
     #[test]
-    fn removes_auth_overrides_that_do_not_enable_auth() {
-        for value in ["0", "false", "no", "n", "off", "invalid", ""] {
-            assert!(should_remove_inherited_scryer_env(
-                OsStr::new("SCRYER_AUTH_ENABLED"),
-                OsStr::new(value)
-            ));
-        }
+    fn desktop_environment_preserves_inherited_precedence_and_reloads_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "SCRYER_AUTH_ENABLED=true\nSCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS=127.0.0.1\n",
+        )
+        .unwrap();
+        let inherited = vec![("SCRYER_AUTH_ENABLED".into(), "false".into())];
+        let mut command = std::process::Command::new("scryer");
+        configure_environment(&mut command, dir.path(), inherited).unwrap();
+        let values: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            values,
+            vec![(
+                OsStr::new("SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS"),
+                Some(OsStr::new("127.0.0.1"))
+            )]
+        );
+        std::fs::write(&path, "SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS=::1\n").unwrap();
+        let mut restarted = std::process::Command::new("scryer");
+        configure_environment(&mut restarted, dir.path(), vec![]).unwrap();
+        assert_eq!(
+            restarted.get_envs().next().unwrap().1,
+            Some(OsStr::new("::1"))
+        );
     }
 
     #[test]
-    fn isolates_other_scryer_environment_variables() {
-        assert!(should_remove_inherited_scryer_env(
-            OsStr::new("scryer_bind"),
-            OsStr::new("0.0.0.0:8080")
-        ));
-        assert!(should_remove_inherited_scryer_env(
-            OsStr::new("SCRYER_BASE_PATH"),
-            OsStr::new("/scryer")
-        ));
-        assert!(!should_remove_inherited_scryer_env(
-            OsStr::new("PATH"),
-            OsStr::new("example")
-        ));
+    fn desktop_environment_rejects_managed_overrides_from_either_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("scryer");
+        let error = configure_environment(
+            &mut command,
+            dir.path(),
+            vec![("SCRYER_DB_URL".into(), "private-value".into())],
+        )
+        .unwrap_err();
+        assert!(error.contains("SCRYER_DB_URL"));
+        assert!(!error.contains("private-value"));
+        std::fs::write(dir.path().join(".env"), "SCRYER_BIND=0.0.0.0:8080").unwrap();
+        assert!(configure_environment(&mut command, dir.path(), vec![]).is_err());
     }
 
     // -- the desktop profile --------------------------------------------------

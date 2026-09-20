@@ -2545,7 +2545,10 @@ const libraryPathsFieldSelection = `
 
 const serviceSettingsFieldSelection = `
     tlsCertPath
-    tlsKeyPath`;
+    tlsKeyPath
+    trustedProxyIps
+    trustedProxyOverride
+    trustedProxySource`;
 
 // Batched query for quality profiles page: 5 requests → 1
 export const qualityProfilesInitQuery = `query QualityProfilesInit {

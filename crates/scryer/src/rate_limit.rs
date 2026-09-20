@@ -16,6 +16,9 @@ use async_graphql::{
 };
 use governor::clock::Clock;
 use governor::{DefaultKeyedRateLimiter, Quota};
+use scryer_application::rate_limit_proxy_policy::{
+    IpMatcher, TrustedProxyPolicy, TrustedProxyRuntime,
+};
 use scryer_interface::{GRAPHQL_RECURSIVE_DEPTH_LIMIT, LoginAttemptPrincipal};
 
 const GRAPHQL_SELECTION_TRAVERSAL_BUDGET: usize = 1_024;
@@ -28,7 +31,7 @@ pub(crate) struct ScryerRateLimiter {
 
 struct RateLimitBuckets {
     bypass: Vec<IpMatcher>,
-    trusted_proxies: Vec<IpMatcher>,
+    trusted_proxies: TrustedProxyRuntime,
     login: Bucket,
     auth_start: Bucket,
     auth_peer: Bucket,
@@ -130,14 +133,8 @@ pub(crate) struct RateLimitDecision {
     pub(crate) retry_after: Option<Duration>,
 }
 
-#[derive(Clone, Copy)]
-enum IpMatcher {
-    Exact(IpAddr),
-    Cidr(IpAddr, u8),
-}
-
 impl ScryerRateLimiter {
-    pub(crate) fn from_env() -> Self {
+    pub(crate) fn from_env(trusted_proxies: TrustedProxyRuntime) -> Self {
         Self {
             inner: Arc::new(RateLimitBuckets {
                 bypass: parse_ip_matchers(
@@ -145,9 +142,7 @@ impl ScryerRateLimiter {
                         .unwrap_or_default()
                         .as_str(),
                 ),
-                trusted_proxies: parse_ip_matchers_from_env_with_warnings(
-                    "SCRYER_RATE_LIMIT_TRUSTED_PROXY_IPS",
-                ),
+                trusted_proxies,
                 login: Bucket::from_env(
                     "SCRYER_LOGIN_RATE_LIMIT_ATTEMPTS",
                     "SCRYER_LOGIN_RATE_LIMIT_WINDOW_SECS",
@@ -217,7 +212,7 @@ impl ScryerRateLimiter {
         Self {
             inner: Arc::new(RateLimitBuckets {
                 bypass: Vec::new(),
-                trusted_proxies: Vec::new(),
+                trusted_proxies: TrustedProxyRuntime::default(),
                 login: Bucket::for_test(login_requests),
                 auth_start: Bucket::for_test(auth_start_requests),
                 auth_peer: Bucket::for_test(auth_peer_requests),
@@ -240,18 +235,26 @@ impl ScryerRateLimiter {
             .iter()
             .map(|spec| parse_ip_matcher(spec).expect("valid bypass spec"))
             .collect();
-        buckets.trusted_proxies = trusted_proxy_specs
-            .iter()
-            .map(|spec| parse_ip_matcher(spec).expect("valid trusted proxy spec"))
-            .collect();
+        buckets.trusted_proxies = TrustedProxyRuntime::new(
+            TrustedProxyPolicy::new(
+                trusted_proxy_specs
+                    .iter()
+                    .map(|spec| spec.to_string())
+                    .collect(),
+                None,
+            )
+            .expect("valid trusted proxy specs"),
+        );
         limiter
     }
 
+    pub(crate) fn trusted_proxy_snapshot(&self) -> Arc<TrustedProxyPolicy> {
+        self.inner.trusted_proxies.snapshot()
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
-        self.inner
-            .trusted_proxies
-            .iter()
-            .any(|matcher| matcher.matches(ip))
+        self.trusted_proxy_snapshot().matches(ip)
     }
 
     pub(crate) fn check_graphql(
@@ -975,77 +978,8 @@ fn parse_ip_matchers(raw: &str) -> Vec<IpMatcher> {
         .collect()
 }
 
-fn parse_ip_matchers_from_env_with_warnings(name: &str) -> Vec<IpMatcher> {
-    std::env::var(name)
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .filter_map(|value| match parse_ip_matcher(value) {
-            Some(matcher) => Some(matcher),
-            None => {
-                tracing::warn!(
-                    environment_variable = name,
-                    value,
-                    "ignoring invalid trusted proxy address or CIDR"
-                );
-                None
-            }
-        })
-        .collect()
-}
-
 fn parse_ip_matcher(raw: &str) -> Option<IpMatcher> {
-    let Some((ip, prefix)) = raw.split_once('/') else {
-        return raw.parse::<IpAddr>().ok().map(IpMatcher::Exact);
-    };
-    let ip = ip.trim().parse::<IpAddr>().ok()?;
-    let prefix = prefix.trim().parse::<u8>().ok()?;
-    match ip {
-        IpAddr::V4(_) if prefix <= 32 => Some(IpMatcher::Cidr(ip, prefix)),
-        IpAddr::V6(_) if prefix <= 128 => Some(IpMatcher::Cidr(ip, prefix)),
-        _ => None,
-    }
-}
-
-impl IpMatcher {
-    fn matches(self, ip: IpAddr) -> bool {
-        let ip = ip.to_canonical();
-        match self {
-            Self::Exact(exact) => exact.to_canonical() == ip,
-            Self::Cidr(base, prefix) => cidr_contains(base, prefix, ip),
-        }
-    }
-}
-
-fn cidr_contains(base: IpAddr, prefix: u8, ip: IpAddr) -> bool {
-    match (base, ip) {
-        (IpAddr::V4(base), IpAddr::V4(ip)) => {
-            let mask = ipv4_mask(prefix);
-            u32::from(base) & mask == u32::from(ip) & mask
-        }
-        (IpAddr::V6(base), IpAddr::V6(ip)) => {
-            let mask = ipv6_mask(prefix);
-            u128::from(base) & mask == u128::from(ip) & mask
-        }
-        _ => false,
-    }
-}
-
-fn ipv4_mask(prefix: u8) -> u32 {
-    if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    }
-}
-
-fn ipv6_mask(prefix: u8) -> u128 {
-    if prefix == 0 {
-        0
-    } else {
-        u128::MAX << (128 - prefix)
-    }
+    IpMatcher::parse(raw)
 }
 
 #[cfg(test)]

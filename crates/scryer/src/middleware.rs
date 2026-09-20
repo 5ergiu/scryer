@@ -2746,7 +2746,8 @@ fn rate_limit_provenance(
     rate_limiter: &ScryerRateLimiter,
 ) -> RateLimitProvenance {
     let peer_ip = remote_addr.ip().to_canonical();
-    if !rate_limiter.is_trusted_proxy(peer_ip) {
+    let trusted_proxies = rate_limiter.trusted_proxy_snapshot();
+    if !trusted_proxies.matches(peer_ip) {
         return RateLimitProvenance::direct(peer_ip);
     }
 
@@ -2757,7 +2758,7 @@ fn rate_limit_provenance(
     chain.push(peer_ip);
     while chain
         .last()
-        .is_some_and(|hop| rate_limiter.is_trusted_proxy(*hop))
+        .is_some_and(|hop| trusted_proxies.matches(*hop))
     {
         chain.pop();
     }
@@ -3323,7 +3324,7 @@ mod tests {
             app,
             schema: context.schema.clone(),
             auth_runtime: AuthRuntimeStateHandle::new(auth_enabled_snapshot()),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: AuthlessWebClientProofState::new(),
         };
@@ -3413,7 +3414,7 @@ mod tests {
             app: context.app.clone(),
             schema: context.schema.clone(),
             auth_runtime: context.auth_runtime.clone(),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: AuthlessWebClientProofState::new(),
         };
@@ -3547,7 +3548,7 @@ mod tests {
             app: context.app.clone(),
             schema: context.schema.clone(),
             auth_runtime: AuthRuntimeStateHandle::new(auth_disabled_snapshot()),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: AuthlessWebClientProofState::new(),
         };
@@ -3575,7 +3576,7 @@ mod tests {
             app: context.app.clone(),
             schema: context.schema.clone(),
             auth_runtime: AuthRuntimeStateHandle::new(auth_disabled_snapshot()),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: proof_state.clone(),
         };
