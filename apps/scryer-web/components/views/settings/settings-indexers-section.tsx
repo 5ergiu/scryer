@@ -1639,13 +1639,15 @@ export function SettingsIndexersSection({
                               className="bg-muted/20 p-3 max-[1279px]:block"
                             >
                               {indexerRoutingLoaded ? (
-                                <IndexerRoutingDisclosure
-                                  indexer={indexer}
-                                  routingByScope={indexerRoutingByScope}
-                                  isLoading={indexerRoutingLoading}
-                                  mutatingScopes={mutatingIndexerRoutingScopes}
-                                  onChange={updateIndexerRoutingForScope}
-                                />
+                                <div className="w-full max-w-4xl">
+                                  <IndexerRoutingDisclosure
+                                    indexer={indexer}
+                                    routingByScope={indexerRoutingByScope}
+                                    isLoading={indexerRoutingLoading}
+                                    mutatingScopes={mutatingIndexerRoutingScopes}
+                                    onChange={updateIndexerRoutingForScope}
+                                  />
+                                </div>
                               ) : (
                                 <div className="flex min-h-24 items-center justify-center">
                                   <LoadingMark className="h-5 w-5" />
