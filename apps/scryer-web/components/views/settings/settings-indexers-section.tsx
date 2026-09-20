@@ -148,7 +148,7 @@ const FALLBACK_PROVIDER_OPTIONS = [
 ];
 
 const INDEXER_NARROW_CELL_CLASS =
-  "max-[1279px]:flex max-[1279px]:items-start max-[1279px]:justify-between max-[1279px]:gap-4 max-[1279px]:border-b max-[1279px]:border-border/60 max-[1279px]:px-3 max-[1279px]:py-2 max-[1279px]:text-right max-[1279px]:before:shrink-0 max-[1279px]:before:text-left max-[1279px]:before:text-xs max-[1279px]:before:font-medium max-[1279px]:before:text-muted-foreground max-[1279px]:before:content-[attr(data-label)]";
+  "max-[1279px]:flex max-[1279px]:items-center max-[1279px]:justify-between max-[1279px]:gap-4 max-[1279px]:border-b max-[1279px]:border-border/60 max-[1279px]:px-3 max-[1279px]:py-2 max-[1279px]:text-right max-[1279px]:before:shrink-0 max-[1279px]:before:text-left max-[1279px]:before:text-xs max-[1279px]:before:font-medium max-[1279px]:before:text-muted-foreground max-[1279px]:before:content-[attr(data-label)]";
 
 function selectedIndexerPresetName(
   fields: ConfigFieldDef[],
@@ -862,9 +862,11 @@ function IndexerRoutingDisclosure({
 
   return (
     <Table
+      overflow="clip"
       layout="fixed"
       density="dense"
-      className="border border-border/60 bg-background/35"
+      wrapperClassName="rounded-[14px] border border-[var(--scry-border2)] bg-[var(--scry-surfC)]"
+      className="[&_td]:align-middle [&_th]:align-middle"
     >
       <TableHeader>
         <TableRow>
@@ -889,38 +891,45 @@ function IndexerRoutingDisclosure({
           );
 
           return (
-            <TableRow key={scope} data-ui="settings-indexer-routing-row">
+            <TableRow
+              key={scope}
+              data-ui="settings-table-row"
+              data-subtable-row="indexer-routing"
+            >
               <TableCell className="font-medium">{facetLabel}</TableCell>
               <TableCell>
-                <IndexerCategoryPicker
-                  triggerId={selectorId(
-                    "settings-indexer-routing-categories",
-                    indexer.id,
-                    scope,
-                  )}
-                  panelId={selectorId(
-                    "settings-indexer-routing-categories-panel",
-                    indexer.id,
-                    scope,
-                  )}
-                  categoryIdPrefix={selectorId(
-                    "settings-indexer-routing-category",
-                    indexer.id,
-                    scope,
-                  )}
-                  value={routing.categories}
-                  scope={scope}
-                  capsCategories={indexer.capsCategories}
-                  disabled={isPending}
-                  categoriesLabel={`${t("settings.indexerRoutingCategories")} (${facetLabel})`}
-                  onChange={(categories) =>
-                    void onChange(scope, indexer.id, { categories })
-                  }
-                />
+                <div className="w-full max-w-md">
+                  <IndexerCategoryPicker
+                    triggerId={selectorId(
+                      "settings-indexer-routing-categories",
+                      indexer.id,
+                      scope,
+                    )}
+                    panelId={selectorId(
+                      "settings-indexer-routing-categories-panel",
+                      indexer.id,
+                      scope,
+                    )}
+                    categoryIdPrefix={selectorId(
+                      "settings-indexer-routing-category",
+                      indexer.id,
+                      scope,
+                    )}
+                    value={routing.categories}
+                    scope={scope}
+                    capsCategories={indexer.capsCategories}
+                    disabled={isPending}
+                    categoriesLabel={`${t("settings.indexerRoutingCategories")} (${facetLabel})`}
+                    onChange={(categories) =>
+                      void onChange(scope, indexer.id, { categories })
+                    }
+                  />
+                </div>
               </TableCell>
               <TableCell className="text-center">
                 <Checkbox
                   id={enabledId}
+                  size="large"
                   checked={routing.enabled}
                   disabled={isPending}
                   aria-label={`${t("settings.indexerRoutingEnabled")}: ${facetLabel}`}
@@ -1217,7 +1226,7 @@ export function SettingsIndexersSection({
                 overflow="clip"
                 layout="fixed"
                 density="dense"
-                className="[&_td]:px-2 [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
+                className="[&_td]:align-middle [&_td]:px-2 [&_th]:align-middle [&_th]:px-2 max-[1279px]:block max-[1279px]:[&_colgroup]:hidden max-[1279px]:[&_thead]:hidden max-[1279px]:[&_tbody]:block"
               >
                 <colgroup>
                   <col className={showProxyColumn ? "w-[12%]" : "w-[15%]"} />
@@ -1272,17 +1281,28 @@ export function SettingsIndexersSection({
                           id={selectorId("settings-indexer-row", indexer.name)}
                           className={cn(
                             indexer.isManaged && "bg-muted/25",
-                            "max-[1279px]:mb-3 max-[1279px]:block max-[1279px]:overflow-hidden max-[1279px]:rounded-lg max-[1279px]:border max-[1279px]:border-border",
+                            "cursor-pointer max-[1279px]:mb-3 max-[1279px]:block max-[1279px]:overflow-hidden max-[1279px]:rounded-lg max-[1279px]:border max-[1279px]:border-border",
                           )}
+                          onClick={(event) => {
+                            if (
+                              event.target instanceof Element &&
+                              event.target.closest(
+                                "button, a, input, select, textarea, [role='button']",
+                              )
+                            ) {
+                              return;
+                            }
+                            toggleIndexerRouting(indexer.id);
+                          }}
                         >
                           <TableCell
                             data-label={t("label.name")}
                             className={INDEXER_NARROW_CELL_CLASS}
                           >
-                            <div className="flex items-start gap-1">
+                            <div className="flex items-center gap-1">
                               <button
                                 type="button"
-                                className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                                 aria-label={t("settings.indexerRoutingScope", {
                                   scope: indexer.name,
                                 })}
@@ -1493,7 +1513,7 @@ export function SettingsIndexersSection({
                               INDEXER_NARROW_CELL_CLASS,
                             )}
                           >
-                            <div className="flex flex-nowrap justify-end gap-2">
+                            <div className="flex flex-nowrap items-center justify-end gap-2">
                               <IndexerActionButton
                                 id={selectorId(
                                   "settings-indexer-error-history",
