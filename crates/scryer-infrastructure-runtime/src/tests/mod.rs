@@ -13,10 +13,10 @@ use scryer_application::{
     ReleaseDecision, ReleaseDownloadAttemptOutcome, ScopedExternalId, SettingsRepository,
     ShowRepository, SortDirection, SubmissionScope, SubtitleDownloadRepository,
     SubtitleProviderConfigRepository, SubtitleProviderConfigUpdate, TitleArtworkUrlUpdate,
-    TitleCatalogFilter, TitleCatalogProfileNames, TitleCatalogSort, TitleCatalogSortKey,
-    TitleCredit, TitleExternalIdLookup, TitleExternalRating, TitleImageBlob, TitleImageKind,
-    TitleImageRepository, TitleImageSourceResult, TitleImageVariantRecord, TitleListProjection,
-    TitleMetadataUpdate, TitleRatingSummary, TitleRepository, UserRepository,
+    TitleCatalogAggregates, TitleCatalogFilter, TitleCatalogProfileNames, TitleCatalogSort,
+    TitleCatalogSortKey, TitleCredit, TitleExternalIdLookup, TitleExternalRating, TitleImageBlob,
+    TitleImageKind, TitleImageRepository, TitleImageSourceResult, TitleImageVariantRecord,
+    TitleListProjection, TitleMetadataUpdate, TitleRatingSummary, TitleRepository, UserRepository,
     subtitles::{ExternalSubtitleDetectionSource, ExternalSubtitleProbeCacheEntry},
 };
 use scryer_domain::{

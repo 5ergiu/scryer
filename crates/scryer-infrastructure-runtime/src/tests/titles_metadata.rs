@@ -662,7 +662,11 @@ async fn title_catalog_scryer_rating_sort_uses_grouped_rating_summary() {
         10,
         0,
         false,
-        true,
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await
     .expect("catalog rating sort should succeed");
@@ -782,7 +786,11 @@ async fn title_catalog_quality_sort_ranks_the_file_quality_the_catalog_shows() {
             10,
             0,
             false,
-            true,
+            TitleCatalogAggregates {
+                total_count: true,
+                filter_counts: true,
+                managed_bytes: true,
+            },
         )
         .await
         .expect("catalog quality sort should succeed");
@@ -860,7 +868,11 @@ async fn title_catalog_profile_sort_orders_by_effective_profile_name() {
         10,
         0,
         false,
-        true,
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await
     .expect("catalog profile sort should succeed");
@@ -1083,7 +1095,7 @@ async fn identical_metadata_identity_is_isolated_by_library_title() {
         10,
         0,
         true,
-        false,
+        TitleCatalogAggregates::default(),
     )
     .await
     .expect("first library catalog should load owner tags");
