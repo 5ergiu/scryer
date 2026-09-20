@@ -805,6 +805,7 @@ export function SettingsIndexersSection({
   const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
   const isManagedSyncProvider = normalizedProviderType === "prowlarr";
   const isEditing = editorMode === "edit";
+  const isSavingEditor = mutatingIndexerId === (editingIndexerId ?? "new");
   const indexersById = React.useMemo(() => {
     return new Map(settingsIndexers.map((indexer) => [indexer.id, indexer]));
   }, [settingsIndexers]);
@@ -1321,7 +1322,10 @@ export function SettingsIndexersSection({
 
       {isEditorOpen ? (
         <>
-          <Card>
+          <Card
+            className="relative overflow-hidden"
+            aria-busy={isSavingEditor}
+          >
             <CardHeader className="flex items-center justify-between gap-3">
               <CardTitle className="text-base">
                 {editingIndexerId
@@ -1561,8 +1565,8 @@ export function SettingsIndexersSection({
               </div>
             ) : null}
             <div className="flex gap-2">
-              <Button id="settings-indexer-save" type="submit" disabled={mutatingIndexerId === "new"}>
-                {mutatingIndexerId === "new"
+              <Button id="settings-indexer-save" type="submit" disabled={isSavingEditor}>
+                {isSavingEditor
                   ? t("label.saving")
                   : editingIndexerId
                     ? t("settings.indexerUpdate")
@@ -1590,6 +1594,18 @@ export function SettingsIndexersSection({
             </div>
               </form>
             </CardContent>
+            {isSavingEditor ? (
+              <div
+                role="status"
+                aria-live="polite"
+                className="absolute inset-0 z-10 flex items-center justify-center rounded-[inherit] bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
+              >
+                <div className="flex items-center gap-2 rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-surf)] px-4 py-3 text-sm font-medium text-[var(--scry-ink2)] shadow-[0_12px_28px_rgba(2,6,23,0.28)]">
+                  <LoadingMark className="h-4 w-4" />
+                  {t("label.saving")}
+                </div>
+              </div>
+            ) : null}
           </Card>
           {isEditing ? (
             <div className="flex justify-center">
