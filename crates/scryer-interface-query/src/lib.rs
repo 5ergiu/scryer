@@ -2075,6 +2075,34 @@ impl CatalogQueries {
             .collect())
     }
 
+    /// Read the currently eligible grab destinations for an authorized search result.
+    async fn indexer_grab_clients(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Interactive search containing the release.")] search_id: ID,
+        #[graphql(desc = "Release download URL from that search.")] download_url: String,
+        #[graphql(desc = "Optional catalog title used to resolve assignment routing.")] title_id: Option<ID>,
+    ) -> GqlResult<Vec<IndexerGrabClientPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let clients = app.indexer_grab_clients(&actor, search_id.as_ref(), &download_url, title_id.as_ref().map(|id| id.as_ref())).await.map_err(to_gql_error)?;
+        Ok(clients.into_iter().map(|client| IndexerGrabClientPayload {
+            id: client.id.into(), name: client.name, category: client.category, mapped: client.mapped,
+        }).collect())
+    }
+
+    /// Read native client category names. Unsupported clients retain custom entry.
+    async fn download_client_categories(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Enabled download client to query.")] client_id: ID,
+    ) -> GqlResult<DownloadClientCategoriesPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let categories = app.download_client_categories(&actor, client_id.as_ref()).await.map_err(to_gql_error)?;
+        Ok(DownloadClientCategoriesPayload { supported: categories.is_some(), categories: categories.unwrap_or_default() })
+    }
+
     /// Poll an interactive release-search job; null means no visible snapshot exists.
     async fn interactive_release_search(
         &self,

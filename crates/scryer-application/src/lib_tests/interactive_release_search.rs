@@ -763,6 +763,47 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
     assert!(issued.candidate_token.is_some(), "{issued:?}");
     assert!(issued.queue_scope.is_some(), "{issued:?}");
 
+    struct RoutedClient {
+        inner: Arc<dyn DownloadClient>,
+        requests: Arc<Mutex<Vec<DownloadClientAddRequest>>>,
+    }
+    #[async_trait]
+    impl DownloadClient for RoutedClient {
+        async fn indexer_grab_clients(&self, _: &Title, _: Option<&str>, _: DownloadSourceKind) -> AppResult<Vec<crate::IndexerGrabClient>> {
+            Ok(vec![crate::IndexerGrabClient { id: "fixture-client".into(), name: "Fixture".into(), category: Some("routed".into()), mapped: true }])
+        }
+        async fn submit_download(&self, request: &DownloadClientAddRequest) -> AppResult<DownloadGrabResult> {
+            self.requests.lock().await.push(request.clone());
+            self.inner.submit_download(request).await
+        }
+    }
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let routed_client = Arc::new(RoutedClient { inner: app.services.integrations.download_client.clone(), requests: requests.clone() });
+    let app = app.with_test_overrides(|services| services.with_download_client(routed_client).with_download_submissions(submissions.clone()));
+    let token = issued.candidate_token.as_deref().unwrap();
+    let denied = app.queue_indexer_search_assignment(
+        &operator, &title.id, token, issued.size_bytes, SubmissionConflictPolicy::from_replace_flag(false), false,
+        crate::IndexerGrabSelection { client_id: "stale-client".into(), category: Some("custom".into()) },
+    ).await.expect_err("stale selection must be rejected before submission");
+    assert!(matches!(denied, AppError::Validation(_)));
+    assert!(requests.lock().await.is_empty());
+    let outcome = app.queue_indexer_search_assignment(
+        &operator, &title.id, token, issued.size_bytes, SubmissionConflictPolicy::from_replace_flag(false), false,
+        crate::IndexerGrabSelection { client_id: "fixture-client".into(), category: Some(String::new()) },
+    ).await.expect("assigned grab");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    let handed = requests.lock().await;
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].title.id, title.id);
+    assert_eq!(handed[0].category.as_deref(), Some(""));
+    assert_eq!(handed[0].pinned_download_client_id.as_deref(), Some("fixture-client"));
+    drop(handed);
+    let recorded = submissions.store.lock().await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].title_id, title.id);
+    drop(recorded);
+
     let missing = app
         .issue_interactive_release_candidate_token(
             &operator,
@@ -815,13 +856,13 @@ async fn an_unlinked_grab_records_an_orphan_scoped_submission_and_history() {
 
     *submissions.record_submission_error.lock().await = Some("temporary catalog outage".into());
     let error = app
-        .queue_unlinked_release(&user, &start.id, &download_url, &download_client.id)
+        .queue_unlinked_release_with_category(&user, &start.id, &download_url, &download_client.id, Some("custom".into()))
         .await
         .expect_err("client acceptance survives a catalog outage");
     assert!(matches!(error, AppError::DownloadSubmitAmbiguous(_)));
     *submissions.record_submission_error.lock().await = None;
     let outcome = app
-        .queue_unlinked_release(&user, &start.id, &download_url, &download_client.id)
+        .queue_unlinked_release_with_category(&user, &start.id, &download_url, &download_client.id, Some("custom".into()))
         .await
         .expect("queue unlinked release");
     assert_eq!(outcome.client_name, download_client.name);

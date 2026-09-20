@@ -1034,6 +1034,15 @@ impl SabnzbdDownloadClient {
 
 #[async_trait]
 impl DownloadClient for SabnzbdDownloadClient {
+    async fn discover_categories(&self, _client_id: &str) -> AppResult<Option<Vec<String>>> {
+        let value = self.api_get(&[("mode", "get_cats")]).await?;
+        let categories = value.get("categories").cloned()
+            .ok_or_else(|| AppError::Repository("SABnzbd category response is missing categories".into()))?;
+        let names: Vec<String> = serde_json::from_value(categories)
+            .map_err(|error| AppError::Repository(format!("invalid SABnzbd categories: {error}")))?;
+        Ok(Some(names))
+    }
+
     async fn observe_download(
         &self,
         locator: &scryer_application::ClientJobLocator,
@@ -4024,4 +4033,25 @@ mod tests {
             .await
             .expect("probe failure should not fail the delete");
     }
+    #[tokio::test]
+    async fn category_discovery_reads_names_and_rejects_malformed_payloads() {
+        for (body, expected) in [
+            (json!({"categories":["movies","custom"]}), Some(vec!["movies", "custom"])),
+            (json!({"categories":[]}), Some(vec![])),
+            (json!({"categories":[7]}), None),
+            (json!({}), None),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).and(query_param("mode", "get_cats"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server).await;
+            let client = SabnzbdDownloadClient::new(server.uri(), "fixture-key".into());
+            let result = client.discover_categories("client").await;
+            match expected {
+                Some(names) => assert_eq!(result.unwrap(), Some(names.into_iter().map(str::to_string).collect())),
+                None => assert!(result.is_err()),
+            }
+        }
+    }
+
 }

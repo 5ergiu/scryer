@@ -326,6 +326,49 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    pub async fn queue_indexer_search_assignment(
+        &self,
+        actor: &User,
+        title_id: &str,
+        candidate_token: &str,
+        announced_size_bytes: Option<i64>,
+        conflict_policy: SubmissionConflictPolicy,
+        replacement: bool,
+        mut routing: crate::IndexerGrabSelection,
+    ) -> AppResult<QueueDownloadOutcome> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings).await?;
+        routing.validate()?;
+        let (queued_release, scope) = self.verify_release_candidate_token_for_signed_scope(actor, title_id, candidate_token).await?;
+        if announced_size_bytes.is_some_and(|size| queued_release.size_bytes != Some(size)) {
+            return Err(AppError::Validation("release size does not match the signed candidate".into()));
+        }
+        let title = self.services.catalog.titles.get_by_id(title_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("title {title_id}")))?;
+        self.require_library_permission(actor, &title.library_id, scryer_domain::LibraryPermission::ManageTitles).await?;
+        let source_kind = queued_release.source_kind.ok_or_else(|| AppError::Validation("release has no protocol".into()))?;
+        let clients = self.services.integrations.download_client.indexer_grab_clients(&title, queued_release.indexer_id.as_deref(), source_kind).await?;
+        let selected = clients.iter().find(|client| client.id == routing.client_id)
+            .ok_or_else(|| AppError::Validation("selected download client is not eligible".into()))?;
+        if routing.category.is_none() {
+            routing.category = Some(match &selected.category {
+                Some(category) => category.clone(),
+                None => self.derive_download_category(&title.facet).await,
+            });
+        }
+        if replacement {
+            self.blocklist_replaced_primary_release(&title, &scope).await;
+        }
+        let purpose = if replacement { DownloadSubmissionPurpose::ManualReplacement } else { DownloadSubmissionPurpose::Standard };
+        let outcome = self.queue_manual_release_for_title_with_routing(actor, &title, queued_release.clone(), scope, conflict_policy, purpose, Some(routing)).await?;
+        Ok(match outcome {
+            QueueDownloadOutcome::Queued(mut queued) => {
+                queued.queued_release = queued_release;
+                QueueDownloadOutcome::Queued(queued)
+            }
+            other => other,
+        })
+    }
+
     async fn queue_manual_release_for_title(
         &self,
         actor: &User,
@@ -334,6 +377,19 @@ impl AppUseCase {
         scope: SubmissionScope,
         conflict_policy: SubmissionConflictPolicy,
         purpose: DownloadSubmissionPurpose,
+    ) -> AppResult<QueueDownloadOutcome> {
+        self.queue_manual_release_for_title_with_routing(actor, title, queued_release, scope, conflict_policy, purpose, None).await
+    }
+
+    async fn queue_manual_release_for_title_with_routing(
+        &self,
+        actor: &User,
+        title: &Title,
+        queued_release: QueuedReleaseSelection,
+        scope: SubmissionScope,
+        conflict_policy: SubmissionConflictPolicy,
+        purpose: DownloadSubmissionPurpose,
+        routing: Option<crate::IndexerGrabSelection>,
     ) -> AppResult<QueueDownloadOutcome> {
         validate_manual_queue_purpose(purpose, title, &scope)?;
         let QueuedReleaseSelection {
@@ -400,7 +456,7 @@ impl AppUseCase {
                     source_kind,
                     source_title: source_title_for_attempt.clone(),
                     source_password: source_password.clone(),
-                    category: Some(category),
+                    category: routing.as_ref().map(|value| value.category.clone()).unwrap_or(Some(category)),
                     queue_priority: None,
                     download_directory: None,
                     release_title: None,
@@ -422,7 +478,7 @@ impl AppUseCase {
                         SubmissionScope::EpisodeSet { .. } | SubmissionScope::Collection { .. }
                     )
                     .then_some(true),
-                    pinned_download_client_id: None,
+                    pinned_download_client_id: routing.as_ref().map(|value| value.client_id.clone()),
                 },
                 scope: scope.clone(),
                 conflict_policy,

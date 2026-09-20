@@ -76,7 +76,7 @@ export function SettingsIndexerSearchContainer() {
     IndexerSearchIndexerOption[]
   >([]);
   const [query, setQuery] = React.useState("");
-  const [kind, setKind] = React.useState<InteractiveSearchKind>("MOVIE");
+  const kind: InteractiveSearchKind = "RAW";
   const [selectedIndexerIds, setSelectedIndexerIds] = React.useState<string[]>(
     presetIndexerId ? [presetIndexerId] : [],
   );
@@ -320,7 +320,6 @@ export function SettingsIndexerSearchContainer() {
         return;
       }
       setQuery(entry.query);
-      setKind(entry.kind as InteractiveSearchKind);
       setSelectedIndexerIds(entry.indexerIds);
       setCategories(entry.categories.join(", "));
     },
@@ -441,8 +440,6 @@ export function SettingsIndexerSearchContainer() {
       <SettingsIndexerSearchSection
         query={query}
         onQueryChange={setQuery}
-        kind={kind}
-        onKindChange={setKind}
         indexerOptions={indexerOptions}
         selectedIndexerIds={selectedIndexerIds}
         onSelectedIndexerIdsChange={setSelectedIndexerIds}
@@ -493,8 +490,6 @@ export function SettingsIndexerSearchContainer() {
         }}
         releases={grabTargets ?? NO_GRAB_TARGETS}
         searchIdByRowKey={searchIdByRowKey}
-        initialQuery={query}
-        kind={kind}
         onGrabbed={handleGrabbed}
       />
     </>

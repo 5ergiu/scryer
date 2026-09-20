@@ -4631,6 +4631,20 @@ input DownloadClientApiKeyOverrideInput {
 }
 
 """
+Read-only category discovery result from a download client.
+"""
+type DownloadClientCategoriesPayload {
+	"""
+	Whether the adapter supports category discovery.
+	"""
+	supported: Boolean!
+	"""
+	Configured category names; empty when none exist or discovery is unsupported.
+	"""
+	categories: [String!]!
+}
+
+"""
 Download-client configuration with provider metadata and masked secret fields.
 """
 type DownloadClientConfigPayload {
@@ -8018,6 +8032,42 @@ type IndexerErrorSummaryPayload {
 	Response Content-Type header when it was valid UTF-8.
 	"""
 	contentType: String
+}
+
+"""
+Eligible download destination and its effective category.
+"""
+type IndexerGrabClientPayload {
+	"""
+	Download client identity.
+	"""
+	id: ID!
+	"""
+	Display name of the download client.
+	"""
+	name: String!
+	"""
+	Effective category; null uses the client's default.
+	"""
+	category: String
+	"""
+	Whether the indexer mapping constrains this destination.
+	"""
+	mapped: Boolean!
+}
+
+"""
+Operator-selected destination for an indexer-search grab.
+"""
+input IndexerGrabSelectionInput {
+	"""
+	Eligible download client identity.
+	"""
+	clientId: ID!
+	"""
+	Omitted uses routing; empty explicitly uses the client's default.
+	"""
+	category: String
 }
 
 """
@@ -15918,6 +15968,24 @@ type MutationRoot {
 	Queue the release represented by a signed candidate token for an existing title.
 	Returns a job id when accepted or a conflict payload when the submission scope is busy.
 	"""
+	queueIndexerSearchAssignment(
+		"""
+		Signed candidate token and submission options; the token supplies the release identity.
+		"""
+		input: QueueDownloadInput!,
+		"""
+		Operator-selected client and optional category override.
+		"""
+		routing: IndexerGrabSelectionInput!,
+		"""
+		Whether this release replaces existing owned media.
+		"""
+		replacement: Boolean!
+	): QueueDownloadPayload!
+	"""
+	Queue the release represented by a signed candidate token for an existing title.
+	Returns a job id when accepted or a conflict payload when the submission scope is busy.
+	"""
 	queueExistingTitleDownload(
 		"""
 		Signed candidate token and submission options; the token supplies the release identity.
@@ -18136,9 +18204,7 @@ type MutationRoot {
 		input: IssueInteractiveReleaseCandidateTokenInput!
 	): IndexerSearchResultPayload!
 	"""
-	Grab one release of an interactive search with no catalog title behind it: it is submitted
-	to the chosen download client and recorded orphan-scoped, so the completed download waits
-	in Activity for a manual import.
+	Submit an interactive-search release without binding a catalog title.
 	"""
 	queueUnlinkedRelease(
 		"""
@@ -18460,6 +18526,10 @@ type ParsedReleasePayload {
 	Normalized title used for matching.
 	"""
 	normalizedTitle: String!
+	"""
+	Year from the existing release parser.
+	"""
+	year: Int
 	"""
 	Release group, or null when not detected.
 	"""
@@ -20732,6 +20802,32 @@ type QueryRoot {
 		input: SearchReleasesInput!
 	): [IndexerSearchResultPayload!]!
 	"""
+	Read the currently eligible grab destinations for an authorized search result.
+	"""
+	indexerGrabClients(
+		"""
+		Interactive search containing the release.
+		"""
+		searchId: ID!,
+		"""
+		Release download URL from that search.
+		"""
+		downloadUrl: String!,
+		"""
+		Optional catalog title used to resolve assignment routing.
+		"""
+		titleId: ID
+	): [IndexerGrabClientPayload!]!
+	"""
+	Read native client category names. Unsupported clients retain custom entry.
+	"""
+	downloadClientCategories(
+		"""
+		Enabled download client to query.
+		"""
+		clientId: ID!
+	): DownloadClientCategoriesPayload!
+	"""
 	Poll an interactive release-search job; null means no visible snapshot exists.
 	"""
 	interactiveReleaseSearch(
@@ -22166,9 +22262,13 @@ input QueueUnlinkedReleaseInput {
 	"""
 	downloadUrl: String!
 	"""
-	Enabled download client the release is handed to.
+	Eligible download client the release is handed to.
 	"""
 	downloadClientId: ID!
+	"""
+	Omitted uses routing; empty explicitly uses the client's default.
+	"""
+	category: String
 }
 
 """

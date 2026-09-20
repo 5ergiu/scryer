@@ -9256,8 +9256,51 @@ pub trait IndexerArtifactResolver: Send + Sync {
     ) -> AppResult<PreparedIndexerArtifact>;
 }
 
+/// An eligible grab destination, ordered by the effective routing policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerGrabClient {
+    pub id: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub mapped: bool,
+}
+
+/// None keeps effective routing; an empty category explicitly selects client default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerGrabSelection {
+    pub client_id: String,
+    pub category: Option<String>,
+}
+
+impl IndexerGrabSelection {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.client_id.trim().is_empty() {
+            return Err(AppError::Validation("select a download client".into()));
+        }
+        if self.category.as_ref().is_some_and(|category|
+            category.len() > 255 || category.chars().any(char::is_control)) {
+            return Err(AppError::Validation("category must be at most 255 bytes without control characters".into()));
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
+    async fn indexer_grab_clients(
+        &self,
+        _title: &Title,
+        _indexer_id: Option<&str>,
+        _source_kind: DownloadSourceKind,
+    ) -> AppResult<Vec<IndexerGrabClient>> {
+        Err(AppError::Validation("client routing discovery is unsupported".into()))
+    }
+
+    /// None explicitly denotes unsupported discovery; an empty list is supported.
+    async fn discover_categories(&self, _client_id: &str) -> AppResult<Option<Vec<String>>> {
+        Ok(None)
+    }
+
     /// Whether this adapter can delete payloads through its native API.
     fn supports_native_data_removal(&self) -> bool {
         false

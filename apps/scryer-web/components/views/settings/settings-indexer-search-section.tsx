@@ -11,7 +11,6 @@ import {
   Download,
   ExternalLink,
   FileDown,
-  Film,
   FolderTree,
   Funnel,
   RefreshCw,
@@ -42,7 +41,6 @@ import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import type {
   InteractiveSearchIndexerProgress,
-  InteractiveSearchKind,
 } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -89,8 +87,6 @@ export type IndexerSearchAdvancedLimits = {
 export type SettingsIndexerSearchSectionProps = {
   query: string;
   onQueryChange: (query: string) => void;
-  kind: InteractiveSearchKind;
-  onKindChange: (kind: InteractiveSearchKind) => void;
   indexerOptions: IndexerSearchIndexerOption[];
   selectedIndexerIds: string[];
   onSelectedIndexerIdsChange: (indexerIds: string[]) => void;
@@ -136,35 +132,10 @@ export type SettingsIndexerSearchSectionProps = {
   downloading: boolean;
 };
 
-const SEARCH_KINDS: InteractiveSearchKind[] = [
-  "MOVIE",
-  "SERIES",
-  "ANIME",
-  "RAW",
-];
-
-const KIND_LABEL_KEYS: Record<InteractiveSearchKind, string> = {
-  MOVIE: "indexerSearch.kind.movie",
-  SERIES: "indexerSearch.kind.series",
-  ANIME: "indexerSearch.kind.anime",
-  RAW: "indexerSearch.kind.raw",
-};
-
-const SORT_KEYS: IndexerSearchSortKey[] = [
-  "newest",
-  "size",
-  "age",
-  "seeders",
-  "priority",
-];
-
-const SORT_LABEL_KEYS: Record<IndexerSearchSortKey, string> = {
-  newest: "indexerSearch.sort.newest",
-  size: "indexerSearch.sort.size",
-  age: "indexerSearch.sort.age",
-  seeders: "indexerSearch.sort.seeders",
-  priority: "indexerSearch.sort.priority",
-};
+const SORT_COLUMNS = ["release", "indexer", "size", "age", "peers"] as const;
+const SORT_KEYS: IndexerSearchSortKey[] = SORT_COLUMNS.flatMap((column) =>
+  [`${column}-asc`, `${column}-desc`] as IndexerSearchSortKey[],
+);
 
 const HEALTH_DOT_CLASS: Record<IndexerHealthTone, string> = {
   ok: "bg-[var(--scry-success-solid)]",
@@ -321,8 +292,6 @@ function AdvancedField({
 function QueryCard({
   query,
   onQueryChange,
-  kind,
-  onKindChange,
   indexerOptions,
   selectedIndexerIds,
   onSelectedIndexerIdsChange,
@@ -343,8 +312,6 @@ function QueryCard({
   SettingsIndexerSearchSectionProps,
   | "query"
   | "onQueryChange"
-  | "kind"
-  | "onKindChange"
   | "indexerOptions"
   | "selectedIndexerIds"
   | "onSelectedIndexerIdsChange"
@@ -402,28 +369,6 @@ function QueryCard({
             </IconButton>
           ) : null}
         </div>
-        <Select
-          value={kind}
-          onValueChange={(value) => onKindChange(value as InteractiveSearchKind)}
-        >
-          <SelectTrigger
-            id="indexer-search-kind"
-            size="large"
-            chrome="dialog"
-            aria-label={t("indexerSearch.kindLabel")}
-            className="h-[46px] min-w-[168px]"
-          >
-            <Film className="h-[15px] w-[15px] text-[var(--scry-faint)]" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SEARCH_KINDS.map((option) => (
-              <SelectItem key={option} value={option}>
-                {t(KIND_LABEL_KEYS[option])}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         {searching ? (
           <Button
             id="indexer-search-cancel"
@@ -981,8 +926,8 @@ function ReleaseRow({
         : "—";
 
   return (
-    <div>
-      <div
+    <div role="rowgroup">
+      <div role="row"
         id={indexerSearchResultRowId(release)}
         data-ui="indexer-search-row"
         className={cn(
@@ -993,20 +938,20 @@ function ReleaseRow({
             "border-l-[var(--scry-accent)] bg-[rgba(var(--scry-accent-rgb),0.07)]",
         )}
       >
-        <Checkbox
+        <div role="cell"><Checkbox
           id={indexerSearchResultSelectId(release)}
           size="table"
           aria-label={t("indexerSearch.row.select")}
           checked={selected}
           onCheckedChange={() => onToggleRow(release)}
-        />
-        <div className="min-w-0">
+        /></div>
+        <div role="cell" className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <ProtocolBadge release={release} />
             <button
               type="button"
               onClick={() => onToggleExpanded(release)}
-              className="min-w-0 truncate text-left text-[13.5px] font-semibold text-[var(--scry-ink3)] hover:underline"
+              className="min-w-0 whitespace-normal [overflow-wrap:anywhere] text-left text-[13.5px] font-semibold text-[var(--scry-ink3)] hover:underline"
             >
               {release.title}
             </button>
@@ -1023,7 +968,7 @@ function ReleaseRow({
             </div>
           ) : null}
         </div>
-        <div className="min-w-0">
+        <div role="cell" className="min-w-0">
           <div className="truncate text-[12.5px] text-[var(--scry-text2)]">
             {release.source ?? "—"}
           </div>
@@ -1033,13 +978,13 @@ function ReleaseRow({
             </div>
           ) : null}
         </div>
-        <span className="text-right text-[13px] font-semibold tabular-nums text-[var(--scry-ink3)]">
+        <span role="cell" className="text-right text-[13px] font-semibold tabular-nums text-[var(--scry-ink3)]">
           {formatReleaseSize(release.sizeBytes)}
         </span>
-        <span className="text-right text-[12.5px] tabular-nums text-[var(--scry-muted2)]">
+        <span role="cell" className="text-right text-[12.5px] tabular-nums text-[var(--scry-muted2)]">
           {age ? t(age.unitKey, { count: age.value }) : "—"}
         </span>
-        <span
+        <span role="cell"
           className={cn(
             "text-right text-[12.5px] tabular-nums",
             rejected
@@ -1049,7 +994,7 @@ function ReleaseRow({
         >
           {peers}
         </span>
-        <div className="flex justify-end gap-1.5">
+        <div role="cell" className="flex justify-end gap-1.5">
           <IconButton
             id={indexerSearchResultGrabId(release)}
             label={t("indexerSearch.row.grab")}
@@ -1092,7 +1037,7 @@ function ReleaseRow({
           </IconButton>
         </div>
       </div>
-      {expanded ? <ReleaseDetail release={release} /> : null}
+      {expanded ? <div role="row"><div role="cell" aria-colspan={7}><ReleaseDetail release={release} /></div></div> : null}
     </div>
   );
 }
@@ -1150,7 +1095,7 @@ export function SettingsIndexerSearchSection(
             </span>
             <div className="min-w-2 flex-1" />
             <Select
-              value={sort}
+              value={sort === "newest" ? "age-asc" : sort}
               onValueChange={(value) =>
                 onSortChange(value as IndexerSearchSortKey)
               }
@@ -1168,7 +1113,7 @@ export function SettingsIndexerSearchSection(
               <SelectContent>
                 {SORT_KEYS.map((option) => (
                   <SelectItem key={option} value={option}>
-                    {t(SORT_LABEL_KEYS[option])}
+                    {t(`indexerSearch.column.${option.split("-")[0]}`)} {option.endsWith("-desc") ? "↓" : "↑"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1176,26 +1121,30 @@ export function SettingsIndexerSearchSection(
           </div>
 
           <div className="w-full min-w-0 max-w-full overflow-x-auto">
-            <div className="min-w-[1020px]">
-              <div
+            <div role="table" className="min-w-[1020px]">
+              <div role="row"
                 className={cn(
                   RESULT_GRID_CLASS,
                   "border-b border-[var(--scry-border)] py-2.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-faint2)]",
                 )}
               >
-                <span />
-                <span>{t("indexerSearch.column.release")}</span>
-                <span>{t("indexerSearch.column.indexer")}</span>
-                <span className="text-right">
-                  {t("indexerSearch.column.size")}
-                </span>
-                <span className="text-right">
-                  {t("indexerSearch.column.age")}
-                </span>
-                <span className="text-right">
-                  {t("indexerSearch.column.peers")}
-                </span>
-                <span className="text-right">{t("label.actions")}</span>
+                <span role="columnheader" />
+                {SORT_COLUMNS.map((column) => {
+                  const current = sort === "newest" ? "age-asc" : sort;
+                  const active = current.startsWith(`${column}-`);
+                  const descending = current.endsWith("-desc");
+                  return (
+                    <div key={column} role="columnheader"
+                      aria-sort={active ? descending ? "descending" : "ascending" : "none"}
+                      className={column === "release" || column === "indexer" ? "" : "text-right"}>
+                      <button type="button" className="hover:text-foreground"
+                        onClick={() => onSortChange(`${column}-${active && !descending ? "desc" : "asc"}`)}>
+                        {t(`indexerSearch.column.${column}`)} {active ? descending ? "↓" : "↑" : "↕"}
+                      </button>
+                    </div>
+                  );
+                })}
+                <span role="columnheader" className="text-right">{t("label.actions")}</span>
               </div>
               {rows.map((release) => {
                 const key = indexerSearchRowKey(release);
@@ -1252,10 +1201,7 @@ export function SettingsIndexerSearchSection(
                   count: selectedReleases.length,
                 })}
               </strong>
-              {" · "}
-              {hasSelection
-                ? formatReleaseSize(totalReleaseBytes(selectedReleases))
-                : t("indexerSearch.footer.nothingQueued")}
+              {hasSelection && ` · ${formatReleaseSize(totalReleaseBytes(selectedReleases))}`}
             </span>
             <div className="min-w-2 flex-1" />
             <Button

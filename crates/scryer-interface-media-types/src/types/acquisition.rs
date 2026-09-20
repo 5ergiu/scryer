@@ -213,6 +213,8 @@ pub struct ParsedReleasePayload {
     pub raw_title: String,
     /// Normalized title used for matching.
     pub normalized_title: String,
+    /// Year from the existing release parser.
+    pub year: Option<i32>,
     /// Release group, or null when not detected.
     pub release_group: Option<String>,
     /// Quality label, or null when not detected.
@@ -803,8 +805,41 @@ pub struct QueueUnlinkedReleaseInput {
     pub search_id: ID,
     /// Download URL of the release as returned by that search.
     pub download_url: String,
-    /// Enabled download client the release is handed to.
+    /// Eligible download client the release is handed to.
     pub download_client_id: ID,
+    /// Omitted uses routing; empty explicitly uses the client's default.
+    pub category: Option<String>,
+}
+
+#[derive(InputObject)]
+/// Operator-selected destination for an indexer-search grab.
+pub struct IndexerGrabSelectionInput {
+    /// Eligible download client identity.
+    pub client_id: ID,
+    /// Omitted uses routing; empty explicitly uses the client's default.
+    pub category: Option<String>,
+}
+
+#[derive(SimpleObject)]
+/// Eligible download destination and its effective category.
+pub struct IndexerGrabClientPayload {
+    /// Download client identity.
+    pub id: ID,
+    /// Display name of the download client.
+    pub name: String,
+    /// Effective category; null uses the client's default.
+    pub category: Option<String>,
+    /// Whether the indexer mapping constrains this destination.
+    pub mapped: bool,
+}
+
+#[derive(SimpleObject)]
+/// Read-only category discovery result from a download client.
+pub struct DownloadClientCategoriesPayload {
+    /// Whether the adapter supports category discovery.
+    pub supported: bool,
+    /// Configured category names; empty when none exist or discovery is unsupported.
+    pub categories: Vec<String>,
 }
 
 #[derive(SimpleObject, Clone)]

@@ -452,7 +452,7 @@ test("stored saved searches survive junk in localStorage", () => {
         { query: "", kind: "MOVIE" },
       ]),
     ),
-    [{ query: "dune", kind: "MOVIE", indexerIds: ["a"], categories: [] }],
+    [{ query: "dune", kind: "RAW", indexerIds: ["a"], categories: [] }],
   );
 });
 
@@ -488,4 +488,30 @@ test("only http(s) releases can be downloaded to the browser", () => {
     ),
     [usenet.title, torrentFile.title],
   );
+});
+
+
+test("every data column sorts in both directions with missing values last", () => {
+  const a = release({ title: "alpha", source: "alpha", sizeBytes: 2, publishedAt: "2026-01-02", seeders: 2 });
+  const b = release({ title: "Beta", source: "Beta", sizeBytes: 10, publishedAt: "2026-01-01", grabs: 10 });
+  const missing = release({ title: "", source: null, sizeBytes: null, publishedAt: "invalid" });
+  for (const column of ["release", "indexer", "size", "age", "peers"] as const) {
+    assert.deepEqual(sortIndexerSearchReleases([missing, b, a], `${column}-asc`, new Map()), [a, b, missing], column);
+    assert.deepEqual(sortIndexerSearchReleases([a, missing, b], `${column}-desc`, new Map()), [b, a, missing], column);
+  }
+});
+
+test("ties use row identity independently of arrival order", () => {
+  const a = release({ title: "same", downloadUrl: "https://example.test/a" });
+  const b = release({ title: "same", downloadUrl: "https://example.test/b" });
+  for (const key of ["release-asc", "release-desc", "size-asc", "size-desc"] as const) {
+    assert.deepEqual(sortIndexerSearchReleases([b, a], key, new Map()), sortIndexerSearchReleases([a, b], key, new Map()));
+  }
+});
+
+test("saved media searches become raw while retaining explicit scope", () => {
+  for (const kind of ["MOVIE", "SERIES", "ANIME", "RAW"]) {
+    assert.deepEqual(parseSavedIndexerSearches(JSON.stringify([{ query: "example", kind, indexerIds: ["one"], categories: ["2000"] }])),
+      [{ query: "example", kind: "RAW", indexerIds: ["one"], categories: ["2000"] }]);
+  }
 });

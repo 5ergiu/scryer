@@ -551,6 +551,7 @@ pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, BlocklistRepository, BuiltinDownloadClientConnectionTester,
     DatastoreInfo, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
+    IndexerGrabClient, IndexerGrabSelection,
     DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
     DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
     DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,

@@ -1239,6 +1239,7 @@ export const RELEASE_SEARCH_RESULT_FIELDS = `
     parsedRelease {
       rawTitle
       normalizedTitle
+      year
       releaseGroup
       quality
       source
@@ -1686,6 +1687,16 @@ ${pageMetadataFields}
 }
 
 export const titlesQuery = buildTitlesQuery();
+
+export const indexerGrabClientsQuery = `query IndexerGrabClients($searchId: ID!, $downloadUrl: String!, $titleId: ID) {
+  indexerGrabClients(searchId: $searchId, downloadUrl: $downloadUrl, titleId: $titleId) {
+    id name category mapped
+  }
+}`;
+
+export const downloadClientCategoriesQuery = `query DownloadClientCategories($clientId: ID!) {
+  downloadClientCategories(clientId: $clientId) { supported categories }
+}`;
 
 export const catalogSearchTitlesQuery = `query CatalogSearchTitles($facet: MediaFacetValue, $libraryIds: [ID!], $query: String, $limit: Int = 25) {
   titles(facet: $facet, libraryIds: $libraryIds, query: $query, limit: $limit) {
