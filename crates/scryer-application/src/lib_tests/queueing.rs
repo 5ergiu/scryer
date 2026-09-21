@@ -4030,7 +4030,8 @@ async fn series_movie_wanted_subject_uses_parent_owner_when_title_facet_is_missi
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
 
     assert_eq!(search_title.facet, MediaFacet::Movie);
     assert_eq!(subject.title_id, title.id);
@@ -4261,7 +4262,8 @@ async fn convergence_test_title_and_subject(
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     (title, subject)
 }
 
@@ -4586,7 +4588,8 @@ async fn background_acquisition_requeries_only_the_pruned_indexer() {
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     let convergence = app
         .resolve_scope_convergence(&title, &subject)
         .await
@@ -4720,7 +4723,8 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     let convergence = app
         .resolve_scope_convergence(&title, &subject)
         .await
@@ -5509,7 +5513,8 @@ async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
 
     let release = "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb";
     let parsed = crate::release_parser::parse_release_metadata_for_target(

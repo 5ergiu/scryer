@@ -16,18 +16,17 @@
 //!   they carry rows out of the catalog, never files out of the data
 //!   directory — so this directory is excluded by construction, and a
 //!   restore bumps the projection generation, which invalidates whatever
-//!   index the restoring installation happened to have. Every
-//!   read path below degrades to "no fuzzy candidates" — the exact lanes keep
-//!   serving — when the index is missing, stale, corrupt or mid-rebuild.
+//!   index the restoring installation happened to have. Opening and reads
+//!   wait for required rebuilds. An unavailable index is an error, never
+//!   evidence that there are no competing titles.
 //! * The directory is opened through [`MmapDirectory`] only. No other
 //!   directory implementation is compiled in.
 //! * A writer is created per batch and dropped when the batch commits. A
-//!   long-lived writer would hold its heap for the life of the process and
-//!   would keep a lock file across a crash for no benefit.
+//!   separate process lock protects the directory throughout its lifetime,
+//!   including recovery. The OS releases ownership after a crash.
 //! * `scryer_fuzzy.json` beside the segments records the schema version this
 //!   build writes and the projection stamp the contents were built from. A
-//!   mismatch, a missing file or an unreadable one is a rebuild, in the
-//!   background, silently.
+//!   mismatch, a missing file or an unreadable one requires a blocking rebuild.
 //! * Incremental freshness rides on `title_search_index_queue`, which the
 //!   projection writer fills in the *same database transaction* as the
 //!   projection row. A queued title is therefore never lost to a rollback,
@@ -37,7 +36,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use scryer_application::{AppError, AppResult};
@@ -199,29 +198,6 @@ fn register_tokenizers(index: &Index) -> AppResult<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum IndexState {
-    /// Segments match the projection stamp the meta file records.
-    Ready = 0,
-    /// A rebuild is running. Reads answer nothing rather than answering from
-    /// a half-built index and silently narrowing a match to one candidate.
-    Rebuilding = 1,
-    /// The directory could not be opened or written at all. The exact lanes
-    /// are the whole service until the process restarts.
-    Unavailable = 2,
-}
-
-impl IndexState {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Ready,
-            1 => Self::Rebuilding,
-            _ => Self::Unavailable,
-        }
-    }
-}
-
 pub struct TitleFuzzyIndex {
     dir: PathBuf,
     index: Index,
@@ -231,7 +207,9 @@ pub struct TitleFuzzyIndex {
     /// One writer at a time, always. Tantivy enforces this with a lock file;
     /// taking it in process turns a hard error into a wait.
     write_lock: tokio::sync::Mutex<()>,
-    state: AtomicU8,
+    rebuild_complete: AtomicBool,
+    // Keep directory ownership until the index and reader have been dropped.
+    _ownership: std::fs::File,
 }
 
 /// A resolver-lane request: one bucket of the name index, the same
@@ -260,117 +238,52 @@ pub struct UiFuzzyHit {
 }
 
 impl TitleFuzzyIndex {
-    /// Open (or create) the index under `data_dir`, and schedule a silent
-    /// background rebuild when what is on disk cannot be trusted.
-    ///
-    /// This never fails the caller: a directory that cannot be opened leaves
-    /// the index [`IndexState::Unavailable`] and every query answers nothing,
-    /// which is precisely the degraded mode the exact lanes are there for.
-    pub async fn open(data_dir: &Path, source: Arc<dyn TitleTermSource>) -> Arc<Self> {
+    /// Open the index, completing any required recovery and rebuild first.
+    /// Failure to provide the complete index is an error, never an empty match.
+    pub async fn open(data_dir: &Path, source: Arc<dyn TitleTermSource>) -> AppResult<Arc<Self>> {
         let dir = data_dir.join(FUZZY_INDEX_DIR);
-        match Self::open_inner(dir.clone(), source.clone()).await {
-            Ok(index) => index,
-            Err(error) => {
-                tracing::warn!(
-                    path = %dir.display(),
-                    %error,
-                    "title fuzzy index unavailable; exact title lanes only"
-                );
-                Arc::new(Self::unavailable(dir, source))
-            }
-        }
-    }
-
-    fn unavailable(dir: PathBuf, source: Arc<dyn TitleTermSource>) -> Self {
-        // A schema-only in-memory index so the type stays total: every query
-        // below short-circuits on the state before it touches this.
-        let (schema, fields) = build_schema();
-        let index = Index::create_in_ram(schema);
-        let _ = register_tokenizers(&index);
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .expect("in-ram reader");
-        Self {
-            dir,
-            index,
-            reader,
-            fields,
-            source,
-            write_lock: tokio::sync::Mutex::new(()),
-            state: AtomicU8::new(IndexState::Unavailable as u8),
-        }
+        Self::open_inner(dir, source).await
     }
 
     async fn open_inner(dir: PathBuf, source: Arc<dyn TitleTermSource>) -> AppResult<Arc<Self>> {
-        let (schema, fields) = build_schema();
+        let (_, fields) = build_schema();
         let open_dir = dir.clone();
-        let index = tokio::task::spawn_blocking(move || -> AppResult<Index> {
-            std::fs::create_dir_all(&open_dir)
-                .map_err(|error| AppError::Repository(error.to_string()))?;
-            let directory = MmapDirectory::open(&open_dir)
-                .map_err(|error| AppError::Repository(error.to_string()))?;
-            Index::open_or_create(directory, schema)
-                .map_err(|error| AppError::Repository(error.to_string()))
-        })
-        .await
-        .map_err(|error| AppError::Repository(error.to_string()))??;
-        register_tokenizers(&index)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|error: tantivy::TantivyError| AppError::Repository(error.to_string()))?;
+        let (ownership, index, reader) =
+            tokio::task::spawn_blocking(move || open_owned_index(&open_dir))
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))??;
 
         let handle = Arc::new(Self {
             dir,
+            _ownership: ownership,
             index,
             reader,
             fields,
             source,
             write_lock: tokio::sync::Mutex::new(()),
-            state: AtomicU8::new(IndexState::Rebuilding as u8),
+            rebuild_complete: AtomicBool::new(false),
         });
 
         let stamp = handle.source.projection_stamp().await?;
         if handle.read_meta().is_some_and(|meta| meta == stamp) {
-            handle
-                .state
-                .store(IndexState::Ready as u8, Ordering::SeqCst);
+            handle.rebuild_complete.store(true, Ordering::SeqCst);
         } else {
-            handle.spawn_rebuild(stamp);
+            handle.rebuild(stamp).await?;
         }
+        handle.sync().await?;
         Ok(handle)
     }
 
-    /// Rebuild in the background and say nothing. A rebuild is expected on
-    /// first start, after an upgrade that changes collation data, and after
-    /// the directory is lost; none of those is an operator-facing event.
-    fn spawn_rebuild(self: &Arc<Self>, stamp: ProjectionStamp) {
-        let handle = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Err(error) = handle.rebuild(stamp).await {
-                tracing::warn!(
-                    path = %handle.dir.display(),
-                    %error,
-                    "title fuzzy index rebuild failed; exact title lanes only"
-                );
-                handle
-                    .state
-                    .store(IndexState::Unavailable as u8, Ordering::SeqCst);
-            }
-        });
+    /// Drop every document and page the projection back in, one writer per
+    /// batch. Readers wait for the complete replacement before proceeding.
+    pub async fn rebuild(&self, stamp: ProjectionStamp) -> AppResult<()> {
+        let _guard = self.write_lock.lock().await;
+        self.rebuild_locked(stamp).await
     }
 
-    /// Drop every document and page the projection back in, one writer per
-    /// batch. Public so a test — and a future maintenance command — can force
-    /// it and await the result instead of racing a background task.
-    pub async fn rebuild(&self, stamp: ProjectionStamp) -> AppResult<()> {
-        self.state
-            .store(IndexState::Rebuilding as u8, Ordering::SeqCst);
-        let _guard = self.write_lock.lock().await;
-        self.remove_meta();
+    async fn rebuild_locked(&self, stamp: ProjectionStamp) -> AppResult<()> {
+        self.rebuild_complete.store(false, Ordering::SeqCst);
+        self.remove_meta()?;
 
         {
             let index = self.index.clone();
@@ -405,25 +318,34 @@ impl TitleFuzzyIndex {
         // way the stamp below describes the projection the pages came from.
         self.write_meta(&stamp)?;
         self.reload()?;
-        self.state.store(IndexState::Ready as u8, Ordering::SeqCst);
+        self.rebuild_complete.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Apply everything `title_search_index_queue` holds. Cheap when the
-    /// queue is empty, which is the normal case: one indexed read.
+    /// Apply everything `title_search_index_queue` holds and check that the
+    /// projection generation has not changed while draining it.
     ///
     /// Called before a fuzzy read rather than from a timer, so a caller never
     /// sees a title the database has already accepted but the index has not.
     pub async fn sync(&self) -> AppResult<()> {
-        if IndexState::from_u8(self.state.load(Ordering::SeqCst)) != IndexState::Ready {
-            return Ok(());
-        }
+        let _guard = self.write_lock.lock().await;
+        self.sync_locked().await
+    }
+
+    async fn sync_locked(&self) -> AppResult<()> {
         loop {
+            let stamp = self.source.projection_stamp().await?;
+            if !self.ready() || !self.stamp_matches(&stamp) {
+                self.rebuild_locked(stamp).await?;
+                continue;
+            }
             let queued = self.source.queued_titles(QUEUE_DRAIN_BATCH).await?;
             if queued.is_empty() {
-                return Ok(());
+                if self.source.projection_stamp().await? == stamp {
+                    return Ok(());
+                }
+                continue;
             }
-            let _guard = self.write_lock.lock().await;
             let title_ids = queued
                 .iter()
                 .map(|entry| entry.title_id.clone())
@@ -433,9 +355,6 @@ impl TitleFuzzyIndex {
             self.reload()?;
             let seqs = queued.iter().map(|entry| entry.seq).collect::<Vec<_>>();
             self.source.clear_queued(&seqs).await?;
-            if (queued.len() as i64) < QUEUE_DRAIN_BATCH {
-                return Ok(());
-            }
         }
     }
 
@@ -517,14 +436,18 @@ impl TitleFuzzyIndex {
         .map_err(|error| AppError::Repository(error.to_string()))
     }
 
-    fn remove_meta(&self) {
+    fn remove_meta(&self) -> AppResult<()> {
         // A rebuild that dies halfway must not leave a stamp claiming the
         // segments are complete.
-        let _ = std::fs::remove_file(self.meta_path());
+        match std::fs::remove_file(self.meta_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::Repository(error.to_string())),
+        }
     }
 
     fn ready(&self) -> bool {
-        IndexState::from_u8(self.state.load(Ordering::SeqCst)) == IndexState::Ready
+        self.rebuild_complete.load(Ordering::SeqCst)
     }
 
     /// The resolver lane: term ids of projected names within `distance` edits
@@ -533,12 +456,16 @@ impl TitleFuzzyIndex {
     /// Returns term ids rather than hydrated candidates so the caller reads
     /// the candidate columns from `title_search_terms` — one source of truth
     /// for what a candidate *is*, whichever lane found it.
-    pub async fn resolver_candidates(&self, query: ResolverFuzzyQuery<'_>) -> Vec<i64> {
-        if !self.ready() || query.match_term.is_empty() {
-            return Vec::new();
+    pub async fn resolver_candidates(&self, query: ResolverFuzzyQuery<'_>) -> AppResult<Vec<i64>> {
+        let _guard = self.write_lock.lock().await;
+        self.sync_locked().await?;
+        if query.match_term.is_empty() {
+            return Ok(Vec::new());
         }
         let fields = self.fields;
-        let reader = self.reader.clone();
+        // Pin a complete generation before allowing another rebuild to start.
+        let searcher = self.reader.searcher();
+        drop(_guard);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![
             (Occur::Must, term_clause(fields.script, query.script)),
             (
@@ -570,7 +497,6 @@ impl TitleFuzzyIndex {
         let limit = query.limit;
         let boolean = BooleanQuery::new(clauses);
         let hits = tokio::task::spawn_blocking(move || -> tantivy::Result<Vec<i64>> {
-            let searcher = reader.searcher();
             let docs = searcher.search(
                 &boolean,
                 &TopDocs::with_limit(limit.max(1)).order_by_score(),
@@ -589,17 +515,8 @@ impl TitleFuzzyIndex {
         })
         .await;
 
-        match hits {
-            Ok(Ok(term_ids)) => term_ids,
-            Ok(Err(error)) => {
-                tracing::debug!(%error, "title fuzzy resolver lane failed");
-                Vec::new()
-            }
-            Err(error) => {
-                tracing::debug!(%error, "title fuzzy resolver lane panicked");
-                Vec::new()
-            }
-        }
+        hits.map_err(|error| AppError::Repository(error.to_string()))?
+            .map_err(|error| AppError::Repository(error.to_string()))
     }
 
     /// The UI lane: per query token, the titles holding a projected token
@@ -610,10 +527,15 @@ impl TitleFuzzyIndex {
         facets: &[&str],
         distance_for: impl Fn(usize) -> u8,
         limit_per_token: usize,
-    ) -> Vec<UiFuzzyHit> {
-        if !self.ready() || tokens.is_empty() {
-            return Vec::new();
+    ) -> AppResult<Vec<UiFuzzyHit>> {
+        let _guard = self.write_lock.lock().await;
+        self.sync_locked().await?;
+        if tokens.is_empty() {
+            return Ok(Vec::new());
         }
+        // All tokens must search the same complete generation.
+        let searcher = self.reader.searcher();
+        drop(_guard);
         let fields = self.fields;
         let mut hits = Vec::new();
         for token in tokens {
@@ -640,10 +562,9 @@ impl TitleFuzzyIndex {
                 )),
             ));
             let boolean = BooleanQuery::new(clauses);
-            let reader = self.reader.clone();
+            let searcher = searcher.clone();
             let token_key = token.clone();
             let found = tokio::task::spawn_blocking(move || -> tantivy::Result<Vec<UiFuzzyHit>> {
-                let searcher = reader.searcher();
                 let docs = searcher.search(
                     &boolean,
                     &TopDocs::with_limit(limit_per_token.max(1)).order_by_score(),
@@ -668,14 +589,119 @@ impl TitleFuzzyIndex {
                 Ok(found)
             })
             .await;
-            match found {
-                Ok(Ok(found)) => hits.extend(found),
-                Ok(Err(error)) => tracing::debug!(%error, "title fuzzy ui lane failed"),
-                Err(error) => tracing::debug!(%error, "title fuzzy ui lane panicked"),
-            }
+            hits.extend(
+                found
+                    .map_err(|error| AppError::Repository(error.to_string()))?
+                    .map_err(|error| AppError::Repository(error.to_string()))?,
+            );
         }
-        hits
+        Ok(hits)
     }
+}
+
+fn reject_symlink(path: &Path) -> AppResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::Repository(format!(
+            "title index path must not be a symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Repository(error.to_string())),
+    }
+}
+
+fn open_index_files(dir: &Path) -> tantivy::Result<(Index, IndexReader)> {
+    std::fs::create_dir_all(dir)?;
+    if dir.join(META_FILE).exists() && !dir.join("meta.json").exists() {
+        return Err(tantivy::directory::error::OpenReadError::FileDoesNotExist(
+            dir.join("meta.json"),
+        )
+        .into());
+    }
+    let directory = MmapDirectory::open(dir)?;
+    let index = Index::open_or_create(directory, build_schema().0)?;
+    register_tokenizers(&index)
+        .map_err(|error| tantivy::TantivyError::InvalidArgument(error.to_string()))?;
+    if !index.validate_checksum()?.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "title index checksum mismatch",
+        )
+        .into());
+    }
+    let reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()?;
+    Ok((index, reader))
+}
+
+fn recoverable_index_error(error: &tantivy::TantivyError) -> bool {
+    use tantivy::TantivyError;
+    use tantivy::directory::error::OpenReadError;
+    match error {
+        TantivyError::DataCorruption(_)
+        | TantivyError::SchemaError(_)
+        | TantivyError::IncompatibleIndex(_)
+        | TantivyError::DeserializeError(_)
+        | TantivyError::OpenReadError(OpenReadError::FileDoesNotExist(_))
+        | TantivyError::OpenReadError(OpenReadError::IncompatibleIndex(_)) => true,
+        TantivyError::IoError(error)
+        | TantivyError::OpenReadError(OpenReadError::IoError {
+            io_error: error, ..
+        }) => error.kind() == std::io::ErrorKind::InvalidData,
+        _ => false,
+    }
+}
+
+fn open_owned_index(dir: &Path) -> AppResult<(std::fs::File, Index, IndexReader)> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| AppError::Repository("title index has no parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(|error| AppError::Repository(error.to_string()))?;
+    let lock_path = parent.join("title-fuzzy-index.lock");
+    reject_symlink(&lock_path)?;
+    let ownership = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+    ownership.try_lock().map_err(|error| {
+        AppError::Repository(format!(
+            "title index is already owned or cannot be locked: {error}"
+        ))
+    })?;
+    reject_symlink(dir)?;
+    if dir.exists() && !dir.is_dir() {
+        return Err(AppError::Repository(
+            "title index path is not a directory".into(),
+        ));
+    }
+    let (index, reader) = match open_index_files(dir) {
+        Ok(opened) => opened,
+        Err(error) if recoverable_index_error(&error) => {
+            // Reserve a new sibling without replacing anything already there.
+            // Keep the entire old directory, including files Tantivy does not own.
+            let mut suffix = 0u64;
+            let preserved = loop {
+                let candidate = parent.join(format!("{FUZZY_INDEX_DIR}.recovery-{suffix}"));
+                match std::fs::create_dir(&candidate) {
+                    Ok(()) => break candidate,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
+                    Err(error) => return Err(AppError::Repository(error.to_string())),
+                }
+            };
+            std::fs::rename(dir, preserved.join(FUZZY_INDEX_DIR))
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+            tracing::warn!(%error, path = %preserved.display(), "preserved unreadable title index; rebuilding before use");
+            open_index_files(dir).map_err(|error| AppError::Repository(error.to_string()))?
+        }
+        Err(error) => return Err(AppError::Repository(error.to_string())),
+    };
+    Ok((ownership, index, reader))
 }
 
 fn term_clause(field: Field, value: &str) -> Box<dyn Query> {

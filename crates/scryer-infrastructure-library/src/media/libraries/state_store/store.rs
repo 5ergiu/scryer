@@ -120,13 +120,16 @@ impl WantedStore {
         self
     }
 
-    async fn typo_ranks(&self, query: &AcquisitionScopeStatesQuery) -> Vec<(String, i64)> {
+    async fn typo_ranks(
+        &self,
+        query: &AcquisitionScopeStatesQuery,
+    ) -> AppResult<Vec<(String, i64)>> {
         let Some(plan) = query
             .title_search
             .as_deref()
             .and_then(|search| crate::queries::title_search::build_title_search_plan(None, search))
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         scryer_infrastructure_library_search::resolve_typo_title_ranks(self.fuzzy.as_deref(), &plan)
             .await
@@ -616,7 +619,7 @@ fn append_wanted_query_filters(
     sql: &mut String,
     args: &mut Vec<SqlArg>,
     query: &AcquisitionScopeStatesQuery,
-    include_title_search: bool,
+    title_search: Option<&crate::queries::title_search::ResolvedTitleSearch>,
 ) {
     append_in_filter(sql, args, "w.status", &query.statuses);
     append_in_filter(sql, args, "w.media_type", &query.media_types);
@@ -625,29 +628,11 @@ fn append_wanted_query_filters(
         args.push(SqlArg::Text(title_id.to_string()));
     }
     append_in_filter(sql, args, "t.library_id", &query.library_ids);
-    if include_title_search
-        && let Some(normalized) = query
-            .title_search
-            .as_deref()
-            .map(crate::queries::title_search::normalize_title_search_text)
-            .filter(|value| !value.is_empty())
-    {
-        sql.push_str(
-            " AND EXISTS (
-                SELECT 1
-                  FROM title_search_terms wanted_title_search
-                 WHERE wanted_title_search.title_id = w.title_id
-                   AND wanted_title_search.term_kind NOT LIKE '%_token'
-                   AND (
-                        wanted_title_search.normalized_term = {}
-                        OR wanted_title_search.normalized_term LIKE {}
-                        OR wanted_title_search.normalized_term LIKE {}
-                   )
-            )",
-        );
-        args.push(SqlArg::Text(normalized.clone()));
-        args.push(SqlArg::Text(format!("{normalized}%")));
-        args.push(SqlArg::Text(format!("%{normalized}%")));
+    if let Some(title_search) = title_search {
+        let (predicate, search_args) = title_search.predicate("w.title_id");
+        sql.push_str(" AND ");
+        sql.push_str(&predicate);
+        args.extend(search_args.into_iter().map(SqlArg::Text));
     }
     append_in_filter(
         sql,
@@ -1200,7 +1185,7 @@ impl AcquisitionScopeStateRepository for WantedStore {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
             && sqlite_title_search_has_text(&query)
         {
-            let typo_ranks = self.typo_ranks(&query).await;
+            let typo_ranks = self.typo_ranks(&query).await?;
             return crate::queries::wanted::list_wanted_items_query(pool, &query, &typo_ranks)
                 .await;
         }
@@ -1208,7 +1193,13 @@ impl AcquisitionScopeStateRepository for WantedStore {
         let mut sql = wanted_item_select_sql().to_string();
         sql.push_str(" WHERE 1=1");
         let mut args = Vec::new();
-        append_wanted_query_filters(&mut sql, &mut args, &query, true);
+        let title_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            None,
+            query.title_search.as_deref(),
+        )
+        .await?;
+        append_wanted_query_filters(&mut sql, &mut args, &query, title_search.as_ref());
         sql.push_str(" ORDER BY w.updated_at DESC LIMIT {} OFFSET {}");
         args.push(SqlArg::I64(query.limit));
         args.push(SqlArg::I64(query.offset));
@@ -1227,7 +1218,7 @@ impl AcquisitionScopeStateRepository for WantedStore {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
             && sqlite_title_search_has_text(&query)
         {
-            let typo_ranks = self.typo_ranks(&query).await;
+            let typo_ranks = self.typo_ranks(&query).await?;
             return crate::queries::wanted::count_wanted_items_query(pool, &query, &typo_ranks)
                 .await;
         }
@@ -1246,7 +1237,13 @@ impl AcquisitionScopeStateRepository for WantedStore {
               WHERE 1=1",
         );
         let mut args = Vec::new();
-        append_wanted_query_filters(&mut sql, &mut args, &query, true);
+        let title_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            None,
+            query.title_search.as_deref(),
+        )
+        .await?;
+        append_wanted_query_filters(&mut sql, &mut args, &query, title_search.as_ref());
         SqlRuntime::fetch_optional(self.datastore.read_exec(), &sql, &args)
             .await?
             .map(|row| row.i64("cnt"))

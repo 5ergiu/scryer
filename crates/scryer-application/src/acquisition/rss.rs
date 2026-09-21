@@ -2090,9 +2090,16 @@ impl AppUseCase {
             };
 
             let search_title = series_movie_search_title(title, &link);
-            let subject = self
+            let subject = match self
                 .resolve_release_search_subject_for_wanted_item(title, &search_title, &wanted, None)
-                .await;
+                .await
+            {
+                Ok(subject) => subject,
+                Err(error) => {
+                    tracing::error!(%error, title_id = %title.id, "RSS series movie: title index unavailable");
+                    continue;
+                }
+            };
             let matched_releases = releases
                 .iter()
                 .filter(|release| {
@@ -2281,14 +2288,21 @@ impl AppUseCase {
         let search_title = self
             .release_search_title_for_wanted_item(title, &wanted, episode.as_ref())
             .await;
-        let mut subject = self
+        let mut subject = match self
             .resolve_release_search_subject_for_wanted_item(
                 title,
                 &search_title,
                 &wanted,
                 episode.as_ref(),
             )
-            .await;
+            .await
+        {
+            Ok(subject) => subject,
+            Err(error) => {
+                tracing::error!(%error, title_id = %title.id, "RSS acquisition: title index unavailable");
+                return;
+            }
+        };
         if let Some(scope) = scope_override.as_ref() {
             subject.submission_scope = scope.clone();
         }

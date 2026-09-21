@@ -1,9 +1,8 @@
-//! The tantivy index itself: freshness, invalidation and degradation.
+//! The Tantivy index itself: freshness, invalidation and blocking recovery.
 //!
 //! Every other search test goes through a store. These go at the index
-//! directly, because its contract — a queue drained before every fuzzy read,
-//! a stamp that invalidates the whole thing, and silence plus empty results
-//! whenever it cannot serve — is what the exact lanes are allowed to rely on.
+//! directly: reads require a complete projection, wait for rebuilds, and return
+//! an error when the index cannot serve them.
 
 use super::*;
 use scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource;
@@ -27,6 +26,7 @@ async fn open_index(services: &SqliteServices, dir: &std::path::Path) -> Arc<Tit
         Arc::new(DatastoreTitleTermSource::new(services.datastore())),
     )
     .await
+    .expect("index must open ready")
 }
 
 /// The resolver's own query shape, spelled the way the port spells it.
@@ -74,7 +74,8 @@ async fn a_queued_title_is_visible_to_the_next_fuzzy_read() {
 
     let candidates = index
         .resolver_candidates(resolver_query(&observed("Akumo"), 1))
-        .await;
+        .await
+        .expect("lookup must succeed");
     assert!(
         !candidates.is_empty(),
         "a one-edit misspelling must reach the title queued a moment ago"
@@ -101,6 +102,7 @@ async fn a_deleted_title_leaves_the_index_on_the_next_sync() {
         !index
             .resolver_candidates(resolver_query(&observed("Akumo"), 1))
             .await
+            .expect("lookup must succeed")
             .is_empty()
     );
 
@@ -112,6 +114,7 @@ async fn a_deleted_title_leaves_the_index_on_the_next_sync() {
         index
             .resolver_candidates(resolver_query(&observed("Akumo"), 1))
             .await
+            .expect("lookup must succeed")
             .is_empty(),
         "a deleted title must not keep answering from the index"
     );
@@ -143,41 +146,358 @@ async fn a_stamp_from_another_projection_marks_the_directory_for_rebuild() {
         "a foreign stamp must send the next open into a rebuild"
     );
 
-    index
-        .rebuild(current.clone())
-        .await
-        .expect("rebuild must succeed");
+    drop(index);
+    let index = open_index(&services, dir.path()).await;
     assert!(index.stamp_matches(&current));
     assert!(
         !index
             .resolver_candidates(resolver_query(&observed("Akumo"), 1))
             .await
+            .expect("lookup must succeed")
             .is_empty(),
         "the rebuilt index must answer again"
+    );
+
+    sqlx::query("UPDATE title_search_meta SET projection_generation = projection_generation + 1")
+        .execute(services.pool())
+        .await
+        .unwrap();
+    let restored = index_stamp(&services).await;
+    assert!(!index.stamp_matches(&restored));
+    assert!(
+        !index
+            .resolver_candidates(resolver_query(&observed("Akumo"), 1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        index.stamp_matches(&restored),
+        "a live projection change must rebuild before the read returns"
     );
 
     let _ = std::fs::remove_file(db);
 }
 
 #[tokio::test]
-async fn an_unusable_directory_answers_nothing_instead_of_failing() {
+async fn an_unusable_directory_is_an_error() {
     let (services, db) = temp_services("scryer_fuzzy_index_unusable").await;
     let dir = tempfile::tempdir().unwrap();
     let blocked = dir.path().join("blocked");
     // A file where the index directory should be: opening it cannot succeed.
     std::fs::write(&blocked, b"not a directory").unwrap();
 
-    let index = open_index(&services, &blocked).await;
     assert!(
-        index
-            .resolver_candidates(resolver_query(&observed("Akumo"), 1))
-            .await
-            .is_empty(),
-        "an index that cannot open must answer nothing, not panic"
+        TitleFuzzyIndex::open(
+            &blocked,
+            Arc::new(DatastoreTitleTermSource::new(services.datastore())),
+        )
+        .await
+        .is_err()
     );
-    assert!(index.sync().await.is_ok(), "sync must stay quiet too");
+    assert_eq!(std::fs::read(&blocked).unwrap(), b"not a directory");
 
     let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
+async fn corrupt_missing_and_incompatible_indexes_rebuild_before_open_returns() {
+    for damage in ["malformed", "missing", "schema", "segment"] {
+        let dir = tempfile::tempdir().unwrap();
+        let services = SqliteServices::new(dir.path().join("fixture.db").to_string_lossy())
+            .await
+            .unwrap();
+        let catalog = title_store(&services);
+        anime_title(&catalog, "recovery-title", "Aokumo").await;
+        let index = open_index(&services, dir.path()).await;
+        drop(index);
+        let index_dir = dir.path().join("title-fuzzy-index");
+        std::fs::write(index_dir.join("unrelated.bin"), b"preserve inside").unwrap();
+        std::fs::write(dir.path().join("unrelated.bin"), b"preserve outside").unwrap();
+        let mut damaged_file = "meta.json".to_string();
+        if damage == "missing" {
+            std::fs::rename(
+                index_dir.join("meta.json"),
+                index_dir.join("saved-meta.json"),
+            )
+            .unwrap();
+        } else if damage == "schema" {
+            let mut meta: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(index_dir.join("meta.json")).unwrap())
+                    .unwrap();
+            meta["schema"] = serde_json::json!([]);
+            std::fs::write(
+                index_dir.join("meta.json"),
+                serde_json::to_vec(&meta).unwrap(),
+            )
+            .unwrap();
+        } else if damage == "segment" {
+            damaged_file = std::fs::read_dir(&index_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .find(|name| name.ends_with(".term"))
+                .expect("term segment");
+            std::fs::write(index_dir.join(&damaged_file), b"corrupt fixture").unwrap();
+        } else {
+            std::fs::write(index_dir.join("meta.json"), b"corrupt fixture").unwrap();
+        }
+        let index = open_index(&services, dir.path()).await;
+        let hits = index
+            .resolver_candidates(resolver_query(&observed("Akumo"), 1))
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        let preserved = dir
+            .path()
+            .join("title-fuzzy-index.recovery-0/title-fuzzy-index");
+        assert_eq!(
+            std::fs::read(preserved.join("unrelated.bin")).unwrap(),
+            b"preserve inside"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("unrelated.bin")).unwrap(),
+            b"preserve outside"
+        );
+        if damage == "missing" {
+            assert!(preserved.join("saved-meta.json").is_file());
+        } else if damage == "schema" {
+            let meta: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(preserved.join("meta.json")).unwrap())
+                    .unwrap();
+            assert_eq!(meta["schema"], serde_json::json!([]));
+        } else {
+            assert_eq!(
+                std::fs::read(preserved.join(damaged_file)).unwrap(),
+                b"corrupt fixture"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_owned_index_cannot_be_moved_by_another_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = SqliteServices::new(dir.path().join("fixture.db").to_string_lossy())
+        .await
+        .unwrap();
+    let index = open_index(&services, dir.path()).await;
+    let meta_path = dir.path().join("title-fuzzy-index/meta.json");
+    let before = std::fs::read(&meta_path).unwrap();
+    assert!(
+        TitleFuzzyIndex::open(
+            dir.path(),
+            Arc::new(DatastoreTitleTermSource::new(services.datastore()))
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(meta_path).unwrap(), before);
+    assert!(!dir.path().join("title-fuzzy-index.recovery-0").exists());
+    drop(index);
+    open_index(&services, dir.path()).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_index_is_rejected_without_touching_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("unrelated.bin"), b"preserve target").unwrap();
+    std::os::unix::fs::symlink(target.path(), dir.path().join("title-fuzzy-index")).unwrap();
+    let services = SqliteServices::new(dir.path().join("fixture.db").to_string_lossy())
+        .await
+        .unwrap();
+    assert!(
+        TitleFuzzyIndex::open(
+            dir.path(),
+            Arc::new(DatastoreTitleTermSource::new(services.datastore()))
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(target.path().join("unrelated.bin")).unwrap(),
+        b"preserve target"
+    );
+    assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 1);
+}
+
+struct GatedTermSource {
+    inner: DatastoreTitleTermSource,
+    pause: std::sync::atomic::AtomicBool,
+    fail: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Semaphore,
+}
+
+#[async_trait::async_trait]
+impl scryer_infrastructure_library_search::fuzzy::TitleTermSource for GatedTermSource {
+    async fn page_terms(
+        &self,
+        after: i64,
+        limit: i64,
+    ) -> AppResult<Vec<scryer_infrastructure_library_search::fuzzy::IndexedTerm>> {
+        if self.pause.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.resume.acquire().await.unwrap().forget();
+        }
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AppError::Repository(
+                "fixture projection unavailable".into(),
+            ));
+        }
+        self.inner.page_terms(after, limit).await
+    }
+    async fn terms_for_titles(
+        &self,
+        ids: &[String],
+    ) -> AppResult<Vec<scryer_infrastructure_library_search::fuzzy::IndexedTerm>> {
+        self.inner.terms_for_titles(ids).await
+    }
+    async fn queued_titles(
+        &self,
+        limit: i64,
+    ) -> AppResult<Vec<scryer_infrastructure_library_search::fuzzy::QueuedTitle>> {
+        self.inner.queued_titles(limit).await
+    }
+    async fn clear_queued(&self, seqs: &[i64]) -> AppResult<()> {
+        self.inner.clear_queued(seqs).await
+    }
+    async fn projection_stamp(&self) -> AppResult<ProjectionStamp> {
+        self.inner.projection_stamp().await
+    }
+}
+
+#[tokio::test]
+async fn reads_wait_for_rebuild_and_failed_rebuilds_are_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = SqliteServices::new(dir.path().join("fixture.db").to_string_lossy())
+        .await
+        .unwrap();
+    anime_title(&title_store(&services), "blocked-title", "Aokumo").await;
+    let source = Arc::new(GatedTermSource {
+        inner: DatastoreTitleTermSource::new(services.datastore()),
+        pause: false.into(),
+        fail: false.into(),
+        entered: tokio::sync::Notify::new(),
+        resume: tokio::sync::Semaphore::new(0),
+    });
+    let index = TitleFuzzyIndex::open(dir.path(), source.clone())
+        .await
+        .unwrap();
+    source
+        .pause
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let stamp = index_stamp(&services).await;
+    let rebuilding = {
+        let index = index.clone();
+        tokio::spawn(async move { index.rebuild(stamp).await })
+    };
+    let bound = std::time::Duration::from_secs(30);
+    tokio::time::timeout(bound, source.entered.notified())
+        .await
+        .unwrap();
+    let name = observed("Akumo");
+    let mut lookup = std::pin::pin!(index.resolver_candidates(resolver_query(&name, 1)));
+    tokio::select! {
+        biased;
+        result = &mut lookup => panic!("lookup escaped an incomplete rebuild: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+    source.resume.add_permits(1);
+    tokio::time::timeout(bound, rebuilding)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        !tokio::time::timeout(bound, lookup)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    source.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(index.rebuild(index_stamp(&services).await).await.is_err());
+    assert!(
+        index
+            .resolver_candidates(resolver_query(&name, 1))
+            .await
+            .is_err()
+    );
+    source
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !index
+            .resolver_candidates(resolver_query(&name, 1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_search_keeps_one_snapshot_without_blocking_rebuilds() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = SqliteServices::new(dir.path().join("fixture.db").to_string_lossy())
+        .await
+        .unwrap();
+    let catalog = title_store(&services);
+    anime_title(&catalog, "original-title", "Aokumo Lantern").await;
+    let index = open_index(&services, dir.path()).await;
+    let stamp = index_stamp(&services).await;
+    let bound = std::time::Duration::from_secs(30);
+    let (start, started) = tokio::sync::oneshot::channel();
+    let (finished, finish) = std::sync::mpsc::channel();
+    let rebuilding = {
+        let index = index.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(bound, started).await.unwrap().unwrap();
+            anime_title(&catalog, "new-title", "Aokumo Lantern").await;
+            tokio::time::timeout(bound, index.rebuild(stamp))
+                .await
+                .unwrap()
+                .unwrap();
+            finished.send(()).unwrap();
+        })
+    };
+    let start = std::cell::RefCell::new(Some(start));
+    let tokens = vec!["aokumo".to_string(), "lantern".to_string()];
+    let hits = tokio::time::timeout(
+        bound,
+        index.ui_candidates(
+            &tokens,
+            &["anime"],
+            |_| {
+                // The snapshot is pinned before the first token is evaluated.
+                if let Some(start) = start.borrow_mut().take() {
+                    start.send(()).unwrap();
+                    finish
+                        .recv_timeout(bound)
+                        .expect("rebuild must not wait for the search");
+                }
+                0
+            },
+            64,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(bound, rebuilding)
+        .await
+        .unwrap()
+        .unwrap();
+    for token in &tokens {
+        assert!(hits.iter().any(|hit| hit.token_key == *token));
+    }
+    assert!(hits.iter().all(|hit| hit.title_id == "original-title"));
+    let current = index
+        .ui_candidates(&tokens, &["anime"], |_| 0, 64)
+        .await
+        .unwrap();
+    assert!(current.iter().any(|hit| hit.title_id == "new-title"));
 }
 
 async fn index_stamp(services: &SqliteServices) -> ProjectionStamp {

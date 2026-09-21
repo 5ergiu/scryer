@@ -273,15 +273,12 @@ impl TitleStore {
         }
 
         let rows = match query.as_deref() {
-            Some(query)
-                if matches!(mode, PersistedTitleReadMode::Presentation)
-                    && library_ids.is_none() =>
-            {
+            Some(query) if matches!(mode, PersistedTitleReadMode::Presentation) => {
                 if normalize_title_search_text(query).is_empty() {
                     return Ok(Vec::new());
                 }
                 match &self.datastore {
-                    StoreDatastore::Sqlite { pool, .. } => {
+                    StoreDatastore::Sqlite { pool, .. } if library_ids.is_none() => {
                         let mut titles = list_titles_via_sqlite_title_search_query(
                             pool,
                             facet,
@@ -296,7 +293,7 @@ impl TitleStore {
                         }
                         return Ok(titles);
                     }
-                    StoreDatastore::Postgres { .. } => {
+                    _ => {
                         // Same lane, same index, same ranks: the typo
                         // tolerance is not a SQLite-only feature any more.
                         let typo_ranks = match build_title_search_plan(facet.clone(), query) {
@@ -305,12 +302,12 @@ impl TitleStore {
                                     self.fuzzy.as_deref(),
                                     &plan,
                                 )
-                                .await
+                                .await?
                             }
                             None => Vec::new(),
                         };
                         let (sql, args) =
-                            build_ranked_title_list_sql(facet, None, query, &typo_ranks);
+                            build_ranked_title_list_sql(facet, library_ids, query, &typo_ranks);
                         SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?
                     }
                 }
@@ -987,7 +984,13 @@ impl TitleRepository for TitleStore {
             });
         }
 
-        let query = query.as_deref();
+        let resolved_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            facet.clone(),
+            query.as_deref(),
+        )
+        .await?;
+        let query = resolved_search.as_ref();
         let filter_counts = if aggregates.filter_counts {
             fetch_title_catalog_filter_counts(
                 &self.datastore,
@@ -1370,12 +1373,12 @@ impl TitleRepository for TitleStore {
         // index answers "within n edits of" and hands back term ids, and the
         // candidate columns are read from the same projection row the
         // equality lanes read, so a candidate is the same thing whichever
-        // lane found it. No index, or one that is rebuilding, means no typo
-        // candidates and the equality lanes answer alone.
-        if let (Some(distance), Some(fuzzy)) = (query.typo_distance, self.fuzzy.as_deref()) {
-            if let Err(error) = fuzzy.sync().await {
-                tracing::debug!(%error, "title fuzzy index sync failed before a resolver lookup");
-            }
+        // lane found it. The index must be complete before ambiguity is evaluated.
+        if let Some(distance) = query.typo_distance {
+            let fuzzy = self
+                .fuzzy
+                .as_deref()
+                .ok_or_else(|| AppError::Repository("title fuzzy index is not attached".into()))?;
             let term_ids = fuzzy
                 .resolver_candidates(
                     scryer_infrastructure_library_search::fuzzy::ResolverFuzzyQuery {
@@ -1387,7 +1390,7 @@ impl TitleRepository for TitleStore {
                         limit: query.limit.max(0) as usize,
                     },
                 )
-                .await;
+                .await?;
             if !term_ids.is_empty() {
                 let placeholders = std::iter::repeat_n("{}", term_ids.len())
                     .collect::<Vec<_>>()
@@ -2609,7 +2612,7 @@ async fn list_titles_via_sqlite_title_search_query(
     };
 
     let typo_ranks =
-        scryer_infrastructure_library_search::resolve_typo_title_ranks(fuzzy, &search_plan).await;
+        scryer_infrastructure_library_search::resolve_typo_title_ranks(fuzzy, &search_plan).await?;
     let mut builder = QueryBuilder::<Sqlite>::new("");
     push_ranked_title_matches_cte(&mut builder, &search_plan, &typo_ranks);
     builder.push(format!(
@@ -3407,7 +3410,7 @@ fn build_plain_title_list_sql(
 fn build_title_catalog_count_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     dialect: TitleCatalogSqlDialect,
 ) -> (String, Vec<SqlArg>) {
@@ -3425,7 +3428,7 @@ async fn fetch_title_catalog_count(
     datastore: &StoreDatastore,
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
 ) -> AppResult<usize> {
     let (sql, args) = build_title_catalog_count_sql(
@@ -3479,7 +3482,7 @@ async fn fetch_title_catalog_filter_counts(
     datastore: &StoreDatastore,
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     active_filter: &TitleCatalogFilter,
 ) -> AppResult<TitleCatalogFilterCounts> {
     let all_filter = TitleCatalogFilter {
@@ -3637,7 +3640,7 @@ fn build_title_catalog_options_scope_sql(
 fn build_title_catalog_page_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     sort: TitleCatalogSort,
     limit: usize,
@@ -3663,7 +3666,7 @@ fn build_title_catalog_page_sql(
 fn build_title_catalog_where_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     dialect: TitleCatalogSqlDialect,
 ) -> (String, Vec<SqlArg>) {
@@ -3685,9 +3688,10 @@ fn build_title_catalog_where_sql(
         args.push(SqlArg::Text(facet.as_str().to_string()));
     }
 
-    if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
-        clauses.push("LOWER(name) LIKE {}".to_string());
-        args.push(SqlArg::Text(format!("%{}%", query.to_lowercase())));
+    if let Some(query) = query {
+        let (predicate, search_args) = query.predicate("titles.id");
+        clauses.push(predicate);
+        args.extend(search_args.into_iter().map(SqlArg::Text));
     }
 
     if !filter.root_folder_ids.is_empty() {

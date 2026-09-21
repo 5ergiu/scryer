@@ -33,6 +33,59 @@ const TYPO_TOP_LIMIT: i64 = 50;
 const MAX_NORMALIZED_QUERY_CHARS: usize = 512;
 const MAX_TYPO_QUERY_TOKENS: usize = 16;
 
+/// A search resolved once and shared by page and aggregate queries.
+pub struct ResolvedTitleSearch {
+    normalized_query: String,
+    typo_ranks: Vec<(String, i64)>,
+}
+
+impl ResolvedTitleSearch {
+    pub async fn resolve(
+        index: Option<&TitleFuzzyIndex>,
+        facet: Option<MediaFacet>,
+        query: Option<&str>,
+    ) -> AppResult<Option<Self>> {
+        let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(plan) = build_title_search_plan(facet, query) else {
+            return Ok(Some(Self {
+                normalized_query: String::new(),
+                typo_ranks: Vec::new(),
+            }));
+        };
+        let typo_ranks = resolve_typo_title_ranks(index, &plan).await?;
+        Ok(Some(Self {
+            normalized_query: plan.normalized_query,
+            typo_ranks,
+        }))
+    }
+
+    /// `title_id_column` is a caller-owned SQL identifier, never user input.
+    /// Bind markers use the infrastructure SQL runtime's `{}` convention.
+    pub fn predicate(&self, title_id_column: &str) -> (String, Vec<String>) {
+        if self.normalized_query.is_empty() {
+            return ("1 = 0".into(), Vec::new());
+        }
+        let mut sql = format!(
+            "(EXISTS (SELECT 1 FROM title_search_terms search_term \
+             WHERE search_term.title_id = {title_id_column} \
+             AND search_term.term_kind NOT LIKE '%_token' \
+             AND search_term.normalized_term LIKE {{}})"
+        );
+        let mut args = vec![format!("%{}%", self.normalized_query)];
+        if !self.typo_ranks.is_empty() {
+            let placeholders = std::iter::repeat_n("{}", self.typo_ranks.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" OR {title_id_column} IN ({placeholders})"));
+            args.extend(self.typo_ranks.iter().map(|(id, _)| id.clone()));
+        }
+        sql.push(')');
+        (sql, args)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TitleSearchPlan {
     normalized_query: String,
@@ -423,29 +476,26 @@ pub fn typo_title_ranks(plan: &TitleSearchPlan, hits: &[UiFuzzyHit]) -> Vec<(Str
 
 /// The typo lane end to end: ask the index, then apply the precision rules.
 ///
-/// `None` — no index attached, or one that is missing, stale, corrupt or
-/// rebuilding — yields no typo candidates, and the direct lanes answer the
-/// search on their own. That is the documented degraded mode, not an error.
+/// A missing or unavailable index is an error whenever the typo lane is needed.
 pub async fn resolve_typo_title_ranks(
     index: Option<&fuzzy::TitleFuzzyIndex>,
     plan: &TitleSearchPlan,
-) -> Vec<(String, i64)> {
-    let Some(index) = index else {
-        return Vec::new();
-    };
-    typo_title_ranks(plan, &fuzzy_typo_hits(index, plan).await)
+) -> AppResult<Vec<(String, i64)>> {
+    if plan.query_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let index =
+        index.ok_or_else(|| AppError::Repository("title fuzzy index is not attached".into()))?;
+    Ok(typo_title_ranks(plan, &fuzzy_typo_hits(index, plan).await?))
 }
 
 /// Ask the fuzzy index for this plan's typo candidates.
 pub async fn fuzzy_typo_hits(
     index: &fuzzy::TitleFuzzyIndex,
     plan: &TitleSearchPlan,
-) -> Vec<UiFuzzyHit> {
+) -> AppResult<Vec<UiFuzzyHit>> {
     if plan.query_tokens.is_empty() || plan.normalized_query.chars().count() < 4 {
-        return Vec::new();
-    }
-    if let Err(error) = index.sync().await {
-        tracing::debug!(%error, "title fuzzy index sync failed before a ui search");
+        return Ok(Vec::new());
     }
     index
         .ui_candidates(

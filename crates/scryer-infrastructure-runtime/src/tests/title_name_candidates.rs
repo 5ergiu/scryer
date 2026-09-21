@@ -520,9 +520,13 @@ async fn title_matching_port_on_postgres() -> AppResult<()> {
                 ),
             ),
         )
-        .await;
-        let catalog = TitleStore::new(services.datastore()).with_fuzzy_index(fuzzy);
-        let result = assert_title_matching_port(&catalog).await;
+        .await?;
+        let catalog = TitleStore::new(services.datastore()).with_fuzzy_index(fuzzy.clone());
+        let wanted = WantedStore::new(services.datastore()).with_fuzzy_index(fuzzy);
+        let result = async {
+            assert_title_matching_port(&catalog).await?;
+            super::wanted_items_and_search::assert_catalog_search(&catalog, &wanted).await
+        }.await;
         services.pool().close().await;
         result
     }

@@ -12607,7 +12607,8 @@ async fn automatic_search_refuses_pack_coverage_of_a_paused_sibling_without_hidi
         }
         let evaluated = app
             .evaluate_search_results_for_subject(&title, &subject, candidates, false)
-            .await;
+            .await
+            .expect("evaluation should succeed");
         assert_eq!(evaluated.len(), results.len(), "discovery remains visible");
         assert!(
             evaluated

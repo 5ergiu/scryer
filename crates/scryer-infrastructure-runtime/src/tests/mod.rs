@@ -440,21 +440,9 @@ async fn fuzzy_test_index(
             services.datastore(),
         ),
     );
-    let index =
-        scryer_infrastructure_library_search::TitleFuzzyIndex::open(dir.path(), source.clone())
-            .await;
-    // Production opens the index and lets the first rebuild finish in the
-    // background while the exact lanes serve. A test that raced that window
-    // would be asserting on the degraded path by accident, so the rebuild is
-    // awaited here instead.
-    {
-        use scryer_infrastructure_library_search::fuzzy::TitleTermSource;
-        let stamp = source
-            .projection_stamp()
-            .await
-            .expect("the projection stamp should load");
-        index.rebuild(stamp).await.expect("rebuild should succeed");
-    }
+    let index = scryer_infrastructure_library_search::TitleFuzzyIndex::open(dir.path(), source)
+        .await
+        .expect("index should open ready");
     (index, dir)
 }
 

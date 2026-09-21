@@ -811,9 +811,7 @@ impl DatastoreAssembly {
         )
         .await?;
         let datastore = db.datastore();
-        // The bounded-distance lane. Opening it never fails the boot: a
-        // directory that cannot be read leaves the index unavailable and the
-        // exact lanes carry title matching until the next start.
+        // Matching must not start until the complete title index is ready.
         let fuzzy_index = scryer_infrastructure_library_search::fuzzy::TitleFuzzyIndex::open(
             &config.data_dir,
             Arc::new(
@@ -822,7 +820,7 @@ impl DatastoreAssembly {
                 ),
             ),
         )
-        .await;
+        .await?;
         let title_store =
             Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let show_store = Arc::new(ShowStore::new(datastore.clone()));
@@ -965,9 +963,7 @@ impl DatastoreAssembly {
         )
         .await?;
         let datastore = db.datastore();
-        // The bounded-distance lane. Opening it never fails the boot: a
-        // directory that cannot be read leaves the index unavailable and the
-        // exact lanes carry title matching until the next start.
+        // Matching must not start until the complete title index is ready.
         let fuzzy_index = scryer_infrastructure_library_search::fuzzy::TitleFuzzyIndex::open(
             &config.data_dir,
             Arc::new(
@@ -976,7 +972,7 @@ impl DatastoreAssembly {
                 ),
             ),
         )
-        .await;
+        .await?;
         let title_store =
             Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let show_store = Arc::new(ShowStore::new(datastore.clone()));

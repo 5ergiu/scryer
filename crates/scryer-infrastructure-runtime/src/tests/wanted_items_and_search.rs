@@ -565,6 +565,172 @@ async fn release_decision_explanations_are_compressed_and_hydrated_across_read_p
 }
 
 #[tokio::test]
+async fn catalog_search_uses_index_for_scoped_pages_and_counts() -> AppResult<()> {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    let services = SqliteServices::new(dir.path().join("catalog.db").to_string_lossy()).await?;
+    let (catalog, wanted, _index_dir) = super::search_stores(&services).await;
+    assert_catalog_search(&catalog, &wanted).await
+}
+
+pub(super) async fn assert_catalog_search(
+    catalog: &TitleStore,
+    wanted: &WantedStore,
+) -> AppResult<()> {
+    let mut first = make_test_title("catalog-search-a", None);
+    first.name = "Lanternhouse".into();
+    first.aliases = vec!["Hidden Aurora".into()];
+    first.slug = Some("separate-locator".into());
+    first.monitored = true;
+    let mut second = first.clone();
+    second.id = "catalog-search-b".into();
+    second.name = "Lanternhouse Two".into();
+    second.slug = Some("second-locator".into());
+    second.monitored = false;
+    let mut excluded = first.clone();
+    excluded.id = "catalog-search-excluded".into();
+    excluded.slug = Some("excluded-locator".into());
+    excluded.facet = MediaFacet::Series;
+    excluded.library_id = scryer_domain::default_library_id_for_facet(&excluded.facet);
+    let libraries = vec![first.library_id.clone()];
+    for title in [first, second, excluded] {
+        TitleRepository::create(catalog, title).await?;
+    }
+    for query in ["lanterhouse", "hidden aurora", "locator", "!!!"] {
+        for offset in [0, 1] {
+            let page = TitleRepository::list_for_libraries_catalog(
+                catalog,
+                None,
+                &libraries,
+                Some(query.into()),
+                TitleCatalogFilter::default(),
+                TitleCatalogSort::default(),
+                1,
+                offset,
+                TitleListProjection::default(),
+                TitleCatalogAggregates {
+                    total_count: true,
+                    filter_counts: true,
+                    managed_bytes: false,
+                },
+            )
+            .await?;
+            if query == "!!!" {
+                assert_eq!(page.total_count, 0);
+                assert_eq!(page.filter_counts.all, 0);
+                assert!(page.items.is_empty());
+                assert!(!page.has_more);
+                continue;
+            }
+            assert_eq!(page.total_count, 2, "query={query}");
+            assert_eq!(page.filter_counts.all, 2);
+            assert_eq!(page.filter_counts.monitored, 1);
+            assert_eq!(page.filter_counts.unmonitored, 1);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.has_more, offset == 0);
+            assert_eq!(
+                page.items[0].id,
+                ["catalog-search-a", "catalog-search-b"][offset]
+            );
+        }
+    }
+    let filtered = TitleRepository::list_for_libraries_catalog(
+        catalog,
+        None,
+        &libraries,
+        Some("lanterhouse".into()),
+        TitleCatalogFilter {
+            monitored: Some(false),
+            ..TitleCatalogFilter::default()
+        },
+        TitleCatalogSort::default(),
+        10,
+        0,
+        TitleListProjection::default(),
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: false,
+        },
+    )
+    .await?;
+    assert_eq!(filtered.total_count, 1);
+    assert_eq!(filtered.items[0].id, "catalog-search-b");
+    let scoped = TitleRepository::list_for_libraries_without_external_ids(
+        catalog,
+        None,
+        &libraries,
+        Some("lanterhouse".into()),
+    )
+    .await?;
+    assert_eq!(scoped.len(), 2);
+    assert!(
+        scoped
+            .iter()
+            .all(|title| libraries.contains(&title.library_id))
+    );
+
+    for id in [
+        "catalog-search-a",
+        "catalog-search-b",
+        "catalog-search-excluded",
+    ] {
+        wanted
+            .upsert_acquisition_scope_state(&AcquisitionScopeState {
+                id: format!("wanted-{id}"),
+                title_id: id.into(),
+                title_name: None,
+                title_slug: None,
+                title_facet: None,
+                library_id: None,
+                library_name: None,
+                library_slug: None,
+                episode_id: None,
+                collection_id: None,
+                series_movie_link_id: None,
+                season_number: None,
+                episode_number: None,
+                media_type: "movie".into(),
+                last_search_at: None,
+                status: AcquisitionScopeStatus::Wanted,
+                grabbed_release: None,
+                landed_bar: None,
+                latest_release_decision: None,
+                mismatch_recovery_eligible: false,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: if id == "catalog-search-a" {
+                    "2026-01-02T00:00:00Z"
+                } else {
+                    "2026-01-01T00:00:00Z"
+                }
+                .into(),
+            })
+            .await?;
+    }
+    for search in ["lanterhouse", "hidden aurora", "locator"] {
+        let mut found = Vec::new();
+        for offset in [0, 1] {
+            let query = AcquisitionScopeStatesQuery {
+                title_search: Some(search.into()),
+                library_ids: libraries.clone(),
+                limit: 1,
+                offset,
+                ..AcquisitionScopeStatesQuery::default()
+            };
+            assert_eq!(
+                wanted.count_acquisition_scope_states(query.clone()).await?,
+                2
+            );
+            let page = wanted.list_acquisition_scope_states(query).await?;
+            assert_eq!(page.len(), 1);
+            found.push(page[0].title_id.clone());
+        }
+        found.sort();
+        assert_eq!(found, ["catalog-search-a", "catalog-search-b"]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn title_search_matches_aliases_slug_and_typos_with_direct_priority() {
     let (services, db) = temp_services("scryer_catalog_title_search").await;
     let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;

@@ -2005,29 +2005,15 @@ fn preferred_scoped_external_id(ids: &[ScopedExternalId], source: &str) -> Optio
 }
 
 impl AppUseCase {
-    /// Library-local identity ambiguity for a search subject: one grouped
-    /// count over the persisted lookup-key column. Falls back to "not
-    /// ambiguous" when the read fails; the import gate still catches the
-    /// mismatch.
-    pub(crate) async fn title_identity_ambiguity(&self, title: &Title) -> TitleIdentityAmbiguity {
-        match async {
-            self.monitored_title_matcher()
-                .await?
-                .evidence_ambiguity(title)
-                .await
-        }
-        .await
-        {
-            Ok(ambiguity) => ambiguity,
-            Err(error) => {
-                tracing::debug!(
-                    title_id = title.id.as_str(),
-                    error = %error,
-                    "identity ambiguity: monitored title index unavailable, treating title as unambiguous"
-                );
-                TitleIdentityAmbiguity::default()
-            }
-        }
+    /// An unavailable index cannot establish that a title is unambiguous.
+    pub(crate) async fn title_identity_ambiguity(
+        &self,
+        title: &Title,
+    ) -> AppResult<TitleIdentityAmbiguity> {
+        self.monitored_title_matcher()
+            .await?
+            .evidence_ambiguity(title)
+            .await
     }
 
     fn release_search_category_for_facet(&self, facet: &MediaFacet) -> String {
@@ -2167,14 +2153,14 @@ impl AppUseCase {
         subject: &ResolvedReleaseSearchSubject,
         mut results: Vec<IndexerSearchResult>,
         user_invoked: bool,
-    ) -> Vec<IndexerSearchResult> {
+    ) -> AppResult<Vec<IndexerSearchResult>> {
         // The subject's evidence was built from the subject's own names. The
         // spelling lane also has to see what each *release* is named, or the
         // collision guard has no competitor to find and a rival spelling
         // silently becomes a confident match. One fetch for every release
         // name in this batch, at the same distance and through the same port
         // method the release-anchored paths use.
-        let extended_subject = self.subject_with_release_anchors(subject, &results).await;
+        let extended_subject = self.subject_with_release_anchors(subject, &results).await?;
         let subject = extended_subject.as_ref().unwrap_or(subject);
         // `DbBlocklisted` reads the per-title blocklist (the single, removable
         // exclusion source), never the failed-attempt history.
@@ -2216,7 +2202,7 @@ impl AppUseCase {
                     error = %error,
                     "auto evaluation: failed to resolve quality profile; leaving candidates unevaluated"
                 );
-                return results;
+                return Ok(results);
             }
         };
 
@@ -2432,7 +2418,7 @@ impl AppUseCase {
             annotate_auto_decision(candidate, code);
         }
 
-        results
+        Ok(results)
     }
 
     /// The subject again, with every candidate's release name folded into its
@@ -2444,8 +2430,10 @@ impl AppUseCase {
         &self,
         subject: &ResolvedReleaseSearchSubject,
         results: &[IndexerSearchResult],
-    ) -> Option<ResolvedReleaseSearchSubject> {
-        let existing = subject.title_evidence.ambiguity.spelling_index.as_ref()?;
+    ) -> AppResult<Option<ResolvedReleaseSearchSubject>> {
+        let Some(existing) = subject.title_evidence.ambiguity.spelling_index.as_ref() else {
+            return Ok(None);
+        };
         let mut anchors = Vec::new();
         let mut seen = HashSet::new();
         for candidate in results {
@@ -2458,34 +2446,18 @@ impl AppUseCase {
             }
         }
         if anchors.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        let matcher = match self.monitored_title_matcher().await {
-            Ok(matcher) => matcher,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "release anchors: title index unavailable, keeping subject evidence as built"
-                );
-                return None;
-            }
-        };
+        let matcher = self.monitored_title_matcher().await?;
         let mut index = existing.as_ref().clone();
-        if let Err(error) = matcher
+        matcher
             .extend_spelling_candidates(&mut index, &anchors)
-            .await
-        {
-            tracing::debug!(
-                %error,
-                "release anchors: candidate fetch failed, keeping subject evidence as built"
-            );
-            return None;
-        }
+            .await?;
 
         let mut subject = subject.clone();
         subject.title_evidence.ambiguity.spelling_index = Some(Arc::new(index));
-        Some(subject)
+        Ok(Some(subject))
     }
 
     pub(crate) async fn resolve_release_search_subject_for_title(
@@ -2523,7 +2495,7 @@ impl AppUseCase {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
             title_evidence: canonical_title_evidence(title)
-                .with_ambiguity(self.title_identity_ambiguity(title).await),
+                .with_ambiguity(self.title_identity_ambiguity(title).await?),
             queries: vec![query],
             imdb_id,
             tmdb_id,
@@ -2676,7 +2648,7 @@ impl AppUseCase {
                 &evidence_title,
                 episode_record.as_ref(),
             )
-            .with_ambiguity(self.title_identity_ambiguity(title).await),
+            .with_ambiguity(self.title_identity_ambiguity(title).await?),
             queries,
             imdb_id,
             tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
@@ -2747,7 +2719,7 @@ impl AppUseCase {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
             title_evidence: canonical_title_evidence(title)
-                .with_ambiguity(self.title_identity_ambiguity(title).await),
+                .with_ambiguity(self.title_identity_ambiguity(title).await?),
             queries,
             imdb_id,
             tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
@@ -2808,7 +2780,7 @@ impl AppUseCase {
                 title_id: title.id.clone(),
                 title_tags: title.tags.clone(),
                 title_evidence: canonical_title_evidence(&search_title)
-                    .with_ambiguity(self.title_identity_ambiguity(&search_title).await),
+                    .with_ambiguity(self.title_identity_ambiguity(&search_title).await?),
                 queries,
                 imdb_id,
                 tmdb_id: tmdb_id_from_external_ids(&search_title.external_ids),
@@ -2839,7 +2811,7 @@ impl AppUseCase {
         search_title: &Title,
         item: &AcquisitionScopeState,
         episode: Option<&Episode>,
-    ) -> ResolvedReleaseSearchSubject {
+    ) -> AppResult<ResolvedReleaseSearchSubject> {
         // Anime whose community numbering differs from TVDB's needs the extra
         // community-numbered query forms; every other title reads `None` here
         // and searches exactly as before.
@@ -2871,11 +2843,11 @@ impl AppUseCase {
         let evidence_title =
             title_with_bridge_cour_titles(search_title, anime_numbering_bridge.as_ref());
 
-        ResolvedReleaseSearchSubject {
+        Ok(ResolvedReleaseSearchSubject {
             title_id: owner_title.id.clone(),
             title_tags: owner_title.tags.clone(),
             title_evidence: canonical_title_evidence_for_episode(&evidence_title, episode)
-                .with_ambiguity(self.title_identity_ambiguity(search_title).await),
+                .with_ambiguity(self.title_identity_ambiguity(search_title).await?),
             queries: query_result.queries,
             imdb_id: query_result.imdb_id,
             tmdb_id: query_result.tmdb_id,
@@ -2904,7 +2876,7 @@ impl AppUseCase {
                 _ => ReleaseSearchSubjectKind::Title,
             },
             submission_scope: direct_download_submission_scope_for_wanted_item(item, episode),
-        }
+        })
     }
 }
 

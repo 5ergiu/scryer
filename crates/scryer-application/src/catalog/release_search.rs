@@ -1712,7 +1712,7 @@ impl AppUseCase {
                 // skips the monitored check for exactly those searches.
                 matches!(mode, SearchMode::Interactive) || background_value.is_none(),
             )
-            .await;
+            .await?;
         if self
             .finalize_evaluated_search_session_or_warn(
                 &outcome.search_session_id,
