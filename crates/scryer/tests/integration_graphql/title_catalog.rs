@@ -1712,7 +1712,10 @@ async fn graphql_add_title_separates_a_movie_and_a_series_sharing_one_id_value()
         "a tmdb movie id and a tmdb series id with the same value name two different titles"
     );
     assert_eq!(movie["data"]["addTitle"]["title"]["facet"], json!("MOVIE"));
-    assert_eq!(series["data"]["addTitle"]["title"]["facet"], json!("SERIES"));
+    assert_eq!(
+        series["data"]["addTitle"]["title"]["facet"],
+        json!("SERIES")
+    );
     assert_eq!(
         movie["data"]["addTitle"]["title"]["externalIds"],
         json!([{ "source": "tmdb", "kind": "movie", "value": "880202" }])

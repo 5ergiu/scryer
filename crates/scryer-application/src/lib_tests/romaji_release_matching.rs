@@ -79,7 +79,8 @@ const ROMANIZATIONS: &[Romanization] = &[
 
 /// How a group wraps an anime name: the fansub bracket shape, the scene
 /// season/episode shape, and a season pack.
-const SHAPES: &[(&str, fn(&str) -> String)] = &[
+type ReleaseShape = (&'static str, fn(&str) -> String);
+const SHAPES: &[ReleaseShape] = &[
     ("fansub episode", |name| {
         format!("[Group] {name} - 03 [1080p]")
     }),
@@ -119,14 +120,14 @@ async fn anime_with_romanization(romanization: &str, tagged: bool) -> (AppUseCas
             &title.id,
             TitleMetadataUpdate {
                 aliases: vec![romanization.to_string()],
-                tagged_aliases: tagged
-                    .then(|| {
-                        vec![scryer_domain::TaggedAlias {
-                            name: romanization.to_string(),
-                            language: "x-jat".to_string(),
-                        }]
-                    })
-                    .unwrap_or_default(),
+                tagged_aliases: if tagged {
+                    vec![scryer_domain::TaggedAlias {
+                        name: romanization.to_string(),
+                        language: "x-jat".to_string(),
+                    }]
+                } else {
+                    Vec::new()
+                },
                 ..Default::default()
             },
         )

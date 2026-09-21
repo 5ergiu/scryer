@@ -1303,11 +1303,22 @@ fn map_weaver_outbound_error(operation: &str, error: OutboundHttpError) -> AppEr
 impl DownloadClient for WeaverDownloadClient {
     async fn discover_categories(&self, _client_id: &str) -> AppResult<Option<Vec<String>>> {
         #[derive(serde::Deserialize)]
-        struct Category { name: String }
+        struct Category {
+            name: String,
+        }
         #[derive(serde::Deserialize)]
-        struct Categories { categories: Vec<Category> }
-        let data: Categories = self.graphql_request("query { categories { name } }", serde_json::json!({})).await?;
-        Ok(Some(data.categories.into_iter().map(|category| category.name).collect()))
+        struct Categories {
+            categories: Vec<Category>,
+        }
+        let data: Categories = self
+            .graphql_request("query { categories { name } }", serde_json::json!({}))
+            .await?;
+        Ok(Some(
+            data.categories
+                .into_iter()
+                .map(|category| category.name)
+                .collect(),
+        ))
     }
 
     async fn observe_download(
@@ -1404,7 +1415,10 @@ impl DownloadClient for WeaverDownloadClient {
             json!({"key": "*scryer_import_purpose", "value": request.purpose.as_str()}),
         ];
         if !title.id.is_empty() {
-            attributes.insert(0, json!({"key": "*scryer_title_id", "value": title.id.clone()}));
+            attributes.insert(
+                0,
+                json!({"key": "*scryer_title_id", "value": title.id.clone()}),
+            );
         }
         if let Some(download_id) = request.download_id {
             attributes.push(json!({"key": "*scryer_download_id", "value": download_id.to_wire()}));
@@ -3634,22 +3648,30 @@ mod tests {
     #[tokio::test]
     async fn category_discovery_reads_names_and_rejects_malformed_payloads() {
         for (body, expected) in [
-            (json!({"data":{"categories":[{"name":"movies"},{"name":"custom"}]}}), Some(vec!["movies", "custom"])),
+            (
+                json!({"data":{"categories":[{"name":"movies"},{"name":"custom"}]}}),
+                Some(vec!["movies", "custom"]),
+            ),
             (json!({"data":{"categories":[]}}), Some(vec![])),
             (json!({"data":{"categories":[{"name":7}]}}), None),
             (json!({"data":{}}), None),
         ] {
             let server = MockServer::start().await;
-            Mock::given(method("POST")).and(body_string_contains("categories { name }"))
+            Mock::given(method("POST"))
+                .and(body_string_contains("categories { name }"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(body))
-                .expect(1).mount(&server).await;
+                .expect(1)
+                .mount(&server)
+                .await;
             let client = WeaverDownloadClient::new(server.uri(), None);
             let result = client.discover_categories("client").await;
             match expected {
-                Some(names) => assert_eq!(result.unwrap(), Some(names.into_iter().map(str::to_string).collect())),
+                Some(names) => assert_eq!(
+                    result.unwrap(),
+                    Some(names.into_iter().map(str::to_string).collect())
+                ),
                 None => assert!(result.is_err()),
             }
         }
     }
-
 }

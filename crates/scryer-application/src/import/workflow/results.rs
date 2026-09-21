@@ -220,10 +220,6 @@ pub async fn retry_failed_import(
     .map_err(|error| AppError::Repository(format!("import retry task failed: {error}")))?
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "retry retains the original completed-import request context"
-)]
 async fn execute_history_retry(
     app: &AppUseCase,
     actor: &User,

@@ -2672,40 +2672,127 @@ type DashboardActivityStatsPayload {
 	previous: ActivityWindowCountsPayload!
 }
 
+"""
+Classification of a completed dashboard import.
+"""
 enum DashboardImportKindValue {
+	"""
+	Completed import without a more specific classification.
+	"""
 	IMPORTED
+	"""
+	A newly imported media file.
+	"""
 	NEW_IMPORT
+	"""
+	An import that upgraded existing media.
+	"""
 	UPGRADE
 }
 
+"""
+Recent activity and API usage for one indexer.
+"""
 type DashboardIndexerStatsPayload {
+	"""
+	Indexer configuration identifier.
+	"""
 	indexerId: ID!
+	"""
+	Indexer display name.
+	"""
 	indexerName: String!
+	"""
+	Number of queries in the last 24 hours.
+	"""
 	queriesLast24H: Int!
+	"""
+	Number of failed queries in the last 24 hours.
+	"""
 	failedLast24H: Int!
+	"""
+	Number of grabs in the last 24 hours.
+	"""
 	grabsLast24H: Int!
+	"""
+	Current API usage reported by the indexer, when available.
+	"""
 	apiCurrent: Int
+	"""
+	API usage limit reported by the indexer, when available.
+	"""
 	apiMax: Int
 }
 
+"""
+One recent completed import shown on the dashboard.
+"""
 type DashboardRecentImportPayload {
+	"""
+	Import history identifier.
+	"""
 	id: ID!
+	"""
+	Associated title identifier, when available.
+	"""
 	titleId: ID
+	"""
+	Associated title display name, when available.
+	"""
 	titleName: String
+	"""
+	Associated library identifier, when available.
+	"""
 	libraryId: ID
+	"""
+	Media facet of the associated title.
+	"""
 	facet: MediaFacetValue
+	"""
+	Poster image URL for the associated title.
+	"""
 	posterUrl: String
+	"""
+	Associated episode details, when available.
+	"""
 	episode: EpisodePayload
+	"""
+	Classification of this import.
+	"""
 	kind: DashboardImportKindValue!
+	"""
+	Imported media quality label, when available.
+	"""
 	quality: String
+	"""
+	Imported media size in bytes, when available.
+	"""
 	sizeBytes: Long
+	"""
+	Time the import was recorded.
+	"""
 	occurredAt: DateTime!
 }
 
+"""
+Title counts and indexer activity shown on the dashboard.
+"""
 type DashboardSummaryPayload {
+	"""
+	Number of movie titles.
+	"""
 	titlesMovie: Int!
+	"""
+	Number of series titles.
+	"""
 	titlesSeries: Int!
+	"""
+	Number of anime titles.
+	"""
 	titlesAnime: Int!
+	"""
+	Recent activity and reported API usage for each indexer.
+	"""
 	indexerStats: [DashboardIndexerStatsPayload!]!
 }
 
@@ -21475,8 +21562,19 @@ type QueryRoot {
 	Lists users with authorization and authentication-factor status, excluding secret values.
 	"""
 	users: [UserPayload!]!
+	"""
+	Read title counts and indexer activity for the dashboard.
+	"""
 	dashboardSummary: DashboardSummaryPayload!
-	dashboardRecentImports(limit: Int): [DashboardRecentImportPayload!]!
+	"""
+	List recent completed imports for the dashboard.
+	"""
+	dashboardRecentImports(
+		"""
+		Maximum number of imports to return; defaults to 15 and is limited to 1 through 50.
+		"""
+		limit: Int
+	): [DashboardRecentImportPayload!]!
 	"""
 	Return the path style supported by the running service.
 	"""

@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::queries::sql_runtime::StoreDatastore;
-use scryer_application::{ShowRepository, TitleCatalogFilter, TitleCatalogSort, TitleListProjection};
+use scryer_application::{
+    ShowRepository, TitleCatalogFilter, TitleCatalogSort, TitleListProjection,
+};
 use scryer_infrastructure_library::media::shows::store::ShowStore;
 
 fn tag_definition(id: &str, label: &str) -> scryer_domain::TitleTagDefinition {

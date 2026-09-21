@@ -2094,14 +2094,29 @@ impl CatalogQueries {
         ctx: &Context<'_>,
         #[graphql(desc = "Interactive search containing the release.")] search_id: ID,
         #[graphql(desc = "Release download URL from that search.")] download_url: String,
-        #[graphql(desc = "Optional catalog title used to resolve assignment routing.")] title_id: Option<ID>,
+        #[graphql(desc = "Optional catalog title used to resolve assignment routing.")]
+        title_id: Option<ID>,
     ) -> GqlResult<Vec<IndexerGrabClientPayload>> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
-        let clients = app.indexer_grab_clients(&actor, search_id.as_ref(), &download_url, title_id.as_ref().map(|id| id.as_ref())).await.map_err(to_gql_error)?;
-        Ok(clients.into_iter().map(|client| IndexerGrabClientPayload {
-            id: client.id.into(), name: client.name, category: client.category, mapped: client.mapped,
-        }).collect())
+        let clients = app
+            .indexer_grab_clients(
+                &actor,
+                search_id.as_ref(),
+                &download_url,
+                title_id.as_ref().map(|id| id.as_ref()),
+            )
+            .await
+            .map_err(to_gql_error)?;
+        Ok(clients
+            .into_iter()
+            .map(|client| IndexerGrabClientPayload {
+                id: client.id.into(),
+                name: client.name,
+                category: client.category,
+                mapped: client.mapped,
+            })
+            .collect())
     }
 
     /// Read native client category names. Unsupported clients retain custom entry.
@@ -2112,8 +2127,14 @@ impl CatalogQueries {
     ) -> GqlResult<DownloadClientCategoriesPayload> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
-        let categories = app.download_client_categories(&actor, client_id.as_ref()).await.map_err(to_gql_error)?;
-        Ok(DownloadClientCategoriesPayload { supported: categories.is_some(), categories: categories.unwrap_or_default() })
+        let categories = app
+            .download_client_categories(&actor, client_id.as_ref())
+            .await
+            .map_err(to_gql_error)?;
+        Ok(DownloadClientCategoriesPayload {
+            supported: categories.is_some(),
+            categories: categories.unwrap_or_default(),
+        })
     }
 
     /// Poll an interactive release-search job; null means no visible snapshot exists.
@@ -2971,50 +2992,80 @@ impl JobAndDownloadQueries {
     }
 }
 
+/// Title counts and indexer activity shown on the dashboard.
 #[derive(SimpleObject)]
 struct DashboardSummaryPayload {
+    /// Number of movie titles.
     titles_movie: i32,
+    /// Number of series titles.
     titles_series: i32,
+    /// Number of anime titles.
     titles_anime: i32,
+    /// Recent activity and reported API usage for each indexer.
     indexer_stats: Vec<DashboardIndexerStatsPayload>,
 }
 
+/// Recent activity and API usage for one indexer.
 #[derive(SimpleObject)]
 struct DashboardIndexerStatsPayload {
+    /// Indexer configuration identifier.
     indexer_id: ID,
+    /// Indexer display name.
     indexer_name: String,
+    /// Number of queries in the last 24 hours.
     queries_last_24h: i32,
+    /// Number of failed queries in the last 24 hours.
     failed_last_24h: i32,
+    /// Number of grabs in the last 24 hours.
     grabs_last_24h: i32,
+    /// Current API usage reported by the indexer, when available.
     api_current: Option<i32>,
+    /// API usage limit reported by the indexer, when available.
     api_max: Option<i32>,
 }
 
+/// Classification of a completed dashboard import.
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 enum DashboardImportKindValue {
+    /// Completed import without a more specific classification.
     Imported,
+    /// A newly imported media file.
     NewImport,
+    /// An import that upgraded existing media.
     Upgrade,
 }
 
+/// One recent completed import shown on the dashboard.
 #[derive(SimpleObject)]
 struct DashboardRecentImportPayload {
+    /// Import history identifier.
     id: ID,
+    /// Associated title identifier, when available.
     title_id: Option<ID>,
+    /// Associated title display name, when available.
     title_name: Option<String>,
+    /// Associated library identifier, when available.
     library_id: Option<ID>,
+    /// Media facet of the associated title.
     facet: Option<MediaFacetValue>,
+    /// Poster image URL for the associated title.
     poster_url: Option<String>,
+    /// Associated episode details, when available.
     episode: Option<EpisodePayload>,
+    /// Classification of this import.
     kind: DashboardImportKindValue,
+    /// Imported media quality label, when available.
     quality: Option<String>,
+    /// Imported media size in bytes, when available.
     size_bytes: Option<Long>,
+    /// Time the import was recorded.
     occurred_at: DateTime<Utc>,
 }
 
 #[allow(clippy::too_many_arguments)]
 #[Object]
 impl SystemQueries {
+    /// Read title counts and indexer activity for the dashboard.
     async fn dashboard_summary(&self, ctx: &Context<'_>) -> GqlResult<DashboardSummaryPayload> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
@@ -3038,9 +3089,13 @@ impl SystemQueries {
         })
     }
 
+    /// List recent completed imports for the dashboard.
     async fn dashboard_recent_imports(
         &self,
         ctx: &Context<'_>,
+        #[graphql(
+            desc = "Maximum number of imports to return; defaults to 15 and is limited to 1 through 50."
+        )]
         limit: Option<i32>,
     ) -> GqlResult<Vec<DashboardRecentImportPayload>> {
         let app = app_from_ctx(ctx)?;

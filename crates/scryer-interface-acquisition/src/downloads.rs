@@ -95,8 +95,7 @@ impl DownloadMutations {
         input: QueueDownloadInput,
         #[graphql(desc = "Operator-selected client and optional category override.")]
         routing: IndexerGrabSelectionInput,
-        #[graphql(desc = "Whether this release replaces existing owned media.")]
-        replacement: bool,
+        #[graphql(desc = "Whether this release replaces existing owned media.")] replacement: bool,
     ) -> GqlResult<QueueDownloadPayload> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
@@ -111,10 +110,16 @@ impl DownloadMutations {
         let title_id = title_id.to_string();
         let outcome = app
             .queue_indexer_search_assignment(
-                &actor, &title_id, &candidate_token, size_bytes.map(i64::from),
+                &actor,
+                &title_id,
+                &candidate_token,
+                size_bytes.map(i64::from),
                 SubmissionConflictPolicy::from_replace_flag(replace_in_progress.unwrap_or(false)),
                 replacement,
-                scryer_application::IndexerGrabSelection { client_id: routing.client_id.to_string(), category: routing.category },
+                scryer_application::IndexerGrabSelection {
+                    client_id: routing.client_id.to_string(),
+                    category: routing.category,
+                },
             )
             .await
             .map_err(to_gql_error)?;

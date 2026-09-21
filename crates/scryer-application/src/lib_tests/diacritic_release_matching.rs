@@ -141,7 +141,8 @@ async fn resolve_movie(app: &AppUseCase, release: &str) -> Option<String> {
 }
 
 /// Every episodic shape a group ships, each carrying the subject's year.
-const SERIES_SHAPES: &[(&str, fn(&str) -> String)] = &[
+type ReleaseShape = (&'static str, fn(&str) -> String);
+const SERIES_SHAPES: &[ReleaseShape] = &[
     ("single episode", |name| {
         format!("{name}.{SUBJECT_YEAR}.S01E01.1080p.WEB-DL.H264-Group")
     }),

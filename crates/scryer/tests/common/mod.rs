@@ -145,6 +145,7 @@ pub struct TestContext {
     pub db: SqliteServices,
     pub settings_store: Arc<SettingsStore>,
     pub app_data_dir: tempfile::TempDir,
+    _title_index_dir: tempfile::TempDir,
     pub staged_nzb_store: Arc<FileSystemStagedNzbStore>,
     pub staged_nzb_dir: tempfile::TempDir,
 }
@@ -756,6 +757,21 @@ impl SubtitleDownloadRepository for TestLibraryStateStore {
     }
 }
 
+pub async fn test_title_index(
+    db: &SqliteServices,
+    directory: &std::path::Path,
+) -> Arc<scryer_infrastructure_library::media::search::title_search::TitleFuzzyIndex> {
+    use scryer_infrastructure_library::media::{
+        search::title_search::TitleFuzzyIndex, titles::fuzzy_source::DatastoreTitleTermSource,
+    };
+    TitleFuzzyIndex::open(
+        directory,
+        Arc::new(DatastoreTitleTermSource::new(db.datastore())),
+    )
+    .await
+    .expect("test title index must open ready")
+}
+
 pub fn disabled_auth_runtime_handle() -> AuthRuntimeStateHandle {
     AuthRuntimeStateHandle::new(AuthRuntimeStateSnapshot {
         form_login_enabled: false,
@@ -871,7 +887,9 @@ impl TestContext {
         );
 
         // Build repository implementations from the shared DB runtime.
-        let title_store = TitleStore::new(datastore.clone());
+        let title_index_dir = tempfile::tempdir().expect("title index directory");
+        let fuzzy_index = test_title_index(&db, title_index_dir.path()).await;
+        let title_store = TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone());
         let show_store = ShowStore::new(datastore.clone());
         let library_store = LibraryStore::new(datastore.clone());
         let user_store = UserStore::new(datastore.clone());
@@ -891,7 +909,7 @@ impl TestContext {
             quality_profile_store.clone();
 
         let library_probe_store = LibraryProbeStore::new(datastore.clone());
-        let wanted_store = WantedStore::new(datastore.clone());
+        let wanted_store = WantedStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index);
         let pending_release_store =
             PendingReleaseStore::new(datastore.clone(), db.encryption_key_state());
         let blocklist_store = BlocklistStore::new(datastore.clone());
@@ -1074,6 +1092,7 @@ impl TestContext {
             db,
             settings_store,
             app_data_dir,
+            _title_index_dir: title_index_dir,
             staged_nzb_store,
             staged_nzb_dir,
         }

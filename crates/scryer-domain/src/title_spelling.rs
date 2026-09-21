@@ -343,7 +343,7 @@ pub fn title_numbers(value: &str) -> Vec<String> {
             .chars()
             .next()
             .is_some_and(|first| matches!(first, 'i' | 'v' | 'x'))
-            && lowered.chars().all(|ch| Some(ch) == lowered.chars().next());
+            && lowered.chars().all(|ch| lowered.starts_with(ch));
         let after_context = position > 0
             && NUMERAL_CONTEXT_WORDS
                 .iter()

@@ -5261,9 +5261,8 @@ mod tests {
     /// the SQL it emits is checked as SQL and not just as a string.
     #[tokio::test]
     async fn folder_owner_lookup_finds_a_windows_folder_spelled_the_other_way() {
-        let candidates = scryer_application::stored_paths::folder_path_match_candidates(
-            "c:/media/show",
-        );
+        let candidates =
+            scryer_application::stored_paths::folder_path_match_candidates("c:/media/show");
         let (predicate, args) = folder_path_owner_predicate(&candidates, true);
         assert!(
             predicate.contains("lower(replace(folder_path, '/', '\\'))"),
@@ -5284,10 +5283,8 @@ mod tests {
             .await
             .unwrap();
 
-        let datastore = StoreDatastore::sqlite(
-            pool,
-            std::sync::Arc::new(tokio::sync::Mutex::new(())),
-        );
+        let datastore =
+            StoreDatastore::sqlite(pool, std::sync::Arc::new(tokio::sync::Mutex::new(())));
         let rows = SqlRuntime::fetch_all(
             datastore.read_exec(),
             &format!("SELECT id FROM titles WHERE {predicate} ORDER BY id"),
@@ -6150,8 +6147,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn title_catalog_where_sql_combines_advanced_filter_groups() {
+    #[tokio::test]
+    async fn title_catalog_where_sql_combines_advanced_filter_groups() {
+        let (store, _pool) = migrated_test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let index = scryer_infrastructure_library_search::TitleFuzzyIndex::open(
+            directory.path(),
+            std::sync::Arc::new(
+                crate::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+                    store.datastore.clone(),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        let search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            Some(&index),
+            Some(MediaFacet::Movie),
+            Some("sample"),
+        )
+        .await
+        .unwrap();
         let filter = TitleCatalogFilter {
             monitored: Some(true),
             content_statuses: vec![TitleCatalogContentStatus::Continuing],
@@ -6167,7 +6183,7 @@ mod tests {
         let (sql, args) = build_title_catalog_where_sql(
             Some(MediaFacet::Movie),
             &["library-1".to_string()],
-            Some("sample"),
+            search.as_ref(),
             &filter,
             TitleCatalogSqlDialect::Sqlite,
         );
@@ -6180,6 +6196,7 @@ mod tests {
             2
         );
         assert!(sql.contains("FROM title_metadata_rating_summaries catalog_rating"));
+        assert!(sql.contains("FROM title_search_terms search_term"));
         assert!(sql.contains("monitored = {}"));
         assert!(sql.contains("LOWER(TRIM(COALESCE(content_status, ''))) IN"));
         assert_eq!(args.len(), 15);

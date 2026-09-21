@@ -326,6 +326,10 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signed assignment boundary carries identity, conflict policy, and explicit operator routing"
+    )]
     pub async fn queue_indexer_search_assignment(
         &self,
         actor: &User,
@@ -381,6 +385,10 @@ impl AppUseCase {
         self.queue_manual_release_for_title_with_routing(actor, title, queued_release, scope, conflict_policy, purpose, None).await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared submission path retains the existing manual queue inputs plus optional operator routing"
+    )]
     async fn queue_manual_release_for_title_with_routing(
         &self,
         actor: &User,

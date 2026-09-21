@@ -1407,14 +1407,26 @@ mod tests {
         insert_download(&store, FIRST_ID, "scryer_submission", None).await;
         insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
         assert!(
-            store.load_download(&id).await.unwrap().unwrap().terminal_at.is_none(),
+            store
+                .load_download(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at
+                .is_none(),
             "a live download must not start terminal"
         );
 
         store.end_binding(&id).await.unwrap();
 
         assert!(
-            store.load_download(&id).await.unwrap().unwrap().terminal_at.is_some(),
+            store
+                .load_download(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at
+                .is_some(),
             "every end_binding caller is a terminal event, so the download is finished with it"
         );
     }
@@ -1499,7 +1511,8 @@ mod tests {
         assert_eq!(binding.client_config_id.as_deref(), Some("client-1"));
         assert!(binding.ended_at.is_none());
         assert_eq!(
-            store.load_download(&DownloadId::parse(FIRST_ID).unwrap())
+            store
+                .load_download(&DownloadId::parse(FIRST_ID).unwrap())
                 .await
                 .unwrap()
                 .unwrap()

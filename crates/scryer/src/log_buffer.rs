@@ -332,7 +332,9 @@ mod tests {
     #[test]
     fn ring_buffer_splits_several_lines_in_one_write() {
         let mut buffer = LogRingBuffer::new(8);
-        buffer.write_all(b"one\ntwo\n\nthree\ntrailing").expect("write");
+        buffer
+            .write_all(b"one\ntwo\n\nthree\ntrailing")
+            .expect("write");
         assert_eq!(
             buffer.snapshot(8),
             vec!["one".to_string(), "two".to_string(), "three".to_string()],

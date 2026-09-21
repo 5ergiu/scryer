@@ -218,7 +218,11 @@ async fn queue_import_request_with_download_id_scopes_active_rows_by_client_and_
 
 #[tokio::test]
 async fn stale_processing_recovery_respects_transfer_progress_heartbeat() {
-    let (pool, workflow) = import_store_test_harness(1).await;
+    let services = SqliteServices::new(":memory:")
+        .await
+        .expect("migrated database");
+    let pool = services.pool().clone();
+    let workflow = ImportStore::new(services.datastore());
     let threshold_seconds = 45 * 60;
 
     let stale_id = workflow

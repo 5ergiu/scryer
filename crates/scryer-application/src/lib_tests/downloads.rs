@@ -12850,6 +12850,27 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
             .with_blocklist_repo(blocklist_repo.clone())
     });
 
+    let policy = scryer_rules::UserPolicy {
+        id: "no_probe_files".to_string(),
+        name: "No probe files".to_string(),
+        rego_source: scryer_rules::rewrite_package_declaration(
+            r#"
+score_entry["operator_refuses_this_file"] := -10000 if {
+    input.file != null
+}
+"#,
+            "no_probe_files",
+        ),
+        origin: scryer_rules::PolicyOrigin::User,
+        applied_facets: vec!["anime".to_string()],
+    };
+    *app.services
+        .customization
+        .user_rules
+        .write()
+        .expect("user rules lock") =
+        scryer_rules::UserRulesEngine::build(&[policy]).expect("rule fixture should compile");
+
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
@@ -12887,8 +12908,7 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
         .await
         .expect("create series movie link");
 
-    // Occupied at 1080p, so a landed 720p is a refusal rather than an
-    // import-and-blocklist.
+    // The existing linked file must not change when the file-only rule vetoes the import.
     std::fs::create_dir_all(&title_folder).expect("create title folder");
     let incumbent_path = title_folder.join("Refused Link Import - 1080p.mkv");
     std::fs::File::create(&incumbent_path)
@@ -13027,13 +13047,14 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
 
     let mut analysis = crate::post_download_gate::build_stream_pointer_media_file_analysis();
     analysis.video_codec = crate::release_parser::VideoCodec::parse("h264");
-    analysis.video_width = Some(1280);
-    analysis.video_height = Some(720);
+    analysis.video_width = Some(1920);
+    analysis.video_height = Some(1080);
+    let rule_file_doc = crate::user_rule_input::file_doc_from_analysis(&analysis);
     let _probe = crate::post_download_gate::probe_override::install(
         crate::post_download_gate::ImportedFileAcceptance {
             analysis: Some(analysis),
             scan_error: None,
-            rule_file_doc: None,
+            rule_file_doc: Some(rule_file_doc),
             audio_language_warning: None,
         },
     );
@@ -13047,12 +13068,18 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
         "{result:?}"
     );
 
+    assert!(result.release_burned, "{result:?}");
+    assert!(
+        incumbent_path.exists(),
+        "the linked incumbent survives the veto"
+    );
+
     let entries = blocklist_repo.entries.lock().await.clone();
     let expected = crate::normalize_release_name(Some(release_title)).unwrap_or_default();
     entries
         .iter()
         .find(|entry| entry.normalized_release_name == expected)
-        .expect("the lying release is blocklisted for the title");
+        .expect("the file-rule veto is blocklisted for the title");
 
     let reopened = app
         .services
