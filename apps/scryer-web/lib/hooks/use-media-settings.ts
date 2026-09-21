@@ -1,4 +1,5 @@
 import * as React from "react";
+import { SettingsSaveGuard } from "@/lib/utils/settings-save-guard";
 import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
@@ -165,7 +166,7 @@ export type UseMediaSettingsResult = {
   setFolderChmod: React.Dispatch<React.SetStateAction<Record<ViewCategoryId, string>>>;
   chownGroup: Record<ViewCategoryId, string>;
   setChownGroup: React.Dispatch<React.SetStateAction<Record<ViewCategoryId, string>>>;
-  saveSetting: (scope: string, scopeId: string | undefined, keyName: string, value: string) => void;
+  saveSetting: (scope: string, scopeId: string | undefined, keyName: string, value: string) => Promise<void> | void;
   saveCategoryQualityProfileOverride: (value: string) => Promise<void> | void;
   saveCategoryScoringPersonaOverride: (
     persona: ScoringPersonaId | null,
@@ -394,6 +395,7 @@ export function useMediaSettings({
     [activeQualityScopeId, client, setGlobalStatus],
   );
 
+  const [generalSaveGuard] = React.useState(() => new SettingsSaveGuard());
   const saveSetting = React.useCallback(
     (_scope: string, _scopeId: string | undefined, keyName: string, value: string) => {
       const boolValue = value.trim().toLowerCase() === "true";
@@ -491,14 +493,51 @@ export function useMediaSettings({
         return;
       }
 
-      client
+      const scope = input.scope as ViewCategoryId;
+      const field = Object.keys(input).find((key) => key !== "scope")!;
+      const fields: Record<string, [string, (value: string) => void]> = {
+        fillerPolicy: [categoryFillerPolicies[scope], (next) => setCategoryFillerPolicies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        recapPolicy: [categoryRecapPolicies[scope], (next) => setCategoryRecapPolicies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        monitorSpecials: [categoryMonitorSpecials[scope], (next) => setCategoryMonitorSpecials((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        interSeasonMovies: [categoryInterSeasonMovies[scope], (next) => setCategoryInterSeasonMovies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        monitorFillerMovies: [categoryMonitorFillerMovies[scope], (next) => setCategoryMonitorFillerMovies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        nfoWriteOnImport: [nfoWriteOnImport[scope], (next) => setNfoWriteOnImport((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        plexmatchWriteOnImport: [plexmatchWriteOnImport[scope], (next) => setPlexmatchWriteOnImport((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        renameEnabled: [categoryRenameEnabled[scope], (next) => setCategoryRenameEnabled((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        importMode: [importMode[scope], (next) => setImportMode((prev) => ({ ...prev, [scope]: next as ImportMode }))],
+        setPermissionsLinux: [setPermissionsLinux[scope], (next) => setSetPermissionsLinux((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        fileChmod: [fileChmod[scope], (next) => setFileChmod((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        folderChmod: [folderChmod[scope], (next) => setFolderChmod((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        chownGroup: [chownGroup[scope], (next) => setChownGroup((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+      };
+      const [previousValue, restore] = fields[field];
+      if (!generalSaveGuard.begin()) {
+        restore(previousValue);
+        return;
+      }
+      setMediaSettingsSaving(true);
+      return client
         .mutation(updateMediaSettingsMutation, { input })
         .toPromise()
-        .then(({ error }) => {
-          if (error) setGlobalStatus(error.message);
+        .then(({ data, error }) => {
+          if (error) throw error;
+          const savedValue = data?.updateMediaSettings?.[field];
+          restore(savedValue === undefined ? String(input[field]) : String(savedValue ?? ""));
+        })
+        .catch((error: unknown) => {
+          restore(previousValue);
+          setGlobalStatus(error instanceof Error ? error.message : t("status.failedToUpdate"));
+        })
+        .finally(() => {
+          generalSaveGuard.end();
+          setMediaSettingsSaving(false);
         });
     },
-    [activeQualityScopeId, client, setGlobalStatus],
+    [activeQualityScopeId, client, setGlobalStatus, generalSaveGuard, t,
+      categoryFillerPolicies, categoryRecapPolicies, categoryMonitorSpecials,
+      categoryInterSeasonMovies, categoryMonitorFillerMovies, nfoWriteOnImport,
+      plexmatchWriteOnImport, categoryRenameEnabled, importMode,
+      setPermissionsLinux, fileChmod, folderChmod, chownGroup],
   );
 
   const normalizeQualityProfiles = React.useCallback(
@@ -554,59 +593,62 @@ export function useMediaSettings({
         });
       }
 
-      const nextProfileText = qualityProfileSettingsToCatalogText(qualityProfileSettings);
-      const nextProfiles = normalizeQualityProfiles(nextProfileText);
+      if (qualityProfileSettings) {
+        const nextProfileText = qualityProfileSettingsToCatalogText(qualityProfileSettings);
+        const nextProfiles = normalizeQualityProfiles(nextProfileText);
 
-      const rawGlobalProfileId =
-        coerceProfileSetting(
-          qualityProfileSettings?.globalProfileId ?? "",
-        ) || "";
-      const resolvedGlobalId =
-        rawGlobalProfileId &&
-        nextProfiles.some((p) => p.id === rawGlobalProfileId)
-          ? rawGlobalProfileId
-          : (nextProfiles[0]?.id ?? "");
-      setGlobalQualityProfileId((current) =>
-        current === resolvedGlobalId ? current : resolvedGlobalId,
-      );
-      setGlobalScoringPersona((current) =>
-        current === (qualityProfileSettings?.globalScoringPersona ?? "BALANCED")
-          ? current
-          : (qualityProfileSettings?.globalScoringPersona ?? "BALANCED"),
-      );
+        const rawGlobalProfileId =
+          coerceProfileSetting(
+            qualityProfileSettings?.globalProfileId ?? "",
+          ) || "";
+        const resolvedGlobalId =
+          rawGlobalProfileId &&
+          nextProfiles.some((p) => p.id === rawGlobalProfileId)
+            ? rawGlobalProfileId
+            : (nextProfiles[0]?.id ?? "");
+        setGlobalQualityProfileId((current) =>
+          current === resolvedGlobalId ? current : resolvedGlobalId,
+        );
+        setGlobalScoringPersona((current) =>
+          current === (qualityProfileSettings?.globalScoringPersona ?? "BALANCED")
+            ? current
+            : (qualityProfileSettings?.globalScoringPersona ?? "BALANCED"),
+        );
 
-      setQualityProfiles((currentProfiles) =>
-        currentProfiles.length === nextProfiles.length &&
-        currentProfiles.every(
-          (profile, index) =>
-            profile.id === nextProfiles[index]?.id &&
-            profile.name === nextProfiles[index]?.name,
-        )
-          ? currentProfiles
-          : nextProfiles,
-      );
+        setQualityProfiles((currentProfiles) =>
+          currentProfiles.length === nextProfiles.length &&
+          currentProfiles.every(
+            (profile, index) =>
+              profile.id === nextProfiles[index]?.id &&
+              profile.name === nextProfiles[index]?.name,
+          )
+            ? currentProfiles
+            : nextProfiles,
+        );
 
-      const nextOverrides = qualityProfileSettingsToCategoryOverrides(qualityProfileSettings);
-      setCategoryQualityProfileOverrides((previous) =>
-        QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => previous[scopeId] === nextOverrides[scopeId])
-          ? previous
-          : nextOverrides,
-      );
-      const nextPersonaSelections =
-        qualityProfileSettingsToCategoryPersonaSelections(qualityProfileSettings);
-      setCategoryPersonaSelections((previous) =>
-        QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => {
-          const current = previous[scopeId];
-          const next = nextPersonaSelections[scopeId];
-          return (
-            current.overridePersona === next.overridePersona &&
-            current.effectivePersona === next.effectivePersona &&
-            current.inheritsGlobal === next.inheritsGlobal
-          );
-        })
-          ? previous
-          : nextPersonaSelections,
-      );
+        const nextOverrides = qualityProfileSettingsToCategoryOverrides(qualityProfileSettings);
+        setCategoryQualityProfileOverrides((previous) =>
+          QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => previous[scopeId] === nextOverrides[scopeId])
+            ? previous
+            : nextOverrides,
+        );
+        const nextPersonaSelections =
+          qualityProfileSettingsToCategoryPersonaSelections(qualityProfileSettings);
+        setCategoryPersonaSelections((previous) =>
+          QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => {
+            const current = previous[scopeId];
+            const next = nextPersonaSelections[scopeId];
+            return (
+              current.overridePersona === next.overridePersona &&
+              current.effectivePersona === next.effectivePersona &&
+              current.inheritsGlobal === next.inheritsGlobal
+            );
+          })
+            ? previous
+            : nextPersonaSelections,
+        );
+
+      }
 
       if (mediaSettings) {
         const mediaSettingsScopeId = facetScopedMediaSettingsScopeId(mediaSettings);
@@ -770,6 +812,8 @@ export function useMediaSettings({
   );
 
   const refreshMediaSettings = React.useCallback(async () => {
+    const version = generalSaveGuard.readVersion();
+    if (version === null) return;
     setMediaSettingsLoading(true);
     try {
       const variables = buildMediaSettingsInitVariables(activeQualityScopeId);
@@ -777,6 +821,7 @@ export function useMediaSettings({
         .query(mediaSettingsInitQuery, variables)
         .toPromise();
       if (error) throw error;
+      if (!generalSaveGuard.accepts(version)) return;
 
       setLocalPathStyle(
         localPathStyleFromRuntimeValue(data?.runtimeInfo?.runtimePathStyle),
@@ -795,6 +840,7 @@ export function useMediaSettings({
   }, [
     activeQualityScopeId,
     applyMediaSettingsFromPayload,
+    generalSaveGuard,
     client,
     setGlobalStatus,
     t,

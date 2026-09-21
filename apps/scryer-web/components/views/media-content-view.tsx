@@ -3566,7 +3566,7 @@ export function MediaContentView({
       ) : effectiveContentSettingsSection === "general" ? (
         <GeneralSettingsPanel
           activeQualityScopeId={activeQualityScopeId}
-          mediaSettingsLoading={mediaSettingsLoading}
+          mediaSettingsLoading={mediaSettingsLoading || mediaSettingsSaving}
           categoryFillerPolicies={categoryFillerPolicies}
           handleFillerPolicyChange={handleFillerPolicyChange}
           categoryRecapPolicies={categoryRecapPolicies}
