@@ -1292,7 +1292,7 @@ export function TitleCollectionErrorState({
         <p className="mt-1 text-sm text-muted-foreground">{error}</p>
       ) : null}
       <Button type="button" variant="primary" className="mt-4" onClick={onRetry}>
-        {t("importHistory.retry")}
+        {t("label.retry")}
       </Button>
     </div>
   );
