@@ -432,14 +432,14 @@ export function mergeIndexerProgress(
   return [...merged, ...incomingById.values()];
 }
 
-export type IndexerHealthTone = "pending" | "ok" | "slow" | "failed" | "skipped";
+export type IndexerHealthTone = "pending" | "ok" | "slow" | "partial" | "failed" | "skipped";
 
 export function indexerHealthTone(
   entry: InteractiveSearchIndexerProgress,
 ): IndexerHealthTone {
   switch (entry.status) {
     case "FAILED":
-      return "failed";
+      return entry.resultCount > 0 ? "partial" : "failed";
     case "SKIPPED":
       return "skipped";
     case "COMPLETED":

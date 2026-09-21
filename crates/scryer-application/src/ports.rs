@@ -989,16 +989,24 @@ pub struct TitleNameBucketQuery<'a> {
     pub facet: Option<&'a str>,
     pub script: &'a str,
     pub numbers_key: &'a str,
-    /// Inclusive character-length band for the typo lane. `None` asks for the
-    /// equality lanes only.
-    pub length_band: Option<(i64, i64)>,
+    /// The bounded-distance lane: the widest edit distance a caller will
+    /// admit for this anchor, discovery and collision guard together. `None`
+    /// asks for the equality lanes only.
+    ///
+    /// A store serves this from the persisted fuzzy index, not from SQL:
+    /// "within n edits of" is not an equality, and no index on a text column
+    /// answers it. A store with no index attached answers the equality lanes
+    /// alone, which is a narrower result, never a wrong one.
+    pub typo_distance: Option<u8>,
     /// Equality lanes. No length band bounds these: a romanization or a
     /// locale-equal spelling can differ from the observed name by any number
     /// of characters, so they are fetched by key.
     pub match_term: &'a str,
     pub romanization_key: Option<&'a str>,
     pub collation_keys: &'a [(&'static str, Vec<u8>)],
-    /// Cap on the typo lane. The equality lanes are never capped.
+    /// Guard on how many index hits are hydrated, so a pathological bucket
+    /// cannot turn one release into a catalog-sized read. The equality lanes
+    /// are never capped.
     pub limit: i64,
 }
 
@@ -1471,7 +1479,7 @@ pub trait TitleRepository: Send + Sync {
         sort: TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
+        projection: crate::TitleListProjection,
         aggregates: crate::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
@@ -1486,7 +1494,7 @@ pub trait TitleRepository: Send + Sync {
             });
         }
 
-        let mut titles = if include_external_ids {
+        let mut titles = if projection.include_external_ids {
             self.list_for_libraries(facet, library_ids, query).await?
         } else {
             self.list_for_libraries_without_external_ids(facet, library_ids, query)
@@ -1506,12 +1514,17 @@ pub trait TitleRepository: Send + Sync {
             0
         };
         let has_more = limit > 0 && titles.len().saturating_sub(offset) > limit;
-        let items = titles
+        let mut items = titles
             .into_iter()
             .skip(offset)
             .take(limit)
             .collect::<Vec<_>>();
 
+        if !projection.include_canonical_tags {
+            for title in &mut items {
+                title.canonical_tags.clear();
+            }
+        }
         Ok(TitleCatalogResult {
             items,
             limit,
@@ -1775,8 +1788,10 @@ pub trait TitleRepository: Send + Sync {
     /// One bucket of the persisted name index, for the relaxed spelling lane.
     ///
     /// The equality lanes (same match form, same romanization, equal under a
-    /// collation profile) are exhaustive; the length band is the typo lane and
-    /// is capped, because a common bucket in a large library is unbounded.
+    /// collation profile) are SQL and are exhaustive. The bounded-distance
+    /// lane is the fuzzy index; an in-memory repository has neither and
+    /// answers with its whole bucket, which the caller's spelling comparison
+    /// filters exactly as it filters a fetched one.
     async fn find_title_name_candidates(
         &self,
         query: TitleNameBucketQuery<'_>,

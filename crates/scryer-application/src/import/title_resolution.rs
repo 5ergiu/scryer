@@ -18,6 +18,49 @@ pub(crate) struct ResolvedMonitoredTitle {
 /// in the library, rebuilt whenever anything in the catalog changed; it now
 /// holds a repository handle and asks it for the few names a release can
 /// possibly mean.
+///
+/// # Who resolves a title, and through which lane
+///
+/// Every consumer below reaches the same persisted projection: the exact
+/// lanes are SQL equality over `title_search_terms` (match form,
+/// romanization key, collation key, lookup key, external id) and the
+/// bounded-distance lane is the tantivy index behind
+/// [`crate::ports::TitleNameBucketQuery::typo_distance`]. There is no other
+/// fuzzy lane and no in-memory copy of the catalog on any of these paths.
+///
+/// * **Acquisition search** — `acquisition/release_search.rs`:
+///   `evaluate_search_results_for_subject` (exact + bounded, per-release
+///   anchors loaded through `subject_with_release_anchors`), reached from
+///   `acquisition/workflow/task_runner.rs:1511,3168,3388,4288`,
+///   `acquisition/convergence.rs:148`, `acquisition/wanted_views.rs:639`,
+///   `catalog/release_search.rs:2002,2062,2114` and
+///   `catalog/workflow/queueing.rs:1050,1069,1099`. The pack and season-pack
+///   arbitration at the end of the walk is deliberate and stays where it is
+///   (commit b51668f76): the walk commits once, after every candidate has
+///   been seen.
+/// * **Interactive search** — `catalog/interactive_release_search.rs:1775,
+///   1781,1786`: the same subject resolution and the same evaluation, with
+///   the operator's own query as the anchor.
+/// * **RSS** — `acquisition/rss.rs:1047` builds the poll's bank over this
+///   matcher; `match_release_to_title_context` (`rss.rs:620`) runs the exact
+///   anchor keys and their token prefixes, then the full anchored proof.
+/// * **The identity gate** — `import/completed_download/check.rs:499` and
+///   `import/completed_download/lookup.rs:879`: exact + bounded, with the
+///   completion sources loaded as anchors before the proof.
+/// * **The tracked-download sweep** — `integration/tracked_downloads.rs:1140`.
+/// * **Import** — `import/workflow/series.rs:2753`
+///   (`resolve_title_from_release_candidate_via_port`), called from
+///   `import/workflow/series_movie.rs` for the titleless archive probe, the
+///   no-release-name fallback and the srrdb filename recovery. A manual
+///   import names its title by id and never reaches a matching lane.
+/// * **Relaxed spelling candidates** — `library/title_matching/relaxed.rs:372`
+///   is the one place `find_title_name_candidates` is called; every bounded
+///   lookup above goes through it.
+///
+/// Not a matching consumer, and deliberately still a full read:
+/// `subtitles/orchestration.rs:2158` enumerates every monitored title for the
+/// subtitle sweep, which is an iteration over the catalog rather than a
+/// question about one release's name.
 #[derive(Clone)]
 pub(crate) struct MonitoredTitleMatcher {
     titles: TitleSource,
@@ -32,6 +75,10 @@ pub(crate) struct MonitoredTitleMatcher {
 #[derive(Clone)]
 enum TitleSource {
     Repository(Arc<dyn crate::ports::TitleRepository>),
+    /// A caller-supplied set. Only tests construct one now — production
+    /// resolves through the repository — but the arms that read it are
+    /// production code, so the variant is not compiled away.
+    #[cfg_attr(not(test), allow(dead_code))]
     Fixed(Arc<Vec<Title>>),
 }
 
@@ -51,10 +98,15 @@ impl MonitoredTitleMatcher {
 
     /// A matcher over an explicitly supplied set of titles.
     ///
+    /// Test-only since the import path stopped reading the whole catalog to
+    /// match one release name: every production consumer resolves through the
+    /// repository, which is the point of a persisted index.
+    ///
     /// The set is the caller's — one title under test, a fixture, a request's
     /// own candidates — and never the catalog. It answers from the same
     /// derivation the projection is written with, so it agrees with the
     /// repository-backed matcher name for name.
+    #[cfg(test)]
     pub(crate) fn over_titles(titles: Vec<Title>) -> Self {
         Self {
             titles: TitleSource::Fixed(Arc::new(titles)),
@@ -163,6 +215,29 @@ impl MonitoredTitleMatcher {
                 crate::title_matching::relaxed::SpellingCandidates::from_titles(titles)
             }
         }))
+    }
+
+    /// Fold the buckets `anchors` touch into an index already in hand.
+    ///
+    /// This is how evidence built from a subject picks up the release that
+    /// will be compared against it: the release's name is an anchor like any
+    /// other, fetched at the same distance, so the collision guard sees the
+    /// competitors it has to see.
+    pub(crate) async fn extend_spelling_candidates(
+        &self,
+        index: &mut crate::title_matching::relaxed::SpellingCandidates,
+        anchors: &[(String, String)],
+    ) -> crate::AppResult<()> {
+        match &self.titles {
+            TitleSource::Repository(titles) => {
+                index
+                    .extend_for_anchors(titles.as_ref(), anchors, None)
+                    .await
+            }
+            // A fixed set is the caller's own and is already whole: there is
+            // no wider bucket to fetch.
+            TitleSource::Fixed(_) => Ok(()),
+        }
     }
 
     /// Titles answering to any of `keys` on their lookup form or its
@@ -495,6 +570,7 @@ pub(crate) async fn find_monitored_episode_title_from_release(
 ///
 /// The set is the caller's; the matcher fallback stays inside it rather than
 /// reaching for the catalog.
+#[cfg(test)]
 pub(crate) async fn resolve_monitored_movie_title_from_release(
     titles: &[Title],
     parsed: &ParsedReleaseMetadata,
@@ -523,6 +599,7 @@ pub(crate) async fn resolve_monitored_movie_title_from_release(
         .flatten()
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_monitored_episode_title_from_release(
     titles: &[Title],
     parsed: &ParsedReleaseMetadata,
@@ -588,6 +665,7 @@ fn normalized_release_title_candidates(parsed: &ParsedReleaseMetadata) -> Vec<St
         })
 }
 
+#[cfg(test)]
 fn title_matches_normalized_candidate(title: &Title, candidate: &str) -> bool {
     if crate::app_usecase_rss::normalize_for_matching(&title.name) == candidate {
         return true;
@@ -603,6 +681,7 @@ fn title_matches_normalized_candidate(title: &Title, candidate: &str) -> bool {
             .any(|alias| crate::app_usecase_rss::normalize_for_matching(&alias.name) == candidate)
 }
 
+#[cfg(test)]
 fn find_title_by_external_ids<'a>(
     titles: &[&'a Title],
     parsed: &ParsedReleaseMetadata,
@@ -643,6 +722,7 @@ fn find_title_by_external_ids<'a>(
     None
 }
 
+#[cfg(test)]
 fn find_unique_title_by_external_ids<'a>(
     titles: &[&'a Title],
     parsed: &ParsedReleaseMetadata,
@@ -674,6 +754,7 @@ fn find_unique_title_by_external_ids<'a>(
     (matches.len() == 1).then(|| matches[0])
 }
 
+#[cfg(test)]
 fn find_movie_title_by_name<'a>(
     titles: &[&'a Title],
     parsed: &ParsedReleaseMetadata,
@@ -724,6 +805,7 @@ fn find_movie_title_by_name<'a>(
     )
 }
 
+#[cfg(test)]
 fn find_unique_title_by_name<'a>(
     titles: &[&'a Title],
     parsed: &ParsedReleaseMetadata,

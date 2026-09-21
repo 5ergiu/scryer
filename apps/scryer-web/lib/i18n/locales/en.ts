@@ -5083,6 +5083,7 @@ const en: LocaleDictionary = {
   "indexerSearch.health.stillSearching":
     "{{count}} of {{total}} still searching",
   "indexerSearch.health.failed": "failed",
+  "indexerSearch.health.partial": "{{count}} · partial",
   "indexerSearch.health.skipped": "skipped",
   "indexerSearch.health.retryFailed": "Retry failed",
   "indexerSearch.refine.title": "Refine",

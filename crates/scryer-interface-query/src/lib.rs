@@ -1226,7 +1226,13 @@ impl CatalogQueries {
                 title_catalog_sort_from_input(sort),
                 page_limit,
                 title_catalog_page_offset(offset),
-                selection.include_external_ids,
+                scryer_application::TitleListProjection {
+                    include_external_ids: selection.include_external_ids,
+                    include_canonical_tags: lookahead
+                        .field("items")
+                        .field("canonicalTags")
+                        .exists(),
+                },
                 aggregates,
             )
             .await

@@ -940,8 +940,6 @@ async fn migration_0140_uses_owner_scoped_metadata_storage_only() {
 
 #[tokio::test]
 async fn migration_0147_retires_w500_variants_and_0148_adds_extensible_proxy_tables() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0147_w500_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -1586,8 +1584,6 @@ async fn migration_0180_postgres_rekeys_constraints_and_compares_fresh_indexes()
 
 #[tokio::test]
 async fn migration_0140_upgrades_v0_16_8_title_metadata_and_media_in_place() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0140_v0_16_8_upgrade_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -2668,8 +2664,6 @@ async fn quarantined_0157_is_recorded_without_running_and_0160_normalizes_withou
     // 0157 must be recorded as applied — same version and checksum as the
     // catalog, so ledger validation stays green forever — without executing,
     // and 0160 must set unambiguous folders while touching no media_files row.
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0157_quarantine_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3016,8 +3010,6 @@ async fn migration_0200_queues_idle_supported_movies_without_interrupting_active
 
 #[tokio::test]
 async fn migrations_0179_and_0180_backfill_and_finalize_canonical_download_identity() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0179_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3545,8 +3537,6 @@ async fn migrations_0179_and_0180_backfill_and_finalize_canonical_download_ident
 
 #[tokio::test]
 async fn migration_0180_rekeys_a_populated_0179_database_and_validates_constraints() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0180_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3780,8 +3770,6 @@ async fn migration_0180_rekeys_a_populated_0179_database_and_validates_constrain
 
 #[tokio::test]
 async fn migration_0179_rejects_duplicate_adopted_token_ids_without_partial_writes() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0179_collision_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3938,8 +3926,6 @@ async fn migration_0179_postgres_backfills_token_identity_from_env() -> AppResul
 
 #[tokio::test]
 async fn migration_0186_admits_token_less_identity_states_without_disturbing_existing_rows() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0186_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -4124,8 +4110,6 @@ async fn migration_0186_admits_token_less_identity_states_without_disturbing_exi
 
 #[tokio::test]
 async fn migration_0201_compacts_discovery_payloads_and_rekeys_recommendation_cards() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0201_discovery_storage_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -4427,8 +4411,6 @@ async fn migration_0201_postgres_uses_native_payload_and_timestamp_types() -> Ap
 
 #[tokio::test]
 async fn migrations_0202_and_0203_bind_factor_state_and_session_epochs() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0202_0203_factor_state_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -5272,8 +5254,6 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
 
 #[tokio::test]
 async fn migration_0206_rebuilds_media_requests_without_losing_child_rows() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0206_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -5806,8 +5786,6 @@ async fn migration_0253_terminalises_downloads_whose_client_config_is_gone() {
 
 #[tokio::test]
 async fn migration_0244_splits_the_external_id_key_by_entity_kind() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0244_external_id_kind_{}.db",
         chrono::Utc::now().timestamp_micros()

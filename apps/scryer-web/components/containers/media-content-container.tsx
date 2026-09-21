@@ -1112,13 +1112,15 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     return titleCatalogSort;
   }, [effectiveViewMode, titleCatalogSort, view, visibleTitleTableColumns]);
   const titleCatalogProjection = React.useMemo(
-    () =>
-      titleCatalogProjectionForTable({
+    () => ({
+      ...titleCatalogProjectionForTable({
         facet: activeFacet,
         visibleColumns:
           effectiveViewMode === "poster" ? {} : visibleTitleTableColumns,
         sort: effectiveTitleCatalogSort,
       }),
+      includeSettings: effectiveViewMode !== "poster",
+    }),
     [activeFacet, effectiveTitleCatalogSort, effectiveViewMode, visibleTitleTableColumns],
   );
   const [bulkActionBusy, setBulkActionBusy] = React.useState(false);

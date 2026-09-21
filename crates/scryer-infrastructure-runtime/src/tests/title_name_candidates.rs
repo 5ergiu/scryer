@@ -55,7 +55,7 @@ fn candidate_pairs(candidates: &[scryer_application::TitleNameCandidate]) -> Vec
     pairs
 }
 
-/// The SQL bucket narrows by key and length band; the in-memory bucket a fake
+/// The SQL bucket narrows by key and by the fuzzy index; the in-memory bucket a fake
 /// answers with returns the whole (facet, script, numbers) bucket and lets the
 /// spelling comparison filter it. The fake may therefore hold more names, but
 /// never fewer: a name the store can reach must be one a fake can reach too,
@@ -86,14 +86,14 @@ fn bucket_query<'a>(
     numbers_key: &'a str,
     collation_keys: &'a [(&'static str, Vec<u8>)],
     romanization_key: Option<&'a str>,
-    length_band: Option<(i64, i64)>,
+    typo_distance: Option<u8>,
     limit: i64,
 ) -> TitleNameBucketQuery<'a> {
     TitleNameBucketQuery {
         facet,
         script: title_spelling::title_script(anchor).as_str(),
         numbers_key,
-        length_band,
+        typo_distance,
         match_term: anchor,
         romanization_key,
         collation_keys,
@@ -312,9 +312,9 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
             .any(|(id, term)| id == "de-hoehle" && term == &anchor),
         "{candidates:?}"
     );
-    // The ASCII-spelled rival is not literally equal and shares no length
-    // band request here, but the German phonebook collation key equates the
-    // two spellings — which is exactly how a competitor is found.
+    // The ASCII-spelled rival is not literally equal and no fuzzy lane was
+    // asked for here, but the German phonebook collation key equates the two
+    // spellings — which is exactly how a competitor is found.
     assert!(
         candidate_pairs(&candidates)
             .iter()
@@ -365,19 +365,18 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
     );
     assert_within(&candidates, &name_candidates_in_bucket(&titles, &query));
 
-    // The typo lane: a misspelling equals nothing, so only the length band
+    // The typo lane: a misspelling equals nothing, so only the fuzzy index
     // can reach the name.
     let observed = title_spelling::title_lookup_form("Die Höhle der Lowen");
     let numbers = title_spelling::title_numbers_key("Die Höhle der Lowen");
     let collation = collation_keys_for(&observed);
-    let length = observed.chars().count() as i64;
     let query = bucket_query(
         Some("series"),
         &observed,
         &numbers,
         &collation,
         None,
-        Some((length - 4, length + 4)),
+        Some(4),
         64,
     );
     let candidates = TitleRepository::find_title_name_candidates(catalog, query).await?;
@@ -385,7 +384,7 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
         candidate_pairs(&candidates)
             .iter()
             .any(|(id, _)| id == "de-hoehle"),
-        "a typo must still reach the name through the length band: {candidates:?}"
+        "a typo must still reach the name through the fuzzy index: {candidates:?}"
     );
     let query = bucket_query(
         Some("series"),
@@ -393,13 +392,14 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
         &numbers,
         &collation,
         None,
-        Some((length - 4, length + 4)),
+        Some(4),
         64,
     );
     assert_within(&candidates, &name_candidates_in_bucket(&titles, &query));
 
-    // The cap bounds the typo lane only. Asking for one row still returns the
-    // equality matches, which are what identity is actually proven against.
+    // The cap bounds the fuzzy lane only. Asking for one row still returns
+    // the equality matches, which are what identity is actually proven
+    // against.
     let anchor = title_spelling::title_lookup_form("Die Höhle der Löwen");
     let numbers = title_spelling::title_numbers_key("Die Höhle der Löwen");
     let collation = collation_keys_for(&anchor);
@@ -411,7 +411,7 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
             &numbers,
             &collation,
             None,
-            Some((0, 4096)),
+            Some(4),
             1,
         ),
     )
@@ -468,7 +468,7 @@ async fn title_matching_port_on_sqlite() -> AppResult<()> {
         chrono::Utc::now().timestamp_micros()
     ));
     let services = SqliteServices::new(db.to_string_lossy()).await?;
-    let catalog = TitleStore::new(services.datastore());
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
     let result = assert_title_matching_port(&catalog).await;
     services.pool().close().await;
     let _ = std::fs::remove_file(&db);
@@ -510,7 +510,18 @@ async fn title_matching_port_on_postgres() -> AppResult<()> {
         let services =
             crate::PostgresServices::new_with_mode(url.to_string(), crate::MigrationMode::Apply)
                 .await?;
-        let catalog = TitleStore::new(services.datastore());
+        let index_dir =
+            tempfile::tempdir().map_err(|error| AppError::Repository(error.to_string()))?;
+        let fuzzy = scryer_infrastructure_library_search::TitleFuzzyIndex::open(
+            index_dir.path(),
+            std::sync::Arc::new(
+                scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+                    services.datastore(),
+                ),
+            ),
+        )
+        .await;
+        let catalog = TitleStore::new(services.datastore()).with_fuzzy_index(fuzzy);
         let result = assert_title_matching_port(&catalog).await;
         services.pool().close().await;
         result

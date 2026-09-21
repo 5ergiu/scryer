@@ -728,6 +728,20 @@ mod tests {
         }
     }
 
+    /// The tripwire for editing history: every SQL asset that shipped in
+    /// 0.18.21 hashed together, so an accidental touch of an already-applied
+    /// migration is caught rather than shipped.
+    ///
+    /// It has been crossed once, deliberately. `baselines/0140_baseline.sql`
+    /// carried `CREATE VIRTUAL TABLE title_search_spellfix USING spellfix1;`,
+    /// and the binary no longer links a `spellfix1` module, so replaying that
+    /// baseline into an empty database fails outright with `no such module`.
+    /// A baseline is only ever replayed into an empty database — it is never
+    /// checksum-verified against an installation that already applied it — so
+    /// dropping that one line changes nothing for any existing database and is
+    /// the only way a fresh install can still be created. The hash below was
+    /// updated with that edit and for no other reason; anything else that
+    /// moves it is a mistake.
     #[test]
     fn released_0_18_21_sql_assets_are_immutable() {
         let root = source_db_root();
@@ -770,7 +784,7 @@ mod tests {
         }
         assert_eq!(
             hasher.finalize().to_hex().as_str(),
-            "57b821be60b4e6cab89d76ad2961d05288cca5bd19e8314c2083eb4f66a43f58"
+            "938d16ced1cae4d032586d83ed2e9a029c34246724a84d39dcc51eb88e680592"
         );
     }
 

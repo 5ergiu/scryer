@@ -1,6 +1,56 @@
 use super::*;
 
 #[tokio::test]
+async fn graphql_catalog_skips_unrequested_canonical_tag_hydration() {
+    let ctx = TestContext::new().await;
+    let id = add_test_title(&ctx, "Poster Series", "SERIES").await;
+    seed_catalog_filter_metadata(
+        &ctx,
+        &id,
+        &[("canonical:genre:drama", "genre", "Drama")],
+        None,
+    )
+    .await;
+    let body = gql(
+        &ctx,
+        "{ titles { items { __typename canonicalTags { key } } } }",
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&body);
+    let item = &body["data"]["titles"]["items"][0];
+    assert_eq!(item["canonicalTags"][0]["key"], "canonical:genre:drama");
+    let type_name = item["__typename"].as_str().unwrap();
+    let query = format!(
+        "{{ titles {{ items {{ ...Tags }} }} }} fragment Tags on {type_name} {{ metadata: canonicalTags {{ key }} }}"
+    );
+    let body = gql(&ctx, &query, json!({})).await;
+    assert_no_errors(&body);
+    assert_eq!(
+        body["data"]["titles"]["items"][0]["metadata"][0]["key"],
+        "canonical:genre:drama"
+    );
+    // A poster read must work even when the optional hydration tables are unavailable.
+    sqlx::query("ALTER TABLE title_metadata_tags RENAME TO unavailable_metadata_tags")
+        .execute(ctx.db.pool())
+        .await
+        .unwrap();
+    let body = gql(
+        &ctx,
+        "{ titles { items { id name tags } hasMore } }",
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&body);
+    assert_eq!(body["data"]["titles"]["items"].as_array().unwrap().len(), 1);
+    let body = gql(&ctx, &query, json!({})).await;
+    assert!(
+        body.get("errors").is_some(),
+        "requested tags must still use hydration"
+    );
+}
+
+#[tokio::test]
 async fn graphql_catalog_scroll_has_more_without_aggregates() {
     let ctx = TestContext::new().await;
     for (index, facet) in ["MOVIE", "SERIES", "ANIME"].into_iter().enumerate() {

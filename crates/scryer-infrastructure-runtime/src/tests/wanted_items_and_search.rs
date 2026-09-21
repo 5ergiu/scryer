@@ -9,8 +9,7 @@ async fn completing_a_scope_clears_the_grab_only_when_a_file_landed() {
     let services = SqliteServices::new(db.to_string_lossy())
         .await
         .expect("db should initialize");
-    let workflow = wanted_store(&services);
-    let catalog = title_store(&services);
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
     let now = Utc::now().to_rfc3339();
 
     let title = make_test_title("title-series", None);
@@ -107,8 +106,7 @@ async fn completing_a_scope_clears_the_grab_only_when_a_file_landed() {
 #[tokio::test]
 async fn list_wanted_items_filters_on_latest_decision_code() {
     let (services, db) = temp_services("scryer_wanted_latest_decision").await;
-    let workflow = wanted_store(&services);
-    let catalog = title_store(&services);
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
     let now = Utc::now();
 
     let title = make_test_title("title-latest-decision", None);
@@ -249,8 +247,7 @@ async fn list_wanted_items_filters_on_latest_decision_code() {
 #[tokio::test]
 async fn repeated_identical_release_decisions_update_in_place() {
     let (services, db) = temp_services("scryer_release_decision_dedupe").await;
-    let workflow = wanted_store(&services);
-    let catalog = title_store(&services);
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
     let now = Utc::now();
     let title = make_test_title("title-dedupe", None);
     TitleRepository::create(&catalog, title.clone())
@@ -364,8 +361,7 @@ async fn repeated_identical_release_decisions_update_in_place() {
 #[tokio::test]
 async fn release_decision_explanations_are_compressed_and_hydrated_across_read_paths() {
     let (services, db) = temp_services("scryer_release_decision_explanation").await;
-    let workflow = wanted_store(&services);
-    let catalog = title_store(&services);
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
     let now = Utc::now();
     let title = make_test_title("title-explanation", None);
     TitleRepository::create(&catalog, title.clone())
@@ -571,7 +567,7 @@ async fn release_decision_explanations_are_compressed_and_hydrated_across_read_p
 #[tokio::test]
 async fn title_search_matches_aliases_slug_and_typos_with_direct_priority() {
     let (services, db) = temp_services("scryer_catalog_title_search").await;
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     let mut direct_title = make_test_title("title-search-direct", None);
     direct_title.name = "Lanternhouse Rock! Earth".to_string();
@@ -622,9 +618,9 @@ async fn title_search_matches_aliases_slug_and_typos_with_direct_priority() {
 }
 
 #[tokio::test]
-async fn title_search_short_typo_does_not_return_loose_spellfix_neighbors() {
+async fn title_search_short_typo_does_not_return_loose_fuzzy_neighbors() {
     let (services, db) = temp_services("scryer_catalog_title_search_short_typo").await;
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     let mut aokumo = make_test_title("title-search-aokumo", None);
     aokumo.name = "Aokumo".to_string();
@@ -675,7 +671,7 @@ async fn title_search_short_typo_does_not_return_loose_spellfix_neighbors() {
 #[tokio::test]
 async fn title_search_returns_valid_single_substitution_typo_for_frielen() {
     let (services, db) = temp_services("scryer_catalog_title_search_frielen_typo").await;
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     let mut frielen = make_test_title("title-search-frielen", None);
     frielen.name = "Silver Horizon: Beyond Harbor's End".to_string();
@@ -715,7 +711,7 @@ async fn title_search_returns_valid_single_substitution_typo_for_frielen() {
 #[tokio::test]
 async fn title_search_projection_refreshes_after_hydrated_metadata_update_and_delete() {
     let (services, db) = temp_services("scryer_title_search_projection_refresh").await;
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     let mut title = make_test_title("title-projection-refresh", None);
     title.name = "Example Show".to_string();
@@ -770,8 +766,7 @@ async fn title_search_projection_refreshes_after_hydrated_metadata_update_and_de
 #[tokio::test]
 async fn list_wanted_items_filters_with_fuzzy_title_search() {
     let (services, db) = temp_services("scryer_wanted_title_search").await;
-    let workflow = wanted_store(&services);
-    let catalog = title_store(&services);
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
     let now = Utc::now();
 
     let mut title = make_test_title("title-search-match", None);

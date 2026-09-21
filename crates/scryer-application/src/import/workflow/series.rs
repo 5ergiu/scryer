@@ -2736,25 +2736,35 @@ pub(crate) fn is_sample_file(path: &Path) -> bool {
         .map(|m| m.len() < SAMPLE_SIZE_THRESHOLD)
         .unwrap_or(false)
 }
-async fn resolve_title_from_release_candidate(
-    titles: &[Title],
+/// The same resolution, asked of the catalog instead of a slice of it.
+///
+/// The slice form below exists for callers that already hold their candidate
+/// set. These callers did not: they read every title in the library to match
+/// one release name, which is both the largest read in the import path and a
+/// worse answer — the port resolves through the persisted projection and its
+/// fuzzy index, so a romanized or natively-scripted name reaches its title,
+/// while an in-memory comparison over `Vec<Title>` only ever sees the names
+/// the rows happen to carry.
+async fn resolve_title_from_release_candidate_via_port(
+    titles: &Arc<dyn crate::ports::TitleRepository>,
     candidate: &ParsedReleaseMetadata,
     facet_hint: Option<&str>,
 ) -> Option<Title> {
-    if candidate.episode.is_some() {
-        crate::import_title_resolution::resolve_monitored_episode_title_from_release(
-            titles, candidate, facet_hint,
-        )
-        .await
-        .map(|resolved| resolved.title)
+    let matcher = crate::import_title_resolution::MonitoredTitleMatcher::new(titles.clone());
+    let resolved = if candidate.episode.is_some() {
+        matcher.resolve_episode(candidate, facet_hint).await
     } else {
-        crate::import_title_resolution::resolve_monitored_movie_title_from_release(
-            titles, candidate,
-        )
-        .await
-        .map(|resolved| resolved.title)
+        matcher.resolve_movie(candidate).await
+    };
+    match resolved {
+        Ok(resolved) => resolved.map(|resolved| resolved.title),
+        Err(error) => {
+            tracing::warn!(%error, "title resolution from a release candidate failed");
+            None
+        }
     }
 }
+
 /// Canonical import-time release metadata for an episode file: the release
 /// evidence parsed with the title's canonical grab-time context (see
 /// `parse_import_release_for_title`) supplies every score-bearing fact; the

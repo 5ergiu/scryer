@@ -38,9 +38,6 @@ async fn run_rebaseline_inner(ctx: &TaskContext, args: RebaselineArgs) -> Result
         bail!("--through must be a positive migration version");
     }
 
-    scryer_infrastructure_datastore::register_spellfix_auto_extension()
-        .map_err(|error| anyhow!(error.to_string()))?;
-
     let db_root = ctx.path("crates/scryer/src/db");
     let sqlite_baseline_relative = baseline_relative(args.through, BaselineEngine::Sqlite);
     let sqlite_baseline_path = db_root.join(&sqlite_baseline_relative);

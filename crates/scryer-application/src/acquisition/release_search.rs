@@ -2168,6 +2168,14 @@ impl AppUseCase {
         mut results: Vec<IndexerSearchResult>,
         user_invoked: bool,
     ) -> Vec<IndexerSearchResult> {
+        // The subject's evidence was built from the subject's own names. The
+        // spelling lane also has to see what each *release* is named, or the
+        // collision guard has no competitor to find and a rival spelling
+        // silently becomes a confident match. One fetch for every release
+        // name in this batch, at the same distance and through the same port
+        // method the release-anchored paths use.
+        let extended_subject = self.subject_with_release_anchors(subject, &results).await;
+        let subject = extended_subject.as_ref().unwrap_or(subject);
         // `DbBlocklisted` reads the per-title blocklist (the single, removable
         // exclusion source), never the failed-attempt history.
         let db_blocklist = self
@@ -2425,6 +2433,59 @@ impl AppUseCase {
         }
 
         results
+    }
+
+    /// The subject again, with every candidate's release name folded into its
+    /// spelling evidence.
+    ///
+    /// `None` when there is nothing to add — no evidence index, or no result
+    /// carries a name — and the caller then keeps the subject as it stands.
+    async fn subject_with_release_anchors(
+        &self,
+        subject: &ResolvedReleaseSearchSubject,
+        results: &[IndexerSearchResult],
+    ) -> Option<ResolvedReleaseSearchSubject> {
+        let existing = subject.title_evidence.ambiguity.spelling_index.as_ref()?;
+        let mut anchors = Vec::new();
+        let mut seen = HashSet::new();
+        for candidate in results {
+            let (forms, _) =
+                crate::title_matching::relaxed::neutral_spelling_forms(&candidate.title);
+            for (key, raw) in forms {
+                if seen.insert(key.clone()) {
+                    anchors.push((key, raw));
+                }
+            }
+        }
+        if anchors.is_empty() {
+            return None;
+        }
+
+        let matcher = match self.monitored_title_matcher().await {
+            Ok(matcher) => matcher,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "release anchors: title index unavailable, keeping subject evidence as built"
+                );
+                return None;
+            }
+        };
+        let mut index = existing.as_ref().clone();
+        if let Err(error) = matcher
+            .extend_spelling_candidates(&mut index, &anchors)
+            .await
+        {
+            tracing::debug!(
+                %error,
+                "release anchors: candidate fetch failed, keeping subject evidence as built"
+            );
+            return None;
+        }
+
+        let mut subject = subject.clone();
+        subject.title_evidence.ambiguity.spelling_index = Some(Arc::new(index));
+        Some(subject)
     }
 
     pub(crate) async fn resolve_release_search_subject_for_title(

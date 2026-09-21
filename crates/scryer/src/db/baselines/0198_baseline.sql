@@ -1574,7 +1574,6 @@ CREATE TABLE title_more_like_this_items (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (source_title_id, discovery_title_id)
 );
-CREATE VIRTUAL TABLE title_search_spellfix USING spellfix1;
 CREATE TABLE title_search_terms (
     term_id INTEGER PRIMARY KEY,
     title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,

@@ -28,8 +28,6 @@ async fn pre_upgrade_pool() -> SqlitePool {
 }
 
 async fn pre_upgrade_pool_at(version: i64) -> SqlitePool {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix extension should register before the migration fixture");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")

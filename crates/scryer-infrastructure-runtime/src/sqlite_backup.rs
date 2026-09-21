@@ -309,7 +309,7 @@ async fn application_tables(pool: &sqlx::SqlitePool) -> AppResult<Vec<String>> {
 }
 
 fn is_engine_internal_table(table: &str) -> bool {
-    table.starts_with("sqlite_") || table.starts_with("title_search_spellfix_")
+    table.starts_with("sqlite_")
 }
 
 async fn ordered_export_tables(pool: &sqlx::SqlitePool) -> AppResult<Vec<String>> {
