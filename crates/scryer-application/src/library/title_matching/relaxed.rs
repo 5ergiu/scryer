@@ -255,10 +255,10 @@ const BUCKET_FETCH_LIMIT: i64 = 2_000;
 /// [`spelling_distance`] never admits more than three edits, and
 /// [`SpellingCandidates::has_competitor`] asks for one more than the winning
 /// distance, so nothing this module compares can be further than this from
-/// the anchor. Fetching at this distance once therefore serves both discovery
-/// and the collision guard, and no consumer needs a wider one: a subject's
-/// own names are anchors like any other, because the release that will be
-/// compared against them is itself loaded as an anchor.
+/// the anchor. It is the ceiling on [`anchor_fetch_distance`], not the
+/// distance any single anchor is fetched at: a short name cannot consume
+/// anywhere near four edits, and asking the index for edits the comparison
+/// will throw away is what turns a bucket read into a catalog read.
 const MAX_SPELLING_DISTANCE: u8 = 4;
 
 /// The numbers guard, owned by the domain so the persisted projection can key
@@ -373,7 +373,7 @@ impl SpellingCandidates {
                         facet: Some(candidate_facet),
                         script: title_script(anchor).as_str(),
                         numbers_key: &numbers_key,
-                        typo_distance: Some(MAX_SPELLING_DISTANCE),
+                        typo_distance: Some(anchor_fetch_distance(anchor)),
                         match_term: anchor,
                         romanization_key: japanese_romanization_key(anchor, Some("ja")).as_deref(),
                         collation_keys: &collation_keys,
@@ -481,6 +481,37 @@ pub(crate) struct SpellingMatch {
     pub exact: bool,
 }
 
+/// The number of edits a comparison over names of `length` non-whitespace
+/// characters admits. The one source of truth for that arithmetic:
+/// [`spelling_distance`] applies it to a pair of names, and
+/// [`anchor_fetch_distance`] applies it to the anchor alone to decide what to
+/// ask the index for. Nothing else may restate it.
+fn spelling_bound(length: usize, cjk: bool) -> usize {
+    if cjk {
+        (length / 20).clamp(1, 2)
+    } else {
+        (length / 10).min(3)
+    }
+}
+
+/// The widest distance the name index has to answer for one anchor.
+///
+/// [`spelling_distance`] bounds a comparison by the *shorter* of the two
+/// names, so the anchor's own length is an upper bound on every comparison it
+/// can take part in, and [`SpellingCandidates::has_competitor`] adds exactly
+/// one edit on top of a winning distance. Fetching at that number rather than
+/// at [`MAX_SPELLING_DISTANCE`] keeps the bucket read proportional to what the
+/// comparison can actually consume; the ceiling still applies so no caller can
+/// ask the index for a distance this module would never honour.
+pub(crate) fn anchor_fetch_distance(anchor: &str) -> u8 {
+    let length = anchor.chars().filter(|ch| !ch.is_whitespace()).count();
+    let cjk = title_script(anchor) == TitleScript::Cjk;
+    let bound = spelling_bound(length, cjk).saturating_add(1);
+    u8::try_from(bound)
+        .unwrap_or(MAX_SPELLING_DISTANCE)
+        .min(MAX_SPELLING_DISTANCE)
+}
+
 fn spelling_distance(
     observed: &str,
     observed_raw: &str,
@@ -507,13 +538,7 @@ fn spelling_distance(
     if length < 10 && rival_bound.is_none() {
         return None;
     }
-    let bound = rival_bound.unwrap_or_else(|| {
-        if cjk {
-            (length / 20).clamp(1, 2)
-        } else {
-            (length / 10).min(3)
-        }
-    });
+    let bound = rival_bound.unwrap_or_else(|| spelling_bound(length, cjk));
     bounded_levenshtein_distance(observed, &name.text, bound).map(|distance| (distance, None))
 }
 
@@ -661,6 +686,46 @@ mod tests {
                 year: Some(2019),
             },
         }
+    }
+
+    /// What the index is asked for must cover every bound the comparison can
+    /// apply to that anchor, and nothing wider. The two are one decision, so
+    /// they are pinned against each other rather than restated.
+    #[test]
+    fn the_fetch_distance_covers_every_bound_the_comparison_can_apply() {
+        for anchor in [
+            "Vex",
+            "Zolar",
+            "Quorrel Vane",
+            "Quorrel Vane of the Pale Meridian",
+            "Quorrel Vane of the Pale Meridian and the Long Quiet Harbour",
+            "蒼雲",
+            "蒼雲の記録",
+            "蒼雲の記録と遠い灯りの物語について語られたこと",
+        ] {
+            let fetch = anchor_fetch_distance(anchor) as usize;
+            assert!(
+                (1..=MAX_SPELLING_DISTANCE as usize).contains(&fetch),
+                "{anchor}: fetch distance {fetch} is outside the module's own ceiling"
+            );
+            let cjk = title_script(anchor) == TitleScript::Cjk;
+            let anchor_length = anchor.chars().filter(|ch| !ch.is_whitespace()).count();
+            for rival_length in 1..=120usize {
+                // `spelling_distance` bounds on the shorter of the two names,
+                // and `has_competitor` adds one edit to the winning distance.
+                let needed = (spelling_bound(anchor_length.min(rival_length), cjk) + 1)
+                    .min(MAX_SPELLING_DISTANCE as usize);
+                assert!(
+                    needed <= fetch,
+                    "{anchor} against a {rival_length}-character name needs {needed} \
+                     edits but the index is only asked for {fetch}"
+                );
+            }
+        }
+        // A short name cannot consume the blanket distance this used to send.
+        assert_eq!(anchor_fetch_distance("Zolar"), 1);
+        assert_eq!(anchor_fetch_distance("Quorrel Vane"), 2);
+        assert_eq!(anchor_fetch_distance("蒼雲"), 2);
     }
 
     #[test]
