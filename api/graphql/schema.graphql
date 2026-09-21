@@ -2672,6 +2672,43 @@ type DashboardActivityStatsPayload {
 	previous: ActivityWindowCountsPayload!
 }
 
+enum DashboardImportKindValue {
+	IMPORTED
+	NEW_IMPORT
+	UPGRADE
+}
+
+type DashboardIndexerStatsPayload {
+	indexerId: ID!
+	indexerName: String!
+	queriesLast24H: Int!
+	failedLast24H: Int!
+	grabsLast24H: Int!
+	apiCurrent: Int
+	apiMax: Int
+}
+
+type DashboardRecentImportPayload {
+	id: ID!
+	titleId: ID
+	titleName: String
+	libraryId: ID
+	facet: MediaFacetValue
+	posterUrl: String
+	episode: EpisodePayload
+	kind: DashboardImportKindValue!
+	quality: String
+	sizeBytes: Long
+	occurredAt: DateTime!
+}
+
+type DashboardSummaryPayload {
+	titlesMovie: Int!
+	titlesSeries: Int!
+	titlesAnime: Int!
+	indexerStats: [DashboardIndexerStatsPayload!]!
+}
+
 """
 Calendar date scalar serialized as an ISO-8601 `YYYY-MM-DD` string without a time zone.
 """
@@ -16031,11 +16068,11 @@ type MutationRoot {
 		input: BeginManualImportSelectionInput!
 	): ManualImportSelectionPayload!
 	"""
-	Retry a previously failed import, optionally with an archive password.
+	Reevaluate a failed or skipped import from an existing completed download.
 	"""
 	retryImport(
 		"""
-		Failed import identity and optional archive password used for the retry.
+		Failed or skipped import identity and optional archive password. Rechecks existing files using current policy; does not retry the download.
 		"""
 		input: RetryImportInput!
 	): ImportResultPayload!
@@ -21438,6 +21475,8 @@ type QueryRoot {
 	Lists users with authorization and authentication-factor status, excluding secret values.
 	"""
 	users: [UserPayload!]!
+	dashboardSummary: DashboardSummaryPayload!
+	dashboardRecentImports(limit: Int): [DashboardRecentImportPayload!]!
 	"""
 	Return the path style supported by the running service.
 	"""
