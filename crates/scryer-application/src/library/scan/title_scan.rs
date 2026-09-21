@@ -2004,6 +2004,146 @@ impl AppUseCase {
         .await
     }
 
+    /// Restore reusable technical evidence after ownership reconciliation recreated rows.
+    pub(crate) async fn restore_folder_reconciliation_analysis(
+        &self,
+        title_ids: &[String],
+        cached: &[TitleMediaFile],
+    ) -> AppResult<()> {
+        let cached_by_path = cached
+            .iter()
+            .map(|file| (file.file_path.as_str(), file))
+            .collect::<HashMap<_, _>>();
+        for current in self
+            .services
+            .library
+            .media_files
+            .list_media_files_for_titles(title_ids)
+            .await?
+        {
+            let Some(previous) = cached_by_path.get(current.file_path.as_str()) else {
+                continue;
+            };
+            if current.id == previous.id {
+                continue;
+            }
+            let destination = stored_path_to_path_buf(&current.file_path);
+            let _permit = self
+                .runtime
+                .imports
+                .execution_coordinator
+                .acquire_destination(&destination)
+                .await;
+            let snapshot = file_source_snapshot_from_path(&destination).await?;
+            // A missing signature is not enough evidence to transfer another row's analysis.
+            if previous.source_signature_scheme.is_none()
+                || !title_media_file_matches_snapshot(previous, &snapshot)
+            {
+                continue;
+            }
+            let mut details = previous.analysis_details.clone();
+            if current.title_id != previous.title_id
+                && let Some(disc) = details.disc.as_mut()
+            {
+                disc.selection.episode_mappings.clear();
+            }
+            let analysis = crate::MediaFileAnalysis {
+                details,
+                video_codec: previous.video_codec,
+                video_width: previous.video_width,
+                video_height: previous.video_height,
+                video_bitrate_kbps: previous.video_bitrate_kbps,
+                video_bit_depth: previous.video_bit_depth,
+                video_hdr_format: previous.video_hdr_format.clone(),
+                dovi_profile: previous.dovi_profile,
+                dovi_bl_compat_id: previous.dovi_bl_compat_id,
+                video_frame_rate: previous.video_frame_rate.clone(),
+                video_profile: previous.video_profile.clone(),
+                audio_codec: previous.audio_codec.clone(),
+                audio_profile: previous.audio_profile.clone(),
+                audio_channels: previous.audio_channels,
+                audio_bitrate_kbps: previous.audio_bitrate_kbps,
+                audio_languages: previous.audio_languages.clone(),
+                audio_streams: previous.audio_streams.clone(),
+                subtitle_languages: previous.subtitle_languages.clone(),
+                subtitle_codecs: previous.subtitle_codecs.clone(),
+                subtitle_streams: previous.subtitle_streams.clone(),
+                has_multiaudio: previous.has_multiaudio,
+                duration_seconds: previous.duration_seconds,
+                num_chapters: previous.num_chapters,
+                container_format: previous.container_format.clone(),
+            };
+            self.services
+                .library
+                .media_files
+                .update_media_file_analysis_if_unchanged(&current, analysis)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild associations from an owned folder without refreshing metadata or probing media.
+    pub(crate) async fn reconcile_title_folder(
+        &self,
+        actor: &User,
+        title_id: &str,
+    ) -> AppResult<LibraryScanSummary> {
+        let started = Instant::now();
+        let title = self
+            .services
+            .catalog
+            .titles
+            .get_by_id(title_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("title {title_id}")))?;
+        self.require_library_management_permission(actor, &title.library_id)
+            .await?;
+        let folder = title
+            .folder_path
+            .as_deref()
+            .filter(|folder| !folder.trim().is_empty())
+            .ok_or_else(|| AppError::Validation("title has no owned folder".into()))?;
+        if !episodic_title_directory_present(&stored_path_to_path_buf(folder)).await? {
+            return Err(AppError::Validation("owned folder is unavailable".into()));
+        }
+        let files = self
+            .services
+            .library
+            .library_scanner
+            .scan_library(folder)
+            .await?;
+        let discovery_ms = elapsed_ms_u64(started);
+        let file_count = files.len();
+        let work = LibraryScanTitleWork {
+            facet_plan: title_scan_facet_plan(&title),
+            title,
+            scope: LibraryScanTitleWorkScope::ScopedFiles(files),
+            mode: LibraryScanTitleWalkMode::FolderReconciliation,
+            created_in_scan: false,
+        };
+        let result = self
+            .walk_library_title(
+                actor,
+                LibraryScanTitleWalkRequest {
+                    work,
+                    session_id: None,
+                    cancel_token: None,
+                    file_total_mode: LibraryScanFileTotalMode::MarkKnownAfterThisWalk,
+                    full_folder_scan: true,
+                    file_analysis_concurrency: 1,
+                },
+            )
+            .await;
+        tracing::info!(
+            title_id,
+            file_count,
+            discovery_ms,
+            elapsed_ms = elapsed_ms_u64(started),
+            "folder reconciliation completed"
+        );
+        result.map(|result| result.summary)
+    }
+
     pub async fn scan_title_library(
         &self,
         actor: &User,
@@ -2180,6 +2320,7 @@ impl AppUseCase {
                 session_id,
                 title_scan_root,
                 cancel_token.as_ref(),
+                mode,
             )
             .await;
             if let Some(coordinator) = session_coordinator.as_ref() {
@@ -2275,6 +2416,7 @@ impl AppUseCase {
         let mut stat_elapsed = Duration::ZERO;
         let mut analyze_elapsed = Duration::ZERO;
         let mut db_elapsed = Duration::ZERO;
+        let mut matching_elapsed = Duration::ZERO;
 
         // A scoped scan only ever touches the files it was handed, so the
         // directory itself is irrelevant there. A full-folder scan must know
@@ -2565,6 +2707,7 @@ impl AppUseCase {
                 let existing_snapshot_matches = existing
                     .is_some_and(|existing| title_media_file_matches_snapshot(existing, &snapshot));
 
+                let matching_started = Instant::now();
                 let filename_parse = parse_library_filename(&LibraryFilenameParseInput {
                     path: &source_path,
                     display_name: Some(file.display_name.as_str()),
@@ -2586,6 +2729,7 @@ impl AppUseCase {
                         LibraryFilenameFallbackPolicy::WhenNeeded
                     },
                 });
+                matching_elapsed = matching_elapsed.saturating_add(matching_started.elapsed());
                 let is_disc_image = scryer_domain::is_disc_image(&source_path);
                 let target_episodes = if is_disc_image {
                     Vec::new()
@@ -2717,7 +2861,19 @@ impl AppUseCase {
                     PlannedTitleScanRecord::New => true,
                 };
 
-                if !should_analyze {
+                if !should_analyze || mode == LibraryScanTitleWalkMode::FolderReconciliation {
+                    if should_analyze
+                        && let PlannedTitleScanRecord::Existing { file_id, .. } = &plan.record
+                    {
+                        self.services
+                            .library
+                            .media_files
+                            .update_media_file_analysis(
+                                file_id,
+                                crate::MediaFileAnalysis::default(),
+                            )
+                            .await?;
+                    }
                     unchanged_file_skips += 1;
                     let file_path = plan.file.path.clone();
                     let outcome = finalize_title_scan_file(
@@ -2899,7 +3055,8 @@ impl AppUseCase {
                     title_updated_after_scan = true;
                 }
 
-                if matches!(title.facet, MediaFacet::Series | MediaFacet::Anime)
+                if mode != LibraryScanTitleWalkMode::FolderReconciliation
+                    && matches!(title.facet, MediaFacet::Series | MediaFacet::Anime)
                     && let Some(use_season_folders) = layout_summary.inferred_use_season_folders()
                     && crate::import_workflow::season_folder_tag_override(&title).is_none()
                     // A scan must not turn a layout observed under a previous
@@ -2948,6 +3105,7 @@ impl AppUseCase {
             walk_ms = u64::try_from(walk_elapsed.as_millis()).unwrap_or(u64::MAX),
             stat_ms = u64::try_from(stat_elapsed.as_millis()).unwrap_or(u64::MAX),
             analyze_ms = u64::try_from(analyze_elapsed.as_millis()).unwrap_or(u64::MAX),
+            matching_ms = u64::try_from(matching_elapsed.as_millis()).unwrap_or(u64::MAX),
             db_ms = u64::try_from(db_elapsed.as_millis()).unwrap_or(u64::MAX),
             analyzed_files,
             unchanged_file_skips,
