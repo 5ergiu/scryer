@@ -894,11 +894,18 @@ fn normalize_dump_text_value(
 }
 
 fn looks_like_utc_timestamp(value: &str) -> bool {
-    value.len() == 20
-        && value.ends_with('Z')
+    let suffix = value.get(19..).unwrap_or("invalid");
+    let valid_suffix = suffix == "Z"
+        || (value.as_bytes().get(10) == Some(&b' ') && suffix.is_empty())
+        || suffix.strip_prefix('.').is_some_and(|fraction| {
+            let digits = fraction.strip_suffix('Z').unwrap_or(fraction);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    value.len() >= 19
+        && valid_suffix
         && value.as_bytes().get(4) == Some(&b'-')
         && value.as_bytes().get(7) == Some(&b'-')
-        && value.as_bytes().get(10) == Some(&b'T')
+        && matches!(value.as_bytes().get(10), Some(b'T' | b' '))
         && value.as_bytes().get(13) == Some(&b':')
         && value.as_bytes().get(16) == Some(&b':')
 }
@@ -917,6 +924,53 @@ mod tests {
     use scryer_infrastructure_datastore::migration_assets::{
         EngineScope, LegacySqlBlock, SourceMigrationManifest,
     };
+
+    #[tokio::test]
+    async fn sqlite_current_baseline_matches_full_migration_replay() {
+        let mut dumps = Vec::new();
+        for enable_baselines in [false, true] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            scryer_infrastructure_datastore::migrations::replay_source_catalog_for_fresh_install(
+                &pool,
+                None,
+                enable_baselines,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !sqlite_table_exists(&pool, "title_search_spellfix")
+                    .await
+                    .unwrap()
+            );
+            dumps.push(canonical_database_dump(&pool).await.unwrap());
+            pool.close().await;
+        }
+        assert_eq!(dumps[0], dumps[1]);
+    }
+
+    #[test]
+    fn baseline_timestamps_cover_sqlite_default_and_fractional_formats() {
+        for value in [
+            "2026-09-21T13:54:49Z",
+            "2026-09-21T13:54:49.500Z",
+            "2026-09-21 13:54:49",
+            "2026-09-21 13:54:49.500",
+        ] {
+            assert!(looks_like_utc_timestamp(value), "{value}");
+        }
+        for value in [
+            "",
+            "arbitrary text",
+            "2026-09-21",
+            "2026-09-21T13:54:49.fooZ",
+        ] {
+            assert!(!looks_like_utc_timestamp(value), "{value}");
+        }
+    }
 
     #[test]
     fn normalize_postgres_schema_dump_strips_runtime_noise() {
@@ -961,7 +1015,7 @@ ALTER TABLE ONLY public.download_jobs
 
         let checked_in = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../crates/scryer/src/db/postgres/baselines/0198_baseline.sql"),
+                .join("../crates/scryer/src/db/postgres/baselines/0254_baseline.sql"),
         )
         .expect("active PostgreSQL baseline should be readable");
         assert!(checked_in.ends_with(POSTGRES_BUILTIN_BASELINE_SEED_SQL));

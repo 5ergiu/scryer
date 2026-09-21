@@ -1,13 +1,37 @@
+CREATE TABLE api_keys (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lookup_id TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL,
+    label TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    provisioning_source TEXT NOT NULL,
+    CHECK (provisioning_source IN ('user', 'environment'))
+);
+CREATE TABLE application_compatibility_journal (
+    migration_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    original_metadata TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'blocked', 'validated')),
+    detail TEXT,
+    PRIMARY KEY (migration_id, subject_id, source_digest)
+);
+CREATE TABLE application_migrations (
+    migration_id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    execution_time_ms INTEGER NOT NULL
+);
 CREATE TABLE blocklist (
     id           TEXT PRIMARY KEY,
     title_id     TEXT NOT NULL,
-    source_title TEXT,
-    source_hint  TEXT,
-    quality      TEXT,
-    download_id  TEXT,
+    release_name TEXT,
     reason       TEXT,
-    data_json    TEXT,
-    created_at   TEXT NOT NULL,
+    created_at   TEXT NOT NULL, normalized_release_name TEXT NOT NULL DEFAULT '', indexer_id TEXT NOT NULL DEFAULT '', info_hash TEXT,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
 );
 CREATE TABLE collection_external_ids(
@@ -88,7 +112,7 @@ CREATE TABLE discovery_items (
     tombstoned_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+, recommendation_score REAL, base_rank REAL);
 CREATE TABLE discovery_pending_context_changes (
     id TEXT PRIMARY KEY NOT NULL,
     scope_key TEXT NOT NULL DEFAULT 'default',
@@ -104,15 +128,6 @@ CREATE TABLE discovery_pending_context_changes (
     last_seen_sequence INTEGER,
     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE discovery_raw_pages (
-    run_id TEXT NOT NULL REFERENCES discovery_sync_runs(id) ON DELETE CASCADE,
-    payload_kind TEXT NOT NULL,
-    page_number INTEGER NOT NULL DEFAULT 0,
-    compression TEXT NOT NULL DEFAULT 'none',
-    raw_payload TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (run_id, payload_kind, page_number)
 );
 CREATE TABLE discovery_section_items (
     run_id TEXT NOT NULL REFERENCES discovery_sync_runs(id) ON DELETE CASCADE,
@@ -162,16 +177,12 @@ CREATE TABLE discovery_sync_runs (
     page_count INTEGER,
     item_count INTEGER,
     facet_count INTEGER,
-    raw_submit_json TEXT,
-    raw_changes_json TEXT,
-    raw_final_status_json TEXT,
-    raw_ack_json TEXT,
     error_text TEXT,
     started_at TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+, acknowledged_at TEXT);
 CREATE TABLE discovery_sync_state (
     scope_key TEXT PRIMARY KEY NOT NULL,
     last_success_generation_id TEXT REFERENCES discovery_sync_runs(id) ON DELETE SET NULL,
@@ -309,10 +320,10 @@ CREATE TABLE discovery_titles (
     tmdb_collection_id TEXT,
     tmdb_collection_name TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, is_adult INTEGER NOT NULL DEFAULT 0, content_ratings_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE (target_key_norm, language)
 );
-CREATE TABLE domain_events(
+CREATE TABLE domain_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
     occurred_at TEXT NOT NULL,
@@ -325,8 +336,52 @@ CREATE TABLE domain_events(
     stream_kind TEXT NOT NULL,
     stream_id TEXT,
     event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL
-, actor_kind TEXT NOT NULL DEFAULT 'system', actor_display_name TEXT NOT NULL DEFAULT 'System');
+    payload_json BLOB NOT NULL,
+    actor_kind TEXT NOT NULL DEFAULT 'system',
+    actor_display_name TEXT NOT NULL DEFAULT 'System',
+    import_status TEXT,
+    media_file_delete_reason TEXT,
+    download_id TEXT
+);
+CREATE TABLE download_cleanup (
+    download_id TEXT PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    client_type TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    title_id TEXT,
+    facet TEXT,
+    source_title TEXT,
+    tracked_state TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+    attempts BIGINT NOT NULL DEFAULT 0,
+    history_offset BIGINT NOT NULL DEFAULT 0,
+    payload_checkpoint TEXT,
+    outcome TEXT,
+    last_error TEXT,
+    next_attempt_at TEXT NOT NULL,
+    lease_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE download_client_bindings (
+    download_id TEXT PRIMARY KEY,
+    client_config_id TEXT,
+    client_type_snapshot TEXT,
+    client_name_snapshot TEXT,
+    native_item_id TEXT,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    ended_at TEXT,
+    FOREIGN KEY (download_id) REFERENCES downloads(id)
+);
+CREATE TABLE download_client_status (
+    client_config_id TEXT PRIMARY KEY NOT NULL,
+    initial_failure_at TEXT,
+    most_recent_failure_at TEXT,
+    escalation_level INTEGER NOT NULL DEFAULT 0,
+    disabled_until TEXT,
+    FOREIGN KEY(client_config_id) REFERENCES download_clients(id) ON DELETE CASCADE
+);
 CREATE TABLE download_clients(
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -339,10 +394,11 @@ CREATE TABLE download_clients(
     last_seen_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-, client_priority INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE download_identity_states (
+, client_priority INTEGER NOT NULL DEFAULT 0, proxy_config_id TEXT);
+CREATE TABLE "download_identity_states" (
     id TEXT PRIMARY KEY,
     identity_key TEXT NOT NULL UNIQUE,
+    canonical_download_id TEXT NOT NULL,
     download_id TEXT,
     client_id TEXT,
     client_type TEXT,
@@ -352,7 +408,7 @@ CREATE TABLE download_identity_states (
     detail TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    CHECK (download_id IS NOT NULL)
+    FOREIGN KEY (canonical_download_id) REFERENCES downloads(id)
 );
 CREATE TABLE download_import_artifacts (
     id TEXT PRIMARY KEY,
@@ -369,13 +425,16 @@ CREATE TABLE download_import_artifacts (
     result TEXT NOT NULL,
     reason_code TEXT,
     imported_media_file_id TEXT,
-    created_at TEXT NOT NULL, source_client_id TEXT,
+    created_at TEXT NOT NULL,
+    source_client_id TEXT,
+    canonical_download_id TEXT,
     FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE SET NULL,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE SET NULL,
     FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE SET NULL,
-    FOREIGN KEY (imported_media_file_id) REFERENCES media_files(id) ON DELETE SET NULL
+    FOREIGN KEY (imported_media_file_id) REFERENCES media_files(id) ON DELETE SET NULL,
+    FOREIGN KEY (canonical_download_id) REFERENCES downloads(id)
 );
-CREATE TABLE download_queue_commands (
+CREATE TABLE "download_queue_commands" (
     id TEXT PRIMARY KEY,
     action TEXT NOT NULL,
     client_type TEXT NOT NULL,
@@ -387,22 +446,16 @@ CREATE TABLE download_queue_commands (
     started_at TEXT,
     finished_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-, client_id TEXT);
+    updated_at TEXT NOT NULL,
+    client_id TEXT,
+    canonical_download_id TEXT,
+    FOREIGN KEY (canonical_download_id) REFERENCES downloads(id)
+);
 CREATE TABLE download_submission_episode_links (
-    download_client_id TEXT NOT NULL DEFAULT '',
-    download_client_type TEXT NOT NULL,
-    download_client_item_id TEXT NOT NULL,
+    download_id TEXT NOT NULL,
     episode_id TEXT NOT NULL,
-    PRIMARY KEY (
-        download_client_id,
-        download_client_type,
-        download_client_item_id,
-        episode_id
-    ),
-    FOREIGN KEY (download_client_id, download_client_type, download_client_item_id)
-        REFERENCES download_submissions(download_client_id, download_client_type, download_client_item_id)
-        ON DELETE CASCADE
+    PRIMARY KEY (download_id, episode_id),
+    FOREIGN KEY (download_id) REFERENCES download_submissions(id) ON DELETE CASCADE
 );
 CREATE TABLE "download_submissions" (
     id TEXT PRIMARY KEY,
@@ -410,7 +463,7 @@ CREATE TABLE "download_submissions" (
     facet TEXT NOT NULL,
     download_client_id TEXT NOT NULL DEFAULT '',
     download_client_type TEXT NOT NULL,
-    download_client_item_id TEXT NOT NULL,
+    download_client_item_id TEXT,
     source_title TEXT,
     submitted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     collection_id TEXT,
@@ -419,14 +472,39 @@ CREATE TABLE "download_submissions" (
     source_hint TEXT,
     source_kind TEXT,
     request_signature TEXT,
-    episode_id TEXT, download_id TEXT, purpose TEXT NOT NULL DEFAULT 'standard', series_movie_link_id TEXT, actor_kind TEXT, actor_user_id TEXT, actor_display_name TEXT,
-    UNIQUE(download_client_id, download_client_type, download_client_item_id)
+    episode_id TEXT,
+    download_id TEXT,
+    purpose TEXT NOT NULL DEFAULT 'standard',
+    series_movie_link_id TEXT,
+    actor_kind TEXT,
+    actor_user_id TEXT,
+    actor_display_name TEXT,
+    source_provider_id TEXT,
+    source_provider_name TEXT,
+    seeding_profile_id TEXT,
+    seed_goal_ratio REAL,
+    seed_goal_seconds INTEGER,
+    seed_never_remove INTEGER,
+    seed_goal_met_action TEXT,
+    seed_goal_source TEXT,
+    seed_info_hash TEXT,
+    seed_post_import_tracking TEXT,
+    release_size_bytes INTEGER, info_hash TEXT,
+    FOREIGN KEY (id) REFERENCES downloads(id)
+);
+CREATE TABLE downloads (
+    id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL CHECK (origin IN ('scryer_submission', 'foreign_observation')),
+    created_at TEXT NOT NULL,
+    first_observed_at TEXT,
+    last_observed_at TEXT,
+    terminal_at TEXT
 );
 CREATE TABLE emby_media_server_details (
     connection_id TEXT PRIMARY KEY,
     api_key TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, server_id TEXT, connect_enabled INTEGER NOT NULL DEFAULT 0 CHECK (connect_enabled IN (0, 1)),
     FOREIGN KEY (connection_id) REFERENCES media_server_connections(id) ON DELETE CASCADE
 );
 CREATE TABLE episode_external_ids(
@@ -459,19 +537,6 @@ CREATE TABLE episodes(
     updated_at TEXT, monitored INTEGER NOT NULL DEFAULT 1, overview TEXT, is_filler INTEGER NOT NULL DEFAULT 0, absolute_number TEXT, is_recap INTEGER NOT NULL DEFAULT 0, tvdb_id TEXT, image_url TEXT,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE,
     FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE SET NULL
-);
-CREATE TABLE event_outboxes(
-    id TEXT PRIMARY KEY,
-    history_event_id TEXT NOT NULL,
-    channel_key TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    dispatched_at TEXT,
-    FOREIGN KEY (history_event_id) REFERENCES history_events(id) ON DELETE CASCADE
 );
 CREATE TABLE event_subscriber_offsets(
     subscriber_name TEXT PRIMARY KEY,
@@ -556,7 +621,8 @@ CREATE TABLE external_subtitle_probe_cache (
 CREATE TABLE file_episode_map(
     file_id TEXT NOT NULL,
     episode_id TEXT NOT NULL,
-    is_filler INTEGER DEFAULT 0,
+    is_filler INTEGER DEFAULT 0, role TEXT NOT NULL DEFAULT 'additional'
+    CHECK (role IN ('primary', 'additional')),
     PRIMARY KEY (file_id, episode_id),
     FOREIGN KEY (file_id) REFERENCES media_files(id) ON DELETE CASCADE,
     FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
@@ -579,7 +645,28 @@ CREATE TABLE history_events(
     FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE SET NULL
 );
-CREATE TABLE imports(
+CREATE TABLE image_proxy_cache_entries (
+  token TEXT NOT NULL,
+  variant TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  upstream_etag TEXT,
+  upstream_last_modified TEXT,
+  fetched_at TEXT NOT NULL,
+  last_accessed_at TEXT NOT NULL,
+  PRIMARY KEY (token, variant),
+  FOREIGN KEY (token) REFERENCES image_proxy_sources(token) ON DELETE CASCADE
+);
+CREATE TABLE image_proxy_sources (
+  token TEXT PRIMARY KEY,
+  upstream_url TEXT,
+  owner_type TEXT,
+  owner_id TEXT,
+  image_kind TEXT NOT NULL,
+  fallback_class TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE TABLE "imports" (
     id TEXT PRIMARY KEY,
     source_system TEXT NOT NULL,
     source_ref TEXT NOT NULL,
@@ -590,8 +677,18 @@ CREATE TABLE imports(
     started_at TEXT,
     finished_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-, rename_plan_json TEXT, source_client_id TEXT, download_id TEXT, import_transfer_phase TEXT, import_transfer_bytes INTEGER, import_transfer_total_bytes INTEGER, import_transfer_started_at TEXT, import_transfer_updated_at TEXT);
+    updated_at TEXT NOT NULL,
+    rename_plan_json TEXT,
+    source_client_id TEXT,
+    download_id TEXT,
+    import_transfer_phase TEXT,
+    import_transfer_bytes INTEGER,
+    import_transfer_total_bytes INTEGER,
+    import_transfer_started_at TEXT,
+    import_transfer_updated_at TEXT,
+    canonical_download_id TEXT,
+    FOREIGN KEY (canonical_download_id) REFERENCES downloads(id)
+);
 CREATE TABLE indexer_api_quotas (
     indexer_id TEXT PRIMARY KEY NOT NULL,
     api_current INTEGER,
@@ -602,6 +699,74 @@ CREATE TABLE indexer_api_quotas (
     last_query_at TEXT,
     last_reset_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE indexer_errors (
+    id TEXT PRIMARY KEY,
+    indexer_id TEXT NOT NULL REFERENCES indexers(id) ON DELETE CASCADE,
+    indexer_name TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    http_status INTEGER NOT NULL,
+    classification TEXT NOT NULL,
+    provider_error_code INTEGER NULL,
+    message TEXT NOT NULL,
+    content_type TEXT NULL,
+    payload_format_version INTEGER NOT NULL,
+    response_zstd BLOB NOT NULL,
+    occurred_at TEXT NOT NULL
+);
+CREATE TABLE indexer_search_candidate_source_values (
+    source_id TEXT NOT NULL REFERENCES indexer_search_candidate_sources(id) ON DELETE CASCADE,
+    value_kind TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY(source_id, value_kind, ordinal)
+);
+CREATE TABLE indexer_search_candidate_sources (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES indexer_search_candidates(id) ON DELETE CASCADE,
+    indexer_id TEXT NOT NULL,
+    source_identity TEXT NOT NULL,
+    provider_ref TEXT,
+    source TEXT NOT NULL,
+    encrypted_download_url TEXT,
+    encrypted_link_url TEXT,
+    published_at TEXT,
+    thumbs_up INTEGER,
+    thumbs_down INTEGER,
+    grabs INTEGER,
+    grab_current INTEGER,
+    grab_max INTEGER,
+    response_tvdb_id TEXT,
+    response_tmdb_id TEXT,
+    response_imdb_id TEXT,
+    season INTEGER,
+    episode INTEGER,
+    absolute_episode INTEGER,
+    release_group TEXT,
+    provider_source TEXT,
+    seeders INTEGER,
+    peers INTEGER,
+    download_volume_factor REAL,
+    upload_volume_factor REAL,
+    protected INTEGER,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    reusable_until TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    UNIQUE(candidate_id, indexer_id, source_identity)
+);
+CREATE TABLE indexer_search_candidates (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    size_bytes INTEGER,
+    source_kind TEXT,
+    info_hash TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    reusable_until TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 CREATE TABLE indexer_search_learning (
     indexer_id TEXT NOT NULL,
@@ -616,6 +781,35 @@ CREATE TABLE indexer_search_learning (
     suppressed INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (indexer_id, title_id, facet, strategy_key)
+);
+CREATE TABLE indexer_search_run_candidate_sources (
+    run_id TEXT NOT NULL REFERENCES indexer_search_runs(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES indexer_search_candidate_sources(id) ON DELETE CASCADE,
+    search_session_id TEXT NOT NULL,
+    PRIMARY KEY(run_id, source_id)
+);
+CREATE TABLE indexer_search_runs (
+    id TEXT PRIMARY KEY,
+    indexer_id TEXT NOT NULL,
+    provider_type TEXT NOT NULL,
+    search_session_id TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    query_signature TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    page INTEGER,
+    -- Reserved for the per-strategy search corpus (plan 151): the provider
+    -- offset this run requested and the next offset it advertised. Nothing
+    -- reads or writes them yet.
+    provider_offset INTEGER,
+    next_provider_offset INTEGER,
+    range_min_size INTEGER,
+    range_max_size INTEGER,
+    result_count INTEGER NOT NULL,
+    completion_state TEXT NOT NULL,
+    retry_at TEXT,
+    error_summary TEXT,
+    indexer_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE indexer_system_backoffs (
     indexer_id TEXT PRIMARY KEY NOT NULL,
@@ -639,7 +833,9 @@ CREATE TABLE indexers(
     last_error_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-, enable_interactive_search INTEGER NOT NULL DEFAULT 1, enable_auto_search INTEGER NOT NULL DEFAULT 1, config_json TEXT, managed_parent_config_id TEXT, managed_child_key TEXT, managed_metadata_json TEXT, caps_snapshot_json TEXT);
+, enable_interactive_search INTEGER NOT NULL DEFAULT 1, enable_auto_search INTEGER NOT NULL DEFAULT 1, config_json TEXT, managed_parent_config_id TEXT, managed_child_key TEXT, managed_metadata_json TEXT, caps_snapshot_json TEXT, proxy_config_id TEXT, last_error_message TEXT, download_client_id TEXT
+    REFERENCES download_clients(id)
+    ON DELETE SET NULL, seeding_profile_id TEXT);
 CREATE TABLE jellyfin_media_server_details (
     connection_id TEXT PRIMARY KEY,
     api_key TEXT,
@@ -667,6 +863,13 @@ CREATE TABLE library_probe_signatures(
     updated_at TEXT NOT NULL,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
 );
+CREATE TABLE library_root_id_remaps (
+    legacy_root_id TEXT PRIMARY KEY NOT NULL,
+    root_id TEXT NOT NULL,
+    normalized_path TEXT NOT NULL,
+    remapped INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE library_roots (
     id TEXT PRIMARY KEY,
     library_id TEXT NOT NULL,
@@ -674,7 +877,7 @@ CREATE TABLE library_roots (
     normalized_path TEXT NOT NULL,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, legacy_path_derived_id TEXT,
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 CREATE TABLE library_scan_unmatched_items (
@@ -691,7 +894,404 @@ CREATE TABLE library_scan_unmatched_items (
     search_attempts_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-, status TEXT NOT NULL DEFAULT 'pending', title_id TEXT, library_id TEXT);
+, status TEXT NOT NULL DEFAULT 'pending', title_id TEXT, library_id TEXT, size_bytes INTEGER);
+CREATE TABLE lifecycle_action_runs (
+    id TEXT PRIMARY KEY NOT NULL,
+    candidate_id TEXT NOT NULL REFERENCES lifecycle_candidates(id) ON DELETE CASCADE,
+    rule_set_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    title_id TEXT NOT NULL,
+    action_kind TEXT NOT NULL,
+    match_generation INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    hold_reason TEXT,
+    error TEXT,
+    detail TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), subject_kind TEXT NOT NULL DEFAULT 'title', subject_id TEXT NOT NULL DEFAULT '',
+    UNIQUE (idempotency_key, attempt)
+);
+CREATE TABLE lifecycle_candidates (
+    id TEXT PRIMARY KEY NOT NULL,
+    rule_set_id TEXT NOT NULL REFERENCES maintenance_rule_sets(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    matcher_content_hash TEXT NOT NULL DEFAULT '',
+    title_id TEXT NOT NULL,
+    library_id TEXT NOT NULL DEFAULT '',
+    facet TEXT NOT NULL DEFAULT '',
+    subject_kind TEXT NOT NULL DEFAULT 'title',
+    match_generation INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'observing',
+    state_reason TEXT NOT NULL DEFAULT '',
+    reason_codes TEXT NOT NULL DEFAULT '[]',
+    action_kind TEXT NOT NULL DEFAULT 'do_nothing',
+    grace_days INTEGER NOT NULL DEFAULT 0,
+    first_matched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_matched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    due_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_evaluated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    held_since TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+, action_attempts INTEGER NOT NULL DEFAULT 0, subject_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE lifecycle_claims (
+    id TEXT PRIMARY KEY NOT NULL,
+    title_id TEXT NOT NULL,
+    library_id TEXT NOT NULL DEFAULT '',
+    producer TEXT NOT NULL,
+    producer_ref TEXT,
+    kind TEXT NOT NULL DEFAULT 'retain_until',
+    state TEXT NOT NULL DEFAULT 'dormant',
+    duration_days INTEGER,
+    starts_at TEXT,
+    expires_at TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    released_reason TEXT
+);
+CREATE TABLE location_file_resolutions (
+    operation_id TEXT NOT NULL REFERENCES location_operations(id) ON DELETE CASCADE,
+    title_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    resolution_json TEXT NOT NULL,
+    PRIMARY KEY (operation_id, title_id, source_path)
+);
+CREATE TABLE location_operation_owned_entities (
+    operation_id TEXT NOT NULL,
+    -- title | root | library
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    -- exclusive | shared
+    ownership_mode TEXT NOT NULL DEFAULT 'exclusive',
+    acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    released_at TEXT,
+    PRIMARY KEY (operation_id, entity_type, entity_id),
+    FOREIGN KEY (operation_id) REFERENCES location_operations(id) ON DELETE CASCADE
+);
+CREATE TABLE location_operation_title_checkpoints (
+    operation_id TEXT NOT NULL,
+    title_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    -- pending | moving | verifying | reconciling | cleaning_up | completed
+    -- | completed_with_warnings | skipped | blocked | failed
+    -- (`TitleCheckpointState` in scryer-application::location::model)
+    state TEXT NOT NULL DEFAULT 'pending',
+    -- Per-title preview classification, as previewed (FR-015/FR-080); value set
+    -- owned by scryer-application::location::classify.
+    classification TEXT,
+    source_library_id TEXT,
+    source_root_id TEXT,
+    source_folder_path TEXT,
+    destination_library_id TEXT,
+    destination_root_id TEXT,
+    destination_folder_path TEXT,
+    -- Set when this title merges into an existing destination title (plan D8).
+    merged_into_title_id TEXT,
+    file_total INTEGER NOT NULL DEFAULT 0,
+    file_completed_count INTEGER NOT NULL DEFAULT 0,
+    bytes_total INTEGER NOT NULL DEFAULT 0,
+    bytes_completed INTEGER NOT NULL DEFAULT 0,
+    -- The three explanations a checkpoint can carry, each in its own column so
+    -- Activity never has to guess which one it is reading: why the title could
+    -- not enter the operation, why it failed, and — for a title that finished
+    -- with warnings (dedup, collision rename, preserve-instead-of-recycle) —
+    -- what the user still has to see.
+    blocked_reason TEXT,
+    failure_reason TEXT,
+    note TEXT,
+    checkpointed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reason_code TEXT,
+    PRIMARY KEY (operation_id, title_id),
+    FOREIGN KEY (operation_id) REFERENCES location_operations(id) ON DELETE CASCADE
+);
+CREATE TABLE location_operation_verifications (
+    id TEXT PRIMARY KEY NOT NULL,
+    operation_id TEXT NOT NULL,
+    title_id TEXT,
+    media_file_id TEXT,
+    source_path TEXT NOT NULL,
+    destination_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    -- full | quick
+    requested_depth TEXT NOT NULL,
+    -- full | quick
+    applied_depth TEXT NOT NULL,
+    fell_back INTEGER NOT NULL DEFAULT 0,
+    fallback_reason TEXT,
+    -- verified | mismatch | unavailable
+    -- (`FileVerificationOutcome` in scryer-application::location::model)
+    outcome TEXT NOT NULL,
+    move_crc TEXT,
+    move_crc_algorithm TEXT,
+    full_blake3 TEXT,
+    sampled_signature_scheme TEXT,
+    sampled_signature_value TEXT,
+    failure_reason TEXT,
+    -- The note for a record that neither fell back nor failed: how a verified
+    -- destination was proven, in the words Activity shows per file (FR-043).
+    -- Distinct from `fallback_reason` and `failure_reason` so the three cases
+    -- stay separable after the fact.
+    detail TEXT,
+    verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (operation_id) REFERENCES location_operations(id) ON DELETE CASCADE
+);
+CREATE TABLE location_operations (
+    id TEXT PRIMARY KEY NOT NULL,
+    -- folder_reassignment | root_move | root_change | root_consolidation
+    -- | cross_library_transfer | adoption
+    operation_type TEXT NOT NULL,
+    -- move_with_scryer | files_already_there | catalog_only
+    -- (`LocationExecutionMode` in scryer-application::location::model)
+    execution_mode TEXT NOT NULL,
+    -- queued | preparing | moving | verifying | reconciling | cleaning_up
+    -- | completed | completed_with_warnings | canceled | failed
+    -- (`LocationOperationState` in scryer-application::location::model, FR-091)
+    state TEXT NOT NULL DEFAULT 'queued',
+    initiated_by_user_id TEXT,
+    source_library_id TEXT,
+    source_root_id TEXT,
+    destination_library_id TEXT,
+    destination_root_id TEXT,
+    -- Fingerprint of the confirmed plan (FR-081/FR-089). Empty until a plan is built.
+    plan_fingerprint TEXT NOT NULL DEFAULT '',
+    plan_json TEXT,
+    -- full | quick, resolved from the user preference when the plan is confirmed (FR-042/043)
+    verification_depth TEXT NOT NULL DEFAULT 'full',
+    -- Set when any file fell back to the quick floor, so the weaker guarantee is auditable.
+    verification_fallback_count INTEGER NOT NULL DEFAULT 0,
+    title_total INTEGER NOT NULL DEFAULT 0,
+    title_completed_count INTEGER NOT NULL DEFAULT 0,
+    title_blocked_count INTEGER NOT NULL DEFAULT 0,
+    file_total INTEGER NOT NULL DEFAULT 0,
+    file_completed_count INTEGER NOT NULL DEFAULT 0,
+    bytes_total INTEGER NOT NULL DEFAULT 0,
+    bytes_completed INTEGER NOT NULL DEFAULT 0,
+    -- Outcome counters Activity shows next to the volume counters above
+    -- (FR-091, US8 scenario 1). Every one of them is derived from decisions the
+    -- confirmed plan already made, so a resumed run recomputes the same values
+    -- rather than incrementing a running total it cannot trust.
+    --   merge_count      titles merged into an existing destination title (US7)
+    --   dedup_count      files/assets recycled as proven duplicates (FR-073)
+    --   rename_count     files/assets renamed to avoid a collision (FR-074/075)
+    --   no_op_count      titles that needed no change
+    --   unresolved_count items still needing a user decision (FR-016, FR-086)
+    merge_count INTEGER NOT NULL DEFAULT 0,
+    dedup_count INTEGER NOT NULL DEFAULT 0,
+    rename_count INTEGER NOT NULL DEFAULT 0,
+    no_op_count INTEGER NOT NULL DEFAULT 0,
+    unresolved_count INTEGER NOT NULL DEFAULT 0,
+    -- The Activity/job row this operation runs under, when it has one.
+    job_run_id TEXT,
+    workflow_operation_id TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_at TEXT,
+    failure_reason TEXT,
+    confirmed_at TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reason_code TEXT,
+    FOREIGN KEY (initiated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE TABLE location_transfer_progress (
+    operation_id TEXT PRIMARY KEY NOT NULL REFERENCES location_operations(id) ON DELETE CASCADE,
+    progress_basis_points BIGINT NOT NULL DEFAULT 0,
+    titles_initialized BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE TABLE location_transfer_runtime (
+    id BIGINT PRIMARY KEY NOT NULL CHECK (id = 1),
+    generation BIGINT NOT NULL
+);
+CREATE TABLE location_transfer_titles (
+    operation_id TEXT NOT NULL REFERENCES location_operations(id) ON DELETE CASCADE,
+    title_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    hot_rank BIGINT NOT NULL,
+    summary_json TEXT NOT NULL,
+    PRIMARY KEY (operation_id, title_id)
+);
+CREATE TABLE login_verification_challenges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    login_method TEXT NOT NULL,
+    persist_session INTEGER NOT NULL,
+    allow_passkey INTEGER NOT NULL,
+    allow_totp INTEGER NOT NULL,
+    auth_session_version TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CHECK (login_method IN ('local_password', 'jellyfin', 'emby')),
+    CHECK (persist_session IN (0, 1)),
+    CHECK (allow_passkey IN (0, 1)),
+    CHECK (allow_totp IN (0, 1))
+);
+CREATE TABLE maintenance_action_job_receipts (
+    candidate_id TEXT NOT NULL,
+    match_generation INTEGER NOT NULL,
+    revision_number INTEGER NOT NULL,
+    step_id TEXT NOT NULL,
+    dispatch_attempt INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    logical_request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    job_run_id TEXT,
+    state TEXT NOT NULL,
+    reconciliation_evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, match_generation, revision_number, step_id, dispatch_attempt),
+    FOREIGN KEY (candidate_id, match_generation, revision_number, step_id)
+        REFERENCES maintenance_action_steps(candidate_id, match_generation, revision_number, step_id)
+        ON DELETE CASCADE
+);
+CREATE TABLE maintenance_action_step_attempts (
+    id TEXT PRIMARY KEY NOT NULL,
+    candidate_id TEXT NOT NULL,
+    match_generation INTEGER NOT NULL,
+    revision_number INTEGER NOT NULL,
+    step_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    intent_json TEXT NOT NULL DEFAULT '{}',
+    before_state_json TEXT NOT NULL DEFAULT '{}',
+    target_identity_json TEXT NOT NULL DEFAULT '{}',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    hold_reason TEXT,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (candidate_id, match_generation, revision_number, step_id)
+        REFERENCES maintenance_action_steps(candidate_id, match_generation, revision_number, step_id)
+        ON DELETE CASCADE
+);
+CREATE TABLE maintenance_action_steps (
+    candidate_id TEXT NOT NULL REFERENCES lifecycle_candidates(id) ON DELETE CASCADE,
+    match_generation INTEGER NOT NULL,
+    revision_number INTEGER NOT NULL,
+    step_id TEXT NOT NULL,
+    rule_set_id TEXT NOT NULL,
+    title_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    sequence_content_hash TEXT NOT NULL,
+    step_kind TEXT NOT NULL,
+    intent_json TEXT NOT NULL DEFAULT '{}',
+    before_state_json TEXT NOT NULL DEFAULT '{}',
+    target_identity_json TEXT NOT NULL DEFAULT '{}',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    lease_id TEXT,
+    lease_expires_at TEXT,
+    hold_reason TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    PRIMARY KEY (candidate_id, match_generation, revision_number, step_id)
+);
+CREATE TABLE maintenance_evaluation_runs (
+    id TEXT PRIMARY KEY NOT NULL,
+    rule_set_id TEXT NOT NULL REFERENCES maintenance_rule_sets(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    matcher_content_hash TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    evaluated_count INTEGER NOT NULL DEFAULT 0,
+    matched_count INTEGER NOT NULL DEFAULT 0,
+    no_match_count INTEGER NOT NULL DEFAULT 0,
+    unknown_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    canceled_candidates INTEGER NOT NULL DEFAULT 0,
+    superseded_candidates INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER,
+    error TEXT
+);
+CREATE TABLE maintenance_rule_exclusions (
+    id TEXT PRIMARY KEY NOT NULL,
+    rule_set_id TEXT REFERENCES maintenance_rule_sets(id) ON DELETE CASCADE,
+    title_id TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+, subject_kind TEXT NOT NULL DEFAULT 'title', subject_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE maintenance_rule_revisions (
+    id TEXT PRIMARY KEY NOT NULL,
+    rule_set_id TEXT NOT NULL REFERENCES maintenance_rule_sets(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    rego_source TEXT NOT NULL,
+    action_spec TEXT NOT NULL,
+    grace_days INTEGER NOT NULL DEFAULT 0,
+    matcher_content_hash TEXT NOT NULL,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), storage_root_id TEXT,
+    UNIQUE (rule_set_id, revision_number)
+);
+CREATE TABLE maintenance_rule_set_libraries (
+    rule_set_id TEXT NOT NULL REFERENCES maintenance_rule_sets(id) ON DELETE CASCADE,
+    library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE RESTRICT,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (rule_set_id, library_id),
+    UNIQUE (rule_set_id, position)
+);
+CREATE TABLE maintenance_rule_sets (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    evaluation_mode TEXT NOT NULL DEFAULT 'disabled',
+    subject_kind TEXT NOT NULL DEFAULT 'title',
+    current_revision_number INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+, effect_arming TEXT NOT NULL DEFAULT 'none', destructive_rearm_required INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE maintenance_sequence_terminal_memberships (
+    id TEXT PRIMARY KEY NOT NULL,
+    candidate_id TEXT NOT NULL UNIQUE REFERENCES lifecycle_candidates(id) ON DELETE CASCADE,
+    rule_set_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    matcher_content_hash TEXT NOT NULL,
+    title_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    match_generation INTEGER NOT NULL,
+    sequence_content_hash TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    expected_step_ids_json TEXT NOT NULL DEFAULT '[]',
+    completed_step_ids_json TEXT NOT NULL DEFAULT '[]',
+    terminal_step_id TEXT,
+    created_at TEXT NOT NULL,
+    released_at TEXT
+);
+CREATE TABLE manual_import_selection_candidates (
+    id TEXT PRIMARY KEY,
+    selection_id TEXT NOT NULL,
+    canonical_path TEXT NOT NULL,
+    quality TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (selection_id, canonical_path)
+);
+CREATE TABLE manual_import_selections (
+    id TEXT PRIMARY KEY,
+    actor_user_id TEXT NOT NULL,
+    title_id TEXT NOT NULL,
+    source_client_id TEXT NOT NULL DEFAULT '',
+    source_system TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+, release_evidence_json TEXT, trusted_source_root TEXT NOT NULL DEFAULT '', archive_workspace_root TEXT, canonical_download_id TEXT);
 CREATE TABLE media_files(
     id TEXT PRIMARY KEY,
     title_id TEXT NOT NULL,
@@ -702,7 +1302,7 @@ CREATE TABLE media_files(
     has_multiaudio INTEGER DEFAULT 0,
     scan_status TEXT NOT NULL DEFAULT 'pending',
     scan_error TEXT,
-    created_at TEXT NOT NULL, video_codec TEXT, video_width INTEGER, video_height INTEGER, video_bitrate_kbps INTEGER, video_bit_depth INTEGER, video_hdr_format TEXT, audio_codec TEXT, audio_channels INTEGER, duration_seconds INTEGER, container_format TEXT, analysis_json TEXT, video_frame_rate TEXT, video_profile TEXT, audio_bitrate_kbps INTEGER, scene_name TEXT, release_group TEXT, source_type TEXT, resolution TEXT, video_codec_parsed TEXT, audio_codec_parsed TEXT, acquisition_score INTEGER, scoring_log TEXT, indexer_source TEXT, grabbed_release_title TEXT, grabbed_at TEXT, edition TEXT, original_file_path TEXT, release_hash TEXT, num_chapters INTEGER, source_signature_scheme TEXT, source_signature_value TEXT, audio_profile TEXT, audio_channels_parsed TEXT, role TEXT NOT NULL DEFAULT 'primary',
+    created_at TEXT NOT NULL, video_codec TEXT, video_width INTEGER, video_height INTEGER, video_bitrate_kbps INTEGER, video_bit_depth INTEGER, video_hdr_format TEXT, audio_codec TEXT, audio_channels INTEGER, duration_seconds INTEGER, container_format TEXT, analysis_json TEXT, video_frame_rate TEXT, video_profile TEXT, audio_bitrate_kbps INTEGER, scene_name TEXT, release_group TEXT, source_type TEXT, resolution TEXT, video_codec_parsed TEXT, audio_codec_parsed TEXT, acquisition_score INTEGER, scoring_log TEXT, indexer_source TEXT, grabbed_release_title TEXT, grabbed_at TEXT, edition TEXT, original_file_path TEXT, release_hash TEXT, num_chapters INTEGER, source_signature_scheme TEXT, source_signature_value TEXT, audio_profile TEXT, audio_channels_parsed TEXT, role TEXT NOT NULL DEFAULT 'primary', announced_size_bytes INTEGER, full_blake3 TEXT, move_crc TEXT, move_crc_algorithm TEXT, hash_computed_at TEXT, analysis_revision INTEGER NOT NULL DEFAULT 0, analysis_attempt_revision INTEGER, analysis_attempted_at TEXT, analysis_attempt_source TEXT, analysis_attempt_status TEXT, analysis_attempt_json TEXT,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
 );
 CREATE TABLE media_request_external_ids (
@@ -740,18 +1340,7 @@ CREATE TABLE "media_requests" (
     content_status TEXT,
     requested_quality_profile_id TEXT,
     requested_quality_profile_name TEXT,
-    requested_monitor_type TEXT
-        CHECK (
-            requested_monitor_type IS NULL
-            OR requested_monitor_type IN (
-                'monitored',
-                'unmonitored',
-                'futureepisodes',
-                'missingandfutureepisodes',
-                'allepisodes',
-                'none'
-            )
-        ),
+    requested_monitor_type TEXT,
     resolved_by_user_id TEXT,
     resolved_at TEXT,
     created_title_id TEXT,
@@ -760,6 +1349,7 @@ CREATE TABLE "media_requests" (
     created_by_user_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    rating_summary_json TEXT NOT NULL DEFAULT '{"rating":null,"rating_sources":[],"external_ratings":[]}', background_url TEXT, requested_lease_days INTEGER, approved_lease_days INTEGER, decision_id TEXT, decided_by_rule_set_ids TEXT NOT NULL DEFAULT '[]', policy_tags_json TEXT NOT NULL DEFAULT '[]', metadata_snapshot_json TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
@@ -778,7 +1368,7 @@ CREATE TABLE media_server_connections (
     auto_add_enabled INTEGER NOT NULL DEFAULT 0,
     default_app_permissions INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, external_url TEXT,
     CHECK (provider IN ('jellyfin', 'plex', 'emby'))
 );
 CREATE TABLE media_server_default_library_grants (
@@ -796,6 +1386,69 @@ CREATE TABLE media_server_path_mappings (
     destination_path TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (connection_id) REFERENCES media_server_connections(id) ON DELETE CASCADE
+);
+CREATE TABLE media_server_playback_items (
+    connection_id TEXT NOT NULL,
+    entity_kind TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    provider_item_id TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (connection_id, entity_kind, entity_id),
+    FOREIGN KEY (connection_id) REFERENCES media_server_connections(id) ON DELETE CASCADE,
+    CHECK (entity_kind IN ('title', 'episode'))
+);
+CREATE TABLE media_server_signal_sync_state (
+    connection_id TEXT PRIMARY KEY NOT NULL
+        REFERENCES media_server_connections(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    -- Snapshot of the connection's enabled flag as of the last sweep, so a
+    -- reader can tell "nothing was collected because the connection is off"
+    -- from "nothing was collected because the sweep failed".
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_started_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT,
+    participant_count INTEGER NOT NULL DEFAULT 0,
+    signal_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE media_server_user_media_signals (
+    id TEXT PRIMARY KEY NOT NULL,
+    connection_id TEXT NOT NULL
+        REFERENCES media_server_connections(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    -- Denormalized from the linked account at sync time. Kept as a plain
+    -- column rather than a join so a later account unlink leaves the
+    -- observation attributable to the identity that produced it.
+    scryer_user_id TEXT,
+    provider_item_id TEXT NOT NULL,
+    -- 'movie' or 'episode'. Show-level rollups are computed by readers, never
+    -- stored: a stored rollup would be a second source of truth that the next
+    -- sweep could silently contradict.
+    kind TEXT NOT NULL,
+    scryer_title_id TEXT,
+    scryer_episode_id TEXT,
+    played INTEGER NOT NULL DEFAULT 0,
+    play_count INTEGER NOT NULL DEFAULT 0,
+    last_played_at TEXT,
+    observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    sync_generation INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE monitor_selections (
+    owner_kind TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    entry_kind TEXT NOT NULL,
+    entry_key TEXT NOT NULL,
+    label TEXT,
+    external_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner_kind, owner_id, entry_kind, entry_key),
+    CHECK (owner_kind IN ('title', 'media_request')),
+    CHECK (entry_kind IN ('season', 'series_movie'))
 );
 CREATE TABLE movie_entities (
     id TEXT PRIMARY KEY NOT NULL,
@@ -855,7 +1508,21 @@ CREATE TABLE oauth_authorization_codes (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     consumed_at TEXT
-, authorization_source TEXT NOT NULL DEFAULT 'authenticated');
+, authorization_source TEXT NOT NULL DEFAULT 'authenticated', auth_session_version TEXT NOT NULL DEFAULT '', jellyfin_connection_id TEXT NULL, jellyfin_external_url TEXT NULL, jellyfin_base_url TEXT NULL, jellyfin_api_key_hash TEXT NULL);
+CREATE TABLE oauth_client_redirect_uris (
+    client_id TEXT NOT NULL REFERENCES oauth_client_registrations(client_id) ON DELETE CASCADE,
+    redirect_uri TEXT NOT NULL,
+    PRIMARY KEY (client_id, redirect_uri)
+);
+CREATE TABLE oauth_client_registrations (
+    client_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'custom'
+        CHECK (kind IN ('custom', 'jellyfin_plugin')),
+    CHECK (enabled IN (0, 1))
+);
 CREATE TABLE oauth_refresh_grants (
     id TEXT PRIMARY KEY,
     family_id TEXT NOT NULL,
@@ -868,7 +1535,7 @@ CREATE TABLE oauth_refresh_grants (
     last_used_at TEXT,
     revoked_at TEXT,
     revoked_reason TEXT
-, authorization_source TEXT NOT NULL DEFAULT 'authenticated');
+, authorization_source TEXT NOT NULL DEFAULT 'authenticated', redirect_uri TEXT NOT NULL DEFAULT '', jellyfin_connection_id TEXT NULL, jellyfin_external_url TEXT NULL, jellyfin_base_url TEXT NULL, jellyfin_api_key_hash TEXT NULL);
 CREATE TABLE oauth_refresh_tokens (
     id TEXT PRIMARY KEY,
     grant_id TEXT NOT NULL REFERENCES oauth_refresh_grants(id) ON DELETE CASCADE,
@@ -893,7 +1560,7 @@ CREATE TABLE pending_releases (
     delay_until TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting',
     grabbed_at TEXT
-, source_kind TEXT, source_password TEXT, published_at TEXT, info_hash TEXT);
+, source_kind TEXT, source_password TEXT, published_at TEXT, info_hash TEXT, indexer_id TEXT, minimum_seed_ratio REAL, minimum_seed_time_minutes INTEGER, season_pack_seed_ratio REAL, season_pack_seed_time_minutes INTEGER, seeders INTEGER, release_identity TEXT, last_observed_at TEXT NOT NULL DEFAULT '', coverage_identity TEXT, role TEXT NOT NULL DEFAULT 'primary', last_decision_code TEXT, release_age_unknown INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE plex_media_server_details (
     connection_id TEXT PRIMARY KEY,
     machine_id TEXT,
@@ -955,8 +1622,8 @@ CREATE TABLE post_processing_script_runs (
     file_path TEXT,
     status TEXT NOT NULL,                         -- 'success' | 'failed' | 'timeout' | 'running'
     exit_code INTEGER,
-    stdout_tail TEXT,                             -- last 4KB
-    stderr_tail TEXT,                             -- last 4KB
+    stdout_tail BLOB,                             -- last 32 KiB, zstd frame
+    stderr_tail BLOB,                             -- last 32 KiB, zstd frame
     duration_ms INTEGER,
     env_payload_json TEXT,                        -- the JSON payload passed to the script
     started_at TEXT NOT NULL,
@@ -978,6 +1645,28 @@ CREATE TABLE post_processing_scripts (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE proxy_configs (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    provider_type TEXT NOT NULL,
+    protocol TEXT,
+    base_url TEXT NOT NULL,
+    request_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    username_encrypted TEXT,
+    -- Transport proxy passwords. SSH authenticates with an Ed25519 private key.
+    password_encrypted TEXT,
+    remote_dns INTEGER NOT NULL DEFAULT 0,
+    private_key_encrypted TEXT,
+    private_key_passphrase_encrypted TEXT,
+    host_key_fingerprint TEXT,
+    host_key_pinned_at TEXT,
+    last_health_status TEXT,
+    last_error_message TEXT,
+    last_error_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+, peer_public_key TEXT, preshared_key_encrypted TEXT, tunnel_public_key TEXT, tunnel_addresses TEXT, tunnel_dns_servers TEXT, tunnel_mtu INTEGER, tunnel_keepalive_seconds INTEGER);
 CREATE TABLE quality_profile_audio_codec_allowlist(
     profile_id TEXT NOT NULL,
     codec TEXT NOT NULL,
@@ -1044,18 +1733,18 @@ CREATE TABLE quality_profiles(
     created_at TEXT NOT NULL
 , prefer_dual_audio INTEGER NOT NULL DEFAULT 0, required_audio_languages TEXT NOT NULL DEFAULT '[]', scoring_config TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE release_decisions (
-    id                  TEXT PRIMARY KEY,
-    wanted_item_id      TEXT NOT NULL REFERENCES wanted_items(id) ON DELETE CASCADE,
-    title_id            TEXT NOT NULL,
-    release_title       TEXT NOT NULL,
-    release_url         TEXT,
-    release_size_bytes  INTEGER,
-    decision_code       TEXT NOT NULL,
-    candidate_score     INTEGER NOT NULL,
-    current_score       INTEGER,
-    score_delta         INTEGER,
-    explanation_json    TEXT,
-    created_at          TEXT NOT NULL
+    id TEXT PRIMARY KEY,
+    wanted_item_id TEXT NOT NULL REFERENCES wanted_items(id) ON DELETE CASCADE,
+    title_id TEXT NOT NULL,
+    release_title TEXT NOT NULL,
+    release_url TEXT,
+    release_size_bytes INTEGER,
+    decision_code TEXT NOT NULL,
+    candidate_score INTEGER NOT NULL,
+    current_score INTEGER,
+    score_delta INTEGER,
+    explanation_json BLOB,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE release_download_attempts(
     id TEXT PRIMARY KEY,
@@ -1068,6 +1757,65 @@ CREATE TABLE release_download_attempts(
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL, source_password TEXT,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE SET NULL
+);
+CREATE TABLE request_rule_decisions (
+    id TEXT PRIMARY KEY NOT NULL,
+    request_id TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    mode TEXT NOT NULL DEFAULT 'disabled',
+    effective_outcome TEXT NOT NULL DEFAULT 'manual_review',
+    policy_outcome TEXT NOT NULL DEFAULT 'manual_review',
+    fallback_reason TEXT,
+    votes_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    input_hash TEXT NOT NULL DEFAULT '',
+    input_schema_version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE request_rule_revisions (
+    id TEXT PRIMARY KEY NOT NULL,
+    rule_set_id TEXT NOT NULL REFERENCES request_rule_sets(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    rego_source TEXT NOT NULL,
+    matcher_content_hash TEXT NOT NULL,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (rule_set_id, revision_number)
+);
+CREATE TABLE request_rule_set_libraries (
+    rule_set_id TEXT NOT NULL REFERENCES request_rule_sets(id) ON DELETE CASCADE,
+    library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE RESTRICT,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (rule_set_id, library_id),
+    UNIQUE (rule_set_id, position)
+);
+CREATE TABLE request_rule_sets (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    evaluation_mode TEXT NOT NULL DEFAULT 'disabled',
+    current_revision_number INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE rule_pack_installations (
+    pack_id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    auto_update INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    last_updated TEXT NOT NULL,
+    last_error TEXT
+, customizable INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE rule_pack_members (
+    pack_id TEXT NOT NULL REFERENCES rule_pack_installations(pack_id) ON DELETE CASCADE,
+    template_id TEXT NOT NULL,
+    rule_set_id TEXT NOT NULL REFERENCES rule_sets(id) ON DELETE CASCADE,
+    removed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (pack_id, template_id),
+    UNIQUE (rule_set_id)
 );
 CREATE TABLE rule_set_history (
     id TEXT PRIMARY KEY NOT NULL,
@@ -1087,7 +1835,30 @@ CREATE TABLE rule_sets (
     applied_facets TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-, is_managed INTEGER NOT NULL DEFAULT 0, managed_key TEXT);
+, is_managed INTEGER NOT NULL DEFAULT 0, managed_key TEXT, managed_tag_filter TEXT, evaluation_phase TEXT NOT NULL DEFAULT 'additional', exclusive_group TEXT, disabled_reason TEXT);
+CREATE TABLE scope_indexer_coverage (
+    scope_key TEXT NOT NULL,
+    facet TEXT NOT NULL,
+    indexer_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    searched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope_key, facet, indexer_id)
+);
+CREATE TABLE seeding_profiles (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    ratio REAL,
+    seed_time_minutes INTEGER,
+    season_pack_mode TEXT NOT NULL DEFAULT 'inherit',
+    season_pack_ratio REAL,
+    season_pack_seed_time_minutes INTEGER,
+    honor_tracker_minimums INTEGER NOT NULL DEFAULT 1,
+    goal_met_action TEXT NOT NULL DEFAULT 'remove_entry',
+    never_remove INTEGER NOT NULL DEFAULT 0,
+    minimum_seeders INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+, post_import_tracking TEXT NOT NULL DEFAULT 'park');
 CREATE TABLE series_movie_links (
     id TEXT PRIMARY KEY NOT NULL,
     series_title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -1106,7 +1877,7 @@ CREATE TABLE series_movie_links (
     monitored INTEGER NOT NULL DEFAULT 1,
     legacy_collection_id TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, monitoring_override INTEGER, metadata_active INTEGER NOT NULL DEFAULT 1, tags TEXT NOT NULL DEFAULT '[]',
     UNIQUE(legacy_collection_id)
 );
 CREATE TABLE settings_definitions(
@@ -1177,35 +1948,62 @@ CREATE TABLE subtitle_provider_configs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 , enabled_facets TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE title_anime_numbering_bridges (
+    title_id TEXT PRIMARY KEY,
+    generated_on TEXT NOT NULL,
+    corroborating_order TEXT,
+    seasons_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'anime_community',
+    FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
+);
+CREATE TABLE title_credits (
+    title_id TEXT REFERENCES titles(id) ON DELETE CASCADE,
+    movie_entity_id TEXT REFERENCES movie_entities(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    person_id TEXT NOT NULL,
+    person_name TEXT NOT NULL DEFAULT '',
+    person_original_name TEXT NOT NULL DEFAULT '',
+    person_image_url TEXT NOT NULL DEFAULT '',
+    person_source TEXT NOT NULL DEFAULT '',
+    person_external_id TEXT NOT NULL DEFAULT '',
+    character_name TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT '',
+    billing_order INTEGER NOT NULL DEFAULT 0,
+    episode_count INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((title_id IS NOT NULL) <> (movie_entity_id IS NOT NULL))
+);
 CREATE TABLE title_external_ids(
     id TEXT PRIMARY KEY NOT NULL,
     title_id TEXT NOT NULL,
     source TEXT NOT NULL,
     external_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT, facet TEXT, library_id TEXT,
+    updated_at TEXT, facet TEXT, library_id TEXT, external_kind TEXT NOT NULL DEFAULT '', external_key TEXT,
     FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
 );
 CREATE TABLE title_image_blobs (
-  digest TEXT PRIMARY KEY,
-  format TEXT NOT NULL,
-  width INTEGER NOT NULL,
-  height INTEGER NOT NULL,
-  bytes BLOB NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE title_image_variants (
-  id TEXT PRIMARY KEY,
-  title_image_id TEXT NOT NULL,
-  variant_key TEXT NOT NULL,
-  blob_digest TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE (title_image_id, variant_key),
-  FOREIGN KEY (title_image_id) REFERENCES title_images(id) ON DELETE CASCADE,
-  FOREIGN KEY (blob_digest) REFERENCES title_image_blobs(digest) ON DELETE RESTRICT
-);
+            digest TEXT PRIMARY KEY,
+            format TEXT NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            bytes BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+CREATE TABLE "title_image_variants" (
+            id TEXT PRIMARY KEY,
+            title_image_id TEXT NOT NULL,
+            variant_key TEXT NOT NULL,
+            blob_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (title_image_id, variant_key),
+            FOREIGN KEY (title_image_id) REFERENCES title_images(id) ON DELETE CASCADE,
+            FOREIGN KEY (blob_digest) REFERENCES title_image_blobs(digest) ON DELETE RESTRICT
+        );
 CREATE TABLE title_images (
   id TEXT PRIMARY KEY,
   title_id TEXT NOT NULL,
@@ -1224,7 +2022,8 @@ CREATE TABLE title_images (
   FOREIGN KEY (title_id) REFERENCES titles(id) ON DELETE CASCADE
 );
 CREATE TABLE title_metadata_external_ratings (
-    title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+    title_id TEXT REFERENCES titles(id) ON DELETE CASCADE,
+    movie_entity_id TEXT REFERENCES movie_entities(id) ON DELETE CASCADE,
     source TEXT NOT NULL,
     sort_index INTEGER NOT NULL DEFAULT 0,
     value REAL,
@@ -1234,21 +2033,24 @@ CREATE TABLE title_metadata_external_ratings (
     url TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (title_id, source)
+    CHECK ((title_id IS NOT NULL) <> (movie_entity_id IS NOT NULL))
 );
 CREATE TABLE title_metadata_rating_sources (
-    title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+    title_id TEXT REFERENCES titles(id) ON DELETE CASCADE,
+    movie_entity_id TEXT REFERENCES movie_entities(id) ON DELETE CASCADE,
     source TEXT NOT NULL,
     sort_index INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (title_id, source)
+    CHECK ((title_id IS NOT NULL) <> (movie_entity_id IS NOT NULL))
 );
 CREATE TABLE title_metadata_rating_summaries (
-    title_id TEXT PRIMARY KEY NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+    title_id TEXT REFERENCES titles(id) ON DELETE CASCADE,
+    movie_entity_id TEXT REFERENCES movie_entities(id) ON DELETE CASCADE,
     rating REAL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((title_id IS NOT NULL) <> (movie_entity_id IS NOT NULL))
 );
 CREATE TABLE title_metadata_tag_source_keys (
     title_id TEXT NOT NULL,
@@ -1279,9 +2081,10 @@ CREATE TABLE title_metadata_tags (
     sort_index INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (title_id, tag_key)
 );
-CREATE TABLE title_more_like_this_items (
+CREATE TABLE "title_more_like_this_items" (
     source_title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
-    discovery_title_id TEXT NOT NULL REFERENCES discovery_titles(id) ON DELETE CASCADE,
+    discovery_title_id TEXT NOT NULL
+        REFERENCES title_recommendation_cards(discovery_title_id) ON DELETE CASCADE,
     sort_index INTEGER NOT NULL DEFAULT 0,
     rank_score REAL,
     best_source TEXT,
@@ -1293,6 +2096,28 @@ CREATE TABLE title_more_like_this_items (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (source_title_id, discovery_title_id)
 );
+CREATE TABLE title_recommendation_cards (
+    discovery_title_id TEXT PRIMARY KEY NOT NULL,
+    payload_version INTEGER NOT NULL DEFAULT 1,
+    payload_blob BLOB,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE title_search_collation_keys (
+    term_id INTEGER NOT NULL REFERENCES title_search_terms(term_id) ON DELETE CASCADE,
+    profile TEXT NOT NULL,
+    collation_key BLOB NOT NULL,
+    PRIMARY KEY (term_id, profile)
+);
+CREATE TABLE title_search_index_queue (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    title_id TEXT NOT NULL
+);
+CREATE TABLE title_search_meta (
+    id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+    collation_version TEXT NOT NULL DEFAULT '',
+    projection_generation INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE title_search_terms (
     term_id INTEGER PRIMARY KEY,
     title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -1301,6 +2126,14 @@ CREATE TABLE title_search_terms (
     raw_term TEXT NOT NULL,
     normalized_term TEXT NOT NULL,
     weight INTEGER NOT NULL
+, literal_term TEXT NOT NULL DEFAULT '', stripped_year_key TEXT NOT NULL DEFAULT '', match_term TEXT NOT NULL DEFAULT '', match_year INTEGER, script TEXT NOT NULL DEFAULT 'other', numbers_key TEXT NOT NULL DEFAULT '', char_length INTEGER NOT NULL DEFAULT 0, romanization_key TEXT, language_tag TEXT, title_year INTEGER);
+CREATE TABLE title_tag_definitions (
+    id TEXT PRIMARY KEY NOT NULL,
+    label TEXT NOT NULL,
+    description TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE TABLE titles(
     id TEXT PRIMARY KEY NOT NULL,
@@ -1315,7 +2148,7 @@ CREATE TABLE titles(
     created_at TEXT NOT NULL,
     updated_at TEXT,
     deleted_at TEXT
-, year INTEGER, overview TEXT, poster_url TEXT, sort_title TEXT, slug TEXT, imdb_id TEXT, runtime_minutes INTEGER, genres TEXT NOT NULL DEFAULT '[]', content_status TEXT, language TEXT, first_aired TEXT, network TEXT, studio TEXT, country TEXT, aliases TEXT NOT NULL DEFAULT '[]', metadata_language TEXT, metadata_fetched_at TEXT, min_availability TEXT, digital_release_date TEXT, background_url TEXT, folder_path TEXT, tagged_aliases_json TEXT DEFAULT '[]', poster_local_path TEXT, background_local_path TEXT, metadata_hydration_next_attempt_at TEXT, metadata_hydration_attempt_count INTEGER NOT NULL DEFAULT 0, library_id TEXT, root_folder_id TEXT, catalog_sort_key TEXT NOT NULL DEFAULT '', popularity REAL);
+, year INTEGER, overview TEXT, poster_url TEXT, sort_title TEXT, slug TEXT, imdb_id TEXT, runtime_minutes INTEGER, genres TEXT NOT NULL DEFAULT '[]', content_status TEXT, language TEXT, first_aired TEXT, network TEXT, studio TEXT, country TEXT, aliases TEXT NOT NULL DEFAULT '[]', metadata_language TEXT, metadata_fetched_at TEXT, min_availability TEXT, digital_release_date TEXT, background_url TEXT, folder_path TEXT, tagged_aliases_json TEXT DEFAULT '[]', poster_local_path TEXT, background_local_path TEXT, metadata_hydration_next_attempt_at TEXT, metadata_hydration_attempt_count INTEGER NOT NULL DEFAULT 0, library_id TEXT, root_folder_id TEXT, catalog_sort_key TEXT NOT NULL DEFAULT '', popularity REAL, smg_identity_backfill_attempt_count INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE totp_credentials (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
@@ -1326,7 +2159,7 @@ CREATE TABLE totp_credentials (
     last_accepted_step INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_used_at TEXT,
+    last_used_at TEXT, attempt_window_started_at TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (algorithm IN ('SHA1', 'SHA256', 'SHA512')),
     CHECK (digits IN (6, 8)),
@@ -1340,7 +2173,7 @@ CREATE TABLE totp_enrollment_challenges (
     digits INTEGER NOT NULL,
     period_seconds INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL, auth_session_version TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (algorithm IN ('SHA1', 'SHA256', 'SHA512')),
     CHECK (digits IN (6, 8)),
@@ -1419,7 +2252,7 @@ CREATE TABLE user_app_permission_masks (
     PRIMARY KEY (user_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
-CREATE TABLE user_external_accounts (
+CREATE TABLE "user_external_accounts" (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -1431,10 +2264,11 @@ CREATE TABLE user_external_accounts (
     status TEXT NOT NULL,
     verified_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL, last_login_at TEXT,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (connection_id) REFERENCES media_server_connections(id),
-    CHECK (provider IN ('plex', 'jellyfin')),
+    CHECK (provider IN ('plex', 'jellyfin', 'emby')),
     CHECK (status IN ('pending_claim', 'active', 'disabled'))
 );
 CREATE TABLE user_library_permission_masks (
@@ -1484,20 +2318,16 @@ CREATE TABLE "users" (
     updated_at TEXT NOT NULL DEFAULT '',
     last_login_at TEXT
 , account_kind TEXT NOT NULL DEFAULT 'local'
-        CHECK (account_kind IN ('local', 'external_auto_provisioned')), auth_session_version TEXT);
+        CHECK (account_kind IN ('local', 'external_auto_provisioned')), auth_session_version TEXT, password_change_required INTEGER NOT NULL DEFAULT 0
+    CHECK (password_change_required IN (0, 1)));
 CREATE TABLE wanted_items (
     id              TEXT PRIMARY KEY,
     title_id        TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
     episode_id      TEXT REFERENCES episodes(id) ON DELETE CASCADE,
     media_type      TEXT NOT NULL,
-    search_phase    TEXT NOT NULL DEFAULT 'primary',
-    next_search_at  TEXT,
     last_search_at  TEXT,
-    search_count    INTEGER NOT NULL DEFAULT 0,
-    baseline_date   TEXT,
     status          TEXT NOT NULL DEFAULT 'wanted',
     grabbed_release TEXT,
-    current_score   INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL, collection_id TEXT REFERENCES collections(id), series_movie_link_id TEXT REFERENCES series_movie_links(id),
     UNIQUE(title_id, episode_id)
@@ -1508,7 +2338,8 @@ CREATE TABLE webauthn_challenges (
     challenge_type TEXT NOT NULL,
     state_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT 'standalone_authentication', login_verification_challenge_id TEXT
+    REFERENCES login_verification_challenges(id) ON DELETE CASCADE, auth_session_version TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (challenge_type IN ('registration', 'authentication'))
 );
@@ -1549,9 +2380,14 @@ CREATE TABLE workflow_operations(
     FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE SET NULL,
     FOREIGN KEY (media_file_id) REFERENCES media_files(id) ON DELETE SET NULL
 );
-CREATE INDEX idx_blocklist_source_title
-    ON blocklist (source_title)
-    WHERE source_title IS NOT NULL;
+CREATE INDEX idx_api_keys_user_created
+    ON api_keys(user_id, created_at DESC);
+CREATE UNIQUE INDEX idx_blocklist_info_hash_unique
+    ON blocklist (title_id, info_hash)
+    WHERE info_hash IS NOT NULL;
+CREATE UNIQUE INDEX idx_blocklist_release_unique
+    ON blocklist (title_id, indexer_id, normalized_release_name)
+    WHERE info_hash IS NULL;
 CREATE INDEX idx_blocklist_title_id
     ON blocklist (title_id);
 CREATE INDEX idx_collection_external_ids_title_provenance
@@ -1572,6 +2408,10 @@ CREATE INDEX idx_discovery_item_subject_links_run_type_key
     ON discovery_item_subject_links(run_id, link_type, subject_key, item_id);
 CREATE INDEX idx_discovery_items_active_title
     ON discovery_items(base_generation_id, discovery_title_id, tombstoned_at);
+CREATE INDEX idx_discovery_items_generation_rank
+    ON discovery_items(base_generation_id, tombstoned_at, owned_in_input);
+CREATE INDEX idx_discovery_items_generation_recommendation
+    ON discovery_items(base_generation_id, recommendation_score DESC, rank_score DESC, sort_index ASC);
 CREATE INDEX idx_discovery_items_run
     ON discovery_items(run_id);
 CREATE INDEX idx_discovery_items_run_section
@@ -1582,8 +2422,6 @@ CREATE INDEX idx_discovery_pending_changes_scope_seen
     ON discovery_pending_context_changes(scope_key, last_seen_at);
 CREATE INDEX idx_discovery_pending_changes_scope_sequence
     ON discovery_pending_context_changes(scope_key, last_seen_sequence);
-CREATE INDEX idx_discovery_raw_pages_run
-    ON discovery_raw_pages(run_id, payload_kind, page_number);
 CREATE INDEX idx_discovery_section_items_run_section
     ON discovery_section_items(run_id, section_id, sort_index);
 CREATE INDEX idx_discovery_sections_run_surface
@@ -1614,39 +2452,58 @@ CREATE INDEX idx_discovery_title_terms_title
     ON discovery_title_terms(discovery_title_id, term_kind, sort_index);
 CREATE INDEX idx_discovery_titles_key_language
     ON discovery_titles(target_key_norm, language);
-CREATE INDEX idx_domain_events_event_type_sequence
-    ON domain_events (event_type, sequence DESC);
-CREATE INDEX idx_domain_events_facet_sequence
-    ON domain_events (facet, sequence DESC);
-CREATE INDEX idx_domain_events_occurred_at
-    ON domain_events (occurred_at DESC);
+CREATE INDEX idx_domain_events_event_type_sequence ON domain_events (event_type, sequence DESC);
+CREATE INDEX idx_domain_events_occurred_at ON domain_events (occurred_at DESC);
 CREATE INDEX idx_domain_events_stream_sequence
-    ON domain_events (stream_kind, stream_id, sequence DESC);
+    ON domain_events (stream_id, sequence)
+    WHERE stream_id IS NOT NULL;
 CREATE INDEX idx_domain_events_title_sequence
-    ON domain_events (title_id, sequence DESC);
+    ON domain_events (title_id, sequence DESC)
+    WHERE title_id IS NOT NULL;
+CREATE INDEX idx_download_cleanup_due ON download_cleanup(status, next_attempt_at, client_id);
+CREATE UNIQUE INDEX idx_download_client_bindings_active_locator_unique
+    ON download_client_bindings(client_config_id, client_type_snapshot, native_item_id)
+    WHERE native_item_id IS NOT NULL
+      AND ended_at IS NULL;
+CREATE INDEX idx_download_client_bindings_locator
+    ON download_client_bindings(client_config_id, client_type_snapshot, native_item_id);
+CREATE INDEX idx_download_client_status_disabled_until
+    ON download_client_status(disabled_until);
 CREATE INDEX idx_download_clients_client_priority
     ON download_clients (client_priority);
 CREATE UNIQUE INDEX idx_download_clients_name
     ON download_clients (name);
+CREATE INDEX idx_download_identity_states_canonical_download_id
+    ON download_identity_states(canonical_download_id);
+CREATE INDEX idx_download_identity_states_canonical_latest
+    ON download_identity_states(canonical_download_id, updated_at DESC, id DESC);
+CREATE INDEX idx_download_identity_states_client_item
+    ON download_identity_states(client_type, download_client_item_id, client_id);
 CREATE INDEX idx_download_identity_states_download_id
     ON download_identity_states(client_id, client_type, download_id);
 CREATE INDEX idx_download_import_artifacts_episode
     ON download_import_artifacts (episode_id, result);
+CREATE INDEX idx_download_import_artifacts_import_episode
+ON download_import_artifacts (import_id, episode_id, result, created_at DESC);
 CREATE INDEX idx_download_import_artifacts_retention
     ON download_import_artifacts (created_at, import_id);
 CREATE INDEX idx_download_import_artifacts_source
     ON download_import_artifacts (COALESCE(source_client_id, ''), source_system, source_ref, created_at);
 CREATE UNIQUE INDEX idx_download_queue_commands_active_unique
-ON download_queue_commands(action, COALESCE(client_id, ''), client_type, download_client_item_id, is_history)
-WHERE status IN ('queued', 'running');
+    ON download_queue_commands(action, COALESCE(client_id, ''), client_type, download_client_item_id, is_history)
+    WHERE status IN ('queued', 'running');
 CREATE INDEX idx_download_queue_commands_source
-ON download_queue_commands(COALESCE(client_id, ''), client_type, download_client_item_id, is_history, created_at DESC);
+    ON download_queue_commands(COALESCE(client_id, ''), client_type, download_client_item_id, is_history, created_at DESC);
 CREATE INDEX idx_download_queue_commands_status
-ON download_queue_commands(action, status, updated_at);
+    ON download_queue_commands(action, status, updated_at);
 CREATE INDEX idx_download_submission_episode_links_episode
-ON download_submission_episode_links(episode_id);
+    ON download_submission_episode_links(episode_id);
+CREATE INDEX idx_download_submissions_client_item
+    ON download_submissions(download_client_type, download_client_item_id, download_client_id);
 CREATE INDEX idx_download_submissions_download_id
     ON download_submissions(download_client_id, download_client_type, download_id);
+CREATE INDEX idx_download_submissions_seed_info_hash
+    ON download_submissions(seed_info_hash);
 CREATE INDEX idx_download_submissions_title_request_signature
     ON download_submissions(title_id, request_signature);
 CREATE INDEX idx_episode_external_ids_title_provenance
@@ -1657,16 +2514,15 @@ CREATE INDEX idx_episodes_collection
     ON episodes (collection_id);
 CREATE INDEX idx_episodes_title
     ON episodes (title_id, season_number);
-CREATE INDEX idx_event_outboxes_channel
-    ON event_outboxes (channel_key);
-CREATE INDEX idx_event_outboxes_status
-    ON event_outboxes (status, updated_at);
 CREATE INDEX idx_external_subtitle_probe_cache_file_path
     ON external_subtitle_probe_cache(file_path);
 CREATE INDEX idx_external_subtitle_probe_cache_media_file
     ON external_subtitle_probe_cache(media_file_id);
 CREATE INDEX idx_file_episode_map_episode
     ON file_episode_map (episode_id);
+CREATE UNIQUE INDEX idx_file_episode_map_one_primary_per_episode
+ON file_episode_map (episode_id)
+WHERE role = 'primary';
 CREATE INDEX idx_file_series_movie_link_map_link
     ON file_series_movie_link_map(series_movie_link_id);
 CREATE INDEX idx_history_events_occurred_at
@@ -1679,6 +2535,10 @@ CREATE INDEX idx_history_title_time
     ON history_events (title_id, occurred_at DESC);
 CREATE INDEX idx_history_type_time
     ON history_events (event_type, occurred_at DESC);
+CREATE INDEX idx_image_proxy_cache_entries_last_accessed_at
+  ON image_proxy_cache_entries(last_accessed_at);
+CREATE INDEX idx_image_proxy_sources_last_seen_at
+  ON image_proxy_sources(last_seen_at);
 CREATE UNIQUE INDEX idx_imports_active_download_id
     ON imports (COALESCE(source_client_id, ''), source_system, download_id)
     WHERE download_id IS NOT NULL
@@ -1690,18 +2550,44 @@ CREATE UNIQUE INDEX idx_imports_source_ref
     WHERE download_id IS NULL;
 CREATE INDEX idx_imports_status_updated_at
     ON imports (status, updated_at);
+CREATE INDEX idx_indexer_errors_indexer_occurred_at_id
+    ON indexer_errors (indexer_id, occurred_at DESC, id DESC);
+CREATE INDEX idx_indexer_errors_occurred_at
+    ON indexer_errors (occurred_at);
+CREATE INDEX idx_indexer_search_candidates_expiry
+    ON indexer_search_candidates(expires_at);
 CREATE INDEX idx_indexer_search_learning_title
     ON indexer_search_learning (indexer_id, title_id, facet);
+CREATE INDEX idx_indexer_search_run_sources_run
+    ON indexer_search_run_candidate_sources(run_id);
+CREATE INDEX idx_indexer_search_run_sources_session
+    ON indexer_search_run_candidate_sources(search_session_id);
+CREATE INDEX idx_indexer_search_run_sources_source
+    ON indexer_search_run_candidate_sources(source_id);
+CREATE INDEX idx_indexer_search_runs_indexer_created
+    ON indexer_search_runs(indexer_id, created_at DESC);
+CREATE INDEX idx_indexer_search_runs_scope_created
+    ON indexer_search_runs(scope_key, created_at DESC);
+CREATE INDEX idx_indexer_search_sources_indexer_reusable
+    ON indexer_search_candidate_sources(indexer_id, reusable_until);
 CREATE INDEX idx_indexer_system_backoffs_disabled_until
     ON indexer_system_backoffs(disabled_until);
+CREATE INDEX idx_indexers_download_client_id
+    ON indexers(download_client_id);
 CREATE UNIQUE INDEX idx_indexers_managed_child_identity
 ON indexers(managed_parent_config_id, managed_child_key)
 WHERE managed_parent_config_id IS NOT NULL AND managed_child_key IS NOT NULL;
 CREATE INDEX idx_indexers_managed_parent ON indexers(managed_parent_config_id);
+CREATE INDEX idx_indexers_proxy_config_id
+    ON indexers(proxy_config_id);
+CREATE INDEX idx_indexers_seeding_profile_id
+    ON indexers(seeding_profile_id);
 CREATE UNIQUE INDEX idx_libraries_facet_slug
     ON libraries(facet, slug);
 CREATE INDEX idx_library_probe_signatures_last_probed
     ON library_probe_signatures (last_probed_at DESC);
+CREATE INDEX idx_library_root_id_remaps_root
+    ON library_root_id_remaps(root_id);
 CREATE INDEX idx_library_roots_library
     ON library_roots(library_id, is_default DESC, path ASC);
 CREATE UNIQUE INDEX idx_library_roots_normalized_path
@@ -1720,6 +2606,98 @@ CREATE INDEX idx_library_scan_unmatched_items_root_status_updated
     ON library_scan_unmatched_items (facet, scan_root, status, updated_at DESC);
 CREATE INDEX idx_library_scan_unmatched_items_root_updated
     ON library_scan_unmatched_items (facet, scan_root, updated_at DESC);
+CREATE INDEX idx_lifecycle_action_runs_candidate
+    ON lifecycle_action_runs(candidate_id);
+CREATE INDEX idx_lifecycle_action_runs_rule_set
+    ON lifecycle_action_runs(rule_set_id, started_at DESC);
+CREATE UNIQUE INDEX idx_lifecycle_candidates_active_subject
+    ON lifecycle_candidates(rule_set_id, subject_kind, subject_id)
+    WHERE state NOT IN ('succeeded', 'failed', 'canceled', 'excluded');
+CREATE INDEX idx_lifecycle_candidates_rule_state
+    ON lifecycle_candidates(rule_set_id, state);
+CREATE INDEX idx_lifecycle_candidates_subject_generation
+    ON lifecycle_candidates(rule_set_id, subject_kind, subject_id, match_generation);
+CREATE INDEX idx_lifecycle_candidates_title
+    ON lifecycle_candidates(title_id);
+CREATE UNIQUE INDEX idx_lifecycle_claims_live_producer
+    ON lifecycle_claims(producer, producer_ref)
+    WHERE state IN ('dormant', 'active') AND producer_ref IS NOT NULL;
+CREATE INDEX idx_lifecycle_claims_title_state
+    ON lifecycle_claims(title_id, state);
+CREATE UNIQUE INDEX idx_location_operation_owned_entities_active
+    ON location_operation_owned_entities(entity_type, entity_id)
+    WHERE released_at IS NULL;
+CREATE INDEX idx_location_operation_owned_entities_operation
+    ON location_operation_owned_entities(operation_id, released_at);
+CREATE INDEX idx_location_operation_title_checkpoints_order
+    ON location_operation_title_checkpoints(operation_id, sequence ASC);
+CREATE INDEX idx_location_operation_title_checkpoints_state
+    ON location_operation_title_checkpoints(operation_id, state);
+CREATE INDEX idx_location_operation_title_checkpoints_title
+    ON location_operation_title_checkpoints(title_id);
+CREATE UNIQUE INDEX idx_location_operation_verifications_destination
+    ON location_operation_verifications(operation_id, destination_path);
+CREATE INDEX idx_location_operation_verifications_media_file
+    ON location_operation_verifications(media_file_id);
+CREATE INDEX idx_location_operation_verifications_title
+    ON location_operation_verifications(operation_id, title_id);
+CREATE INDEX idx_location_operations_destination_root
+    ON location_operations(destination_root_id);
+CREATE INDEX idx_location_operations_source_root
+    ON location_operations(source_root_id);
+CREATE INDEX idx_location_operations_state
+    ON location_operations(state, updated_at DESC);
+CREATE INDEX idx_location_transfer_titles_page ON location_transfer_titles(operation_id, hot_rank, sequence, title_id);
+CREATE INDEX idx_login_verification_challenges_expires_at
+    ON login_verification_challenges (expires_at);
+CREATE INDEX idx_login_verification_challenges_user_id
+    ON login_verification_challenges (user_id);
+CREATE UNIQUE INDEX idx_maintenance_action_job_receipts_accepted_request
+    ON maintenance_action_job_receipts(candidate_id, match_generation, revision_number, step_id, request_hash)
+    WHERE state IN ('accepted', 'completed');
+CREATE INDEX idx_maintenance_action_job_receipts_step
+    ON maintenance_action_job_receipts(candidate_id, match_generation, revision_number, step_id, dispatch_attempt DESC);
+CREATE INDEX idx_maintenance_action_step_attempts_step
+    ON maintenance_action_step_attempts(candidate_id, match_generation, revision_number, step_id, attempt, started_at DESC);
+CREATE INDEX idx_maintenance_action_steps_candidate
+    ON maintenance_action_steps(candidate_id, match_generation, revision_number, step_id);
+CREATE INDEX idx_maintenance_evaluation_runs_rule_set
+    ON maintenance_evaluation_runs(rule_set_id, started_at DESC);
+CREATE UNIQUE INDEX idx_maintenance_rule_exclusions_global_subject
+    ON maintenance_rule_exclusions(subject_kind, subject_id)
+    WHERE rule_set_id IS NULL;
+CREATE UNIQUE INDEX idx_maintenance_rule_exclusions_rule_subject
+    ON maintenance_rule_exclusions(rule_set_id, subject_kind, subject_id)
+    WHERE rule_set_id IS NOT NULL;
+CREATE INDEX idx_maintenance_rule_exclusions_title
+    ON maintenance_rule_exclusions(title_id);
+CREATE INDEX idx_maintenance_rule_revisions_rule_set
+    ON maintenance_rule_revisions(rule_set_id, revision_number DESC);
+CREATE INDEX idx_maintenance_rule_set_libraries_library
+    ON maintenance_rule_set_libraries(library_id);
+CREATE UNIQUE INDEX idx_maintenance_sequence_terminal_memberships_active
+    ON maintenance_sequence_terminal_memberships(rule_set_id, revision_number, subject_kind, subject_id)
+    WHERE released_at IS NULL;
+CREATE INDEX idx_maintenance_sequence_terminal_memberships_active_page
+    ON maintenance_sequence_terminal_memberships(rule_set_id, revision_number, id)
+    WHERE released_at IS NULL;
+CREATE INDEX idx_manual_import_selection_candidates_selection
+    ON manual_import_selection_candidates (selection_id);
+CREATE INDEX idx_manual_import_selections_canonical_download
+    ON manual_import_selections (canonical_download_id, actor_user_id, title_id, updated_at DESC);
+CREATE INDEX idx_manual_import_selections_owner
+    ON manual_import_selections (actor_user_id, title_id, source_client_id, source_system, source_ref);
+CREATE INDEX idx_manual_import_selections_source
+    ON manual_import_selections (source_client_id, source_system, source_ref);
+CREATE INDEX idx_media_files_analysis_refresh ON media_files(analysis_revision, analysis_attempted_at, id);
+CREATE INDEX idx_media_files_full_blake3
+    ON media_files(full_blake3)
+    WHERE full_blake3 IS NOT NULL;
+CREATE INDEX idx_media_files_full_hash_missing
+    ON media_files(id)
+    WHERE full_blake3 IS NULL;
+CREATE INDEX idx_media_files_id_role_path
+    ON media_files(id, role, file_path);
 CREATE INDEX idx_media_files_title
     ON media_files (title_id);
 CREATE INDEX idx_media_files_title_path
@@ -1738,6 +2716,16 @@ CREATE INDEX idx_media_server_connections_provider
     ON media_server_connections (provider, enabled);
 CREATE INDEX idx_media_server_path_mappings_connection
     ON media_server_path_mappings (connection_id, sort_order);
+CREATE INDEX idx_media_server_playback_items_entity
+    ON media_server_playback_items (entity_kind, entity_id);
+CREATE INDEX idx_media_server_signals_episode
+    ON media_server_user_media_signals(scryer_episode_id);
+CREATE UNIQUE INDEX idx_media_server_signals_participant_item
+    ON media_server_user_media_signals(connection_id, external_user_id, provider_item_id);
+CREATE INDEX idx_media_server_signals_title
+    ON media_server_user_media_signals(scryer_title_id);
+CREATE INDEX idx_monitor_selections_owner
+    ON monitor_selections (owner_kind, owner_id);
 CREATE INDEX idx_movie_entities_anidb_id
     ON movie_entities(anidb_id)
     WHERE anidb_id IS NOT NULL AND anidb_id <> '';
@@ -1753,6 +2741,12 @@ CREATE INDEX idx_movie_entities_tmdb_id
 CREATE INDEX idx_movie_entities_tvdb_id
     ON movie_entities(tvdb_id)
     WHERE tvdb_id IS NOT NULL AND tvdb_id <> '';
+CREATE INDEX idx_movie_entity_metadata_external_ratings_order
+    ON title_metadata_external_ratings(movie_entity_id, sort_index ASC, source ASC);
+CREATE INDEX idx_movie_entity_metadata_external_ratings_source_norm
+    ON title_metadata_external_ratings(source, normalized, movie_entity_id);
+CREATE INDEX idx_movie_entity_metadata_rating_sources_order
+    ON title_metadata_rating_sources(movie_entity_id, sort_index ASC, source ASC);
 CREATE UNIQUE INDEX idx_notification_channels_name_type
     ON notification_channels (name, channel_type);
 CREATE INDEX idx_notification_subscriptions_channel
@@ -1771,6 +2765,8 @@ CREATE INDEX idx_oauth_authorization_codes_expires_at
     ON oauth_authorization_codes(expires_at);
 CREATE INDEX idx_oauth_authorization_codes_user_id
     ON oauth_authorization_codes(user_id);
+CREATE INDEX idx_oauth_client_registrations_enabled
+    ON oauth_client_registrations(enabled);
 CREATE INDEX idx_oauth_refresh_grants_authorization_source
     ON oauth_refresh_grants(authorization_source);
 CREATE INDEX idx_oauth_refresh_grants_family_id
@@ -1781,14 +2777,24 @@ CREATE INDEX idx_oauth_refresh_tokens_family_id
     ON oauth_refresh_tokens(family_id);
 CREATE INDEX idx_oauth_refresh_tokens_grant_id
     ON oauth_refresh_tokens(grant_id);
-CREATE INDEX idx_operations_status_time
-    ON workflow_operations (status, started_at DESC);
+CREATE INDEX idx_pending_releases_active_coverage
+    ON pending_releases(coverage_identity, status, published_at, added_at);
+CREATE UNIQUE INDEX idx_pending_releases_active_release_identity
+    ON pending_releases(release_identity)
+    WHERE status IN ('waiting', 'standby', 'processing', 'needs_review');
+CREATE INDEX idx_pending_releases_active_unknown_age
+    ON pending_releases(release_age_unknown, status, indexer_id, added_at)
+    WHERE release_age_unknown = 1;
+CREATE INDEX idx_pending_releases_indexer_id
+    ON pending_releases(indexer_id);
 CREATE INDEX idx_pending_releases_status ON pending_releases(status);
 CREATE INDEX idx_pending_releases_wanted ON pending_releases(wanted_item_id, status);
 CREATE INDEX idx_plugin_catalog_sources_kind
     ON plugin_catalog_sources(source_kind);
 CREATE INDEX idx_pp_script_runs_script_id ON post_processing_script_runs(script_id, started_at DESC);
 CREATE INDEX idx_pp_script_runs_title_id ON post_processing_script_runs(title_id, started_at DESC);
+CREATE INDEX idx_proxy_configs_provider_type
+    ON proxy_configs(provider_type);
 CREATE INDEX idx_quality_profile_audio_codec_allowlist_profile
     ON quality_profile_audio_codec_allowlist (profile_id);
 CREATE INDEX idx_quality_profile_audio_codec_blocklist_profile
@@ -1805,19 +2811,30 @@ CREATE INDEX idx_quality_profile_video_codec_blocklist_profile
     ON quality_profile_video_codec_blocklist (profile_id);
 CREATE INDEX idx_quality_profiles_scope
     ON quality_profiles (scope, scope_id);
-CREATE INDEX idx_release_decisions_created_at
-    ON release_decisions (created_at DESC);
-CREATE INDEX idx_release_decisions_wanted
-    ON release_decisions(wanted_item_id, created_at DESC);
+CREATE INDEX idx_release_decisions_created_at ON release_decisions (created_at DESC);
+CREATE INDEX idx_release_decisions_wanted ON release_decisions (wanted_item_id, created_at DESC);
 CREATE INDEX idx_release_download_attempts_outcome_attempted
     ON release_download_attempts (outcome, attempted_at DESC);
 CREATE INDEX idx_release_download_attempts_source_hint
     ON release_download_attempts (source_hint);
 CREATE INDEX idx_release_download_attempts_source_title
     ON release_download_attempts (source_title);
+CREATE INDEX idx_request_rule_decisions_request
+    ON request_rule_decisions(request_id, evaluated_at DESC);
+CREATE INDEX idx_request_rule_revisions_rule_set
+    ON request_rule_revisions(rule_set_id, revision_number DESC);
+CREATE INDEX idx_request_rule_set_libraries_library
+    ON request_rule_set_libraries(library_id);
+CREATE INDEX idx_rule_pack_members_pack_id ON rule_pack_members(pack_id);
 CREATE INDEX idx_rule_set_history_created_at
     ON rule_set_history (created_at DESC);
 CREATE UNIQUE INDEX idx_rule_sets_managed_key ON rule_sets(managed_key) WHERE managed_key IS NOT NULL;
+CREATE INDEX idx_scope_indexer_coverage_indexer
+    ON scope_indexer_coverage(indexer_id);
+CREATE INDEX idx_scope_indexer_coverage_searched_at
+    ON scope_indexer_coverage(searched_at);
+CREATE UNIQUE INDEX idx_seeding_profiles_name
+    ON seeding_profiles(LOWER(name));
 CREATE UNIQUE INDEX idx_series_movie_links_legacy_collection
     ON series_movie_links(legacy_collection_id)
     WHERE legacy_collection_id IS NOT NULL;
@@ -1840,46 +2857,100 @@ CREATE INDEX idx_subtitle_provider_configs_enabled
     ON subtitle_provider_configs(is_enabled);
 CREATE INDEX idx_subtitle_provider_configs_provider_type
     ON subtitle_provider_configs(provider_type);
-CREATE UNIQUE INDEX idx_title_external_ids_library_lookup
+CREATE INDEX idx_title_credits_movie_kind
+    ON title_credits(movie_entity_id, kind);
+CREATE UNIQUE INDEX idx_title_credits_movie_owner
+    ON title_credits(movie_entity_id, position)
+    WHERE movie_entity_id IS NOT NULL;
+CREATE INDEX idx_title_credits_title_kind
+    ON title_credits(title_id, kind);
+CREATE UNIQUE INDEX idx_title_credits_title_owner
+    ON title_credits(title_id, position)
+    WHERE title_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_title_external_ids_library_kind_lookup
+    ON title_external_ids(library_id, source, external_kind, external_id);
+CREATE INDEX idx_title_external_ids_library_source_value
     ON title_external_ids(library_id, source, external_id);
 CREATE INDEX idx_title_external_ids_title_id
     ON title_external_ids(title_id);
-CREATE INDEX idx_title_image_variants_image_variant
-  ON title_image_variants(title_image_id, variant_key);
 CREATE INDEX idx_title_image_variants_blob_digest
-  ON title_image_variants(blob_digest);
+             ON title_image_variants(blob_digest);
+CREATE INDEX idx_title_image_variants_image_variant
+             ON title_image_variants(title_image_id, variant_key);
 CREATE INDEX idx_title_images_title_kind ON title_images(title_id, kind);
+CREATE UNIQUE INDEX idx_title_metadata_external_ratings_movie_owner
+    ON title_metadata_external_ratings(movie_entity_id, source)
+    WHERE movie_entity_id IS NOT NULL;
 CREATE INDEX idx_title_metadata_external_ratings_order
     ON title_metadata_external_ratings(title_id, sort_index ASC, source ASC);
 CREATE INDEX idx_title_metadata_external_ratings_source_norm
     ON title_metadata_external_ratings(source, normalized, title_id);
+CREATE UNIQUE INDEX idx_title_metadata_external_ratings_title_owner
+    ON title_metadata_external_ratings(title_id, source)
+    WHERE title_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_title_metadata_rating_sources_movie_owner
+    ON title_metadata_rating_sources(movie_entity_id, source)
+    WHERE movie_entity_id IS NOT NULL;
 CREATE INDEX idx_title_metadata_rating_sources_order
     ON title_metadata_rating_sources(title_id, sort_index ASC, source ASC);
+CREATE UNIQUE INDEX idx_title_metadata_rating_sources_title_owner
+    ON title_metadata_rating_sources(title_id, source)
+    WHERE title_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_title_metadata_rating_summaries_movie_owner
+    ON title_metadata_rating_summaries(movie_entity_id)
+    WHERE movie_entity_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_title_metadata_rating_summaries_title_owner
+    ON title_metadata_rating_summaries(title_id)
+    WHERE title_id IS NOT NULL;
 CREATE INDEX idx_title_metadata_tags_category_name
     ON title_metadata_tags(category, name, title_id);
 CREATE INDEX idx_title_more_like_this_items_source_order
     ON title_more_like_this_items(source_title_id, sort_index ASC, rank_score DESC);
 CREATE INDEX idx_title_more_like_this_items_title
     ON title_more_like_this_items(discovery_title_id);
+CREATE INDEX idx_title_search_collation_keys_profile_key
+    ON title_search_collation_keys(profile, collation_key);
+CREATE INDEX idx_title_search_index_queue_title_id
+    ON title_search_index_queue(title_id);
+CREATE INDEX idx_title_search_terms_bucket
+    ON title_search_terms(facet, script, numbers_key, char_length);
+CREATE INDEX idx_title_search_terms_facet_literal
+    ON title_search_terms(facet, literal_term);
+CREATE INDEX idx_title_search_terms_facet_match_term
+    ON title_search_terms(facet, match_term);
 CREATE INDEX idx_title_search_terms_facet_normalized_term
     ON title_search_terms(facet, normalized_term);
+CREATE INDEX idx_title_search_terms_facet_romanization
+    ON title_search_terms(facet, romanization_key);
 CREATE INDEX idx_title_search_terms_normalized_term
     ON title_search_terms(normalized_term);
+CREATE INDEX idx_title_search_terms_stripped_year_key
+    ON title_search_terms(term_kind, stripped_year_key);
 CREATE INDEX idx_title_search_terms_title_id
     ON title_search_terms(title_id);
 CREATE UNIQUE INDEX idx_title_search_terms_title_kind_normalized
     ON title_search_terms(title_id, term_kind, normalized_term);
+CREATE UNIQUE INDEX idx_title_tag_definitions_label
+    ON title_tag_definitions(label);
 CREATE INDEX idx_titles_catalog_sort_key
     ON titles(catalog_sort_key, name, year, id);
+CREATE INDEX idx_titles_created_at
+    ON titles(created_at);
 CREATE INDEX idx_titles_facet_monitored
     ON titles (facet, monitored);
 CREATE INDEX idx_titles_facet_normalized_slug
 ON titles (facet, LOWER(TRIM(slug)))
 WHERE slug IS NOT NULL AND TRIM(slug) <> '';
+CREATE INDEX idx_titles_library_folder_path
+    ON titles(library_id, folder_path);
+CREATE INDEX idx_titles_library_folder_path_lookup
+    ON titles(library_id, lower(replace(folder_path, '/', '\')));
 CREATE INDEX idx_titles_library_name
     ON titles(library_id, LOWER(name), id);
 CREATE INDEX idx_titles_metadata_hydration_due
     ON titles(metadata_hydration_next_attempt_at, metadata_fetched_at);
+CREATE INDEX idx_titles_movie_smg_identity_backfill_candidates
+    ON titles(facet, smg_identity_backfill_attempt_count, id);
 CREATE INDEX idx_titles_popularity
     ON titles(popularity);
 CREATE INDEX idx_titles_root_folder_id
@@ -1915,8 +2986,6 @@ CREATE UNIQUE INDEX idx_wanted_items_movie_unique
     WHERE episode_id IS NULL
       AND collection_id IS NULL
       AND series_movie_link_id IS NULL;
-CREATE INDEX idx_wanted_items_next_search
-    ON wanted_items(status, next_search_at);
 CREATE UNIQUE INDEX idx_wanted_items_series_movie_link
     ON wanted_items(series_movie_link_id)
     WHERE series_movie_link_id IS NOT NULL;
@@ -1924,6 +2993,8 @@ CREATE INDEX idx_wanted_items_title
     ON wanted_items(title_id);
 CREATE INDEX idx_webauthn_challenges_expires_at
     ON webauthn_challenges (expires_at);
+CREATE INDEX idx_webauthn_challenges_login_verification
+    ON webauthn_challenges (login_verification_challenge_id);
 CREATE INDEX idx_webauthn_challenges_user_id
     ON webauthn_challenges (user_id);
 CREATE UNIQUE INDEX idx_webauthn_credentials_credential_id
@@ -1936,19 +3007,26 @@ CREATE INDEX idx_workflow_operations_active_job_started
       AND status IN ('queued', 'running', 'discovering');
 CREATE INDEX idx_workflow_operations_actor_job_started
     ON workflow_operations (actor_user_id, job_key, started_at DESC)
-    WHERE job_key IS NOT NULL;
+    WHERE job_key IS NOT NULL
+      AND actor_user_id IS NOT NULL;
 CREATE INDEX idx_workflow_operations_actor_recent_started
     ON workflow_operations (actor_user_id, started_at DESC)
-    WHERE job_key IS NOT NULL;
+    WHERE job_key IS NOT NULL
+      AND actor_user_id IS NOT NULL;
 CREATE INDEX idx_workflow_operations_job_key_started
     ON workflow_operations (job_key, started_at DESC);
-CREATE INDEX idx_workflow_operations_job_key_status
-    ON workflow_operations (job_key, status, started_at DESC);
 CREATE INDEX idx_workflow_operations_job_recent_started
     ON workflow_operations (started_at DESC)
     WHERE job_key IS NOT NULL;
 CREATE INDEX idx_workflow_operations_status_started
     ON workflow_operations (status, started_at);
+CREATE UNIQUE INDEX totp_enrollment_challenges_one_active_per_user
+    ON totp_enrollment_challenges (user_id);
+CREATE TRIGGER titles_delete_enqueue_fuzzy_index
+AFTER DELETE ON titles
+BEGIN
+    INSERT INTO title_search_index_queue (title_id) VALUES (OLD.id);
+END;
 CREATE TRIGGER trg_titles_root_folder_id_required_insert
 BEFORE INSERT ON titles
 FOR EACH ROW
@@ -1966,9 +3044,13 @@ END;
 INSERT INTO "libraries" ("id", "facet", "name", "slug", "is_default", "created_at", "updated_at") VALUES ('anime_default_library', 'anime', 'Anime', 'anime', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
 INSERT INTO "libraries" ("id", "facet", "name", "slug", "is_default", "created_at", "updated_at") VALUES ('movie_default_library', 'movie', 'Movies', 'movies', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
 INSERT INTO "libraries" ("id", "facet", "name", "slug", "is_default", "created_at", "updated_at") VALUES ('series_default_library', 'series', 'Series', 'series', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at") VALUES ('canonical_root_for_anime_default_library', 'anime_default_library', '/data/anime', '/data/anime', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at") VALUES ('canonical_root_for_movie_default_library', 'movie_default_library', '/data/movies', '/data/movies', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at") VALUES ('canonical_root_for_series_default_library', 'series_default_library', '/data/series', '/data/series', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
+INSERT INTO "library_root_id_remaps" ("legacy_root_id", "root_id", "normalized_path", "remapped", "created_at") VALUES ('3e1fce99b6700cecffbea040ff14843bf59d0f63799a4be8f75956efa1393b0e', 'root_40ccaf1cd56bb07fe89c141c0ace99ef', '/data/series', 1, '1970-01-01T00:00:00Z');
+INSERT INTO "library_root_id_remaps" ("legacy_root_id", "root_id", "normalized_path", "remapped", "created_at") VALUES ('8277630ec2b8f510eb797f12f9b66bec03e5c9a395982fb220034a05aa044637', 'root_a0ee8082805273c1aa79dbcaeb707b63', '/data/anime', 1, '1970-01-01T00:00:00Z');
+INSERT INTO "library_root_id_remaps" ("legacy_root_id", "root_id", "normalized_path", "remapped", "created_at") VALUES ('8312cd866e8499fd5a7a90f518f5d121e7d8a90ffb285800f60eeb323506c456', 'root_fe62bfbd205b27685df9635ddaaf0860', '/data/movies', 1, '1970-01-01T00:00:00Z');
+INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at", "legacy_path_derived_id") VALUES ('canonical_root_for_anime_default_library', 'anime_default_library', '/data/anime', '/data/anime', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '8277630ec2b8f510eb797f12f9b66bec03e5c9a395982fb220034a05aa044637');
+INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at", "legacy_path_derived_id") VALUES ('canonical_root_for_movie_default_library', 'movie_default_library', '/data/movies', '/data/movies', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '8312cd866e8499fd5a7a90f518f5d121e7d8a90ffb285800f60eeb323506c456');
+INSERT INTO "library_roots" ("id", "library_id", "path", "normalized_path", "is_default", "created_at", "updated_at", "legacy_path_derived_id") VALUES ('canonical_root_for_series_default_library', 'series_default_library', '/data/series', '/data/series', 1, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '3e1fce99b6700cecffbea040ff14843bf59d0f63799a4be8f75956efa1393b0e');
+INSERT INTO "location_transfer_runtime" ("id", "generation") VALUES (1, 0);
 INSERT INTO "quality_profile_quality_tiers" ("profile_id", "quality_tier", "sort_order", "created_at") VALUES ('1080p', '1080P', 0, '1970-01-01T00:00:00Z');
 INSERT INTO "quality_profile_quality_tiers" ("profile_id", "quality_tier", "sort_order", "created_at") VALUES ('1080p', '720P', 1, '1970-01-01T00:00:00Z');
 INSERT INTO "quality_profile_quality_tiers" ("profile_id", "quality_tier", "sort_order", "created_at") VALUES ('4k', '1080P', 1, '1970-01-01T00:00:00Z');
@@ -1976,4 +3058,7 @@ INSERT INTO "quality_profile_quality_tiers" ("profile_id", "quality_tier", "sort
 INSERT INTO "quality_profile_quality_tiers" ("profile_id", "quality_tier", "sort_order", "created_at") VALUES ('4k', '720P', 2, '1970-01-01T00:00:00Z');
 INSERT INTO "quality_profiles" ("id", "name", "scope", "scope_id", "archival_quality", "allow_unknown_quality", "atmos_preferred", "dolby_vision_allowed", "detected_hdr_allowed", "prefer_remux", "allow_bd_disk", "allow_upgrades", "created_at", "prefer_dual_audio", "required_audio_languages", "scoring_config") VALUES ('1080p', '1080P', 'system', NULL, '1080P', 0, 1, 1, 1, 1, 0, 1, '1970-01-01T00:00:00Z', 0, '[]', '{}');
 INSERT INTO "quality_profiles" ("id", "name", "scope", "scope_id", "archival_quality", "allow_unknown_quality", "atmos_preferred", "dolby_vision_allowed", "detected_hdr_allowed", "prefer_remux", "allow_bd_disk", "allow_upgrades", "created_at", "prefer_dual_audio", "required_audio_languages", "scoring_config") VALUES ('4k', '4K', 'system', NULL, '2160P', 0, 1, 1, 1, 1, 0, 1, '1970-01-01T00:00:00Z', 0, '[]', '{}');
-INSERT INTO "users" ("id", "username", "display_name", "status", "password_hash", "passkey_public_key", "locale", "created_at", "updated_at", "last_login_at", "account_kind", "auth_session_version") VALUES ('00000000000000000000000000000001', 'admin', NULL, 'active', NULL, NULL, NULL, '', '1970-01-01T00:00:00Z', NULL, 'local', NULL);
+INSERT INTO "settings_definitions" ("id", "category", "scope", "key_name", "data_type", "default_value_json", "is_sensitive", "validation_json", "created_at", "updated_at") VALUES ('title-tags-pending-deletions', 'system', 'system', 'title_tags.pending_deletions', 'json', '{}', 0, NULL, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
+INSERT INTO "settings_definitions" ("id", "category", "scope", "key_name", "data_type", "default_value_json", "is_sensitive", "validation_json", "created_at", "updated_at") VALUES ('title-tags-pending-renames', 'system', 'system', 'title_tags.pending_renames', 'json', '{}', 0, NULL, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
+INSERT INTO "title_search_meta" ("id", "collation_version", "projection_generation") VALUES (1, '', 0);
+INSERT INTO "users" ("id", "username", "display_name", "status", "password_hash", "passkey_public_key", "locale", "created_at", "updated_at", "last_login_at", "account_kind", "auth_session_version", "password_change_required") VALUES ('00000000000000000000000000000001', 'admin', NULL, 'active', NULL, NULL, NULL, '', '1970-01-01T00:00:00Z', NULL, 'local', NULL, 0);

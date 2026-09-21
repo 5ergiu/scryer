@@ -1804,26 +1804,6 @@ file = "postgres/migrations/0211_durable_download_cleanup.sql"
 engine = "postgres"
 scope = "all"
 
-[[baseline]]
-through_version = 140
-file = "baselines/0140_baseline.sql"
-engine = "sqlite"
-
-[[baseline]]
-through_version = 140
-file = "postgres/baselines/0140_baseline.sql"
-engine = "postgres"
-
-[[baseline]]
-through_version = 198
-file = "baselines/0198_baseline.sql"
-engine = "sqlite"
-
-[[baseline]]
-through_version = 198
-file = "postgres/baselines/0198_baseline.sql"
-engine = "postgres"
-
 [[migration]]
 version = 212
 description = "maintenance rule sets and immutable matcher revisions"
@@ -2564,3 +2544,13 @@ kind = "sql"
 file = "postgres/migrations/0254_titles_folder_path_lookup_index.sql"
 engine = "postgres"
 scope = "all"
+
+[[baseline]]
+through_version = 254
+file = "baselines/0254_baseline.sql"
+engine = "sqlite"
+
+[[baseline]]
+through_version = 254
+file = "postgres/baselines/0254_baseline.sql"
+engine = "postgres"

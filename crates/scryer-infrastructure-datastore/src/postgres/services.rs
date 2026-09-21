@@ -1187,8 +1187,8 @@ mod tests {
     }
 
     fn postgres_parity_index_names_from_source() -> BTreeSet<String> {
-        let mut indexes: BTreeSet<String> = std::fs::read_to_string(postgres_0140_baseline_path())
-            .expect("read PostgreSQL 0140 baseline")
+        let indexes: BTreeSet<String> = std::fs::read_to_string(postgres_0254_baseline_path())
+            .expect("read PostgreSQL 0254 baseline")
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
@@ -1199,24 +1199,12 @@ mod tests {
                     .map(str::to_string)
             })
             .collect();
-        // Indexes on tables/columns dropped after the 0140 baseline: the
-        // owning table went with discovery_raw_pages (migration 0144) and
-        // event_outboxes (migration 0146); the wanted_items scheduler column
-        // it covered was dropped the same way (migration 0143).
-        for dropped_index in [
-            "idx_discovery_raw_pages_run",
-            "idx_event_outboxes_channel",
-            "idx_event_outboxes_status",
-            "idx_wanted_items_next_search",
-        ] {
-            indexes.remove(dropped_index);
-        }
         indexes
     }
 
-    fn postgres_0140_baseline_path() -> PathBuf {
+    fn postgres_0254_baseline_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../scryer/src/db/postgres/baselines/0140_baseline.sql")
+            .join("../scryer/src/db/postgres/baselines/0254_baseline.sql")
     }
 
     async fn assert_postgres_runtime_schema_columns(pool: &sqlx::PgPool) -> AppResult<()> {
@@ -1244,7 +1232,7 @@ mod tests {
             .iter()
             .map(|(table, _)| table.clone())
             .collect();
-        let expected_columns = postgres_0140_baseline_columns();
+        let expected_columns = postgres_0254_baseline_columns();
 
         let mut missing_columns = Vec::new();
         for (table, columns) in &expected_columns {
@@ -1257,7 +1245,7 @@ mod tests {
 
         assert!(
             missing_columns.is_empty(),
-            "expected PostgreSQL blank install to include every 0140 baseline column; missing {missing_columns:?}"
+            "expected PostgreSQL blank install to include every 0254 baseline column; missing {missing_columns:?}"
         );
 
         let unexpected_columns: Vec<String> = actual_columns
@@ -1272,7 +1260,7 @@ mod tests {
 
         assert!(
             unexpected_columns.is_empty(),
-            "PostgreSQL blank install exposes columns outside the 0140 baseline: {unexpected_columns:?}"
+            "PostgreSQL blank install exposes columns outside the 0254 baseline: {unexpected_columns:?}"
         );
 
         for removed_table in [
@@ -1293,161 +1281,10 @@ mod tests {
         Ok(())
     }
 
-    fn postgres_0140_baseline_columns() -> BTreeMap<String, BTreeSet<String>> {
-        let mut columns = parse_create_table_columns(include_str!(
-            "../../../scryer/src/db/postgres/baselines/0140_baseline.sql"
-        ));
-        columns
-            .entry("titles".to_string())
-            .or_default()
-            .insert("catalog_sort_key".to_string());
-        columns.entry("indexers".to_string()).or_default().extend([
-            "proxy_config_id".to_string(),
-            "last_error_message".to_string(),
-            "download_client_id".to_string(),
-            // Seeding profile assignment (migrations 0163/0164).
-            "seeding_profile_id".to_string(),
-        ]);
-        // Proxy assignment for the second consumer family (migration 0218).
-        columns
-            .entry("download_clients".to_string())
-            .or_default()
-            .insert("proxy_config_id".to_string());
-        columns
-            .entry("pending_releases".to_string())
-            .or_default()
-            .extend([
-                "indexer_id".to_string(),
-                // Tracker seeding minimums (migration 0165).
-                "minimum_seed_ratio".to_string(),
-                "minimum_seed_time_minutes".to_string(),
-                "season_pack_seed_ratio".to_string(),
-                "season_pack_seed_time_minutes".to_string(),
-                // Reported seeders, re-judged at promotion (migration 0169).
-                "seeders".to_string(),
-            ]);
-        columns
-            .entry("rule_sets".to_string())
-            .or_default()
-            .insert("managed_tag_filter".to_string());
-        columns
-            .entry("download_submissions".to_string())
-            .or_default()
-            .extend([
-                "source_provider_id".to_string(),
-                "source_provider_name".to_string(),
-                // Resolved seeding goals (migration 0164).
-                "seeding_profile_id".to_string(),
-                "seed_goal_ratio".to_string(),
-                "seed_goal_seconds".to_string(),
-                "seed_never_remove".to_string(),
-                "seed_goal_met_action".to_string(),
-                "seed_goal_source".to_string(),
-                "seed_info_hash".to_string(),
-                // Post-import seeding-profile tracking (migration 0166).
-                "seed_post_import_tracking".to_string(),
-                // Reported release size at grab time (migration 0172).
-                "release_size_bytes".to_string(),
-            ]);
-        columns
-            .entry("discovery_titles".to_string())
-            .or_default()
-            .extend(["is_adult".to_string(), "content_ratings_json".to_string()]);
-        if let Some(wanted_items) = columns.get_mut("wanted_items") {
-            for column in [
-                "search_phase",
-                "next_search_at",
-                "search_count",
-                "baseline_date",
-                // Unused write-only score column, dropped (migration 0170).
-                "current_score",
-            ] {
-                wanted_items.remove(column);
-            }
-        }
-        // Write-only raw payload store, dropped along with its index once
-        // nothing read it anymore (migration 0144, RFC 121 SW4.1).
-        columns.remove("discovery_raw_pages");
-        // Unused outbox table, dropped outright (migration 0146).
-        columns.remove("event_outboxes");
-        if let Some(episode_links) = columns.get_mut("download_submission_episode_links") {
-            // Canonical download identity finalization replaces the
-            // client-tuple key with the canonical `download_id`
-            // (migration 0180).
-            for column in [
-                "download_client_id",
-                "download_client_type",
-                "download_client_item_id",
-            ] {
-                episode_links.remove(column);
-            }
-            episode_links.insert("download_id".to_string());
-        }
-        // Canonical download identity, backfilled onto the tables that used
-        // to key off the client tuple (migration 0179).
-        for table in [
-            "download_identity_states",
-            "download_import_artifacts",
-            "download_queue_commands",
-            "imports",
-        ] {
-            columns
-                .entry(table.to_string())
-                .or_default()
-                .insert("canonical_download_id".to_string());
-        }
-        columns
-            .entry("emby_media_server_details".to_string())
-            .or_default()
-            .extend([
-                // First-class Emby Connect support (migration 0155).
-                "server_id".to_string(),
-                "connect_enabled".to_string(),
-            ]);
-        if let Some(file_episode_map) = columns.get_mut("file_episode_map") {
-            // Primary/additional role per episode link (migration 0158).
-            file_episode_map.insert("role".to_string());
-        }
-        columns
-            .entry("library_scan_unmatched_items".to_string())
-            .or_default()
-            .insert(
-                // Sized before a title exists to bind it to (migration 0162).
-                "size_bytes".to_string(),
-            );
-        columns
-            .entry("media_files".to_string())
-            .or_default()
-            .insert(
-                // Announced release size, kept alongside the scanned size
-                // (migration 0173).
-                "announced_size_bytes".to_string(),
-            );
-        columns
-            .entry("media_server_connections".to_string())
-            .or_default()
-            .insert(
-                // Browser-facing deep-link base URL (migration 0182).
-                "external_url".to_string(),
-            );
-        columns.entry("titles".to_string()).or_default().insert(
-            // SMG identity backfill retry counter (migration 0181).
-            "smg_identity_backfill_attempt_count".to_string(),
-        );
-        columns.entry("users".to_string()).or_default().insert(
-            // Forced password reset flag (migration 0168).
-            "password_change_required".to_string(),
-        );
-        columns
-            .entry("webauthn_challenges".to_string())
-            .or_default()
-            .extend([
-                // Login-verification-scoped WebAuthn ceremonies
-                // (migration 0167).
-                "purpose".to_string(),
-                "login_verification_challenge_id".to_string(),
-            ]);
-        columns
+    fn postgres_0254_baseline_columns() -> BTreeMap<String, BTreeSet<String>> {
+        parse_create_table_columns(include_str!(
+            "../../../scryer/src/db/postgres/baselines/0254_baseline.sql"
+        ))
     }
 
     fn parse_create_table_columns(sql: &str) -> BTreeMap<String, BTreeSet<String>> {

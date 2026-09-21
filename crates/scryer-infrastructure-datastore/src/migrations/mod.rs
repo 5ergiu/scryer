@@ -186,12 +186,6 @@ async fn replay_catalog_into_fresh_db_with_context(
         ));
     }
 
-    // After the emptiness check, because this leaves an object behind: the
-    // plain stand-in that lets the already-checksummed spellfix statements in
-    // migrations 0092 and 0236 replay without the module. Migration 0252
-    // drops it again.
-    crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
-
     let target_version = through_version.unwrap_or_else(|| catalog.max_version());
     if target_version <= 0 {
         return Ok(());
@@ -205,6 +199,11 @@ async fn replay_catalog_into_fresh_db_with_context(
         apply_baseline(pool, catalog, payload_bytes, baseline).await?;
         start_version = baseline.through_version + 1;
     }
+
+    // Record the baseline first so snapshots past migration 0252 do not
+    // recreate its retired table. Older snapshots and full replay still need
+    // the stand-in for the historical spellfix statements.
+    crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
 
     apply_version_range(
         pool,

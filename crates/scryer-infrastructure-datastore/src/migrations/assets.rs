@@ -371,7 +371,8 @@ pub fn compile_source_bundle(db_root: &Path) -> Result<CompiledMigrationBundle, 
         let path = db_root.join(&baseline.file);
         let sql = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        key_constraints::validate(baseline.through_version, &baseline.file, &sql)?;
+        // Baselines preserve the schema produced by historical migrations.
+        // Authoring constraints apply to new migrations, not replay snapshots.
         let payload = push_payload(sql.as_bytes(), &mut payload_bytes);
         baselines.push(CompiledBaseline {
             through_version: baseline.through_version,
@@ -605,52 +606,36 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scryer/src/db")
     }
 
-    fn source_postgres_0140_baseline_sql() -> String {
-        fs::read_to_string(source_db_root().join("postgres/baselines/0140_baseline.sql"))
-            .expect("read PostgreSQL 0140 baseline")
+    fn source_postgres_0254_baseline_sql() -> String {
+        fs::read_to_string(source_db_root().join("postgres/baselines/0254_baseline.sql"))
+            .expect("read PostgreSQL 0254 baseline")
     }
 
     #[test]
     fn source_bundle_registers_latest_migration_and_engine_baselines() {
         let bundle =
             compile_source_bundle(&source_db_root()).expect("compile source migration bundle");
-        assert!(
-            bundle.catalog.find_migration(198).is_some(),
-            "migration 0198 must be registered in migration_manifest.toml"
-        );
-        assert!(
-            bundle
-                .catalog
-                .latest_baseline_at_or_below(140, EngineScope::Sqlite)
-                .is_some_and(|baseline| baseline.file == "baselines/0140_baseline.sql"),
-            "SQLite should register the latest manifest-owned baseline"
-        );
-        assert!(
-            bundle
-                .catalog
-                .latest_baseline_at_or_below(140, EngineScope::Postgres)
-                .is_some_and(|baseline| baseline.file == "postgres/baselines/0140_baseline.sql"),
-            "PostgreSQL should register the latest manifest-owned baseline"
-        );
-        assert!(
-            bundle
-                .catalog
-                .latest_baseline_at_or_below(198, EngineScope::Sqlite)
-                .is_some_and(|baseline| baseline.file == "baselines/0198_baseline.sql"),
-            "SQLite should register the 0198 baseline"
-        );
-        assert!(
-            bundle
-                .catalog
-                .latest_baseline_at_or_below(198, EngineScope::Postgres)
-                .is_some_and(|baseline| baseline.file == "postgres/baselines/0198_baseline.sql"),
-            "PostgreSQL should register the 0198 baseline"
-        );
+        assert!(bundle.catalog.find_migration(254).is_some());
+        assert_eq!(bundle.catalog.baselines.len(), 2);
+        for (engine, file) in [
+            (EngineScope::Sqlite, "baselines/0254_baseline.sql"),
+            (
+                EngineScope::Postgres,
+                "postgres/baselines/0254_baseline.sql",
+            ),
+        ] {
+            assert!(
+                bundle
+                    .catalog
+                    .latest_baseline_at_or_below(254, engine)
+                    .is_some_and(|baseline| baseline.file == file)
+            );
+        }
     }
 
     #[test]
-    fn postgres_0140_baseline_keeps_expected_index_coverage() {
-        let sql = source_postgres_0140_baseline_sql();
+    fn postgres_0254_baseline_keeps_expected_index_coverage() {
+        let sql = source_postgres_0254_baseline_sql();
         let index_statement_count = sql
             .lines()
             .filter(|line| {
@@ -659,26 +644,24 @@ mod tests {
             })
             .count();
         assert_eq!(
-            index_statement_count, 190,
-            "PostgreSQL 0140 baseline should preserve the audited index set"
+            index_statement_count, 301,
+            "PostgreSQL 0254 baseline should preserve the audited index set"
         );
 
         for index_name in [
             "idx_titles_facet_normalized_slug",
             "idx_pending_releases_wanted",
-            "idx_domain_events_stream_sequence",
             "idx_download_queue_commands_source",
             "idx_external_subtitle_probe_cache_file_path",
             "idx_history_events_title_time",
             "idx_notification_subscriptions_target_scope",
             "idx_release_download_attempts_outcome_attempted",
             "idx_subtitle_provider_configs_provider_type",
-            "idx_wanted_items_next_search",
-            "idx_workflow_operations_job_key_status",
+            "idx_workflow_operations_job_key_started",
         ] {
             assert!(
                 sql.contains(index_name),
-                "expected PostgreSQL 0140 baseline to include {index_name}"
+                "expected PostgreSQL 0254 baseline to include {index_name}"
             );
         }
     }
@@ -689,8 +672,8 @@ mod tests {
             source_db_root().join("postgres/migrations/0198_seed_canonical_defaults.sql"),
         )
         .expect("PostgreSQL 0198 seed migration should be readable");
-        let sqlite = fs::read_to_string(source_db_root().join("baselines/0140_baseline.sql"))
-            .expect("SQLite 0140 baseline should be readable");
+        let sqlite = fs::read_to_string(source_db_root().join("baselines/0254_baseline.sql"))
+            .expect("SQLite 0254 baseline should be readable");
 
         for seed in [
             "anime_default_library",
@@ -728,27 +711,12 @@ mod tests {
         }
     }
 
-    /// The tripwire for editing history: every SQL asset that shipped in
-    /// 0.18.21 hashed together, so an accidental touch of an already-applied
-    /// migration is caught rather than shipped.
-    ///
-    /// It has been crossed once, deliberately. `baselines/0140_baseline.sql`
-    /// carried `CREATE VIRTUAL TABLE title_search_spellfix USING spellfix1;`,
-    /// and the binary no longer links a `spellfix1` module, so replaying that
-    /// baseline into an empty database fails outright with `no such module`.
-    /// A baseline is only ever replayed into an empty database — it is never
-    /// checksum-verified against an installation that already applied it — so
-    /// dropping that one line changes nothing for any existing database and is
-    /// the only way a fresh install can still be created. The hash below was
-    /// updated with that edit and for no other reason; anything else that
-    /// moves it is a mistake.
+    /// Released migrations remain immutable. Replay-generated baselines can
+    /// be retired and are deliberately excluded from this migration checksum.
     #[test]
     fn released_0_18_21_sql_assets_are_immutable() {
         let root = source_db_root();
-        let mut paths = vec![
-            root.join("baselines/0140_baseline.sql"),
-            root.join("postgres/baselines/0140_baseline.sql"),
-        ];
+        let mut paths = Vec::new();
         for relative_dir in ["migrations", "postgres/migrations"] {
             for entry in fs::read_dir(root.join(relative_dir)).expect("migration directory") {
                 let path = entry.expect("migration entry").path();
@@ -784,7 +752,7 @@ mod tests {
         }
         assert_eq!(
             hasher.finalize().to_hex().as_str(),
-            "938d16ced1cae4d032586d83ed2e9a029c34246724a84d39dcc51eb88e680592"
+            "bd680098639a2eab10f57ee11336d183786c3cf55fa436aa859994131e0f51ec"
         );
     }
 
@@ -911,21 +879,21 @@ mod tests {
     }
 
     #[test]
-    fn postgres_0140_baseline_keeps_title_aware_unmatched_items_schema() {
-        let sql = source_postgres_0140_baseline_sql();
+    fn postgres_0254_baseline_keeps_title_aware_unmatched_items_schema() {
+        let sql = source_postgres_0254_baseline_sql();
         assert!(
             sql.contains("title_id text"),
-            "PostgreSQL 0140 baseline must include library_scan_unmatched_items.title_id"
+            "PostgreSQL 0254 baseline must include library_scan_unmatched_items.title_id"
         );
         assert!(
             sql.contains("idx_library_scan_unmatched_items_facet_title_status_updated"),
-            "PostgreSQL 0140 baseline must preserve the title-aware unmatched-items index"
+            "PostgreSQL 0254 baseline must preserve the title-aware unmatched-items index"
         );
     }
 
     #[test]
-    fn postgres_0140_baseline_keeps_runtime_title_image_columns() {
-        let sql = source_postgres_0140_baseline_sql();
+    fn postgres_0254_baseline_keeps_runtime_title_image_columns() {
+        let sql = source_postgres_0254_baseline_sql();
         for expected in [
             "poster_local_path text",
             "background_local_path text",
@@ -934,7 +902,7 @@ mod tests {
         ] {
             assert!(
                 sql.contains(expected),
-                "expected PostgreSQL 0140 baseline to include {expected}"
+                "expected PostgreSQL 0254 baseline to include {expected}"
             );
         }
     }

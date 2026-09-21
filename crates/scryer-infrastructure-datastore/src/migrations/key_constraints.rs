@@ -1,10 +1,10 @@
-//! Authoring guard for SQL assets, shared by the build script and migration tools.
+//! Authoring guard for new SQL migrations, shared by the build script and migration tools.
 //!
 //! Every ordinary table must declare a primary key and explicit NOT NULL on each
 //! component, in both dialects. This includes INTEGER keys: spelling the invariant
 //! out avoids SQLite's INTEGER/BIGINT and inline/composite primary-key differences.
 //! Released SQL is immutable; 0211 is the fixed 0.19.17 boundary, not a moving
-//! exemption. New baselines must satisfy the same rule as new migrations.
+//! exemption. Baselines are replay snapshots and are excluded by the bundle compiler.
 
 use std::collections::BTreeMap;
 

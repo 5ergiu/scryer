@@ -279,8 +279,16 @@ async fn the_upgrade_retains_the_legacy_id_for_diagnostics_and_lookup() {
 #[tokio::test]
 async fn the_upgrade_leaves_roots_that_were_never_path_derived_in_place() {
     let pool = pre_upgrade_pool().await;
-    // The baseline's seeded default roots already carry non-path-derived ids;
-    // re-keying them would break stable references for no gain.
+    // Reproduce the canonical root ID used by retired baselines explicitly;
+    // this upgrade scenario must not depend on which baselines are retained.
+    let updated = sqlx::query(
+        "UPDATE library_roots SET id = 'canonical_root_for_movie_default_library'
+         WHERE library_id = 'movie_default_library' AND normalized_path = '/data/movies'",
+    )
+    .execute(&pool)
+    .await
+    .expect("canonical fixture root should update");
+    assert_eq!(updated.rows_affected(), 1);
     seed_title(
         &pool,
         "seeded-title",
