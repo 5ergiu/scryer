@@ -15,14 +15,24 @@
 //!    rewriting the schema under `PRAGMA writable_schema`, which is the one
 //!    supported way to delete an object whose module is unavailable.
 //!
-//! 2. **Migrations 0092, 0236 and the 0198 baseline are already applied and
-//!    checksummed.** Editing them would fail every existing installation's
-//!    checksum verification, so they still contain their `title_search_spellfix`
-//!    statements. A plain table of that name satisfies all of them —
+//! 2. **Migrations 0092 and 0236 are already applied and checksummed.**
+//!    Editing them would fail every existing installation's checksum
+//!    verification, so they still contain their `title_search_spellfix`
+//!    statements: 0092's `CREATE VIRTUAL TABLE`, and 0236's repair `DELETE`
+//!    plus the `title_search_terms_delete_spellfix` trigger whose body names
+//!    the table. A plain table of that name satisfies all of them —
 //!    `CREATE VIRTUAL TABLE IF NOT EXISTS` becomes a no-op when the name is
 //!    taken, and the `DELETE`s and the trigger work against an ordinary table
 //!    — so this installs one as a stand-in for exactly as long as the replay
 //!    needs it. Migration 0252 drops it together with the 0236 trigger.
+//!
+//!    The baselines are a different case: they are snapshots the ledger does
+//!    not checksum, only the per-version migrations are, so the
+//!    `CREATE VIRTUAL TABLE title_search_spellfix USING spellfix1;` line was
+//!    simply removed from `0140_baseline.sql` and `0198_baseline.sql` in this
+//!    release. A fresh install that starts from a baseline still needs the
+//!    stand-in anyway, because the migrations above the baseline replay on top
+//!    of it and 0236 is one of them.
 //!
 //! Both steps are idempotent and both are no-ops on a database that has
 //! already passed 0252.
@@ -94,6 +104,15 @@ async fn applied_migration_ceiling(pool: &SqlitePool) -> AppResult<i64> {
 /// keeps it on would let any later statement corrupt the schema. `RESET`
 /// rather than `OFF` so the schema cache is reloaded immediately instead of
 /// at the next connection.
+///
+/// `RESET` only reloads *this* connection. Deleting a row from `sqlite_master`
+/// is not DDL, so SQLite does not bump the schema cookie for it, and every
+/// other connection in the pool would keep the schema it had already cached
+/// and go on resolving `title_search_spellfix` to a virtual table whose module
+/// is gone. SQLite's own recipe for `writable_schema` edits sets
+/// `PRAGMA schema_version` for exactly this reason, and that is done here
+/// inside the same write transaction as the delete, so a crash leaves either
+/// both or neither.
 async fn drop_virtual_table_via_writable_schema(pool: &SqlitePool) -> AppResult<()> {
     let mut connection = pool.acquire().await.map_err(repo_err)?;
 
@@ -102,17 +121,58 @@ async fn drop_virtual_table_via_writable_schema(pool: &SqlitePool) -> AppResult<
             .execute(&mut *connection)
             .await
             .map_err(repo_err)?;
-        sqlx::query("DELETE FROM sqlite_master WHERE name = ?1 OR tbl_name = ?1")
-            .bind(SPELLFIX_TABLE)
+        sqlx::query("BEGIN IMMEDIATE")
             .execute(&mut *connection)
             .await
             .map_err(repo_err)?;
-        Ok::<(), AppError>(())
+
+        // Everything between BEGIN and COMMIT, the COMMIT included. A COMMIT
+        // that fails — SQLITE_BUSY, an I/O error — leaves the transaction open
+        // exactly as an earlier failure does, so it has to take the same exit.
+        let transaction = async {
+            let schema_version = sqlx::query_scalar::<_, i64>("PRAGMA schema_version")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(repo_err)?;
+            sqlx::query("DELETE FROM sqlite_master WHERE name = ?1 OR tbl_name = ?1")
+                .bind(SPELLFIX_TABLE)
+                .execute(&mut *connection)
+                .await
+                .map_err(repo_err)?;
+            // PRAGMA arguments cannot be bound, and this one is an integer
+            // this function computed, so there is nothing to inject.
+            let next = next_schema_version(schema_version);
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "PRAGMA schema_version = {next}"
+            )))
+            .execute(&mut *connection)
+            .await
+            .map_err(repo_err)?;
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(repo_err)?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+
+        // One exit for every failure above. Without it the connection could
+        // go back to the pool still holding the IMMEDIATE write lock, and the
+        // next statement to land on it would run inside that abandoned
+        // transaction while every other writer blocked behind the lock. A
+        // rollback that fails in turn — because SQLite already unwound the
+        // transaction itself — adds nothing to the original error.
+        if let Err(error) = transaction {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(error);
+        }
+        Ok(())
     }
     .await;
 
     // RESET runs whatever happened above, and its own failure must not mask
-    // the original one.
+    // the original one. `result?` also returns before the vocab DROP below,
+    // so a failed rewrite never gets to drop the shadow table.
     let reset = sqlx::query("PRAGMA writable_schema = RESET")
         .execute(&mut *connection)
         .await
@@ -127,6 +187,18 @@ async fn drop_virtual_table_via_writable_schema(pool: &SqlitePool) -> AppResult<
 
     tracing::info!("removed the retired spellfix1 virtual table from the schema");
     Ok(())
+}
+
+/// Any value other than the current one makes every other connection reload
+/// its schema, so the only thing that matters is that this differs. The header
+/// field is a 32-bit counter, so it is allowed to wrap; outside the ordinary
+/// range it restarts at 1 rather than being pushed past what the field holds.
+fn next_schema_version(current: i64) -> i64 {
+    if current <= 0 || current >= u32::MAX as i64 {
+        1
+    } else {
+        current + 1
+    }
 }
 
 /// The columns the pre-removal migrations reference: `rowid` for the 0236
