@@ -6,7 +6,6 @@ import {
   CircleCheck,
   CircleDashed,
   ListChecks,
-  LoaderCircle,
   PictureInPicture2,
   Sparkles,
   Timer,
@@ -30,7 +29,7 @@ type FacetConfig = {
   Icon: LucideIcon;
   /** rgb triple for translucent chip/glow backgrounds */
   rgb: string;
-  /** solid base color (active spinner + count) */
+  /** solid base color (active count) */
   base: string;
   /** gradient for the accent rail + active bar fill */
   grad: string;
@@ -251,9 +250,8 @@ function ScanPhaseBar({
   percent: number;
   indeterminate: boolean;
 }) {
-  let Icon: LucideIcon;
+  let Icon: LucideIcon | null;
   let iconColor: string;
-  let spin = false;
   let fillStyle: React.CSSProperties;
   let labelColor: string;
   let countColor: string;
@@ -268,9 +266,8 @@ function ScanPhaseBar({
     labelColor = "var(--scry-text2)";
     countColor = "var(--scry-muted2)";
   } else if (status === "active") {
-    Icon = LoaderCircle;
+    Icon = null;
     iconColor = facet.base;
-    spin = true;
     fillStyle = {
       width: `${percent}%`,
       background: facet.grad,
@@ -289,15 +286,13 @@ function ScanPhaseBar({
   return (
     <div className="mb-[11px] last:mb-0">
       <div className="mb-1.5 flex items-center gap-2">
-        {spin ? (
-          <LoadingMark className="h-3.5 w-3.5 shrink-0" />
-        ) : (
+        {Icon ? (
           <Icon
             className="h-3.5 w-3.5 shrink-0"
             style={{ color: iconColor }}
             aria-hidden="true"
           />
-        )}
+        ) : null}
         <span className="text-xs font-semibold" style={{ color: labelColor }}>
           {label}
         </span>
