@@ -5694,7 +5694,7 @@ async fn migration_0242_attributes_single_client_bindings_and_ends_the_rest() {
     );
 }
 
-/// Migration 0252 finishes the canonical downloads a deleted client config
+/// Migration 0253 finishes the canonical downloads a deleted client config
 /// left behind.
 ///
 /// `terminal_at` had no writer before this change, so deleting a client ended
@@ -5705,7 +5705,7 @@ async fn migration_0242_attributes_single_client_bindings_and_ends_the_rest() {
 /// binding whose download is still live, so these rows must be marked finished
 /// or they would be re-adopted instead.
 #[tokio::test]
-async fn migration_0252_terminalises_downloads_whose_client_config_is_gone() {
+async fn migration_0253_terminalises_downloads_whose_client_config_is_gone() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -5755,11 +5755,11 @@ async fn migration_0252_terminalises_downloads_whose_client_config_is_gone() {
 
     let apply = || async {
         sqlx::raw_sql(include_str!(
-            "../../../scryer/src/db/migrations/0252_terminalise_client_less_downloads.sql"
+            "../../../scryer/src/db/migrations/0253_terminalise_client_less_downloads.sql"
         ))
         .execute(&pool)
         .await
-        .expect("migration 0252 should apply");
+        .expect("migration 0253 should apply");
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
                 .fetch_all(&pool)
@@ -5801,7 +5801,7 @@ async fn migration_0252_terminalises_downloads_whose_client_config_is_gone() {
     );
 
     // Idempotent: a second application changes nothing.
-    assert_eq!(apply().await, after, "migration 0252 must be re-runnable");
+    assert_eq!(apply().await, after, "migration 0253 must be re-runnable");
 }
 
 #[tokio::test]

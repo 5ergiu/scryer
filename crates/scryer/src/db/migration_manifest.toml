@@ -2515,18 +2515,19 @@ engine = "postgres"
 scope = "all"
 
 [[migration]]
-version = 252
+version = 253
 description = "finish downloads whose client config is gone"
 checksum_algo = "blake3"
 
 [[migration.steps]]
 kind = "sql"
-file = "migrations/0252_terminalise_client_less_downloads.sql"
+file = "migrations/0253_terminalise_client_less_downloads.sql"
 engine = "sqlite"
 scope = "all"
 
 [[migration.steps]]
 kind = "sql"
-file = "postgres/migrations/0252_terminalise_client_less_downloads.sql"
+file = "postgres/migrations/0253_terminalise_client_less_downloads.sql"
 engine = "postgres"
 scope = "all"
+
