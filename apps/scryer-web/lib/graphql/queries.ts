@@ -1320,6 +1320,7 @@ export const interactiveReleaseSearchQuery = `query InteractiveReleaseSearch($id
       resultCount
       elapsedMs
       failureReason
+      rateLimited
     }
     startedAt
     completedAt
@@ -2236,6 +2237,7 @@ export const indexersQuery = `query Indexers($providerType: String) {
     rateLimitSeconds
     rateLimitBurst
     disabledUntil
+    rateLimitedUntil
     isEnabled
     isManaged
     managedParentConfigId
@@ -2455,6 +2457,7 @@ const indexerFieldSelection = `
     rateLimitSeconds
     rateLimitBurst
     disabledUntil
+    rateLimitedUntil
     isEnabled
     isManaged
     managedParentConfigId
@@ -4705,6 +4708,7 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
     lastHealthStatus
     lastErrorMessage
     lastErrorAt
+    rateLimitedUntil
   }
   downloadClientConfigs {
     id

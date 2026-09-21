@@ -270,6 +270,24 @@ function IndexerStatusCell({
     }
   }
 
+  // Ahead of the last error: a cooling indexer is quiet on the indexer's own
+  // instruction, and whatever error text is still on file predates that.
+  if (
+    indexer.rateLimitedUntil &&
+    new Date(indexer.rateLimitedUntil) > new Date()
+  ) {
+    return (
+      <span
+        className="text-muted-foreground"
+        title={t("settings.indexerCoolingDownHelp")}
+      >
+        {t("settings.indexerCoolingDownUntil", {
+          time: formatRelativeTime(indexer.rateLimitedUntil),
+        })}
+      </span>
+    );
+  }
+
   if (indexer.lastErrorAt) {
     const content = t("settings.indexerLastError", {
       time: formatRelativeTime(indexer.lastErrorAt),

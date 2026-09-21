@@ -33,6 +33,11 @@ export type DashboardIndexer = {
   lastHealthStatus: string | null;
   lastErrorMessage: string | null;
   lastErrorAt: string | null;
+  /**
+   * When this indexer's rate-limit cooldown lifts, or null when it is not
+   * cooling down. A cooling indexer is quiet, not broken.
+   */
+  rateLimitedUntil: string | null;
 };
 
 export type DashboardDownloadClient = {

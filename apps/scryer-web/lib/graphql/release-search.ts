@@ -24,6 +24,11 @@ export type InteractiveSearchIndexerProgress = {
   /** Wall time of the indexer's own call, or null before it answered. */
   elapsedMs: number | null;
   failureReason: string | null;
+  /**
+   * The indexer asked Scryer to slow down rather than failing. It resumes on
+   * its own, so the row reads as a cooldown rather than an error.
+   */
+  rateLimited: boolean;
 };
 
 export type InteractiveSearchProgress = {

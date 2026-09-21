@@ -1575,6 +1575,8 @@ const nl: LocaleDictionary = {
   "settings.indexerAutoSearch": "Auto",
   "settings.indexerStatus": "Status",
   "settings.indexerDisabledUntil": "Uitgeschakeld tot {{time}}",
+  "settings.indexerCoolingDownUntil": "Gepauzeerd · hervat {{time}}",
+  "settings.indexerCoolingDownHelp": "De indexer vroeg Scryer om rustiger aan te doen. Zoeken wordt automatisch hervat.",
   "settings.indexerLastError": "Fout {{time}}",
   "settings.indexerLastSearched": "Gezocht {{time}}",
   "settings.indexerNoActivity": "Geen activiteit",

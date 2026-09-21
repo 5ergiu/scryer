@@ -634,7 +634,7 @@ pub use quality_profile::{
     ScoringEntryKind, ScoringSource, builtin_4k_profile, builtin_8k_profile, builtin_1080p_profile,
     builtin_anime_profile, builtin_default_quality_profile, parse_profile_catalog_from_json,
 };
-pub use rate_limit_signal::{RateLimitSignal, RateLimitSignalSource};
+pub use rate_limit_signal::{RateLimitSignal, RateLimitSignalSource, destination_cooldown_until};
 pub use services::{
     AppServices, AppServicesBuilder, AppUseCase, ExternalImportArrSourceKind,
     ExternalImportArrSourceSeriesEntry, ExternalImportArrSourceWarmupResult,

@@ -614,6 +614,8 @@ pub fn from_indexer_config_with_fields(
     // answers admission from this value at the Prowlarr tier, so the row has to
     // be able to say so instead of reading "Inherit default".
     let prowlarr_minimum_seeders = scryer_application::prowlarr_managed_minimum_seeders(&config);
+    let rate_limited_until =
+        scryer_application::destination_cooldown_until(&config.rate_limit_domain_key());
     let (config_json, stored_secret_keys) =
         redact_indexer_config_json(config.config_json, config_fields);
     let has_api_key = stored_secret_keys.iter().any(|key| key == "api_key")
@@ -639,6 +641,7 @@ pub fn from_indexer_config_with_fields(
         rate_limit_seconds: config.rate_limit_seconds,
         rate_limit_burst: config.rate_limit_burst,
         disabled_until: config.disabled_until,
+        rate_limited_until,
         is_enabled: config.is_enabled,
         enable_interactive_search: config.enable_interactive_search,
         enable_auto_search: config.enable_auto_search,

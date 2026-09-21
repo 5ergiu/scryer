@@ -67,6 +67,7 @@ function indexer(
     resultCount: 0,
     elapsedMs: 100,
     failureReason: null,
+    rateLimited: false,
     ...overrides,
   };
 }
@@ -335,6 +336,21 @@ test("health tones read slowness from elapsed time, not from a status", () => {
     indexerHealthTone(indexer({ name: "e", status: "SEARCHING" })),
     "pending",
   );
+});
+
+test("a rate-limited indexer reads as cooling down, not as a failure", () => {
+  const cooling = indexer({
+    name: "indexer-a.example",
+    status: "FAILED",
+    rateLimited: true,
+    failureReason: "indexer is cooling down after a rate limit; retry after 120s",
+  });
+  assert.equal(indexerHealthTone(cooling), "cooling");
+  // With results already in hand the row stays partial: the user has
+  // something to look at, and partial already reads as "not everything".
+  assert.equal(indexerHealthTone({ ...cooling, resultCount: 12 }), "partial");
+  // Without the flag the same status is still a plain failure.
+  assert.equal(indexerHealthTone({ ...cooling, rateLimited: false }), "failed");
 });
 
 test("incomplete searches with results are partial and remain retryable", () => {

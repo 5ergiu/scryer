@@ -432,13 +432,25 @@ export function mergeIndexerProgress(
   return [...merged, ...incomingById.values()];
 }
 
-export type IndexerHealthTone = "pending" | "ok" | "slow" | "partial" | "failed" | "skipped";
+export type IndexerHealthTone =
+  | "pending"
+  | "ok"
+  | "slow"
+  | "partial"
+  | "failed"
+  | "skipped"
+  | "cooling";
 
 export function indexerHealthTone(
   entry: InteractiveSearchIndexerProgress,
 ): IndexerHealthTone {
   switch (entry.status) {
     case "FAILED":
+      // A cooldown outranks the failed status the snapshot carries it under:
+      // the indexer answered, it just asked to be asked again later.
+      if (entry.rateLimited) {
+        return entry.resultCount > 0 ? "partial" : "cooling";
+      }
       return entry.resultCount > 0 ? "partial" : "failed";
     case "SKIPPED":
       return "skipped";

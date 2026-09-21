@@ -144,6 +144,8 @@ const HEALTH_DOT_CLASS: Record<IndexerHealthTone, string> = {
   failed: "bg-[var(--scry-danger-solid)]",
   skipped: "bg-[var(--scry-faint3)]",
   pending: "bg-[var(--scry-faint4)]",
+  // Neutral on purpose: a cooldown is the indexer's own instruction, not a fault.
+  cooling: "bg-[var(--scry-faint3)]",
 };
 
 const HEALTH_COUNT_CLASS: Record<IndexerHealthTone, string> = {
@@ -153,6 +155,7 @@ const HEALTH_COUNT_CLASS: Record<IndexerHealthTone, string> = {
   failed: "text-[var(--scry-danger-text-soft)]",
   skipped: "text-[var(--scry-muted3)]",
   pending: "text-[var(--scry-muted3)]",
+  cooling: "text-[var(--scry-muted3)]",
 };
 
 type BadgeTone = "neutral" | "accent" | "success" | "warning" | "danger";
@@ -648,6 +651,8 @@ function HealthLine({
               <span className={cn("tabular-nums", HEALTH_COUNT_CLASS[tone])}>
                 {tone === "partial"
                   ? t("indexerSearch.health.partial", { count: entry.resultCount })
+                  : tone === "cooling"
+                  ? t("indexerSearch.health.coolingDown")
                   : tone === "failed"
                   ? t("indexerSearch.health.failed")
                   : tone === "skipped"
