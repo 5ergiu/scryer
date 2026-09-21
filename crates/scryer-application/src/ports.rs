@@ -5020,6 +5020,23 @@ pub trait DownloadRegistryRepository: Send + Sync {
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
 
+    /// Active bindings Scryer created by submitting a grab, created before
+    /// `created_before`, whose download no client listing has ever carried.
+    ///
+    /// The absence prune works from the in-memory tracker, and only a listed
+    /// job is ever tracked. A job its client dropped before the first listing
+    /// therefore never reaches the prune; this is the durable side of the same
+    /// question, so the poller can ask it of a client that answered.
+    ///
+    /// The default is empty so repositories with no durable bindings (the null
+    /// repository, test fakes) need not implement it.
+    async fn list_never_observed_submission_bindings(
+        &self,
+        _created_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        Ok(Vec::new())
+    }
+
     /// Refresh the observation timestamps of already-resolved downloads.
     ///
     /// A client tick re-observes the same rows every 10 s, but a binding's

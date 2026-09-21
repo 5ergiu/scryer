@@ -172,6 +172,32 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .transpose()
     }
 
+    async fn list_never_observed_submission_bindings(
+        &self,
+        created_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT b.download_id, b.client_config_id, b.client_type_snapshot,
+                    b.client_name_snapshot, b.native_item_id, b.created_at, b.last_seen_at,
+                    b.ended_at
+             FROM download_client_bindings b
+             JOIN downloads d ON d.id = b.download_id
+             WHERE b.ended_at IS NULL
+               AND b.native_item_id IS NOT NULL
+               AND b.created_at < {}
+               AND d.origin = 'scryer_submission'
+               AND d.first_observed_at IS NULL
+               AND d.terminal_at IS NULL
+             ORDER BY b.created_at, b.download_id",
+            &[SqlArg::Timestamp(created_before)],
+        )
+        .await?
+        .into_iter()
+        .map(binding_from_row)
+        .collect()
+    }
+
     /// Write every due freshness refresh in ONE transaction.
     ///
     /// Callers reach this only for downloads whose identity they already
@@ -1374,6 +1400,55 @@ mod tests {
             .unwrap()
             .expect("active binding should load");
         assert_eq!(found.download_id, DownloadId::parse(FIRST_ID).unwrap());
+    }
+
+    #[tokio::test]
+    async fn never_observed_listing_holds_only_unlisted_live_submissions_past_the_cutoff() {
+        const THIRD_ID: &str = "00000000-0000-4000-8000-000000000003";
+        const FOURTH_ID: &str = "00000000-0000-4000-8000-000000000004";
+        let store = store().await;
+        // The one the listing is for: submitted, still bound, never listed.
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        // A submission a listing has carried belongs to the tracker's prune.
+        insert_download(&store, SECOND_ID, "scryer_submission", Some(CREATED_AT)).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), Some("job-2"), None).await;
+        // A foreign row is not Scryer's to settle here.
+        insert_download(&store, THIRD_ID, "foreign_observation", None).await;
+        insert_binding(&store, THIRD_ID, Some("client-1"), Some("job-3"), None).await;
+        // An ended binding has nothing left to end.
+        insert_download(&store, FOURTH_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FOURTH_ID,
+            Some("client-1"),
+            Some("job-4"),
+            Some(CREATED_AT),
+        )
+        .await;
+
+        let after_creation = "2026-08-24T12:40:00Z".parse::<DateTime<Utc>>().unwrap();
+        let listed = store
+            .list_never_observed_submission_bindings(after_creation)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|binding| binding.download_id.to_string())
+                .collect::<Vec<_>>(),
+            vec![FIRST_ID.to_string()]
+        );
+
+        // Still inside the grace window: the cutoff precedes the submission.
+        let before_creation = "2026-08-24T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert!(
+            store
+                .list_never_observed_submission_bindings(before_creation)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

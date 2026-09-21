@@ -1020,6 +1020,8 @@ async fn process_tracked_download_snapshot(
     // transaction rather than one per row inside a resolution transaction.
     crate::download_identity::flush_shared_observation_touches(app).await;
 
+    let full_authoritative_listing =
+        matches!(prune, TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes);
     let unavailable_sources = match prune {
         TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes => runtime
             .tracker
@@ -1040,6 +1042,17 @@ async fn process_tracked_download_snapshot(
 
     for source_identity in unavailable_sources {
         drop_source_removed_from_client(app, &source_identity).await;
+    }
+
+    if full_authoritative_listing && let Some(authoritative_client_ids) = authoritative_client_ids
+    {
+        drop_submissions_never_listed_by_client(
+            app,
+            &items,
+            authoritative_client_ids,
+            excluded_client_type_refs,
+        )
+        .await;
     }
 
     reconcile_terminal_tracked_downloads(app, &mut runtime.tracker).await;
@@ -1338,6 +1351,102 @@ pub(crate) async fn drop_source_removed_from_client(
         item_id = %locator.item_id,
         "download is no longer listed by its client; ended its binding and dropped it from the queue"
     );
+}
+
+/// How long a submitted job may go unlisted before its absence is believed.
+///
+/// A client does not always list a job the instant it accepts it — SABnzbd is
+/// still fetching the NZB, qBittorrent is still resolving a magnet — so a
+/// submission gets this long to show up once before "never listed" means gone.
+const NEVER_LISTED_SUBMISSION_GRACE_SECS: i64 = 60;
+
+/// A job its client dropped before Scryer ever saw it is gone too.
+///
+/// The prune above only knows jobs the tracker has tracked, and the tracker
+/// only tracks what a listing carried. A submission the client stopped listing
+/// before the first poll was never tracked, so nothing ended its binding and
+/// its scope stayed claimed indefinitely. The durable registry knows which
+/// submissions no listing has ever carried; once the grace has passed and
+/// their client has answered a full listing without them, they take the same
+/// exit as every other vanished job.
+async fn drop_submissions_never_listed_by_client(
+    app: &AppUseCase,
+    items: &[DownloadQueueItem],
+    authoritative_client_ids: &HashSet<String>,
+    excluded_client_types: &[&str],
+) {
+    let created_before =
+        chrono::Utc::now() - chrono::Duration::seconds(NEVER_LISTED_SUBMISSION_GRACE_SECS);
+    let bindings = match app
+        .services
+        .workflow
+        .download_registry
+        .list_never_observed_submission_bindings(created_before)
+        .await
+    {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to list submissions their client never listed"
+            );
+            return;
+        }
+    };
+    let listed_jobs = items
+        .iter()
+        .map(|item| listed_job_key(&item.client_id, &item.download_client_item_id))
+        .collect::<HashSet<_>>();
+    for locator in never_listed_submission_locators(
+        &bindings,
+        &listed_jobs,
+        authoritative_client_ids,
+        excluded_client_types,
+    ) {
+        drop_source_removed_from_client(app, &locator).await;
+    }
+}
+
+/// The never-observed bindings this listing is entitled to call gone: their
+/// client answered in full, its type is polled here, and the listing in hand
+/// does not carry the job after all.
+fn never_listed_submission_locators(
+    bindings: &[crate::DownloadClientBindingRecord],
+    listed_jobs: &HashSet<(String, String)>,
+    authoritative_client_ids: &HashSet<String>,
+    excluded_client_types: &[&str],
+) -> Vec<crate::ClientJobLocator> {
+    bindings
+        .iter()
+        .filter_map(|binding| {
+            let client_id = binding.client_config_id.as_deref()?;
+            let client_type = binding.client_type_snapshot.as_deref()?;
+            let item_id = binding.native_item_id.as_deref()?;
+            if !authoritative_client_ids.contains(client_id)
+                || crate::tracked_downloads::tracked_client_type_is_excluded(
+                    client_type,
+                    excluded_client_types,
+                )
+                || listed_jobs.contains(&listed_job_key(client_id, item_id))
+            {
+                return None;
+            }
+            Some(crate::ClientJobLocator::new(
+                Some(client_id),
+                client_type,
+                item_id,
+            ))
+        })
+        .collect()
+}
+
+/// Clients do not agree with themselves on the casing of a native id (a
+/// qBittorrent hash comes back in either), so a listed job is keyed without it.
+fn listed_job_key(client_id: &str, item_id: &str) -> (String, String) {
+    (
+        client_id.trim().to_string(),
+        item_id.trim().to_ascii_lowercase(),
+    )
 }
 
 fn tracked_download_snapshot_projection_key(
@@ -3669,6 +3778,67 @@ mod ignored_submission_scope_release_tests {
         assert_eq!(
             released_ids(&submission, &rows),
             vec!["scope-ep-1".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod never_listed_submission_tests {
+    use std::collections::HashSet;
+
+    use super::{listed_job_key, never_listed_submission_locators};
+    use crate::DownloadClientBindingRecord;
+
+    fn binding(client_id: &str, client_type: &str, item_id: &str) -> DownloadClientBindingRecord {
+        DownloadClientBindingRecord {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            client_config_id: Some(client_id.to_string()),
+            client_type_snapshot: Some(client_type.to_string()),
+            client_name_snapshot: None,
+            native_item_id: Some(item_id.to_string()),
+            created_at: chrono::Utc::now(),
+            last_seen_at: None,
+            ended_at: None,
+        }
+    }
+
+    fn clients(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_submission_its_answering_client_never_listed_is_gone() {
+        let gone = never_listed_submission_locators(
+            &[binding("qbit", "qbittorrent", "ABCDEF")],
+            &HashSet::new(),
+            &clients(&["qbit"]),
+            &[],
+        );
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].client_id.as_deref(), Some("qbit"));
+        assert_eq!(gone[0].client_type, "qbittorrent");
+        assert_eq!(gone[0].item_id, "ABCDEF");
+    }
+
+    #[test]
+    fn silence_and_other_pollers_are_not_absence() {
+        let bindings = [
+            // Its client did not answer this tick: an outage ends nothing.
+            binding("sab", "sabnzbd", "nzo_1"),
+            // A bridged client type is not this poller's to judge.
+            binding("weaver", "weaver", "job-1"),
+            // The listing in hand carries it after all, in the other casing.
+            binding("qbit", "qbittorrent", "ABCDEF"),
+        ];
+        let listed = HashSet::from([listed_job_key("qbit", "abcdef")]);
+        assert!(
+            never_listed_submission_locators(
+                &bindings,
+                &listed,
+                &clients(&["qbit", "weaver"]),
+                &["weaver"],
+            )
+            .is_empty()
         );
     }
 }
