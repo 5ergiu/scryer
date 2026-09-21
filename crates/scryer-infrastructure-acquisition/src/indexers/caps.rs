@@ -608,13 +608,34 @@ async fn record_caps_scheduler_feedback(
 pub fn parse_caps_snapshot_xml(body: &[u8]) -> AppResult<IndexerCapsSnapshot> {
     let mut reader = Reader::from_reader(Cursor::new(body));
     reader.config_mut().trim_text(true);
+    reader.config_mut().expand_empty_elements = true;
+    let mut depth = 0_usize;
+    let mut saw_root = false;
+    let mut saw_declaration = false;
+    let mut saw_doctype = false;
     let mut buf = Vec::new();
     let mut snapshot = IndexerCapsSnapshot::default();
     let mut categories = BTreeMap::<String, IndexerCategoryDescriptor>::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+            Ok(Event::Start(element)) => {
+                if depth == 0 {
+                    if saw_root || !matches!(element.name().as_ref(), "caps" | "error") {
+                        return Err(AppError::Repository(
+                            "indexer returned an invalid caps document root".into(),
+                        ));
+                    }
+                    saw_root = true;
+                }
+                depth += 1;
+                for attribute in element.attributes() {
+                    attribute.map_err(|error| {
+                        AppError::Repository(format!(
+                            "indexer returned invalid caps XML attributes: {error}"
+                        ))
+                    })?;
+                }
                 match element.name().as_ref() {
                     "error" => return Err(parse_caps_newznab_error(&element)?),
                     "server" => {
@@ -668,7 +689,45 @@ pub fn parse_caps_snapshot_xml(body: &[u8]) -> AppResult<IndexerCapsSnapshot> {
                     _ => {}
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::End(_)) => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    AppError::Repository("indexer returned unmatched caps XML closing tag".into())
+                })?;
+            }
+            Ok(Event::Text(text)) if depth == 0 && !text.as_ref().trim().is_empty() => {
+                return Err(AppError::Repository(
+                    "indexer returned text outside the caps document".into(),
+                ));
+            }
+            Ok(Event::Decl(_)) => {
+                if saw_root || saw_declaration || saw_doctype {
+                    return Err(AppError::Repository(
+                        "indexer returned a misplaced caps XML declaration".into(),
+                    ));
+                }
+                saw_declaration = true;
+            }
+            Ok(Event::DocType(_)) => {
+                if saw_root || saw_doctype {
+                    return Err(AppError::Repository(
+                        "indexer returned a misplaced caps XML doctype".into(),
+                    ));
+                }
+                saw_doctype = true;
+            }
+            Ok(Event::CData(_)) if depth == 0 => {
+                return Err(AppError::Repository(
+                    "indexer returned an invalid caps document".into(),
+                ));
+            }
+            Ok(Event::Eof) => {
+                if !saw_root || depth != 0 {
+                    return Err(AppError::Repository(
+                        "indexer returned an empty or incomplete caps document".into(),
+                    ));
+                }
+                break;
+            }
             Err(error) => {
                 return Err(AppError::Repository(format!(
                     "indexer returned invalid caps XML: {error}"
@@ -784,6 +843,44 @@ fn map_caps_outbound_error(error: OutboundHttpError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_document_requires_one_complete_caps_root() {
+        for invalid in [
+            "",
+            " ",
+            "<html/>",
+            "<rss/>",
+            "<caps>",
+            "<caps><search/></caps",
+            "<caps/><caps/>",
+            "text<caps/>",
+            "<caps/>text",
+            "<caps duplicate='1' duplicate='2'/>",
+            "<caps><!DOCTYPE caps></caps>",
+            "<caps/><!DOCTYPE caps>",
+            "<!DOCTYPE caps><!DOCTYPE caps><caps/>",
+            "<caps><?xml version='1.0'?></caps>",
+            "<caps/><?xml version='1.0'?>",
+            "<?xml version='1.0'?><?xml version='1.0'?><caps/>",
+        ] {
+            assert!(
+                parse_caps_snapshot_xml(invalid.as_bytes()).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        for valid in [
+            "<caps/>",
+            "<?xml version='1.0'?><!DOCTYPE caps SYSTEM 'https://indexer.example/caps.dtd'><caps/>",
+            "<?xml version='1.0'?><caps><server title='Example'/></caps>",
+            "<caps><searching><search available='yes' supportedParams='q'/></searching></caps>",
+        ] {
+            assert!(
+                parse_caps_snapshot_xml(valid.as_bytes()).is_ok(),
+                "rejected {valid:?}"
+            );
+        }
+    }
 
     #[test]
     fn caps_outbound_rate_limit_preserves_retry_after() {
