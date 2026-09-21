@@ -522,9 +522,12 @@ impl TitleContextBank {
         title: &Title,
         spelling: &Arc<crate::title_matching::relaxed::SpellingCandidates>,
     ) -> AppResult<TitleContextCandidate> {
-        let evidence = canonical_title_evidence(title).with_ambiguity(
+        // Discovery read the index, so the proof reads the same names: a cour
+        // name lives in the index and on no title row.
+        let evidence_title = self.matcher.evidence_title(title).await?;
+        let evidence = canonical_title_evidence(&evidence_title).with_ambiguity(
             self.matcher
-                .identity_ambiguity(title)
+                .identity_ambiguity(&evidence_title)
                 .await?
                 .with_spelling_candidates(spelling.clone()),
         );
@@ -816,6 +819,21 @@ async fn match_release_to_title_context(
     }
 
     Ok(best.map(|(info, _, _)| info.clone()))
+}
+
+/// The RSS cycle's title match over a repository-backed matcher, every title
+/// in scope: the same path a poll takes, for tests that own a catalog.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_release(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    Ok(
+        match_release_to_title_context(release_title, &IndexerResponseAttributes::default(), &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
 }
 
 #[cfg(test)]

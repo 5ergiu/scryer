@@ -1802,6 +1802,23 @@ pub trait TitleRepository: Send + Sync {
         ))
     }
 
+    /// Every name the persisted index holds for one title.
+    ///
+    /// The index is the whole of what a title answers to: its catalog names
+    /// and the names written beside them, such as an anime numbering bridge's
+    /// cour names, which no title row carries. A matcher that found a title
+    /// through the index proves the match against these, never against the
+    /// row alone, or a name that discovered the title could not also prove it.
+    async fn list_title_index_names(&self, title_id: &str) -> AppResult<Vec<TitleNameCandidate>> {
+        Ok(self
+            .list_for_matching(None, None)
+            .await?
+            .iter()
+            .filter(|title| title.id == title_id)
+            .flat_map(title_name_candidates)
+            .collect())
+    }
+
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>>;
     async fn get_by_id_without_external_ids(&self, id: &str) -> AppResult<Option<Title>> {
         self.get_by_id(id).await

@@ -89,6 +89,35 @@ pub(crate) fn strip_trailing_year_key(key: &str) -> &str {
     scryer_domain::title_spelling::strip_trailing_year(key)
 }
 
+/// Fold the names the index holds for `title` into a copy of it, as tagged
+/// aliases, so `CanonicalTitleEvidence` — lookup keys and spelling identity
+/// alike — sees them. Names the row already answers to are left alone.
+pub(crate) fn title_with_index_names(
+    title: &Title,
+    names: Vec<crate::ports::TitleNameCandidate>,
+) -> Title {
+    let mut seen = std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+        .map(crate::title_matching::canonical_lookup_key)
+        .collect::<HashSet<_>>();
+    let mut evidence_title = title.clone();
+    for name in names {
+        if name.title_id != title.id
+            || !seen.insert(crate::title_matching::canonical_lookup_key(&name.raw_term))
+        {
+            continue;
+        }
+        evidence_title
+            .tagged_aliases
+            .push(scryer_domain::TaggedAlias {
+                name: name.raw_term,
+                language: name.language_tag.unwrap_or_default(),
+            });
+    }
+    evidence_title
+}
+
 impl MonitoredTitleMatcher {
     pub(crate) fn new(titles: Arc<dyn crate::ports::TitleRepository>) -> Self {
         Self {
@@ -111,6 +140,26 @@ impl MonitoredTitleMatcher {
         Self {
             titles: TitleSource::Fixed(Arc::new(titles)),
         }
+    }
+
+    /// `title` as the index names it: the catalog row plus every name the
+    /// persisted index holds for it that the row does not carry.
+    ///
+    /// The index is the canonical record of what a title answers to. An anime
+    /// numbering bridge's cour names are written there and nowhere on the
+    /// title row, so evidence built from the row alone lets a cour name
+    /// discover its title and then fail to prove it. Every proof — lookup
+    /// keys, spelling identity, collision guard — is built from this.
+    ///
+    /// The result is evidence only. It is never the title handed back to a
+    /// caller, so an index-only name can not be written onto the catalog row.
+    pub(crate) async fn evidence_title(&self, title: &Title) -> crate::AppResult<Title> {
+        let TitleSource::Repository(titles) = &self.titles else {
+            // A fixed set is the caller's own and already whole.
+            return Ok(title.clone());
+        };
+        let names = titles.list_title_index_names(&title.id).await?;
+        Ok(title_with_index_names(title, names))
     }
 
     /// Pillar A tier 0: the subset of `keys` that at least one *other* library
@@ -513,12 +562,16 @@ impl MonitoredTitleMatcher {
             if !title.monitored || !filter(&title) {
                 continue;
             }
-            let evidence = crate::acquisition_release_search::canonical_title_evidence(&title)
-                .with_ambiguity(
-                    self.identity_ambiguity(&title)
-                        .await?
-                        .with_spelling_candidates(spelling.clone()),
-                );
+            // The spelling lane found this title through the index, so the
+            // proof has to read the same names the index does.
+            let evidence_title = self.evidence_title(&title).await?;
+            let evidence =
+                crate::acquisition_release_search::canonical_title_evidence(&evidence_title)
+                    .with_ambiguity(
+                        self.identity_ambiguity(&evidence_title)
+                            .await?
+                            .with_spelling_candidates(spelling.clone()),
+                    );
             if crate::acquisition_release_search::match_parsed_release_to_title_evidence(
                 parsed, &evidence,
             )

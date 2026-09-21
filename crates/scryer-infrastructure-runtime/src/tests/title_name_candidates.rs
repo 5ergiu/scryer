@@ -514,6 +514,102 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
     Ok(())
 }
 
+/// An anime bridge's cour names are names of the title that exist only in the
+/// index: the bridge write restates the projection, and the title row is left
+/// alone. Everything that reads the index has to answer to them — the matcher's
+/// proof step through `list_title_index_names`, and the catalog search a user
+/// types a cour name into.
+async fn assert_index_carries_cour_names(catalog: &TitleStore, shows: &ShowStore) -> AppResult<()> {
+    const COUR_NAME: &str = "Saltmarsh Beacon Owari no Koukai";
+    let title = matching_title(
+        "cour-anime",
+        "Saltmarsh Beacon",
+        MediaFacet::Anime,
+        Some("ja"),
+        Some(2014),
+        &["Shiosai no Tomoshibi"],
+    );
+    let libraries = vec![title.library_id.clone()];
+    TitleRepository::create(catalog, title).await?;
+    ShowRepository::replace_anime_numbering_bridge(
+        shows,
+        "cour-anime",
+        Some(&scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
+            generated_on: "2026-01-01".into(),
+            corroborating_order: None,
+            seasons: vec![scryer_domain::AnimeCommunitySeason {
+                index: 2,
+                titles: vec![COUR_NAME.into()],
+                absolute_start: Some(13),
+                ..Default::default()
+            }],
+        }),
+    )
+    .await?;
+
+    let row = TitleRepository::get_by_id(catalog, "cour-anime")
+        .await?
+        .expect("title exists");
+    assert!(
+        row.aliases.iter().all(|alias| alias != COUR_NAME)
+            && row
+                .tagged_aliases
+                .iter()
+                .all(|alias| alias.name != COUR_NAME),
+        "the bridge write must not put a cour name on the title row"
+    );
+
+    let names = TitleRepository::list_title_index_names(catalog, "cour-anime").await?;
+    let raw_terms = names
+        .iter()
+        .map(|name| name.raw_term.as_str())
+        .collect::<Vec<_>>();
+    for expected in ["Saltmarsh Beacon", "Shiosai no Tomoshibi", COUR_NAME] {
+        assert!(
+            raw_terms.contains(&expected),
+            "index names lack {expected:?}: {raw_terms:?}"
+        );
+    }
+    assert!(names.iter().all(|name| name.title_id == "cour-anime"));
+    assert!(
+        TitleRepository::list_title_index_names(catalog, "no-such-title")
+            .await?
+            .is_empty()
+    );
+
+    // A release named after the cour reaches the title through the key lane,
+    // by way of the cour name alone.
+    let keys = vec![title_spelling::title_lookup_form(COUR_NAME)];
+    let found = TitleRepository::find_titles_by_lookup_keys(catalog, &keys).await?;
+    assert_eq!(ids(&found), vec!["cour-anime".to_string()]);
+
+    for query in ["owari no koukai", "Saltmarsh Beacon Owari"] {
+        let page = TitleRepository::list_for_libraries_catalog(
+            catalog,
+            None,
+            &libraries,
+            Some(query.into()),
+            TitleCatalogFilter::default(),
+            TitleCatalogSort::default(),
+            10,
+            0,
+            TitleListProjection::default(),
+            TitleCatalogAggregates {
+                total_count: true,
+                filter_counts: false,
+                managed_bytes: false,
+            },
+        )
+        .await?;
+        assert!(
+            page.items.iter().any(|item| item.id == "cour-anime"),
+            "catalog search for a cour name ({query:?}) must find its title"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn title_matching_port_on_sqlite() -> AppResult<()> {
     let db = std::env::temp_dir().join(format!(
@@ -522,7 +618,12 @@ async fn title_matching_port_on_sqlite() -> AppResult<()> {
     ));
     let services = SqliteServices::new(db.to_string_lossy()).await?;
     let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
-    let result = assert_title_matching_port(&catalog).await;
+    let shows = super::show_store(&services);
+    let result = async {
+        assert_title_matching_port(&catalog).await?;
+        assert_index_carries_cour_names(&catalog, &shows).await
+    }
+    .await;
     services.pool().close().await;
     let _ = std::fs::remove_file(&db);
     result
@@ -578,6 +679,8 @@ async fn title_matching_port_on_postgres() -> AppResult<()> {
         let wanted = WantedStore::new(services.datastore()).with_fuzzy_index(fuzzy);
         let result = async {
             assert_title_matching_port(&catalog).await?;
+            assert_index_carries_cour_names(&catalog, &ShowStore::new(services.datastore()))
+                .await?;
             super::wanted_items_and_search::assert_catalog_search(&catalog, &wanted).await
         }.await;
         services.pool().close().await;

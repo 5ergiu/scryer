@@ -2016,6 +2016,17 @@ impl AppUseCase {
             .await
     }
 
+    /// `title` with every name the persisted index holds for it, for building
+    /// evidence. See [`MonitoredTitleMatcher::evidence_title`].
+    ///
+    /// [`MonitoredTitleMatcher::evidence_title`]: crate::import_title_resolution::MonitoredTitleMatcher::evidence_title
+    pub(crate) async fn index_evidence_title(&self, title: &Title) -> AppResult<Title> {
+        self.monitored_title_matcher()
+            .await?
+            .evidence_title(title)
+            .await
+    }
+
     fn release_search_category_for_facet(&self, facet: &MediaFacet) -> String {
         self.facet_registry
             .get(facet)
@@ -2491,11 +2502,15 @@ impl AppUseCase {
             ));
         }
 
+        // Results come back under any name the index holds for the title, a
+        // cour name included, so the evidence is built from the index's names.
+        let evidence_title = self.index_evidence_title(title).await?;
+
         Ok(ResolvedReleaseSearchSubject {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
-            title_evidence: canonical_title_evidence(title)
-                .with_ambiguity(self.title_identity_ambiguity(title).await?),
+            title_evidence: canonical_title_evidence(&evidence_title)
+                .with_ambiguity(self.title_identity_ambiguity(&evidence_title).await?),
             queries: vec![query],
             imdb_id,
             tmdb_id,
@@ -2715,11 +2730,15 @@ impl AppUseCase {
             ));
         }
 
+        // Results come back under any name the index holds for the title, a
+        // cour name included, so the evidence is built from the index's names.
+        let evidence_title = self.index_evidence_title(title).await?;
+
         Ok(ResolvedReleaseSearchSubject {
             title_id: title.id.clone(),
             title_tags: title.tags.clone(),
-            title_evidence: canonical_title_evidence(title)
-                .with_ambiguity(self.title_identity_ambiguity(title).await?),
+            title_evidence: canonical_title_evidence(&evidence_title)
+                .with_ambiguity(self.title_identity_ambiguity(&evidence_title).await?),
             queries,
             imdb_id,
             tmdb_id: tmdb_id_from_external_ids(&title.external_ids),

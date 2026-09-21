@@ -131,3 +131,140 @@ async fn a_bridge_read_outage_cannot_reach_title_matching() {
         "a title still resolves by its own name during a bridge outage"
     );
 }
+
+const SYNTHETIC_COUR_NAME: &str =
+    "Rantan Kyokai Monogatari Saigo no Gassho o Utau Toki no Hikari to Kage no Uta";
+const SYNTHETIC_COUR_RELEASE: &str = "Rantan Kyoukai Monogatari Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-GRP";
+
+async fn title_with_index_only_cour_name(app: &AppUseCase, user: &User) -> Title {
+    let title = app
+        .add_title(
+            user,
+            NewTitle {
+                name: "Lantern Border Chronicle".into(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create anime title");
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(
+            &title.id,
+            Some(&scryer_domain::AnimeNumberingBridge {
+                source: Default::default(),
+                generated_on: "2026-01-01".into(),
+                corroborating_order: None,
+                seasons: vec![scryer_domain::AnimeCommunitySeason {
+                    index: 4,
+                    titles: vec![SYNTHETIC_COUR_NAME.into()],
+                    absolute_start: Some(37),
+                    ..Default::default()
+                }],
+            }),
+        )
+        .await
+        .expect("store the anime numbering bridge");
+    title
+}
+
+/// The shape the production store has: a cour name is a name the index holds
+/// for the title, and the title row never carries it.
+#[tokio::test]
+async fn a_cour_name_lives_in_the_index_and_never_on_the_title_row() {
+    let (app, user) = bootstrap();
+    let title = title_with_index_only_cour_name(&app, &user).await;
+
+    let row = app
+        .services
+        .catalog
+        .titles
+        .get_by_id(&title.id)
+        .await
+        .expect("read title")
+        .expect("title exists");
+    assert!(
+        row.tagged_aliases
+            .iter()
+            .all(|alias| alias.name != SYNTHETIC_COUR_NAME),
+        "the catalog row must not carry an index-only name"
+    );
+
+    let index_names = app
+        .services
+        .catalog
+        .titles
+        .list_title_index_names(&title.id)
+        .await
+        .expect("index names");
+    assert!(
+        index_names
+            .iter()
+            .any(|name| name.raw_term == SYNTHETIC_COUR_NAME),
+        "the index holds the cour name"
+    );
+}
+
+/// RSS discovers a title through the index and then proves the match. The
+/// proof has to read the index's names too: a romanized cour spelling that
+/// found its title must not be dropped for want of a name on the row.
+#[tokio::test]
+async fn rss_matches_a_release_named_after_an_index_only_cour_name() {
+    let (app, user) = bootstrap();
+    let title = title_with_index_only_cour_name(&app, &user).await;
+
+    let matcher = app
+        .monitored_title_matcher()
+        .await
+        .expect("build the monitored title matcher");
+    let matched = crate::acquisition::rss::rss_title_id_for_release(
+        (*matcher).clone(),
+        SYNTHETIC_COUR_RELEASE,
+    )
+    .await
+    .expect("match release");
+
+    assert_eq!(matched, Some(title.id.clone()));
+}
+
+/// Evidence built for a search subject answers to the index's names, and the
+/// title a caller gets back is still the catalog row.
+#[tokio::test]
+async fn index_names_are_evidence_only_and_never_reach_the_returned_title() {
+    let (app, user) = bootstrap();
+    let title = title_with_index_only_cour_name(&app, &user).await;
+
+    let evidence_title = app
+        .index_evidence_title(&title)
+        .await
+        .expect("evidence title");
+    assert!(
+        evidence_title
+            .tagged_aliases
+            .iter()
+            .any(|alias| alias.name == SYNTHETIC_COUR_NAME)
+    );
+
+    let matcher = app
+        .monitored_title_matcher()
+        .await
+        .expect("build the monitored title matcher");
+    let parsed = crate::release_parser::parse_release_metadata(SYNTHETIC_COUR_RELEASE);
+    let resolved = matcher
+        .resolve_episode(&parsed, Some("anime"))
+        .await
+        .expect("resolve episode")
+        .expect("the cour-named file resolves");
+    assert_eq!(resolved.title.id, title.id);
+    assert!(
+        resolved
+            .title
+            .tagged_aliases
+            .iter()
+            .all(|alias| alias.name != SYNTHETIC_COUR_NAME),
+        "an index-only name must not ride back on the resolved title"
+    );
+}
