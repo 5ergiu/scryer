@@ -590,6 +590,10 @@ async fn persist_ignored_movie_scan_file_metadata_error(
 /// Register a discovered movie file the same way episodic title scans do:
 /// persist or reuse a media-file row, run media analysis when needed, and
 /// ensure a movie collection points at the file path for overview UI.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "movie-scan finalization coordinates persistence, analysis, and summary accounting together"
+)]
 pub(super) async fn finalize_movie_scan_file(
     app: &AppUseCase,
     title: &Title,
