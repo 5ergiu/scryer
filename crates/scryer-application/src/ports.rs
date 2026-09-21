@@ -4302,6 +4302,33 @@ pub trait IndexerConfigRepository: Send + Sync {
         Ok(())
     }
     async fn update(&self, update: IndexerConfigUpdate) -> AppResult<IndexerConfig>;
+    /// Reject an edit based on an older configuration revision.
+    async fn update_if_unchanged(
+        &self,
+        update: IndexerConfigUpdate,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<IndexerConfig> {
+        let current = self
+            .get_by_id(&update.id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("indexer configuration".into()))?;
+        if current.updated_at != expected_updated_at {
+            return Err(AppError::Validation(
+                "Indexer settings changed during validation; reload and try again".into(),
+            ));
+        }
+        self.update(update).await
+    }
+
+    /// Publish caps only if the configuration and previous snapshot still match.
+    async fn save_caps_if_unchanged(
+        &self,
+        _expected: &IndexerConfig,
+        _snapshot: &str,
+    ) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn set_download_client_mapping(
         &self,
         indexer_id: &str,

@@ -166,6 +166,131 @@ impl IndexerConfigStore {
     }
 }
 
+impl IndexerConfigStore {
+    async fn update_versioned(
+        &self,
+        update: IndexerConfigUpdate,
+        expected_updated_at: Option<chrono::DateTime<Utc>>,
+    ) -> AppResult<IndexerConfig> {
+        let encryption_key = self.encryption_key()?;
+        let mut assignments = vec!["updated_at = {}".to_string()];
+        let mut args = vec![SqlArg::Timestamp(Utc::now())];
+
+        if let Some(name) = update.name.as_ref() {
+            assignments.push("name = {}".to_string());
+            args.push(SqlArg::Text(name.clone()));
+        }
+        if let Some(provider_type) = update.provider_type.as_ref() {
+            assignments.push("provider_type = {}".to_string());
+            args.push(SqlArg::Text(provider_type.clone()));
+        }
+        if let Some(base_url) = update.derived_base_url.as_ref() {
+            assignments.push("base_url = {}".to_string());
+            args.push(SqlArg::Text(base_url.clone()));
+        }
+        if let Some(rate_limit_seconds) = update.rate_limit_seconds {
+            assignments.push("rate_limit_seconds = {}".to_string());
+            args.push(SqlArg::I64(rate_limit_seconds));
+        }
+        if let Some(rate_limit_burst) = update.rate_limit_burst {
+            assignments.push("rate_limit_burst = {}".to_string());
+            args.push(SqlArg::I64(rate_limit_burst));
+        }
+        if let Some(is_enabled) = update.is_enabled {
+            assignments.push("is_enabled = {}".to_string());
+            args.push(SqlArg::Bool(is_enabled));
+        }
+        if let Some(enable_interactive_search) = update.enable_interactive_search {
+            assignments.push("enable_interactive_search = {}".to_string());
+            args.push(SqlArg::Bool(enable_interactive_search));
+        }
+        if let Some(enable_auto_search) = update.enable_auto_search {
+            assignments.push("enable_auto_search = {}".to_string());
+            args.push(SqlArg::Bool(enable_auto_search));
+        }
+        if let Some(proxy_config_id) = update.proxy_config_id.as_ref() {
+            assignments.push("proxy_config_id = {}".to_string());
+            args.push(SqlArg::OptText(proxy_config_id.clone()));
+        }
+        if let Some(download_client_id) = update.download_client_id.as_ref() {
+            assignments.push("download_client_id = {}".to_string());
+            args.push(SqlArg::OptText(download_client_id.clone()));
+        }
+        if let Some(seeding_profile_id) = update.seeding_profile_id.as_ref() {
+            assignments.push("seeding_profile_id = {}".to_string());
+            args.push(SqlArg::OptText(seeding_profile_id.clone()));
+        }
+        if let Some(managed_parent_config_id) = update.managed_parent_config_id.as_ref() {
+            assignments.push("managed_parent_config_id = {}".to_string());
+            args.push(SqlArg::OptText(managed_parent_config_id.clone()));
+        }
+        if let Some(managed_child_key) = update.managed_child_key.as_ref() {
+            assignments.push("managed_child_key = {}".to_string());
+            args.push(SqlArg::OptText(managed_child_key.clone()));
+        }
+        if let Some(managed_metadata_json) = update.managed_metadata_json.as_ref() {
+            assignments.push("managed_metadata_json = {}".to_string());
+            args.push(SqlArg::OptText(managed_metadata_json.clone()));
+        }
+        if let Some(caps_snapshot_json) = update.caps_snapshot_json.as_ref() {
+            assignments.push("caps_snapshot_json = {}".to_string());
+            args.push(SqlArg::OptText(caps_snapshot_json.clone()));
+        }
+        if let Some(config_json) = update.config_json.as_ref() {
+            assignments.push("config_json = {}".to_string());
+            args.push(SqlArg::Text(maybe_encrypt_value(
+                encryption_key.as_ref(),
+                config_json,
+            )?));
+        }
+
+        if assignments.len() == 1 {
+            return Err(AppError::Validation(
+                "at least one indexer config field must be provided".into(),
+            ));
+        }
+
+        let id = update.id.clone();
+        args.push(SqlArg::Text(id.clone()));
+        let mut sql = format!(
+            "UPDATE indexers SET {} WHERE id = {{}}",
+            assignments.join(", ")
+        );
+        if let Some(expected) = expected_updated_at {
+            sql.push_str(" AND updated_at = {}");
+            args.push(SqlArg::Timestamp(expected));
+        }
+        SqlRuntime::run_in_transaction(&self.datastore, "update_indexer_config", move |tx| {
+            let sql = sql.clone();
+            let args = args.clone();
+            let id = id.clone();
+            let encryption_key = encryption_key.clone();
+            Box::pin(async move {
+                let rows = SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await?;
+                if rows == 0 {
+                    return Err(if expected_updated_at.is_some() {
+                        AppError::Validation(
+                            "Indexer settings changed during validation; reload and try again"
+                                .into(),
+                        )
+                    } else {
+                        AppError::NotFound(format!("indexer config {id}"))
+                    });
+                }
+                fetch_optional_indexer(
+                    SqlExec::Tx(tx),
+                    &format!("SELECT {INDEXER_COLUMNS} FROM indexers WHERE id = {{}}"),
+                    &[SqlArg::Text(id.clone())],
+                    encryption_key.as_ref(),
+                )
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("indexer config {id}")))
+            })
+        })
+        .await
+    }
+}
+
 #[async_trait]
 impl IndexerConfigRepository for IndexerConfigStore {
     async fn list(&self, provider_type: Option<String>) -> AppResult<Vec<IndexerConfig>> {
@@ -351,109 +476,49 @@ impl IndexerConfigRepository for IndexerConfigStore {
     }
 
     async fn update(&self, update: IndexerConfigUpdate) -> AppResult<IndexerConfig> {
-        let encryption_key = self.encryption_key()?;
-        let mut assignments = vec!["updated_at = {}".to_string()];
-        let mut args = vec![SqlArg::Timestamp(Utc::now())];
+        self.update_versioned(update, None).await
+    }
 
-        if let Some(name) = update.name.as_ref() {
-            assignments.push("name = {}".to_string());
-            args.push(SqlArg::Text(name.clone()));
-        }
-        if let Some(provider_type) = update.provider_type.as_ref() {
-            assignments.push("provider_type = {}".to_string());
-            args.push(SqlArg::Text(provider_type.clone()));
-        }
-        if let Some(base_url) = update.derived_base_url.as_ref() {
-            assignments.push("base_url = {}".to_string());
-            args.push(SqlArg::Text(base_url.clone()));
-        }
-        if let Some(rate_limit_seconds) = update.rate_limit_seconds {
-            assignments.push("rate_limit_seconds = {}".to_string());
-            args.push(SqlArg::I64(rate_limit_seconds));
-        }
-        if let Some(rate_limit_burst) = update.rate_limit_burst {
-            assignments.push("rate_limit_burst = {}".to_string());
-            args.push(SqlArg::I64(rate_limit_burst));
-        }
-        if let Some(is_enabled) = update.is_enabled {
-            assignments.push("is_enabled = {}".to_string());
-            args.push(SqlArg::Bool(is_enabled));
-        }
-        if let Some(enable_interactive_search) = update.enable_interactive_search {
-            assignments.push("enable_interactive_search = {}".to_string());
-            args.push(SqlArg::Bool(enable_interactive_search));
-        }
-        if let Some(enable_auto_search) = update.enable_auto_search {
-            assignments.push("enable_auto_search = {}".to_string());
-            args.push(SqlArg::Bool(enable_auto_search));
-        }
-        if let Some(proxy_config_id) = update.proxy_config_id.as_ref() {
-            assignments.push("proxy_config_id = {}".to_string());
-            args.push(SqlArg::OptText(proxy_config_id.clone()));
-        }
-        if let Some(download_client_id) = update.download_client_id.as_ref() {
-            assignments.push("download_client_id = {}".to_string());
-            args.push(SqlArg::OptText(download_client_id.clone()));
-        }
-        if let Some(seeding_profile_id) = update.seeding_profile_id.as_ref() {
-            assignments.push("seeding_profile_id = {}".to_string());
-            args.push(SqlArg::OptText(seeding_profile_id.clone()));
-        }
-        if let Some(managed_parent_config_id) = update.managed_parent_config_id.as_ref() {
-            assignments.push("managed_parent_config_id = {}".to_string());
-            args.push(SqlArg::OptText(managed_parent_config_id.clone()));
-        }
-        if let Some(managed_child_key) = update.managed_child_key.as_ref() {
-            assignments.push("managed_child_key = {}".to_string());
-            args.push(SqlArg::OptText(managed_child_key.clone()));
-        }
-        if let Some(managed_metadata_json) = update.managed_metadata_json.as_ref() {
-            assignments.push("managed_metadata_json = {}".to_string());
-            args.push(SqlArg::OptText(managed_metadata_json.clone()));
-        }
-        if let Some(caps_snapshot_json) = update.caps_snapshot_json.as_ref() {
-            assignments.push("caps_snapshot_json = {}".to_string());
-            args.push(SqlArg::OptText(caps_snapshot_json.clone()));
-        }
-        if let Some(config_json) = update.config_json.as_ref() {
-            assignments.push("config_json = {}".to_string());
-            args.push(SqlArg::Text(maybe_encrypt_value(
-                encryption_key.as_ref(),
-                config_json,
-            )?));
-        }
+    async fn update_if_unchanged(
+        &self,
+        update: IndexerConfigUpdate,
+        expected_updated_at: chrono::DateTime<Utc>,
+    ) -> AppResult<IndexerConfig> {
+        self.update_versioned(update, Some(expected_updated_at))
+            .await
+    }
 
-        if assignments.len() == 1 {
-            return Err(AppError::Validation(
-                "at least one indexer config field must be provided".into(),
-            ));
-        }
-
-        let id = update.id.clone();
-        args.push(SqlArg::Text(id.clone()));
+    async fn save_caps_if_unchanged(
+        &self,
+        expected: &IndexerConfig,
+        snapshot: &str,
+    ) -> AppResult<bool> {
+        let args = vec![
+            SqlArg::Text(snapshot.to_string()),
+            SqlArg::Text(expected.id.clone()),
+            SqlArg::Timestamp(expected.updated_at),
+            SqlArg::OptText(expected.caps_snapshot_json.clone()),
+        ];
+        let snapshot_predicate = if expected.caps_snapshot_json.is_some() {
+            "caps_snapshot_json = {}"
+        } else {
+            "caps_snapshot_json IS NULL"
+        };
+        let mut args = if expected.caps_snapshot_json.is_some() {
+            args
+        } else {
+            args[..3].to_vec()
+        };
+        args.push(SqlArg::Text(snapshot.to_string()));
         let sql = format!(
-            "UPDATE indexers SET {} WHERE id = {{}}",
-            assignments.join(", ")
+            "UPDATE indexers SET caps_snapshot_json = {{}} WHERE id = {{}} AND updated_at = {{}} AND ({snapshot_predicate} OR caps_snapshot_json = {{}})"
         );
-        SqlRuntime::run_in_transaction(&self.datastore, "update_indexer_config", move |tx| {
-            let sql = sql.clone();
+        SqlRuntime::run_in_transaction(&self.datastore, "save_indexer_caps", move |tx| {
             let args = args.clone();
-            let id = id.clone();
-            let encryption_key = encryption_key.clone();
-            Box::pin(async move {
-                let rows = SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await?;
-                if rows == 0 {
-                    return Err(AppError::NotFound(format!("indexer config {id}")));
-                }
-                fetch_optional_indexer(
-                    SqlExec::Tx(tx),
-                    &format!("SELECT {INDEXER_COLUMNS} FROM indexers WHERE id = {{}}"),
-                    &[SqlArg::Text(id.clone())],
-                    encryption_key.as_ref(),
-                )
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("indexer config {id}")))
-            })
+            let sql = sql.clone();
+            Box::pin(
+                async move { Ok(SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await? == 1) },
+            )
         })
         .await
     }
@@ -1008,5 +1073,105 @@ mod tests {
             .await
             .expect("mapping clear should succeed");
         assert_eq!(cleared.download_client_id, None);
+    }
+    #[tokio::test]
+    async fn caps_and_validated_save_compare_and_swap_reject_stale_work() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        create_test_indexers_table(&pool).await;
+        let store = IndexerConfigStore::new(
+            StoreDatastore::Sqlite {
+                pool: pool.clone(),
+                writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            },
+            Arc::new(RwLock::new(None)),
+        );
+        let config: IndexerConfig = serde_json::from_value(serde_json::json!({
+            "id": "caps-cas", "name": "Synthetic indexer", "provider_type": "newznab",
+            "base_url": "https://indexer.example.test", "config_json": "{}",
+            "is_enabled": true, "enable_interactive_search": true, "enable_auto_search": true,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let saved = store.create(config).await.unwrap();
+        assert!(store.save_caps_if_unchanged(&saved, "first").await.unwrap());
+        assert!(
+            store.save_caps_if_unchanged(&saved, "first").await.unwrap(),
+            "concurrent shared fetches may persist the same result"
+        );
+        assert!(
+            !store
+                .save_caps_if_unchanged(&saved, "obsolete")
+                .await
+                .unwrap()
+        );
+        let refreshed = store.get_by_id(&saved.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.updated_at, saved.updated_at);
+        assert!(
+            store
+                .save_caps_if_unchanged(&refreshed, "second")
+                .await
+                .unwrap()
+        );
+        let changed = store
+            .update_if_unchanged(
+                IndexerConfigUpdate {
+                    id: saved.id.clone(),
+                    config_json: Some(r#"{"api_key":"replacement"}"#.into()),
+                    caps_snapshot_json: Some(None),
+                    ..Default::default()
+                },
+                saved.updated_at,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .save_caps_if_unchanged(&refreshed, "late")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .update_if_unchanged(
+                    IndexerConfigUpdate {
+                        id: saved.id.clone(),
+                        name: Some("Late save".into()),
+                        ..Default::default()
+                    },
+                    saved.updated_at
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.get_by_id(&saved.id).await.unwrap().unwrap(), changed);
+        // Reopening the store retains the successful caps snapshot and its metadata.
+        let snapshot = r#"{"cache_fetched_at":"2026-01-02T00:00:00Z"}"#;
+        assert!(
+            store
+                .save_caps_if_unchanged(&changed, snapshot)
+                .await
+                .unwrap()
+        );
+        let reopened = IndexerConfigStore::new(
+            StoreDatastore::Sqlite {
+                pool,
+                writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            },
+            Arc::new(RwLock::new(None)),
+        );
+        assert_eq!(
+            reopened
+                .get_by_id(&saved.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .caps_snapshot_json
+                .as_deref(),
+            Some(snapshot)
+        );
     }
 }

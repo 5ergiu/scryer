@@ -13,11 +13,6 @@ struct PreparedManagedIndexerChild {
     routing_by_scope: HashMap<String, Vec<String>>,
 }
 
-pub(crate) struct CapsSnapshotRefreshOutcome {
-    snapshot_json: Option<String>,
-    error_message: Option<String>,
-}
-
 const PROWLARR_MANAGED_CHILD_RATE_LIMIT_SECONDS: i64 = 2;
 const MANAGED_CHILD_LOCAL_DISABLES_KEY: &str = "locally_disabled_children";
 
@@ -239,6 +234,36 @@ pub(crate) fn normalize_indexer_config_json(
     let persisted = parse_indexer_config_json(persisted_config_json)?;
 
     for field in fields {
+        if field.role == Some(scryer_domain::ConfigFieldRole::ConnectionUrl)
+            && let Some(value) = object
+                .get(&field.key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .map(str::to_string)
+        {
+            object.insert(field.key.clone(), serde_json::Value::String(value));
+        }
+        if field.field_type == scryer_domain::ConfigFieldType::Password {
+            let masked = object
+                .get(&field.key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| {
+                    !value.trim().is_empty() && value.trim().chars().all(|c| c == '*')
+                });
+            if (masked || config_value_is_empty(object.get(&field.key)))
+                && let Some(stored) = persisted.get(&field.key)
+                && !config_value_is_empty(Some(stored))
+            {
+                object.insert(field.key.clone(), stored.clone());
+            } else if masked {
+                return Err(AppError::Validation(
+                    "API key appears to be a masked placeholder — enter the real key".into(),
+                ));
+            }
+        }
+    }
+
+    for field in fields {
         if !object.contains_key(&field.key)
             && let Some(stored) = persisted.get(&field.key)
             && !config_value_is_empty(Some(stored))
@@ -286,11 +311,7 @@ pub(crate) fn normalize_indexer_config_json(
         // `required` alone: a field the form is hiding must not be demanded
         // here, or the operator is left with an error about a field they
         // cannot see.
-        let value_of = |key: &str| {
-            object
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-        };
+        let value_of = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
         if scryer_domain::config_field_is_required(field, value_of)
             && config_value_is_empty(object.get(&field.key))
         {
@@ -425,20 +446,30 @@ impl AppUseCase {
         else {
             return Ok(None);
         };
-        let Some(snapshot) = refresher
-            .fetch_for_config_with_accounting(config, proxy, accounting)
-            .await?
-        else {
-            if config.is_direct_nab() {
-                return Err(AppError::Repository(
-                    "caps refresh returned no Newznab caps snapshot".into(),
-                ));
-            }
-            return Ok(None);
-        };
-        serde_json::to_string(&snapshot)
-            .map(Some)
-            .map_err(|error| AppError::Repository(error.to_string()))
+        if let Some(snapshot) =
+            crate::integration::indexer_caps_cache::fresh_snapshot(config, Utc::now())
+        {
+            return Ok(Some(snapshot));
+        }
+        self.services
+            .integrations
+            .indexer_caps_cache
+            .fetch(config, async {
+                let Some(snapshot) = refresher
+                    .fetch_for_config_with_accounting(config, proxy, accounting)
+                    .await?
+                else {
+                    if config.is_direct_nab() {
+                        return Err(AppError::Repository(
+                            "caps refresh returned no Newznab caps snapshot".into(),
+                        ));
+                    }
+                    return Ok(None);
+                };
+                crate::integration::indexer_caps_cache::serialize_snapshot(&snapshot, Utc::now())
+                    .map(Some)
+            })
+            .await
     }
 }
 impl AppUseCase {
@@ -486,50 +517,6 @@ impl AppUseCase {
         self.prune_indexer_search_learning_best_effort(&config.id, "caps_refresh_failure")
             .await;
     }
-
-    pub(crate) async fn refresh_caps_snapshot_json_best_effort(
-        &self,
-        config: &IndexerConfig,
-        fallback: Option<&str>,
-    ) -> CapsSnapshotRefreshOutcome {
-        match self.fetch_caps_snapshot_json_for_config(config).await {
-            Ok(Some(snapshot_json)) => {
-                if config.last_error_message.as_deref().is_some_and(|message| {
-                    message.starts_with(crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX)
-                }) && let Err(error) = self
-                    .services
-                    .integrations
-                    .indexer_configs
-                    .clear_last_error(&config.id)
-                    .await
-                {
-                    tracing::warn!(config_id = %config.id, error = %error, "failed to clear recovered indexer caps error");
-                }
-                CapsSnapshotRefreshOutcome {
-                    snapshot_json: Some(snapshot_json),
-                    error_message: None,
-                }
-            }
-            Ok(None) => CapsSnapshotRefreshOutcome {
-                snapshot_json: fallback.map(ToOwned::to_owned),
-                error_message: None,
-            },
-            Err(error) => {
-                let error_message = format!("{} {error}", crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX);
-                self.record_caps_refresh_failure(config, &error).await;
-                tracing::warn!(
-                    config_id = %config.id,
-                    provider_type = %config.provider_type,
-                    error = %error,
-                    "failed to refresh indexer caps snapshot; keeping the last known snapshot"
-                );
-                CapsSnapshotRefreshOutcome {
-                    snapshot_json: fallback.map(ToOwned::to_owned),
-                    error_message: Some(error_message),
-                }
-            }
-        }
-    }
 }
 impl AppUseCase {
     pub async fn list_indexer_configs(
@@ -560,8 +547,8 @@ impl AppUseCase {
     /// The unattended caps pass (startup and daily). It is not an operator
     /// action, so it holds off every indexer that search dispatch is holding
     /// off: a caps request is a counted API hit, and a restart inside a quota
-    /// backoff must not buy a send. Saving or testing an indexer is the
-    /// operator's explicit retry and still fetches caps.
+    /// backoff must not buy a send. Saving changed connection settings or testing an indexer is the
+    /// operator's explicit retry, but fresh capabilities still need no fetch.
     pub async fn refresh_enabled_direct_nab_caps_snapshots(
         &self,
         actor: &User,
@@ -580,7 +567,10 @@ impl AppUseCase {
         let mut failures = Vec::new();
 
         for config in configs {
-            if !config.is_enabled || !config.is_direct_nab() {
+            if !config.is_enabled
+                || !config.is_direct_nab()
+                || crate::integration::indexer_caps_cache::fresh_snapshot(&config, now).is_some()
+            {
                 continue;
             }
             if let Some(disabled_until) = config
@@ -605,20 +595,14 @@ impl AppUseCase {
 
             match self.fetch_caps_snapshot_json_for_config(&config).await {
                 Ok(Some(snapshot_json)) => {
-                    let updated =
-                        if config.caps_snapshot_json.as_deref() != Some(snapshot_json.as_str()) {
-                            self.services
-                                .integrations
-                                .indexer_configs
-                                .update(IndexerConfigUpdate {
-                                    id: config.id.clone(),
-                                    caps_snapshot_json: Some(Some(snapshot_json)),
-                                    ..Default::default()
-                                })
-                                .await?
-                        } else {
-                            config.clone()
-                        };
+                    if !indexer_configs
+                        .save_caps_if_unchanged(&config, &snapshot_json)
+                        .await?
+                    {
+                        continue;
+                    }
+                    let mut updated = config.clone();
+                    updated.caps_snapshot_json = Some(snapshot_json);
                     if crate::indexer_search_identity(&config, None)
                         != crate::indexer_search_identity(&updated, None)
                     {
@@ -776,14 +760,25 @@ impl AppUseCase {
             .download_client_id
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty());
-        self.test_indexer_connection(
-            actor,
-            &provider_type,
-            Some(&normalized_config_json),
-            None,
-            Some(proxy_config_id.as_deref()),
-        )
-        .await?;
+        self.services
+            .integrations
+            .plugin_provider
+            .available()
+            .ok_or_else(|| AppError::Repository("indexer provider not available".into()))?
+            .validate_config_for_provider(&provider_type, &normalized_config_json)?;
+        let caps_snapshot_json = if input.is_enabled {
+            self.probe_indexer_connection(
+                actor,
+                &provider_type,
+                Some(&normalized_config_json),
+                None,
+                Some(proxy_config_id.as_deref()),
+            )
+            .await?
+            .caps_snapshot_json
+        } else {
+            None
+        };
 
         let mut config = IndexerConfig {
             id: Id::new().0,
@@ -811,7 +806,7 @@ impl AppUseCase {
             managed_parent_config_id: None,
             managed_child_key: None,
             managed_metadata_json: None,
-            caps_snapshot_json: None,
+            caps_snapshot_json,
             last_health_status: None,
             last_error_message: None,
             last_error_at: None,
@@ -831,15 +826,6 @@ impl AppUseCase {
                 })?;
             self.validate_indexer_download_client_mapping(&config, &client)?;
         }
-        let caps_refresh = self
-            .refresh_caps_snapshot_json_best_effort(&config, None)
-            .await;
-        config.caps_snapshot_json = caps_refresh.snapshot_json;
-        if let Some(error_message) = caps_refresh.error_message {
-            config.last_error_message = Some(error_message);
-            config.last_error_at = Some(Utc::now());
-        }
-
         let proxy_assignment = self
             .services
             .integrations
@@ -940,7 +926,11 @@ impl AppUseCase {
             .config_json
             .as_deref()
             .map(|raw| {
-                normalize_indexer_config_json(&fields, Some(raw), existing.config_json.as_deref())
+                let can_restore = crate::integration::indexer_connection::persisted_indexer_config_can_restore_secrets(
+                    &fields, &effective_provider, &existing.provider_type, Some(raw), existing.config_json.as_deref(),
+                );
+                normalize_indexer_config_json(&fields, Some(raw),
+                    if can_restore { existing.config_json.as_deref() } else { None })
             })
             .transpose()?;
         let normalized_base_url =
@@ -959,20 +949,19 @@ impl AppUseCase {
             self.indexer_management_capabilities_for_provider_type(&effective_provider);
         // A provider switch to Prowlarr sheds a lingering challenge-solver
         // assignment; transport and tunnel proxies only carry bytes and stay.
-        let existing_prowlarr_solver_assignment = if effective_provider
-            .trim()
-            .eq_ignore_ascii_case("prowlarr")
-            && let Some(existing_proxy_id) = existing.proxy_config_id.as_deref()
-        {
-            self.services
-                .integrations
-                .proxy_configs
-                .get_by_id(existing_proxy_id)
-                .await?
-                .is_some_and(|proxy| proxy.is_challenge_solver())
-        } else {
-            false
-        };
+        let existing_prowlarr_solver_assignment =
+            if effective_provider.trim().eq_ignore_ascii_case("prowlarr")
+                && let Some(existing_proxy_id) = existing.proxy_config_id.as_deref()
+            {
+                self.services
+                    .integrations
+                    .proxy_configs
+                    .get_by_id(existing_proxy_id)
+                    .await?
+                    .is_some_and(|proxy| proxy.is_challenge_solver())
+            } else {
+                false
+            };
         let mut normalized_proxy_config_id = match update.proxy_config_id.clone() {
             Some(Some(id)) => {
                 if existing.managed_parent_config_id.is_some() {
@@ -989,10 +978,6 @@ impl AppUseCase {
             None if existing_prowlarr_solver_assignment => Some(None),
             None => None,
         };
-        let should_validate_connection = normalized_provider.is_some()
-            || normalized_config_json.is_some()
-            || normalized_proxy_config_id.is_some()
-            || matches!(update.is_enabled, Some(true)) && !existing.is_enabled;
         let should_sync_managed_children = management_capabilities.supports_managed_children_sync
             && updated_managed_parent_requires_sync(
                 &existing,
@@ -1001,23 +986,6 @@ impl AppUseCase {
                 normalized_config_json.is_some(),
                 normalized_proxy_config_id.is_some(),
             );
-
-        if should_validate_connection {
-            let validation_config_json = normalized_config_json
-                .as_deref()
-                .or(existing.config_json.as_deref());
-            let proxy_override = normalized_proxy_config_id
-                .as_ref()
-                .map(|value| value.as_deref());
-            self.probe_indexer_connection(
-                actor,
-                &effective_provider,
-                validation_config_json,
-                Some(&existing.id),
-                proxy_override,
-            )
-            .await?;
-        }
 
         let preview_config = IndexerConfig {
             id: existing.id.clone(),
@@ -1094,12 +1062,51 @@ impl AppUseCase {
                 })?;
             self.validate_indexer_download_client_mapping(&preview_config, &client)?;
         }
-        let caps_refresh = self
-            .refresh_caps_snapshot_json_best_effort(
-                &preview_config,
-                existing.caps_snapshot_json.as_deref(),
+        let mut normalized_existing = existing.clone();
+        let mut normalized_preview = preview_config.clone();
+        if let Ok(config) =
+            normalize_indexer_config_json(&fields, preview_config.config_json.as_deref(), None)
+        {
+            normalized_preview.config_json = Some(config);
+        }
+        if existing.provider_type == effective_provider
+            && let Ok(config) =
+                normalize_indexer_config_json(&fields, existing.config_json.as_deref(), None)
+        {
+            normalized_existing.config_json = Some(config);
+        }
+        let connection_changed =
+            crate::integration::indexer_caps_cache::connection_identity(&normalized_existing)
+                != crate::integration::indexer_caps_cache::connection_identity(&normalized_preview);
+        if connection_changed {
+            self.services
+                .integrations
+                .plugin_provider
+                .available()
+                .ok_or_else(|| AppError::Repository("indexer provider not available".into()))?
+                .validate_config_for_provider(
+                    &effective_provider,
+                    preview_config.config_json.as_deref().unwrap_or("{}"),
+                )?;
+        }
+        let should_validate_connection = preview_config.is_enabled && connection_changed;
+        let caps_snapshot_update = if should_validate_connection {
+            Some(
+                self.probe_indexer_connection(
+                    actor,
+                    &effective_provider,
+                    preview_config.config_json.as_deref(),
+                    Some(&existing.id),
+                    Some(preview_config.proxy_config_id.as_deref()),
+                )
+                .await?
+                .caps_snapshot_json,
             )
-            .await;
+        } else if connection_changed {
+            Some(None)
+        } else {
+            None
+        };
 
         let proxy_assignment = self
             .services
@@ -1127,39 +1134,42 @@ impl AppUseCase {
             .services
             .integrations
             .indexer_configs
-            .update(IndexerConfigUpdate {
-                id: config_id.to_string(),
-                name: normalized_name,
-                provider_type: normalized_provider,
-                derived_base_url: normalized_base_url,
-                rate_limit_seconds: update.rate_limit_seconds,
-                rate_limit_burst: update.rate_limit_burst,
-                is_enabled: update.is_enabled,
-                enable_interactive_search: if management_capabilities.supports_managed_children_sync
-                {
-                    Some(false)
-                } else {
-                    update.enable_interactive_search
+            .update_if_unchanged(
+                IndexerConfigUpdate {
+                    id: config_id.to_string(),
+                    name: normalized_name,
+                    provider_type: normalized_provider,
+                    derived_base_url: normalized_base_url,
+                    rate_limit_seconds: update.rate_limit_seconds,
+                    rate_limit_burst: update.rate_limit_burst,
+                    is_enabled: update.is_enabled,
+                    enable_interactive_search: if management_capabilities
+                        .supports_managed_children_sync
+                    {
+                        Some(false)
+                    } else {
+                        update.enable_interactive_search
+                    },
+                    enable_auto_search: if management_capabilities.supports_managed_children_sync {
+                        Some(false)
+                    } else {
+                        update.enable_auto_search
+                    },
+                    proxy_config_id: normalized_proxy_config_id,
+                    download_client_id: normalized_download_client_id,
+                    seeding_profile_id: None,
+                    managed_parent_config_id: update.managed_parent_config_id,
+                    managed_child_key: update.managed_child_key,
+                    managed_metadata_json: update.managed_metadata_json,
+                    caps_snapshot_json: caps_snapshot_update,
+                    config_json: normalized_config_json,
                 },
-                enable_auto_search: if management_capabilities.supports_managed_children_sync {
-                    Some(false)
-                } else {
-                    update.enable_auto_search
-                },
-                proxy_config_id: normalized_proxy_config_id,
-                download_client_id: normalized_download_client_id,
-                seeding_profile_id: None,
-                managed_parent_config_id: update.managed_parent_config_id,
-                managed_child_key: update.managed_child_key,
-                managed_metadata_json: update.managed_metadata_json,
-                caps_snapshot_json: Some(caps_refresh.snapshot_json),
-                config_json: normalized_config_json,
-            })
+                existing.updated_at,
+            )
             .await?;
         drop(proxy_assignment);
-        if caps_refresh.error_message.is_none()
-            && crate::indexer_search_identity(&existing, None)
-                != crate::indexer_search_identity(&updated, None)
+        if crate::indexer_search_identity(&existing, None)
+            != crate::indexer_search_identity(&updated, None)
         {
             self.prune_indexer_search_learning_best_effort(
                 &updated.id,
@@ -1167,7 +1177,7 @@ impl AppUseCase {
             )
             .await;
         }
-        if should_validate_connection && caps_refresh.error_message.is_none() {
+        if should_validate_connection {
             let indexer_configs = &self.services.integrations.indexer_configs;
             indexer_configs.clear_last_error(&updated.id).await?;
             // A save that just passed validation is the operator's "try again":
