@@ -31,6 +31,16 @@ These notes cover what's changed since **0.21.7**.
 - **Imports:** when a finished download could not be imported yet and was scheduled to be tried again, that schedule was only held in memory, so restarting Scryer either forgot it or retried immediately. It is now stored, and the order of quality tiers is preserved when the files are re-evaluated.
 - **Quality:** the quality shown for a file now uses the same size thresholds the scan itself uses, so video that has been cropped or padded — common widescreen and vertically padded HD frames — keeps its proper tier instead of being labelled one step lower. 1440p and 4320p now have labels of their own.
 - **Catalog:** paging through the catalog no longer works out library-wide totals that were not asked for, and the list no longer loads artwork details it does not display. Both made large libraries slower to browse.
+- **Media settings:** several settings came back wrong after the page reloaded, and saving the page then stored the wrong value:
+  - The rename collision policy, the missing-metadata policy, and the anime filler and recap policies always reloaded as their defaults.
+  - The anime options for monitoring specials, inter-season movies and filler movies reloaded as their defaults.
+  - **Use season folders**, when turned off, could show as on again.
+
+  All of them now reload as you saved them. A save that fails now puts the previous value back, and a settings read that finishes after you save can no longer replace what you just saved.
+- **Download client routing:** the order of a library's download clients reverted to an arbitrary order after a reload, and the next save made that the order Scryer picked clients in. The order you set is now kept.
+- **Changing a title's folder** — including swapping folders between two titles or taking over another title's folder — now re-links the files already in that folder without re-fetching the title's metadata or re-reading every file, so it finishes much sooner. File details are kept for files that haven't changed, and metadata updates on the title's next refresh.
+- **Confirmation dialogs** with a long list, such as a large rename preview, now scroll the list and keep the confirm and cancel buttons on screen.
+- **Library scans:** the scan progress panel no longer shows a spinner beside every phase that is running.
 
 ## API changes
 
