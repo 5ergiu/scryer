@@ -397,6 +397,42 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
     );
     assert_within(&candidates, &name_candidates_in_bucket(&titles, &query));
 
+    // Every spelling a group ships for the umlaut name reaches it through the
+    // persisted lanes, asked exactly as the resolver asks: the distance is the
+    // one a 16-letter anchor can consume (one edit, plus one for the
+    // competitor check), not a blanket ceiling. Marks kept is equality, marks
+    // dropped and marks written out are collation equivalences, and the
+    // half-typed spelling is the fuzzy index's.
+    for spelling in [
+        "Die Höhle der Löwen",
+        "Die Hohle der Lowen",
+        "Die Hoehle der Loewen",
+        "Die Höhle der Lowen",
+    ] {
+        let observed = title_spelling::title_lookup_form(spelling);
+        let numbers = title_spelling::title_numbers_key(spelling);
+        let collation = collation_keys_for(&observed);
+        let candidates = TitleRepository::find_title_name_candidates(
+            catalog,
+            bucket_query(
+                Some("series"),
+                &observed,
+                &numbers,
+                &collation,
+                None,
+                Some(2),
+                2000,
+            ),
+        )
+        .await?;
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.title_id == "de-hoehle"),
+            "{spelling} must reach the umlaut title: {candidates:?}"
+        );
+    }
+
     // The cap bounds the fuzzy lane only. Asking for one row still returns
     // the equality matches, which are what identity is actually proven
     // against.
