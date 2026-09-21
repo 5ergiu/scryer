@@ -1254,6 +1254,11 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
             # Avoid glibc libgcc outline-atomic helpers when linking against musl.
             native_flags="${native_flags} -mno-outline-atomics"
+            # jemalloc bakes in the page size of the machine that builds it and
+            # refuses to start on a kernel with larger pages. The runner has
+            # 4 KiB pages; arm64 hosts run 4, 16 (Raspberry Pi 5, Asahi) and
+            # 64 KiB. Build for the largest, which serves all three.
+            export JEMALLOC_SYS_WITH_LG_PAGE=16
           fi
           export "${target_cflags_var}=${native_flags}"
           export "${target_cxxflags_var}=${native_flags}"
@@ -1266,6 +1271,7 @@ jobs:
             printf '%s=%s\n' "${target_cc_var}" "${!target_cc_var}"
             printf '%s=%s\n' "${target_cflags_var}" "${!target_cflags_var}"
             printf '%s=%s\n' "${target_cxxflags_var}" "${!target_cxxflags_var}"
+            printf 'JEMALLOC_SYS_WITH_LG_PAGE=%s\n' "${JEMALLOC_SYS_WITH_LG_PAGE:-}"
             printf 'AWS_LC_SYS_USE_SYSTEM=%s\n' "${AWS_LC_SYS_USE_SYSTEM}"
             printf 'AWS_LC_SYS_STATIC=%s\n' "${AWS_LC_SYS_STATIC}"
             printf 'AWS_LC_SYS_SMALL=%s\n' "${AWS_LC_SYS_SMALL}"

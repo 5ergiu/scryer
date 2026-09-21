@@ -39,6 +39,11 @@ pub(super) struct MockTitleRepo {
     /// somewhere to send a result.
     pub(super) list_for_matching_calls: AtomicUsize,
     pub(super) monitor_selections: Arc<Mutex<HashMap<String, scryer_domain::MonitorSelection>>>,
+    /// Names the search index holds for a title that its row does not — an
+    /// anime numbering bridge's cour names. The real store writes these to
+    /// `title_search_terms` only, so they are kept apart here too: a read of
+    /// the row never returns them, and only the index reads below do.
+    pub(super) index_only_names: Arc<Mutex<HashMap<String, Vec<scryer_domain::TaggedAlias>>>>,
 }
 #[derive(Default)]
 pub(crate) struct RecordingJobRunRepo {
@@ -251,6 +256,16 @@ pub(super) fn sorted_limited_job_runs(
 }
 
 impl MockTitleRepo {
+    /// The catalog rows behind titles found through the index view, which
+    /// carries names no row does.
+    async fn rows_of(&self, found: Vec<Title>) -> AppResult<Vec<Title>> {
+        let store = self.store.lock().await;
+        Ok(found
+            .iter()
+            .filter_map(|found| store.iter().find(|title| title.id == found.id).cloned())
+            .collect())
+    }
+
     pub(super) async fn fail_create_or_get_existing(&self, message: &str) {
         *self.create_or_get_existing_error.lock().await = Some(message.to_string());
     }
@@ -659,7 +674,51 @@ impl TitleRepository for MockTitleRepo {
     ) -> AppResult<Vec<Title>> {
         self.list_for_matching_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.list(facet, query).await
+        // The matching read is the index's view of the catalog.
+        let mut titles = self.list(facet, query).await?;
+        let index_only_names = self.index_only_names.lock().await;
+        for title in &mut titles {
+            if let Some(names) = index_only_names.get(&title.id) {
+                title.tagged_aliases.extend(names.iter().cloned());
+            }
+        }
+        Ok(titles)
+    }
+
+    /// The index finds a title by any name it holds, and hands back the row.
+    async fn find_titles_by_lookup_keys(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = crate::ports::titles_matching_lookup_keys(
+            self.list_for_matching(None, None).await?,
+            keys,
+        );
+        self.rows_of(found).await
+    }
+
+    async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = crate::ports::titles_matching_lookup_key_shapes(
+            self.list_for_matching(None, None).await?,
+            keys,
+        );
+        self.rows_of(found).await
+    }
+
+    async fn list_title_index_names(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
+        let Some(mut title) = self.get_by_id(title_id).await? else {
+            return Ok(Vec::new());
+        };
+        if let Some(names) = self.index_only_names.lock().await.get(title_id) {
+            title.tagged_aliases.extend(names.iter().cloned());
+        }
+        Ok(crate::ports::title_name_candidates(&title))
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {

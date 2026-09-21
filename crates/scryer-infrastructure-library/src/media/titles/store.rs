@@ -1430,6 +1430,40 @@ impl TitleRepository for TitleStore {
         Ok(candidates)
     }
 
+    async fn list_title_index_names(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<scryer_application::TitleNameCandidate>> {
+        // The same term kinds the bucket lanes above read, so a name that can
+        // discover a title is always one of the names returned for it.
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT title_id, facet, raw_term, literal_term, match_term, match_year, language_tag \
+             FROM title_search_terms \
+             WHERE title_id = {} AND term_kind IN ('name', 'alias', 'tagged_alias') \
+             ORDER BY term_id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name = scryer_application::TitleNameCandidate {
+                title_id: row.text("title_id")?,
+                facet: row.text("facet")?,
+                raw_term: row.text("raw_term")?,
+                literal_term: row.text("literal_term")?,
+                match_term: row.text("match_term")?,
+                match_year: row.opt_i32("match_year")?,
+                language_tag: row.opt_text("language_tag")?,
+            };
+            if seen.insert(name.literal_term.clone()) {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
         self.get_by_id_internal(id, true).await
     }
