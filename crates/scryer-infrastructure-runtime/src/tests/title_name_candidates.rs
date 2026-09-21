@@ -405,6 +405,22 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
     let collation = collation_keys_for(&anchor);
     let capped = TitleRepository::find_title_name_candidates(
         catalog,
+        bucket_query(Some("series"), &anchor, &numbers, &collation, None, None, 1),
+    )
+    .await?;
+    assert!(
+        capped
+            .iter()
+            .any(|candidate| candidate.title_id == "de-hoehle"),
+        "the equality lanes are never capped: {capped:?}"
+    );
+
+    // What the cap does to the fuzzy lane, on the other hand, is not a short
+    // list. A bounded-distance lane that fills its cap was cut off somewhere
+    // arbitrary, and a caller reading that as "no competing name" would
+    // attribute a release to the wrong title, so it is an error instead.
+    let saturated = TitleRepository::find_title_name_candidates(
+        catalog,
         bucket_query(
             Some("series"),
             &anchor,
@@ -415,12 +431,13 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
             1,
         ),
     )
-    .await?;
+    .await;
+    let Err(error) = saturated else {
+        panic!("a fuzzy lane that fills its cap must not answer short: {saturated:?}");
+    };
     assert!(
-        capped
-            .iter()
-            .any(|candidate| candidate.title_id == "de-hoehle"),
-        "the equality lanes are never capped: {capped:?}"
+        error.to_string().contains("incomplete"),
+        "the cap error must say the answer is incomplete: {error}"
     );
 
     // A facet hint narrows the bucket, as the in-memory index's facet key did.

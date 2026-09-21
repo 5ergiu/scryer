@@ -42,7 +42,7 @@ use async_trait::async_trait;
 use scryer_application::{AppError, AppResult};
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, QueryClone, TermQuery};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions, Value,
 };
@@ -198,6 +198,10 @@ fn register_tokenizers(index: &Index) -> AppResult<()> {
     Ok(())
 }
 
+/// The in-process writer lock, in the form every blocking writer task keeps a
+/// share of. See [`TitleFuzzyIndex::write_lock`].
+type WriteGuard = Arc<tokio::sync::OwnedMutexGuard<()>>;
+
 pub struct TitleFuzzyIndex {
     dir: PathBuf,
     index: Index,
@@ -206,7 +210,21 @@ pub struct TitleFuzzyIndex {
     source: Arc<dyn TitleTermSource>,
     /// One writer at a time, always. Tantivy enforces this with a lock file;
     /// taking it in process turns a hard error into a wait.
-    write_lock: tokio::sync::Mutex<()>,
+    ///
+    /// The guard is *owned* and shared into every blocking task that creates a
+    /// writer, so it outlives the awaiting future rather than the caller's
+    /// stack. A caller whose future is dropped mid-await — which is what a
+    /// disconnected GraphQL client does — therefore cannot release this while
+    /// a detached blocking task still holds tantivy's own lock file; without
+    /// that, the next reader's `writer_with_num_threads` fails outright and a
+    /// match, import or search fails with it.
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// What [`META_FILE`] says, kept in memory so a read does not do a
+    /// blocking file read on the async runtime. The file remains the durable
+    /// record: this is seeded from it at open and only changes in
+    /// [`Self::write_meta`] and [`Self::remove_meta`], both under
+    /// [`Self::write_lock`].
+    meta: std::sync::RwLock<Option<ProjectionStamp>>,
     rebuild_complete: AtomicBool,
     // Keep directory ownership until the index and reader have been dropped.
     _ownership: std::fs::File,
@@ -253,6 +271,7 @@ impl TitleFuzzyIndex {
                 .await
                 .map_err(|error| AppError::Repository(error.to_string()))??;
 
+        let meta = read_meta_file(&dir.join(META_FILE));
         let handle = Arc::new(Self {
             dir,
             _ownership: ownership,
@@ -260,7 +279,8 @@ impl TitleFuzzyIndex {
             reader,
             fields,
             source,
-            write_lock: tokio::sync::Mutex::new(()),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            meta: std::sync::RwLock::new(meta),
             rebuild_complete: AtomicBool::new(false),
         });
 
@@ -277,17 +297,30 @@ impl TitleFuzzyIndex {
     /// Drop every document and page the projection back in, one writer per
     /// batch. Readers wait for the complete replacement before proceeding.
     pub async fn rebuild(&self, stamp: ProjectionStamp) -> AppResult<()> {
-        let _guard = self.write_lock.lock().await;
-        self.rebuild_locked(stamp).await
+        let guard = self.write_guard().await;
+        self.rebuild_locked(&guard, stamp).await
     }
 
-    async fn rebuild_locked(&self, stamp: ProjectionStamp) -> AppResult<()> {
+    /// Take the writer lock in a form a blocking task can keep alive on its
+    /// own. Every path that may create a tantivy writer goes through here.
+    async fn write_guard(&self) -> WriteGuard {
+        Arc::new(self.write_lock.clone().lock_owned().await)
+    }
+
+    async fn rebuild_locked(&self, guard: &WriteGuard, stamp: ProjectionStamp) -> AppResult<()> {
+        // Set before anything is destroyed: a rebuild whose future is dropped
+        // halfway leaves the index not ready and without a stamp, which is the
+        // state the next reader already knows how to repair.
         self.rebuild_complete.store(false, Ordering::SeqCst);
         self.remove_meta()?;
 
         {
             let index = self.index.clone();
+            let guard = guard.clone();
             tokio::task::spawn_blocking(move || -> AppResult<()> {
+                // Dropped after the writer below, so the in-process lock is
+                // held for exactly as long as a tantivy writer exists.
+                let _guard = guard;
                 let mut writer = index
                     .writer_with_num_threads::<TantivyDocument>(1, WRITER_HEAP_BYTES)
                     .map_err(|error| AppError::Repository(error.to_string()))?;
@@ -310,7 +343,7 @@ impl TitleFuzzyIndex {
                 break;
             }
             after = page.iter().map(|term| term.term_id).max().unwrap_or(after);
-            self.write_batch(page, Vec::new()).await?;
+            self.write_batch(guard, page, Vec::new()).await?;
         }
 
         // Anything enqueued while the rebuild ran is already reflected by the
@@ -328,15 +361,15 @@ impl TitleFuzzyIndex {
     /// Called before a fuzzy read rather than from a timer, so a caller never
     /// sees a title the database has already accepted but the index has not.
     pub async fn sync(&self) -> AppResult<()> {
-        let _guard = self.write_lock.lock().await;
-        self.sync_locked().await
+        let guard = self.write_guard().await;
+        self.sync_locked(&guard).await
     }
 
-    async fn sync_locked(&self) -> AppResult<()> {
+    async fn sync_locked(&self, guard: &WriteGuard) -> AppResult<()> {
         loop {
             let stamp = self.source.projection_stamp().await?;
             if !self.ready() || !self.stamp_matches(&stamp) {
-                self.rebuild_locked(stamp).await?;
+                self.rebuild_locked(guard, stamp).await?;
                 continue;
             }
             let queued = self.source.queued_titles(QUEUE_DRAIN_BATCH).await?;
@@ -351,7 +384,7 @@ impl TitleFuzzyIndex {
                 .map(|entry| entry.title_id.clone())
                 .collect::<Vec<_>>();
             let terms = self.source.terms_for_titles(&title_ids).await?;
-            self.write_batch(terms, title_ids).await?;
+            self.write_batch(guard, terms, title_ids).await?;
             self.reload()?;
             let seqs = queued.iter().map(|entry| entry.seq).collect::<Vec<_>>();
             self.source.clear_queued(&seqs).await?;
@@ -362,6 +395,7 @@ impl TitleFuzzyIndex {
     /// so a rename cannot leave the previous spelling matchable.
     async fn write_batch(
         &self,
+        guard: &WriteGuard,
         terms: Vec<IndexedTerm>,
         replace_title_ids: Vec<String>,
     ) -> AppResult<()> {
@@ -370,7 +404,11 @@ impl TitleFuzzyIndex {
         }
         let index = self.index.clone();
         let fields = self.fields;
+        let guard = guard.clone();
         tokio::task::spawn_blocking(move || -> AppResult<()> {
+            // Dropped after the writer, so a dropped caller future cannot let
+            // a second writer start while this one is still committing.
+            let _guard = guard;
             let mut writer = index
                 .writer_with_num_threads::<TantivyDocument>(1, WRITER_HEAP_BYTES)
                 .map_err(|error| AppError::Repository(error.to_string()))?;
@@ -412,15 +450,20 @@ impl TitleFuzzyIndex {
         self.read_meta().is_some_and(|meta| &meta == stamp)
     }
 
+    /// The cached stamp. Deliberately not a file read: this is on the path of
+    /// every fuzzy read, and the file only changes under the write lock.
     fn read_meta(&self) -> Option<ProjectionStamp> {
-        #[derive(serde::Deserialize)]
-        struct Meta {
-            schema_version: u32,
-            stamp: ProjectionStamp,
-        }
-        let bytes = std::fs::read(self.meta_path()).ok()?;
-        let meta = serde_json::from_slice::<Meta>(&bytes).ok()?;
-        (meta.schema_version == FUZZY_SCHEMA_VERSION).then_some(meta.stamp)
+        self.meta
+            .read()
+            .expect("title index meta cache is never held across a panic")
+            .clone()
+    }
+
+    fn store_meta(&self, stamp: Option<ProjectionStamp>) {
+        *self
+            .meta
+            .write()
+            .expect("title index meta cache is never held across a panic") = stamp;
     }
 
     fn write_meta(&self, stamp: &ProjectionStamp) -> AppResult<()> {
@@ -433,12 +476,17 @@ impl TitleFuzzyIndex {
             serde_json::to_vec(&payload)
                 .map_err(|error| AppError::Repository(error.to_string()))?,
         )
-        .map_err(|error| AppError::Repository(error.to_string()))
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+        self.store_meta(Some(stamp.clone()));
+        Ok(())
     }
 
     fn remove_meta(&self) -> AppResult<()> {
         // A rebuild that dies halfway must not leave a stamp claiming the
-        // segments are complete.
+        // segments are complete. The cache is cleared first, so a failure to
+        // remove the file cannot leave the process trusting a stamp it just
+        // decided was wrong.
+        self.store_meta(None);
         match std::fs::remove_file(self.meta_path()) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -457,15 +505,15 @@ impl TitleFuzzyIndex {
     /// the candidate columns from `title_search_terms` — one source of truth
     /// for what a candidate *is*, whichever lane found it.
     pub async fn resolver_candidates(&self, query: ResolverFuzzyQuery<'_>) -> AppResult<Vec<i64>> {
-        let _guard = self.write_lock.lock().await;
-        self.sync_locked().await?;
+        let guard = self.write_guard().await;
+        self.sync_locked(&guard).await?;
         if query.match_term.is_empty() {
             return Ok(Vec::new());
         }
         let fields = self.fields;
         // Pin a complete generation before allowing another rebuild to start.
         let searcher = self.reader.searcher();
-        drop(_guard);
+        drop(guard);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![
             (Occur::Must, term_clause(fields.script, query.script)),
             (
@@ -489,34 +537,69 @@ impl TitleFuzzyIndex {
                     .collect(),
             )),
         ));
-        clauses.push((
-            Occur::Must,
-            spelling_clause(&fields, query.match_term, query.distance),
-        ));
 
-        let limit = query.limit;
-        let boolean = BooleanQuery::new(clauses);
-        let hits = tokio::task::spawn_blocking(move || -> tantivy::Result<Vec<i64>> {
-            let docs = searcher.search(
-                &boolean,
-                &TopDocs::with_limit(limit.max(1)).order_by_score(),
-            )?;
-            let mut term_ids = Vec::with_capacity(docs.len());
-            for (_score, address) in docs {
-                let doc = searcher.doc::<TantivyDocument>(address)?;
-                if let Some(value) = doc
-                    .get_first(fields.term_id)
-                    .and_then(|value| value.as_i64())
-                {
-                    term_ids.push(value);
+        let limit = query.limit.max(1);
+        let bucket = format!(
+            "facet={} script={} numbers={}",
+            query.facet.unwrap_or("*"),
+            query.script,
+            query.numbers_key
+        );
+        // One search per lane, unioned. The lanes score on different scales —
+        // the automaton's hits all carry the same constant score, the gram
+        // lane's carry BM25 — so a single ranked search lets gram noise evict
+        // an exact hit that shares no n-gram with the query. Separate searches
+        // make that impossible without having to reason about relative scores.
+        let mut term_ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for lane in spelling_lanes(&fields, query.match_term, query.distance) {
+            let mut lane_clauses = clauses
+                .iter()
+                .map(|(occur, clause)| (*occur, clause.box_clone()))
+                .collect::<Vec<_>>();
+            lane_clauses.push((Occur::Must, lane));
+            let boolean = BooleanQuery::new(lane_clauses);
+            let searcher = searcher.clone();
+            let found =
+                tokio::task::spawn_blocking(move || -> tantivy::Result<(usize, Vec<i64>)> {
+                    let docs =
+                        searcher.search(&boolean, &TopDocs::with_limit(limit).order_by_score())?;
+                    let matched = docs.len();
+                    let mut lane_ids = Vec::with_capacity(matched);
+                    for (_score, address) in docs {
+                        let doc = searcher.doc::<TantivyDocument>(address)?;
+                        if let Some(value) = doc
+                            .get_first(fields.term_id)
+                            .and_then(|value| value.as_i64())
+                        {
+                            lane_ids.push(value);
+                        }
+                    }
+                    Ok((matched, lane_ids))
+                })
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+            let (matched, lane_ids) = found;
+            // A lane that filled its limit was cut off at an arbitrary point
+            // in a ranking that means nothing to the caller. Returning what
+            // fits would be read as "these are all the competing names", which
+            // is exactly the wrong answer to be silent about.
+            if matched >= limit {
+                return Err(AppError::Repository(format!(
+                    "title index lane for {bucket} returned its full limit of {limit} \
+                     names at distance {}: the bounded-distance answer is incomplete \
+                     and must not be read as an absence of competing titles",
+                    query.distance
+                )));
+            }
+            for term_id in lane_ids {
+                if seen.insert(term_id) {
+                    term_ids.push(term_id);
                 }
             }
-            Ok(term_ids)
-        })
-        .await;
-
-        hits.map_err(|error| AppError::Repository(error.to_string()))?
-            .map_err(|error| AppError::Repository(error.to_string()))
+        }
+        Ok(term_ids)
     }
 
     /// The UI lane: per query token, the titles holding a projected token
@@ -528,14 +611,14 @@ impl TitleFuzzyIndex {
         distance_for: impl Fn(usize) -> u8,
         limit_per_token: usize,
     ) -> AppResult<Vec<UiFuzzyHit>> {
-        let _guard = self.write_lock.lock().await;
-        self.sync_locked().await?;
+        let guard = self.write_guard().await;
+        self.sync_locked(&guard).await?;
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
         // All tokens must search the same complete generation.
         let searcher = self.reader.searcher();
-        drop(_guard);
+        drop(guard);
         let fields = self.fields;
         let mut hits = Vec::new();
         for token in tokens {
@@ -597,6 +680,20 @@ impl TitleFuzzyIndex {
         }
         Ok(hits)
     }
+}
+
+/// The durable record, read once at open. Everything after that reads the
+/// cached copy: an unreadable, malformed or older-schema file is the same
+/// answer as a missing one — no stamp, so rebuild.
+fn read_meta_file(path: &Path) -> Option<ProjectionStamp> {
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        schema_version: u32,
+        stamp: ProjectionStamp,
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let meta = serde_json::from_slice::<Meta>(&bytes).ok()?;
+    (meta.schema_version == FUZZY_SCHEMA_VERSION).then_some(meta.stamp)
 }
 
 fn reject_symlink(path: &Path) -> AppResult<()> {
@@ -711,62 +808,67 @@ fn term_clause(field: Field, value: &str) -> Box<dyn Query> {
     ))
 }
 
-/// One spelling, two ways of being close to it.
+/// One spelling, up to two independent ways of being close to it.
 ///
-/// Tantivy's Levenshtein automaton is exact but stops at
-/// [`MAX_AUTOMATON_DISTANCE`], and it counts *bytes*: in a script whose
-/// characters are three bytes wide, "one character wrong" is three edits and
-/// is indistinguishable from a different title. Both gaps are covered by the
-/// same device — character n-grams with a shared-gram floor:
+/// Each returned query is a *lane*, searched on its own by
+/// [`TitleFuzzyIndex::resolver_candidates`] and unioned with the others. They
+/// are not `Should` clauses of one query on purpose: their scores are not
+/// comparable, so combining them lets one lane's ranking discard the other's
+/// hits.
 ///
-/// * A wide script (Han, Kana, Hangul) always goes through bigrams, because
-///   the automaton cannot express a character-level tolerance there at all.
-/// * A distance above the automaton's ceiling goes through trigrams. `k`
-///   edits destroy at most `n * k` n-grams, so a candidate within `k` edits
-///   shares at least `G - n * k` of the query's `G` grams. That is a floor,
-///   not a heuristic: nothing within the distance can fall below it.
+/// * The **automaton lane** is exact but stops at [`MAX_AUTOMATON_DISTANCE`].
+///   It counts *characters*, not bytes — `levenshtein_automata` builds its DFA
+///   over `char`s — so it is meaningful in every script and runs for every
+///   script. A three-character Han name one character away from another is a
+///   distance of one here, which is the only lane that can see it: two such
+///   names share no bigram at all.
+/// * The **gram lane** supplements it with character n-grams and a shared-gram
+///   floor, for the two cases the automaton cannot cover on its own: a wide
+///   script, where names are short enough that a single character carries much
+///   of the name, and a distance above the automaton's ceiling. `k` edits
+///   destroy at most `n * k` n-grams, so a candidate within `k` edits shares at
+///   least `G - n * k` of the query's `G` grams. That is a floor, not a
+///   heuristic: nothing within the distance can fall below it.
 ///
-/// Either way this lane only has to *find* candidates. Every one of them is
+/// Either way these lanes only have to *find* candidates. Every one of them is
 /// then measured exactly by the caller's spelling comparison, so a loose gram
 /// hit costs a comparison and can never become a match on its own.
-fn spelling_clause(fields: &Fields, match_term: &str, distance: u8) -> Box<dyn Query> {
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    let wide = is_wide_script(match_term);
+fn spelling_lanes(fields: &Fields, match_term: &str, distance: u8) -> Vec<Box<dyn Query>> {
+    let mut lanes: Vec<Box<dyn Query>> = Vec::new();
 
-    if !wide {
-        let automaton_distance = distance.min(MAX_AUTOMATON_DISTANCE);
-        for field in [fields.match_raw, fields.literal_raw] {
-            clauses.push((
-                Occur::Should,
-                Box::new(FuzzyTermQuery::new(
+    let automaton_distance = distance.min(MAX_AUTOMATON_DISTANCE);
+    lanes.push(Box::new(BooleanQuery::new(
+        [fields.match_raw, fields.literal_raw]
+            .into_iter()
+            .map(|field| {
+                let query: Box<dyn Query> = Box::new(FuzzyTermQuery::new(
                     Term::from_field_text(field, match_term),
                     automaton_distance,
                     true,
-                )),
-            ));
-        }
-    }
+                ));
+                (Occur::Should, query)
+            })
+            .collect(),
+    )));
 
+    let wide = is_wide_script(match_term);
     let gram_size = if wide { 2 } else { 3 };
     if wide || distance > MAX_AUTOMATON_DISTANCE {
         let grams = character_ngrams(match_term, gram_size);
         if !grams.is_empty() {
             let destroyed = gram_size * distance as usize;
             let required = grams.len().saturating_sub(destroyed).max(1);
-            clauses.push((
-                Occur::Should,
-                Box::new(BooleanQuery::with_minimum_required_clauses(
-                    grams
-                        .into_iter()
-                        .map(|gram| (Occur::Should, term_clause(fields.grams, gram.as_str())))
-                        .collect(),
-                    required,
-                )),
-            ));
+            lanes.push(Box::new(BooleanQuery::with_minimum_required_clauses(
+                grams
+                    .into_iter()
+                    .map(|gram| (Occur::Should, term_clause(fields.grams, gram.as_str())))
+                    .collect(),
+                required,
+            )));
         }
     }
 
-    Box::new(BooleanQuery::new(clauses))
+    lanes
 }
 
 fn character_ngrams(value: &str, size: usize) -> Vec<String> {

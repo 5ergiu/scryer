@@ -86,6 +86,138 @@ async fn a_queued_title_is_visible_to_the_next_fuzzy_read() {
     let _ = std::fs::remove_file(db);
 }
 
+/// Gram noise cannot crowd out a name the automaton can see, and a lane that
+/// fills its limit says so instead of answering short.
+///
+/// Both halves use one fixture, because they are one failure: a bucket whose
+/// gram-sharing rows outnumber the limit. Asked at the distance the anchor can
+/// actually consume, the rival is found — it is the automaton lane's hit, and
+/// that lane is searched on its own. Asked at the blanket distance the
+/// resolver used to send, the gram floor collapses to a single shared trigram,
+/// the lane fills up, and the answer is incomplete.
+#[tokio::test]
+async fn gram_noise_cannot_hide_a_rival_and_a_full_lane_is_an_error() {
+    let (services, db) = temp_services("scryer_fuzzy_index_gram_noise").await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = title_store(&services);
+
+    // Every one of these shares the query's trigrams and is many edits away
+    // from it. There are twice as many of them as the limit below.
+    for (ordinal, suffix) in [
+        "Drift", "Crest", "Pylon", "Harbour", "Quarry", "Beacon", "Mantle", "Thicket",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        anime_title(
+            &catalog,
+            &format!("gram-noise-{ordinal}"),
+            &format!("Zolarium {suffix}"),
+        )
+        .await;
+    }
+    // One edit from the query and sharing none of its trigrams: an edit in the
+    // middle of a five-character name destroys every trigram it has, so only
+    // the automaton lane can find this.
+    let rival = anime_title(&catalog, "gram-noise-rival", "Zomar").await;
+    let index = open_index(&services, dir.path()).await;
+
+    let name = observed("Zolar");
+    let mut narrow = resolver_query(&name, 2);
+    narrow.limit = 4;
+    let hits = index
+        .resolver_candidates(narrow)
+        .await
+        .expect("the bucket must answer");
+    let hydrated = title_ids_for_terms(&services, &hits).await;
+    assert!(
+        hydrated.contains(&rival.id.to_string()),
+        "a one-edit rival must survive a bucket full of gram noise: {hydrated:?}"
+    );
+
+    let mut saturating = resolver_query(&name, 4);
+    saturating.limit = 4;
+    let error = index
+        .resolver_candidates(saturating)
+        .await
+        .expect_err("a lane that fills its limit must not answer short");
+    let message = error.to_string();
+    assert!(
+        message.contains("incomplete") && message.contains("4"),
+        "the error must name the bucket and the limit: {message}"
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// The two lanes do not compete for one ranked result set.
+///
+/// Neither lane fills the limit here, but together they match more rows than
+/// it: ranked as one query, the gram rows score on BM25 and the automaton's
+/// score a constant, so the exact hits are the ones that fall off the end.
+/// Searched separately and unioned, both survive.
+#[tokio::test]
+async fn gram_hits_and_automaton_hits_do_not_share_one_ranking() {
+    let (services, db) = temp_services("scryer_fuzzy_index_lane_union").await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = title_store(&services);
+
+    for (ordinal, suffix) in ["Drift", "Crest", "Pylon"].into_iter().enumerate() {
+        anime_title(
+            &catalog,
+            &format!("lane-union-noise-{ordinal}"),
+            &format!("Zolarium {suffix}"),
+        )
+        .await;
+    }
+    // Two edits away and sharing no trigram, so it is an automaton hit only.
+    // Created first, so it holds the lower document address and wins a tie.
+    anime_title(&catalog, "lane-union-decoy", "Zemar").await;
+    let rival = anime_title(&catalog, "lane-union-rival", "Zomar").await;
+    let index = open_index(&services, dir.path()).await;
+
+    let name = observed("Zolar");
+    // Distance three: past the automaton's ceiling, so the gram lane runs too.
+    let mut query = resolver_query(&name, 3);
+    query.limit = 4;
+    let hits = index
+        .resolver_candidates(query)
+        .await
+        .expect("neither lane fills the limit");
+    let hydrated = title_ids_for_terms(&services, &hits).await;
+    assert!(
+        hydrated.contains(&rival.id.to_string()),
+        "an exact hit must not be ranked away by gram hits: {hydrated:?}"
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// A wide script gets the automaton too. Two three-character names one
+/// character apart share no bigram, so the gram lane alone cannot see the
+/// rival — and the automaton counts characters, not bytes, so it can.
+#[tokio::test]
+async fn a_wide_script_rival_one_character_away_is_found() {
+    let (services, db) = temp_services("scryer_fuzzy_index_wide_script").await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = title_store(&services);
+    let rival = anime_title(&catalog, "wide-script-rival", "蒼硯録").await;
+    let index = open_index(&services, dir.path()).await;
+
+    let name = observed("蒼曜録");
+    let hits = index
+        .resolver_candidates(resolver_query(&name, 1))
+        .await
+        .expect("the bucket must answer");
+    let hydrated = title_ids_for_terms(&services, &hits).await;
+    assert!(
+        hydrated.contains(&rival.id.to_string()),
+        "a one-character rival in a wide script must be visible: {hydrated:?}"
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
 #[tokio::test]
 async fn a_deleted_title_leaves_the_index_on_the_next_sync() {
     let (services, db) = temp_services("scryer_fuzzy_index_delete").await;
@@ -435,6 +567,88 @@ async fn reads_wait_for_rebuild_and_failed_rebuilds_are_errors() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// A caller that goes away mid-write cannot break the next reader.
+///
+/// Dropping the awaiting future used to release the in-process writer lock
+/// while the detached blocking task still held tantivy's own lock file, so the
+/// next reader's writer could not be created at all and a match, import or
+/// search failed on it. The guard now lives inside the blocking task, so the
+/// next reader waits instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_write_does_not_break_the_next_read() {
+    let (services, db) = temp_services("scryer_fuzzy_index_cancelled_write").await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = title_store(&services);
+    // Enough rows that the rebuild's blocking write is real work rather than
+    // an instant no-op, so the drop below lands while it is in flight.
+    for ordinal in 0..50u8 {
+        anime_title(
+            &catalog,
+            &format!("cancelled-write-{ordinal}"),
+            &format!(
+                "Zephran {}{}",
+                (b'a' + ordinal / 26) as char,
+                (b'a' + ordinal % 26) as char
+            ),
+        )
+        .await;
+    }
+    let subject = anime_title(&catalog, "cancelled-write-subject", "Aokumo").await;
+
+    let source = Arc::new(GatedTermSource {
+        inner: DatastoreTitleTermSource::new(services.datastore()),
+        pause: false.into(),
+        fail: false.into(),
+        entered: tokio::sync::Notify::new(),
+        resume: tokio::sync::Semaphore::new(0),
+    });
+    let index = TitleFuzzyIndex::open(dir.path(), source.clone())
+        .await
+        .unwrap();
+    source
+        .pause
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let stamp = index_stamp(&services).await;
+    let bound = std::time::Duration::from_secs(30);
+
+    {
+        let mut rebuilding = std::pin::pin!(index.rebuild(stamp));
+        let entered = source.entered.notified();
+        let deadline = tokio::time::sleep(bound);
+        tokio::pin!(entered, deadline);
+        // Polls the rebuild until it parks on the gated projection read, which
+        // is past the blocking delete step.
+        tokio::select! {
+            biased;
+            result = &mut rebuilding => panic!("the rebuild must still be gated: {result:?}"),
+            () = &mut entered => {}
+            () = &mut deadline => panic!("the rebuild never reached the projection read"),
+        }
+        source.resume.add_permits(1);
+        // Now drive it into the blocking write and abandon it there.
+        for _ in 0..8 {
+            tokio::select! {
+                biased;
+                result = &mut rebuilding => panic!("the rebuild must not have finished: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+    }
+
+    let name = observed("Akumo");
+    let hits = tokio::time::timeout(bound, index.resolver_candidates(resolver_query(&name, 1)))
+        .await
+        .expect("a cancelled write must not stall the next read forever")
+        .expect("a cancelled write must not make the next read fail");
+    let hydrated = title_ids_for_terms(&services, &hits).await;
+    assert!(
+        hydrated.contains(&subject.id.to_string()),
+        "the read after a cancelled write must serve a complete index: {hydrated:?}"
+    );
+
+    let _ = std::fs::remove_file(db);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
