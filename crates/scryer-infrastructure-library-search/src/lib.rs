@@ -227,11 +227,15 @@ fn max_typo_distance(query_char_count: usize) -> i64 {
 }
 
 /// The automaton the fuzzy index runs counts whole edits, so the band above
-/// rounds up: a token allowed 1.5 edits is asked for 2 and the exact
-/// measurement below throws the half away.
+/// rounds *down*: it is asked for exactly the number of whole edits
+/// [`typo_title_ranks`] will accept, never more. Asking for the rounded-up
+/// distance is not free tolerance — the extra edit admits hits the precision
+/// check then throws away, and because the index ranks these hits by a
+/// constant score they can displace real ones out of the per-token limit.
+/// A band below one whole edit still asks for one: a typo lane that tolerates
+/// nothing is not a typo lane.
 pub fn fuzzy_typo_distance(query_char_count: usize) -> u8 {
     max_typo_distance(query_char_count).div_euclid(100).max(1) as u8
-        + u8::from(max_typo_distance(query_char_count) % 100 != 0)
 }
 
 fn max_typo_length_delta(query_char_count: usize) -> i64 {
@@ -1288,4 +1292,32 @@ fn projection_source_from_pg_row(
         metadata_language: row.try_get("metadata_language").unwrap_or(None),
         year: row.try_get("year").unwrap_or(None),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The index must be asked for exactly the whole-edit distance the
+    /// precision check accepts. These are the two halves of one decision in
+    /// two functions, so they are pinned together: a band edited in
+    /// [`max_typo_distance`] moves both, and a rounding change in either one
+    /// breaks this.
+    #[test]
+    fn the_typo_lane_asks_for_the_distance_it_will_accept() {
+        for query_char_count in 0..40usize {
+            let accepted = max_typo_distance(query_char_count).div_euclid(100) as u8;
+            let requested = fuzzy_typo_distance(query_char_count);
+            assert_eq!(
+                requested,
+                accepted.max(1),
+                "token of {query_char_count} characters: the index is asked for \
+                 {requested} edits but the rank check bounds at {accepted}"
+            );
+        }
+        // One sample per band, so the bands themselves are visible here.
+        assert_eq!(fuzzy_typo_distance(3), 1);
+        assert_eq!(fuzzy_typo_distance(8), 1);
+        assert_eq!(fuzzy_typo_distance(14), 2);
+    }
 }
