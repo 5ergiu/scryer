@@ -1147,6 +1147,8 @@ const pt_BR: LocaleDictionary = {
   "settings.indexerAutoSearch": "Automática",
   "settings.indexerStatus": "Status",
   "settings.indexerDisabledUntil": "Aguardando {{time}}",
+  "settings.indexerCoolingDownUntil": "Em pausa · retoma {{time}}",
+  "settings.indexerCoolingDownHelp": "O indexador pediu ao Scryer para reduzir o ritmo. A busca é retomada automaticamente.",
   "settings.indexerLastError": "Erro {{time}}",
   "settings.indexerLastSearched": "Pesquisado {{time}}",
   "settings.indexerNoActivity": "Sem atividade",
@@ -2481,6 +2483,7 @@ const pt_BR: LocaleDictionary = {
   "indexerSearch.health.stillSearching":
     "{{count}} de {{total}} ainda buscando",
   "indexerSearch.health.failed": "falhou",
+  "indexerSearch.health.coolingDown": "em pausa",
   "indexerSearch.health.skipped": "ignorado",
   "indexerSearch.health.retryFailed": "Repetir os que falharam",
   "indexerSearch.refine.title": "Refinar",

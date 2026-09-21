@@ -9,6 +9,7 @@ import {
   FileVideo,
   FolderInput,
   HardDrive,
+  Hourglass,
   Inbox,
   Puzzle,
   Trash2,
@@ -83,8 +84,10 @@ import {
   attentionTotal,
   compareProviderRows,
   formatCompactAge,
+  formatCompactCountdown,
   formatTerabytes,
   groupStorageRootsByLibrary,
+  isProviderCoolingDown,
   isProviderErroring,
   summarizeIndexerHealth,
   usagePercent,
@@ -969,11 +972,13 @@ function IndexersPanel({ overview }: { overview: DashboardOverview | null }) {
   // healthy one, and unused healthy ones settle to the bottom.
   const sortedIndexers = React.useMemo(() => {
     const entry = (indexer: (typeof indexers)[number]) => ({
-      needsAttention: isProviderErroring(
-        indexer.isEnabled,
-        indexer.lastHealthStatus,
-        indexer.lastErrorMessage,
-      ),
+      needsAttention:
+        !isProviderCoolingDown(indexer.rateLimitedUntil) &&
+        isProviderErroring(
+          indexer.isEnabled,
+          indexer.lastHealthStatus,
+          indexer.lastErrorMessage,
+        ),
       usage:
         (statsById.get(indexer.id)?.queriesLast24H ?? 0) +
         (statsById.get(indexer.id)?.grabsLast24H ?? 0),
@@ -1081,6 +1086,7 @@ function IndexersPanel({ overview }: { overview: DashboardOverview | null }) {
                       lastHealthStatus={indexer.lastHealthStatus}
                       lastError={indexer.lastErrorMessage}
                       lastErrorAt={indexer.lastErrorAt}
+                      rateLimitedUntil={indexer.rateLimitedUntil}
                       onOpenErrorHistory={
                         canViewErrorHistory
                           ? () => setErrorHistoryIndexer({
@@ -1152,12 +1158,14 @@ function ProviderStatus({
   lastHealthStatus,
   lastError,
   lastErrorAt,
+  rateLimitedUntil,
   onOpenErrorHistory,
 }: {
   isEnabled: boolean;
   lastHealthStatus: string | null;
   lastError: string | null;
   lastErrorAt?: string | null;
+  rateLimitedUntil?: string | null;
   onOpenErrorHistory?: () => void;
 }) {
   const t = useTranslate();
@@ -1166,6 +1174,24 @@ function ProviderStatus({
     return (
       <span className="text-[11px] text-[var(--scry-muted2)]">
         {t("label.disabled")}
+      </span>
+    );
+  }
+
+  // A cooldown outranks whatever error text is still on file: the indexer
+  // asked for the pause and it lifts without anyone doing anything.
+  if (isProviderCoolingDown(rateLimitedUntil)) {
+    return (
+      <span
+        className="flex items-center gap-1 text-[11px] text-[var(--scry-muted)]"
+        title={t("settings.indexerCoolingDownHelp")}
+      >
+        <Hourglass className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">
+          {t("settings.indexerCoolingDownUntil", {
+            time: formatCompactCountdown(rateLimitedUntil) ?? "",
+          })}
+        </span>
       </span>
     );
   }

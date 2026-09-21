@@ -99,6 +99,10 @@ pub struct InteractiveReleaseSearchIndexerView {
     /// Wall time of this indexer's own call, once it has answered (D15).
     pub elapsed_ms: Option<i64>,
     pub failure_reason: Option<String>,
+    /// The indexer asked Scryer to slow down rather than failing. It is a
+    /// cooldown that lifts on its own, so the UI reads it as "cooling down"
+    /// instead of an error.
+    pub rate_limited: bool,
 }
 
 /// What a title-less query subject searches as. The kind picks the search
@@ -450,6 +454,7 @@ impl AppUseCase {
                         result_count: 0,
                         elapsed_ms: None,
                         failure_reason: Some("indexer is disabled".to_string()),
+                        rate_limited: false,
                     });
                 }
                 continue;
@@ -497,6 +502,7 @@ impl AppUseCase {
                     result_count: 0,
                     elapsed_ms: None,
                     failure_reason: Some("temporarily disabled".to_string()),
+                    rate_limited: false,
                 });
                 continue;
             }
@@ -509,6 +515,7 @@ impl AppUseCase {
                 result_count: 0,
                 elapsed_ms: None,
                 failure_reason: None,
+                rate_limited: false,
             });
         }
 
@@ -863,6 +870,7 @@ impl AppUseCase {
                     ) {
                         indexer.status = InteractiveReleaseSearchIndexerStatus::Failed;
                         indexer.failure_reason = Some("timed out".to_string());
+                        indexer.rate_limited = false;
                     }
                 }
             }
@@ -900,6 +908,9 @@ impl AppUseCase {
             .find(|indexer| indexer.indexer_id == indexer_id)
         {
             indexer.status = status;
+            indexer.rate_limited = failure_reason
+                .as_deref()
+                .is_some_and(super::release_search::reason_is_rate_limit);
             indexer.failure_reason = failure_reason;
             if elapsed_ms.is_some() {
                 indexer.elapsed_ms = elapsed_ms;
@@ -956,6 +967,7 @@ impl AppUseCase {
             indexer.result_count = batch_len;
             indexer.elapsed_ms = Some(elapsed_ms);
             indexer.failure_reason = None;
+            indexer.rate_limited = false;
         }
     }
 

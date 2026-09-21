@@ -1062,6 +1062,16 @@ fn maybe_cleanup_search_diagnostics(
     });
 }
 
+/// `Some(retry_after)` when this error is a rate limit the indexer recovers
+/// from on its own — a cooldown rather than a failure, so it leaves the
+/// indexer's health, last error, and query stats alone. A quota wall that
+/// warrants the system backoff ladder is not one of these.
+fn plain_rate_limit_cooldown(error: &AppError) -> Option<Option<std::time::Duration>> {
+    rate_limit_signal_from_error(error)
+        .filter(|signal| !signal.warrants_system_backoff())
+        .map(|signal| signal.retry_after)
+}
+
 #[derive(Default)]
 struct StrategyBatchHealth {
     any_success: bool,
@@ -1133,7 +1143,7 @@ impl StrategyBatchHealth {
                 )
                 .await;
             }
-        } else if self.any_error {
+        } else if self.any_error && !self.is_cooldown_only() {
             MultiIndexerSearchClient::record_indexer_last_error(
                 indexer_configs,
                 indexer_id,
@@ -1178,12 +1188,26 @@ impl StrategyBatchHealth {
                 "proxy solver failure recorded without operational backoff"
             );
         } else if self.any_error && !self.any_success {
-            warn!(
+            info!(
                 indexer = indexer_name,
                 retry_after_secs = self.retry_after.map(|delay| delay.as_secs()),
-                "indexer rate-limit failure recorded without operational backoff"
+                cooldown_until = self
+                    .retry_after
+                    .and_then(|delay| chrono::Duration::from_std(delay).ok())
+                    .map(|delay| (chrono::Utc::now() + delay).to_rfc3339()),
+                "indexer cooling down after rate limit"
             );
         }
+    }
+
+    /// Whether every failure in this batch was a rate limit the indexer
+    /// recovers from on its own. The indexer is quiet, not broken, so its
+    /// health and last error stay as they were.
+    fn is_cooldown_only(&self) -> bool {
+        self.had_rate_limit
+            && !self.rate_limit_needs_system_backoff
+            && !self.had_solver_failure
+            && self.representative_error.is_none()
     }
 }
 
@@ -4653,8 +4677,18 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         if err.is_canceled() {
                                             return Err("RSS indexer search canceled".to_string());
                                         }
-                                        warn!(indexer = indexer_name.as_str(), error = %err, "RSS feed fetch failed");
-                                        stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                        let cooldown = plain_rate_limit_cooldown(&err);
+                                        match cooldown {
+                                            Some(retry_after) => info!(
+                                                indexer = indexer_name.as_str(),
+                                                retry_after_secs = retry_after.map(|delay| delay.as_secs()),
+                                                "indexer cooling down after rate limit"
+                                            ),
+                                            None => {
+                                                warn!(indexer = indexer_name.as_str(), error = %err, "RSS feed fetch failed");
+                                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                            }
+                                        }
                                         if rate_limit_signal_from_error(&err)
                                             .is_none_or(|signal| signal.warrants_system_backoff())
                                             && !scryer_application::challenge_solver::is_solver_service_error_message(
@@ -4672,13 +4706,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                                             )
                                             .await;
                                         }
-                                        Self::record_indexer_last_error(
-                                            &indexer_configs,
-                                            &indexer_id,
-                                            &indexer_name,
-                                            Some(sanitize_indexer_error_message(&err.to_string())),
-                                        )
-                                        .await;
+                                        if cooldown.is_none() {
+                                            Self::record_indexer_last_error(
+                                                &indexer_configs,
+                                                &indexer_id,
+                                                &indexer_name,
+                                                Some(sanitize_indexer_error_message(
+                                                    &err.to_string(),
+                                                )),
+                                            )
+                                            .await;
+                                        }
                                         Err(format!("RSS feed fetch failed: {err}"))
                                     }
                                     Err(SearchWindowError::Cancelled) => {
@@ -5273,7 +5311,11 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 error = %err,
                                 "indexer search failed"
                             );
-                            stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                            // A cooldown is not a failed query: the request
+                            // never reached the indexer's own answer.
+                            if plain_rate_limit_cooldown(&err).is_none() {
+                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                            }
 
                             record_strategy_metrics(
                                 &indexer_name,
@@ -5570,7 +5612,9 @@ impl IndexerClient for MultiIndexerSearchClient {
                                     error = %err,
                                     "indexer fallback search failed"
                                 );
-                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                if plain_rate_limit_cooldown(&err).is_none() {
+                                    stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                }
 
                                 record_strategy_metrics(
                                     &indexer_name,
@@ -11261,6 +11305,112 @@ mod tests {
         assert!(calls[2].ids.is_empty());
         assert_eq!(calls[2].query, "Blade Summit S02E03");
         assert!(response.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_batch_records_no_failure_anywhere_the_user_looks() {
+        let touched_ids = StdArc::new(StdMutex::new(Vec::new()));
+        let recorded_messages = StdArc::new(StdMutex::new(Vec::new()));
+        let cleared_ids = StdArc::new(StdMutex::new(Vec::new()));
+        let stats = Arc::new(RecordingIndexerStatsTracker::default());
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_call| {
+                Err(AppError::TemporaryUnavailable {
+                    message: "HTTP 429: slow down; retry after 120s".to_string(),
+                    retry_after: Some(std::time::Duration::from_secs(120)),
+                    rate_limit_cooldown: RateLimitCooldownAction::AlreadyRecorded,
+                })
+            }),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(RecordingTouchIndexerConfigRepository {
+                configs: vec![mock_indexer_config()],
+                touched_ids: touched_ids.clone(),
+                recorded_messages: recorded_messages.clone(),
+                cleared_ids: cleared_ids.clone(),
+            }),
+            stats.clone(),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: series_caps(),
+            }),
+        );
+
+        let _ = multi
+            .search(
+                "Signal Run S01E12".into(),
+                HashMap::from([("tvdb_id".to_string(), "78874".to_string())]),
+                Some("series".into()),
+                Some("series".into()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                Some(1),
+                Some(12),
+                None,
+                vec![],
+            )
+            .await;
+
+        assert!(
+            !calls.lock().expect("call log mutex").is_empty(),
+            "the indexer must actually have been asked"
+        );
+        // A cooldown is not a failure: no last error on the indexer row, and no
+        // failed query in the stats the dashboard counts.
+        assert!(
+            touched_ids.lock().expect("touched ids mutex").is_empty(),
+            "a rate limit must not mark the indexer unhealthy"
+        );
+        assert!(
+            recorded_messages
+                .lock()
+                .expect("recorded messages mutex")
+                .is_empty()
+        );
+        assert!(
+            stats.queries.lock().expect("stats log mutex").is_empty(),
+            "a rate limit must not be counted as a query at all, failed or not"
+        );
+        // A plain 429 also leaves the system backoff ladder alone; only a quota
+        // wall warrants that.
+        assert!(multi.backoff_tracker.is_disabled("idx-1").await.is_none());
+
+        // Control: the same machinery still records a real failure, so the
+        // assertions above are about the rate limit and not about a silent path.
+        let control_stats = Arc::new(RecordingIndexerStatsTracker::default());
+        let (control, _control_calls) =
+            scripted_search_client_with_stats(series_caps(), control_stats.clone(), |_call| {
+                Err(AppError::Repository("upstream status 503".into()))
+            });
+        let _ = control
+            .search(
+                "Signal Run S01E12".into(),
+                HashMap::from([("tvdb_id".to_string(), "78874".to_string())]),
+                Some("series".into()),
+                Some("series".into()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                Some(1),
+                Some(12),
+                None,
+                vec![],
+            )
+            .await;
+        assert!(
+            control_stats
+                .queries
+                .lock()
+                .expect("stats log mutex")
+                .iter()
+                .any(|success| !*success),
+            "a genuine failure is still a failed query"
+        );
     }
 
     #[tokio::test]

@@ -430,6 +430,10 @@ pub struct IndexerConfigPayload {
     pub rate_limit_burst: Option<i64>,
     /// UTC time until which the indexer is disabled, or null when not disabled.
     pub disabled_until: Option<DateTime<Utc>>,
+    /// UTC time until which the indexer is cooling down after asking Scryer to
+    /// slow down, or null when it is not. Unlike `disabledUntil` this is not a
+    /// failure state: searching resumes on its own.
+    pub rate_limited_until: Option<DateTime<Utc>>,
     /// Whether the indexer is enabled.
     pub is_enabled: bool,
     /// Whether interactive searches are enabled.
@@ -1697,6 +1701,9 @@ pub struct InteractiveReleaseSearchIndexerPayload {
     pub elapsed_ms: Option<i32>,
     /// Failure reason, or null when the indexer did not fail.
     pub failure_reason: Option<String>,
+    /// True when the indexer asked Scryer to slow down rather than failing.
+    /// Searching resumes on its own, so this reads as a cooldown, not an error.
+    pub rate_limited: bool,
 }
 
 #[derive(SimpleObject, Clone)]

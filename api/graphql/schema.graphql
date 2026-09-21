@@ -7744,6 +7744,12 @@ type IndexerConfigPayload {
 	"""
 	disabledUntil: DateTime
 	"""
+	UTC time until which the indexer is cooling down after asking Scryer to
+	slow down, or null when it is not. Unlike `disabledUntil` this is not a
+	failure state: searching resumes on its own.
+	"""
+	rateLimitedUntil: DateTime
+	"""
 	Whether the indexer is enabled.
 	"""
 	isEnabled: Boolean!
@@ -8458,6 +8464,11 @@ type InteractiveReleaseSearchIndexerPayload {
 	Failure reason, or null when the indexer did not fail.
 	"""
 	failureReason: String
+	"""
+	True when the indexer asked Scryer to slow down rather than failing.
+	Searching resumes on its own, so this reads as a cooldown, not an error.
+	"""
+	rateLimited: Boolean!
 }
 
 """

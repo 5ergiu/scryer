@@ -544,6 +544,7 @@ pub fn from_interactive_release_search_snapshot(
                 .elapsed_ms
                 .map(|elapsed| i32::try_from(elapsed).unwrap_or(i32::MAX)),
             failure_reason: indexer.failure_reason,
+            rate_limited: indexer.rate_limited,
         })
         .collect();
     // Parity with the one-shot `searchReleases` resolver's limit handling.

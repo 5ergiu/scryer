@@ -443,6 +443,19 @@ fn record_query_coverage_outcomes(
     }
 }
 
+/// Opening words of the reason an indexer that asked Scryer to slow down gets.
+///
+/// The reason travels to the UI as free text, so this constant is the one place
+/// that spells it: [`reason_is_rate_limit`] reads it back to mark the snapshot
+/// row as a cooldown rather than a failure.
+pub(crate) const RATE_LIMITED_INDEXER_REASON: &str = "indexer is cooling down after a rate limit";
+
+/// Whether an incomplete-indexer reason describes a cooldown the indexer asked
+/// for, as opposed to something that went wrong.
+pub(crate) fn reason_is_rate_limit(reason: &str) -> bool {
+    reason.starts_with(RATE_LIMITED_INDEXER_REASON)
+}
+
 pub(crate) fn incomplete_indexer_reason(outcome: IndexerSearchOutcome) -> Option<String> {
     let (reason, retry_after) = match outcome {
         IndexerSearchOutcome::Complete { .. } => return None,
@@ -450,7 +463,7 @@ pub(crate) fn incomplete_indexer_reason(outcome: IndexerSearchOutcome) -> Option
             reason: Some(IndexerSearchIncompleteReason::RateLimited),
             retry_after,
             ..
-        } => ("indexer search was rate limited", retry_after),
+        } => (RATE_LIMITED_INDEXER_REASON, retry_after),
         // Unattested legacy responses are operationally successful; they only
         // withhold convergence coverage until the plugin declares semantics.
         IndexerSearchOutcome::Partial {

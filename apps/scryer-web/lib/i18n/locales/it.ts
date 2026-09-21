@@ -1145,6 +1145,8 @@ const it: LocaleDictionary = {
   "settings.indexerAutoSearch": "Automatica",
   "settings.indexerStatus": "Stato",
   "settings.indexerDisabledUntil": "Backoff {{time}}",
+  "settings.indexerCoolingDownUntil": "In pausa · riprende {{time}}",
+  "settings.indexerCoolingDownHelp": "L’indexer ha chiesto a Scryer di rallentare. La ricerca riprende automaticamente.",
   "settings.indexerLastError": "Errore {{time}}",
   "settings.indexerLastSearched": "Cercato {{time}}",
   "settings.indexerNoActivity": "Nessuna attività",
@@ -2479,6 +2481,7 @@ const it: LocaleDictionary = {
   "indexerSearch.health.stillSearching":
     "{{count}} di {{total}} ancora in ricerca",
   "indexerSearch.health.failed": "non riuscito",
+  "indexerSearch.health.coolingDown": "in pausa",
   "indexerSearch.health.skipped": "saltato",
   "indexerSearch.health.retryFailed": "Riprova i falliti",
   "indexerSearch.refine.title": "Affina",

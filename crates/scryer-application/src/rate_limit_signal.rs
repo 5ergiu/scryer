@@ -1,7 +1,21 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use crate::{AppError, RateLimitCooldownAction};
-use scryer_outbound_http::OutboundHttpError;
+use scryer_outbound_http::{DestinationKey, OutboundHttpError, RateLimitRegistry};
+
+/// When a rate-limit domain's cooldown lifts, or `None` when it is not cooling
+/// down. The key is the caller's own rate-limit domain — for indexers,
+/// `IndexerConfig::rate_limit_domain_key`, so a Prowlarr child answers for
+/// itself rather than for its parent.
+pub fn destination_cooldown_until(domain_key: &str) -> Option<DateTime<Utc>> {
+    let remaining =
+        RateLimitRegistry::new().active_destination_cooldown(&DestinationKey::from(domain_key))?;
+    chrono::Duration::from_std(remaining)
+        .ok()
+        .map(|remaining| Utc::now() + remaining)
+}
 
 /// Where a rate-limit signal was recognised. This enum is the compatibility
 /// ledger for text-derived detection: the typed sources come first
