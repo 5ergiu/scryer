@@ -823,12 +823,14 @@ fn term_clause(field: Field, value: &str) -> Box<dyn Query> {
 ///   distance of one here, which is the only lane that can see it: two such
 ///   names share no bigram at all.
 /// * The **gram lane** supplements it with character n-grams and a shared-gram
-///   floor, for the two cases the automaton cannot cover on its own: a wide
-///   script, where names are short enough that a single character carries much
-///   of the name, and a distance above the automaton's ceiling. `k` edits
-///   destroy at most `n * k` n-grams, so a candidate within `k` edits shares at
-///   least `G - n * k` of the query's `G` grams. That is a floor, not a
-///   heuristic: nothing within the distance can fall below it.
+///   floor, only for a distance above the automaton's ceiling (bigrams in a
+///   wide script, trigrams otherwise). `k` edits destroy at most `n * k`
+///   n-grams, so a candidate within `k` edits shares at least `G - n * k` of
+///   the query's `G` grams. That is a floor, not a heuristic: nothing within
+///   the distance can fall below it. At or below the ceiling the automaton is
+///   already complete in every script, so the gram lane would add nothing but
+///   rows to discard — and on a short wide-script name its floor collapses to
+///   one shared bigram, which is the one realistic way to fill the lane limit.
 ///
 /// Either way these lanes only have to *find* candidates. Every one of them is
 /// then measured exactly by the caller's spelling comparison, so a loose gram
@@ -851,9 +853,8 @@ fn spelling_lanes(fields: &Fields, match_term: &str, distance: u8) -> Vec<Box<dy
             .collect(),
     )));
 
-    let wide = is_wide_script(match_term);
-    let gram_size = if wide { 2 } else { 3 };
-    if wide || distance > MAX_AUTOMATON_DISTANCE {
+    if distance > MAX_AUTOMATON_DISTANCE {
+        let gram_size = if is_wide_script(match_term) { 2 } else { 3 };
         let grams = character_ngrams(match_term, gram_size);
         if !grams.is_empty() {
             let destroyed = gram_size * distance as usize;
