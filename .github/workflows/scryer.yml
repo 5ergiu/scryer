@@ -736,6 +736,10 @@ jobs:
           export SCRYER_SMG_GRAPHQL_URL="https://smg.scryer.media/graphql"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
           export RUST_MIN_STACK="4194304"
+          if [ "$NEXTEST_LANE" = "scryer-graphql" ]; then
+            # Unoptimized generated GraphQL dispatch plus nested scans exceeds 4 MiB.
+            export RUST_MIN_STACK="16777216"
+          fi
           python3 .github/scripts/nextest_matrix.py run "$NEXTEST_LANE" 2>&1 | tee rust-nextest.log
 
       # Saved whether or not tests passed: compiled components stay valid.
@@ -1247,6 +1251,10 @@ jobs:
             export "${target_cc_var}=musl-gcc"
           fi
           native_flags="-O3 -DNDEBUG -ffunction-sections -fdata-sections -fvisibility=hidden"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            # Avoid glibc libgcc outline-atomic helpers when linking against musl.
+            native_flags="${native_flags} -mno-outline-atomics"
+          fi
           export "${target_cflags_var}=${native_flags}"
           export "${target_cxxflags_var}=${native_flags}"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
