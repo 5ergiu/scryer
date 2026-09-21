@@ -2531,3 +2531,19 @@ file = "postgres/migrations/0253_terminalise_client_less_downloads.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 254
+description = "index the folded title folder-ownership lookup"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0254_titles_folder_path_lookup_index.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0254_titles_folder_path_lookup_index.sql"
+engine = "postgres"
+scope = "all"

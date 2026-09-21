@@ -1360,7 +1360,12 @@ pub trait TitleRepository: Send + Sync {
     /// whole library back. The candidates are a filter and not the decision:
     /// the caller applies `folder_paths_match` to every row returned, so a
     /// repository is free to ignore them and return every title in the library,
-    /// which is exactly what this default does.
+    /// which is exactly what this default does. A narrowing repository must
+    /// compare at least as loosely as `folder_paths_match` does: on Windows
+    /// that means folding both sides through
+    /// [`crate::stored_paths::folder_path_lookup_key`] (case and separator
+    /// insensitive) rather than plain equality, or a stored `C:\Media\Show`
+    /// is invisible to a scan that supplies `c:/media/show`.
     ///
     /// Rows keep the list order (`LOWER(name)`, then id) so the caller's
     /// "first owner wins" stays stable.
