@@ -7,7 +7,6 @@ use crate::discovery::{
     public_feed_section_records, snapshot_facet_records, snapshot_item_records,
 };
 use crate::domain_events::{DomainEventActor, new_job_run_domain_event};
-use crate::event_views::replay_library_scan_state;
 use crate::scheduler;
 use chrono::{DateTime, Utc};
 use scryer_domain::{
@@ -365,14 +364,31 @@ fn discovery_context_dirty_event_types() -> Vec<DomainEventType> {
     ]
 }
 
-fn discovery_scan_projection_event_types() -> Vec<DomainEventType> {
-    vec![
-        DomainEventType::LibraryScanStarted,
-        DomainEventType::LibraryScanProgressed,
-        DomainEventType::LibraryScanCompleted,
-        DomainEventType::LibraryScanCanceled,
-        DomainEventType::LibraryScanFailed,
-    ]
+/// How long a started-but-never-ended scan session is left alone before it is
+/// recorded as failed.
+///
+/// This is only ever consulted from the third tier of
+/// `active_library_scan_run_count`, which runs when *neither* the job-run
+/// tracker nor the library-scan tracker knows of a scan — that is, when this
+/// process believes nothing is scanning. A session the log still calls running
+/// at that point belongs to a process lifetime that has ended. The grace period
+/// is therefore not about telling a slow scan from a dead one; it is a margin
+/// against clock skew between the log's timestamps and this host, and against
+/// a session written moments before a restart that is still settling.
+///
+/// One hour is orders of magnitude above the cadence of scan progress events
+/// (a running scan writes one per title and per file) and well inside the 4 h
+/// discovery cycle, so an orphan is cleaned up by the first cycle that sees it.
+const ORPHANED_LIBRARY_SCAN_SESSION_GRACE: chrono::Duration = chrono::Duration::hours(1);
+
+/// Recorded as the failure reason for a scan session nobody ever ended.
+const ORPHANED_LIBRARY_SCAN_FAILURE_MESSAGE: &str =
+    "library scan did not finish; the process that started it is no longer running";
+
+/// A stable event id for the terminal event of an orphaned session, so two
+/// writers racing on the same session collapse onto one row via `append_once`.
+fn orphaned_library_scan_failure_event_id(session_id: &str) -> String {
+    format!("library-scan-orphan-failed:{session_id}")
 }
 
 fn non_empty_discovery_string(value: &str) -> Option<String> {
@@ -706,39 +722,87 @@ impl AppUseCase {
             return Ok(runtime_scan_count);
         }
 
-        let mut events = Vec::new();
-        let mut after_sequence = 0i64;
-        let event_types = discovery_scan_projection_event_types();
-        loop {
-            let batch = self
+        // Neither in-process tracker knows of a scan, so ask the log which
+        // sessions it still believes are running. This used to page every
+        // library-scan event in and replay the projection just to count them,
+        // which on a 111k-title library is 251,634 rows and a 182-215 MB
+        // transient, re-materialised every discovery cycle.
+        let unfinished = self
+            .services
+            .events
+            .domain_events
+            .list_unfinished_library_scan_sessions()
+            .await?;
+        if unfinished.is_empty() {
+            return Ok(0);
+        }
+
+        let stale_before = Utc::now() - ORPHANED_LIBRARY_SCAN_SESSION_GRACE;
+        let (stale, live): (Vec<_>, Vec<_>) = unfinished
+            .into_iter()
+            .partition(|session| session.last_event_at <= stale_before);
+
+        self.finish_orphaned_library_scan_sessions(&stale).await;
+
+        Ok(live.len())
+    }
+
+    /// Write the terminal event an abandoned scan session never got.
+    ///
+    /// A `library_scan_started` with no terminal event stays non-terminal
+    /// forever, so `scans_active` reads true on every later cycle and the
+    /// discovery snapshot is deferred indefinitely. Nothing else ever writes
+    /// that terminal event: the process that owned the session is gone.
+    ///
+    /// Appending it is idempotent by construction — the next call's
+    /// `list_unfinished_library_scan_sessions` no longer returns the session,
+    /// because it now has a terminal row — and the event id is derived from the
+    /// session id so a racing second writer collapses onto the same row.
+    async fn finish_orphaned_library_scan_sessions(
+        &self,
+        sessions: &[crate::ports::UnfinishedLibraryScanSession],
+    ) {
+        for session in sessions {
+            let event = NewDomainEvent {
+                event_id: orphaned_library_scan_failure_event_id(&session.session_id),
+                occurred_at: Utc::now(),
+                actor_kind: scryer_domain::DomainEventActorKind::System,
+                actor_user_id: None,
+                actor_display_name: "System".to_string(),
+                title_id: None,
+                facet: session.facet.clone(),
+                correlation_id: None,
+                causation_id: None,
+                schema_version: 1,
+                stream: scryer_domain::DomainEventStream::LibraryScan {
+                    session_id: session.session_id.clone(),
+                },
+                payload: DomainEventPayload::LibraryScanFailed(scryer_domain::LibraryScanFailedEventData {
+                    session_id: session.session_id.clone(),
+                    error_message: ORPHANED_LIBRARY_SCAN_FAILURE_MESSAGE.to_string(),
+                }),
+            };
+            match self
                 .services
                 .events
                 .domain_events
-                .list(&DomainEventFilter {
-                    after_sequence: Some(after_sequence),
-                    event_types: Some(event_types.clone()),
-                    limit: DISCOVERY_SYNC_DOMAIN_EVENT_CATCH_UP_BATCH_LIMIT,
-                    ..DomainEventFilter::default()
-                })
-                .await?;
-            if batch.is_empty() {
-                break;
-            }
-            after_sequence = batch
-                .last()
-                .map(|event| event.sequence)
-                .unwrap_or(after_sequence);
-            let count = batch.len();
-            events.extend(batch);
-            if count < DISCOVERY_SYNC_DOMAIN_EVENT_CATCH_UP_BATCH_LIMIT {
-                break;
+                .append_once(event)
+                .await
+            {
+                Ok(_) => tracing::warn!(
+                    session_id = %session.session_id,
+                    library_id = ?session.library_id,
+                    started_at = %session.started_at,
+                    last_event_at = %session.last_event_at,
+                    "library scan session was abandoned; recording it as failed"
+                ),
+                Err(error) => tracing::warn!(
+                    session_id = %session.session_id,
+                    %error,
+                    "failed to record an abandoned library scan session as failed"
+                ),
             }
         }
-
-        Ok(replay_library_scan_state(&events)
-            .values()
-            .filter(|session| !session.status.is_terminal())
-            .count())
     }
 
     pub async fn list_jobs(&self, actor: &User) -> AppResult<Vec<JobDefinition>> {

@@ -2,7 +2,10 @@ use super::*;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use scryer_application::{AppError, AppResult, DashboardActivityStats, DomainEventRepository};
+use scryer_application::{
+    AppError, AppResult, DashboardActivityStats, DomainEventRepository,
+    UnfinishedLibraryScanSession,
+};
 use scryer_domain::{
     DomainEvent, DomainEventFilter, DomainEventType, NewDomainEvent, TitleHistoryEventType,
 };
@@ -45,6 +48,83 @@ impl DomainEventRepository for DomainEventStore {
     async fn list(&self, filter: &DomainEventFilter) -> AppResult<Vec<DomainEvent>> {
         let (sql, args) = build_domain_event_list_sql(filter);
         fetch_domain_events(self.datastore.read_exec(), &sql, &args).await
+    }
+
+    /// Ask the log directly for scan sessions that never ended.
+    ///
+    /// The old caller paged every library-scan event in and replayed the whole
+    /// projection to count these. `library_scan_progressed` is the bulk of that
+    /// log and contributes nothing to the answer, so this reads only
+    /// `library_scan_started` rows with no terminal row in the same stream.
+    ///
+    /// The session id *is* the stream id (`DomainEventStream::LibraryScan`), so
+    /// both halves are index work: `idx_domain_events_event_type_sequence`
+    /// seeks the started rows, and `idx_domain_events_stream_sequence` (0246)
+    /// answers the `NOT EXISTS` and the last-event lookup per surviving row.
+    /// The correlated `MAX(occurred_at)` is evaluated after the filter, so it
+    /// runs only for sessions that really are unfinished — normally none.
+    async fn list_unfinished_library_scan_sessions(
+        &self,
+    ) -> AppResult<Vec<UnfinishedLibraryScanSession>> {
+        let terminal_types = [
+            DomainEventType::LibraryScanCompleted,
+            DomainEventType::LibraryScanCanceled,
+            DomainEventType::LibraryScanFailed,
+        ];
+        let sql = format!(
+            "SELECT {DOMAIN_EVENT_COLUMNS}, \
+             (SELECT MAX(last.occurred_at) FROM domain_events last \
+               WHERE last.stream_id = domain_events.stream_id) AS last_event_at \
+             FROM domain_events \
+             WHERE event_type = {{}} \
+               AND stream_id IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM domain_events terminal \
+                                WHERE terminal.stream_id = domain_events.stream_id \
+                                  AND terminal.event_type IN ({})) \
+             ORDER BY sequence",
+            placeholders(terminal_types.len())
+        );
+        let mut args = vec![SqlArg::Text(
+            DomainEventType::LibraryScanStarted.as_str().to_string(),
+        )];
+        args.extend(
+            terminal_types
+                .iter()
+                .map(|event_type| SqlArg::Text(event_type.as_str().to_string())),
+        );
+
+        SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let last_event_at = row.timestamp("last_event_at")?;
+                let event = domain_event_from_row(&row)?;
+                let session_id = match &event.stream {
+                    scryer_domain::DomainEventStream::LibraryScan { session_id } => {
+                        session_id.clone()
+                    }
+                    _ => {
+                        return Err(AppError::Repository(format!(
+                            "library scan started event {} is not on a library scan stream",
+                            event.event_id
+                        )));
+                    }
+                };
+                let library_id = match &event.payload {
+                    scryer_domain::DomainEventPayload::LibraryScanStarted(data) => {
+                        data.library_id.clone()
+                    }
+                    _ => None,
+                };
+                Ok(UnfinishedLibraryScanSession {
+                    session_id,
+                    library_id,
+                    facet: event.facet,
+                    started_at: event.occurred_at,
+                    last_event_at,
+                })
+            })
+            .collect()
     }
 
     async fn latest_sequence(&self) -> AppResult<i64> {

@@ -1066,6 +1066,16 @@ pub struct AppRuntimeAcquisitionState {
     /// [`crate::download_identity::ObservationResolutionCache`].
     pub(crate) download_observation_resolutions:
         Arc<tokio::sync::Mutex<crate::download_identity::ObservationResolutionCache>>,
+    /// Conflicting observations this process has already warned about.
+    ///
+    /// A conflict is a standing state, not an event: the same client row
+    /// conflicts on every tick until something writes the registry. The memo
+    /// keeps that cheap, but a generation bump — which any grab causes — clears
+    /// the memo and would otherwise re-warn every conflicting row. Keyed on the
+    /// conflict itself (locator, token, held binding) so a *different* conflict
+    /// still warns, and so a conflict that recurs unchanged does not.
+    pub(crate) warned_download_identity_conflicts:
+        Arc<tokio::sync::Mutex<std::collections::HashSet<crate::download_identity::ConflictWarningKey>>>,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,
@@ -2450,6 +2460,9 @@ impl AppRuntimeState {
                 wanted_projection_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_registry_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_observation_resolutions: Arc::new(tokio::sync::Mutex::new(
+                    Default::default(),
+                )),
+                warned_download_identity_conflicts: Arc::new(tokio::sync::Mutex::new(
                     Default::default(),
                 )),
                 wanted_projection_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),

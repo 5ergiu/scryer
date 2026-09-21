@@ -200,13 +200,48 @@ impl DownloadClientConfigRepository for DownloadClientConfigStore {
                     // that outlives its client can never be resolved again and
                     // nothing must be left holding a scope. Sonarr drops the
                     // tracked downloads of a removed client the same way.
+                    let ended_at = Utc::now();
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
                         "UPDATE download_client_bindings
                             SET ended_at = {}
                           WHERE client_config_id = {}
                             AND ended_at IS NULL",
-                        &[SqlArg::Timestamp(Utc::now()), SqlArg::Text(id.clone())],
+                        &[SqlArg::Timestamp(ended_at), SqlArg::Text(id.clone())],
+                    )
+                    .await?;
+                    // Ending the binding is not enough. The observation
+                    // resolver rebinds an ended binding whose download is still
+                    // live onto whichever client reports the job next, so a
+                    // download left non-terminal here would be re-adopted the
+                    // moment the same client is re-registered under a new id —
+                    // which is exactly how a load-test instance ended up with
+                    // 961 canonical downloads conflicting with themselves on
+                    // every poll. Deleting the client is Scryer deciding it is
+                    // done with those downloads, so they are marked terminal
+                    // (see `DownloadRecord::terminal_at`) in the same
+                    // transaction.
+                    //
+                    // Only downloads this client's binding was the last active
+                    // one for: a download that some other config still holds
+                    // actively is untouched.
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE downloads
+                            SET terminal_at = {}
+                          WHERE terminal_at IS NULL
+                            AND id IN (
+                                SELECT download_id
+                                  FROM download_client_bindings
+                                 WHERE client_config_id = {}
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM download_client_bindings other
+                                 WHERE other.download_id = downloads.id
+                                   AND other.ended_at IS NULL
+                            )",
+                        &[SqlArg::Timestamp(ended_at), SqlArg::Text(id.clone())],
                     )
                     .await?;
                     let rows = SqlRuntime::execute(
@@ -368,6 +403,25 @@ mod tests {
         .await
         .expect("download_client_bindings table should be created");
         sqlx::query(
+            "CREATE TABLE downloads (
+                id TEXT PRIMARY KEY,
+                origin TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                terminal_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("downloads table should be created");
+        sqlx::query(
+            "INSERT INTO downloads (id, origin, created_at) VALUES
+                 ('download-1', 'scryer_submission', '2026-01-01T00:00:00Z'),
+                 ('download-2', 'scryer_submission', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("downloads should insert");
+        sqlx::query(
             "INSERT INTO download_client_bindings
                  (download_id, client_config_id, client_type_snapshot, native_item_id, created_at)
              VALUES
@@ -459,6 +513,228 @@ mod tests {
             untouched.is_none(),
             "a failed delete rolls its binding cleanup back too"
         );
+
+        let terminal: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("downloads should load");
+        assert!(
+            terminal[0].1.is_some(),
+            "the deleted client's download is finished with its binding"
+        );
+        assert!(
+            terminal[1].1.is_none(),
+            "another client's download is untouched"
+        );
+    }
+
+    /// Ending the binding is not enough on its own: the observation resolver
+    /// rebinds an ended binding whose download is still live onto whichever
+    /// client reports the job next, so a download left non-terminal here comes
+    /// straight back when the same client is re-registered under a new id.
+    #[tokio::test]
+    async fn delete_leaves_a_download_alone_while_another_config_binds_it_actively() {
+        let pool = delete_terminal_schema().await;
+        // download-shared has two bindings: client-1's (about to be deleted)
+        // and client-2's, which stays active.
+        sqlx::query(
+            "INSERT INTO downloads (id, origin, created_at) VALUES
+                 ('download-own', 'scryer_submission', '2026-01-01T00:00:00Z'),
+                 ('download-shared', 'scryer_submission', '2026-01-01T00:00:00Z'),
+                 ('download-done', 'scryer_submission', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("downloads should insert");
+        sqlx::query(
+            "INSERT INTO download_client_bindings
+                 (download_id, client_config_id, client_type_snapshot, native_item_id, created_at, ended_at)
+             VALUES
+                 ('download-own', 'client-1', 'nzbget', 'job-1', '2026-01-01T00:00:00Z', NULL),
+                 ('download-shared', 'client-2', 'nzbget', 'job-2', '2026-01-01T00:00:00Z', NULL),
+                 ('download-done', 'client-1', 'nzbget', 'job-3', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("bindings should insert");
+        // The shared download is also reachable from the deleted client, via a
+        // binding row that is already ended.
+        sqlx::query(
+            "UPDATE download_client_bindings SET client_config_id = 'client-1'
+              WHERE download_id = 'download-done'",
+        )
+        .execute(&pool)
+        .await
+        .expect("binding should update");
+        sqlx::query("INSERT INTO download_clients (id) VALUES ('client-1'), ('client-2')")
+            .execute(&pool)
+            .await
+            .expect("clients should insert");
+
+        let store = DownloadClientConfigStore::new(
+            StoreDatastore::Sqlite {
+                pool: pool.clone(),
+                writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            },
+            Arc::new(RwLock::new(None)),
+        );
+        store
+            .delete_with_cleared_indexer_mapping_count("client-1")
+            .await
+            .expect("client deletion should succeed");
+
+        let terminal: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("downloads should load");
+        assert_eq!(terminal[0].0, "download-done");
+        assert!(
+            terminal[0].1.is_some(),
+            "a download whose only binding was this client's is finished"
+        );
+        assert_eq!(terminal[1].0, "download-own");
+        assert!(
+            terminal[1].1.is_some(),
+            "the deleted client's live download is finished"
+        );
+        assert_eq!(terminal[2].0, "download-shared");
+        assert!(
+            terminal[2].1.is_none(),
+            "a download another config still binds actively must stay live"
+        );
+    }
+
+    async fn delete_terminal_schema() -> sqlx::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should open");
+        for statement in [
+            "CREATE TABLE download_clients (id TEXT PRIMARY KEY)",
+            "CREATE TABLE indexers (
+                 id TEXT PRIMARY KEY,
+                 download_client_id TEXT,
+                 updated_at TEXT NOT NULL
+             )",
+            "CREATE TABLE downloads (
+                 id TEXT PRIMARY KEY,
+                 origin TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 terminal_at TEXT
+             )",
+            "CREATE TABLE download_client_bindings (
+                 download_id TEXT PRIMARY KEY,
+                 client_config_id TEXT,
+                 client_type_snapshot TEXT,
+                 native_item_id TEXT,
+                 created_at TEXT NOT NULL,
+                 ended_at TEXT
+             )",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("schema should be created");
+        }
+        pool
+    }
+
+    /// Postgres counterpart: the terminalising UPDATE uses a correlated
+    /// `NOT EXISTS` against the table it is updating, which the two dialects
+    /// plan differently. Skipped unless `SCRYER_TEST_POSTGRES_URL` is set.
+    #[tokio::test]
+    async fn postgres_delete_terminalises_only_downloads_it_was_the_last_binding_for() {
+        let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            eprintln!(
+                "skipping PostgreSQL client-delete terminal test; SCRYER_TEST_POSTGRES_URL is not set"
+            );
+            return;
+        };
+        let admin_pool = sqlx::PgPool::connect(&raw_url)
+            .await
+            .expect("postgres should connect");
+        let schema = format!(
+            "scryer_test_{}_{}",
+            std::process::id(),
+            scryer_domain::Id::new().0.replace('-', "_")
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
+            .await
+            .expect("test schema should be created");
+
+        let separator = if raw_url.contains('?') { '&' } else { '?' };
+        let schema_url = format!("{raw_url}{separator}options=-csearch_path%3D{schema}");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&schema_url)
+            .await
+            .expect("postgres should connect with search_path");
+        for statement in [
+            "CREATE TABLE download_clients (id TEXT PRIMARY KEY)",
+            "CREATE TABLE indexers (
+                 id TEXT PRIMARY KEY,
+                 download_client_id TEXT,
+                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+             )",
+            "CREATE TABLE downloads (
+                 id TEXT PRIMARY KEY,
+                 origin TEXT NOT NULL,
+                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                 terminal_at TIMESTAMP WITH TIME ZONE
+             )",
+            "CREATE TABLE download_client_bindings (
+                 download_id TEXT PRIMARY KEY REFERENCES downloads(id),
+                 client_config_id TEXT,
+                 client_type_snapshot TEXT,
+                 native_item_id TEXT,
+                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                 ended_at TIMESTAMP WITH TIME ZONE
+             )",
+            "INSERT INTO download_clients (id) VALUES ('client-1'), ('client-2')",
+            "INSERT INTO downloads (id, origin, created_at) VALUES
+                 ('download-own', 'scryer_submission', NOW()),
+                 ('download-shared', 'scryer_submission', NOW())",
+            "INSERT INTO download_client_bindings
+                 (download_id, client_config_id, client_type_snapshot, native_item_id, created_at)
+             VALUES
+                 ('download-own', 'client-1', 'nzbget', 'job-1', NOW()),
+                 ('download-shared', 'client-2', 'nzbget', 'job-2', NOW())",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .expect("schema and fixtures should be created");
+        }
+
+        let store = DownloadClientConfigStore::new(
+            StoreDatastore::Postgres { pool: pool.clone() },
+            Arc::new(RwLock::new(None)),
+        );
+        store
+            .delete_with_cleared_indexer_mapping_count("client-1")
+            .await
+            .expect("client deletion should succeed");
+
+        let terminal: Vec<(String, Option<chrono::DateTime<Utc>>)> =
+            sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("downloads should load");
+        assert!(terminal[0].1.is_some(), "download-own must be finished");
+        assert!(terminal[1].1.is_none(), "download-shared must stay live");
+
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin_pool)
+            .await
+            .expect("test schema should be dropped");
     }
 
     #[tokio::test]

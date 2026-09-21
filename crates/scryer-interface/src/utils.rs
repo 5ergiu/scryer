@@ -170,7 +170,7 @@ pub(crate) fn map_add_input(
     let mut external_ids = external_ids
         .unwrap_or_default()
         .into_iter()
-        .map(|item| ExternalId::new(item.source, item.value))
+        .map(|item| item.into_domain())
         .collect::<Vec<_>>();
     // Every facet retains every external id it was added with. Series and anime
     // titles hold their imdb/tmdb/smg ids alongside tvdb: those ids flow on into
@@ -222,8 +222,80 @@ pub(crate) fn parse_download_source_kind(
 
 #[cfg(test)]
 mod tests {
-    use crate::types::MediaFacetValue;
+    use super::map_add_input;
+    use crate::types::{AddTitleInput, ExternalIdInput, MediaFacetValue};
     use scryer_domain::MediaFacet;
+
+    fn add_input(facet: MediaFacetValue, external_ids: Vec<ExternalIdInput>) -> AddTitleInput {
+        AddTitleInput {
+            name: "Test".to_string(),
+            facet,
+            library_id: None,
+            monitored: true,
+            tags: Vec::new(),
+            options: None,
+            external_ids: Some(external_ids),
+            smg_id: None,
+            tvdb_id: None,
+            tmdb_id: None,
+            imdb_id: None,
+            source_hint: None,
+            source_kind: None,
+            source_title: None,
+            min_availability: None,
+            year: None,
+            overview: None,
+            sort_title: None,
+            slug: None,
+            runtime_minutes: None,
+            language: None,
+            content_status: None,
+        }
+    }
+
+    /// The kind names the entity an id points at. A kindless domain id is a
+    /// wildcard in the title store, so dropping the caller's kind here lets a
+    /// movie id resolve onto a series that happens to share the source/value.
+    #[test]
+    fn map_add_input_carries_the_external_id_kind_into_the_domain_id() {
+        let title = map_add_input(
+            add_input(
+                MediaFacetValue::Movie,
+                vec![ExternalIdInput {
+                    source: "tmdb".to_string(),
+                    kind: Some("Movie".to_string()),
+                    value: "880101".to_string(),
+                }],
+            ),
+            None,
+        )
+        .expect("mapped title");
+
+        assert_eq!(title.external_ids.len(), 1);
+        assert_eq!(title.external_ids[0].source, "tmdb");
+        assert_eq!(title.external_ids[0].kind.as_deref(), Some("movie"));
+        assert_eq!(title.external_ids[0].value, "880101");
+    }
+
+    /// An omitted kind still means "unknown", which the store treats as a
+    /// wildcard on purpose.
+    #[test]
+    fn map_add_input_leaves_an_omitted_external_id_kind_unset() {
+        let title = map_add_input(
+            add_input(
+                MediaFacetValue::Movie,
+                vec![ExternalIdInput {
+                    source: "tmdb".to_string(),
+                    kind: None,
+                    value: "880101".to_string(),
+                }],
+            ),
+            None,
+        )
+        .expect("mapped title");
+
+        assert_eq!(title.external_ids[0].kind, None);
+    }
 
     #[test]
     fn media_facet_value_maps_series_to_series_domain() {

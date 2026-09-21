@@ -1368,7 +1368,12 @@ pub trait TitleRepository: Send + Sync {
     /// whole library back. The candidates are a filter and not the decision:
     /// the caller applies `folder_paths_match` to every row returned, so a
     /// repository is free to ignore them and return every title in the library,
-    /// which is exactly what this default does.
+    /// which is exactly what this default does. A narrowing repository must
+    /// compare at least as loosely as `folder_paths_match` does: on Windows
+    /// that means folding both sides through
+    /// [`crate::stored_paths::folder_path_lookup_key`] (case and separator
+    /// insensitive) rather than plain equality, or a stored `C:\Media\Show`
+    /// is invisible to a scan that supplies `c:/media/show`.
     ///
     /// Rows keep the list order (`LOWER(name)`, then id) so the caller's
     /// "first owner wins" stays stable.
@@ -4083,6 +4088,34 @@ pub trait TotpRepository: Send + Sync {
     async fn clear_failed_attempts(&self, user_id: &str) -> AppResult<u64>;
 }
 
+/// A library-scan session the event log records as started and never ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnfinishedLibraryScanSession {
+    pub session_id: String,
+    pub library_id: Option<String>,
+    pub facet: Option<scryer_domain::MediaFacet>,
+    /// When the session's `library_scan_started` was recorded.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// The most recent event of any kind in the session's stream. This is what
+    /// a staleness rule has to judge: a scan that is still working keeps
+    /// writing progress, so a long gap means the process that owned it is gone.
+    pub last_event_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Event types the fallback replay of
+/// [`DomainEventRepository::list_unfinished_library_scan_sessions`] needs.
+fn unfinished_library_scan_replay_event_types() -> Vec<DomainEventType> {
+    vec![
+        DomainEventType::LibraryScanStarted,
+        DomainEventType::LibraryScanProgressed,
+        DomainEventType::LibraryScanCompleted,
+        DomainEventType::LibraryScanCanceled,
+        DomainEventType::LibraryScanFailed,
+    ]
+}
+
+const UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT: usize = 500;
+
 #[async_trait]
 pub trait DomainEventRepository: Send + Sync {
     /// A library-scoped, count-free page of import facts, newest sequence first.
@@ -4144,6 +4177,58 @@ pub trait DomainEventRepository: Send + Sync {
         after_sequence: i64,
         limit: usize,
     ) -> AppResult<Vec<DomainEvent>>;
+    /// Library-scan sessions that were started and never ended.
+    ///
+    /// The caller wants a count of scans still believed to be running, and the
+    /// identity of any that have to be finished off. That is a question about
+    /// `library_scan_started` rows and the absence of a terminal row for the
+    /// same session — `library_scan_progressed` contributes nothing to it, and
+    /// on a large library it is essentially all of the log (251,594 of 251,634
+    /// library-scan rows on the 111k-title load-test instance).
+    ///
+    /// The default implementation is the honest, slow answer: page the whole
+    /// projection in and replay it. Stores that can ask the question directly
+    /// override it; the default exists so an in-memory or partial
+    /// implementation is still correct, never so the real store can skip it.
+    async fn list_unfinished_library_scan_sessions(
+        &self,
+    ) -> AppResult<Vec<UnfinishedLibraryScanSession>> {
+        let mut events = Vec::new();
+        let mut after_sequence = 0i64;
+        loop {
+            let batch = self
+                .list(&DomainEventFilter {
+                    after_sequence: Some(after_sequence),
+                    event_types: Some(unfinished_library_scan_replay_event_types()),
+                    limit: UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT,
+                    ..DomainEventFilter::default()
+                })
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            after_sequence = batch
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(after_sequence);
+            let count = batch.len();
+            events.extend(batch);
+            if count < UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT {
+                break;
+            }
+        }
+        Ok(crate::events::event_views::replay_library_scan_state(&events)
+            .into_values()
+            .filter(|session| !session.status.is_terminal())
+            .map(|session| UnfinishedLibraryScanSession {
+                session_id: session.session_id,
+                library_id: session.library_id,
+                facet: Some(session.facet),
+                started_at: session.started_at,
+                last_event_at: session.updated_at,
+            })
+            .collect())
+    }
     async fn delete_for_title_ids(&self, title_ids: &[String]) -> AppResult<u32>;
     async fn get_subscriber_offset(&self, subscriber: &str) -> AppResult<i64>;
     async fn set_subscriber_offset(&self, subscriber: &str, sequence: i64) -> AppResult<()>;

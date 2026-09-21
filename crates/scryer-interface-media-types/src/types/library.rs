@@ -714,6 +714,21 @@ pub struct ExternalIdInput {
     pub value: String,
 }
 
+impl ExternalIdInput {
+    /// Convert to the domain id, preserving the caller-supplied entity kind.
+    ///
+    /// Dropping `kind` here would hand the title store a wildcard id: a movie
+    /// id whose source/value already exists on a series would resolve to that
+    /// series instead of creating a distinct title, and the input would read
+    /// back with a null kind.
+    pub fn into_domain(self) -> scryer_domain::ExternalId {
+        match self.kind {
+            Some(kind) => scryer_domain::ExternalId::with_kind(self.source, kind, self.value),
+            None => scryer_domain::ExternalId::new(self.source, self.value),
+        }
+    }
+}
+
 #[derive(InputObject, Clone)]
 /// Optional title settings used when creating or updating a title.
 pub struct TitleOptionsInput {

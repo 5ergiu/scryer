@@ -362,6 +362,68 @@ impl TitleStore {
 /// variable ceiling with room for the monitored bind.
 const SET_TITLES_MONITORED_BIND_CHUNK: usize = 900;
 
+/// The `folder_path` half of the folder-ownership lookup, with its binds.
+///
+/// The narrowing has to let through every row `folder_paths_match` would
+/// accept, or a title that already owns the folder goes unseen and a second
+/// title claims it. Off Windows the matcher compares the stored spelling
+/// exactly, so exact equality against the candidate spellings is already a
+/// superset. On Windows the matcher lowercases and treats `/` and `\` as one
+/// separator, so a stored `C:\Media\Show` has to be reachable from a scanned
+/// `c:/media/show`; both sides go through
+/// [`scryer_application::stored_paths::folder_path_lookup_key`] — in SQL,
+/// `lower(replace(folder_path, '/', '\'))`, which sqlite and postgres both
+/// understand and which migration 0253 indexes.
+///
+/// The escape form keeps exact equality: it is ASCII by construction and its
+/// `%uXXXX` units are not a path spelling to fold. That is why the folded arm
+/// excludes it and the exact arm is kept on Windows too.
+fn folder_path_owner_predicate(
+    match_candidates: &[String],
+    windows: bool,
+) -> (String, Vec<SqlArg>) {
+    let exact_placeholders = std::iter::repeat_n("{}", match_candidates.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut args = match_candidates
+        .iter()
+        .cloned()
+        .map(SqlArg::Text)
+        .collect::<Vec<_>>();
+    if !windows {
+        return (format!("folder_path IN ({exact_placeholders})"), args);
+    }
+
+    let mut folded = Vec::<String>::new();
+    for candidate in match_candidates {
+        if scryer_application::stored_paths::is_escaped_stored_path(candidate) {
+            continue;
+        }
+        let key = scryer_application::stored_paths::folder_path_lookup_key_for_platform(
+            candidate, windows,
+        );
+        if !folded.contains(&key) {
+            folded.push(key);
+        }
+    }
+    if folded.is_empty() {
+        return (format!("folder_path IN ({exact_placeholders})"), args);
+    }
+
+    let folded_placeholders = std::iter::repeat_n("{}", folded.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    args.extend(folded.into_iter().map(SqlArg::Text));
+    (
+        format!(
+            "(folder_path IN ({exact_placeholders}) OR (\
+             folder_path NOT LIKE 'scryer-path-v1:%' \
+             AND lower(replace(folder_path, '/', '\\')) IN ({folded_placeholders})))"
+        ),
+        args,
+    )
+}
+
 #[async_trait]
 impl TitleRepository for TitleStore {
     async fn title_counts(&self) -> AppResult<scryer_application::TitleCounts> {
@@ -416,19 +478,18 @@ impl TitleRepository for TitleStore {
         if match_candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = std::iter::repeat_n("{}", match_candidates.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let (predicate, candidate_args) =
+            folder_path_owner_predicate(match_candidates, cfg!(windows));
         let sql = format!(
             "SELECT {TITLE_COLUMNS} FROM titles \
-             WHERE library_id = {{}} AND id <> {{}} AND folder_path IN ({placeholders}) \
+             WHERE library_id = {{}} AND id <> {{}} AND {predicate} \
              ORDER BY LOWER(name), id"
         );
         let mut args = vec![
             SqlArg::Text(library_id.to_string()),
             SqlArg::Text(exclude_title_id.to_string()),
         ];
-        args.extend(match_candidates.iter().cloned().map(SqlArg::Text));
+        args.extend(candidate_args);
 
         let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
         decode_runtime_title_rows(&rows, PersistedTitleReadMode::Presentation, false)
@@ -5185,6 +5246,74 @@ mod tests {
     use super::*;
 
     use sqlx::sqlite::SqlitePoolOptions;
+
+    /// A title stored as `C:\Media\Show` has to be found when a scan or a move
+    /// supplies `c:/media/show`: on Windows `folder_paths_match` accepts the
+    /// pair, and a narrowing that drops it reports no owner and lets a second
+    /// title claim an owned folder.
+    ///
+    /// The Windows rule is driven through the predicate's platform argument, so
+    /// this runs on every host, and the folded arm is executed by sqlite here so
+    /// the SQL it emits is checked as SQL and not just as a string.
+    #[tokio::test]
+    async fn folder_owner_lookup_finds_a_windows_folder_spelled_the_other_way() {
+        let candidates = scryer_application::stored_paths::folder_path_match_candidates(
+            "c:/media/show",
+        );
+        let (predicate, args) = folder_path_owner_predicate(&candidates, true);
+        assert!(
+            predicate.contains("lower(replace(folder_path, '/', '\\'))"),
+            "windows predicate does not fold the stored spelling: {predicate}"
+        );
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, folder_path TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO titles VALUES ('owner', 'C:\\Media\\Show'), ('other', 'C:\\Media\\Show 2')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let datastore = StoreDatastore::sqlite(
+            pool,
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
+        let rows = SqlRuntime::fetch_all(
+            datastore.read_exec(),
+            &format!("SELECT id FROM titles WHERE {predicate} ORDER BY id"),
+            &args,
+        )
+        .await
+        .unwrap();
+        let found = rows
+            .iter()
+            .map(|row| row.text("id").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec!["owner".to_string()],
+            "the folded lookup must find the owner and only the owner"
+        );
+    }
+
+    /// Off Windows the matcher compares the stored spelling exactly, so the
+    /// narrowing must not start folding case or separators.
+    #[test]
+    fn folder_owner_lookup_stays_exact_off_windows() {
+        let candidates = scryer_application::stored_paths::folder_path_match_candidates(
+            "/media/movies/Arrival (2016)",
+        );
+        let (predicate, args) = folder_path_owner_predicate(&candidates, false);
+        assert_eq!(predicate.matches("{}").count(), candidates.len());
+        assert_eq!(args.len(), candidates.len());
+        assert!(!predicate.contains("lower("), "{predicate}");
+    }
 
     #[tokio::test]
     async fn catalog_aggregate_selection_skips_unrequested_tables_and_page_hydration() {
