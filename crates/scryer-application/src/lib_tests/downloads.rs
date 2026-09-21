@@ -15075,9 +15075,19 @@ async fn enabling_a_disabled_indexer_revalidates_its_retained_proxy_after_connec
         update_app
             .update_indexer_config(
                 &update_user,
+                // Enabling alone no longer probes: a save only validates the
+                // connection when the connection changed. The rotated key is
+                // that change, so the probe reads the retained proxy first.
                 IndexerConfigUpdate {
                     id: "disabled-indexer".to_string(),
                     is_enabled: Some(true),
+                    config_json: Some(
+                        serde_json::json!({
+                            "base_url": "https://api.nzbgeek.info",
+                            "api_key": "rotated-secret"
+                        })
+                        .to_string(),
+                    ),
                     ..Default::default()
                 },
             )
