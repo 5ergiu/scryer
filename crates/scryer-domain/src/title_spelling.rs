@@ -762,4 +762,222 @@ mod tests {
         assert_eq!(compare_title_spelling("かく", "がく", Some("ru")), None);
         assert_eq!(compare_title_spelling("маи", "май", Some("ja")), None);
     }
+
+    /// The romanization axes a catalog and a release group each choose
+    /// independently for one Japanese name. Every pair here is the same name,
+    /// so a consumer that resolves one spelling must resolve all of them.
+    ///
+    /// Measured and not folded, and so not asserted here: kunrei-shiki
+    /// consonants (`si`/`shi`, `ti`/`chi`, `tu`/`tsu`, `zi`/`ji`, `sya`/`sha`,
+    /// `hu`/`fu`), the particles written `ha`/`wa` and `he`/`e`, `dzu`/`zu`,
+    /// `v`/`b` for katakana `v`, the syllabic apostrophe in `jun'ichi`, and
+    /// hyphenation. Release groups overwhelmingly write Hepburn, so those stay
+    /// out of the fold rather than widening it. What the fold's own doc
+    /// comment promises and the code does not deliver is pinned separately, in
+    /// `the_fold_covers_every_spelling_its_doc_claims`.
+    #[test]
+    fn japanese_romanization_folds_the_axes_it_implements() {
+        for (axis, left, right) in [
+            // Long o: macron, `ou`, `oo` and bare are one vowel.
+            (
+                "macron o against ou",
+                "toukyou monogatari",
+                "tōkyō monogatari",
+            ),
+            (
+                "macron o against bare",
+                "tokyo monogatari",
+                "tōkyō monogatari",
+            ),
+            ("ou against bare", "gasshou no uta", "gassho no uta"),
+            ("oo against bare", "gasshoo no uta", "gassho no uta"),
+            ("ou against oo", "gasshou no uta", "gasshoo no uta"),
+            // The same `ou` inside ordinary words, which is where a group
+            // meets it rather than in a constructed stem.
+            ("ou in sayounara", "sayounara no uta", "sayonara no uta"),
+            ("ou against oo in ohayou", "ohayou no uta", "ohayoo no uta"),
+            // A long vowel that opens the word, where the `oo` spelling is the
+            // one a group reaches for. All three spellings of Ōsaka agree.
+            ("word-initial oo", "oosaka monogatari", "osaka monogatari"),
+            (
+                "word-initial macron against oo",
+                "ōsaka monogatari",
+                "oosaka monogatari",
+            ),
+            (
+                "word-initial macron against bare",
+                "ōsaka monogatari",
+                "osaka monogatari",
+            ),
+            // Long u: macron, `uu` and bare.
+            ("macron u against uu", "yuusha no uta", "yūsha no uta"),
+            ("macron u against bare", "yusha no uta", "yūsha no uta"),
+            ("uu against bare", "yuusha no uta", "yusha no uta"),
+            // The particle written `wo` and the particle written `o`.
+            ("wo particle", "hikari wo utau", "hikari o utau"),
+            // `m` before a labial is the same syllable as `n`.
+            ("m before b", "yuusha no shimbun", "yusha no shinbun"),
+            ("m before p", "sempai no uta", "senpai no uta"),
+            // Several axes at once, which is what a real name looks like.
+            (
+                "every axis together",
+                "saigo no gasshou wo utau yuusha no shimbun",
+                "saigo no gassho o utau yūsha no shinbun",
+            ),
+        ] {
+            for language in ["x-jat", "ja", "jpn", "ja-Latn"] {
+                let result = compare_title_spelling(left, right, Some(language));
+                assert!(
+                    matches!(
+                        result,
+                        Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+                    ),
+                    "{language} / {axis}: {left} / {right}: {result:?}"
+                );
+            }
+        }
+
+        // The axes no diacritic fold can answer — a doubled vowel, a particle
+        // spelled two ways, a labial `m` — are the romanization lane's own, so
+        // they must be reported as such and not merely equated by collation.
+        for (axis, left, right) in [
+            ("ou against bare", "gasshou no uta", "gassho no uta"),
+            ("oo against bare", "gasshoo no uta", "gassho no uta"),
+            ("uu against bare", "yuusha no uta", "yusha no uta"),
+            ("ou in sayounara", "sayounara no uta", "sayonara no uta"),
+            ("word-initial oo", "oosaka monogatari", "osaka monogatari"),
+            ("wo particle", "hikari wo utau", "hikari o utau"),
+            ("m before b", "yuusha no shimbun", "yusha no shinbun"),
+            ("m before p", "sempai no uta", "senpai no uta"),
+        ] {
+            assert_eq!(
+                compare_title_spelling(left, right, Some("x-jat")),
+                Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG)),
+                "{axis}: {left} / {right} is the romanization lane's answer"
+            );
+        }
+
+        // A circumflex is the other way a macron gets typed, and the
+        // transliteration tag an anime catalog actually carries reads it. The
+        // plain `ja` tag does not; that inconsistency is pinned in
+        // `doubled_long_vowels_fold_for_every_vowel`.
+        assert!(
+            matches!(
+                compare_title_spelling("tôkyô monogatari", "tōkyō monogatari", Some("x-jat")),
+                Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+            ),
+            "a circumflex is a macron under the romanization tag"
+        );
+
+        // The fold equates spellings of one name, never two names. A vowel
+        // length that is the whole difference between two words stays a
+        // difference.
+        for (left, right) in [
+            ("hikari no uta", "kage no uta"),
+            ("yuusha no uta", "yuurei no uta"),
+            ("toukyou monogatari", "toukyou monogatori"),
+        ] {
+            assert_eq!(
+                compare_title_spelling(left, right, Some("x-jat")),
+                Some(SpellingEquivalence::Different),
+                "{left} / {right} are different names"
+            );
+        }
+    }
+
+    /// Where `romanized_japanese_spelling` does less than its own doc comment
+    /// says. It claims to fold "long vowels written with a macron, doubled, or
+    /// bare (`Gasshō` / `Gasshou` / `Gassho`), the `wo`/`o` particle, and `m`
+    /// before a labial (`Shimbun` / `Shinbun`)". Two of those three are
+    /// narrower in the code than in the sentence.
+    ///
+    /// *Doubled long vowels.* The macron arm folds all five vowels; the
+    /// doubling arm matches only `('o', 'u' | 'o')` and `('u', 'u')`. So `ā`
+    /// equals `a` while `aa` does not:
+    ///
+    /// * `okāsan` folds to `okasan`, `okaasan` stays `okaasan`
+    /// * `nīsan` folds to `nisan`, `niisan` stays `niisan`
+    /// * `onēsan` folds to `onesan`, `oneesan` stays `oneesan`
+    ///
+    /// Long `e` written `ei` is not read as a long vowel at all, so `sensei`,
+    /// `sensee` and `sensē` are three spellings of one word that compare as
+    /// three different words; so do `keiki` and `kēki`. This is the harder
+    /// half: `ei` is a true diphthong in some words, so folding it costs
+    /// precision. That cost is already being paid by the rule next to it — the
+    /// `ou` arm equates `koui` (行為) with `koi` (恋), two unrelated words — so
+    /// consistency with the rest of the fold is not an argument for leaving
+    /// `ei` alone.
+    ///
+    /// *`m` before a labial.* The arm matches `('m', Some('b' | 'p'))`. `m` is
+    /// itself a labial, so `mm` is missed and `Gumma`, the traditional Hepburn
+    /// spelling of 群馬, does not reach `Gunma`.
+    ///
+    /// Ignored until the code covers what the sentence promises; the
+    /// assertions below are what it should answer.
+    #[test]
+    #[ignore = "doubled aa/ii/ee, long e written ei, and m before m are not folded; see the comment above"]
+    fn the_fold_covers_every_spelling_its_doc_claims() {
+        for (axis, language, left, right) in [
+            (
+                "macron a against aa",
+                "x-jat",
+                "okaasan no uta",
+                "okāsan no uta",
+            ),
+            (
+                "aa against bare",
+                "x-jat",
+                "okaasan no uta",
+                "okasan no uta",
+            ),
+            (
+                "macron i against ii",
+                "x-jat",
+                "niisan no uta",
+                "nīsan no uta",
+            ),
+            ("ii against bare", "x-jat", "niisan no uta", "nisan no uta"),
+            (
+                "macron e against ee",
+                "x-jat",
+                "oneesan no uta",
+                "onēsan no uta",
+            ),
+            (
+                "ee against bare",
+                "x-jat",
+                "oneesan no uta",
+                "onesan no uta",
+            ),
+            // Long e written `ei`, the Hepburn spelling and so the one a
+            // group ships.
+            (
+                "ei against macron e",
+                "x-jat",
+                "sensei no uta",
+                "sensē no uta",
+            ),
+            ("ei against ee", "x-jat", "sensei no uta", "sensee no uta"),
+            (
+                "ee against macron e",
+                "x-jat",
+                "sensee no uta",
+                "sensē no uta",
+            ),
+            ("ei against macron e in keiki", "x-jat", "keiki", "kēki"),
+            // `m` before `m`, which is a labial like `b` and `p`.
+            ("m before m", "x-jat", "gumma no uta", "gunma no uta"),
+            // And a circumflex should read as a macron under every Japanese
+            // tag, not only `x-jat`.
+            ("circumflex", "ja", "tôkyô monogatari", "tōkyō monogatari"),
+        ] {
+            assert!(
+                matches!(
+                    compare_title_spelling(left, right, Some(language)),
+                    Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+                ),
+                "{axis} under {language}: {left} / {right}"
+            );
+        }
+    }
 }
