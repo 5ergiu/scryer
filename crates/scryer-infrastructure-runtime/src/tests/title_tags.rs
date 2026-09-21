@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::queries::sql_runtime::StoreDatastore;
-use scryer_application::{ShowRepository, TitleCatalogFilter, TitleCatalogSort};
+use scryer_application::{ShowRepository, TitleCatalogFilter, TitleCatalogSort, TitleListProjection};
 use scryer_infrastructure_library::media::shows::store::ShowStore;
 
 fn tag_definition(id: &str, label: &str) -> scryer_domain::TitleTagDefinition {
@@ -199,7 +199,7 @@ async fn assert_title_tag_registry_behaviour(
         TitleCatalogSort::default(),
         50,
         0,
-        false,
+        TitleListProjection::default().without_external_ids(),
         TitleCatalogAggregates {
             total_count: true,
             filter_counts: true,
@@ -222,7 +222,7 @@ async fn assert_title_tag_registry_behaviour(
         TitleCatalogSort::default(),
         50,
         0,
-        false,
+        TitleListProjection::default().without_external_ids(),
         TitleCatalogAggregates {
             total_count: true,
             filter_counts: true,

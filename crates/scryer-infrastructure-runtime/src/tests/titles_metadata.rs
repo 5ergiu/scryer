@@ -661,7 +661,7 @@ async fn title_catalog_scryer_rating_sort_uses_grouped_rating_summary() {
         TitleCatalogSort::new(TitleCatalogSortKey::RatingScryer, SortDirection::Desc),
         10,
         0,
-        false,
+        TitleListProjection::default().without_external_ids(),
         TitleCatalogAggregates {
             total_count: true,
             filter_counts: true,
@@ -785,7 +785,7 @@ async fn title_catalog_quality_sort_ranks_the_file_quality_the_catalog_shows() {
             TitleCatalogSort::new(TitleCatalogSortKey::Quality, direction),
             10,
             0,
-            false,
+            TitleListProjection::default().without_external_ids(),
             TitleCatalogAggregates {
                 total_count: true,
                 filter_counts: true,
@@ -867,7 +867,7 @@ async fn title_catalog_profile_sort_orders_by_effective_profile_name() {
         sort,
         10,
         0,
-        false,
+        TitleListProjection::default().without_external_ids(),
         TitleCatalogAggregates {
             total_count: true,
             filter_counts: true,
@@ -1094,7 +1094,7 @@ async fn identical_metadata_identity_is_isolated_by_library_title() {
         TitleCatalogSort::default(),
         10,
         0,
-        true,
+        TitleListProjection::default(),
         TitleCatalogAggregates::default(),
     )
     .await
