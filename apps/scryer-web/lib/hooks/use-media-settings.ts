@@ -46,6 +46,11 @@ import {
 } from "@/lib/utils/quality-profiles";
 import {
   facetScopedMediaSettingsScopeId,
+  normalizeAnimeMediaSettings,
+  normalizeFillerPolicy,
+  normalizeRecapPolicy,
+  normalizeRenameCollisionPolicy,
+  normalizeRenameMissingMetadataPolicy,
   updateFacetScopedStringArrayRecord,
   updateFacetScopedStringRecord,
 } from "@/lib/utils/media-settings-scope";
@@ -175,18 +180,7 @@ export type UseMediaSettingsResult = {
 const DEFAULT_RENAME_COLLISION_POLICY = "SKIP";
 const DEFAULT_RENAME_MISSING_METADATA_POLICY = "FALLBACK_TITLE";
 const DEFAULT_FILLER_POLICY = "DOWNLOAD_ALL";
-const ALLOWED_RENAME_COLLISION_POLICIES = new Set([
-  "SKIP",
-  "ERROR",
-  "REPLACE_IF_BETTER",
-]);
-const ALLOWED_RENAME_MISSING_METADATA_POLICIES = new Set([
-  "SKIP",
-  "FALLBACK_TITLE",
-]);
-const ALLOWED_FILLER_POLICIES = new Set(["DOWNLOAD_ALL", "SKIP_FILLER"]);
 const DEFAULT_RECAP_POLICY = "DOWNLOAD_ALL";
-const ALLOWED_RECAP_POLICIES = new Set(["DOWNLOAD_ALL", "SKIP_RECAP"]);
 const DEFAULT_FOLDER_TEMPLATE = "{title} ({year})";
 const DEFAULT_SEASON_FOLDER_TEMPLATE = "Season {season}";
 const DEFAULT_SPECIALS_FOLDER_TEMPLATE = "Specials";
@@ -527,46 +521,6 @@ export function useMediaSettings({
     [t],
   );
 
-  const normalizeRenameCollisionPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RENAME_COLLISION_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RENAME_COLLISION_POLICY;
-    },
-    [],
-  );
-
-  const normalizeRenameMissingMetadataPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RENAME_MISSING_METADATA_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RENAME_MISSING_METADATA_POLICY;
-    },
-    [],
-  );
-
-  const normalizeFillerPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_FILLER_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_FILLER_POLICY;
-    },
-    [],
-  );
-
-  const normalizeRecapPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RECAP_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RECAP_POLICY;
-    },
-    [],
-  );
-
   const applyMediaSettingsFromPayload = React.useCallback(
     (
       qualityProfileSettings: QualityProfileSettingsPayload | null | undefined,
@@ -732,36 +686,22 @@ export function useMediaSettings({
         });
 
         if (mediaSettings.scope === "ANIME") {
-          setCategoryFillerPolicies((previous) => {
-            const nextPolicy = normalizeFillerPolicy(mediaSettings.fillerPolicy);
-            return previous.ANIME === nextPolicy
-              ? previous
-              : { ...previous, anime: nextPolicy };
-          });
-          setCategoryRecapPolicies((previous) => {
-            const nextPolicy = normalizeRecapPolicy(mediaSettings.recapPolicy);
-            return previous.ANIME === nextPolicy
-              ? previous
-              : { ...previous, anime: nextPolicy };
-          });
-          setCategoryMonitorSpecials((previous) => {
-            const nextValue = mediaSettings.monitorSpecials ? "true" : "false";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
-          setCategoryInterSeasonMovies((previous) => {
-            const nextValue = mediaSettings.interSeasonMovies === false ? "false" : "true";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
-          setCategoryMonitorFillerMovies((previous) => {
-            const nextValue = mediaSettings.monitorFillerMovies ? "true" : "false";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
+          const animeSettings = normalizeAnimeMediaSettings(mediaSettings);
+          setCategoryFillerPolicies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.fillerPolicy),
+          );
+          setCategoryRecapPolicies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.recapPolicy),
+          );
+          setCategoryMonitorSpecials((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.monitorSpecials),
+          );
+          setCategoryInterSeasonMovies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.interSeasonMovies),
+          );
+          setCategoryMonitorFillerMovies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.monitorFillerMovies),
+          );
         }
 
         setNfoWriteOnImport((previous) => {
@@ -824,10 +764,6 @@ export function useMediaSettings({
     },
     [
       normalizeQualityProfiles,
-      normalizeRenameCollisionPolicy,
-      normalizeRenameMissingMetadataPolicy,
-      normalizeFillerPolicy,
-      normalizeRecapPolicy,
       setGlobalScoringPersona,
       view,
     ],
@@ -1206,10 +1142,6 @@ export function useMediaSettings({
       nfoWriteOnImport,
       plexmatchWriteOnImport,
       applyMediaSettingsFromPayload,
-      normalizeFillerPolicy,
-      normalizeRecapPolicy,
-      normalizeRenameCollisionPolicy,
-      normalizeRenameMissingMetadataPolicy,
       client,
       setGlobalStatus,
       t,
