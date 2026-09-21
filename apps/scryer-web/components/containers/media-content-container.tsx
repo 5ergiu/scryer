@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createCatalogPageRequestGate } from "@/lib/utils/catalog-page-request";
 import { useAutomaticSearch } from "@/lib/hooks/use-automatic-search";
 import { MediaContentView } from "@/components/views/media-content-view";
 import {
@@ -1268,6 +1269,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   const catalogTitleRequestSeqRef = React.useRef(0);
   const catalogBootstrapRequestSeqRef = React.useRef(0);
   const catalogPageLoadInFlightRef = React.useRef(false);
+  const [catalogPageRequestGate] = React.useState(createCatalogPageRequestGate);
+  const [catalogPageError, setCatalogPageError] = React.useState<string | null>(null);
   const catalogQueryKeyRef = React.useRef("");
   const libraryScanTitleRefreshRef = React.useRef<{
     key: string;
@@ -2136,6 +2139,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         libraryIds,
       );
       const requestSeq = ++catalogTitleRequestSeqRef.current;
+      catalogPageRequestGate.reset();
+      setCatalogPageError(null);
       catalogPageLoadInFlightRef.current = true;
       catalogQueryKeyRef.current = queryKey;
       if (isInitial) {
@@ -2226,6 +2231,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
     },
     [
+      catalogPageRequestGate,
       activeFacet,
       client,
       effectiveAdvancedTitleFilters,
@@ -2350,6 +2356,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       !shouldLoadCatalogTitles ||
       !catalogPaginationState.hasMore ||
       catalogPaginationState.loadingMore ||
+      catalogPageRequestGate.paused ||
       catalogPageLoadInFlightRef.current
     ) {
       return;
@@ -2374,25 +2381,29 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     setCatalogPaginationState((current) => ({ ...current, loadingMore: true }));
 
     try {
-      const { data, error } = await client
-        .query(
-          buildTitlesQuery(titleCatalogProjection, { includeAggregates: false }),
-          buildTitleCatalogQueryVariables({
-            facet: activeFacet,
-            libraryIds: selectedLibraryIds,
-            query,
-            filters: effectiveTitleQuickFilters,
-            advancedFilters: effectiveAdvancedTitleFilters,
-            sort: effectiveTitleCatalogSort,
-            limit: TITLE_CATALOG_PAGE_SIZE,
-            offset,
-          }),
-          { requestPolicy: "network-only" },
-        )
-        .toPromise();
-      if (error) {
-        throw error;
-      }
+      const result = await catalogPageRequestGate.run(async () => {
+        const { data, error } = await client
+          .query(
+            buildTitlesQuery(titleCatalogProjection, { includeAggregates: false }),
+            buildTitleCatalogQueryVariables({
+              facet: activeFacet,
+              libraryIds: selectedLibraryIds,
+              query,
+              filters: effectiveTitleQuickFilters,
+              advancedFilters: effectiveAdvancedTitleFilters,
+              sort: effectiveTitleCatalogSort,
+              limit: TITLE_CATALOG_PAGE_SIZE,
+              offset,
+            }),
+            { requestPolicy: "network-only" },
+          )
+          .toPromise();
+        if (error) throw error;
+        if (!data?.titles) throw new Error(t("status.failedToLoad"));
+        return data;
+      });
+      if (!result) return;
+      const data = result;
       if (
         requestSeq !== catalogTitleRequestSeqRef.current ||
         catalogQueryKeyRef.current !== queryKey
@@ -2414,7 +2425,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         requestSeq === catalogTitleRequestSeqRef.current &&
         catalogQueryKeyRef.current === queryKey
       ) {
-        setTitleStatus(
+        setCatalogPageError(
           error instanceof Error ? error.message : t("status.failedToLoad"),
         );
       }
@@ -2432,6 +2443,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     }
   }, [
     activeFacet,
+    catalogPageRequestGate,
     catalogPaginationState.hasMore,
     catalogPaginationState.loadingMore,
     catalogPaginationState.nextOffset,
@@ -2442,11 +2454,17 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     effectiveTitleCatalogSort,
     selectedLibraryIds,
     setMonitoredTitles,
-    setTitleStatus,
     shouldLoadCatalogTitles,
     t,
     titleCatalogProjection,
   ]);
+
+  const retryCatalogPage = React.useCallback(async () => {
+    if (catalogPageLoadInFlightRef.current) return;
+    catalogPageRequestGate.reset();
+    setCatalogPageError(null);
+    await loadMoreCatalogTitles();
+  }, [catalogPageRequestGate, loadMoreCatalogTitles]);
 
   const refreshLoadedCatalogTitlesQuietly = React.useCallback(async ({
     firstPageOnly = false,
@@ -5168,7 +5186,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           titleLoading,
           catalogTotalTitleCount: catalogPaginationState.totalCount,
           catalogManagedBytes: catalogPaginationState.managedBytes,
-          catalogHasMoreTitles: catalogPaginationState.hasMore,
+          catalogHasMoreTitles: catalogPaginationState.hasMore && !catalogPageError,
+          catalogPageError,
+          retryCatalogPage,
           catalogLoadingMoreTitles: catalogPaginationState.loadingMore,
           loadMoreCatalogTitles,
           titleCatalogSortKey: titleCatalogSort.key,

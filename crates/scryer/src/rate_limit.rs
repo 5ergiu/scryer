@@ -658,7 +658,12 @@ pub(crate) fn rate_limited_graphql_single_response(decision: &RateLimitDecision)
     let mut extensions = ErrorExtensionValues::default();
     extensions.set("code", "RATE_LIMITED");
     if let Some(retry_after) = decision.retry_after {
-        extensions.set("retryAfterSeconds", retry_after.as_secs());
+        extensions.set(
+            "retryAfterSeconds",
+            retry_after
+                .as_secs()
+                .saturating_add(u64::from(retry_after.subsec_nanos() > 0)),
+        );
     }
 
     let mut error = ServerError::new(decision.message.clone(), None);
@@ -670,7 +675,12 @@ pub(crate) fn rate_limited_graphql_error(decision: &RateLimitDecision) -> Error 
     Error::new(decision.message.clone()).extend_with(|_, extensions| {
         extensions.set("code", "RATE_LIMITED");
         if let Some(retry_after) = decision.retry_after {
-            extensions.set("retryAfterSeconds", retry_after.as_secs());
+            extensions.set(
+                "retryAfterSeconds",
+                retry_after
+                    .as_secs()
+                    .saturating_add(u64::from(retry_after.subsec_nanos() > 0)),
+            );
         }
     })
 }
@@ -929,7 +939,6 @@ fn contains_expensive_field(query: &str) -> bool {
     ]
     .iter()
     .any(|field| query.contains(field))
-        || query.contains("titles(") && query.contains("query:")
 }
 
 fn stricter_class(
@@ -1332,11 +1341,51 @@ mod tests {
     }
 
     #[test]
-    fn query_title_search_uses_search_bucket() {
-        let batch = BatchRequest::Single(async_graphql::Request::new(
-            "query Titles($q: String!) { titles(query: $q) { id } }",
-        ));
-        assert_eq!(classify_graphql(&batch), GraphqlRateLimitClass::Search);
+    fn catalog_queries_use_api_bucket() {
+        for query in [
+            "query Titles($q: String, $offset: Int) { titles(query: $q, limit: 72, offset: $offset) { items { id } hasMore } }",
+            "{ titles(query: \"\", limit: 72) { items { id } hasMore } }",
+            "{ titles(query: \"example\", limit: 0) { totalCount filterCounts { all } } }",
+        ] {
+            let batch = BatchRequest::Single(async_graphql::Request::new(query));
+            assert_eq!(classify_graphql(&batch), GraphqlRateLimitClass::Api);
+        }
+    }
+
+    #[test]
+    fn external_searches_keep_search_bucket_with_catalog_queries() {
+        for field in ["searchReleases", "searchMetadata", "searchMetadataMulti"] {
+            let batch = BatchRequest::Single(async_graphql::Request::new(format!(
+                "{{ titles(query: \"\") {{ totalCount }} {field} {{ id }} }}"
+            )));
+            assert_eq!(classify_graphql(&batch), GraphqlRateLimitClass::Search);
+        }
+    }
+
+    #[test]
+    fn graphql_retry_delay_rounds_up() {
+        for (duration, seconds) in [
+            (Duration::ZERO, 0),
+            (Duration::from_millis(1), 1),
+            (Duration::from_secs(1), 1),
+            (Duration::from_millis(1001), 2),
+        ] {
+            let decision = RateLimitDecision {
+                message: "rate limited".into(),
+                retry_after: Some(duration),
+            };
+            let response = rate_limited_graphql_single_response(&decision);
+            let extensions = response.errors[0].extensions.as_ref().unwrap();
+            assert_eq!(
+                extensions.get("retryAfterSeconds"),
+                Some(&Value::from(seconds))
+            );
+            let error = rate_limited_graphql_error(&decision);
+            assert_eq!(
+                error.extensions.unwrap().get("retryAfterSeconds"),
+                Some(&Value::from(seconds))
+            );
+        }
     }
 
     #[test]
