@@ -126,7 +126,10 @@ async fn drop_virtual_table_via_writable_schema(pool: &SqlitePool) -> AppResult<
             .await
             .map_err(repo_err)?;
 
-        let rewrite = async {
+        // Everything between BEGIN and COMMIT, the COMMIT included. A COMMIT
+        // that fails — SQLITE_BUSY, an I/O error — leaves the transaction open
+        // exactly as an earlier failure does, so it has to take the same exit.
+        let transaction = async {
             let schema_version = sqlx::query_scalar::<_, i64>("PRAGMA schema_version")
                 .fetch_one(&mut *connection)
                 .await
@@ -145,28 +148,31 @@ async fn drop_virtual_table_via_writable_schema(pool: &SqlitePool) -> AppResult<
             .execute(&mut *connection)
             .await
             .map_err(repo_err)?;
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(repo_err)?;
             Ok::<(), AppError>(())
         }
         .await;
 
-        match rewrite {
-            Ok(()) => sqlx::query("COMMIT")
-                .execute(&mut *connection)
-                .await
-                .map(|_| ())
-                .map_err(repo_err),
-            Err(error) => {
-                // The original failure is what the caller needs; a rollback
-                // that also fails adds nothing to it.
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-                Err(error)
-            }
+        // One exit for every failure above. Without it the connection could
+        // go back to the pool still holding the IMMEDIATE write lock, and the
+        // next statement to land on it would run inside that abandoned
+        // transaction while every other writer blocked behind the lock. A
+        // rollback that fails in turn — because SQLite already unwound the
+        // transaction itself — adds nothing to the original error.
+        if let Err(error) = transaction {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(error);
         }
+        Ok(())
     }
     .await;
 
     // RESET runs whatever happened above, and its own failure must not mask
-    // the original one.
+    // the original one. `result?` also returns before the vocab DROP below,
+    // so a failed rewrite never gets to drop the shadow table.
     let reset = sqlx::query("PRAGMA writable_schema = RESET")
         .execute(&mut *connection)
         .await
