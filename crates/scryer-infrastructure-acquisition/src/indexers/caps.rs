@@ -611,6 +611,8 @@ pub fn parse_caps_snapshot_xml(body: &[u8]) -> AppResult<IndexerCapsSnapshot> {
     reader.config_mut().expand_empty_elements = true;
     let mut depth = 0_usize;
     let mut saw_root = false;
+    let mut saw_declaration = false;
+    let mut saw_doctype = false;
     let mut buf = Vec::new();
     let mut snapshot = IndexerCapsSnapshot::default();
     let mut categories = BTreeMap::<String, IndexerCategoryDescriptor>::new();
@@ -697,7 +699,23 @@ pub fn parse_caps_snapshot_xml(body: &[u8]) -> AppResult<IndexerCapsSnapshot> {
                     "indexer returned text outside the caps document".into(),
                 ));
             }
-            Ok(Event::DocType(_)) | Ok(Event::CData(_)) if depth == 0 => {
+            Ok(Event::Decl(_)) => {
+                if saw_root || saw_declaration || saw_doctype {
+                    return Err(AppError::Repository(
+                        "indexer returned a misplaced caps XML declaration".into(),
+                    ));
+                }
+                saw_declaration = true;
+            }
+            Ok(Event::DocType(_)) => {
+                if saw_root || saw_doctype {
+                    return Err(AppError::Repository(
+                        "indexer returned a misplaced caps XML doctype".into(),
+                    ));
+                }
+                saw_doctype = true;
+            }
+            Ok(Event::CData(_)) if depth == 0 => {
                 return Err(AppError::Repository(
                     "indexer returned an invalid caps document".into(),
                 ));
@@ -839,6 +857,12 @@ mod tests {
             "text<caps/>",
             "<caps/>text",
             "<caps duplicate='1' duplicate='2'/>",
+            "<caps><!DOCTYPE caps></caps>",
+            "<caps/><!DOCTYPE caps>",
+            "<!DOCTYPE caps><!DOCTYPE caps><caps/>",
+            "<caps><?xml version='1.0'?></caps>",
+            "<caps/><?xml version='1.0'?>",
+            "<?xml version='1.0'?><?xml version='1.0'?><caps/>",
         ] {
             assert!(
                 parse_caps_snapshot_xml(invalid.as_bytes()).is_err(),
@@ -847,6 +871,7 @@ mod tests {
         }
         for valid in [
             "<caps/>",
+            "<?xml version='1.0'?><!DOCTYPE caps SYSTEM 'https://indexer.example/caps.dtd'><caps/>",
             "<?xml version='1.0'?><caps><server title='Example'/></caps>",
             "<caps><searching><search available='yes' supportedParams='q'/></searching></caps>",
         ] {

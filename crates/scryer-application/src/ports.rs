@@ -4290,6 +4290,29 @@ pub trait IndexerConfigRepository: Send + Sync {
     async fn clear_last_error(&self, _id: &str) -> AppResult<()> {
         Ok(())
     }
+    /// Apply a validation result only while its settings and observed health still match.
+    async fn set_last_error_if_unchanged(
+        &self,
+        expected: &IndexerConfig,
+        message: Option<String>,
+    ) -> AppResult<bool> {
+        let Some(current) = self.get_by_id(&expected.id).await? else {
+            return Ok(false);
+        };
+        if current.updated_at != expected.updated_at
+            || current.last_error_at != expected.last_error_at
+            || current.last_error_message != expected.last_error_message
+            || current.last_health_status != expected.last_health_status
+        {
+            return Ok(false);
+        }
+        if message.is_some() {
+            self.record_last_error(&expected.id, message).await?;
+        } else {
+            self.clear_last_error(&expected.id).await?;
+        }
+        Ok(true)
+    }
     async fn list_system_backoffs(
         &self,
     ) -> AppResult<std::collections::HashMap<String, IndexerSystemBackoff>> {

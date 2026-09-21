@@ -405,6 +405,61 @@ impl IndexerConfigRepository for IndexerConfigStore {
         .await
     }
 
+    async fn set_last_error_if_unchanged(
+        &self,
+        expected: &IndexerConfig,
+        message: Option<String>,
+    ) -> AppResult<bool> {
+        let (assignments, mut args) = if let Some(message) = message {
+            (
+                "last_error_at = {}, last_error_message = {}",
+                vec![SqlArg::Timestamp(Utc::now()), SqlArg::Text(message)],
+            )
+        } else {
+            (
+                "last_error_at = NULL, last_error_message = NULL, last_health_status = NULL",
+                Vec::new(),
+            )
+        };
+        args.push(SqlArg::Text(expected.id.clone()));
+        args.push(SqlArg::Timestamp(expected.updated_at));
+        let mut sql =
+            format!("UPDATE indexers SET {assignments} WHERE id = {{}} AND updated_at = {{}}");
+        for (column, value) in [
+            (
+                "last_error_at",
+                expected.last_error_at.map(SqlArg::Timestamp),
+            ),
+            (
+                "last_error_message",
+                expected.last_error_message.clone().map(SqlArg::Text),
+            ),
+            (
+                "last_health_status",
+                expected.last_health_status.clone().map(SqlArg::Text),
+            ),
+        ] {
+            if let Some(value) = value {
+                sql.push_str(&format!(" AND {column} = {{}}"));
+                args.push(value);
+            } else {
+                sql.push_str(&format!(" AND {column} IS NULL"));
+            }
+        }
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "set_indexer_health_if_unchanged",
+            move |tx| {
+                let args = args.clone();
+                let sql = sql.clone();
+                Box::pin(async move {
+                    Ok(SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await? == 1)
+                })
+            },
+        )
+        .await
+    }
+
     async fn list_system_backoffs(&self) -> AppResult<HashMap<String, IndexerSystemBackoff>> {
         let rows = SqlRuntime::fetch_all(
             self.datastore.read_exec(),
@@ -1074,6 +1129,95 @@ mod tests {
             .expect("mapping clear should succeed");
         assert_eq!(cleared.download_client_id, None);
     }
+    #[tokio::test]
+    async fn caps_health_compare_and_swap_preserves_newer_failures_and_settings() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        create_test_indexers_table(&pool).await;
+        let store = IndexerConfigStore::new(
+            StoreDatastore::Sqlite {
+                pool,
+                writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            },
+            Arc::new(RwLock::new(None)),
+        );
+        let config = serde_json::from_value(serde_json::json!({
+            "id": "health-cas", "name": "Synthetic indexer", "provider_type": "newznab",
+            "base_url": "https://indexer.example.test", "config_json": "{}",
+            "is_enabled": true, "enable_interactive_search": true, "enable_auto_search": true,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let initial = store.create(config).await.unwrap();
+        assert!(
+            store
+                .set_last_error_if_unchanged(&initial, Some("caps failed".into()))
+                .await
+                .unwrap()
+        );
+        let caps_failed = store.get_by_id(&initial.id).await.unwrap().unwrap();
+        assert!(
+            store
+                .set_last_error_if_unchanged(&caps_failed, None)
+                .await
+                .unwrap()
+        );
+        let before_search = store.get_by_id(&initial.id).await.unwrap().unwrap();
+        store
+            .record_last_error(&initial.id, Some("new search failed".into()))
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .set_last_error_if_unchanged(&before_search, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_last_error_if_unchanged(&before_search, Some("old caps failed".into()))
+                .await
+                .unwrap()
+        );
+        let search_failed = store.get_by_id(&initial.id).await.unwrap().unwrap();
+        assert_eq!(
+            search_failed.last_error_message.as_deref(),
+            Some("new search failed")
+        );
+        store
+            .update(IndexerConfigUpdate {
+                id: initial.id.clone(),
+                config_json: Some(r#"{"api_key":"replacement"}"#.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .set_last_error_if_unchanged(&search_failed, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_last_error_if_unchanged(&search_failed, Some("old endpoint failed".into()))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .get_by_id(&initial.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_error_message,
+            search_failed.last_error_message
+        );
+    }
+
     #[tokio::test]
     async fn caps_and_validated_save_compare_and_swap_reject_stale_work() {
         let pool = SqlitePoolOptions::new()

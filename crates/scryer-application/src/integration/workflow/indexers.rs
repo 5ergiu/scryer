@@ -496,14 +496,19 @@ impl AppUseCase {
 
     async fn record_caps_refresh_failure(&self, config: &IndexerConfig, error: &AppError) {
         let message = format!("{} {error}", crate::INDEXER_CAPS_REFRESH_ERROR_PREFIX);
-        if let Err(record_error) = self
+        match self
             .services
             .integrations
             .indexer_configs
-            .record_last_error(&config.id, Some(message))
+            .set_last_error_if_unchanged(config, Some(message))
             .await
         {
-            tracing::warn!(config_id = %config.id, error = %record_error, "failed to persist indexer caps health error");
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(record_error) => {
+                tracing::warn!(config_id = %config.id, error = %record_error, "failed to persist indexer caps health error");
+                return;
+            }
         }
         if let Err(prune_error) = self
             .services
@@ -618,7 +623,7 @@ impl AppUseCase {
                         .services
                         .integrations
                         .indexer_configs
-                        .clear_last_error(&config.id)
+                        .set_last_error_if_unchanged(&config, None)
                         .await
                     {
                         tracing::warn!(config_id = %config.id, error = %error, "failed to clear recovered indexer caps error");
@@ -1179,17 +1184,23 @@ impl AppUseCase {
         }
         if should_validate_connection {
             let indexer_configs = &self.services.integrations.indexer_configs;
-            indexer_configs.clear_last_error(&updated.id).await?;
-            // A save that just passed validation is the operator's "try again":
-            // drop the persisted system backoff and its in-memory mirror so the
-            // next search dispatches to this indexer instead of skipping it.
-            indexer_configs.clear_system_backoff(&updated.id).await?;
-            updated.disabled_until = None;
-            self.services
-                .integrations
-                .indexer_client
-                .reset_indexer_backoff(&updated.id)
-                .await;
+            let mut observed_health = existing.clone();
+            observed_health.updated_at = updated.updated_at;
+            if indexer_configs
+                .set_last_error_if_unchanged(&observed_health, None)
+                .await?
+            {
+                // A save that just passed validation is the operator's "try again":
+                // drop the persisted system backoff and its in-memory mirror so the
+                // next search dispatches to this indexer instead of skipping it.
+                indexer_configs.clear_system_backoff(&updated.id).await?;
+                updated.disabled_until = None;
+                self.services
+                    .integrations
+                    .indexer_client
+                    .reset_indexer_backoff(&updated.id)
+                    .await;
+            }
         }
         if should_sync_managed_children {
             if updated.is_enabled {

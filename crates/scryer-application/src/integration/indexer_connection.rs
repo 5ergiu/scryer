@@ -54,7 +54,7 @@ impl AppUseCase {
             self.services
                 .integrations
                 .indexer_configs
-                .clear_last_error(&config.id)
+                .set_last_error_if_unchanged(&config, None)
                 .await?;
             self.publish_indexers_changed();
         }
@@ -5919,6 +5919,49 @@ mod tests {
         assert!(save.unwrap().caps_snapshot_json.is_some());
         test.unwrap();
         assert_eq!(refresher.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn delayed_test_does_not_clear_health_recorded_while_it_was_running() {
+        let repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let config = cache_config();
+        repo.created.lock().await.push(config.clone());
+        let refresher = Arc::new(HeldCapsRefresher::default());
+        let app = cache_app(
+            repo.clone(),
+            refresher.clone(),
+            Arc::new(RecordingIndexerClient::new(false)),
+        );
+        let actor = test_admin();
+        let test = app.test_indexer_connection(
+            &actor,
+            "newznab",
+            config.config_json.as_deref(),
+            Some(&config.id),
+            None,
+        );
+        tokio::pin!(test);
+        assert_pending(test.as_mut());
+        {
+            let mut configs = repo.created.lock().await;
+            configs[0].last_error_at = Some(Utc::now());
+            configs[0].last_error_message = Some("New search failure".into());
+        }
+        refresher.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), test)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repo.cleared_ids().await.is_empty());
+        assert_eq!(
+            repo.get_by_id(&config.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_error_message
+                .as_deref(),
+            Some("New search failure"),
+        );
     }
 
     #[tokio::test]
