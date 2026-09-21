@@ -323,9 +323,10 @@ pub const MAX_DESTINATION_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60)
 /// consecutive rate limit.
 ///
 /// The server said "slow down" and nothing else, so the only honest answer is
-/// to keep asking later and later until it stops saying it. A success resets
-/// the ladder, so a destination that recovers early is picked up again on the
-/// rung it is already serving.
+/// to keep asking later and later until it stops saying it. One success is not
+/// that: a sliding-window quota lets a request or two through as soon as the
+/// wait ends and then refuses again, so the rung only clears once the
+/// destination has answered normally for as long as the wait it just served.
 const RATE_LIMIT_FALLBACK_COOLDOWN_LADDER: [Duration; 5] = [
     Duration::from_secs(60),
     Duration::from_secs(2 * 60),
@@ -336,6 +337,16 @@ const RATE_LIMIT_FALLBACK_COOLDOWN_LADDER: [Duration; 5] = [
 
 /// The one-based ladder rung a persisted fallback cooldown was cut from, so an
 /// escalation survives a restart without a column of its own.
+/// A destination's place on the fallback ladder.
+#[derive(Clone, Copy)]
+struct FallbackRung {
+    /// One-based index into [`RATE_LIMIT_FALLBACK_COOLDOWN_LADDER`].
+    level: usize,
+    /// When a normal answer counts as recovery: the end of the cooldown plus a
+    /// clean stretch as long as the cooldown itself.
+    proven_at: Instant,
+}
+
 fn fallback_cooldown_level_for(delay: Duration) -> Option<usize> {
     RATE_LIMIT_FALLBACK_COOLDOWN_LADDER
         .iter()
@@ -501,8 +512,8 @@ struct RateLimitRegistryState {
     destination_cooldowns: Mutex<HashMap<DestinationKey, PersistedDestinationCooldown>>,
     dirty_destination_cooldowns: Mutex<HashMap<DestinationKey, PersistedDestinationCooldown>>,
     /// Which rung of [`RATE_LIMIT_FALLBACK_COOLDOWN_LADDER`] each destination
-    /// currently sits on. One-based; an absent entry is "not backing off".
-    destination_fallback_levels: Mutex<HashMap<DestinationKey, usize>>,
+    /// currently sits on. An absent entry is "not backing off".
+    destination_fallback_levels: Mutex<HashMap<DestinationKey, FallbackRung>>,
 }
 
 #[derive(Clone)]
@@ -664,7 +675,15 @@ impl RateLimitRegistry {
             if cooldown.source == RetryAfterSource::FallbackBackoff
                 && let Some(level) = cooldown.retry_after.and_then(fallback_cooldown_level_for)
             {
-                levels.insert(cooldown.destination_key.clone(), level);
+                levels.insert(
+                    cooldown.destination_key.clone(),
+                    FallbackRung {
+                        level,
+                        proven_at: now_instant
+                            + delay
+                            + RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[level - 1],
+                    },
+                );
             }
             deadlines.insert(cooldown.destination_key.clone(), now_instant + delay);
             record_destination_cooldown_until(&cooldown.destination_key, cooldown.cooldown_until);
@@ -894,14 +913,21 @@ impl RateLimitRegistry {
         )
     }
 
-    /// Clears a destination's fallback escalation after it answers normally.
+    /// Clears a destination's fallback escalation once it has answered
+    /// normally for long enough to call it recovered. An earlier success keeps
+    /// the rung, so the next refusal climbs instead of starting over.
     pub fn note_destination_success(&self, destination: &DestinationKey) {
         let mut levels = self
             .state
             .destination_fallback_levels
             .lock()
             .expect("destination fallback level lock poisoned");
-        levels.remove(destination);
+        if levels
+            .get(destination)
+            .is_some_and(|rung| Instant::now() >= rung.proven_at)
+        {
+            levels.remove(destination);
+        }
     }
 
     /// The next fallback cooldown for this destination.
@@ -921,13 +947,20 @@ impl RateLimitRegistry {
             .destination_fallback_levels
             .lock()
             .expect("destination fallback level lock poisoned");
-        let level = levels.entry(destination.clone()).or_insert(0);
-        if !already_cooling || *level == 0 {
-            *level = level
-                .saturating_add(1)
-                .min(RATE_LIMIT_FALLBACK_COOLDOWN_LADDER.len());
+        let current = levels.get(destination).map_or(0, |rung| rung.level);
+        if already_cooling && current > 0 {
+            return RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[current - 1];
         }
-        RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[*level - 1]
+        let level = (current + 1).min(RATE_LIMIT_FALLBACK_COOLDOWN_LADDER.len());
+        let wait = RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[level - 1];
+        levels.insert(
+            destination.clone(),
+            FallbackRung {
+                level,
+                proven_at: Instant::now() + wait + wait,
+            },
+        );
+        wait
     }
 
     fn record_destination_cooldown_inner(
@@ -4131,7 +4164,7 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_fallback_cooldown_ladder_escalates_and_resets_on_success() {
         let registry = RateLimitRegistry::isolated();
         let destination: DestinationKey = "indexer-a.example".into();
@@ -4164,11 +4197,27 @@ mod tests {
             ]
         );
 
+        // A request let through right after the wait is not recovery: a
+        // sliding-window quota does exactly that before refusing again.
         registry.note_destination_success(&destination);
-        let (after_success, _) = registry
+        let (after_early_success, _) = registry
             .record_destination_fallback_cooldown(&destination)
             .await;
-        assert_eq!(after_success, Duration::from_secs(60));
+        assert_eq!(after_early_success, Duration::from_secs(1200));
+        registry
+            .state
+            .destination_deadlines
+            .lock()
+            .unwrap()
+            .remove(&destination);
+
+        // Answering normally for as long as the wait it served is.
+        tokio::time::advance(Duration::from_secs(2 * 1200)).await;
+        registry.note_destination_success(&destination);
+        let (after_recovery, _) = registry
+            .record_destination_fallback_cooldown(&destination)
+            .await;
+        assert_eq!(after_recovery, Duration::from_secs(60));
     }
 
     #[tokio::test]
