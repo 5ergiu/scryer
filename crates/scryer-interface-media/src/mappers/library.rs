@@ -1168,9 +1168,7 @@ pub fn monitor_selection_from_input(
                 external_ids: movie
                     .external_ids
                     .into_iter()
-                    .map(|external_id| {
-                        scryer_domain::ExternalId::new(external_id.source, external_id.value)
-                    })
+                    .map(|external_id| external_id.into_domain())
                     .collect(),
             })
             .collect(),

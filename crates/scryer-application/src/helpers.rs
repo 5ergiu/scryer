@@ -629,7 +629,14 @@ pub(crate) fn sanitize_ids(ids: Vec<ExternalId>) -> Vec<ExternalId> {
             if source.is_empty() || value.is_empty() {
                 None
             } else {
-                Some(ExternalId::new(source, value))
+                // The kind names the entity the id points at and is part of the
+                // id's identity: rebuilding without it turns every stored id
+                // into a wildcard, so a movie id would resolve onto a series
+                // sharing the source/value and the id would read back kindless.
+                Some(match id.kind {
+                    Some(kind) => ExternalId::with_kind(source, kind, value),
+                    None => ExternalId::new(source, value),
+                })
             }
         })
         .collect()

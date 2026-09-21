@@ -1576,6 +1576,103 @@ async fn graphql_add_series_keeps_every_identity_from_search_input() {
     );
 }
 
+/// `ExternalIdInput.kind` names the entity an id points at. The add-title
+/// mapper must carry it into the domain id: a kindless id is a wildcard in the
+/// title store, so dropping it both loses the caller's assertion and reads the
+/// id back with `kind: null`.
+#[tokio::test]
+async fn graphql_add_title_keeps_the_external_id_kind_it_was_given() {
+    let ctx = TestContext::new().await;
+    let body = gql(
+        &ctx,
+        r#"mutation($input: AddTitleInput!) {
+            addTitle(input: $input) {
+                title { externalIds { source kind value } }
+            }
+        }"#,
+        json!({
+            "input": {
+                "name": "Kinded Identity",
+                "facet": "MOVIE",
+                "monitored": true,
+                "tags": [],
+                "externalIds": [
+                    { "source": "tmdb", "kind": "movie", "value": "880101" }
+                ]
+            }
+        }),
+    )
+    .await;
+
+    assert_no_errors(&body);
+    assert_eq!(
+        body["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "movie", "value": "880101" }]),
+        "the kind supplied with an external id must survive the add and read back"
+    );
+}
+
+/// A provider can issue the same numeric id for a movie and for a series. The
+/// kind is what keeps them apart, so two adds that differ only in the id's kind
+/// must produce two distinct titles rather than resolving onto the first one.
+#[tokio::test]
+async fn graphql_add_title_separates_a_movie_and_a_series_sharing_one_id_value() {
+    let ctx = TestContext::new().await;
+    let add = |facet: &'static str, kind: &'static str, name: &'static str| {
+        let ctx = &ctx;
+        async move {
+            let body = gql(
+                ctx,
+                r#"mutation($input: AddTitleInput!) {
+                    addTitle(input: $input) {
+                        title { id facet externalIds { source kind value } }
+                    }
+                }"#,
+                json!({
+                    "input": {
+                        "name": name,
+                        "facet": facet,
+                        "monitored": true,
+                        "tags": [],
+                        "externalIds": [
+                            { "source": "tmdb", "kind": kind, "value": "880202" }
+                        ]
+                    }
+                }),
+            )
+            .await;
+            assert_no_errors(&body);
+            body
+        }
+    };
+
+    let movie = add("MOVIE", "movie", "Shared Id Movie").await;
+    let series = add("SERIES", "series", "Shared Id Series").await;
+
+    let movie_id = movie["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("movie title id")
+        .to_string();
+    let series_id = series["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("series title id")
+        .to_string();
+    assert_ne!(
+        movie_id, series_id,
+        "a tmdb movie id and a tmdb series id with the same value name two different titles"
+    );
+    assert_eq!(movie["data"]["addTitle"]["title"]["facet"], json!("MOVIE"));
+    assert_eq!(series["data"]["addTitle"]["title"]["facet"], json!("SERIES"));
+    assert_eq!(
+        movie["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "movie", "value": "880202" }])
+    );
+    assert_eq!(
+        series["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "series", "value": "880202" }])
+    );
+}
+
 /// The e2e harness verifies an added series by reading its imdb id back out of
 /// `titles { items { externalIds } }`. A series added with imdb + tvdb must
 /// therefore store and list both, not just the tvdb id.
