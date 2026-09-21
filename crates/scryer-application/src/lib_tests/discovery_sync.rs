@@ -4594,10 +4594,7 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
             .lock()
             .await
             .iter()
-            .any(|stored| matches!(
-                stored.payload,
-                DomainEventPayload::LibraryScanFailed(_)
-            )),
+            .any(|stored| matches!(stored.payload, DomainEventPayload::LibraryScanFailed(_))),
         "a scan inside the grace window must not be finished off"
     );
 
@@ -4609,10 +4606,9 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
             .lock()
             .await
             .iter()
-            .any(|filter| filter
-                .event_types
-                .as_ref()
-                .is_some_and(|types| types.contains(&scryer_domain::DomainEventType::LibraryScanProgressed))),
+            .any(|filter| filter.event_types.as_ref().is_some_and(
+                |types| types.contains(&scryer_domain::DomainEventType::LibraryScanProgressed)
+            )),
         "no read may request library_scan_progressed rows"
     );
 }
@@ -7578,9 +7574,7 @@ async fn discovery_sync_fails_an_abandoned_library_scan_session() {
         crate::domain_events::DomainEventActor::system(),
         "scan-done",
         MediaFacet::Movie,
-        DomainEventPayload::LibraryScanCompleted(test_library_scan_completed_event(
-            "scan-done", 1,
-        )),
+        DomainEventPayload::LibraryScanCompleted(test_library_scan_completed_event("scan-done", 1)),
     );
     finished.occurred_at = abandoned_at;
     domain_events

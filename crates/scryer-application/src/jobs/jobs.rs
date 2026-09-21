@@ -777,18 +777,14 @@ impl AppUseCase {
                 stream: scryer_domain::DomainEventStream::LibraryScan {
                     session_id: session.session_id.clone(),
                 },
-                payload: DomainEventPayload::LibraryScanFailed(scryer_domain::LibraryScanFailedEventData {
-                    session_id: session.session_id.clone(),
-                    error_message: ORPHANED_LIBRARY_SCAN_FAILURE_MESSAGE.to_string(),
-                }),
+                payload: DomainEventPayload::LibraryScanFailed(
+                    scryer_domain::LibraryScanFailedEventData {
+                        session_id: session.session_id.clone(),
+                        error_message: ORPHANED_LIBRARY_SCAN_FAILURE_MESSAGE.to_string(),
+                    },
+                ),
             };
-            match self
-                .services
-                .events
-                .domain_events
-                .append_once(event)
-                .await
-            {
+            match self.services.events.domain_events.append_once(event).await {
                 Ok(_) => tracing::warn!(
                     session_id = %session.session_id,
                     library_id = ?session.library_id,

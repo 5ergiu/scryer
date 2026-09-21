@@ -1188,40 +1188,87 @@ impl AppUseCase {
     /// download surfaces in Activity for a manual import instead of being
     /// auto-imported.
     pub async fn indexer_grab_clients(
-        &self, actor: &User, search_id: &str, download_url: &str, title_id: Option<&str>,
+        &self,
+        actor: &User,
+        search_id: &str,
+        download_url: &str,
+        title_id: Option<&str>,
     ) -> AppResult<Vec<crate::IndexerGrabClient>> {
-        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings).await?;
-        let (result, kind) = self.find_interactive_search_result(actor, search_id, download_url).await?;
-        let (_, source_kind) = result.canonical_download_source()
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let (result, kind) = self
+            .find_interactive_search_result(actor, search_id, download_url)
+            .await?;
+        let (_, source_kind) = result
+            .canonical_download_source()
             .ok_or_else(|| AppError::Validation("release has no usable download source".into()))?;
         let title = if let Some(id) = title_id {
-            let title = self.services.catalog.titles.get_by_id(id).await?
+            let title = self
+                .services
+                .catalog
+                .titles
+                .get_by_id(id)
+                .await?
                 .ok_or_else(|| AppError::NotFound(format!("title {id}")))?;
-            self.require_library_permission(actor, &title.library_id, scryer_domain::LibraryPermission::ManageTitles).await?;
+            self.require_library_permission(
+                actor,
+                &title.library_id,
+                scryer_domain::LibraryPermission::ManageTitles,
+            )
+            .await?;
             title
         } else {
-            let facet = kind.and_then(InteractiveSearchKind::facet).unwrap_or_else(|| {
-                if result.parsed_release_metadata.as_ref().is_some_and(|parsed| parsed.episode.is_some()) {
-                    MediaFacet::Series
-                } else { MediaFacet::Movie }
-            });
+            let facet = kind
+                .and_then(InteractiveSearchKind::facet)
+                .unwrap_or_else(|| {
+                    if result
+                        .parsed_release_metadata
+                        .as_ref()
+                        .is_some_and(|parsed| parsed.episode.is_some())
+                    {
+                        MediaFacet::Series
+                    } else {
+                        MediaFacet::Movie
+                    }
+                });
             unlinked_grab_title(&result.title, facet, self.runtime.environment.now())
         };
-        let mut clients = self.services.integrations.download_client.indexer_grab_clients(&title, result.indexer_id.as_deref(), source_kind).await?;
+        let mut clients = self
+            .services
+            .integrations
+            .download_client
+            .indexer_grab_clients(&title, result.indexer_id.as_deref(), source_kind)
+            .await?;
         if title_id.is_some() {
             let fallback = self.derive_download_category(&title.facet).await;
             for client in &mut clients {
-                if client.category.is_none() { client.category = Some(fallback.clone()); }
+                if client.category.is_none() {
+                    client.category = Some(fallback.clone());
+                }
             }
         }
         Ok(clients)
     }
 
-    pub async fn download_client_categories(&self, actor: &User, client_id: &str) -> AppResult<Option<Vec<String>>> {
-        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings).await?;
-        let categories = self.services.integrations.download_client.discover_categories(client_id).await?;
+    pub async fn download_client_categories(
+        &self,
+        actor: &User,
+        client_id: &str,
+    ) -> AppResult<Option<Vec<String>>> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let categories = self
+            .services
+            .integrations
+            .download_client
+            .discover_categories(client_id)
+            .await?;
         Ok(categories.map(|values| {
-            let mut values: Vec<_> = values.into_iter().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()).collect();
+            let mut values: Vec<_> = values
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
             values.sort();
             values.dedup();
             values
@@ -1235,7 +1282,14 @@ impl AppUseCase {
         download_url: &str,
         download_client_id: &str,
     ) -> AppResult<QueueUnlinkedReleaseOutcome> {
-        self.queue_unlinked_release_with_category(actor, search_id, download_url, download_client_id, None).await
+        self.queue_unlinked_release_with_category(
+            actor,
+            search_id,
+            download_url,
+            download_client_id,
+            None,
+        )
+        .await
     }
 
     pub async fn queue_unlinked_release_with_category(
@@ -1250,7 +1304,11 @@ impl AppUseCase {
         // library, so it is gated on system settings rather than a library.
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
-        crate::IndexerGrabSelection { client_id: download_client_id.to_string(), category: category.clone() }.validate()?;
+        crate::IndexerGrabSelection {
+            client_id: download_client_id.to_string(),
+            category: category.clone(),
+        }
+        .validate()?;
         let (result, kind) = self
             .find_interactive_search_result(actor, search_id, download_url)
             .await?;

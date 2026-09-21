@@ -1,6 +1,5 @@
 mod acquisition;
 mod api_keys;
-pub mod rate_limit_proxy_policy;
 pub mod application_upgrade;
 mod authorization;
 mod catalog;
@@ -10,6 +9,7 @@ mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
+pub mod rate_limit_proxy_policy;
 
 /// Completed-history rows the poller considers each cycle.
 ///

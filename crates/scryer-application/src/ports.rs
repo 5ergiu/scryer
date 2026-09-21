@@ -4217,17 +4217,19 @@ pub trait DomainEventRepository: Send + Sync {
                 break;
             }
         }
-        Ok(crate::events::event_views::replay_library_scan_state(&events)
-            .into_values()
-            .filter(|session| !session.status.is_terminal())
-            .map(|session| UnfinishedLibraryScanSession {
-                session_id: session.session_id,
-                library_id: session.library_id,
-                facet: Some(session.facet),
-                started_at: session.started_at,
-                last_event_at: session.updated_at,
-            })
-            .collect())
+        Ok(
+            crate::events::event_views::replay_library_scan_state(&events)
+                .into_values()
+                .filter(|session| !session.status.is_terminal())
+                .map(|session| UnfinishedLibraryScanSession {
+                    session_id: session.session_id,
+                    library_id: session.library_id,
+                    facet: Some(session.facet),
+                    started_at: session.started_at,
+                    last_event_at: session.updated_at,
+                })
+                .collect(),
+        )
     }
     async fn delete_for_title_ids(&self, title_ids: &[String]) -> AppResult<u32>;
     async fn get_subscriber_offset(&self, subscriber: &str) -> AppResult<i64>;

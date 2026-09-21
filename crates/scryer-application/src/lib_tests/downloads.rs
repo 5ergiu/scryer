@@ -16351,10 +16351,7 @@ async fn tracking_memoizes_a_conflicting_row_until_the_registry_moves() {
     );
     // The locator is already held by one download; the row reports another.
     registry
-        .bind(
-            locator,
-            scryer_domain::download_identity::DownloadId::new(),
-        )
+        .bind(locator, scryer_domain::download_identity::DownloadId::new())
         .await;
     item.download_id = Some(scryer_domain::download_identity::DownloadId::new().to_wire());
     let app =

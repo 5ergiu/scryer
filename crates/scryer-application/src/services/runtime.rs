@@ -1074,8 +1074,9 @@ pub struct AppRuntimeAcquisitionState {
     /// the memo and would otherwise re-warn every conflicting row. Keyed on the
     /// conflict itself (locator, token, held binding) so a *different* conflict
     /// still warns, and so a conflict that recurs unchanged does not.
-    pub(crate) warned_download_identity_conflicts:
-        Arc<tokio::sync::Mutex<std::collections::HashSet<crate::download_identity::ConflictWarningKey>>>,
+    pub(crate) warned_download_identity_conflicts: Arc<
+        tokio::sync::Mutex<std::collections::HashSet<crate::download_identity::ConflictWarningKey>>,
+    >,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,

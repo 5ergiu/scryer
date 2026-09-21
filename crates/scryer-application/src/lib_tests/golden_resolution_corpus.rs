@@ -113,8 +113,14 @@ fn golden_releases() -> Vec<(&'static str, Option<&'static str>)> {
         ("Blade.Runner.1982.1080p.BluRay.x264-GRP", None),
         ("Blade.Runner.1080p.BluRay.x264-GRP", None),
         // Same name, different year.
-        ("The.Office.2005.S01E01.1080p.WEB-DL.H264-GRP", Some("series")),
-        ("The.Office.2001.S01E01.1080p.WEB-DL.H264-GRP", Some("series")),
+        (
+            "The.Office.2005.S01E01.1080p.WEB-DL.H264-GRP",
+            Some("series"),
+        ),
+        (
+            "The.Office.2001.S01E01.1080p.WEB-DL.H264-GRP",
+            Some("series"),
+        ),
         ("The.Office.S01E01.1080p.WEB-DL.H264-GRP", Some("series")),
         // Packs and ranges.
         ("Harbor.Lights.S01.1080p.WEB-DL.H264-GRP", Some("series")),
@@ -127,10 +133,19 @@ fn golden_releases() -> Vec<(&'static str, Option<&'static str>)> {
             Some("series"),
         ),
         ("Aokumo.no.Kiroku.S02.1080p.WEB-DL.H264-GRP", Some("anime")),
-        ("[GRP] Aokumo no Kiroku - 13-24 [1080p][Batch]", Some("anime")),
-        ("[GRP] Sousou no Frieren - 01-28 [1080p][Batch]", Some("anime")),
+        (
+            "[GRP] Aokumo no Kiroku - 13-24 [1080p][Batch]",
+            Some("anime"),
+        ),
+        (
+            "[GRP] Sousou no Frieren - 01-28 [1080p][Batch]",
+            Some("anime"),
+        ),
         // Noise that must resolve to nothing.
-        ("Some.Unrelated.Show.S01E01.1080p.WEB-DL.H264-GRP", Some("series")),
+        (
+            "Some.Unrelated.Show.S01E01.1080p.WEB-DL.H264-GRP",
+            Some("series"),
+        ),
         ("[GRP] Kumo no Michi - 03 [1080p]", Some("anime")),
         ("Harbor.S01E01.1080p.WEB-DL.H264-GRP", Some("series")),
     ]
