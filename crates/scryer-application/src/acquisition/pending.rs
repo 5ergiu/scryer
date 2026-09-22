@@ -61,6 +61,25 @@ pub(crate) enum PendingGrabTrigger {
     Operator,
 }
 
+/// Whether a `waiting` row is the delay lane's claim on its scope.
+///
+/// A row parked because its download client refused it — the RSS lane keeps a
+/// refused promotion as `waiting` under `download_client_unavailable` so the
+/// release survives until the client returns — is not a delay decision:
+/// nothing is going to promote it on a timer, and the only way to learn
+/// whether the client is back is to submit again. A title walk that treats
+/// such a row as "already claimed" never submits, never records the refusal,
+/// and reports a job COMPLETED with nothing grabbed and nothing failed. The
+/// walk must instead run the scope as if the row were not there: the
+/// submission either succeeds or is refused and counted.
+pub(crate) fn pending_release_claims_scope(release: &PendingRelease) -> bool {
+    release.last_decision_code.as_deref()
+        != Some(
+            crate::acquisition_release_search::ReleaseAutoDecisionCode::DownloadClientUnavailable
+                .as_str(),
+        )
+}
+
 impl AppUseCase {
     /// Load delay profiles from settings.
     pub(crate) async fn load_delay_profiles(&self) -> Vec<DelayProfile> {

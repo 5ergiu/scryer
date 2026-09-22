@@ -2353,6 +2353,14 @@ impl AppUseCase {
                                 | crate::types::PendingReleaseStatus::Standby
                                 | crate::types::PendingReleaseStatus::Processing
                         ) && covered_wanted_item_ids.contains(&release.wanted_item_id)
+                            // A client-refused row holds nothing: only a
+                            // fresh submission can find out whether the
+                            // client is back, and that submission is the
+                            // one a search job has to count if it is
+                            // refused again.
+                            && crate::acquisition::pending::pending_release_claims_scope(
+                                release,
+                            )
                     })
         };
         let evaluation_context = AutoCandidateEvaluationContext {

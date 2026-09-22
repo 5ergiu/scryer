@@ -1541,15 +1541,20 @@ pub(crate) async fn try_saved_candidates(
 ) -> StandbyRecoveryOutcome {
     // A waiting row is already the chosen best candidate. Never claim a
     // lower-ranked standby release while the delay-promotion lane owns it.
-    if !app
+    // A row the client refused is not that lane's (see
+    // `pending_release_claims_scope`): it is a saved result whose submission
+    // the client turned away, so it is walked below with the standby rows —
+    // submitted again, and counted if it is refused again.
+    let (claimed, refused): (Vec<_>, Vec<_>) = app
         .services
         .workflow
         .pending_releases
         .list_pending_releases_for_wanted_item(&item.id)
         .await
         .unwrap_or_default()
-        .is_empty()
-    {
+        .into_iter()
+        .partition(super::pending::pending_release_claims_scope);
+    if !claimed.is_empty() {
         return StandbyRecoveryOutcome::Parked { scope: None };
     }
 
@@ -1560,6 +1565,7 @@ pub(crate) async fn try_saved_candidates(
         .list_standby_pending_releases_for_wanted_item(&item.id)
         .await
         .unwrap_or_default();
+    standby_releases.extend(refused);
 
     let mut season_pack_ids = HashSet::new();
     let mut series_pack_ids = HashSet::new();
@@ -1642,6 +1648,7 @@ pub(crate) async fn try_saved_candidates(
             if let Some(scope) = title_pending.iter().find_map(|pending| {
                 let metadata = parse_coverage(pending);
                 (pending.status == PendingReleaseStatus::Waiting
+                    && super::pending::pending_release_claims_scope(pending)
                     && pending.wanted_item_id != item.id
                     && metadata.0)
                     .then_some(metadata.3)
@@ -1728,13 +1735,15 @@ pub(crate) async fn try_saved_candidates(
         effective_wanted.grabbed_release = None;
         effective_wanted.last_search_at = None;
 
+        // From the row's own status: a client-refused row arrives here still
+        // `waiting`, and a stale expectation would skip it.
         let claimed = app
             .services
             .workflow
             .pending_releases
             .compare_and_set_pending_release_status(
                 &standby.id,
-                PendingReleaseStatus::Standby,
+                standby.status,
                 PendingReleaseStatus::Processing,
                 None,
             )
