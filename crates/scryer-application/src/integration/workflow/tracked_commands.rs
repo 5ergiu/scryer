@@ -3050,15 +3050,20 @@ async fn apply_terminal_cleanup_outcome(
         if state == TrackedDownloadState::ImportedSeeding {
             promote_imported_seeding_to_imported(app, tracker, id).await;
         }
-        // An entry the gate deliberately left in the client is not gone, so the
+        // An entry cleanup deliberately left in the client is not gone, so the
         // row cannot be forgotten: nothing else would notice the operator
         // removing it later, and its binding and `terminal_at` would stay open
         // forever. Keep it tracked and non-actionable — `Imported` is terminal,
         // so it is never re-offered for import — and let the absence prune end
         // the binding when the client stops listing it.
-        if cleanup.outcome
-            == crate::import::import::TerminalDownloadCleanupOutcome::SeedingEntryKept
+        //
+        // Torrent clients only. A Usenet client's history is a rolling window:
+        // an imported job leaving it is the window scrolling, not the operator
+        // removing anything, and treating that as absence would end bindings on
+        // a timer and churn the identity rows behind them.
+        if crate::import::import::terminal_download_cleanup_leaves_entry_in_client(cleanup.outcome)
             && let Some(td) = tracker.find_mut(id)
+            && crate::seeding_gate::client_type_is_torrent(app, &td.client_type)
         {
             td.completed_source = None;
             td.retained_in_client_after_cleanup = true;

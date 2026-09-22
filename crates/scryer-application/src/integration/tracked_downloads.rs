@@ -94,16 +94,21 @@ pub struct TrackedDownload {
     /// router's maximum backoff.
     pub snapshot_missing_since: Option<DateTime<Utc>>,
     /// Runtime-only marker that this download's cleanup finished with the
-    /// client entry deliberately left in place (the seeding gate released it
-    /// under a `Keep`/`StopSeeding` policy).
+    /// client entry deliberately left in place — no removal configured, the
+    /// seeding gate released it under a `Keep`/`StopSeeding` policy, or the
+    /// profile handed the torrent off.
+    ///
+    /// Torrent clients only: a Usenet client's history is a rolling window, so
+    /// an imported job leaving it is the window scrolling rather than the
+    /// operator removing the entry.
     ///
     /// Such a row stays in the cache so the absence prune can see the entry
     /// vanish when the operator finally removes it and end its binding — a
     /// download that stops being listed ends its binding, exactly as
     /// `drop_source_removed_from_client` documents. It is not re-offered to
-    /// the seeding gate, though: the gate already released it, and re-running
-    /// it per poll would re-pause the torrent and log the same release once a
-    /// tick forever.
+    /// the cleanup gate, though: cleanup already finished with it, and
+    /// re-running it per poll would re-pause a stopped torrent and log the
+    /// same release once a tick forever.
     pub retained_in_client_after_cleanup: bool,
 }
 
@@ -5597,6 +5602,10 @@ mod tests {
         retained.state = TrackedDownloadState::Imported;
         retained.retained_in_client_after_cleanup = true;
         retained.title_id = Some("title-retained".to_string());
+        // Only torrent clients carry the retained marker: a Usenet client's
+        // history window scrolling is not the operator removing anything.
+        retained.client_type = "qbittorrent".to_string();
+        retained.client_item.client_type = "qbittorrent".to_string();
         let retained_id = retained.id.clone();
         tracker.cache.insert(retained.download_id, retained);
 
@@ -5607,7 +5616,7 @@ mod tests {
             unavailable_sources,
             vec![ClientJobLocator::new(
                 Some("client-1"),
-                "nzbget",
+                "qbittorrent",
                 "retained-after-import"
             )],
             "an imported entry the client stopped listing must reach the binding drop"
