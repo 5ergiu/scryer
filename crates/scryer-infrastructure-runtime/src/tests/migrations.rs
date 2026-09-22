@@ -4425,6 +4425,15 @@ async fn migrations_0202_and_0203_bind_factor_state_and_session_epochs() {
         .expect("0201 fixture schema should install");
 
     sqlx::query(
+        "INSERT INTO users (id, username, status, created_at, updated_at)
+         VALUES ('00000000000000000000000000000001', 'factor-state-user', 'active',
+                 '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("legacy credential owner should insert");
+
+    sqlx::query(
         "INSERT INTO totp_credentials (
             id, user_id, secret_base32, algorithm, digits, period_seconds,
             created_at, updated_at

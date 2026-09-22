@@ -2418,7 +2418,10 @@ mod tests {
                 sent: AtomicU32::new(0),
                 gate: None,
             });
-            let transport = transport(Arc::clone(&stats));
+            let mut transport = transport(Arc::clone(&stats));
+            // Each response case is independent of the preceding 429 cooldown.
+            transport.outbound_http =
+                OutboundHttpClient::new(generic_reqwest_client(), RateLimitRegistry::isolated());
             let now = Utc::now();
             let proxy = scryer_domain::ProxyConfig {
                 id: "solver".into(),
