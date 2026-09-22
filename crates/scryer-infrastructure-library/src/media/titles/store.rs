@@ -423,6 +423,42 @@ fn folder_path_owner_predicate(
 
 #[async_trait]
 impl TitleRepository for TitleStore {
+    async fn list_discovery_context_titles(
+        &self,
+    ) -> AppResult<Vec<scryer_application::DiscoveryContextTitle>> {
+        let genres = match &self.datastore {
+            StoreDatastore::Sqlite { .. } => {
+                "COALESCE((SELECT json_group_array(name) FROM title_metadata_tags WHERE title_id = titles.id AND LOWER(category) = 'genre'), '[]')"
+            }
+            StoreDatastore::Postgres { .. } => {
+                "COALESCE((SELECT json_agg(name)::text FROM title_metadata_tags WHERE title_id = titles.id AND LOWER(category) = 'genre'), '[]')"
+            }
+        };
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT id, library_id, name, facet, external_ids, {genres} AS genres FROM titles"
+            ),
+            &[],
+        )
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let facet = parse_facet(&row.text("facet")?);
+                Ok(scryer_application::DiscoveryContextTitle {
+                    id: row.text("id")?,
+                    library_id: row
+                        .opt_text("library_id")?
+                        .unwrap_or_else(|| scryer_domain::default_library_id_for_facet(&facet)),
+                    name: row.text("name")?,
+                    facet,
+                    external_ids: decode_title_json_or_default(row, "external_ids")?,
+                    genres: decode_title_json_or_default(row, "genres")?,
+                })
+            })
+            .collect()
+    }
+
     async fn title_counts(&self) -> AppResult<scryer_application::TitleCounts> {
         let rows = SqlRuntime::fetch_all(
             self.datastore.read_exec(),
@@ -5284,6 +5320,40 @@ mod tests {
     use super::*;
 
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn discovery_context_projection_reads_only_identity_and_genres() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Omit presentation columns and provenance tables: touching either must fail.
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, library_id TEXT, name TEXT, facet TEXT, external_ids TEXT)").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE title_metadata_tags (title_id TEXT, category TEXT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(r#"INSERT INTO titles VALUES ('a', NULL, 'A', 'movie', '[{"source":"tmdb","value":"10"}]'), ('b', 'alternate', 'B', 'anime', '[]')"#).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO title_metadata_tags VALUES ('a', 'GENRE', 'Animation'), ('a', 'genre', 'Drama'), ('a', 'theme', 'Mystery')").execute(&pool).await.unwrap();
+        let store = TitleStore::new(StoreDatastore::sqlite(
+            pool,
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+        let mut rows = store.list_discovery_context_titles().await.unwrap();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].library_id,
+            scryer_domain::default_library_id_for_facet(&MediaFacet::Movie)
+        );
+        assert_eq!(rows[0].external_ids[0].value, "10");
+        rows[0].genres.sort();
+        assert_eq!(rows[0].genres, ["Animation", "Drama"]);
+        assert_eq!(rows[1].library_id, "alternate");
+        assert!(rows[1].genres.is_empty());
+        assert!(rows[1].external_ids.is_empty());
+    }
 
     /// A title stored as `C:\Media\Show` has to be found when a scan or a move
     /// supplies `c:/media/show`: on Windows `folder_paths_match` accepts the

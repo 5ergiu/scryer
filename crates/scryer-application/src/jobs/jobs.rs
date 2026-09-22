@@ -1,6 +1,6 @@
 use super::*;
 use crate::discovery::{
-    DiscoveryContextDefaults, DiscoveryLibraryContext, build_discovery_library_context,
+    DiscoveryContextDefaults, DiscoveryLibraryContext, build_projected_discovery_library_context,
     coalesce_pending_context_change, discovery_library_growth_warrants_snapshot,
     incremental_item_records, pending_context_change_from_domain_event,
     pending_context_changes_need_snapshot_reconciliation, public_feed_item_records,
@@ -2090,13 +2090,11 @@ impl AppUseCase {
         // submit, and no scheduling bookkeeping for either. The public feed
         // (region and language only) keeps refreshing.
         let personalized_discovery_enabled = self.personalized_discovery_enabled().await?;
-        let titles = self.services.catalog.titles.list(None, None).await?;
         let defaults = DiscoveryContextDefaults {
             region: self.discovery_region().await,
             language: self.metadata_language().await,
             ..DiscoveryContextDefaults::default()
         };
-        let library_context = build_discovery_library_context(&titles, defaults.clone());
         let existing_state = self
             .services
             .library
@@ -2105,8 +2103,6 @@ impl AppUseCase {
             .await?;
         let state_created = existing_state.is_none();
         let mut state = existing_state.unwrap_or_default();
-        let subject_context_changed =
-            state.last_subject_fingerprint.as_deref() != Some(library_context.fingerprint.as_str());
 
         state.startup_jitter_seconds = discovery_jitter_seconds(
             &scheduler_seed,
@@ -2170,7 +2166,108 @@ impl AppUseCase {
             .list_all_pending_discovery_context_changes(DISCOVERY_DEFAULT_SCOPE_KEY)
             .await?;
         let pending_changes_are_quiet = discovery_pending_changes_are_quiet(now, &pending_changes);
+        // Public work and acknowledgement recovery do not need library evidence.
+        let public_feed_due = trigger_source == JobTriggerSource::Manual
+            || trigger_source == JobTriggerSource::ScheduledStartup
+            || state.last_public_feed_generation_id.is_none()
+            || state
+                .next_public_feed_eligible_at
+                .is_some_and(|gate| now >= gate);
+        let public_feed = if public_feed_due {
+            Some(
+                self.execute_discovery_public_feed(trigger_source, &defaults, &mut state, now)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let scans_active =
+            personalized_discovery_enabled && self.active_library_scan_run_count().await? > 0;
+        let first_snapshot_pending = state.last_success_generation_id.is_none();
+        let quiet_blocked = trigger_source != JobTriggerSource::Manual
+            && state.inflight_context_snapshot_run_id.is_none()
+            && first_snapshot_pending
+            && state.bootstrap_quiet_until.is_some_and(|gate| now < gate);
+        let backoff_blocked = state.backoff_until.is_some_and(|gate| now < gate);
+        if personalized_discovery_enabled
+            && first_snapshot_pending
+            && quiet_blocked
+            && !scans_active
+            && !backoff_blocked
+        {
+            let candidate = state
+                .bootstrap_quiet_until
+                .unwrap_or(now)
+                .max(discovery_accelerated_at(now, &scheduler_seed));
+            if discovery_prefer_earlier_gate(
+                &mut state.next_context_snapshot_eligible_at,
+                candidate,
+            ) {
+                state.updated_at = now;
+            }
+        }
+        if !personalized_discovery_enabled || scans_active || quiet_blocked || backoff_blocked {
+            let next_run_at = discovery_next_run_at(
+                now,
+                DiscoveryNextRunCandidates {
+                    next_incremental: state
+                        .next_incremental_reload_eligible_at
+                        .unwrap_or(next_incremental),
+                    incremental_reload_possible: !first_snapshot_pending,
+                    personalized_enabled: personalized_discovery_enabled,
+                    next_context: state
+                        .next_context_snapshot_eligible_at
+                        .unwrap_or(next_context),
+                    next_public: state.next_public_feed_eligible_at.unwrap_or(next_public),
+                    bootstrap_quiet_until: state.bootstrap_quiet_until,
+                    backoff_until: state.backoff_until,
+                    scan_blocked_retry_at: scans_active.then_some(if first_snapshot_pending {
+                        discovery_accelerated_at(now, &scheduler_seed)
+                    } else {
+                        now + chrono::Duration::seconds(DISCOVERY_SYNC_BOOTSTRAP_QUIET_SECONDS)
+                    }),
+                    pending_changes_quiet_at: (!pending_changes_are_quiet)
+                        .then(|| discovery_pending_changes_quiet_at(&pending_changes))
+                        .flatten(),
+                },
+            );
+            self.services
+                .library
+                .discovery
+                .upsert_discovery_sync_state(&state)
+                .await?;
+            self.set_job_next_run_at(JobKey::DiscoverySync, next_run_at)
+                .await;
+            return Ok(JobExecutionOutcome::new(
+                Some("Discovery evaluated without building library context".to_string()),
+                Some(
+                    json!({
+                        "personalized_discovery_enabled": personalized_discovery_enabled,
+                        "context_build_deferred": true,
+                        "scans_active": scans_active,
+                        "quiet_blocked": quiet_blocked,
+                        "backoff_blocked": backoff_blocked,
+                        "ack_recovery": ack_recovery,
+                        "public_feed": public_feed,
+                        "next_run_at": next_run_at.to_rfc3339(),
+                    })
+                    .to_string(),
+                ),
+            ));
+        }
+        let titles = self
+            .services
+            .catalog
+            .titles
+            .list_discovery_context_titles()
+            .await?;
+        let library_context = build_projected_discovery_library_context(&titles, defaults.clone());
+        let subject_context_changed =
+            state.last_subject_fingerprint.as_deref() != Some(library_context.fingerprint.as_str());
+        // A scan may have started while the repository read was in flight.
+        let scans_active = self.active_library_scan_run_count().await? > 0;
         let unchanged_fingerprint_cleanup_due = state.last_success_generation_id.is_some()
+            && !scans_active
             && state.inflight_context_snapshot_run_id.is_none()
             && !subject_context_changed
             && state.dirty_since.is_some()
@@ -2235,8 +2332,6 @@ impl AppUseCase {
                 discovery_library_growth_warrants_snapshot(previous, library_context.subjects.len())
             });
 
-        let active_scan_count = self.active_library_scan_run_count().await?;
-        let scans_active = active_scan_count > 0;
         let snapshot_backoff_ready = state.backoff_until.is_none_or(|until| now >= until);
         // With personalized discovery off there is no first snapshot to reach
         // for, so the acceleration, the bootstrap-quiet wake, and the silent
@@ -2328,24 +2423,6 @@ impl AppUseCase {
                     || full_snapshot_reconciliation_due
                     || library_growth_snapshot_due)
                 && state.last_success_generation_id.is_some()
-        };
-
-        // Public feed is independent of the personalized pipeline: refresh it
-        // immediately on startup (before any snapshot work) so the public rails
-        // populate as soon as the app boots; otherwise hold to the daily gate.
-        let public_feed_due = trigger_source == JobTriggerSource::Manual
-            || trigger_source == JobTriggerSource::ScheduledStartup
-            || state.last_public_feed_generation_id.is_none()
-            || state
-                .next_public_feed_eligible_at
-                .is_some_and(|gate| now >= gate);
-        let public_feed = if public_feed_due {
-            Some(
-                self.execute_discovery_public_feed(trigger_source, &defaults, &mut state, now)
-                    .await?,
-            )
-        } else {
-            None
         };
 
         let context_snapshot = if context_snapshot_due {
