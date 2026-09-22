@@ -1105,6 +1105,7 @@ mod expected_episode_release_title_tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 

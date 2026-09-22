@@ -138,6 +138,7 @@ fn tracked_for(
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     }
 }
 
@@ -4221,6 +4222,70 @@ async fn a_stop_seeding_profile_pauses_the_torrent_instead_of_removing_it() {
             .map(|(_, item_id)| item_id.clone())
             .collect::<Vec<_>>(),
         vec!["torrent-live-8".to_string()]
+    );
+}
+
+/// The gate released the torrent but left the entry in the client, so the row
+/// cannot simply be forgotten: nothing else would notice the operator removing
+/// the entry later, and its binding would never end. It stays tracked and out
+/// of the gate's way.
+#[tokio::test]
+async fn a_released_torrent_left_in_the_client_stays_tracked_without_re_running_the_gate() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (app, mut tracked) = torrent_cleanup_fixture(
+        download_client.clone(),
+        "Kept After Seeding",
+        "torrent-live-kept-1",
+        Some(PersistedSeedGoals {
+            goal_met_action: Some(scryer_domain::SeedGoalMetAction::StopSeeding),
+            ..persisted_goals(false)
+        }),
+    )
+    .await;
+    observed(
+        DownloadSeedingSnapshot {
+            can_remove: Some(false),
+            can_move_files: Some(true),
+            seed_ratio: Some(2.5),
+            ..DownloadSeedingSnapshot::default()
+        },
+        &mut tracked,
+    );
+    let id = tracked.id.clone();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    tracker.insert_for_tests(tracked);
+
+    crate::app_usecase_integration::finalize_tracked_terminal_state(
+        &app,
+        &mut tracker,
+        &id,
+        TrackedDownloadState::ImportedSeeding,
+    )
+    .await;
+
+    let retained = tracker
+        .find(&id)
+        .expect("an entry the gate left in the client stays tracked");
+    assert_eq!(retained.state, TrackedDownloadState::Imported);
+    assert!(retained.retained_in_client_after_cleanup);
+    assert!(
+        download_client.deleted_requests.lock().await.is_empty(),
+        "the entry was kept, not removed"
+    );
+    assert_eq!(download_client.paused_requests.lock().await.len(), 1);
+
+    // The reconcile tick must leave it alone: the gate already released it, so
+    // re-offering would pause the torrent again once per poll.
+    crate::app_usecase_integration::reconcile_terminal_tracked_downloads(&app, &mut tracker).await;
+
+    assert!(
+        tracker.find(&id).is_some(),
+        "the reconcile tick must not drop a retained row"
+    );
+    assert_eq!(
+        download_client.paused_requests.lock().await.len(),
+        1,
+        "a released entry must not be re-released on the next poll"
     );
 }
 

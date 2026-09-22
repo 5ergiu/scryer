@@ -93,6 +93,18 @@ pub struct TrackedDownload {
     /// once it has persisted beyond the grace window, which must outlast the
     /// router's maximum backoff.
     pub snapshot_missing_since: Option<DateTime<Utc>>,
+    /// Runtime-only marker that this download's cleanup finished with the
+    /// client entry deliberately left in place (the seeding gate released it
+    /// under a `Keep`/`StopSeeding` policy).
+    ///
+    /// Such a row stays in the cache so the absence prune can see the entry
+    /// vanish when the operator finally removes it and end its binding — a
+    /// download that stops being listed ends its binding, exactly as
+    /// `drop_source_removed_from_client` documents. It is not re-offered to
+    /// the seeding gate, though: the gate already released it, and re-running
+    /// it per poll would re-pause the torrent and log the same release once a
+    /// tick forever.
+    pub retained_in_client_after_cleanup: bool,
 }
 
 /// Content-only reason a completed download is temporarily held from import.
@@ -537,6 +549,7 @@ impl TrackedDownloadService {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         Self::resolve_title(app, &mut td).await;
@@ -3749,6 +3762,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 
@@ -5434,6 +5448,7 @@ mod tests {
                 skip_reacquire_on_failure: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
+                retained_in_client_after_cleanup: false,
             };
             tracker.cache.insert(tracked.download_id, tracked);
         }
@@ -5569,6 +5584,37 @@ mod tests {
                 "nzbget",
                 "queue-resident"
             )]
+        );
+    }
+
+    #[test]
+    fn global_snapshot_pruning_reports_an_imported_entry_the_client_stopped_listing() {
+        // The seeding gate released this torrent but left it in the client, so
+        // the row is still tracked. Removing the entry is what ends its
+        // binding, and only the prune can report that.
+        let mut tracker = TrackedDownloadService::new();
+        let mut retained = build_tracked_download("retained-after-import");
+        retained.state = TrackedDownloadState::Imported;
+        retained.retained_in_client_after_cleanup = true;
+        retained.title_id = Some("title-retained".to_string());
+        let retained_id = retained.id.clone();
+        tracker.cache.insert(retained.download_id, retained);
+
+        let unavailable_sources =
+            tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
+
+        assert_eq!(
+            unavailable_sources,
+            vec![ClientJobLocator::new(
+                Some("client-1"),
+                "nzbget",
+                "retained-after-import"
+            )],
+            "an imported entry the client stopped listing must reach the binding drop"
+        );
+        assert!(
+            tracker.find(&retained_id).is_none_or(|td| !td.is_trackable),
+            "the row is no longer trackable once the client stopped listing it"
         );
     }
 
@@ -6051,6 +6097,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::failed_download_handler::check(&mut tracked);
@@ -6100,6 +6147,7 @@ mod tests {
                 skip_reacquire_on_failure: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
+                retained_in_client_after_cleanup: false,
             };
 
             crate::failed_download_handler::check(&mut tracked);
@@ -6303,6 +6351,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::failed_download_handler::check(&mut tracked);
@@ -6389,6 +6438,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::fail_active_manual_import_for_source(&app, &tracked, "health below critical").await;
@@ -6605,6 +6655,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::fail_active_manual_import_for_source(&app, &tracked, "health below critical").await;

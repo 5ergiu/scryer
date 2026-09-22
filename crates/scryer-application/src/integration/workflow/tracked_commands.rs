@@ -3050,6 +3050,20 @@ async fn apply_terminal_cleanup_outcome(
         if state == TrackedDownloadState::ImportedSeeding {
             promote_imported_seeding_to_imported(app, tracker, id).await;
         }
+        // An entry the gate deliberately left in the client is not gone, so the
+        // row cannot be forgotten: nothing else would notice the operator
+        // removing it later, and its binding and `terminal_at` would stay open
+        // forever. Keep it tracked and non-actionable — `Imported` is terminal,
+        // so it is never re-offered for import — and let the absence prune end
+        // the binding when the client stops listing it.
+        if cleanup.outcome
+            == crate::import::import::TerminalDownloadCleanupOutcome::SeedingEntryKept
+            && let Some(td) = tracker.find_mut(id)
+        {
+            td.completed_source = None;
+            td.retained_in_client_after_cleanup = true;
+            return;
+        }
         tracker.stop_tracking(id);
     } else if let Some(td) = tracker.find_mut(id) {
         td.completed_source = None;
@@ -3208,7 +3222,7 @@ async fn promote_imported_seeding_to_imported(
         .persist_terminal_state(app, &snapshot.id, TrackedDownloadState::Imported)
         .await;
 }
-async fn reconcile_terminal_tracked_downloads(
+pub(crate) async fn reconcile_terminal_tracked_downloads(
     app: &AppUseCase,
     tracker: &mut crate::tracked_downloads::TrackedDownloadService,
 ) {
@@ -3287,7 +3301,9 @@ async fn reconcile_terminal_tracked_downloads(
         let retained: Vec<_> = tracker
             .get_all()
             .into_iter()
-            .filter(|tracked| tracked.state.is_import_settled())
+            .filter(|tracked| {
+                tracked.state.is_import_settled() && !tracked.retained_in_client_after_cleanup
+            })
             .map(|tracked| (tracked.id.clone(), tracked.download_id, tracked.state))
             .collect();
         for (id, download_id, state) in retained {
@@ -3311,11 +3327,15 @@ async fn reconcile_terminal_tracked_downloads(
 
     // `ImportedSeeding` is not terminal, but it has to be re-offered to the
     // gate on every poll — that re-evaluation is what eventually releases the
-    // torrent once its goal is met.
+    // torrent once its goal is met. A row the gate already released and left in
+    // the client is done with the gate; it stays tracked only so its absence is
+    // noticed.
     let settled: Vec<&TrackedDownload> = tracker
         .get_all()
         .into_iter()
-        .filter(|tracked| tracked.state.is_import_settled())
+        .filter(|tracked| {
+            tracked.state.is_import_settled() && !tracked.retained_in_client_after_cleanup
+        })
         .collect();
     if settled.is_empty() {
         return;

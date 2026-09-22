@@ -1083,6 +1083,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     crate::failed_download_handler::process_failed(&app, &mut tracked_download).await;
@@ -1911,6 +1912,7 @@ async fn tracked_download_failure_prefers_tracked_source_title_for_blocklist_ide
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     crate::failed_download_handler::process_failed(&app, &mut tracked_download).await;
@@ -2044,6 +2046,7 @@ async fn parse_matched_observed_failed_download_does_not_blocklist_or_requeue() 
         skip_reacquire_on_failure: true,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     crate::failed_download_handler::process_failed(&app, &mut tracked_download).await;
@@ -2312,6 +2315,7 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     crate::failed_download_handler::process_failed(&app, &mut tracked_download).await;
