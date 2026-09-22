@@ -100,7 +100,7 @@ test("the title overview catches up once the activity subscription starts", () =
   });
 
   // The page's initial read already happened; nothing has been requested yet.
-  assert.deepEqual(refreshed, []);
+  assert.equal(refreshed.length, 0);
 
   assert.ok(streamOptions.onStart, "the hook must subscribe with an onStart");
   streamOptions.onStart?.();
