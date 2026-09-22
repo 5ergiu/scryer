@@ -2263,6 +2263,7 @@ async fn tracked_title_assignment_fixture() -> TrackedTitleAssignmentFixture {
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     });
     let submission = DownloadSubmission {
         download_id: scryer_domain::download_identity::DownloadId::new(),
@@ -4675,6 +4676,7 @@ async fn failed_tracked_cleanup_uses_facet_routing_and_exact_client_id() {
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     let outcome = crate::import::import::reconcile_terminal_download_cleanup_for_tracked(
@@ -11814,6 +11816,7 @@ impl DispositionFixture {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 

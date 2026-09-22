@@ -651,10 +651,13 @@ fn sqlite_title_search_has_text(query: &AcquisitionScopeStatesQuery) -> bool {
 }
 
 fn wanted_upsert_sql(datastore: &StoreDatastore, item: &AcquisitionScopeState) -> String {
+    // Episode scope before collection scope. An episode row carries its owning
+    // `collection_id` for attribution as well as its `episode_id`, so matching
+    // the collection first would fold every episode of one season onto the same
+    // row — the shape `find_wanted_state_for_scope` and the in-memory repository
+    // already dispatch on.
     let conflict_target = if item.series_movie_link_id.is_some() {
         "(series_movie_link_id) WHERE series_movie_link_id IS NOT NULL"
-    } else if item.collection_id.is_some() {
-        "(collection_id) WHERE collection_id IS NOT NULL"
     } else if item.episode_id.is_some() {
         match datastore {
             StoreDatastore::Sqlite { .. } => "(title_id, episode_id)",
@@ -662,6 +665,10 @@ fn wanted_upsert_sql(datastore: &StoreDatastore, item: &AcquisitionScopeState) -
                 "(title_id, episode_id) WHERE episode_id IS NOT NULL"
             }
         }
+    } else if item.collection_id.is_some() {
+        // Matches `idx_wanted_items_collection_id`, which 0255 narrowed to the
+        // collection-scoped rows so episode rows may carry the same id.
+        "(collection_id) WHERE collection_id IS NOT NULL AND episode_id IS NULL"
     } else {
         "(title_id) WHERE episode_id IS NULL AND collection_id IS NULL AND series_movie_link_id IS NULL"
     };
@@ -737,20 +744,27 @@ async fn fetch_seed_target_tx(
                           last_search_at, status,
                           grabbed_release, created_at, updated_at
                      FROM wanted_items";
-    let (sql, args) = if let Some(collection_id) = item.collection_id.as_deref() {
-        (
-            format!("{columns} WHERE title_id = {{}} AND collection_id = {{}}"),
-            vec![
-                SqlArg::Text(item.title_id.clone()),
-                SqlArg::Text(collection_id.to_string()),
-            ],
-        )
-    } else if let Some(episode_id) = item.episode_id.as_deref() {
+    // Same precedence as the upsert conflict target and
+    // `find_wanted_state_for_scope`: the episode identity wins, then the
+    // remaining scope keys, then the bare title. An episode target also carries
+    // its collection id, so the collection arm has to exclude episode rows or it
+    // hands every episode of a season the same sibling row.
+    let (sql, args) = if let Some(episode_id) = item.episode_id.as_deref() {
         (
             format!("{columns} WHERE title_id = {{}} AND episode_id = {{}}"),
             vec![
                 SqlArg::Text(item.title_id.clone()),
                 SqlArg::Text(episode_id.to_string()),
+            ],
+        )
+    } else if let Some(collection_id) = item.collection_id.as_deref() {
+        (
+            format!(
+                "{columns} WHERE title_id = {{}} AND collection_id = {{}} AND episode_id IS NULL"
+            ),
+            vec![
+                SqlArg::Text(item.title_id.clone()),
+                SqlArg::Text(collection_id.to_string()),
             ],
         )
     } else if let Some(series_movie_link_id) = item.series_movie_link_id.as_deref() {

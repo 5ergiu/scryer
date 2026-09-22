@@ -103,6 +103,163 @@ async fn completing_a_scope_clears_the_grab_only_when_a_file_landed() {
     let _ = std::fs::remove_file(db);
 }
 
+/// An unpersisted episode-scoped state view, shaped the way the acquisition
+/// paths build one: it carries the episode identity *and* the owning collection
+/// id, which is attribution rather than scope key.
+fn episode_scope_view(
+    title_id: &str,
+    id: &str,
+    episode_id: &str,
+    collection_id: &str,
+) -> AcquisitionScopeState {
+    let now = Utc::now().to_rfc3339();
+    AcquisitionScopeState {
+        id: id.to_string(),
+        title_id: title_id.to_string(),
+        title_name: None,
+        title_slug: None,
+        title_facet: None,
+        library_id: None,
+        library_name: None,
+        library_slug: None,
+        episode_id: Some(episode_id.to_string()),
+        collection_id: Some(collection_id.to_string()),
+        series_movie_link_id: None,
+        season_number: Some("1".to_string()),
+        episode_number: None,
+        media_type: "episode".to_string(),
+        last_search_at: None,
+        status: AcquisitionScopeStatus::Wanted,
+        grabbed_release: None,
+        landed_bar: None,
+        latest_release_decision: None,
+        mismatch_recovery_eligible: false,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+#[tokio::test]
+async fn episode_scopes_of_one_collection_get_their_own_state_rows() {
+    let (services, db) = temp_services("scryer_episode_scope_rows").await;
+    let (catalog, workflow, _index_dir) = super::search_stores(&services).await;
+    let now = Utc::now().to_rfc3339();
+
+    let title = make_test_title("title-collection-scope", None);
+    TitleRepository::create(&catalog, title)
+        .await
+        .expect("title should insert");
+
+    sqlx::query(
+        "INSERT INTO collections
+         (id, title_id, collection_type, collection_index, created_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind("collection-one")
+    .bind("title-collection-scope")
+    .bind("season")
+    .bind("1")
+    .bind(&now)
+    .execute(services.pool())
+    .await
+    .expect("collection should insert");
+
+    for (episode_id, episode_number) in [("episode-one", "1"), ("episode-two", "2")] {
+        sqlx::query(
+            "INSERT INTO episodes
+             (id, title_id, collection_id, episode_type, episode_number, season_number, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(episode_id)
+        .bind("title-collection-scope")
+        .bind("collection-one")
+        .bind("standard")
+        .bind(episode_number)
+        .bind("1")
+        .bind(&now)
+        .execute(services.pool())
+        .await
+        .expect("episode should insert");
+    }
+
+    // Both episodes belong to the same season, so both views carry the same
+    // collection id. The episode identity is what picks the row.
+    let first_id = workflow
+        .ensure_acquisition_scope_state(&episode_scope_view(
+            "title-collection-scope",
+            "wanted-episode-one",
+            "episode-one",
+            "collection-one",
+        ))
+        .await
+        .expect("first episode scope should seed");
+    let second_id = workflow
+        .ensure_acquisition_scope_state(&episode_scope_view(
+            "title-collection-scope",
+            "wanted-episode-two",
+            "episode-two",
+            "collection-one",
+        ))
+        .await
+        .expect("second episode scope should seed");
+
+    assert_eq!(first_id, "wanted-episode-one");
+    assert_eq!(
+        second_id, "wanted-episode-two",
+        "a sibling episode of the same season must not reuse the first episode's row"
+    );
+
+    // Re-ensuring resolves back to each episode's own row rather than the
+    // collection-matched sibling.
+    assert_eq!(
+        workflow
+            .ensure_acquisition_scope_state(&episode_scope_view(
+                "title-collection-scope",
+                "wanted-episode-two-again",
+                "episode-two",
+                "collection-one",
+            ))
+            .await
+            .expect("re-ensure should resolve"),
+        "wanted-episode-two"
+    );
+
+    // A grab recorded against one episode leaves the other alone.
+    workflow
+        .update_acquisition_scope_status(
+            &second_id,
+            AcquisitionScopeStatus::Grabbed.as_str(),
+            Some("2026-04-20T00:00:00Z"),
+            Some("Synthetic Series S01E02"),
+        )
+        .await
+        .expect("status update should apply");
+
+    let first = workflow
+        .get_acquisition_scope_state_for_title("title-collection-scope", Some("episode-one"))
+        .await
+        .expect("first episode state should load")
+        .expect("first episode state should exist");
+    assert_eq!(first.id, "wanted-episode-one");
+    assert_eq!(first.status, AcquisitionScopeStatus::Wanted);
+    assert_eq!(first.grabbed_release, None);
+    assert_eq!(first.collection_id.as_deref(), Some("collection-one"));
+
+    let second = workflow
+        .get_acquisition_scope_state_for_title("title-collection-scope", Some("episode-two"))
+        .await
+        .expect("second episode state should load")
+        .expect("second episode state should exist");
+    assert_eq!(second.id, "wanted-episode-two");
+    assert_eq!(second.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(
+        second.grabbed_release.as_deref(),
+        Some("Synthetic Series S01E02")
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
 #[tokio::test]
 async fn list_wanted_items_filters_on_latest_decision_code() {
     let (services, db) = temp_services("scryer_wanted_latest_decision").await;
