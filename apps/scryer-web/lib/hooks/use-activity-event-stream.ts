@@ -14,6 +14,10 @@ type UseActivityEventStreamOptions = {
   titleId?: string | null;
   facet?: string | null;
   pause?: boolean;
+  // Fired once each time the deferred subscription actually starts, so a
+  // caller can catch up on whatever happened between its initial read and the
+  // socket being live.
+  onStart?: () => void;
   onEvent: (activity: ActivityEvent) => void;
 };
 
@@ -22,9 +26,11 @@ export function useActivityEventStream({
   titleId,
   facet,
   pause = false,
+  onStart,
   onEvent,
 }: UseActivityEventStreamOptions) {
   const onEventRef = useRef(onEvent);
+  const onStartRef = useRef(onStart);
   const kindsRef = useRef(kinds);
   const titleIdRef = useRef(titleId);
   const facetRef = useRef(facet);
@@ -32,6 +38,7 @@ export function useActivityEventStream({
 
   useEffect(() => {
     onEventRef.current = onEvent;
+    onStartRef.current = onStart;
     kindsRef.current = kinds;
     titleIdRef.current = titleId;
     facetRef.current = facet;
@@ -45,6 +52,9 @@ export function useActivityEventStream({
     enabled: !pause,
     requestKey: "activityEvents",
     request: { query: activitySubscriptionQuery },
+    onStart() {
+      onStartRef.current?.();
+    },
     onNext(result) {
       const payload = result.data?.activityEvents;
       if (!payload) {

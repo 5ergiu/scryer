@@ -169,6 +169,14 @@ export function useTitleOverviewReactiveRefresh<
     kinds: activityKinds,
     titleId,
     pause,
+    // The subscription starts a beat after mount, so anything that happened
+    // between the page's initial read and the socket being live was never
+    // delivered — an import that lands in that window used to leave the page
+    // stale until the next poll. One catch-up read per start closes it.
+    onStart() {
+      clearBulkOverviewRefresh();
+      queueOverviewRefresh();
+    },
     onEvent(activity) {
       if (!shouldHandleTitleOverviewActivity(titleId, activity.titleId)) {
         return;
