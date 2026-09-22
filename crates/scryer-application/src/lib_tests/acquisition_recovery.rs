@@ -13208,6 +13208,138 @@ async fn a_title_walk_whose_saved_result_the_disabled_client_refuses_fails_the_j
     );
 }
 
+/// A `waiting` row the RSS lane parked because the client refused it is not a
+/// delay hold, and a season search that meets one must still submit and count.
+///
+/// The `indexer-download-client-mapping` gate caught the other reading: an RSS
+/// tick promoted the fixture release, the disabled mapped client refused it,
+/// and the lane kept the row `waiting` under `download_client_unavailable`.
+/// The operator's season search then found the row, took it for the delay
+/// lane's claim on the scope, and walked on without submitting — so nothing
+/// was refused *by the job*, and it read COMPLETED with nothing grabbed. The
+/// row is a refusal awaiting the client's return; the walk has to submit
+/// again, and when the client is still gone, that refusal fails the job.
+#[tokio::test]
+async fn a_title_walk_resubmits_a_waiting_result_the_client_refused_and_fails_the_job() {
+    // The indexers hold nothing, so the refused row is the job's only
+    // candidate: a walk that takes it for a hold makes no submission at all.
+    let (app, title, _, download_client) = seed_recent_failed_season_pack_fixture_with_indexer(
+        Arc::new(TrackingIndexerClient::default().returning_no_results()),
+    )
+    .await;
+    let job_runs = Arc::new(RecordingJobRunRepo::default());
+    let app = app.with_test_overrides(|services| services.with_job_runs(job_runs.clone()));
+    attach_default_library_to_scope_states(&app, MediaFacet::Anime).await;
+    download_client
+        .set_submit_error(Some(StubSubmitError::SubmitUnavailable(
+            "mapped download client is globally disabled".to_string(),
+        )))
+        .await;
+
+    let episodes = app
+        .services
+        .catalog
+        .shows
+        .list_episodes_for_title(&title.id)
+        .await
+        .expect("list the fixture episodes");
+    let first_episode = episodes
+        .iter()
+        .find(|episode| episode.episode_number.as_deref() == Some("23"))
+        .expect("the fixture has S07E23");
+    let first_scope = app
+        .services
+        .workflow
+        .acquisition_scope_states
+        .list_acquisition_scope_states(AcquisitionScopeStatesQuery {
+            limit: i64::MAX,
+            ..AcquisitionScopeStatesQuery::default()
+        })
+        .await
+        .expect("list seeded scope states")
+        .into_iter()
+        .find(|state| state.episode_id.as_deref() == Some(first_episode.id.as_str()))
+        .expect("S07E23 has a wanted scope");
+    // What the RSS lane leaves behind after the client refuses its promotion.
+    let mut refused = pending_movie_release(
+        &first_scope.id,
+        &title,
+        "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-RSS",
+        PendingReleaseStatus::Waiting,
+    );
+    refused.last_decision_code = Some(
+        crate::acquisition_release_search::ReleaseAutoDecisionCode::DownloadClientUnavailable
+            .as_str()
+            .to_string(),
+    );
+    app.services
+        .workflow
+        .pending_releases
+        .insert_pending_release(&refused)
+        .await
+        .expect("seed the refused RSS row");
+
+    let actor = test_admin_user();
+    let run = app
+        .start_acquisition_search_job(
+            &actor,
+            AcquisitionSearchRequest {
+                title_id: Some(title.id.clone()),
+                season_number: Some(7),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start the season-scoped acquisition search");
+
+    let view = await_acquisition_search_job(&app, &actor, &run.id).await;
+    let submitted = download_client
+        .submitted_release_titles
+        .lock()
+        .await
+        .clone();
+    assert!(
+        !submitted.is_empty()
+            && submitted
+                .iter()
+                .all(|release| release == &refused.release_title),
+        "the refused row is no hold: the job submitted it again, and nothing else: {submitted:?}"
+    );
+    let kept = app
+        .services
+        .workflow
+        .pending_releases
+        .get_pending_release(&refused.id)
+        .await
+        .expect("load the refused row")
+        .expect("the refused row still exists");
+    assert!(
+        matches!(
+            kept.status,
+            PendingReleaseStatus::Waiting | PendingReleaseStatus::Standby
+        ),
+        "the row is kept for when the client recovers, never expired: {:?}",
+        kept.status
+    );
+    assert_eq!(
+        view.state, "failed",
+        "the only submission the job made was refused: {view:?}"
+    );
+    assert_eq!(view.grabbed_count, 0);
+    assert_eq!(
+        view.failed_count, 1,
+        "one episode scope could not submit: {view:?}"
+    );
+    assert_eq!(
+        view.processed, view.total,
+        "the walk ran every work item it announced: {view:?}"
+    );
+    assert!(
+        title_blocklist_entries(&app, &title.id).await.is_empty(),
+        "a refused submission never blocklists the release"
+    );
+}
+
 /// A request narrows by wanted kind; the target derivation does not. The walk
 /// therefore runs the scopes the *request* resolved to, not everything derived
 /// for the title — otherwise "search cutoff-unmet for this title" would go on to
