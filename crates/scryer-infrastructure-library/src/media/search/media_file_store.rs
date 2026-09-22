@@ -5190,7 +5190,10 @@ mod tests {
         );
         assert!(
             media_files
-                .list_live_media_files_for_episode_ids("different-title", &[episode_one.id.clone()])
+                .list_live_media_files_for_episode_ids(
+                    "different-title",
+                    std::slice::from_ref(&episode_one.id)
+                )
                 .await
                 .unwrap()
                 .is_empty()
