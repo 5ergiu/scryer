@@ -38,6 +38,9 @@ pub(super) struct MockTitleRepo {
     /// Scheduled pollers must not pay for this before they know they have
     /// somewhere to send a result.
     pub(super) list_for_matching_calls: AtomicUsize,
+    pub(super) list_calls: AtomicUsize,
+    pub(super) discovery_context_reads: AtomicUsize,
+    pub(super) discovery_read_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     pub(super) monitor_selections: Arc<Mutex<HashMap<String, scryer_domain::MonitorSelection>>>,
     /// Names the search index holds for a title that its row does not — an
     /// anime numbering bridge's cour names. The real store writes these to
@@ -332,6 +335,26 @@ impl TitleImageRepository for BlockingTitleImageRepo {
 
 #[async_trait]
 impl TitleRepository for MockTitleRepo {
+    async fn list_discovery_context_titles(&self) -> AppResult<Vec<crate::DiscoveryContextTitle>> {
+        self.discovery_context_reads.fetch_add(1, Ordering::SeqCst);
+        let gate = self.discovery_read_gate.lock().await.clone();
+        if let Some(gate) = gate {
+            tokio::time::timeout(crate::test_wait::TEST_WAIT_DEADLINE, gate.wait())
+                .await
+                .expect("read admitted");
+            tokio::time::timeout(crate::test_wait::TEST_WAIT_DEADLINE, gate.wait())
+                .await
+                .expect("read released");
+        }
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .map(crate::DiscoveryContextTitle::from)
+            .collect())
+    }
+
     async fn replace_title_monitor_selection(
         &self,
         title_id: &str,
@@ -361,6 +384,7 @@ impl TitleRepository for MockTitleRepo {
         facet: Option<MediaFacet>,
         query: Option<String>,
     ) -> AppResult<Vec<Title>> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         let list = self.store.lock().await.clone();
         let normalized_query = query.map(|value| value.to_lowercase());
         Ok(list

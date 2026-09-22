@@ -1173,8 +1173,46 @@ pub fn name_candidates_in_bucket(
     candidates
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryContextTitle {
+    pub id: String,
+    pub library_id: String,
+    pub name: String,
+    pub facet: MediaFacet,
+    pub external_ids: Vec<scryer_domain::ExternalId>,
+    pub genres: Vec<String>,
+}
+
+impl From<&Title> for DiscoveryContextTitle {
+    fn from(title: &Title) -> Self {
+        Self {
+            id: title.id.clone(),
+            library_id: title.library_id.clone(),
+            name: title.name.clone(),
+            facet: title.facet.clone(),
+            external_ids: title.external_ids.clone(),
+            genres: title
+                .canonical_tags
+                .iter()
+                .filter(|tag| tag.category.eq_ignore_ascii_case("genre"))
+                .map(|tag| tag.name.clone())
+                .collect(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait TitleRepository: Send + Sync {
+    /// Identity and genre evidence for discovery, without presentation metadata.
+    async fn list_discovery_context_titles(&self) -> AppResult<Vec<DiscoveryContextTitle>> {
+        Ok(self
+            .list(None, None)
+            .await?
+            .iter()
+            .map(DiscoveryContextTitle::from)
+            .collect())
+    }
+
     /// Aggregate counts without hydrating catalog records. SQL stores override this.
     async fn title_counts(&self) -> AppResult<TitleCounts> {
         let mut counts = TitleCounts::default();
