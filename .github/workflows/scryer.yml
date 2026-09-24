@@ -1375,7 +1375,7 @@ jobs:
             sccache_lane: scryer-macos-arm64
             sccache_writer_id: scryer-darwin-arm64-portable
             artifact_name: scryer-darwin-arm64-portable
-            release_profile: release
+            release_profile: release-thin
             install_nasm: false
             extra_rustflags: ""
           - arch: x86_64
