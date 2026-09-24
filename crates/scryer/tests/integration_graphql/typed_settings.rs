@@ -1,6 +1,113 @@
 use super::*;
 
 #[tokio::test]
+async fn graphql_trusted_proxies_requires_system_settings_permission() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let admin = ctx.app.find_or_create_default_user().await.unwrap();
+    let viewer = ctx
+        .app
+        .create_user(
+            &admin,
+            "proxy-viewer".into(),
+            "fixture-password".into(),
+            AppPermissionMask::NONE,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let response = schema_exec(&ctx, r#"mutation { updateServiceSettings(input: {trustedProxyIps:["127.0.0.1"]}) { trustedProxyIps } }"#, Some(viewer)).await;
+    assert_graphql_field_denied(&response, "updateServiceSettings");
+    assert!(
+        ctx.app
+            .trusted_proxy_runtime()
+            .snapshot()
+            .addresses
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn graphql_trusted_proxies_override_reset_and_reload() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    ctx.app
+        .initialize_trusted_proxy_policy("127.0.0.1")
+        .await
+        .unwrap();
+    let runtime = ctx.app.trusted_proxy_runtime();
+    let before = runtime.snapshot();
+    let mutation = r#"mutation Update($input: UpdateServiceSettingsInput!) {
+        updateServiceSettings(input: $input) { tlsCertPath trustedProxyIps trustedProxyOverride trustedProxySource }
+    }"#;
+    let saved = gql(&ctx, mutation, json!({"input":{"trustedProxyIps":["192.0.2.0/24", "::1"], "tlsCertPath":"/etc/scryer/current.crt"}})).await;
+    assert_no_errors(&saved);
+    assert_eq!(
+        saved["data"]["updateServiceSettings"]["trustedProxySource"],
+        "settings"
+    );
+    assert!(runtime.snapshot().matches("192.0.2.1".parse().unwrap()));
+    assert!(!runtime.snapshot().matches("127.0.0.1".parse().unwrap()));
+    assert!(before.matches("127.0.0.1".parse().unwrap()));
+
+    let invalid = gql(
+        &ctx,
+        mutation,
+        json!({"input":{"trustedProxyIps":["192.0.2.1/99"]}}),
+    )
+    .await;
+    assert!(
+        invalid["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    );
+    assert!(runtime.snapshot().matches("192.0.2.1".parse().unwrap()));
+    // Older clients can still save TLS paths without replacing the proxy policy.
+    let legacy = gql(
+        &ctx,
+        mutation,
+        json!({"input":{"tlsCertPath":"/etc/scryer/new.crt", "tlsKeyPath":"/etc/scryer/new.key"}}),
+    )
+    .await;
+    assert_no_errors(&legacy);
+    assert!(runtime.snapshot().matches("192.0.2.1".parse().unwrap()));
+
+    let empty = gql(&ctx, mutation, json!({"input":{"trustedProxyIps":[]}})).await;
+    assert_no_errors(&empty);
+    assert_eq!(
+        empty["data"]["updateServiceSettings"]["tlsCertPath"],
+        "/etc/scryer/new.crt"
+    );
+    assert_eq!(
+        empty["data"]["updateServiceSettings"]["trustedProxyOverride"],
+        json!([])
+    );
+    ctx.app
+        .initialize_trusted_proxy_policy("127.0.0.1")
+        .await
+        .unwrap();
+    assert!(!runtime.snapshot().matches("127.0.0.1".parse().unwrap()));
+
+    let reset = gql(
+        &ctx,
+        mutation,
+        json!({"input":{"resetTrustedProxyIps":true}}),
+    )
+    .await;
+    assert_no_errors(&reset);
+    assert_eq!(
+        reset["data"]["updateServiceSettings"]["trustedProxyOverride"],
+        json!(null)
+    );
+    assert!(runtime.snapshot().matches("127.0.0.1".parse().unwrap()));
+    ctx.app
+        .initialize_trusted_proxy_policy("::1")
+        .await
+        .unwrap();
+    assert!(runtime.snapshot().matches("::1".parse().unwrap()));
+}
+
+#[tokio::test]
 async fn graphql_media_settings_rejects_invalid_folder_template_tokens() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;

@@ -19,6 +19,10 @@ pub struct DownloadRegistryStore {
 struct ObservationState {
     first_observed_at: Option<DateTime<Utc>>,
     last_observed_at: Option<DateTime<Utc>>,
+    /// The download's end marker. See `DownloadRecord::terminal_at`: it is the
+    /// difference between "Scryer is done with this download" and "Scryer lost
+    /// the binding while the job is still live in a client".
+    terminal_at: Option<DateTime<Utc>>,
 }
 
 struct ActiveObservationBinding {
@@ -168,6 +172,32 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .transpose()
     }
 
+    async fn list_never_observed_submission_bindings(
+        &self,
+        created_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT b.download_id, b.client_config_id, b.client_type_snapshot,
+                    b.client_name_snapshot, b.native_item_id, b.created_at, b.last_seen_at,
+                    b.ended_at
+             FROM download_client_bindings b
+             JOIN downloads d ON d.id = b.download_id
+             WHERE b.ended_at IS NULL
+               AND b.native_item_id IS NOT NULL
+               AND b.created_at < {}
+               AND d.origin = 'scryer_submission'
+               AND d.first_observed_at IS NULL
+               AND d.terminal_at IS NULL
+             ORDER BY b.created_at, b.download_id",
+            &[SqlArg::Timestamp(created_before)],
+        )
+        .await?
+        .into_iter()
+        .map(binding_from_row)
+        .collect()
+    }
+
     /// Write every due freshness refresh in ONE transaction.
     ///
     /// Callers reach this only for downloads whose identity they already
@@ -193,18 +223,42 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .await
     }
 
+    /// End a binding and finish the download it belonged to.
+    ///
+    /// Every caller reaches here because Scryer is *done* with the download: a
+    /// completed queue or history delete
+    /// (`integration::download_queue_commands`), a download removed from its
+    /// client and recorded as ignored (`integration::workflow::tracked_commands`),
+    /// or a stale binding proven by a completed delete
+    /// (`download_identity::heal_binding_after_completed_delete`). So the
+    /// download is marked terminal in the same transaction.
+    ///
+    /// This is load-bearing for the observation resolver: an ended binding on a
+    /// *non-terminal* download is rebound onto whichever client reports the job
+    /// next. Without the terminal marker written here, a listing that predates
+    /// one of those deletes would rebind the item and undo the delete.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()> {
         let id = id.to_string();
         SqlRuntime::run_in_transaction(&self.datastore, "end_download_client_binding", move |tx| {
             let id = id.clone();
             Box::pin(async move {
+                let ended_at = Utc::now();
                 SqlRuntime::execute(
                     SqlExec::Tx(tx),
                     "UPDATE download_client_bindings
                      SET ended_at = {}
                      WHERE download_id = {}
                        AND ended_at IS NULL",
-                    &[SqlArg::Timestamp(Utc::now()), SqlArg::Text(id)],
+                    &[SqlArg::Timestamp(ended_at), SqlArg::Text(id.clone())],
+                )
+                .await?;
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "UPDATE downloads
+                     SET terminal_at = {}
+                     WHERE id = {}
+                       AND terminal_at IS NULL",
+                    &[SqlArg::Timestamp(ended_at), SqlArg::Text(id)],
                 )
                 .await?;
                 Ok(())
@@ -243,11 +297,36 @@ async fn resolve_observation_tx(
                 Some(binding) if binding_matches_locator(&binding, &observation.locator) => {
                     Some(binding)
                 }
-                Some(binding)
-                    if binding.ended_at.is_some()
-                        && binding_locator_fields_match(&binding, &observation.locator) =>
-                {
-                    return Ok(ObservationResolution::BindingAlreadyEnded);
+                // An ended binding is the end of a *binding*, not necessarily
+                // the end of the download. `terminal_at` is the marker that
+                // tells the two apart.
+                //
+                // Terminal: Scryer finished with this download — a completed
+                // queue or history delete, a removal from the client, or the
+                // deletion of the client config that owned it. Re-observing it
+                // must not resurrect it, exactly as Sonarr's terminal history
+                // states (Imported/Failed/Ignored) make later polls leave the
+                // item alone.
+                //
+                // Not terminal: the binding was lost while the job is still
+                // live in a client — the client config was re-created under a
+                // new id, a backup predating the delete was restored, or
+                // migration 0242 ended an unattributable binding. Sonarr keys
+                // purely on the download id and re-tracks the item under
+                // whichever client reports it, so the same canonical download
+                // is re-pointed at the observing client here. The locator is
+                // free: `resolve_against_active_locator_tx` above returned
+                // `None`, so no active binding claims it, and the active-locator
+                // unique index backstops a concurrent writer.
+                Some(binding) if binding.ended_at.is_some() => {
+                    if state.terminal_at.is_some() {
+                        return Ok(ObservationResolution::BindingAlreadyEnded);
+                    }
+                    rebind_ended_binding_tx(tx, token_id, observation).await?;
+                    touch_observation_tx(tx, token_id, observation).await?;
+                    return Ok(ObservationResolution::Rebound {
+                        download_id: token_id,
+                    });
                 }
                 Some(binding) if binding.ended_at.is_none() && binding.native_item_id.is_some() => {
                     return Ok(locator_conflict(token_id, binding.download_id));
@@ -383,7 +462,7 @@ async fn active_observation_binding_by_locator_tx(
         SqlExec::Tx(tx),
         "SELECT b.download_id, b.client_config_id, b.client_type_snapshot, b.client_name_snapshot,
                 b.native_item_id, b.created_at, b.last_seen_at, b.ended_at,
-                d.first_observed_at, d.last_observed_at
+                d.first_observed_at, d.last_observed_at, d.terminal_at
          FROM download_client_bindings b
          JOIN downloads d ON d.id = b.download_id
          WHERE b.ended_at IS NULL
@@ -405,6 +484,7 @@ async fn active_observation_binding_by_locator_tx(
             state: ObservationState {
                 first_observed_at: optional_timestamp_from_row(&row, "first_observed_at")?,
                 last_observed_at: optional_timestamp_from_row(&row, "last_observed_at")?,
+                terminal_at: optional_timestamp_from_row(&row, "terminal_at")?,
             },
             binding: binding_from_row(row)?,
         })
@@ -464,7 +544,7 @@ async fn observation_state_for_download_tx(
 ) -> AppResult<Option<ObservationState>> {
     SqlRuntime::fetch_optional(
         SqlExec::Tx(tx),
-        "SELECT first_observed_at, last_observed_at
+        "SELECT first_observed_at, last_observed_at, terminal_at
          FROM downloads
          WHERE id = {}",
         &[SqlArg::Text(download_id.to_string())],
@@ -474,6 +554,7 @@ async fn observation_state_for_download_tx(
         Ok(ObservationState {
             first_observed_at: optional_timestamp_from_row(&row, "first_observed_at")?,
             last_observed_at: optional_timestamp_from_row(&row, "last_observed_at")?,
+            terminal_at: optional_timestamp_from_row(&row, "terminal_at")?,
         })
     })
     .transpose()
@@ -597,6 +678,48 @@ async fn create_foreign_observation_tx(
     )
     .await?;
     create_bound_binding_tx(tx, download_id, observation).await
+}
+
+/// Re-activate an ended binding onto the client that is reporting the job now.
+///
+/// `download_client_bindings.download_id` is the primary key, so a canonical
+/// download has exactly one binding row and a rebind is an update in place
+/// rather than a second row. The whole locator is re-pointed — a re-created
+/// client config has a new id, and may even have a different name — and
+/// `ended_at` is cleared, which is what makes the row active again.
+///
+/// Callers must have established that no active binding holds the locator. The
+/// active-locator unique index (0180) is the backstop for a concurrent writer
+/// that claims it in between; `resolve_observation` converges that loser onto
+/// the winner.
+async fn rebind_ended_binding_tx(
+    tx: &mut SqlTx<'_>,
+    download_id: DownloadId,
+    observation: &ObservedClientJob,
+) -> AppResult<()> {
+    let client_name_snapshot = observed_client_name_snapshot_tx(tx, &observation.locator).await?;
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "UPDATE download_client_bindings
+            SET client_config_id = {},
+                client_type_snapshot = {},
+                client_name_snapshot = {},
+                native_item_id = {},
+                last_seen_at = {},
+                ended_at = NULL
+          WHERE download_id = {}
+            AND ended_at IS NOT NULL",
+        &[
+            SqlArg::OptText(observation.locator.client_id.clone()),
+            SqlArg::Text(observation.locator.client_type.clone()),
+            SqlArg::OptText(client_name_snapshot),
+            SqlArg::Text(observation.locator.item_id.clone()),
+            SqlArg::Timestamp(observation.observed_at),
+            SqlArg::Text(download_id.to_string()),
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 async fn create_bound_binding_tx(
@@ -978,6 +1101,21 @@ mod tests {
         .expect("binding should insert");
     }
 
+    /// Stand in for whatever finished the download — an import, a failure, a
+    /// completed delete, or the deletion of its client config.
+    async fn mark_download_terminal(store: &DownloadRegistryStore, id: &str) {
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "UPDATE downloads SET terminal_at = {} WHERE id = {}",
+            &[
+                SqlArg::Text(CREATED_AT.to_string()),
+                SqlArg::Text(id.to_string()),
+            ],
+        )
+        .await
+        .expect("download should terminalise");
+    }
+
     async fn insert_download_client(store: &DownloadRegistryStore, id: &str, name: &str) {
         insert_download_client_of_type(store, id, name, "qbittorrent").await;
     }
@@ -1265,6 +1403,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn never_observed_listing_holds_only_unlisted_live_submissions_past_the_cutoff() {
+        const THIRD_ID: &str = "00000000-0000-4000-8000-000000000003";
+        const FOURTH_ID: &str = "00000000-0000-4000-8000-000000000004";
+        let store = store().await;
+        // The one the listing is for: submitted, still bound, never listed.
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        // A submission a listing has carried belongs to the tracker's prune.
+        insert_download(&store, SECOND_ID, "scryer_submission", Some(CREATED_AT)).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), Some("job-2"), None).await;
+        // A foreign row is not Scryer's to settle here.
+        insert_download(&store, THIRD_ID, "foreign_observation", None).await;
+        insert_binding(&store, THIRD_ID, Some("client-1"), Some("job-3"), None).await;
+        // An ended binding has nothing left to end.
+        insert_download(&store, FOURTH_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FOURTH_ID,
+            Some("client-1"),
+            Some("job-4"),
+            Some(CREATED_AT),
+        )
+        .await;
+
+        let after_creation = "2026-08-24T12:40:00Z".parse::<DateTime<Utc>>().unwrap();
+        let listed = store
+            .list_never_observed_submission_bindings(after_creation)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|binding| binding.download_id.to_string())
+                .collect::<Vec<_>>(),
+            vec![FIRST_ID.to_string()]
+        );
+
+        // Still inside the grace window: the cutoff precedes the submission.
+        let before_creation = "2026-08-24T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert!(
+            store
+                .list_never_observed_submission_bindings(before_creation)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn known_token_with_matching_ended_binding_skips_without_writes() {
         let store = store().await;
         let id = DownloadId::parse(FIRST_ID).unwrap();
@@ -1284,6 +1471,234 @@ mod tests {
                 .await
                 .unwrap(),
             ObservationResolution::BindingAlreadyEnded
+        );
+        assert_eq!(raw_identity_snapshot(&store, FIRST_ID).await, before);
+    }
+
+    #[tokio::test]
+    async fn ending_a_binding_marks_the_download_terminal() {
+        let store = store().await;
+        let id = DownloadId::parse(FIRST_ID).unwrap();
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+        assert!(
+            store
+                .load_download(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at
+                .is_none(),
+            "a live download must not start terminal"
+        );
+
+        store.end_binding(&id).await.unwrap();
+
+        assert!(
+            store
+                .load_download(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at
+                .is_some(),
+            "every end_binding caller is a terminal event, so the download is finished with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn ended_binding_on_a_terminal_download_skips_without_writes() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FIRST_ID,
+            Some("client-gone"),
+            Some("job-1"),
+            Some(CREATED_AT),
+        )
+        .await;
+        mark_download_terminal(&store, FIRST_ID).await;
+        let before = raw_identity_snapshot(&store, FIRST_ID).await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::BindingAlreadyEnded
+        );
+        assert_eq!(
+            raw_identity_snapshot(&store, FIRST_ID).await,
+            before,
+            "a finished download must never be resurrected by a re-observation"
+        );
+    }
+
+    /// The load-test shape: the client config was deleted and re-created under
+    /// a new id, so the ended binding names a config that no longer exists
+    /// while the job is still live in the same client. Before this rebind the
+    /// pair resolved to `Conflict { token_id: T, binding_download_id: T }` — a
+    /// download conflicting with itself — on every poll, forever.
+    #[tokio::test]
+    async fn ended_binding_on_a_live_download_rebinds_onto_the_observing_client() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FIRST_ID,
+            Some("client-gone"),
+            Some("job-1"),
+            Some(CREATED_AT),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::Rebound {
+                download_id: DownloadId::parse(FIRST_ID).unwrap(),
+            }
+        );
+
+        let binding = store
+            .find_active_binding_by_locator(&ClientJobLocator::new(
+                Some("client-1"),
+                "qBittorrent",
+                "job-1",
+            ))
+            .await
+            .unwrap()
+            .expect("the rebound binding should be active under the observing client");
+        assert_eq!(binding.download_id, DownloadId::parse(FIRST_ID).unwrap());
+        assert_eq!(binding.client_config_id.as_deref(), Some("client-1"));
+        assert!(binding.ended_at.is_none());
+        assert_eq!(
+            store
+                .load_download(&DownloadId::parse(FIRST_ID).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at,
+            None,
+            "a rebind must not finish the download"
+        );
+    }
+
+    #[tokio::test]
+    async fn ended_binding_under_a_different_client_type_rebinds() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding_with_client(
+            &store,
+            FIRST_ID,
+            Some("client-1"),
+            Some("nzbget"),
+            Some("Old"),
+            Some("job-1"),
+            Some(CREATED_AT),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::Rebound {
+                download_id: DownloadId::parse(FIRST_ID).unwrap(),
+            }
+        );
+        let binding = store
+            .load_binding(&DownloadId::parse(FIRST_ID).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        // `ClientJobLocator::new` normalizes the client type, so the rebound
+        // snapshot carries the normalized form rather than the stale "nzbget".
+        assert_eq!(binding.client_type_snapshot.as_deref(), Some("qbittorrent"));
+        assert!(binding.ended_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn ended_binding_on_the_same_locator_rebinds_when_the_download_is_live() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FIRST_ID,
+            Some("client-1"),
+            Some("job-1"),
+            Some(CREATED_AT),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::Rebound {
+                download_id: DownloadId::parse(FIRST_ID).unwrap(),
+            }
+        );
+    }
+
+    /// The locator is the scarce resource: a rebind may only take one that is
+    /// free. Another download holding it actively is a real conflict, and stays
+    /// one.
+    #[tokio::test]
+    async fn ended_binding_conflicts_when_another_active_binding_holds_the_locator() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(
+            &store,
+            FIRST_ID,
+            Some("client-1"),
+            Some("job-1"),
+            Some(CREATED_AT),
+        )
+        .await;
+        insert_download(&store, SECOND_ID, "foreign_observation", None).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), Some("job-1"), None).await;
+        let before = raw_identity_snapshot(&store, FIRST_ID).await;
+
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await
+                .unwrap(),
+            ObservationResolution::Conflict {
+                token_id: DownloadId::parse(FIRST_ID).unwrap(),
+                binding_download_id: DownloadId::parse(SECOND_ID).unwrap(),
+            }
         );
         assert_eq!(raw_identity_snapshot(&store, FIRST_ID).await, before);
     }
@@ -2418,6 +2833,178 @@ mod tests {
             .map_err(|error| AppError::Repository(error.to_string()))?;
         assert_eq!(downloads, 1, "losing transactions must roll back fully");
         assert_eq!(bindings, 1);
+        Ok(())
+    }
+
+    /// Postgres counterpart of the three ended-binding outcomes covered on
+    /// sqlite above: terminal downloads skip, live downloads rebind, and a
+    /// locator another active binding holds still conflicts. The timestamp
+    /// columns are real `TIMESTAMP WITH TIME ZONE` here rather than sqlite
+    /// TEXT, which is what the `ended_at IS NOT NULL` / `terminal_at IS NULL`
+    /// predicates ride on. Skipped unless `SCRYER_TEST_POSTGRES_URL` names a
+    /// reachable server.
+    #[tokio::test]
+    async fn postgres_ended_binding_skips_rebinds_or_conflicts() -> AppResult<()> {
+        let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            eprintln!(
+                "skipping PostgreSQL ended-binding test; SCRYER_TEST_POSTGRES_URL is not set"
+            );
+            return Ok(());
+        };
+
+        let admin_pool = sqlx::PgPool::connect(&raw_url).await.map_err(|error| {
+            AppError::Repository(format!("failed to connect to postgres: {error}"))
+        })?;
+        let schema = format!(
+            "scryer_test_{}_{}",
+            std::process::id(),
+            scryer_domain::Id::new().0.replace('-', "_")
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
+            .await
+            .map_err(|error| {
+                AppError::Repository(format!("failed to create test schema: {error}"))
+            })?;
+
+        let result = postgres_ended_binding_case(&raw_url, &schema).await;
+
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin_pool)
+            .await
+            .map_err(|error| {
+                AppError::Repository(format!("failed to drop test schema {schema}: {error}"))
+            })?;
+        result
+    }
+
+    async fn postgres_ended_binding_case(raw_url: &str, schema: &str) -> AppResult<()> {
+        let separator = if raw_url.contains('?') { '&' } else { '?' };
+        let schema_url = format!("{raw_url}{separator}options=-csearch_path%3D{schema}");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&schema_url)
+            .await
+            .map_err(|error| {
+                AppError::Repository(format!("failed to connect with search_path: {error}"))
+            })?;
+        for statement in POSTGRES_CANONICAL_SCHEMA {
+            sqlx::query(sqlx::AssertSqlSafe(*statement))
+                .execute(&pool)
+                .await
+                .map_err(|error| {
+                    AppError::Repository(format!("failed to create canonical schema: {error}"))
+                })?;
+        }
+        let store = DownloadRegistryStore::new(StoreDatastore::Postgres { pool: pool.clone() });
+
+        let seed = |id: &'static str, item: &'static str, terminal: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO downloads (id, origin, created_at, terminal_at)
+                     VALUES ($1, 'scryer_submission', NOW(), CASE WHEN $2 THEN NOW() END)",
+                )
+                .bind(id)
+                .bind(terminal)
+                .execute(&pool)
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+                sqlx::query(
+                    "INSERT INTO download_client_bindings (
+                         download_id, client_config_id, client_type_snapshot,
+                         native_item_id, created_at, ended_at)
+                     VALUES ($1, 'client-gone', 'qbittorrent', $2, NOW(), NOW())",
+                )
+                .bind(id)
+                .bind(item)
+                .execute(&pool)
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+                Ok::<(), AppError>(())
+            }
+        };
+
+        // Terminal download: skip.
+        seed(FIRST_ID, "job-1", true).await?;
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-1",
+                    Some(&wire(FIRST_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await?,
+            ObservationResolution::BindingAlreadyEnded
+        );
+
+        // Live download on a free locator: rebind.
+        seed(SECOND_ID, "job-2", false).await?;
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-2",
+                    Some(&wire(SECOND_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await?,
+            ObservationResolution::Rebound {
+                download_id: DownloadId::parse(SECOND_ID).unwrap(),
+            }
+        );
+        let rebound = store
+            .find_active_binding_by_locator(&ClientJobLocator::new(
+                Some("client-1"),
+                "qBittorrent",
+                "job-2",
+            ))
+            .await?
+            .expect("the rebound binding should be active under the observing client");
+        assert_eq!(rebound.download_id, DownloadId::parse(SECOND_ID).unwrap());
+        assert_eq!(rebound.client_config_id.as_deref(), Some("client-1"));
+
+        // Live download whose locator another active binding holds: conflict.
+        const THIRD_ID: &str = "00000000-0000-4000-8000-000000000003";
+        const FOURTH_ID: &str = "00000000-0000-4000-8000-000000000004";
+        seed(THIRD_ID, "job-3", false).await?;
+        sqlx::query(
+            "INSERT INTO downloads (id, origin, created_at)
+             VALUES ($1, 'foreign_observation', NOW())",
+        )
+        .bind(FOURTH_ID)
+        .execute(&pool)
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO download_client_bindings (
+                 download_id, client_config_id, client_type_snapshot,
+                 native_item_id, created_at)
+             VALUES ($1, 'client-1', 'qbittorrent', 'job-3', NOW())",
+        )
+        .bind(FOURTH_ID)
+        .execute(&pool)
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+        assert_eq!(
+            store
+                .resolve_observation(&observation(
+                    "job-3",
+                    Some(&wire(THIRD_ID)),
+                    Some("release"),
+                    "2026-08-24T13:00:00Z",
+                ))
+                .await?,
+            ObservationResolution::Conflict {
+                token_id: DownloadId::parse(THIRD_ID).unwrap(),
+                binding_download_id: DownloadId::parse(FOURTH_ID).unwrap(),
+            }
+        );
         Ok(())
     }
 }

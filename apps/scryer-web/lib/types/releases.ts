@@ -33,6 +33,7 @@ export type Release = {
   parsedRelease?: {
     rawTitle: string;
     normalizedTitle: string;
+    year?: number | null;
     releaseGroup?: string | null;
     quality?: string | null;
     source?: string | null;

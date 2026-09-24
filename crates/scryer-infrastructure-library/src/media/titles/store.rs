@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use scryer_application::{
@@ -140,11 +142,27 @@ enum TitleCatalogSqlDialect {
 #[derive(Clone)]
 pub struct TitleStore {
     datastore: StoreDatastore,
+    /// The bounded-distance lane, shared with the UI search. `None` is the
+    /// documented degraded mode: the exact lanes below are exhaustive on
+    /// their own and a missing index costs typo tolerance, never a wrong
+    /// answer.
+    fuzzy: Option<Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>>,
 }
 
 impl TitleStore {
     pub fn new(datastore: StoreDatastore) -> Self {
-        Self { datastore }
+        Self {
+            datastore,
+            fuzzy: None,
+        }
+    }
+
+    pub fn with_fuzzy_index(
+        mut self,
+        index: Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>,
+    ) -> Self {
+        self.fuzzy = Some(index);
+        self
     }
 
     async fn find_existing_title_after_unique_conflict(
@@ -226,6 +244,21 @@ impl TitleStore {
     /// tag join. It is a second query bound to every id the list returned, so a
     /// caller that does not read `Title::canonical_tags` should say so rather
     /// than drag thousands of placeholders through the pool.
+    /// Titles by id, read exactly as `list_for_matching` reads them: matching
+    /// mode, external ids included, no canonical tag join.
+    async fn titles_for_matching_by_ids(&self, ids: &[String]) -> AppResult<Vec<Title>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("{}", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT {TITLE_COLUMNS} FROM titles WHERE id IN ({placeholders})");
+        let args = ids.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+        decode_runtime_title_rows(&rows, PersistedTitleReadMode::Matching, true)
+    }
+
     async fn list_internal(
         &self,
         facet: Option<MediaFacet>,
@@ -240,20 +273,18 @@ impl TitleStore {
         }
 
         let rows = match query.as_deref() {
-            Some(query)
-                if matches!(mode, PersistedTitleReadMode::Presentation)
-                    && library_ids.is_none() =>
-            {
+            Some(query) if matches!(mode, PersistedTitleReadMode::Presentation) => {
                 if normalize_title_search_text(query).is_empty() {
                     return Ok(Vec::new());
                 }
                 match &self.datastore {
-                    StoreDatastore::Sqlite { pool, .. } => {
+                    StoreDatastore::Sqlite { pool, .. } if library_ids.is_none() => {
                         let mut titles = list_titles_via_sqlite_title_search_query(
                             pool,
                             facet,
                             query,
                             include_external_ids,
+                            self.fuzzy.as_deref(),
                         )
                         .await?;
                         if include_canonical_tags {
@@ -262,8 +293,21 @@ impl TitleStore {
                         }
                         return Ok(titles);
                     }
-                    StoreDatastore::Postgres { .. } => {
-                        let (sql, args) = build_ranked_title_list_sql(facet, None, query);
+                    _ => {
+                        // Same lane, same index, same ranks: the typo
+                        // tolerance is not a SQLite-only feature any more.
+                        let typo_ranks = match build_title_search_plan(facet.clone(), query) {
+                            Some(plan) => {
+                                scryer_infrastructure_library_search::resolve_typo_title_ranks(
+                                    self.fuzzy.as_deref(),
+                                    &plan,
+                                )
+                                .await?
+                            }
+                            None => Vec::new(),
+                        };
+                        let (sql, args) =
+                            build_ranked_title_list_sql(facet, library_ids, query, &typo_ranks);
                         SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?
                     }
                 }
@@ -315,8 +359,127 @@ impl TitleStore {
 /// variable ceiling with room for the monitored bind.
 const SET_TITLES_MONITORED_BIND_CHUNK: usize = 900;
 
+/// The `folder_path` half of the folder-ownership lookup, with its binds.
+///
+/// The narrowing has to let through every row `folder_paths_match` would
+/// accept, or a title that already owns the folder goes unseen and a second
+/// title claims it. Off Windows the matcher compares the stored spelling
+/// exactly, so exact equality against the candidate spellings is already a
+/// superset. On Windows the matcher lowercases and treats `/` and `\` as one
+/// separator, so a stored `C:\Media\Show` has to be reachable from a scanned
+/// `c:/media/show`; both sides go through
+/// [`scryer_application::stored_paths::folder_path_lookup_key`] — in SQL,
+/// `lower(replace(folder_path, '/', '\'))`, which sqlite and postgres both
+/// understand and which migration 0253 indexes.
+///
+/// The escape form keeps exact equality: it is ASCII by construction and its
+/// `%uXXXX` units are not a path spelling to fold. That is why the folded arm
+/// excludes it and the exact arm is kept on Windows too.
+fn folder_path_owner_predicate(
+    match_candidates: &[String],
+    windows: bool,
+) -> (String, Vec<SqlArg>) {
+    let exact_placeholders = std::iter::repeat_n("{}", match_candidates.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut args = match_candidates
+        .iter()
+        .cloned()
+        .map(SqlArg::Text)
+        .collect::<Vec<_>>();
+    if !windows {
+        return (format!("folder_path IN ({exact_placeholders})"), args);
+    }
+
+    let mut folded = Vec::<String>::new();
+    for candidate in match_candidates {
+        if scryer_application::stored_paths::is_escaped_stored_path(candidate) {
+            continue;
+        }
+        let key = scryer_application::stored_paths::folder_path_lookup_key_for_platform(
+            candidate, windows,
+        );
+        if !folded.contains(&key) {
+            folded.push(key);
+        }
+    }
+    if folded.is_empty() {
+        return (format!("folder_path IN ({exact_placeholders})"), args);
+    }
+
+    let folded_placeholders = std::iter::repeat_n("{}", folded.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    args.extend(folded.into_iter().map(SqlArg::Text));
+    (
+        format!(
+            "(folder_path IN ({exact_placeholders}) OR (\
+             folder_path NOT LIKE 'scryer-path-v1:%' \
+             AND lower(replace(folder_path, '/', '\\')) IN ({folded_placeholders})))"
+        ),
+        args,
+    )
+}
+
 #[async_trait]
 impl TitleRepository for TitleStore {
+    async fn list_discovery_context_titles(
+        &self,
+    ) -> AppResult<Vec<scryer_application::DiscoveryContextTitle>> {
+        let genres = match &self.datastore {
+            StoreDatastore::Sqlite { .. } => {
+                "COALESCE((SELECT json_group_array(name) FROM title_metadata_tags WHERE title_id = titles.id AND LOWER(category) = 'genre'), '[]')"
+            }
+            StoreDatastore::Postgres { .. } => {
+                "COALESCE((SELECT json_agg(name)::text FROM title_metadata_tags WHERE title_id = titles.id AND LOWER(category) = 'genre'), '[]')"
+            }
+        };
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT id, library_id, name, facet, external_ids, {genres} AS genres FROM titles"
+            ),
+            &[],
+        )
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let facet = parse_facet(&row.text("facet")?);
+                Ok(scryer_application::DiscoveryContextTitle {
+                    id: row.text("id")?,
+                    library_id: row
+                        .opt_text("library_id")?
+                        .unwrap_or_else(|| scryer_domain::default_library_id_for_facet(&facet)),
+                    name: row.text("name")?,
+                    facet,
+                    external_ids: decode_title_json_or_default(row, "external_ids")?,
+                    genres: decode_title_json_or_default(row, "genres")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn title_counts(&self) -> AppResult<scryer_application::TitleCounts> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT facet, COUNT(*) AS total, SUM(CASE WHEN monitored THEN 1 ELSE 0 END) AS monitored FROM titles GROUP BY facet",
+            &[],
+        ).await?;
+        let mut counts = scryer_application::TitleCounts::default();
+        for row in rows {
+            let total = row.i64("total")? as usize;
+            counts.total += total;
+            counts.monitored += row.i64("monitored")? as usize;
+            match row.text("facet")?.as_str() {
+                "movie" => counts.movie += total,
+                "series" => counts.series += total,
+                "anime" => counts.anime += total,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
+
     async fn list(
         &self,
         facet: Option<MediaFacet>,
@@ -348,19 +511,18 @@ impl TitleRepository for TitleStore {
         if match_candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders = std::iter::repeat_n("{}", match_candidates.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let (predicate, candidate_args) =
+            folder_path_owner_predicate(match_candidates, cfg!(windows));
         let sql = format!(
             "SELECT {TITLE_COLUMNS} FROM titles \
-             WHERE library_id = {{}} AND id <> {{}} AND folder_path IN ({placeholders}) \
+             WHERE library_id = {{}} AND id <> {{}} AND {predicate} \
              ORDER BY LOWER(name), id"
         );
         let mut args = vec![
             SqlArg::Text(library_id.to_string()),
             SqlArg::Text(exclude_title_id.to_string()),
         ];
-        args.extend(match_candidates.iter().cloned().map(SqlArg::Text));
+        args.extend(candidate_args);
 
         let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
         decode_runtime_title_rows(&rows, PersistedTitleReadMode::Presentation, false)
@@ -843,8 +1005,8 @@ impl TitleRepository for TitleStore {
         sort: TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
-        include_catalog_counts: bool,
+        projection: scryer_application::TitleListProjection,
+        aggregates: scryer_application::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
             return Ok(TitleCatalogResult {
@@ -858,8 +1020,14 @@ impl TitleRepository for TitleStore {
             });
         }
 
-        let query = query.as_deref();
-        let filter_counts = if include_catalog_counts {
+        let resolved_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            facet.clone(),
+            query.as_deref(),
+        )
+        .await?;
+        let query = resolved_search.as_ref();
+        let filter_counts = if aggregates.filter_counts {
             fetch_title_catalog_filter_counts(
                 &self.datastore,
                 facet.clone(),
@@ -871,19 +1039,19 @@ impl TitleRepository for TitleStore {
         } else {
             TitleCatalogFilterCounts::default()
         };
-        let total_count = if include_catalog_counts {
+        let total_count = if aggregates.total_count {
             fetch_title_catalog_count(&self.datastore, facet.clone(), library_ids, query, &filter)
                 .await?
         } else {
             0
         };
-        let managed_bytes = if include_catalog_counts {
+        let managed_bytes = if aggregates.managed_bytes {
             fetch_title_catalog_managed_bytes(&self.datastore, facet.clone(), library_ids).await?
         } else {
             0
         };
 
-        if limit == 0 || (include_catalog_counts && total_count == 0) {
+        if limit == 0 {
             return Ok(TitleCatalogResult {
                 items: Vec::new(),
                 limit,
@@ -901,18 +1069,22 @@ impl TitleRepository for TitleStore {
             query,
             &filter,
             sort,
-            limit,
+            limit.saturating_add(1),
             offset,
             title_catalog_dialect_for_datastore(&self.datastore),
         );
-        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &page_sql, &page_args).await?;
+        let mut rows =
+            SqlRuntime::fetch_all(self.datastore.read_exec(), &page_sql, &page_args).await?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
         let mut items = decode_runtime_title_rows(
             &rows,
             PersistedTitleReadMode::Presentation,
-            include_external_ids,
+            projection.include_external_ids,
         )?;
-        attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut items).await?;
-        let has_more = include_catalog_counts && offset.saturating_add(items.len()) < total_count;
+        if projection.include_canonical_tags {
+            attach_metadata_tags_to_titles(self.datastore.read_exec(), &mut items).await?;
+        }
 
         Ok(TitleCatalogResult {
             items,
@@ -1066,6 +1238,266 @@ impl TitleRepository for TitleStore {
             false,
         )
         .await
+    }
+
+    /// The exact lane of release and import resolution, answered from the
+    /// persisted projection instead of a catalog-sized map held per process.
+    async fn find_titles_by_lookup_keys(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("{}", keys.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT title_id FROM title_search_terms \
+             WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+             AND literal_term IN ({placeholders})"
+        );
+        let args = keys.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+        let ids = rows
+            .iter()
+            .map(|row| row.text("title_id"))
+            .collect::<AppResult<Vec<_>>>()?;
+        self.titles_for_matching_by_ids(&ids).await
+    }
+
+    async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("{}", keys.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT title_id FROM title_search_terms \
+             WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+             AND (literal_term IN ({placeholders}) OR stripped_year_key IN ({placeholders}))"
+        );
+        let mut args = keys.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+        args.extend(keys.iter().cloned().map(SqlArg::Text));
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+        let ids = rows
+            .iter()
+            .map(|row| row.text("title_id"))
+            .collect::<AppResult<Vec<_>>>()?;
+        self.titles_for_matching_by_ids(&ids).await
+    }
+
+    async fn monitored_library_scopes(&self) -> AppResult<Vec<(String, String)>> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT DISTINCT library_id, facet FROM titles WHERE monitored = TRUE \
+             ORDER BY library_id, facet",
+            &[],
+        )
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.text("library_id")?, row.text("facet")?)))
+            .collect()
+    }
+
+    async fn find_titles_by_external_id(&self, source: &str, value: &str) -> AppResult<Vec<Title>> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT DISTINCT title_id FROM title_external_ids \
+             WHERE LOWER(source) = LOWER({}) AND LOWER(TRIM(external_id)) = LOWER({})",
+            &[
+                SqlArg::Text(source.to_string()),
+                SqlArg::Text(value.to_string()),
+            ],
+        )
+        .await?;
+        let ids = rows
+            .iter()
+            .map(|row| row.text("title_id"))
+            .collect::<AppResult<Vec<_>>>()?;
+        self.titles_for_matching_by_ids(&ids).await
+    }
+
+    /// One grouped read over the year-stripped key column. The in-memory
+    /// version of this was a map from every lookup key in the library to the
+    /// titles claiming it, rebuilt whenever anything in the catalog changed.
+    async fn lookup_keys_claimed_by_other_titles(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let shapes = keys
+            .iter()
+            .map(|key| scryer_domain::title_spelling::strip_trailing_year(key).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let placeholders = std::iter::repeat_n("{}", shapes.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stripped_year_key, COUNT(*) AS claims FROM title_search_terms \
+             WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+             AND title_id <> {{}} AND stripped_year_key IN ({placeholders}) \
+             GROUP BY stripped_year_key"
+        );
+        let mut args = vec![SqlArg::Text(title_id.to_string())];
+        args.extend(shapes.iter().cloned().map(SqlArg::Text));
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+        let mut claimed = std::collections::HashSet::new();
+        for row in &rows {
+            if row.i64("claims")? > 0 {
+                claimed.insert(row.text("stripped_year_key")?);
+            }
+        }
+        Ok(keys
+            .iter()
+            .filter(|key| claimed.contains(scryer_domain::title_spelling::strip_trailing_year(key)))
+            .cloned()
+            .collect())
+    }
+
+    async fn find_title_name_candidates(
+        &self,
+        query: scryer_application::TitleNameBucketQuery<'_>,
+    ) -> AppResult<Vec<scryer_application::TitleNameCandidate>> {
+        const CANDIDATE_COLUMNS: &str =
+            "title_id, facet, raw_term, literal_term, match_term, match_year, language_tag";
+
+        let mut args = vec![
+            SqlArg::Text(query.script.to_string()),
+            SqlArg::Text(query.numbers_key.to_string()),
+        ];
+        let mut bucket = String::from(
+            "term_kind IN ('name', 'alias', 'tagged_alias') AND script = {} AND numbers_key = {}",
+        );
+        if let Some(facet) = query.facet {
+            bucket.push_str(" AND facet = {}");
+            args.push(SqlArg::Text(facet.to_string()));
+        }
+
+        // The equality lanes first, uncapped: a romanization or a
+        // locale-equal spelling is not a bounded edit distance, so no length
+        // band can stand in for them.
+        let mut equality = vec!["match_term = {}".to_string()];
+        args.push(SqlArg::Text(query.match_term.to_string()));
+        if let Some(romanization_key) = query.romanization_key {
+            equality.push("romanization_key = {}".to_string());
+            args.push(SqlArg::Text(romanization_key.to_string()));
+        }
+        for (profile, key) in query.collation_keys {
+            equality.push(
+                "EXISTS (SELECT 1 FROM title_search_collation_keys k \
+                 WHERE k.term_id = title_search_terms.term_id \
+                 AND k.profile = {} AND k.collation_key = {})"
+                    .to_string(),
+            );
+            args.push(SqlArg::Text((*profile).to_string()));
+            args.push(SqlArg::OptBytes(Some(key.clone())));
+        }
+        let sql = format!(
+            "SELECT {CANDIDATE_COLUMNS} FROM title_search_terms \
+             WHERE {bucket} AND ({})",
+            equality.join(" OR ")
+        );
+        let mut rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
+
+        // Then the bounded-distance lane, which is not SQL at all: the fuzzy
+        // index answers "within n edits of" and hands back term ids, and the
+        // candidate columns are read from the same projection row the
+        // equality lanes read, so a candidate is the same thing whichever
+        // lane found it. The index must be complete before ambiguity is evaluated.
+        if let Some(distance) = query.typo_distance {
+            let fuzzy = self
+                .fuzzy
+                .as_deref()
+                .ok_or_else(|| AppError::Repository("title fuzzy index is not attached".into()))?;
+            let term_ids = fuzzy
+                .resolver_candidates(
+                    scryer_infrastructure_library_search::fuzzy::ResolverFuzzyQuery {
+                        facet: query.facet,
+                        script: query.script,
+                        numbers_key: query.numbers_key,
+                        match_term: query.match_term,
+                        distance,
+                        limit: query.limit.max(0) as usize,
+                    },
+                )
+                .await?;
+            if !term_ids.is_empty() {
+                let placeholders = std::iter::repeat_n("{}", term_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let hydrate_sql = format!(
+                    "SELECT {CANDIDATE_COLUMNS} FROM title_search_terms \
+                     WHERE term_id IN ({placeholders})"
+                );
+                let hydrate_args = term_ids
+                    .iter()
+                    .copied()
+                    .map(SqlArg::I64)
+                    .collect::<Vec<_>>();
+                rows.extend(
+                    SqlRuntime::fetch_all(self.datastore.read_exec(), &hydrate_sql, &hydrate_args)
+                        .await?,
+                );
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut candidates = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let candidate = scryer_application::TitleNameCandidate {
+                title_id: row.text("title_id")?,
+                facet: row.text("facet")?,
+                raw_term: row.text("raw_term")?,
+                literal_term: row.text("literal_term")?,
+                match_term: row.text("match_term")?,
+                match_year: row.opt_i32("match_year")?,
+                language_tag: row.opt_text("language_tag")?,
+            };
+            if seen.insert((candidate.title_id.clone(), candidate.literal_term.clone())) {
+                candidates.push(candidate);
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn list_title_index_names(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<scryer_application::TitleNameCandidate>> {
+        // The same term kinds the bucket lanes above read, so a name that can
+        // discover a title is always one of the names returned for it.
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT title_id, facet, raw_term, literal_term, match_term, match_year, language_tag \
+             FROM title_search_terms \
+             WHERE title_id = {} AND term_kind IN ('name', 'alias', 'tagged_alias') \
+             ORDER BY term_id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name = scryer_application::TitleNameCandidate {
+                title_id: row.text("title_id")?,
+                facet: row.text("facet")?,
+                raw_term: row.text("raw_term")?,
+                literal_term: row.text("literal_term")?,
+                match_term: row.text("match_term")?,
+                match_year: row.opt_i32("match_year")?,
+                language_tag: row.opt_text("language_tag")?,
+            };
+            if seen.insert(name.literal_term.clone()) {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
@@ -2243,13 +2675,16 @@ async fn list_titles_via_sqlite_title_search_query(
     facet: Option<MediaFacet>,
     query: &str,
     include_external_ids: bool,
+    fuzzy: Option<&scryer_infrastructure_library_search::TitleFuzzyIndex>,
 ) -> AppResult<Vec<Title>> {
     let Some(search_plan) = build_title_search_plan(facet, query) else {
         return Ok(Vec::new());
     };
 
+    let typo_ranks =
+        scryer_infrastructure_library_search::resolve_typo_title_ranks(fuzzy, &search_plan).await?;
     let mut builder = QueryBuilder::<Sqlite>::new("");
-    push_ranked_title_matches_cte(&mut builder, &search_plan);
+    push_ranked_title_matches_cte(&mut builder, &search_plan, &typo_ranks);
     builder.push(format!(
         "SELECT {TITLE_COLUMNS} FROM ranked_title_matches
          JOIN titles ON titles.id = ranked_title_matches.title_id
@@ -3045,7 +3480,7 @@ fn build_plain_title_list_sql(
 fn build_title_catalog_count_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     dialect: TitleCatalogSqlDialect,
 ) -> (String, Vec<SqlArg>) {
@@ -3063,7 +3498,7 @@ async fn fetch_title_catalog_count(
     datastore: &StoreDatastore,
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
 ) -> AppResult<usize> {
     let (sql, args) = build_title_catalog_count_sql(
@@ -3093,13 +3528,14 @@ async fn fetch_title_catalog_managed_bytes(
     }
 
     let (scope_sql, args) = build_title_catalog_options_scope_sql(facet, library_ids, &[]);
-    let media_size_sql =
-        title_catalog_media_size_subquery(title_catalog_dialect_for_datastore(datastore));
+    let media_size_sql = title_catalog_media_size_subquery_scoped(
+        title_catalog_dialect_for_datastore(datastore),
+        "JOIN scoped_titles ON scoped_titles.id = mf.title_id",
+    );
     let sql = format!(
-        "SELECT CAST(COALESCE(SUM(COALESCE(catalog_media_size.total_size_bytes, 0)), 0) AS BIGINT) AS managed_bytes \
-           FROM titles \
-      LEFT JOIN ({media_size_sql}) catalog_media_size ON catalog_media_size.title_id = titles.id \
-          WHERE {scope_sql}"
+        "WITH scoped_titles AS (SELECT id FROM titles WHERE {scope_sql}) \
+         SELECT CAST(COALESCE(SUM(catalog_media_size.total_size_bytes), 0) AS BIGINT) AS managed_bytes \
+           FROM ({media_size_sql}) catalog_media_size"
     );
 
     Ok(
@@ -3116,7 +3552,7 @@ async fn fetch_title_catalog_filter_counts(
     datastore: &StoreDatastore,
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     active_filter: &TitleCatalogFilter,
 ) -> AppResult<TitleCatalogFilterCounts> {
     let all_filter = TitleCatalogFilter {
@@ -3274,7 +3710,7 @@ fn build_title_catalog_options_scope_sql(
 fn build_title_catalog_page_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     sort: TitleCatalogSort,
     limit: usize,
@@ -3300,7 +3736,7 @@ fn build_title_catalog_page_sql(
 fn build_title_catalog_where_sql(
     facet: Option<MediaFacet>,
     library_ids: &[String],
-    query: Option<&str>,
+    query: Option<&crate::queries::title_search::ResolvedTitleSearch>,
     filter: &TitleCatalogFilter,
     dialect: TitleCatalogSqlDialect,
 ) -> (String, Vec<SqlArg>) {
@@ -3322,9 +3758,10 @@ fn build_title_catalog_where_sql(
         args.push(SqlArg::Text(facet.as_str().to_string()));
     }
 
-    if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
-        clauses.push("LOWER(name) LIKE {}".to_string());
-        args.push(SqlArg::Text(format!("%{}%", query.to_lowercase())));
+    if let Some(query) = query {
+        let (predicate, search_args) = query.predicate("titles.id");
+        clauses.push(predicate);
+        args.extend(search_args.into_iter().map(SqlArg::Text));
     }
 
     if !filter.root_folder_ids.is_empty() {
@@ -4032,6 +4469,13 @@ fn title_catalog_movie_media_subquery(dialect: TitleCatalogSqlDialect) -> String
 }
 
 fn title_catalog_media_size_subquery(dialect: TitleCatalogSqlDialect) -> String {
+    title_catalog_media_size_subquery_scoped(dialect, "")
+}
+
+fn title_catalog_media_size_subquery_scoped(
+    dialect: TitleCatalogSqlDialect,
+    scope_join: &str,
+) -> String {
     let total_size_expression =
         title_catalog_total_size_sum_expression(dialect, "matched.size_bytes");
     format!(
@@ -4045,6 +4489,7 @@ fn title_catalog_media_size_subquery(dialect: TitleCatalogSqlDialect) -> String 
                            ELSE 0
                        END AS size_bytes
                   FROM media_files mf
+                  {scope_join}
              LEFT JOIN file_episode_map fem
                     ON fem.file_id = mf.id
              LEFT JOIN collections c
@@ -4115,12 +4560,14 @@ fn build_ranked_title_list_sql(
     facet: Option<MediaFacet>,
     library_ids: Option<&[String]>,
     query: &str,
+    typo_ranks: &[(String, i64)],
 ) -> (String, Vec<SqlArg>) {
     let normalized = normalize_title_search_text(query);
     let mut sql = format!(
         "SELECT {TITLE_COLUMNS}
            FROM titles
            JOIN (
+                SELECT title_id, MIN(rank) AS rank FROM (
                 SELECT title_id,
                        MIN(
                            CASE
@@ -4149,8 +4596,15 @@ fn build_ranked_title_list_sql(
 
     sql.push_str(" WHERE ");
     sql.push_str(&where_clauses.join(" AND "));
+    sql.push_str(" GROUP BY title_id");
+    for (title_id, rank) in typo_ranks {
+        sql.push_str(" UNION ALL SELECT {} AS title_id, {} AS rank");
+        args.push(SqlArg::Text(title_id.clone()));
+        args.push(SqlArg::I64(*rank));
+    }
     sql.push_str(
-        " GROUP BY title_id
+        " ) combined_title_matches
+           GROUP BY title_id
            ) ranked_titles ON ranked_titles.title_id = titles.id",
     );
 
@@ -4800,6 +5254,22 @@ async fn replace_title_external_ids_projection_sql_tx(
     Ok(())
 }
 
+/// Rewrite one title's projection rows from its current catalog row.
+///
+/// The projection also carries the cour names the title's numbering bridge
+/// holds, so a bridge write has to restate the projection: the resolver reads
+/// nothing else. Absent titles are a no-op — a bridge can outlive its title
+/// inside one transaction.
+pub(crate) async fn refresh_title_search_projection_tx(
+    tx: &mut SqlTx<'_>,
+    title_id: &str,
+) -> AppResult<()> {
+    let Some(title) = load_title_tx(tx, title_id, false).await? else {
+        return Ok(());
+    };
+    replace_title_search_projection_sql_tx(tx, &title).await
+}
+
 async fn replace_title_search_projection_sql_tx(
     tx: &mut SqlTx<'_>,
     title: &Title,
@@ -4850,6 +5320,191 @@ mod tests {
     use super::*;
 
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn discovery_context_projection_reads_only_identity_and_genres() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Omit presentation columns and provenance tables: touching either must fail.
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, library_id TEXT, name TEXT, facet TEXT, external_ids TEXT)").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE title_metadata_tags (title_id TEXT, category TEXT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(r#"INSERT INTO titles VALUES ('a', NULL, 'A', 'movie', '[{"source":"tmdb","value":"10"}]'), ('b', 'alternate', 'B', 'anime', '[]')"#).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO title_metadata_tags VALUES ('a', 'GENRE', 'Animation'), ('a', 'genre', 'Drama'), ('a', 'theme', 'Mystery')").execute(&pool).await.unwrap();
+        let store = TitleStore::new(StoreDatastore::sqlite(
+            pool,
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+        let mut rows = store.list_discovery_context_titles().await.unwrap();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].library_id,
+            scryer_domain::default_library_id_for_facet(&MediaFacet::Movie)
+        );
+        assert_eq!(rows[0].external_ids[0].value, "10");
+        rows[0].genres.sort();
+        assert_eq!(rows[0].genres, ["Animation", "Drama"]);
+        assert_eq!(rows[1].library_id, "alternate");
+        assert!(rows[1].genres.is_empty());
+        assert!(rows[1].external_ids.is_empty());
+    }
+
+    /// A title stored as `C:\Media\Show` has to be found when a scan or a move
+    /// supplies `c:/media/show`: on Windows `folder_paths_match` accepts the
+    /// pair, and a narrowing that drops it reports no owner and lets a second
+    /// title claim an owned folder.
+    ///
+    /// The Windows rule is driven through the predicate's platform argument, so
+    /// this runs on every host, and the folded arm is executed by sqlite here so
+    /// the SQL it emits is checked as SQL and not just as a string.
+    #[tokio::test]
+    async fn folder_owner_lookup_finds_a_windows_folder_spelled_the_other_way() {
+        let candidates =
+            scryer_application::stored_paths::folder_path_match_candidates("c:/media/show");
+        let (predicate, args) = folder_path_owner_predicate(&candidates, true);
+        assert!(
+            predicate.contains("lower(replace(folder_path, '/', '\\'))"),
+            "windows predicate does not fold the stored spelling: {predicate}"
+        );
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, folder_path TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO titles VALUES ('owner', 'C:\\Media\\Show'), ('other', 'C:\\Media\\Show 2')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let datastore =
+            StoreDatastore::sqlite(pool, std::sync::Arc::new(tokio::sync::Mutex::new(())));
+        let rows = SqlRuntime::fetch_all(
+            datastore.read_exec(),
+            &format!("SELECT id FROM titles WHERE {predicate} ORDER BY id"),
+            &args,
+        )
+        .await
+        .unwrap();
+        let found = rows
+            .iter()
+            .map(|row| row.text("id").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec!["owner".to_string()],
+            "the folded lookup must find the owner and only the owner"
+        );
+    }
+
+    /// Off Windows the matcher compares the stored spelling exactly, so the
+    /// narrowing must not start folding case or separators.
+    #[test]
+    fn folder_owner_lookup_stays_exact_off_windows() {
+        let candidates = scryer_application::stored_paths::folder_path_match_candidates(
+            "/media/movies/Arrival (2016)",
+        );
+        let (predicate, args) = folder_path_owner_predicate(&candidates, false);
+        assert_eq!(predicate.matches("{}").count(), candidates.len());
+        assert_eq!(args.len(), candidates.len());
+        assert!(!predicate.contains("lower("), "{predicate}");
+    }
+
+    #[tokio::test]
+    async fn catalog_aggregate_selection_skips_unrequested_tables_and_page_hydration() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Deliberately omit all hydration, media, monitored, and status columns.
+        sqlx::query("CREATE TABLE titles (id TEXT PRIMARY KEY, library_id TEXT, facet TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO titles VALUES ('a','visible','movie'), ('b','hidden','movie')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = TitleStore::new(StoreDatastore::Sqlite {
+            pool,
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        });
+        for (selection, expected) in [
+            (scryer_application::TitleCatalogAggregates::default(), 0),
+            (
+                scryer_application::TitleCatalogAggregates {
+                    total_count: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+        ] {
+            let result = store
+                .list_for_libraries_catalog(
+                    Some(MediaFacet::Movie),
+                    &["visible".into()],
+                    None,
+                    TitleCatalogFilter::default(),
+                    TitleCatalogSort::default(),
+                    0,
+                    0,
+                    TitleListProjection::without_canonical_tags().without_external_ids(),
+                    selection,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.total_count, expected);
+            assert!(result.items.is_empty());
+            assert!(!result.has_more);
+            assert_eq!(result.managed_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_counts_need_only_facet_and_monitored_columns() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE titles (facet TEXT NOT NULL, monitored INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = TitleStore::new(StoreDatastore::Sqlite {
+            pool: pool.clone(),
+            writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        });
+        assert_eq!(store.title_counts().await.unwrap().total, 0);
+        sqlx::query(
+            "INSERT INTO titles VALUES ('movie', 1), ('movie', 0), ('series', 1), ('anime', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let counts = store.title_counts().await.unwrap();
+        assert_eq!(
+            (
+                counts.total,
+                counts.monitored,
+                counts.movie,
+                counts.series,
+                counts.anime
+            ),
+            (4, 2, 2, 1, 1)
+        );
+    }
 
     fn hydration_identity(source: &str, value: &str) -> Vec<ExternalId> {
         vec![ExternalId::new(source.to_string(), value.to_string())]
@@ -4906,10 +5561,31 @@ mod tests {
         .execute(&pool)
         .await
         .expect("title_search_terms table should be created");
-        sqlx::query("CREATE TABLE title_search_spellfix (term TEXT)")
-            .execute(&pool)
-            .await
-            .expect("title_search_spellfix table should be created");
+        // Deleting a projection claims the title for the fuzzy index in the
+        // same transaction, so the queue has to exist for the delete to run.
+        sqlx::query(
+            "CREATE TABLE title_search_index_queue (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                title_id TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("title_search_index_queue table should be created");
+        // The projection's collation keys hang off a term row; deleting a
+        // title clears them explicitly rather than trusting SQLite foreign-key
+        // enforcement, which is not guaranteed to be on.
+        sqlx::query(
+            "CREATE TABLE title_search_collation_keys (
+                term_id INTEGER NOT NULL,
+                profile TEXT NOT NULL,
+                collation_key BLOB NOT NULL,
+                PRIMARY KEY (term_id, profile)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("title_search_collation_keys table should be created");
         sqlx::query(
             "CREATE TABLE indexer_search_learning (
                 indexer_id TEXT NOT NULL,
@@ -5008,8 +5684,6 @@ mod tests {
 
     #[tokio::test]
     async fn persist_smg_id_replaces_a_redirected_value_and_rebuilds_external_id_lookups() {
-        scryer_infrastructure_datastore::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before migrations");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -5131,8 +5805,6 @@ mod tests {
     }
 
     async fn migrated_test_store() -> (TitleStore, sqlx::SqlitePool) {
-        scryer_infrastructure_datastore::register_spellfix_auto_extension()
-            .expect("spellfix extension should register before migrations");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -5579,8 +6251,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn title_catalog_where_sql_combines_advanced_filter_groups() {
+    #[tokio::test]
+    async fn title_catalog_where_sql_combines_advanced_filter_groups() {
+        let (store, _pool) = migrated_test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let index = scryer_infrastructure_library_search::TitleFuzzyIndex::open(
+            directory.path(),
+            std::sync::Arc::new(
+                crate::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+                    store.datastore.clone(),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        let search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            Some(&index),
+            Some(MediaFacet::Movie),
+            Some("sample"),
+        )
+        .await
+        .unwrap();
         let filter = TitleCatalogFilter {
             monitored: Some(true),
             content_statuses: vec![TitleCatalogContentStatus::Continuing],
@@ -5596,7 +6287,7 @@ mod tests {
         let (sql, args) = build_title_catalog_where_sql(
             Some(MediaFacet::Movie),
             &["library-1".to_string()],
-            Some("sample"),
+            search.as_ref(),
             &filter,
             TitleCatalogSqlDialect::Sqlite,
         );
@@ -5609,6 +6300,7 @@ mod tests {
             2
         );
         assert!(sql.contains("FROM title_metadata_rating_summaries catalog_rating"));
+        assert!(sql.contains("FROM title_search_terms search_term"));
         assert!(sql.contains("monitored = {}"));
         assert!(sql.contains("LOWER(TRIM(COALESCE(content_status, ''))) IN"));
         assert_eq!(args.len(), 15);

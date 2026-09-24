@@ -940,8 +940,6 @@ async fn migration_0140_uses_owner_scoped_metadata_storage_only() {
 
 #[tokio::test]
 async fn migration_0147_retires_w500_variants_and_0148_adds_extensible_proxy_tables() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0147_w500_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -1586,8 +1584,6 @@ async fn migration_0180_postgres_rekeys_constraints_and_compares_fresh_indexes()
 
 #[tokio::test]
 async fn migration_0140_upgrades_v0_16_8_title_metadata_and_media_in_place() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0140_v0_16_8_upgrade_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -2668,8 +2664,6 @@ async fn quarantined_0157_is_recorded_without_running_and_0160_normalizes_withou
     // 0157 must be recorded as applied — same version and checksum as the
     // catalog, so ledger validation stays green forever — without executing,
     // and 0160 must set unambiguous folders while touching no media_files row.
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0157_quarantine_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3016,8 +3010,6 @@ async fn migration_0200_queues_idle_supported_movies_without_interrupting_active
 
 #[tokio::test]
 async fn migrations_0179_and_0180_backfill_and_finalize_canonical_download_identity() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0179_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3545,8 +3537,6 @@ async fn migrations_0179_and_0180_backfill_and_finalize_canonical_download_ident
 
 #[tokio::test]
 async fn migration_0180_rekeys_a_populated_0179_database_and_validates_constraints() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0180_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3780,8 +3770,6 @@ async fn migration_0180_rekeys_a_populated_0179_database_and_validates_constrain
 
 #[tokio::test]
 async fn migration_0179_rejects_duplicate_adopted_token_ids_without_partial_writes() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0179_collision_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -3938,8 +3926,6 @@ async fn migration_0179_postgres_backfills_token_identity_from_env() -> AppResul
 
 #[tokio::test]
 async fn migration_0186_admits_token_less_identity_states_without_disturbing_existing_rows() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0186_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -4124,8 +4110,6 @@ async fn migration_0186_admits_token_less_identity_states_without_disturbing_exi
 
 #[tokio::test]
 async fn migration_0201_compacts_discovery_payloads_and_rekeys_recommendation_cards() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0201_discovery_storage_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -4427,8 +4411,6 @@ async fn migration_0201_postgres_uses_native_payload_and_timestamp_types() -> Ap
 
 #[tokio::test]
 async fn migrations_0202_and_0203_bind_factor_state_and_session_epochs() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0202_0203_factor_state_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -4441,6 +4423,15 @@ async fn migrations_0202_and_0203_bind_factor_state_and_session_epochs() {
     crate::migrations::replay_source_catalog_for_fresh_install(&pool, Some(201), true)
         .await
         .expect("0201 fixture schema should install");
+
+    sqlx::query(
+        "INSERT INTO users (id, username, status, created_at, updated_at)
+         VALUES ('00000000000000000000000000000001', 'factor-state-user', 'active',
+                 '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("legacy credential owner should insert");
 
     sqlx::query(
         "INSERT INTO totp_credentials (
@@ -5272,8 +5263,6 @@ async fn migration_0220_adds_the_wireguard_columns_without_disturbing_existing_r
 
 #[tokio::test]
 async fn migration_0206_rebuilds_media_requests_without_losing_child_rows() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0206_{}.db",
         chrono::Utc::now().timestamp_micros()
@@ -5694,10 +5683,118 @@ async fn migration_0242_attributes_single_client_bindings_and_ends_the_rest() {
     );
 }
 
+/// Migration 0253 finishes the canonical downloads a deleted client config
+/// left behind.
+///
+/// `terminal_at` had no writer before this change, so deleting a client ended
+/// its bindings and left the downloads live. Re-adding the same physical client
+/// gives it a new config id while the client still lists the same native items
+/// carrying the old tokens, which the resolver could only report as a conflict
+/// — the same row, every poll, forever. The resolver now rebinds an ended
+/// binding whose download is still live, so these rows must be marked finished
+/// or they would be re-adopted instead.
+#[tokio::test]
+async fn migration_0253_terminalises_downloads_whose_client_config_is_gone() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("migration test database should open");
+    sqlx::raw_sql(
+        "CREATE TABLE download_clients (id TEXT PRIMARY KEY, client_type TEXT NOT NULL);
+         CREATE TABLE downloads (
+             id TEXT PRIMARY KEY,
+             origin TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             terminal_at TEXT
+         );
+         CREATE TABLE download_client_bindings (
+             download_id TEXT PRIMARY KEY,
+             client_config_id TEXT,
+             client_type_snapshot TEXT,
+             native_item_id TEXT,
+             created_at TEXT NOT NULL,
+             ended_at TEXT
+         );
+         INSERT INTO download_clients (id, client_type) VALUES ('client-live', 'weaver');
+         INSERT INTO downloads (id, origin, created_at, terminal_at) VALUES
+             ('download-orphan', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-live-client', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-active', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-blank-config', 'scryer_submission', '2026-01-01T00:00:00Z', NULL),
+             ('download-already-done', 'scryer_submission', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+         INSERT INTO download_client_bindings
+             (download_id, client_config_id, client_type_snapshot, native_item_id, created_at, ended_at)
+         VALUES
+             -- The load-test shape: ended, and its config no longer exists.
+             ('download-orphan', 'client-gone', 'weaver', '10000', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             -- Ended, but the config is still configured: the user may re-enable
+             -- or re-observe it, so this is not ours to finish.
+             ('download-live-client', 'client-live', 'weaver', '10001', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             -- Still actively bound: live, whatever else is true.
+             ('download-active', 'client-gone', 'weaver', '10002', '2026-01-01T00:00:00Z', NULL),
+             -- Migration 0242 ends unattributable bindings without a config id;
+             -- those name no client, so they are not evidence of a deleted one.
+             ('download-blank-config', '', 'weaver', '10003', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+             ('download-already-done', 'client-gone', 'weaver', '10004', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
+    )
+    .execute(&pool)
+    .await
+    .expect("orphaned-download fixture should initialize");
+
+    let apply = || async {
+        sqlx::raw_sql(include_str!(
+            "../../../scryer/src/db/migrations/0253_terminalise_client_less_downloads.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("migration 0253 should apply");
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, terminal_at FROM downloads ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("downloads should load");
+        rows
+    };
+
+    let after = apply().await;
+    let terminal_at = |wanted: &str| {
+        after
+            .iter()
+            .find(|(id, _)| id == wanted)
+            .expect("seeded download")
+            .1
+            .clone()
+    };
+
+    assert!(
+        terminal_at("download-orphan").is_some(),
+        "an ended binding naming a config that is gone means Scryer is done with it"
+    );
+    assert!(
+        terminal_at("download-live-client").is_none(),
+        "the client is still configured, so this download is not ours to finish"
+    );
+    assert!(
+        terminal_at("download-active").is_none(),
+        "a download some client still reports actively stays live"
+    );
+    assert!(
+        terminal_at("download-blank-config").is_none(),
+        "a binding that names no client is not evidence of a deleted one"
+    );
+    assert_eq!(
+        terminal_at("download-already-done").as_deref(),
+        Some("2026-01-02T00:00:00Z"),
+        "an already-finished download keeps its original timestamp"
+    );
+
+    // Idempotent: a second application changes nothing.
+    assert_eq!(apply().await, after, "migration 0253 must be re-runnable");
+}
+
 #[tokio::test]
 async fn migration_0244_splits_the_external_id_key_by_entity_kind() {
-    crate::spellfix::register_spellfix_auto_extension()
-        .expect("spellfix auto-extension should register");
     let db = std::env::temp_dir().join(format!(
         "scryer_migration_0244_external_id_kind_{}.db",
         chrono::Utc::now().timestamp_micros()

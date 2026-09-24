@@ -754,6 +754,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_SERVICE,
             scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: scryer_application::rate_limit_proxy_policy::TRUSTED_PROXIES_KEY,
+            data_type: "json",
+            default_value_json: "null",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_SERVICE,
+            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "encryption.master_key",
             data_type: "string",
             default_value_json: "null",

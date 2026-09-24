@@ -320,6 +320,11 @@ impl FeedbackTimeoutDownloadClient {
 
 #[async_trait]
 impl DownloadClient for FeedbackTimeoutDownloadClient {
+    async fn discover_categories(&self, client_id: &str) -> AppResult<Option<Vec<String>>> {
+        self.run_feedback_read(self.inner.discover_categories(client_id))
+            .await
+    }
+
     async fn observe_download(
         &self,
         locator: &scryer_application::ClientJobLocator,
@@ -1643,10 +1648,16 @@ impl PrioritizedDownloadClientRouter {
             .routing_entry_for_client(&request.title, client_id)
             .await?;
 
-        effective_request.category = routing_entry
-            .as_ref()
-            .and_then(|entry| entry.category.clone())
-            .or_else(|| Self::normalized_request_category(request));
+        effective_request.category =
+            if request.pinned_download_client_id.is_some() && request.category.is_some() {
+                // Explicit operator choice wins, including an empty client-default choice.
+                Self::normalized_request_category(request)
+            } else {
+                routing_entry
+                    .as_ref()
+                    .and_then(|entry| entry.category.clone())
+                    .or_else(|| Self::normalized_request_category(request))
+            };
         let routing_seeding_profile_id = routing_entry
             .as_ref()
             .and_then(|entry| entry.seeding_profile_id.clone());
@@ -2121,6 +2132,69 @@ impl PrioritizedDownloadClientRouter {
 
 #[async_trait]
 impl DownloadClient for PrioritizedDownloadClientRouter {
+    async fn discover_categories(&self, client_id: &str) -> AppResult<Option<Vec<String>>> {
+        let client = self
+            .resolve_client_for_id(client_id)
+            .await?
+            .ok_or_else(|| AppError::Validation("download client is missing or disabled".into()))?;
+        client.discover_categories(client_id).await
+    }
+
+    async fn indexer_grab_clients(
+        &self,
+        title: &scryer_domain::Title,
+        indexer_id: Option<&str>,
+        source_kind: DownloadSourceKind,
+    ) -> AppResult<Vec<scryer_application::IndexerGrabClient>> {
+        let indexer =
+            if let Some(id) = indexer_id {
+                let repository = self
+                    .indexer_configs
+                    .as_ref()
+                    .ok_or_else(|| AppError::Validation("indexer routing is unavailable".into()))?;
+                Some(repository.get_by_id(id).await?.ok_or_else(|| {
+                    AppError::Validation(format!("indexer {id} no longer exists"))
+                })?)
+            } else {
+                None
+            };
+        let mapped = indexer
+            .as_ref()
+            .and_then(|value| value.download_client_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let selection = self.list_clients_for_title(title).await?;
+        let mut eligible = Vec::new();
+        for config in &selection.clients {
+            if mapped.is_some_and(|id| id != config.id)
+                || !Self::config_accepts_source_kind(
+                    config,
+                    source_kind,
+                    self.plugin_provider.as_ref(),
+                )
+            {
+                continue;
+            }
+            let category = self
+                .routing_entry_for_client(title, &config.id)
+                .await?
+                .and_then(|entry| entry.category);
+            eligible.push(scryer_application::IndexerGrabClient {
+                id: config.id.clone(),
+                name: config.name.clone(),
+                category,
+                mapped: mapped.is_some(),
+            });
+        }
+        if eligible.is_empty() {
+            return Err(AppError::Validation(match mapped {
+                Some(id) => format!("Indexer mapping requires client {id}, which is missing, disabled, incompatible, or excluded by routing. Update the indexer mapping or client routing."),
+                None => "No enabled compatible download client is allowed by routing. Configure a download client or update routing.".into(),
+            }));
+        }
+        Ok(eligible)
+    }
+
     /// Resolve the release's file without submitting it (D17).
     ///
     /// The indexer resolves the artifact exactly as the submit path resolves
@@ -2252,6 +2326,20 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
         &self,
         request: &DownloadClientAddRequest,
     ) -> AppResult<DownloadGrabResult> {
+        if let Some(client_id) = request.pinned_download_client_id.as_deref() {
+            let source_kind = request.source_kind.ok_or_else(|| {
+                AppError::Validation("a selected client requires a release protocol".into())
+            })?;
+            let eligible = self
+                .indexer_grab_clients(&request.title, request.indexer_id.as_deref(), source_kind)
+                .await?;
+            if !eligible.iter().any(|client| client.id == client_id) {
+                return Err(AppError::Validation(
+                    "Selected download client is no longer eligible. Refresh routing and retry."
+                        .into(),
+                ));
+            }
+        }
         // Load indexer provenance for the current indexer-to-client mapping.
         let indexer_config = match self.load_indexer_config_for_submission(request).await {
             Ok(indexer_config) => indexer_config,
@@ -2266,6 +2354,15 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             .and_then(|config| config.download_client_id.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        if let (Some(selected), Some(mapped)) = (
+            request.pinned_download_client_id.as_deref(),
+            mapped_client_id,
+        ) && selected != mapped
+        {
+            return Err(AppError::Validation(
+                "indexer mapping changed; refresh routing and retry".into(),
+            ));
+        }
         let request = match self
             .prepare_download_request(request, indexer_config.as_ref())
             .await
@@ -2352,10 +2449,8 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            // An unlinked grab (D8) has no title to route by, so the operator
-            // named the client outright. That choice outranks the indexer
-            // mapping and the routing order; only the client's own routing
-            // entry still applies, for category and queue priority.
+            // The explicit choice was checked against current mappings and routing
+            // before preparing the submission.
             let Some(config) = selection
                 .all_clients
                 .iter()
@@ -5182,6 +5277,178 @@ mod tests {
         assert_eq!(submissions.len(), 1);
         assert_eq!(submissions[0].category.as_deref(), Some("Movies"));
         assert_eq!(submissions[0].queue_priority.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn grab_preview_and_submission_enforce_mapping_and_protocol() {
+        let mut indexer = test_indexer_config("https://indexer.example/api");
+        indexer.download_client_id = Some("mapped".into());
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![
+                    test_config("other", "Other", "weaver", 0),
+                    test_config("mapped", "Mapped", "weaver", 1),
+                ],
+            }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            None,
+        )
+        .with_indexer_config_repositories(
+            Arc::new(RoutingIndexerConfigRepository {
+                configs: vec![indexer],
+            }),
+            Arc::new(EmptyProxyConfigRepository),
+        );
+        let options = router
+            .indexer_grab_clients(&test_title(), Some("indexer-1"), DownloadSourceKind::NzbUrl)
+            .await
+            .unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "mapped");
+        assert!(options[0].mapped);
+        assert!(
+            router
+                .indexer_grab_clients(
+                    &test_title(),
+                    Some("indexer-1"),
+                    DownloadSourceKind::MagnetUri
+                )
+                .await
+                .is_err()
+        );
+        let mut request = DownloadClientAddRequest::from_legacy(
+            &test_title(),
+            Some("https://indexer.example/release.nzb".into()),
+            Some(DownloadSourceKind::NzbUrl),
+            None,
+            None,
+            None,
+        );
+        request.indexer_id = Some("indexer-1".into());
+        request.pinned_download_client_id = Some("other".into());
+        assert!(matches!(
+            router.submit_download(&request).await,
+            Err(AppError::Validation(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn grab_preview_refuses_missing_disabled_and_scope_excluded_mappings() {
+        for case in ["missing", "disabled", "excluded"] {
+            let mut indexer = test_indexer_config("https://indexer.example/api");
+            indexer.download_client_id = Some("mapped".into());
+            let mut config = test_config("mapped", "Mapped", "weaver", 1);
+            config.is_enabled = case != "disabled";
+            let router = PrioritizedDownloadClientRouter::new(
+                Arc::new(MockDownloadClientConfigRepository {
+                    configs: if case == "missing" {
+                        vec![]
+                    } else {
+                        vec![config]
+                    },
+                }),
+                Arc::new(MockSettingsRepository {
+                    routing_by_scope: if case == "excluded" {
+                        HashMap::from([("movie".into(), r#"{"mapped":{"enabled":false}}"#.into())])
+                    } else {
+                        HashMap::new()
+                    },
+                }),
+                null_staged_nzb_store(),
+                test_pipeline_limit(),
+                None,
+            )
+            .with_indexer_config_repositories(
+                Arc::new(RoutingIndexerConfigRepository {
+                    configs: vec![indexer],
+                }),
+                Arc::new(EmptyProxyConfigRepository),
+            );
+            assert!(
+                router
+                    .indexer_grab_clients(
+                        &test_title(),
+                        Some("indexer-1"),
+                        DownloadSourceKind::NzbUrl
+                    )
+                    .await
+                    .is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_category_distinguishes_omitted_custom_and_client_default() {
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![test_config("client", "Client", "weaver", 0)],
+            }),
+            Arc::new(MockSettingsRepository {
+                routing_by_scope: HashMap::from([(
+                    "movie".into(),
+                    r#"{"client":{"enabled":true,"category":"routed"}}"#.into(),
+                )]),
+            }),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            None,
+        );
+        for (pinned, category, expected) in [
+            (false, Some("caller"), Some("routed")),
+            (true, None, Some("routed")),
+            (true, Some("custom"), Some("custom")),
+            (true, Some(""), None),
+        ] {
+            let mut request = DownloadClientAddRequest::from_legacy(
+                &test_title(),
+                None,
+                Some(DownloadSourceKind::NzbUrl),
+                None,
+                None,
+                category.map(str::to_string),
+            );
+            request.pinned_download_client_id = pinned.then(|| "client".into());
+            let (effective, _) = router
+                .apply_selected_client_routing(&request, "client")
+                .await
+                .unwrap();
+            assert_eq!(effective.category.as_deref(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn category_discovery_reports_unsupported_and_bounds_stalled_adapters() {
+        struct StalledCategories;
+        #[async_trait]
+        impl DownloadClient for StalledCategories {
+            async fn submit_download(
+                &self,
+                _: &DownloadClientAddRequest,
+            ) -> AppResult<DownloadGrabResult> {
+                unreachable!()
+            }
+            async fn discover_categories(&self, _: &str) -> AppResult<Option<Vec<String>>> {
+                std::future::pending().await
+            }
+        }
+        assert_eq!(
+            MockDownloadClient::default()
+                .discover_categories("client")
+                .await
+                .unwrap(),
+            None
+        );
+        let wrapped = FeedbackTimeoutDownloadClient::new(
+            Arc::new(StalledCategories),
+            Duration::from_millis(5),
+        );
+        assert!(matches!(
+            wrapped.discover_categories("client").await,
+            Err(AppError::DownloadFeedbackTimeout(_))
+        ));
     }
 
     #[tokio::test]

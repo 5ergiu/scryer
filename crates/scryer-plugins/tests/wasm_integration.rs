@@ -1217,34 +1217,29 @@ fn spawn_newznab_raw_response_server(
     // The server answers until the test process exits, however long the
     // plugin takes to compile before its first request.
     std::thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(30)))
-                        .unwrap();
-                    let mut buffer = [0_u8; 8192];
-                    let bytes_read = stream.read(&mut buffer).unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-                    let is_capabilities = newznab_request_is_capabilities(&request);
-                    let _ = request_tx.send(request);
+        while let Ok((mut stream, _)) = listener.accept() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut buffer = [0_u8; 8192];
+            let bytes_read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            let is_capabilities = newznab_request_is_capabilities(&request);
+            let _ = request_tx.send(request);
 
-                    let response = if is_capabilities {
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{NEWZNAB_PERMISSIVE_CAPS_BODY}",
-                            NEWZNAB_PERMISSIVE_CAPS_BODY.len()
-                        )
-                    } else {
-                        let headers = headers.join("\r\n");
-                        format!(
-                            "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        )
-                    };
-                    let _ = stream.write_all(response.as_bytes());
-                }
-                Err(_) => break,
-            }
+            let response = if is_capabilities {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{NEWZNAB_PERMISSIVE_CAPS_BODY}",
+                    NEWZNAB_PERMISSIVE_CAPS_BODY.len()
+                )
+            } else {
+                let headers = headers.join("\r\n");
+                format!(
+                    "HTTP/1.1 {status}\r\n{headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
         }
     });
 

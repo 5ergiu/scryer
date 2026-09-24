@@ -1,5 +1,121 @@
 use super::*;
 
+#[tokio::test]
+async fn graphql_catalog_skips_unrequested_canonical_tag_hydration() {
+    let ctx = TestContext::new().await;
+    let id = add_test_title(&ctx, "Poster Series", "SERIES").await;
+    seed_catalog_filter_metadata(
+        &ctx,
+        &id,
+        &[("canonical:genre:drama", "genre", "Drama")],
+        None,
+    )
+    .await;
+    let body = gql(
+        &ctx,
+        "{ titles { items { __typename canonicalTags { key } } } }",
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&body);
+    let item = &body["data"]["titles"]["items"][0];
+    assert_eq!(item["canonicalTags"][0]["key"], "canonical:genre:drama");
+    let type_name = item["__typename"].as_str().unwrap();
+    let query = format!(
+        "{{ titles {{ items {{ ...Tags }} }} }} fragment Tags on {type_name} {{ metadata: canonicalTags {{ key }} }}"
+    );
+    let body = gql(&ctx, &query, json!({})).await;
+    assert_no_errors(&body);
+    assert_eq!(
+        body["data"]["titles"]["items"][0]["metadata"][0]["key"],
+        "canonical:genre:drama"
+    );
+    // A poster read must work even when the optional hydration tables are unavailable.
+    sqlx::query("ALTER TABLE title_metadata_tags RENAME TO unavailable_metadata_tags")
+        .execute(ctx.db.pool())
+        .await
+        .unwrap();
+    let body = gql(
+        &ctx,
+        "{ titles { items { id name tags } hasMore } }",
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&body);
+    assert_eq!(body["data"]["titles"]["items"].as_array().unwrap().len(), 1);
+    let body = gql(&ctx, &query, json!({})).await;
+    assert!(
+        body.get("errors").is_some(),
+        "requested tags must still use hydration"
+    );
+}
+
+#[tokio::test]
+async fn graphql_catalog_scroll_has_more_without_aggregates() {
+    let ctx = TestContext::new().await;
+    for (index, facet) in ["MOVIE", "SERIES", "ANIME"].into_iter().enumerate() {
+        add_test_title_with_tvdb_id(
+            &ctx,
+            &format!("First {facet}"),
+            facet,
+            &(910000 + index * 2).to_string(),
+        )
+        .await;
+        add_test_title_with_tvdb_id(
+            &ctx,
+            &format!("Second {facet}"),
+            facet,
+            &(910001 + index * 2).to_string(),
+        )
+        .await;
+        for (offset, expected_len, expected_more) in [(0, 1, true), (1, 1, false), (2, 0, false)] {
+            let body = gql(
+                &ctx,
+                r#"query($facet: MediaFacetValue, $offset: Int) {
+                titles(facet: $facet, limit: 1, offset: $offset) { hasMore items { id } }
+            }"#,
+                json!({"facet": facet, "offset": offset}),
+            )
+            .await;
+            assert_no_errors(&body);
+            assert_eq!(body["data"]["titles"]["hasMore"], expected_more);
+            assert_eq!(
+                body["data"]["titles"]["items"].as_array().unwrap().len(),
+                expected_len
+            );
+        }
+        let body = gql(
+            &ctx,
+            r#"query($facet: MediaFacetValue) {
+            counts: titles(facet: $facet) { totalCount }
+            filters: titles(facet: $facet) { filterCounts { all } }
+            bytes: titles(facet: $facet) { managedBytes }
+            page: titles(facet: $facet, limit: 2) { items { id } hasMore }
+            moreOnly: titles(facet: $facet, limit: 1) { hasMore }
+            itemsOnly: titles(facet: $facet, limit: 1) { items { id } }
+            filtered: titles(facet: $facet, query: "First", limit: 1) { hasMore items { id } }
+        }"#,
+            json!({"facet": facet}),
+        )
+        .await;
+        assert_no_errors(&body);
+        assert_eq!(body["data"]["counts"]["totalCount"], 2);
+        assert_eq!(body["data"]["filters"]["filterCounts"]["all"], 2);
+        assert_eq!(body["data"]["bytes"]["managedBytes"], 0);
+        assert_eq!(body["data"]["page"]["hasMore"], false);
+        assert_eq!(body["data"]["moreOnly"]["hasMore"], true);
+        assert_eq!(
+            body["data"]["itemsOnly"]["items"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(body["data"]["filtered"]["hasMore"], false);
+        assert_eq!(
+            body["data"]["filtered"]["items"].as_array().unwrap().len(),
+            1
+        );
+    }
+}
+
 async fn create_title_catalog_library(
     ctx: &TestContext,
     facet: &str,
@@ -1507,6 +1623,106 @@ async fn graphql_add_series_keeps_every_identity_from_search_input() {
             { "source": "imdb", "value": "tt0202020" },
             { "source": "tvdb", "value": "12345" },
         ])
+    );
+}
+
+/// `ExternalIdInput.kind` names the entity an id points at. The add-title
+/// mapper must carry it into the domain id: a kindless id is a wildcard in the
+/// title store, so dropping it both loses the caller's assertion and reads the
+/// id back with `kind: null`.
+#[tokio::test]
+async fn graphql_add_title_keeps_the_external_id_kind_it_was_given() {
+    let ctx = TestContext::new().await;
+    let body = gql(
+        &ctx,
+        r#"mutation($input: AddTitleInput!) {
+            addTitle(input: $input) {
+                title { externalIds { source kind value } }
+            }
+        }"#,
+        json!({
+            "input": {
+                "name": "Kinded Identity",
+                "facet": "MOVIE",
+                "monitored": true,
+                "tags": [],
+                "externalIds": [
+                    { "source": "tmdb", "kind": "movie", "value": "880101" }
+                ]
+            }
+        }),
+    )
+    .await;
+
+    assert_no_errors(&body);
+    assert_eq!(
+        body["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "movie", "value": "880101" }]),
+        "the kind supplied with an external id must survive the add and read back"
+    );
+}
+
+/// A provider can issue the same numeric id for a movie and for a series. The
+/// kind is what keeps them apart, so two adds that differ only in the id's kind
+/// must produce two distinct titles rather than resolving onto the first one.
+#[tokio::test]
+async fn graphql_add_title_separates_a_movie_and_a_series_sharing_one_id_value() {
+    let ctx = TestContext::new().await;
+    let add = |facet: &'static str, kind: &'static str, name: &'static str| {
+        let ctx = &ctx;
+        async move {
+            let body = gql(
+                ctx,
+                r#"mutation($input: AddTitleInput!) {
+                    addTitle(input: $input) {
+                        title { id facet externalIds { source kind value } }
+                    }
+                }"#,
+                json!({
+                    "input": {
+                        "name": name,
+                        "facet": facet,
+                        "monitored": true,
+                        "tags": [],
+                        "externalIds": [
+                            { "source": "tmdb", "kind": kind, "value": "880202" }
+                        ]
+                    }
+                }),
+            )
+            .await;
+            assert_no_errors(&body);
+            body
+        }
+    };
+
+    let movie = add("MOVIE", "movie", "Shared Id Movie").await;
+    let series = add("SERIES", "series", "Shared Id Series").await;
+
+    let movie_id = movie["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("movie title id")
+        .to_string();
+    let series_id = series["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("series title id")
+        .to_string();
+    assert_ne!(
+        movie_id, series_id,
+        "a tmdb movie id and a tmdb series id with the same value name two different titles"
+    );
+    assert_eq!(movie["data"]["addTitle"]["title"]["facet"], json!("MOVIE"));
+    assert_eq!(
+        series["data"]["addTitle"]["title"]["facet"],
+        json!("SERIES")
+    );
+    assert_eq!(
+        movie["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "movie", "value": "880202" }])
+    );
+    assert_eq!(
+        series["data"]["addTitle"]["title"]["externalIds"],
+        json!([{ "source": "tmdb", "kind": "series", "value": "880202" }])
     );
 }
 

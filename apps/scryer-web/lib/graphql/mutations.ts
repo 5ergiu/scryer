@@ -1288,7 +1288,10 @@ const libraryPathsFieldSelection = `
 
 const serviceSettingsFieldSelection = `
     tlsCertPath
-    tlsKeyPath`;
+    tlsKeyPath
+    trustedProxyIps
+    trustedProxyOverride
+    trustedProxySource`;
 
 export const saveQualityProfileSettingsMutation = `mutation SaveQualityProfileSettings($input: SaveQualityProfileSettingsInput!) {
   saveQualityProfileSettings(input: $input) {${qualityProfileSettingsFieldSelection}
@@ -1323,6 +1326,49 @@ export const updateLibraryPathsMutation = `mutation UpdateLibraryPaths($input: U
 
 export const updateServiceSettingsMutation = `mutation UpdateServiceSettings($input: UpdateServiceSettingsInput!) {
   updateServiceSettings(input: $input) {${serviceSettingsFieldSelection}
+  }
+}`;
+
+export const queueIndexerSearchAssignmentMutation = `mutation QueueIndexerSearchAssignment($input: QueueDownloadInput!, $routing: IndexerGrabSelectionInput!, $replacement: Boolean!) {
+  queueIndexerSearchAssignment(input: $input, routing: $routing, replacement: $replacement) {
+    status
+    jobId
+    titleId
+    titleName
+    sourceTitle
+    sourceKind
+    conflict {
+      titleId
+      titleName
+      downloadClientId
+      downloadClientType
+      downloadClientItemId
+      sourceTitle
+      sourceKind
+      state
+      replaceable
+      scope {
+        __typename
+        ... on EpisodeScopePayload {
+          episodeId
+        }
+        ... on EpisodeSetScopePayload {
+          episodeIds
+        }
+        ... on SeriesMovieScopePayload {
+          seriesMovieLinkId
+        }
+        ... on CollectionScopePayload {
+          collectionId
+        }
+        ... on TitleScopePayload {
+          wholeTitle
+        }
+        ... on OrphanScopePayload {
+          orphaned
+        }
+      }
+    }
   }
 }`;
 

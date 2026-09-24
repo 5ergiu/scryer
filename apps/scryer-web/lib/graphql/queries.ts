@@ -1,4 +1,7 @@
-import { MEDIA_ANALYSIS_FIELDS, MEDIA_DISC_FIELDS } from "../types/media-analysis.ts";
+import {
+  MEDIA_ANALYSIS_FIELDS,
+  MEDIA_DISC_FIELDS,
+} from "../types/media-analysis.ts";
 
 export const DISCOVERY_ITEM_FIELDS = `
     id
@@ -1239,6 +1242,7 @@ export const RELEASE_SEARCH_RESULT_FIELDS = `
     parsedRelease {
       rawTitle
       normalizedTitle
+      year
       releaseGroup
       quality
       source
@@ -1316,6 +1320,7 @@ export const interactiveReleaseSearchQuery = `query InteractiveReleaseSearch($id
       resultCount
       elapsedMs
       failureReason
+      rateLimited
     }
     startedAt
     completedAt
@@ -1352,6 +1357,7 @@ export const TITLE_LIST_FIELDS = `
     createdAt`;
 
 export type TitleCatalogTitleProjection = {
+  includeSettings?: boolean;
   library?: boolean;
   quality?: boolean;
   profile?: boolean;
@@ -1366,6 +1372,7 @@ export type TitleCatalogTitleProjection = {
 
 export type TitleCatalogQueryBuildOptions = {
   includePageMetadata?: boolean;
+  includeAggregates?: boolean;
 };
 
 const TITLE_CATALOG_BASE_FIELDS = `
@@ -1383,27 +1390,29 @@ const TITLE_CATALOG_BASE_FIELDS = `
     backgroundSourceUrl
     contentStatus
     metadataLanguage
-    metadataLanguageOverride
-    effectiveMetadataLanguage
-    inheritsMetadataLanguage
     metadataFetchedAt
     qualityProfileId
     rootFolderId
     monitorType
     useSeasonFolders
-    useSeasonFoldersOverride
-    effectiveUseSeasonFolders
-    inheritsUseSeasonFolders
     monitorSpecials
     interSeasonMovies
     fillerPolicy
     recapPolicy
     createdAt`;
 
-function titleCatalogListFields(
-  projection: TitleCatalogTitleProjection = {},
-) {
+function titleCatalogListFields(projection: TitleCatalogTitleProjection = {}) {
   const fields = [TITLE_CATALOG_BASE_FIELDS];
+  if (projection.includeSettings !== false) {
+    fields.push(`
+    metadataLanguageOverride
+    effectiveMetadataLanguage
+    inheritsMetadataLanguage
+    useSeasonFoldersOverride
+    effectiveUseSeasonFolders
+    inheritsUseSeasonFolders
+    `);
+  }
   if (projection.library) {
     fields.push(`
     libraryName
@@ -1648,7 +1657,10 @@ export function buildTitlesQuery(
   const includePageMetadata = options.includePageMetadata ?? true;
   const pageMetadataFields = includePageMetadata
     ? `
-    hasMore
+    hasMore${
+      options.includeAggregates === false
+        ? ""
+        : `
     totalCount
     managedBytes
     filterCounts {
@@ -1657,6 +1669,7 @@ export function buildTitlesQuery(
       unmonitored
       continuing
       ended
+    }`
     }`
     : "";
   return `query Titles(
@@ -1685,7 +1698,33 @@ ${pageMetadataFields}
 }`;
 }
 
+export const titleCatalogCountsQuery = `query TitleCatalogCounts(
+  $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
+  $filter: TitleCatalogFilterInput
+) {
+  titles(facet: $facet, libraryIds: $libraryIds, query: $query, filter: $filter) {
+    totalCount
+    filterCounts { all monitored unmonitored continuing ended }
+  }
+}`;
+
+export const titleCatalogManagedBytesQuery = `query TitleCatalogManagedBytes(
+  $facet: MediaFacetValue, $libraryIds: [ID!]
+) {
+  titles(facet: $facet, libraryIds: $libraryIds) { managedBytes }
+}`;
+
 export const titlesQuery = buildTitlesQuery();
+
+export const indexerGrabClientsQuery = `query IndexerGrabClients($searchId: ID!, $downloadUrl: String!, $titleId: ID) {
+  indexerGrabClients(searchId: $searchId, downloadUrl: $downloadUrl, titleId: $titleId) {
+    id name category mapped
+  }
+}`;
+
+export const downloadClientCategoriesQuery = `query DownloadClientCategories($clientId: ID!) {
+  downloadClientCategories(clientId: $clientId) { supported categories }
+}`;
 
 export const catalogSearchTitlesQuery = `query CatalogSearchTitles($facet: MediaFacetValue, $libraryIds: [ID!], $query: String, $limit: Int = 25) {
   titles(facet: $facet, libraryIds: $libraryIds, query: $query, limit: $limit) {
@@ -2198,6 +2237,7 @@ export const indexersQuery = `query Indexers($providerType: String) {
     rateLimitSeconds
     rateLimitBurst
     disabledUntil
+    rateLimitedUntil
     isEnabled
     isManaged
     managedParentConfigId
@@ -2417,6 +2457,7 @@ const indexerFieldSelection = `
     rateLimitSeconds
     rateLimitBurst
     disabledUntil
+    rateLimitedUntil
     isEnabled
     isManaged
     managedParentConfigId
@@ -2507,6 +2548,7 @@ const mediaSettingsFieldSelection = `
       isDefault
     }
     requiredAudioLanguages
+    useSeasonFolders
     folderTemplate
     seasonFolderTemplate
     specialsFolderTemplate
@@ -2534,7 +2576,10 @@ const libraryPathsFieldSelection = `
 
 const serviceSettingsFieldSelection = `
     tlsCertPath
-    tlsKeyPath`;
+    tlsKeyPath
+    trustedProxyIps
+    trustedProxyOverride
+    trustedProxySource`;
 
 // Batched query for quality profiles page: 5 requests → 1
 export const qualityProfilesInitQuery = `query QualityProfilesInit {
@@ -3001,11 +3046,32 @@ export const downloadClientRoutingQuery = `query DownloadClientRouting($scopeId:
   }
 }`;
 
+export const downloadClientRoutingAllScopesQuery = `query DownloadClientRoutingAllScopes {
+  movie: downloadClientRouting(scope: MOVIE) {${downloadClientRoutingFieldSelection}
+  }
+  series: downloadClientRouting(scope: SERIES) {${downloadClientRoutingFieldSelection}
+  }
+  anime: downloadClientRouting(scope: ANIME) {${downloadClientRoutingFieldSelection}
+  }
+}`;
+
 // Batched query for indexer routing: 2 requests → 1
 export const indexerRoutingInitQuery = `query IndexerRoutingInit($scopeId: ContentScopeValue!) {
   indexers {${indexerFieldSelection}
   }
   indexerRouting(scope: $scopeId) {${indexerRoutingFieldSelection}
+  }
+}`;
+
+export const indexerRoutingAllScopesQuery = `query IndexerRoutingAllScopes {
+  indexers {
+    id
+  }
+  movie: indexerRouting(scope: MOVIE) {${indexerRoutingFieldSelection}
+  }
+  series: indexerRouting(scope: SERIES) {${indexerRoutingFieldSelection}
+  }
+  anime: indexerRouting(scope: ANIME) {${indexerRoutingFieldSelection}
   }
 }`;
 
@@ -4606,7 +4672,7 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
       anime
     }
   }
-  systemHealth {
+  dashboardSummary {
     titlesMovie
     titlesSeries
     titlesAnime
@@ -4642,6 +4708,7 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
     lastHealthStatus
     lastErrorMessage
     lastErrorAt
+    rateLimitedUntil
   }
   downloadClientConfigs {
     id
@@ -4652,6 +4719,9 @@ export const dashboardOverviewQuery = `query DashboardOverview($activityWindowHo
     lastError
     lastSeenAt
   }
+}`;
+
+export const dashboardStorageQuery = `query DashboardStorage {
   storageRoots {
     path
     libraryId
@@ -4689,22 +4759,9 @@ export const dashboardPendingRequestsQuery = `query DashboardPendingRequests {
 }`;
 
 export const dashboardRecentImportsQuery = `query DashboardRecentImports($limit: Int!) {
-  titleHistory(
-    filter: { eventTypes: [IMPORTED, FILE_UPGRADED], limit: $limit }
-  ) {
-    totalCount
-    items {
-      id
-      titleId
-      titleName
-      posterUrl
-      facet
-      libraryId
-      eventType
-      quality
-      sizeBytes
-      occurredAt
-    }
+  dashboardRecentImports(limit: $limit) {
+    id titleId titleName posterUrl facet libraryId kind quality sizeBytes occurredAt
+    episode { id seasonNumber episodeNumber title overview imageUrl airDate }
   }
 }`;
 

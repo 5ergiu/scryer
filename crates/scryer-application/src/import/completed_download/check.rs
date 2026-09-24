@@ -508,7 +508,17 @@ pub(super) async fn completed_download_proves_assigned_title(
         }
     };
     let mut evidence = crate::acquisition_release_search::canonical_title_evidence(&title);
-    evidence.ambiguity = matcher.identity_ambiguity(&title);
+    evidence.ambiguity = match matcher.evidence_ambiguity(&title).await {
+        Ok(ambiguity) => ambiguity,
+        Err(error) => {
+            tracing::warn!(
+                title_id,
+                error = %error,
+                "completed download identity gate could not read title ambiguity"
+            );
+            return AssignedTitleProof::Unknown;
+        }
+    };
 
     // A series movie is searched and grabbed under the *movie's* identity —
     // `series_movie_search_title` swaps in the movie's name, facet, year and
@@ -529,7 +539,17 @@ pub(super) async fn completed_download_proves_assigned_title(
                     crate::acquisition_release_search::series_movie_search_title(&title, &link);
                 let mut link_evidence =
                     crate::acquisition_release_search::canonical_title_evidence(&link_title);
-                link_evidence.ambiguity = matcher.identity_ambiguity(&link_title);
+                link_evidence.ambiguity = match matcher.evidence_ambiguity(&link_title).await {
+                    Ok(ambiguity) => ambiguity,
+                    Err(error) => {
+                        tracing::warn!(
+                            title_id,
+                            error = %error,
+                            "completed download identity gate could not read link ambiguity"
+                        );
+                        return AssignedTitleProof::Unknown;
+                    }
+                };
                 proof_subjects.push((link_title, link_evidence));
             }
         }
@@ -540,6 +560,52 @@ pub(super) async fn completed_download_proves_assigned_title(
                 "completed download identity gate could not load series movie links"
             );
             return AssignedTitleProof::Unknown;
+        }
+    }
+
+    // The client-reported release name, else the media file names (non-sample,
+    // largest first) — the same claims the completion-time re-resolution used.
+    let completion_sources = crate::import_workflow::completed_download_release_claims(completed);
+
+    // Each subject's evidence was built from the subject's own names. The
+    // names actually on disk are what it will be compared against, so they
+    // get a candidate fetch of their own, at the same distance: without it
+    // the collision guard has no competitor to find and a rival spelling
+    // passes the gate as a confident match.
+    {
+        let mut anchors = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for raw_title in &completion_sources {
+            let (forms, _) = crate::title_matching::relaxed::neutral_spelling_forms(raw_title);
+            for (key, raw) in forms {
+                if seen.insert(key.clone()) {
+                    anchors.push((key, raw));
+                }
+            }
+        }
+        if !anchors.is_empty() {
+            for (_, evidence) in proof_subjects.iter_mut() {
+                let Some(existing) = evidence.ambiguity.spelling_index.as_ref() else {
+                    continue;
+                };
+                let mut index = existing.as_ref().clone();
+                match matcher
+                    .extend_spelling_candidates(&mut index, &anchors)
+                    .await
+                {
+                    Ok(()) => {
+                        evidence.ambiguity.spelling_index = Some(std::sync::Arc::new(index));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            title_id,
+                            error = %error,
+                            "completed download identity gate could not read release-name candidates"
+                        );
+                        return AssignedTitleProof::Unknown;
+                    }
+                }
+            }
         }
     }
 
@@ -598,18 +664,29 @@ pub(super) async fn completed_download_proves_assigned_title(
         })
     };
 
-    // The client-reported release name, else the media file names (non-sample,
-    // largest first) — the same claims the completion-time re-resolution used.
-    let completion_sources = crate::import_workflow::completed_download_release_claims(completed);
-
     // For a parse-matched observation, what actually finished on disk outranks
     // the provisional match: a completion name that positively asserts a
     // *different* library title's identity — and not the assigned one — is a
     // contradiction, not obfuscation, and disproves the assignment outright.
-    let completion_contradicts_assignment = completion_sources.iter().any(|raw_title| {
+    let mut completion_contradicts_assignment = false;
+    for raw_title in &completion_sources {
         let anchor_keys =
             crate::acquisition_release_search::context_free_identity_anchor_keys(raw_title);
-        matcher.keys_name_another_title(title_id, &anchor_keys)
+        let names_another = match matcher
+            .keys_name_another_title(title_id, &anchor_keys)
+            .await
+        {
+            Ok(names_another) => names_another,
+            Err(error) => {
+                tracing::warn!(
+                    title_id,
+                    error = %error,
+                    "completed download identity gate could not read colliding titles"
+                );
+                return AssignedTitleProof::Unknown;
+            }
+        };
+        let contradicts = names_another
             && !proof_subjects.iter().any(|(_, evidence)| {
                 anchor_keys.iter().any(|anchor_key| {
                     crate::acquisition_release_search::evidence_key_for_normalized(
@@ -617,8 +694,12 @@ pub(super) async fn completed_download_proves_assigned_title(
                     )
                     .is_some()
                 })
-            })
-    });
+            });
+        if contradicts {
+            completion_contradicts_assignment = true;
+            break;
+        }
+    }
     if completion_contradicts_assignment {
         return AssignedTitleProof::Disproven;
     }

@@ -99,6 +99,10 @@ pub struct InteractiveReleaseSearchIndexerView {
     /// Wall time of this indexer's own call, once it has answered (D15).
     pub elapsed_ms: Option<i64>,
     pub failure_reason: Option<String>,
+    /// The indexer asked Scryer to slow down rather than failing. It is a
+    /// cooldown that lifts on its own, so the UI reads it as "cooling down"
+    /// instead of an error.
+    pub rate_limited: bool,
 }
 
 /// What a title-less query subject searches as. The kind picks the search
@@ -450,6 +454,7 @@ impl AppUseCase {
                         result_count: 0,
                         elapsed_ms: None,
                         failure_reason: Some("indexer is disabled".to_string()),
+                        rate_limited: false,
                     });
                 }
                 continue;
@@ -497,6 +502,7 @@ impl AppUseCase {
                     result_count: 0,
                     elapsed_ms: None,
                     failure_reason: Some("temporarily disabled".to_string()),
+                    rate_limited: false,
                 });
                 continue;
             }
@@ -509,6 +515,7 @@ impl AppUseCase {
                 result_count: 0,
                 elapsed_ms: None,
                 failure_reason: None,
+                rate_limited: false,
             });
         }
 
@@ -863,6 +870,7 @@ impl AppUseCase {
                     ) {
                         indexer.status = InteractiveReleaseSearchIndexerStatus::Failed;
                         indexer.failure_reason = Some("timed out".to_string());
+                        indexer.rate_limited = false;
                     }
                 }
             }
@@ -900,6 +908,9 @@ impl AppUseCase {
             .find(|indexer| indexer.indexer_id == indexer_id)
         {
             indexer.status = status;
+            indexer.rate_limited = failure_reason
+                .as_deref()
+                .is_some_and(super::release_search::reason_is_rate_limit);
             indexer.failure_reason = failure_reason;
             if elapsed_ms.is_some() {
                 indexer.elapsed_ms = elapsed_ms;
@@ -956,6 +967,7 @@ impl AppUseCase {
             indexer.result_count = batch_len;
             indexer.elapsed_ms = Some(elapsed_ms);
             indexer.failure_reason = None;
+            indexer.rate_limited = false;
         }
     }
 
@@ -1187,6 +1199,94 @@ impl AppUseCase {
     /// scope. Nothing claims the download for a catalog title, so the completed
     /// download surfaces in Activity for a manual import instead of being
     /// auto-imported.
+    pub async fn indexer_grab_clients(
+        &self,
+        actor: &User,
+        search_id: &str,
+        download_url: &str,
+        title_id: Option<&str>,
+    ) -> AppResult<Vec<crate::IndexerGrabClient>> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let (result, kind) = self
+            .find_interactive_search_result(actor, search_id, download_url)
+            .await?;
+        let (_, source_kind) = result
+            .canonical_download_source()
+            .ok_or_else(|| AppError::Validation("release has no usable download source".into()))?;
+        let title = if let Some(id) = title_id {
+            let title = self
+                .services
+                .catalog
+                .titles
+                .get_by_id(id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("title {id}")))?;
+            self.require_library_permission(
+                actor,
+                &title.library_id,
+                scryer_domain::LibraryPermission::ManageTitles,
+            )
+            .await?;
+            title
+        } else {
+            let facet = kind
+                .and_then(InteractiveSearchKind::facet)
+                .unwrap_or_else(|| {
+                    if result
+                        .parsed_release_metadata
+                        .as_ref()
+                        .is_some_and(|parsed| parsed.episode.is_some())
+                    {
+                        MediaFacet::Series
+                    } else {
+                        MediaFacet::Movie
+                    }
+                });
+            unlinked_grab_title(&result.title, facet, self.runtime.environment.now())
+        };
+        let mut clients = self
+            .services
+            .integrations
+            .download_client
+            .indexer_grab_clients(&title, result.indexer_id.as_deref(), source_kind)
+            .await?;
+        if title_id.is_some() {
+            let fallback = self.derive_download_category(&title.facet).await;
+            for client in &mut clients {
+                if client.category.is_none() {
+                    client.category = Some(fallback.clone());
+                }
+            }
+        }
+        Ok(clients)
+    }
+
+    pub async fn download_client_categories(
+        &self,
+        actor: &User,
+        client_id: &str,
+    ) -> AppResult<Option<Vec<String>>> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let categories = self
+            .services
+            .integrations
+            .download_client
+            .discover_categories(client_id)
+            .await?;
+        Ok(categories.map(|values| {
+            let mut values: Vec<_> = values
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            values.sort();
+            values.dedup();
+            values
+        }))
+    }
+
     pub async fn queue_unlinked_release(
         &self,
         actor: &User,
@@ -1194,10 +1294,33 @@ impl AppUseCase {
         download_url: &str,
         download_client_id: &str,
     ) -> AppResult<QueueUnlinkedReleaseOutcome> {
+        self.queue_unlinked_release_with_category(
+            actor,
+            search_id,
+            download_url,
+            download_client_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn queue_unlinked_release_with_category(
+        &self,
+        actor: &User,
+        search_id: &str,
+        download_url: &str,
+        download_client_id: &str,
+        category: Option<String>,
+    ) -> AppResult<QueueUnlinkedReleaseOutcome> {
         // The Indexers page's own gate (D13): an unlinked grab bypasses every
         // library, so it is gated on system settings rather than a library.
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
+        crate::IndexerGrabSelection {
+            client_id: download_client_id.to_string(),
+            category: category.clone(),
+        }
+        .validate()?;
         let (result, kind) = self
             .find_interactive_search_result(actor, search_id, download_url)
             .await?;
@@ -1308,10 +1431,7 @@ impl AppUseCase {
             source_kind: Some(source_kind),
             source_title: Some(result.title.clone()),
             source_password: result.password_hint.clone(),
-            // Left to the router's grab-time choke point: the routing entry
-            // for the pinned client decides the category, and "no entry"
-            // means the download client's own default (D16).
-            category: None,
+            category,
             queue_priority: None,
             download_directory: None,
             release_title: None,

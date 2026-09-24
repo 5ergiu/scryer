@@ -135,14 +135,14 @@ fn indexer_config(
     }
 }
 
-async fn setup_app(configs: Vec<IndexerConfig>) -> (AppUseCase, User) {
+async fn setup_app(configs: Vec<IndexerConfig>) -> (AppUseCase, User, tempfile::TempDir) {
     setup_app_with_movie_routing(configs, None).await
 }
 
 async fn setup_app_with_movie_routing(
     configs: Vec<IndexerConfig>,
     movie_routing: Option<Value>,
-) -> (AppUseCase, User) {
+) -> (AppUseCase, User, tempfile::TempDir) {
     disable_platform_keystore_for_tests();
     initialize_wasm_runtime_for_tests();
 
@@ -306,7 +306,10 @@ async fn setup_app_with_movie_routing(
         },
     );
 
-    let title_store = Arc::new(TitleStore::new(datastore.clone()));
+    let index_dir = tempfile::tempdir().expect("title index directory");
+    let fuzzy_index = common::test_title_index(&db, index_dir.path()).await;
+    let title_store =
+        Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
     let show_store = Arc::new(ShowStore::new(datastore.clone()));
     let user_store = Arc::new(UserStore::new(datastore.clone()));
     let library_store = Arc::new(LibraryStore::new(datastore.clone()));
@@ -342,7 +345,7 @@ async fn setup_app_with_movie_routing(
         quality_profile_store.clone();
 
     let library_probe_store = Arc::new(LibraryProbeStore::new(datastore.clone()));
-    let wanted_store = Arc::new(WantedStore::new(datastore.clone()));
+    let wanted_store = Arc::new(WantedStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index));
     let pending_release_store = Arc::new(PendingReleaseStore::new(
         datastore.clone(),
         encryption_key_state.clone(),
@@ -457,7 +460,7 @@ async fn setup_app_with_movie_routing(
     .await
     .expect("seed configured default quality profile");
 
-    (app, user)
+    (app, user, index_dir)
 }
 
 async fn add_movie(app: &AppUseCase, user: &User, name: &str, imdb: &str) -> String {
@@ -597,7 +600,7 @@ async fn fast_indexer_results_stream_in_before_slow_indexer_completes() {
     .await;
 
     let now = chrono::Utc::now();
-    let (app, user) = setup_app(vec![
+    let (app, user, _index_dir) = setup_app(vec![
         indexer_config("fast-a", format!("{}/api", fast.uri()), "key-a", now),
         indexer_config("slow-b", format!("{}/api", slow.uri()), "key-b", now),
     ])
@@ -683,7 +686,7 @@ async fn rate_limited_indexer_is_marked_failed_and_healthy_results_survive() {
     mount_healthy(&limited, "Paperman.2012.1080p.WEB-DL-GRP", "warmup-1").await;
 
     let now = chrono::Utc::now();
-    let (app, user) = setup_app(vec![
+    let (app, user, _index_dir) = setup_app(vec![
         indexer_config("healthy-a", format!("{}/api", healthy.uri()), "key-a", now),
         indexer_config("limited-b", format!("{}/api", limited.uri()), "key-b", now),
     ])
@@ -761,7 +764,7 @@ async fn cancel_mid_flight_stops_job_and_outbound_requests() {
     .await;
 
     let now = chrono::Utc::now();
-    let (app, user) = setup_app(vec![indexer_config(
+    let (app, user, _index_dir) = setup_app(vec![indexer_config(
         "slow-a",
         format!("{}/api", slow.uri()),
         "key-a",
@@ -842,7 +845,7 @@ async fn same_scope_restart_cancels_previous_job() {
     .await;
 
     let now = chrono::Utc::now();
-    let (app, user) = setup_app(vec![indexer_config(
+    let (app, user, _index_dir) = setup_app(vec![indexer_config(
         "slow-a",
         format!("{}/api", slow.uri()),
         "key-a",
@@ -889,7 +892,7 @@ async fn raw_query_subject_issues_a_text_search_and_completes_with_the_release()
     mount_healthy(&indexer, "Paperman.2012.1080p.WEB-DL-GRP", "raw-1").await;
 
     let now = chrono::Utc::now();
-    let (app, user) = setup_app(vec![indexer_config(
+    let (app, user, _index_dir) = setup_app(vec![indexer_config(
         "raw-a",
         format!("{}/api", indexer.uri()),
         "key-a",
@@ -976,7 +979,7 @@ async fn interactive_search_dispatches_all_scope_enabled_indexers_only() {
         "c411": { "enabled": true, "categories": ["2000"], "priority": 1 },
         "parent": { "enabled": false, "categories": ["2000"], "priority": 3 }
     });
-    let (app, user) = setup_app_with_movie_routing(
+    let (app, user, _index_dir) = setup_app_with_movie_routing(
         vec![
             indexer_config("world", format!("{}/api", world.uri()), "world-key", now),
             indexer_config("c411", format!("{}/api", c411.uri()), "c411-key", now),

@@ -11,6 +11,8 @@ use scryer_domain::{ImportRecord, ImportStatus, ImportTransferPhase, ImportType}
 
 use crate::queries::sql_runtime::{SqlArg, SqlExec, SqlRuntime, StoreDatastore};
 
+include!("import_retry.rs");
+
 #[derive(Clone)]
 pub struct ImportStore {
     datastore: StoreDatastore,
@@ -127,6 +129,54 @@ impl ImportRepository for ImportStore {
             .flatten()
             .as_deref()
             .and_then(scryer_domain::download_identity::DownloadId::parse))
+    }
+
+    async fn claim_import_retry(
+        &self,
+        claim: &scryer_application::ImportRetryClaim,
+        expected_updated_at: chrono::DateTime<Utc>,
+        payload_json: &str,
+    ) -> AppResult<scryer_application::ImportRetryClaimOutcome> {
+        self.claim_retry(claim, expected_updated_at, payload_json)
+            .await
+    }
+
+    async fn finish_import_retry(
+        &self,
+        claim: &scryer_application::ImportRetryClaim,
+        state: scryer_domain::TrackedDownloadState,
+        reason: Option<&str>,
+        detail: Option<&str>,
+    ) -> AppResult<scryer_application::ImportRetryFinishOutcome> {
+        self.finish_retry(claim, state, reason, detail).await
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Option<scryer_application::ImportRetryClaim>> {
+        let row = SqlRuntime::fetch_optional(
+            self.datastore.read_exec(),
+            "SELECT detail FROM download_identity_states WHERE identity_key = {} AND reason = {}",
+            &[
+                SqlArg::Text(format!("download:{download_id}")),
+                SqlArg::Text(IMPORT_RETRY_TRACKED_STATE_REASON.into()),
+            ],
+        )
+        .await?;
+        row.map(|row| {
+            serde_json::from_str(&row.text("detail")?)
+                .map_err(|e| AppError::Repository(format!("invalid import retry marker: {e}")))
+        })
+        .transpose()
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        after_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+        limit: usize,
+    ) -> AppResult<Vec<scryer_application::ImportRetryClaim>> {
+        self.retry_recovery(after_download_id, limit).await
     }
 
     async fn update_import_status(
@@ -717,6 +767,56 @@ fn manual_import_selection_from_rows(
 
 #[async_trait]
 impl ImportArtifactRepository for ImportStore {
+    async fn dashboard_import_artifacts(
+        &self,
+        import_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<Vec<scryer_application::DashboardImportEvidence>> {
+        if import_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = import_ids
+            .iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
+        let episode_filter = if episode_ids.is_empty() {
+            "episode_id IS NULL".to_string()
+        } else {
+            args.extend(episode_ids.iter().cloned().map(SqlArg::Text));
+            format!(
+                "(episode_id IS NULL OR episode_id IN ({}))",
+                placeholders(episode_ids.len())
+            )
+        };
+        SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT import_id, title_id, episode_id,
+                MIN(CASE WHEN reason_code = 'upgrade' THEN 1 ELSE 0 END) AS is_upgrade,
+                CASE WHEN MIN(imported_media_file_id) = MAX(imported_media_file_id)
+                     THEN MIN(imported_media_file_id) ELSE NULL END AS imported_media_file_id
+                FROM download_import_artifacts
+                WHERE import_id IN ({}) AND {episode_filter} AND result = 'imported'
+                GROUP BY import_id, title_id, episode_id",
+                placeholders(import_ids.len())
+            ),
+            &args,
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(scryer_application::DashboardImportEvidence {
+                import_id: row.opt_text("import_id")?,
+                title_id: row.opt_text("title_id")?,
+                episode_id: row.opt_text("episode_id")?,
+                is_upgrade: row.i64("is_upgrade")? != 0,
+                imported_media_file_id: row.opt_text("imported_media_file_id")?,
+            })
+        })
+        .collect()
+    }
+
     async fn insert_artifact(&self, artifact: ImportArtifact) -> AppResult<()> {
         self.insert_artifact_for_download(artifact, None).await
     }
@@ -963,6 +1063,7 @@ impl ImportArtifactRepository for ImportStore {
 
 #[cfg(test)]
 mod tests {
+    include!("import_retry_tests.rs");
     use std::sync::Arc;
 
     use scryer_application::{ImportArtifactRepository, ImportRepository};
@@ -1089,6 +1190,59 @@ mod tests {
             imported_media_file_id: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_import_evidence_is_scoped_to_attempt_episode_and_success() {
+        let store = store().await;
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            include_str!(
+                "../../../../scryer/src/db/migrations/0251_dashboard_import_artifact_index.sql"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+        let identity = source_identity("job");
+        for (id, import, episode, result) in [
+            ("upgrade", "import-1", "episode-1", "imported"),
+            ("other-attempt", "import-2", "episode-1", "imported"),
+            ("other-episode", "import-1", "episode-2", "imported"),
+            ("skipped", "import-1", "episode-1", "skipped"),
+        ] {
+            let mut row = artifact(id, &identity, result);
+            row.import_id = Some(import.into());
+            row.episode_id = Some(episode.into());
+            row.reason_code = Some("upgrade".into());
+            store.insert_artifact(row).await.unwrap();
+        }
+        assert!(
+            store
+                .dashboard_import_artifacts(&[], &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let rows = store
+            .dashboard_import_artifacts(&["import-1".into()], &["episode-1".into()])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].import_id.as_deref(), Some("import-1"));
+        assert!(rows[0].is_upgrade);
+        let mut additional = artifact("additional", &identity, "imported");
+        additional.import_id = Some("import-1".into());
+        store.insert_artifact(additional).await.unwrap();
+        let rows = store
+            .dashboard_import_artifacts(&["import-1".into()], &["episode-1".into()])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].is_upgrade,
+            "a new file alongside an upgrade must retain its completion row"
+        );
     }
 
     fn selection(id: &str, source_identity: ClientJobLocator) -> ManualImportSelection {

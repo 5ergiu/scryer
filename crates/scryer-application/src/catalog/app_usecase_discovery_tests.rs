@@ -731,3 +731,32 @@ fn seeders_rank_more_is_better_and_unknown_is_not_zero() {
         "no seeder information must not sort below a torrent with none"
     );
 }
+
+// ── incomplete_indexer_reason ────────────────────────────────────────────────
+
+#[test]
+fn a_rate_limited_indexer_reads_as_a_cooldown_with_its_retry_time() {
+    let reason = incomplete_indexer_reason(IndexerSearchOutcome::Partial {
+        empty: true,
+        reason: Some(IndexerSearchIncompleteReason::RateLimited),
+        retry_after: Some(std::time::Duration::from_secs(120)),
+    })
+    .expect("a rate limit is an incomplete outcome");
+
+    assert_eq!(
+        reason,
+        "indexer is cooling down after a rate limit; retry after 120s"
+    );
+    assert!(reason_is_rate_limit(&reason));
+
+    // Everything else that leaves a search incomplete is still a failure, and
+    // the snapshot must not dress it up as a cooldown.
+    let upstream = incomplete_indexer_reason(IndexerSearchOutcome::Partial {
+        empty: true,
+        reason: Some(IndexerSearchIncompleteReason::UpstreamFailure),
+        retry_after: None,
+    })
+    .expect("an upstream failure is an incomplete outcome");
+    assert!(!reason_is_rate_limit(&upstream));
+    assert!(!reason_is_rate_limit("timed out"));
+}

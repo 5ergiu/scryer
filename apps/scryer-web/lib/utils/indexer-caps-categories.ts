@@ -65,7 +65,7 @@ export function capsCategoryScopes(category: IndexerCapsCategory): IndexerCapsSc
  * are deduplicated on first occurrence and returned in caps order.
  */
 export function overlayCapsCategories(
-  scope: IndexerCapsScope,
+  scope: IndexerCapsScope | "RAW",
   categories: readonly IndexerCapsCategory[],
   knownCodes: ReadonlySet<string>,
 ): IndexerCapsCategoryOverlay {
@@ -85,7 +85,7 @@ export function overlayCapsCategories(
       }
       continue;
     }
-    if (capsCategoryScopes({ code, label }).includes(scope)) {
+    if (scope === "RAW" || capsCategoryScopes({ code, label }).includes(scope)) {
       extraCategories.push({ code, label });
     }
   }

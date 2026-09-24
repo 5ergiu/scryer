@@ -18,6 +18,7 @@ import {
   createUniqueProfileId,
   dedupeOrdered,
   isValidProfileSelection,
+  moveQualityTier,
   normalizeProfileId,
   normalizeQualityProfilesForUi,
   parseQualityProfileCatalog,
@@ -134,6 +135,7 @@ export type UseQualityProfilesManagerResult = {
   ) => void;
   addQualityTier: (qualityTier: string) => void;
   removeQualityTier: (qualityTier: string) => void;
+  reorderQualityTier: (qualityTier: string, targetIndex: number) => void;
   updateQualityProfilesGlobal: (event?: React.FormEvent<HTMLFormElement>) => Promise<boolean> | boolean;
   saveGlobalQualityProfile: (value: string) => Promise<void> | void;
   saveGlobalScoringPersona: (persona: ScoringPersonaId) => Promise<void> | void;
@@ -209,8 +211,7 @@ export function useQualityProfilesManager(
   const activeQualityProfileTierOptions = React.useMemo(
     () =>
       dedupeOrdered(qualityProfileDraft.quality_tiers)
-        .filter((value) => value.length > 0)
-        .sort(sortStringByNumericDesc),
+        .filter((value) => value.length > 0),
     [qualityProfileDraft.quality_tiers],
   );
   const availableQualityTiers = React.useMemo(
@@ -538,6 +539,16 @@ export function useQualityProfilesManager(
       updateQualityProfileDraft((current) => ({
         ...current,
         quality_tiers: dedupeOrdered([...current.quality_tiers, normalized]),
+      }));
+    },
+    [updateQualityProfileDraft],
+  );
+
+  const reorderQualityTier = React.useCallback(
+    (qualityTier: string, targetIndex: number) => {
+      updateQualityProfileDraft((current) => ({
+        ...current,
+        quality_tiers: moveQualityTier(current.quality_tiers, qualityTier, targetIndex),
       }));
     },
     [updateQualityProfileDraft],
@@ -911,6 +922,7 @@ export function useQualityProfilesManager(
     moveProfileListToDenied,
     addQualityTier,
     removeQualityTier,
+    reorderQualityTier,
     updateQualityProfilesGlobal,
     saveGlobalQualityProfile,
     saveGlobalScoringPersona,

@@ -383,4 +383,7 @@ export type LibraryPaths = {
 export type ServiceSettings = {
   tlsCertPath: string;
   tlsKeyPath: string;
+  trustedProxyIps: string[];
+  trustedProxyOverride: string[] | null;
+  trustedProxySource: "settings" | "environment";
 };

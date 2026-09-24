@@ -1,10 +1,10 @@
-//! Authoring guard for SQL assets, shared by the build script and migration tools.
+//! Authoring guard for new SQL migrations, shared by the build script and migration tools.
 //!
 //! Every ordinary table must declare a primary key and explicit NOT NULL on each
 //! component, in both dialects. This includes INTEGER keys: spelling the invariant
 //! out avoids SQLite's INTEGER/BIGINT and inline/composite primary-key differences.
 //! Released SQL is immutable; 0211 is the fixed 0.19.17 boundary, not a moving
-//! exemption. New baselines must satisfy the same rule as new migrations.
+//! exemption. Baselines are replay snapshots and are excluded by the bundle compiler.
 
 use std::collections::BTreeMap;
 
@@ -59,7 +59,7 @@ fn validate_sql(sql: &str) -> Result<(), String> {
         {
             i += 1;
         }
-        // Virtual tables (e.g. spellfix) have module-defined schemas, not ordinary
+        // Virtual tables (e.g. FTS) have module-defined schemas, not ordinary
         // SQL primary keys. They remain subject to their engine integration tests.
         if !tokens.get(i).is_some_and(|t| t.keyword("TABLE")) {
             continue;
@@ -313,7 +313,7 @@ mod tests {
             "/* CREATE TABLE bad (id TEXT PRIMARY KEY); /* nested */ */ CREATE TABLE `items` (`id` TEXT NOT /* gap */ NULL PRIMARY KEY);",
             "SELECT 'CREATE TABLE bad (id TEXT PRIMARY KEY)'; -- CREATE TABLE bad (id TEXT PRIMARY KEY)\n SELECT $tag$CREATE TABLE bad (id TEXT PRIMARY KEY)$tag$;",
             "CREATE TABLE items (\"a\"\"b\" TEXT NOT NULL, PRIMARY KEY (\"a\"\"b\"));",
-            "CREATE VIRTUAL TABLE title_search_spellfix USING spellfix1;",
+            "CREATE VIRTUAL TABLE title_search_fts USING fts5(name);",
             "ALTER TABLE proxy_configs ALTER COLUMN protocol DROP NOT NULL;",
         ] {
             validate(212, "test.sql", sql).unwrap_or_else(|error| panic!("{sql}: {error}"));

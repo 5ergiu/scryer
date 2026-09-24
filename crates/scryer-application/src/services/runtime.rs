@@ -50,8 +50,15 @@ pub struct AppRuntimeCatalogState {
     /// separate processes or replicas; multi-process profile mutations require
     /// a shared database advisory/transaction lock before they are supported.
     pub quality_profile_reference_lock: Arc<tokio::sync::Mutex<()>>,
-    pub(crate) monitored_title_matcher:
-        Arc<RwLock<crate::import_title_resolution::MonitoredTitleMatcherCache>>,
+    /// Bumped by every catalog write that can change a name, alias, tagged
+    /// alias, facet, year, external id or monitored flag.
+    ///
+    /// Title resolution reads the persisted projection and so needs no
+    /// invalidation of its own; this counter survives for the one consumer
+    /// that still asks "has the catalog changed since I last resolved this?" —
+    /// the tracked-download sweep, which re-resolves an unmatched download
+    /// when the answer is yes.
+    pub(crate) catalog_generation: Arc<std::sync::atomic::AtomicU64>,
     pub poster_wake: Arc<tokio::sync::Notify>,
     pub fanart_wake: Arc<tokio::sync::Notify>,
     pub(crate) title_hydration_wake: Arc<tokio::sync::Notify>,
@@ -1059,6 +1066,17 @@ pub struct AppRuntimeAcquisitionState {
     /// [`crate::download_identity::ObservationResolutionCache`].
     pub(crate) download_observation_resolutions:
         Arc<tokio::sync::Mutex<crate::download_identity::ObservationResolutionCache>>,
+    /// Conflicting observations this process has already warned about.
+    ///
+    /// A conflict is a standing state, not an event: the same client row
+    /// conflicts on every tick until something writes the registry. The memo
+    /// keeps that cheap, but a generation bump — which any grab causes — clears
+    /// the memo and would otherwise re-warn every conflicting row. Keyed on the
+    /// conflict itself (locator, token, held binding) so a *different* conflict
+    /// still warns, and so a conflict that recurs unchanged does not.
+    pub(crate) warned_download_identity_conflicts: Arc<
+        tokio::sync::Mutex<std::collections::HashSet<crate::download_identity::ConflictWarningKey>>,
+    >,
     pub(crate) wanted_projection_cache:
         Arc<tokio::sync::RwLock<HashMap<crate::types::WantedKind, CachedWantedProjection>>>,
     pub(crate) wanted_projection_build_lock: Arc<tokio::sync::Mutex<()>>,
@@ -1469,6 +1487,14 @@ const MAX_CONCURRENT_IMPORT_FINALIZATIONS: usize = 8;
 
 #[derive(Clone)]
 pub(crate) struct ImportExecutionCoordinator {
+    pub(crate) retry_recovery_cursor:
+        Arc<tokio::sync::Mutex<Option<scryer_domain::download_identity::DownloadId>>>,
+    source_permits: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    >,
+
     destination_permits: Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
@@ -1482,6 +1508,8 @@ pub(crate) struct ImportExecutionCoordinator {
 impl Default for ImportExecutionCoordinator {
     fn default() -> Self {
         Self {
+            retry_recovery_cursor: Arc::new(tokio::sync::Mutex::new(None)),
+            source_permits: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             destination_permits: Arc::new(
                 tokio::sync::Mutex::new(std::collections::HashMap::new()),
             ),
@@ -1499,6 +1527,31 @@ impl Default for ImportExecutionCoordinator {
 }
 
 impl ImportExecutionCoordinator {
+    pub(crate) async fn try_acquire_source(
+        &self,
+        completed: &scryer_domain::CompletedDownload,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let key = serde_json::to_string(&(
+            &completed.client_id,
+            &completed.client_type,
+            &completed.download_client_item_id,
+        ))
+        .expect("source identity serializes");
+        let permit = {
+            let mut permits = self.source_permits.lock().await;
+            permits.retain(|_, permit| permit.strong_count() > 0);
+            match permits.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(permit) => permit,
+                None => {
+                    let permit = Arc::new(tokio::sync::Mutex::new(()));
+                    permits.insert(key, Arc::downgrade(&permit));
+                    permit
+                }
+            }
+        };
+        permit.try_lock_owned().ok()
+    }
+
     pub(crate) async fn acquire_destination(
         &self,
         destination: &std::path::Path,
@@ -2312,6 +2365,8 @@ impl NavigationBadgeSection {
 #[derive(Clone)]
 pub struct AppRuntimeSecurityState {
     pub(super) recovery_admin_login_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) trusted_proxies: crate::rate_limit_proxy_policy::TrustedProxyRuntime,
+    pub(crate) service_settings_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -2356,6 +2411,8 @@ impl AppRuntimeState {
             ),
             security: AppRuntimeSecurityState {
                 recovery_admin_login_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                trusted_proxies: Default::default(),
+                service_settings_lock: Default::default(),
             },
             events: AppRuntimeEventState {
                 domain_event_broadcast: domain_event_tx,
@@ -2367,9 +2424,7 @@ impl AppRuntimeState {
             },
             catalog: AppRuntimeCatalogState {
                 quality_profile_reference_lock: Arc::new(tokio::sync::Mutex::new(())),
-                monitored_title_matcher: Arc::new(RwLock::new(
-                    crate::import_title_resolution::MonitoredTitleMatcherCache::default(),
-                )),
+                catalog_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 poster_wake: Arc::new(tokio::sync::Notify::new()),
                 fanart_wake: Arc::new(tokio::sync::Notify::new()),
                 title_hydration_wake: Arc::new(tokio::sync::Notify::new()),
@@ -2406,6 +2461,9 @@ impl AppRuntimeState {
                 wanted_projection_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_registry_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 download_observation_resolutions: Arc::new(tokio::sync::Mutex::new(
+                    Default::default(),
+                )),
+                warned_download_identity_conflicts: Arc::new(tokio::sync::Mutex::new(
                     Default::default(),
                 )),
                 wanted_projection_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),

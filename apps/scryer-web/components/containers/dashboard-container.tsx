@@ -19,6 +19,7 @@ import {
 } from "@/lib/graphql/mutations";
 import {
   dashboardOverviewQuery,
+  dashboardStorageQuery,
   dashboardPendingRequestsQuery,
   dashboardRecentImportsQuery,
   downloadImportQuery,
@@ -28,12 +29,14 @@ import { usePluginManagement } from "@/lib/hooks/use-plugin-management";
 import type {
   DashboardImportedItem,
   DashboardOverview,
+  DashboardStorageRoot,
   DashboardPluginUpdate,
   DashboardRequest,
   DashboardRequestLibrary,
   DownloadQueueItem,
 } from "@/lib/types";
 import { isBreakingVersionChange } from "@/lib/utils/dashboard";
+import { createDashboardRefresh, initialDashboardPanelStates } from "@/lib/utils/dashboard-refresh";
 import { isHistoryQueueState } from "@/lib/utils/download-queue";
 
 /** Trailing window the two 24h tiles compare against the window before it. */
@@ -70,7 +73,15 @@ export function DashboardContainer() {
   );
   const [queueItems, setQueueItems] = React.useState<DownloadQueueItem[]>([]);
   const [queueTotal, setQueueTotal] = React.useState(0);
-  const [loading, setLoading] = React.useState(true);
+  const [storageRoots, setStorageRoots] = React.useState<DashboardStorageRoot[]>([]);
+  const [panels, setPanels] = React.useState(initialDashboardPanelStates);
+  const refresh = React.useMemo(() => createDashboardRefresh((key, patch) => {
+    setPanels((current) => ({ ...current, [key]: { ...current[key], ...patch } }));
+  }), []);
+  React.useEffect(() => {
+    refresh.activate();
+    return () => refresh.dispose();
+  }, [client, refresh]);
   const [actionRequestId, setActionRequestId] = React.useState<string | null>(null);
   const [deleteConfirmItem, setDeleteConfirmItem] =
     React.useState<DownloadQueueItem | null>(null);
@@ -120,111 +131,191 @@ export function DashboardContainer() {
     [plugins],
   );
 
-  const refreshOverview = React.useCallback(async () => {
-    const { data, error } = await client
-      .query(dashboardOverviewQuery, {
-        activityWindowHours: ACTIVITY_WINDOW_HOURS,
-      })
-      .toPromise();
-    if (error) throw error;
+  const refreshOverview = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "overview",
+        async () => {
+          const { data, error } = await client
+            .query(dashboardOverviewQuery, {
+              activityWindowHours: ACTIVITY_WINDOW_HOURS,
+            })
+            .toPromise();
+          if (error) throw error;
 
-    const badges = data?.navigationBadgeCounts;
-    const health = data?.systemHealth;
-    setOverview({
-      username: data?.me?.username ?? null,
-      pendingRequestCount: sumFacetCounts(badges?.pendingMediaRequestCounts),
-      activityImportCount: badges?.activityImportCount ?? 0,
-      library: {
-        movies: health?.titlesMovie ?? 0,
-        series: health?.titlesSeries ?? 0,
-        anime: health?.titlesAnime ?? 0,
-      },
-      activity: data?.dashboardActivityStats ?? {
-        current: { grabbed: 0, upgraded: 0, imported: 0, importFailed: 0 },
-        previous: { grabbed: 0, upgraded: 0, imported: 0, importFailed: 0 },
-      },
-      indexerStats: health?.indexerStats ?? [],
-      indexers: data?.indexers ?? [],
-      downloadClients: data?.downloadClientConfigs ?? [],
-      storageRoots: data?.storageRoots ?? [],
-    });
-  }, [client]);
+          const badges = data?.navigationBadgeCounts;
+          const health = data?.dashboardSummary;
+          return () =>
+            setOverview({
+              username: data?.me?.username ?? null,
+              pendingRequestCount: sumFacetCounts(
+                badges?.pendingMediaRequestCounts,
+              ),
+              activityImportCount: badges?.activityImportCount ?? 0,
+              library: {
+                movies: health?.titlesMovie ?? 0,
+                series: health?.titlesSeries ?? 0,
+                anime: health?.titlesAnime ?? 0,
+              },
+              activity: data?.dashboardActivityStats ?? {
+                current: {
+                  grabbed: 0,
+                  upgraded: 0,
+                  imported: 0,
+                  importFailed: 0,
+                },
+                previous: {
+                  grabbed: 0,
+                  upgraded: 0,
+                  imported: 0,
+                  importFailed: 0,
+                },
+              },
+              indexerStats: health?.indexerStats ?? [],
+              indexers: data?.indexers ?? [],
+              downloadClients: data?.downloadClientConfigs ?? [],
+              storageRoots: [],
+            });
+        },
+        invalidate,
+      ),
+    [client, refresh],
+  );
 
-  const refreshRequests = React.useCallback(async () => {
-    const { data, error } = await client
-      .query(dashboardPendingRequestsQuery, {})
-      .toPromise();
-    if (error) throw error;
+  const refreshRequests = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "requests",
+        async () => {
+          const { data, error } = await client
+            .query(dashboardPendingRequestsQuery, {})
+            .toPromise();
+          if (error) throw error;
 
-    const loaded = (data?.mediaRequests ?? []) as DashboardRequest[];
-    // Oldest first: the request that has been waiting longest leads.
-    setRequests(
-      [...loaded]
-        .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
-        .slice(0, PREVIEW_FETCH_LIMIT),
-    );
-    setRequestLibraries((data?.libraries ?? []) as DashboardRequestLibrary[]);
-  }, [client]);
+          const loaded = (data?.mediaRequests ?? []) as DashboardRequest[];
+          // Oldest first: the request that has been waiting longest leads.
+          return () => {
+            setRequests(
+              [...loaded]
+                .sort(
+                  (left, right) =>
+                    Date.parse(left.createdAt) - Date.parse(right.createdAt),
+                )
+                .slice(0, PREVIEW_FETCH_LIMIT),
+            );
+            setRequestLibraries(
+              (data?.libraries ?? []) as DashboardRequestLibrary[],
+            );
+          };
+        },
+        invalidate,
+      ),
+    [client, refresh],
+  );
 
   // The panel mirrors Activity → Imports: downloads that could not be
   // auto-imported, in the same list the nav badge counts.
-  const refreshImportActivity = React.useCallback(async () => {
-    const { data, error } = await client
-      .query(downloadImportQuery, {
-        limit: PREVIEW_FETCH_LIMIT,
-        offset: 0,
-        filter: "ATTENTION",
-      })
-      .toPromise();
-    if (error) throw error;
+  const refreshImportActivity = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "imports",
+        async () => {
+          const { data, error } = await client
+            .query(downloadImportQuery, {
+              limit: PREVIEW_FETCH_LIMIT,
+              offset: 0,
+              filter: "ATTENTION",
+            })
+            .toPromise();
+          if (error) throw error;
 
-    const items = (data?.downloadImport?.items ?? []) as DownloadQueueItem[];
-    // Oldest first: the download that has been stuck longest leads.
-    setImportActivity(
-      [...items].sort(
-        (left, right) =>
-          Date.parse(left.queuedAt ?? left.lastUpdatedAt ?? "") -
-          Date.parse(right.queuedAt ?? right.lastUpdatedAt ?? ""),
+          const items = (data?.downloadImport?.items ??
+            []) as DownloadQueueItem[];
+          // Oldest first: the download that has been stuck longest leads.
+          return () => {
+            setImportActivity(
+              [...items].sort(
+                (left, right) =>
+                  Date.parse(left.queuedAt ?? left.lastUpdatedAt ?? "") -
+                  Date.parse(right.queuedAt ?? right.lastUpdatedAt ?? ""),
+              ),
+            );
+            setImportActivityTotal(data?.downloadImport?.totalCount ?? 0);
+          };
+        },
+        invalidate,
       ),
-    );
-    setImportActivityTotal(data?.downloadImport?.totalCount ?? 0);
-  }, [client]);
+    [client, refresh],
+  );
 
-  const refreshRecentImports = React.useCallback(async () => {
-    const { data, error } = await client
-      .query(dashboardRecentImportsQuery, { limit: PREVIEW_FETCH_LIMIT })
-      .toPromise();
-    if (error) throw error;
+  const refreshRecentImports = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "recent",
+        async () => {
+          const { data, error } = await client
+            .query(dashboardRecentImportsQuery, { limit: PREVIEW_FETCH_LIMIT })
+            .toPromise();
+          if (error) throw error;
 
-    const loaded = (data?.titleHistory?.items ?? []) as DashboardImportedItem[];
-    // Newest first.
-    setRecentImports(
-      [...loaded].sort(
-        (left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt),
+          return () =>
+            setRecentImports(
+              (data?.dashboardRecentImports ?? []) as DashboardImportedItem[],
+            );
+        },
+        invalidate,
       ),
-    );
-  }, [client]);
+    [client, refresh],
+  );
 
-  const refreshQueue = React.useCallback(async () => {
-    const { data, error } = await client
-      .query(downloadQueuePageQuery, {
-        limit: QUEUE_FETCH_LIMIT,
-        scryerSubmittedOnly: false,
-      })
-      .toPromise();
-    if (error) throw error;
+  const refreshQueue = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "queue",
+        async () => {
+          const { data, error } = await client
+            .query(downloadQueuePageQuery, {
+              limit: QUEUE_FETCH_LIMIT,
+              scryerSubmittedOnly: false,
+            })
+            .toPromise();
+          if (error) throw error;
 
-    setQueueItems((data?.downloadQueuePage?.items ?? []) as DownloadQueueItem[]);
-    setQueueTotal(data?.downloadQueuePage?.totalCount ?? 0);
-  }, [client]);
+          return () => {
+            setQueueItems(
+              (data?.downloadQueuePage?.items ?? []) as DownloadQueueItem[],
+            );
+            setQueueTotal(data?.downloadQueuePage?.totalCount ?? 0);
+          };
+        },
+        invalidate,
+      ),
+    [client, refresh],
+  );
+
+  const refreshStorage = React.useCallback(
+    (invalidate = false) =>
+      refresh.run(
+        "storage",
+        async () => {
+          const { data, error } = await client
+            .query(dashboardStorageQuery, {})
+            .toPromise();
+          if (error) throw error;
+          return () => setStorageRoots(data?.storageRoots ?? []);
+        },
+        invalidate,
+      ),
+    [client, refresh],
+  );
 
   // One import-affecting action finished: the nav badge shrinks and every panel
   // the action touched re-reads its source.
   const refreshAfterImportAction = React.useCallback(() => {
     dispatchNavigationBadgesRefresh({ delta: -1 });
-    void refreshOverview();
-    void refreshImportActivity();
-    void refreshQueue();
+    void refreshOverview(true);
+    void refreshImportActivity(true);
+    void refreshQueue(true);
   }, [refreshImportActivity, refreshOverview, refreshQueue]);
 
   // The activity page's action subset: movies import directly, series and anime
@@ -292,27 +383,11 @@ export function DashboardContainer() {
   ]);
 
   const refreshAll = React.useCallback(async () => {
-    try {
-      await Promise.all([
-        refreshOverview(),
-        refreshRequests(),
-        refreshImportActivity(),
-        refreshRecentImports(),
-        refreshQueue(),
-      ]);
-    } catch (error) {
-      reportError(error);
-    } finally {
-      setLoading(false);
-    }
-  }, [
-    refreshOverview,
-    refreshImportActivity,
-    refreshQueue,
-    refreshRecentImports,
-    refreshRequests,
-    reportError,
-  ]);
+    await Promise.all([
+      refreshOverview(), refreshStorage(), refreshRequests(),
+      refreshImportActivity(), refreshRecentImports(), refreshQueue(),
+    ]);
+  }, [refreshOverview, refreshStorage, refreshRequests, refreshImportActivity, refreshRecentImports, refreshQueue]);
 
   React.useEffect(() => {
     void refreshAll();
@@ -321,19 +396,21 @@ export function DashboardContainer() {
   // A request action only changes the overview counts and the request rail;
   // the queue, import activity, and recent imports are untouched, so skip them.
   const refreshAfterRequestAction = React.useCallback(async () => {
-    await Promise.all([refreshOverview(), refreshRequests()]);
+    await Promise.all([refreshOverview(true), refreshRequests(true)]);
   }, [refreshOverview, refreshRequests]);
 
   // The shell already pulses the badge counts on poll and on window focus;
   // riding that pulse keeps the dashboard fresh without a timer of its own.
   React.useEffect(() => {
+    let lastPulse = 0;
     const handlePulse = (event: Event) => {
       if (!(event instanceof CustomEvent)) {
         return;
       }
       const source = (event as CustomEvent<NavigationBadgesRefreshDetail>).detail
         ?.source;
-      if (source === "poll" || source === "focus") {
+      if (!document.hidden && (source === "poll" || source === "focus") && Date.now() - lastPulse > 2000) {
+        lastPulse = Date.now();
         void refreshAll();
       }
     };
@@ -445,7 +522,8 @@ export function DashboardContainer() {
   return (
     <>
       <DashboardView
-        loading={loading}
+        panels={panels}
+        storageRoots={storageRoots}
         overview={overview}
         requests={requests}
         importActivity={importActivity}

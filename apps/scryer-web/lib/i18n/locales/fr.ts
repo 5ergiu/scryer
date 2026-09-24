@@ -1118,8 +1118,9 @@ const fr: LocaleDictionary = {
     "Supprimer ce téléchargement du téléchargeur ? Il sera ignoré une fois la suppression confirmée par le téléchargeur.",
   "queue.manualUnavailableForResult":
     "La mise en file manuelle n’est pas disponible pour ce résultat.",
-  "importHistory.retry": "Réessayer",
-  "importHistory.retryWithPassword": "Réessayer avec mot de passe",
+  "importHistory.retry": "Réessayer l’importation",
+  "importHistory.retryHelp": "Réévalue les fichiers déjà téléchargés avec l’affectation et le profil de qualité actuels. Ne relance pas le téléchargement.",
+  "importHistory.retryWithPassword": "Réessayer l’importation avec un mot de passe",
   "importHistory.passwordRequired": "Mot de passe requis",
   "importHistory.passwordPlaceholder": "Mot de passe de l'archive",
   "importHistory.retrySuccess": "Réimportation lancée",
@@ -1157,6 +1158,8 @@ const fr: LocaleDictionary = {
   "settings.indexerAutoSearch": "Auto",
   "settings.indexerStatus": "État",
   "settings.indexerDisabledUntil": "Retrait temporaire {{time}}",
+  "settings.indexerCoolingDownUntil": "En pause · reprise {{time}}",
+  "settings.indexerCoolingDownHelp": "L’indexeur a demandé à Scryer de ralentir. La recherche reprend automatiquement.",
   "settings.indexerLastError": "Erreur {{time}}",
   "settings.indexerLastSearched": "Recherché {{time}}",
   "settings.indexerNoActivity": "Aucune activité",
@@ -2500,6 +2503,7 @@ const fr: LocaleDictionary = {
   "indexerSearch.health.stillSearching":
     "{{count}} sur {{total}} cherchent encore",
   "indexerSearch.health.failed": "échec",
+  "indexerSearch.health.coolingDown": "en pause",
   "indexerSearch.health.skipped": "ignoré",
   "indexerSearch.health.retryFailed": "Relancer les échecs",
   "indexerSearch.refine.title": "Affiner",

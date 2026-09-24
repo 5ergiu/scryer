@@ -708,7 +708,7 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // takes no argument and lists only live sessions, and `libraryScanState` is
     // a push stream. Same shape as the `queueReplacementRelease` reinstatement.
     assert_eq!(
-        query_field_count, 170,
+        query_field_count, 174,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -736,7 +736,7 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Failed-move recovery adds `abandonLocationOperation`, the way out of a
     // stalled operation whose storage is not coming back: mutation 247->248.
     assert_eq!(
-        mutation_field_count, 248,
+        mutation_field_count, 249,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -871,10 +871,35 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // carries a `DownloadImportActionsPayload`: OBJECT 460->461, public types
     // 852->853. It is an additive field on a type that already existed, so no
     // other count moves.
-    assert_eq!(public_types.len(), 853);
-    assert_eq!(kind_count("OBJECT"), 461);
-    assert_eq!(kind_count("INPUT_OBJECT"), 221);
-    assert_eq!(kind_count("ENUM"), 159);
+    // Explicit grab destinations add indexerGrabClients and downloadClientCategories,
+    // queueIndexerSearchAssignment, two objects, and IndexerGrabSelectionInput.
+    // Dashboard summary and recent imports add two queries, three objects, and
+    // DashboardImportKindValue. Together: queries 170->174, mutations 248->249,
+    // OBJECT 461->466, INPUT_OBJECT 221->222, ENUM 159->160, public types 853->860.
+    for name in [
+        "indexerGrabClients",
+        "downloadClientCategories",
+        "dashboardSummary",
+        "dashboardRecentImports",
+    ] {
+        assert!(query_field_names.contains(&name), "missing query {name}");
+    }
+    assert!(mutation_field_names.contains(&"queueIndexerSearchAssignment"));
+    for name in [
+        "IndexerGrabClientPayload",
+        "DownloadClientCategoriesPayload",
+        "IndexerGrabSelectionInput",
+        "DashboardSummaryPayload",
+        "DashboardIndexerStatsPayload",
+        "DashboardRecentImportPayload",
+        "DashboardImportKindValue",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert_eq!(public_types.len(), 860);
+    assert_eq!(kind_count("OBJECT"), 466);
+    assert_eq!(kind_count("INPUT_OBJECT"), 222);
+    assert_eq!(kind_count("ENUM"), 160);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));

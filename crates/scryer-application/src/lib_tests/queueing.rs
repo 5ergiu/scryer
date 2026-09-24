@@ -1002,6 +1002,134 @@ async fn a_settled_download_stops_conflicting_new_submissions_for_its_scope() {
 }
 
 #[tokio::test]
+async fn a_deleted_download_stops_conflicting_new_submissions_for_its_scope() {
+    // The user-delete path settles a download just as decisively as a terminal
+    // transition does, so it owes the guard caches the same invalidation. Until
+    // it did, a search inside the 30s window still saw the deleted submission
+    // as accepted and refused the replacement grab as a non-replaceable
+    // conflict.
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let download_queue_commands = Arc::new(TrackingDownloadQueueCommandRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking_and_queue_commands(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+        download_queue_commands.clone(),
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Deleted Regrab".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let queued = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/original.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Deleted.Regrab.2026.720p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("first queue");
+    assert!(matches!(queued, QueueDownloadOutcome::Queued(_)));
+
+    // Inside the cache window the accepted set still blocks the scope.
+    let blocked = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/replacement.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Deleted.Regrab.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("blocked queue outcome");
+    let QueueDownloadOutcome::Conflict(conflict) = blocked else {
+        panic!("an accepted in-flight download should conflict its scope");
+    };
+    assert!(!conflict.replaceable);
+
+    let submission = download_submissions
+        .store
+        .lock()
+        .await
+        .first()
+        .cloned()
+        .expect("the accepted grab should have a submission row");
+    let command_id = download_queue_commands
+        .seed_pending(
+            submission.download_client_id.as_deref(),
+            &submission.download_client_type,
+            &submission.download_client_item_id,
+            false,
+        )
+        .await;
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let poller = tokio::spawn(start_background_download_delete_poller(
+        app.clone(),
+        token.child_token(),
+    ));
+    within_deadline("the queued delete", async {
+        loop {
+            if let Some(record) = download_queue_commands.get(&command_id).await
+                && record.status == scryer_domain::DownloadQueueDeleteStatus::Completed
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    token.cancel();
+    poller.await.expect("delete poller should stop cleanly");
+
+    let regrabbed = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/replacement.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Deleted.Regrab.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("regrab queue");
+    assert!(
+        matches!(regrabbed, QueueDownloadOutcome::Queued(_)),
+        "a deleted download must not block the replacement grab for its scope"
+    );
+    assert_eq!(
+        download_client.submitted_release_titles.lock().await.len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn queue_existing_title_download_submits_source_password_hint() {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
@@ -4030,7 +4158,8 @@ async fn series_movie_wanted_subject_uses_parent_owner_when_title_facet_is_missi
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
 
     assert_eq!(search_title.facet, MediaFacet::Movie);
     assert_eq!(subject.title_id, title.id);
@@ -4261,7 +4390,8 @@ async fn convergence_test_title_and_subject(
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     (title, subject)
 }
 
@@ -4586,7 +4716,8 @@ async fn background_acquisition_requeries_only_the_pruned_indexer() {
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     let convergence = app
         .resolve_scope_convergence(&title, &subject)
         .await
@@ -4720,7 +4851,8 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
     let convergence = app
         .resolve_scope_convergence(&title, &subject)
         .await
@@ -5509,7 +5641,8 @@ async fn wanted_item_subject_evidence_carries_the_anime_bridge_cour_names() {
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
-        .await;
+        .await
+        .expect("subject should resolve");
 
     let release = "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb";
     let parsed = crate::release_parser::parse_release_metadata_for_target(

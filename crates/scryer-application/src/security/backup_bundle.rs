@@ -490,8 +490,23 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         table: "title_search_terms",
         classification: BackupTableClassification::Rebuild,
     },
+    // The fuzzy lane's catch-up queue. Rebuild rather than export: an
+    // imported queue would name titles of the exporting library.
     BackupTableCatalogEntry {
-        table: "title_search_spellfix",
+        table: "title_search_index_queue",
+        classification: BackupTableClassification::Rebuild,
+    },
+    // ICU sort keys for the projection rows above. They are only comparable
+    // within one collation-data version, so exporting them would carry the
+    // exporting build's collation into an importing build that may disagree.
+    BackupTableCatalogEntry {
+        table: "title_search_collation_keys",
+        classification: BackupTableClassification::Rebuild,
+    },
+    // Holds the collation-data fingerprint the projection rows were written
+    // with. The rebuild restamps it with the running build's fingerprint.
+    BackupTableCatalogEntry {
+        table: "title_search_meta",
         classification: BackupTableClassification::Rebuild,
     },
     BackupTableCatalogEntry {

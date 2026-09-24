@@ -1,14 +1,57 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn build_discovery_library_context(
     titles: &[Title],
     defaults: DiscoveryContextDefaults,
 ) -> DiscoveryLibraryContext {
-    let mut subject_provenance = titles
+    let subject_provenance = titles
         .iter()
         .filter_map(build_discovery_library_subject)
         .collect::<Vec<_>>();
 
+    finish_discovery_library_context(
+        subject_provenance,
+        DiscoveryLibraryMediumMix::from_titles(titles),
+        defaults,
+    )
+}
+
+pub(crate) fn build_projected_discovery_library_context(
+    titles: &[crate::DiscoveryContextTitle],
+    defaults: DiscoveryContextDefaults,
+) -> DiscoveryLibraryContext {
+    let mut medium_mix = DiscoveryLibraryMediumMix::default();
+    let subjects = titles
+        .iter()
+        .filter_map(|title| {
+            medium_mix.add(discovery_medium_from_genres(
+                &title.facet,
+                title.genres.iter().map(String::as_str),
+            ));
+            let parts = build_discovery_subject_parts(
+                &title.facet,
+                normalize_external_ids(&title.external_ids),
+            )?;
+            Some(DiscoveryLibrarySubject {
+                title_id: title.id.clone(),
+                library_id: title.library_id.clone(),
+                title_name: title.name.clone(),
+                facet: parts.facet,
+                subject_key: parts.subject_key,
+                subject: parts.subject,
+                canonical: parts.canonical,
+            })
+        })
+        .collect();
+    finish_discovery_library_context(subjects, medium_mix, defaults)
+}
+
+fn finish_discovery_library_context(
+    mut subject_provenance: Vec<DiscoveryLibrarySubject>,
+    medium_mix: DiscoveryLibraryMediumMix,
+    defaults: DiscoveryContextDefaults,
+) -> DiscoveryLibraryContext {
     subject_provenance.sort_by(|left, right| {
         left.subject_key
             .cmp(&right.subject_key)
@@ -29,8 +72,6 @@ pub(crate) fn build_discovery_library_context(
         .iter()
         .map(|subject| subject.canonical.clone())
         .collect::<Vec<_>>();
-
-    let medium_mix = DiscoveryLibraryMediumMix::from_titles(titles);
 
     DiscoveryLibraryContext {
         subjects,
@@ -177,6 +218,7 @@ pub(crate) fn pending_context_change_from_domain_event(
     }
 }
 
+#[cfg(test)]
 pub(super) fn build_discovery_library_subject(title: &Title) -> Option<DiscoveryLibrarySubject> {
     let parts =
         build_discovery_subject_parts(&title.facet, normalized_supported_external_ids(title))?;
@@ -402,9 +444,13 @@ pub(super) fn build_discovery_subject_parts(
     })
 }
 
+#[cfg(test)]
 pub(super) fn normalized_supported_external_ids(title: &Title) -> Vec<CanonicalExternalId> {
-    title
-        .external_ids
+    normalize_external_ids(&title.external_ids)
+}
+
+fn normalize_external_ids(external_ids: &[scryer_domain::ExternalId]) -> Vec<CanonicalExternalId> {
+    external_ids
         .iter()
         .filter_map(|external_id| {
             normalize_supported_external_id(&external_id.source, &external_id.value)

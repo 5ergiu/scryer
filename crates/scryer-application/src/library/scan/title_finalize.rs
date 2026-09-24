@@ -590,6 +590,10 @@ async fn persist_ignored_movie_scan_file_metadata_error(
 /// Register a discovered movie file the same way episodic title scans do:
 /// persist or reuse a media-file row, run media analysis when needed, and
 /// ensure a movie collection points at the file path for overview UI.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "movie-scan finalization coordinates persistence, analysis, and summary accounting together"
+)]
 pub(super) async fn finalize_movie_scan_file(
     app: &AppUseCase,
     title: &Title,
@@ -598,6 +602,7 @@ pub(super) async fn finalize_movie_scan_file(
     session_id: Option<&str>,
     title_scan_root: &str,
     cancel_token: Option<&CancellationToken>,
+    mode: LibraryScanTitleWalkMode,
 ) {
     let file_path = stored_path_to_path_buf(&file.path);
     let file_stem = file_path
@@ -696,6 +701,22 @@ pub(super) async fn finalize_movie_scan_file(
     else {
         return;
     };
+    if mode == LibraryScanTitleWalkMode::FolderReconciliation
+        && persisted_file.should_analyze
+        && let Err(error) = app
+            .services
+            .library
+            .media_files
+            .update_media_file_analysis(
+                &persisted_file.file_id,
+                crate::MediaFileAnalysis::default(),
+            )
+            .await
+    {
+        warn!(%error, "failed to clear stale movie analysis during folder reconciliation");
+        summary.skipped += 1;
+        return;
+    }
     drop(destination_permit);
 
     match crate::subtitles::reconcile_external_subtitles_for_media_file(
@@ -727,7 +748,7 @@ pub(super) async fn finalize_movie_scan_file(
         return;
     }
 
-    if persisted_file.should_analyze {
+    if persisted_file.should_analyze && mode != LibraryScanTitleWalkMode::FolderReconciliation {
         let analysis_outcome = match app
             .analyze_catalogued_media_file(Some(&persisted_file.file_id), file_path.clone())
             .await

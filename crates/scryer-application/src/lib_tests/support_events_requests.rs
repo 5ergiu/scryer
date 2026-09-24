@@ -8,6 +8,9 @@ pub(super) struct MockDomainEventRepo {
     pub(super) subscriber_offsets: Arc<Mutex<HashMap<String, i64>>>,
     pub(super) delete_operation_log: OptionalDeleteOperationLog,
     pub(super) list_calls: AtomicUsize,
+    /// Every `list` filter this repo was asked for, so a test can assert on the
+    /// *shape* of the read and not only its result.
+    pub(super) list_filters: Arc<Mutex<Vec<DomainEventFilter>>>,
 }
 
 impl MockDomainEventRepo {
@@ -197,8 +200,59 @@ impl DomainEventRepository for MockDomainEventRepo {
         Ok(stored)
     }
 
+    /// In-memory twin of the store's bounded query: started sessions with no
+    /// terminal event, and no `library_scan_progressed` row read at all.
+    async fn list_unfinished_library_scan_sessions(
+        &self,
+    ) -> AppResult<Vec<crate::ports::UnfinishedLibraryScanSession>> {
+        fn session_id(event: &DomainEvent) -> Option<&str> {
+            match &event.stream {
+                scryer_domain::DomainEventStream::LibraryScan { session_id } => {
+                    Some(session_id.as_str())
+                }
+                _ => None,
+            }
+        }
+        let events = self.events.lock().await;
+        let terminated: std::collections::HashSet<&str> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.payload,
+                    DomainEventPayload::LibraryScanCompleted(_)
+                        | DomainEventPayload::LibraryScanCanceled(_)
+                        | DomainEventPayload::LibraryScanFailed(_)
+                )
+            })
+            .filter_map(session_id)
+            .collect();
+        Ok(events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                DomainEventPayload::LibraryScanStarted(data) => Some((event, data)),
+                _ => None,
+            })
+            .filter_map(|(event, data)| {
+                let id = session_id(event)?;
+                (!terminated.contains(id)).then(|| crate::ports::UnfinishedLibraryScanSession {
+                    session_id: id.to_string(),
+                    library_id: data.library_id.clone(),
+                    facet: event.facet.clone(),
+                    started_at: event.occurred_at,
+                    last_event_at: events
+                        .iter()
+                        .filter(|other| session_id(other) == Some(id))
+                        .map(|other| other.occurred_at)
+                        .max()
+                        .unwrap_or(event.occurred_at),
+                })
+            })
+            .collect())
+    }
+
     async fn list(&self, filter: &DomainEventFilter) -> AppResult<Vec<DomainEvent>> {
         self.list_calls.fetch_add(1, Ordering::SeqCst);
+        self.list_filters.lock().await.push(filter.clone());
         let events = self.events.lock().await;
         let limit = if filter.limit == 0 {
             usize::MAX

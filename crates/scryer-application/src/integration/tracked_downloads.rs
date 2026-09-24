@@ -93,6 +93,23 @@ pub struct TrackedDownload {
     /// once it has persisted beyond the grace window, which must outlast the
     /// router's maximum backoff.
     pub snapshot_missing_since: Option<DateTime<Utc>>,
+    /// Runtime-only marker that this download's cleanup finished with the
+    /// client entry deliberately left in place — no removal configured, the
+    /// seeding gate released it under a `Keep`/`StopSeeding` policy, or the
+    /// profile handed the torrent off.
+    ///
+    /// Torrent clients only: a Usenet client's history is a rolling window, so
+    /// an imported job leaving it is the window scrolling rather than the
+    /// operator removing the entry.
+    ///
+    /// Such a row stays in the cache so the absence prune can see the entry
+    /// vanish when the operator finally removes it and end its binding — a
+    /// download that stops being listed ends its binding, exactly as
+    /// `drop_source_removed_from_client` documents. It is not re-offered to
+    /// the cleanup gate, though: cleanup already finished with it, and
+    /// re-running it per poll would re-pause a stopped torrent and log the
+    /// same release once a tick forever.
+    pub retained_in_client_after_cleanup: bool,
 }
 
 /// Content-only reason a completed download is temporarily held from import.
@@ -364,6 +381,11 @@ pub struct TrackedDownloadService {
     cache: HashMap<DownloadId, TrackedDownload>,
     last_seen_at: HashMap<DownloadId, DateTime<Utc>>,
     warning_since: HashMap<DownloadId, DateTime<Utc>>,
+    /// The catalog generation each download's title was last resolved against.
+    /// A newer generation is what the dirty-matcher flag used to say: the
+    /// catalog has changed, so an unmatched or parse-matched download is worth
+    /// resolving again.
+    resolved_generation: HashMap<DownloadId, u64>,
 }
 
 impl TrackedDownloadService {
@@ -446,16 +468,23 @@ impl TrackedDownloadService {
         if client_item.state != DownloadQueueState::Warning {
             self.warning_since.remove(&download_id);
         }
+        // The generation the catalog is at right now. A download resolved at an
+        // older generation is re-resolved once, and not again until the next
+        // catalog write: the matcher itself caches nothing, so this counter is
+        // the only thing standing between an unmatched download and a lookup
+        // on every single poll.
+        let catalog_generation = app
+            .runtime
+            .catalog
+            .catalog_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
         let existing = self.cache.get_mut(&download_id);
 
         if let Some(existing) = existing {
-            let matcher_dirty = app
-                .runtime
-                .catalog
-                .monitored_title_matcher
-                .read()
-                .await
-                .dirty;
+            let matcher_dirty = self
+                .resolved_generation
+                .get(&download_id)
+                .is_none_or(|resolved| *resolved != catalog_generation);
             let should_reresolve = should_reresolve_title(existing, &client_item, matcher_dirty);
             // Update the client snapshot but preserve scryer state if not Downloading.
             if existing.state == TrackedDownloadState::Downloading {
@@ -477,6 +506,8 @@ impl TrackedDownloadService {
             existing.is_trackable = true;
             if should_reresolve {
                 Self::resolve_title(app, existing).await;
+                self.resolved_generation
+                    .insert(download_id, catalog_generation);
             }
             return;
         }
@@ -484,6 +515,8 @@ impl TrackedDownloadService {
         // First time seeing this download — build, resolve, and insert.
         let td = Self::build_new_tracked_download(app, download_id, id.clone(), client_item).await;
         self.cache.insert(download_id, td);
+        self.resolved_generation
+            .insert(download_id, catalog_generation);
         self.prune_cache();
     }
 
@@ -521,6 +554,7 @@ impl TrackedDownloadService {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         Self::resolve_title(app, &mut td).await;
@@ -921,6 +955,7 @@ impl TrackedDownloadService {
             self.cache.remove(&download_id);
             self.last_seen_at.remove(&download_id);
             self.warning_since.remove(&download_id);
+            self.resolved_generation.remove(&download_id);
         }
     }
 
@@ -969,6 +1004,8 @@ impl TrackedDownloadService {
         self.last_seen_at
             .retain(|id, _| self.cache.contains_key(id));
         self.warning_since
+            .retain(|id, _| self.cache.contains_key(id));
+        self.resolved_generation
             .retain(|id, _| self.cache.contains_key(id));
     }
 
@@ -1120,13 +1157,16 @@ impl TrackedDownloadService {
         let parsed = crate::parse_release_metadata(release_title);
         if let Ok(matcher) = app.monitored_title_matcher().await {
             let matched = if parsed.episode.is_some() {
-                matcher.resolve_episode(
-                    &parsed,
-                    td.client_item.facet.as_deref().or(td.facet.as_deref()),
-                )
+                matcher
+                    .resolve_episode(
+                        &parsed,
+                        td.client_item.facet.as_deref().or(td.facet.as_deref()),
+                    )
+                    .await
             } else {
-                matcher.resolve_movie(&parsed)
-            };
+                matcher.resolve_movie(&parsed).await
+            }
+            .unwrap_or_default();
 
             if let Some(resolved) = matched {
                 td.title_id = Some(resolved.title.id.clone());
@@ -1169,7 +1209,18 @@ impl TrackedDownloadService {
             // `ImportedSeeding` is not terminal but must still survive a
             // restart: re-deriving it would re-import the payload and then
             // remove a torrent that is still working off its seeding goal.
-            && (state.is_import_settled() || state == TrackedDownloadState::ImportBlocked)
+            && (state.is_import_settled()
+                || state == TrackedDownloadState::ImportBlocked
+                || (state == TrackedDownloadState::Importing
+                    && app
+                        .services
+                        .workflow
+                        .imports
+                        .get_import_retry_claim(&td.download_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()))
         {
             td.state = state;
             let terminal_failure_reason = if state == TrackedDownloadState::Failed {
@@ -1209,6 +1260,8 @@ impl TrackedDownloadService {
                     .flatten();
                 td.status = TrackedDownloadStatus::Error;
                 td.status_messages = detail.into_iter().collect();
+            } else if state == TrackedDownloadState::Importing {
+                td.status_messages = vec!["Import retry is awaiting recovery".into()];
             } else if state == TrackedDownloadState::ImportBlocked {
                 let detail = app
                     .services
@@ -1640,6 +1693,19 @@ pub enum TrackedDownloadCommand {
         id: String,
         reply: oneshot::Sender<AppResult<()>>,
     },
+    BeginHistoryRetry {
+        id: String,
+        reply: oneshot::Sender<AppResult<Option<TrackedDownload>>>,
+    },
+    PublishHistoryRetry {
+        id: String,
+        reply: oneshot::Sender<AppResult<()>>,
+    },
+    FinishHistoryRetry {
+        id: String,
+        finished: Option<Box<TrackedDownload>>,
+        reply: oneshot::Sender<AppResult<()>>,
+    },
     AssignTitle {
         id: String,
         title: Box<Title>,
@@ -1912,6 +1978,56 @@ impl TrackedDownloadHandle {
                 crate::AppError::Repository("tracked download service unavailable".into())
             })?;
         reply_rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn begin_history_retry(
+        &self,
+        id: String,
+    ) -> AppResult<Option<TrackedDownload>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::BeginHistoryRetry { id, reply })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn publish_history_retry(&self, id: String) -> AppResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::PublishHistoryRetry { id, reply })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    pub(crate) async fn finish_history_retry(
+        &self,
+        id: String,
+        finished: Option<Box<TrackedDownload>>,
+    ) -> AppResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::FinishHistoryRetry {
+                id,
+                finished,
+                reply,
+            })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        rx.await.map_err(|_| {
             crate::AppError::Repository("tracked download service dropped reply".into())
         })?
     }
@@ -3651,6 +3767,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 
@@ -5023,7 +5140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_unmatched_snapshot_uses_cached_matcher_until_title_event_invalidates_it() {
+    async fn repeated_unmatched_snapshot_does_not_reread_the_catalog_until_a_title_event() {
         let titles = Arc::new(Mutex::new(Vec::new()));
         let list_for_matching_calls = Arc::new(Mutex::new(0usize));
         let title_repo = Arc::new(MutableTitleRepo {
@@ -5049,7 +5166,14 @@ mod tests {
             .expect("tracked download");
         assert!(tracked.title_id.is_none());
         assert_eq!(tracked.match_type, TitleMatchType::Unmatched);
-        assert_eq!(*list_for_matching_calls.lock().await, 1);
+        // Resolution reads the catalog through the title port; how many reads
+        // one resolution takes is the port's business. What must not happen is
+        // a further read while nothing wrote.
+        let after_first_resolution = *list_for_matching_calls.lock().await;
+        assert!(
+            after_first_resolution > 0,
+            "the first sighting must resolve against the catalog"
+        );
 
         let mut unchanged = build_client_item();
         unchanged.client_type = "weaver".to_string();
@@ -5068,8 +5192,8 @@ mod tests {
         assert_eq!(tracked.match_type, TitleMatchType::Unmatched);
         assert_eq!(
             *list_for_matching_calls.lock().await,
-            1,
-            "unchanged unmatched polls should reuse the cached matcher"
+            after_first_resolution,
+            "an unchanged unmatched poll must not read the catalog again"
         );
 
         let title = build_title("Paper Lantern", MediaFacet::Movie, &[]);
@@ -5099,10 +5223,9 @@ mod tests {
             .expect("tracked download");
         assert_eq!(tracked.title_id.as_deref(), Some(title.id.as_str()));
         assert_eq!(tracked.match_type, TitleMatchType::TitleParse);
-        assert_eq!(
-            *list_for_matching_calls.lock().await,
-            2,
-            "title events should invalidate the cached matcher"
+        assert!(
+            *list_for_matching_calls.lock().await > after_first_resolution,
+            "a title event must re-resolve the unmatched download"
         );
     }
 
@@ -5330,6 +5453,7 @@ mod tests {
                 skip_reacquire_on_failure: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
+                retained_in_client_after_cleanup: false,
             };
             tracker.cache.insert(tracked.download_id, tracked);
         }
@@ -5465,6 +5589,41 @@ mod tests {
                 "nzbget",
                 "queue-resident"
             )]
+        );
+    }
+
+    #[test]
+    fn global_snapshot_pruning_reports_an_imported_entry_the_client_stopped_listing() {
+        // The seeding gate released this torrent but left it in the client, so
+        // the row is still tracked. Removing the entry is what ends its
+        // binding, and only the prune can report that.
+        let mut tracker = TrackedDownloadService::new();
+        let mut retained = build_tracked_download("retained-after-import");
+        retained.state = TrackedDownloadState::Imported;
+        retained.retained_in_client_after_cleanup = true;
+        retained.title_id = Some("title-retained".to_string());
+        // Only torrent clients carry the retained marker: a Usenet client's
+        // history window scrolling is not the operator removing anything.
+        retained.client_type = "qbittorrent".to_string();
+        retained.client_item.client_type = "qbittorrent".to_string();
+        let retained_id = retained.id.clone();
+        tracker.cache.insert(retained.download_id, retained);
+
+        let unavailable_sources =
+            tracker.update_trackable_excluding_client_types(&HashSet::new(), &[]);
+
+        assert_eq!(
+            unavailable_sources,
+            vec![ClientJobLocator::new(
+                Some("client-1"),
+                "qbittorrent",
+                "retained-after-import"
+            )],
+            "an imported entry the client stopped listing must reach the binding drop"
+        );
+        assert!(
+            tracker.find(&retained_id).is_none_or(|td| !td.is_trackable),
+            "the row is no longer trackable once the client stopped listing it"
         );
     }
 
@@ -5947,6 +6106,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::failed_download_handler::check(&mut tracked);
@@ -5996,6 +6156,7 @@ mod tests {
                 skip_reacquire_on_failure: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
+                retained_in_client_after_cleanup: false,
             };
 
             crate::failed_download_handler::check(&mut tracked);
@@ -6199,6 +6360,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::failed_download_handler::check(&mut tracked);
@@ -6285,6 +6447,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::fail_active_manual_import_for_source(&app, &tracked, "health below critical").await;
@@ -6501,6 +6664,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
 
         crate::fail_active_manual_import_for_source(&app, &tracked, "health below critical").await;

@@ -414,7 +414,13 @@ impl ShowRepository for ShowStore {
                 let title_id = title_id.clone();
                 let bridge = bridge.clone();
                 Box::pin(async move {
-                    replace_anime_numbering_bridge_tx(tx, &title_id, bridge.as_ref()).await
+                    replace_anime_numbering_bridge_tx(tx, &title_id, bridge.as_ref()).await?;
+                    // The search projection carries the bridge's cour names, so
+                    // it is restated in the same transaction: a release named
+                    // after a cour has to find the title through the
+                    // projection, which is the only index the resolver reads.
+                    crate::media::titles::store::refresh_title_search_projection_tx(tx, &title_id)
+                        .await
                 })
             },
         )

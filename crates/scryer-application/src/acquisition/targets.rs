@@ -285,7 +285,13 @@ impl AppUseCase {
                 })
                 .await?
                 .into_iter()
-                .find(|existing| existing.collection_id.as_deref() == Some(collection_id)));
+                .find(|existing| {
+                    // Episode rows carry their owning collection id too, so the
+                    // collection scope only matches a row that is not an
+                    // episode's.
+                    existing.episode_id.is_none()
+                        && existing.collection_id.as_deref() == Some(collection_id)
+                }));
         }
         repo.get_acquisition_scope_state_for_title(title_id, None)
             .await

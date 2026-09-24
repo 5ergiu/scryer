@@ -36,6 +36,16 @@ test("names win over numbers and custom ids are offered everywhere", () => {
   ]);
 });
 
+test("raw category choices include all advertised scopes without default selections", () => {
+  const categories = [
+    { code: "2040", label: "Movies/HD" },
+    { code: "5040", label: "TV/HD" },
+    { code: "7020", label: "Books/Comics" },
+  ];
+  assert.deepEqual(overlayCapsCategories("RAW", categories, new Set()).extraCategories, categories);
+  assert.deepEqual(overlayCapsCategories("RAW", [], new Set()).extraCategories, []);
+});
+
 test("overlay splits known labels from extra categories per scope", () => {
   const known = new Set(["2000", "2040", "5000", "5040"]);
   const categories = [

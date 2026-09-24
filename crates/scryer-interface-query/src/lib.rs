@@ -544,6 +544,7 @@ pub fn from_interactive_release_search_snapshot(
                 .elapsed_ms
                 .map(|elapsed| i32::try_from(elapsed).unwrap_or(i32::MAX)),
             failure_reason: indexer.failure_reason,
+            rate_limited: indexer.rate_limited,
         })
         .collect();
     // Parity with the one-shot `searchReleases` resolver's limit handling.
@@ -1205,10 +1206,17 @@ impl CatalogQueries {
         let selection = TitlePayloadSelection::from_ctx(ctx);
         let lookahead = ctx.look_ahead();
         let catalog_filter = title_catalog_filter_from_input(filter).map_err(to_gql_error)?;
-        let include_catalog_counts = lookahead.field("hasMore").exists()
-            || lookahead.field("totalCount").exists()
-            || lookahead.field("filterCounts").exists()
-            || lookahead.field("managedBytes").exists();
+        let aggregates = scryer_application::TitleCatalogAggregates {
+            total_count: lookahead.field("totalCount").exists(),
+            filter_counts: lookahead.field("filterCounts").exists(),
+            managed_bytes: lookahead.field("managedBytes").exists(),
+        };
+        let page_limit = if lookahead.field("items").exists() || lookahead.field("hasMore").exists()
+        {
+            title_catalog_page_limit(limit)
+        } else {
+            0
+        };
         let page = app
             .list_titles(
                 &actor,
@@ -1217,10 +1225,16 @@ impl CatalogQueries {
                 query,
                 catalog_filter,
                 title_catalog_sort_from_input(sort),
-                title_catalog_page_limit(limit),
+                page_limit,
                 title_catalog_page_offset(offset),
-                selection.include_external_ids,
-                include_catalog_counts,
+                scryer_application::TitleListProjection {
+                    include_external_ids: selection.include_external_ids,
+                    include_canonical_tags: lookahead
+                        .field("items")
+                        .field("canonicalTags")
+                        .exists(),
+                },
+                aggregates,
             )
             .await
             .map_err(to_gql_error)?;
@@ -2073,6 +2087,55 @@ impl CatalogQueries {
             .take(safe_limit)
             .map(crate::mappers::from_search_result)
             .collect())
+    }
+
+    /// Read the currently eligible grab destinations for an authorized search result.
+    async fn indexer_grab_clients(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Interactive search containing the release.")] search_id: ID,
+        #[graphql(desc = "Release download URL from that search.")] download_url: String,
+        #[graphql(desc = "Optional catalog title used to resolve assignment routing.")]
+        title_id: Option<ID>,
+    ) -> GqlResult<Vec<IndexerGrabClientPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let clients = app
+            .indexer_grab_clients(
+                &actor,
+                search_id.as_ref(),
+                &download_url,
+                title_id.as_ref().map(|id| id.as_ref()),
+            )
+            .await
+            .map_err(to_gql_error)?;
+        Ok(clients
+            .into_iter()
+            .map(|client| IndexerGrabClientPayload {
+                id: client.id.into(),
+                name: client.name,
+                category: client.category,
+                mapped: client.mapped,
+            })
+            .collect())
+    }
+
+    /// Read native client category names. Unsupported clients retain custom entry.
+    async fn download_client_categories(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Enabled download client to query.")] client_id: ID,
+    ) -> GqlResult<DownloadClientCategoriesPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let categories = app
+            .download_client_categories(&actor, client_id.as_ref())
+            .await
+            .map_err(to_gql_error)?;
+        Ok(DownloadClientCategoriesPayload {
+            supported: categories.is_some(),
+            categories: categories.unwrap_or_default(),
+        })
     }
 
     /// Poll an interactive release-search job; null means no visible snapshot exists.
@@ -2930,9 +2993,151 @@ impl JobAndDownloadQueries {
     }
 }
 
+/// Title counts and indexer activity shown on the dashboard.
+#[derive(SimpleObject)]
+struct DashboardSummaryPayload {
+    /// Number of movie titles.
+    titles_movie: i32,
+    /// Number of series titles.
+    titles_series: i32,
+    /// Number of anime titles.
+    titles_anime: i32,
+    /// Recent activity and reported API usage for each indexer.
+    indexer_stats: Vec<DashboardIndexerStatsPayload>,
+}
+
+/// Recent activity and API usage for one indexer.
+#[derive(SimpleObject)]
+struct DashboardIndexerStatsPayload {
+    /// Indexer configuration identifier.
+    indexer_id: ID,
+    /// Indexer display name.
+    indexer_name: String,
+    /// Number of queries in the last 24 hours.
+    queries_last_24h: i32,
+    /// Number of failed queries in the last 24 hours.
+    failed_last_24h: i32,
+    /// Number of grabs in the last 24 hours.
+    grabs_last_24h: i32,
+    /// Current API usage reported by the indexer, when available.
+    api_current: Option<i32>,
+    /// API usage limit reported by the indexer, when available.
+    api_max: Option<i32>,
+}
+
+/// Classification of a completed dashboard import.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+enum DashboardImportKindValue {
+    /// Completed import without a more specific classification.
+    Imported,
+    /// A newly imported media file.
+    NewImport,
+    /// An import that upgraded existing media.
+    Upgrade,
+}
+
+/// One recent completed import shown on the dashboard.
+#[derive(SimpleObject)]
+struct DashboardRecentImportPayload {
+    /// Import history identifier.
+    id: ID,
+    /// Associated title identifier, when available.
+    title_id: Option<ID>,
+    /// Associated title display name, when available.
+    title_name: Option<String>,
+    /// Associated library identifier, when available.
+    library_id: Option<ID>,
+    /// Media facet of the associated title.
+    facet: Option<MediaFacetValue>,
+    /// Poster image URL for the associated title.
+    poster_url: Option<String>,
+    /// Associated episode details, when available.
+    episode: Option<EpisodePayload>,
+    /// Classification of this import.
+    kind: DashboardImportKindValue,
+    /// Imported media quality label, when available.
+    quality: Option<String>,
+    /// Imported media size in bytes, when available.
+    size_bytes: Option<Long>,
+    /// Time the import was recorded.
+    occurred_at: DateTime<Utc>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[Object]
 impl SystemQueries {
+    /// Read title counts and indexer activity for the dashboard.
+    async fn dashboard_summary(&self, ctx: &Context<'_>) -> GqlResult<DashboardSummaryPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let (counts, stats) = app.dashboard_summary(&actor).await.map_err(to_gql_error)?;
+        Ok(DashboardSummaryPayload {
+            titles_movie: counts.movie as i32,
+            titles_series: counts.series as i32,
+            titles_anime: counts.anime as i32,
+            indexer_stats: stats
+                .into_iter()
+                .map(|s| DashboardIndexerStatsPayload {
+                    indexer_id: s.indexer_id.into(),
+                    indexer_name: s.indexer_name,
+                    queries_last_24h: s.queries_last_24h as i32,
+                    failed_last_24h: s.failed_last_24h as i32,
+                    grabs_last_24h: s.grabs_last_24h as i32,
+                    api_current: s.api_current.map(|v| v as i32),
+                    api_max: s.api_max.map(|v| v as i32),
+                })
+                .collect(),
+        })
+    }
+
+    /// List recent completed imports for the dashboard.
+    async fn dashboard_recent_imports(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "Maximum number of imports to return; defaults to 15 and is limited to 1 through 50."
+        )]
+        limit: Option<i32>,
+    ) -> GqlResult<Vec<DashboardRecentImportPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let items = app
+            .dashboard_recent_imports(&actor, limit.unwrap_or(15).clamp(1, 50) as usize)
+            .await
+            .map_err(to_gql_error)?;
+        items
+            .into_iter()
+            .map(|item| {
+                let r = item.record;
+                Ok(DashboardRecentImportPayload {
+                    id: r.id.into(),
+                    title_id: r.title_id.map(Into::into),
+                    title_name: r.title_name,
+                    library_id: r.library_id.map(Into::into),
+                    facet: r.facet.map(MediaFacetValue::from_domain),
+                    poster_url: r.poster_url,
+                    episode: item.episode.map(|episode| from_episode(&app, episode)),
+                    kind: match item.kind {
+                        scryer_application::DashboardImportKind::Imported => {
+                            DashboardImportKindValue::Imported
+                        }
+                        scryer_application::DashboardImportKind::NewImport => {
+                            DashboardImportKindValue::NewImport
+                        }
+                        scryer_application::DashboardImportKind::Upgrade => {
+                            DashboardImportKindValue::Upgrade
+                        }
+                    },
+                    quality: r.quality,
+                    size_bytes: r.size_bytes.map(Long::from),
+                    occurred_at: DateTime::parse_from_rfc3339(&r.occurred_at)
+                        .map_err(|_| async_graphql::Error::new("Invalid import event timestamp"))?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect()
+    }
+
     /// Return the path style supported by the running service.
     async fn runtime_info(&self, ctx: &Context<'_>) -> GqlResult<RuntimeInfoPayload> {
         let _actor = actor_from_ctx(ctx)?;

@@ -98,6 +98,42 @@ pub struct LibraryProbeStore {
 #[derive(Clone)]
 pub struct WantedStore {
     datastore: StoreDatastore,
+    /// The bounded-distance lane for the wanted view's title filter. Absent
+    /// in fixtures and while the index rebuilds, which costs typo tolerance
+    /// and nothing else.
+    fuzzy: Option<Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>>,
+}
+
+impl WantedStore {
+    pub fn new(datastore: StoreDatastore) -> Self {
+        Self {
+            datastore,
+            fuzzy: None,
+        }
+    }
+
+    pub fn with_fuzzy_index(
+        mut self,
+        index: Arc<scryer_infrastructure_library_search::TitleFuzzyIndex>,
+    ) -> Self {
+        self.fuzzy = Some(index);
+        self
+    }
+
+    async fn typo_ranks(
+        &self,
+        query: &AcquisitionScopeStatesQuery,
+    ) -> AppResult<Vec<(String, i64)>> {
+        let Some(plan) = query
+            .title_search
+            .as_deref()
+            .and_then(|search| crate::queries::title_search::build_title_search_plan(None, search))
+        else {
+            return Ok(Vec::new());
+        };
+        scryer_infrastructure_library_search::resolve_typo_title_ranks(self.fuzzy.as_deref(), &plan)
+            .await
+    }
 }
 
 #[derive(Clone)]
@@ -132,7 +168,6 @@ macro_rules! impl_store_new {
 }
 
 impl_store_new!(LibraryProbeStore);
-impl_store_new!(WantedStore);
 impl_store_new!(BlocklistStore);
 impl_store_new!(SubtitleDownloadStore);
 impl_store_new!(HousekeepingStore);
@@ -584,7 +619,7 @@ fn append_wanted_query_filters(
     sql: &mut String,
     args: &mut Vec<SqlArg>,
     query: &AcquisitionScopeStatesQuery,
-    include_title_search: bool,
+    title_search: Option<&crate::queries::title_search::ResolvedTitleSearch>,
 ) {
     append_in_filter(sql, args, "w.status", &query.statuses);
     append_in_filter(sql, args, "w.media_type", &query.media_types);
@@ -593,29 +628,11 @@ fn append_wanted_query_filters(
         args.push(SqlArg::Text(title_id.to_string()));
     }
     append_in_filter(sql, args, "t.library_id", &query.library_ids);
-    if include_title_search
-        && let Some(normalized) = query
-            .title_search
-            .as_deref()
-            .map(crate::queries::title_search::normalize_title_search_text)
-            .filter(|value| !value.is_empty())
-    {
-        sql.push_str(
-            " AND EXISTS (
-                SELECT 1
-                  FROM title_search_terms wanted_title_search
-                 WHERE wanted_title_search.title_id = w.title_id
-                   AND wanted_title_search.term_kind NOT LIKE '%_token'
-                   AND (
-                        wanted_title_search.normalized_term = {}
-                        OR wanted_title_search.normalized_term LIKE {}
-                        OR wanted_title_search.normalized_term LIKE {}
-                   )
-            )",
-        );
-        args.push(SqlArg::Text(normalized.clone()));
-        args.push(SqlArg::Text(format!("{normalized}%")));
-        args.push(SqlArg::Text(format!("%{normalized}%")));
+    if let Some(title_search) = title_search {
+        let (predicate, search_args) = title_search.predicate("w.title_id");
+        sql.push_str(" AND ");
+        sql.push_str(&predicate);
+        args.extend(search_args.into_iter().map(SqlArg::Text));
     }
     append_in_filter(
         sql,
@@ -625,7 +642,7 @@ fn append_wanted_query_filters(
     );
 }
 
-fn sqlite_title_search_requires_spellfix(query: &AcquisitionScopeStatesQuery) -> bool {
+fn sqlite_title_search_has_text(query: &AcquisitionScopeStatesQuery) -> bool {
     query
         .title_search
         .as_deref()
@@ -634,10 +651,13 @@ fn sqlite_title_search_requires_spellfix(query: &AcquisitionScopeStatesQuery) ->
 }
 
 fn wanted_upsert_sql(datastore: &StoreDatastore, item: &AcquisitionScopeState) -> String {
+    // Episode scope before collection scope. An episode row carries its owning
+    // `collection_id` for attribution as well as its `episode_id`, so matching
+    // the collection first would fold every episode of one season onto the same
+    // row — the shape `find_wanted_state_for_scope` and the in-memory repository
+    // already dispatch on.
     let conflict_target = if item.series_movie_link_id.is_some() {
         "(series_movie_link_id) WHERE series_movie_link_id IS NOT NULL"
-    } else if item.collection_id.is_some() {
-        "(collection_id) WHERE collection_id IS NOT NULL"
     } else if item.episode_id.is_some() {
         match datastore {
             StoreDatastore::Sqlite { .. } => "(title_id, episode_id)",
@@ -645,6 +665,10 @@ fn wanted_upsert_sql(datastore: &StoreDatastore, item: &AcquisitionScopeState) -
                 "(title_id, episode_id) WHERE episode_id IS NOT NULL"
             }
         }
+    } else if item.collection_id.is_some() {
+        // Matches `idx_wanted_items_collection_id`, which 0255 narrowed to the
+        // collection-scoped rows so episode rows may carry the same id.
+        "(collection_id) WHERE collection_id IS NOT NULL AND episode_id IS NULL"
     } else {
         "(title_id) WHERE episode_id IS NULL AND collection_id IS NULL AND series_movie_link_id IS NULL"
     };
@@ -720,20 +744,27 @@ async fn fetch_seed_target_tx(
                           last_search_at, status,
                           grabbed_release, created_at, updated_at
                      FROM wanted_items";
-    let (sql, args) = if let Some(collection_id) = item.collection_id.as_deref() {
-        (
-            format!("{columns} WHERE title_id = {{}} AND collection_id = {{}}"),
-            vec![
-                SqlArg::Text(item.title_id.clone()),
-                SqlArg::Text(collection_id.to_string()),
-            ],
-        )
-    } else if let Some(episode_id) = item.episode_id.as_deref() {
+    // Same precedence as the upsert conflict target and
+    // `find_wanted_state_for_scope`: the episode identity wins, then the
+    // remaining scope keys, then the bare title. An episode target also carries
+    // its collection id, so the collection arm has to exclude episode rows or it
+    // hands every episode of a season the same sibling row.
+    let (sql, args) = if let Some(episode_id) = item.episode_id.as_deref() {
         (
             format!("{columns} WHERE title_id = {{}} AND episode_id = {{}}"),
             vec![
                 SqlArg::Text(item.title_id.clone()),
                 SqlArg::Text(episode_id.to_string()),
+            ],
+        )
+    } else if let Some(collection_id) = item.collection_id.as_deref() {
+        (
+            format!(
+                "{columns} WHERE title_id = {{}} AND collection_id = {{}} AND episode_id IS NULL"
+            ),
+            vec![
+                SqlArg::Text(item.title_id.clone()),
+                SqlArg::Text(collection_id.to_string()),
             ],
         )
     } else if let Some(series_movie_link_id) = item.series_movie_link_id.as_deref() {
@@ -1166,15 +1197,23 @@ impl AcquisitionScopeStateRepository for WantedStore {
         query: AcquisitionScopeStatesQuery,
     ) -> AppResult<Vec<AcquisitionScopeState>> {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
-            && sqlite_title_search_requires_spellfix(&query)
+            && sqlite_title_search_has_text(&query)
         {
-            return crate::queries::wanted::list_wanted_items_query(pool, &query).await;
+            let typo_ranks = self.typo_ranks(&query).await?;
+            return crate::queries::wanted::list_wanted_items_query(pool, &query, &typo_ranks)
+                .await;
         }
 
         let mut sql = wanted_item_select_sql().to_string();
         sql.push_str(" WHERE 1=1");
         let mut args = Vec::new();
-        append_wanted_query_filters(&mut sql, &mut args, &query, true);
+        let title_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            None,
+            query.title_search.as_deref(),
+        )
+        .await?;
+        append_wanted_query_filters(&mut sql, &mut args, &query, title_search.as_ref());
         sql.push_str(" ORDER BY w.updated_at DESC LIMIT {} OFFSET {}");
         args.push(SqlArg::I64(query.limit));
         args.push(SqlArg::I64(query.offset));
@@ -1191,9 +1230,11 @@ impl AcquisitionScopeStateRepository for WantedStore {
         query: AcquisitionScopeStatesQuery,
     ) -> AppResult<i64> {
         if let StoreDatastore::Sqlite { pool, .. } = &self.datastore
-            && sqlite_title_search_requires_spellfix(&query)
+            && sqlite_title_search_has_text(&query)
         {
-            return crate::queries::wanted::count_wanted_items_query(pool, &query).await;
+            let typo_ranks = self.typo_ranks(&query).await?;
+            return crate::queries::wanted::count_wanted_items_query(pool, &query, &typo_ranks)
+                .await;
         }
 
         let mut sql = String::from(
@@ -1210,7 +1251,13 @@ impl AcquisitionScopeStateRepository for WantedStore {
               WHERE 1=1",
         );
         let mut args = Vec::new();
-        append_wanted_query_filters(&mut sql, &mut args, &query, true);
+        let title_search = crate::queries::title_search::ResolvedTitleSearch::resolve(
+            self.fuzzy.as_deref(),
+            None,
+            query.title_search.as_deref(),
+        )
+        .await?;
+        append_wanted_query_filters(&mut sql, &mut args, &query, title_search.as_ref());
         SqlRuntime::fetch_optional(self.datastore.read_exec(), &sql, &args)
             .await?
             .map(|row| row.i64("cnt"))

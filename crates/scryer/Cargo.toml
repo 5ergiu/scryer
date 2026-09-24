@@ -1,6 +1,6 @@
 [package]
 name = "scryer"
-version = "0.21.7"
+version = "0.21.9"
 edition.workspace = true
 
 [features]
@@ -8,6 +8,14 @@ default = []
 # Test-harness images only: sync SCRYER_DEV_API_KEYS in a binary built without
 # debug assertions. Never enable this for a shipped build.
 e2e-harness = []
+# Periodic heap-profile dumps for load-test / benchmark images. jemalloc's
+# sampling profiler is compiled into every non-Windows build (see the
+# `tikv-jemallocator` dependency below) and is inert until `MALLOC_CONF` turns
+# it on, so this feature adds only the background thread that dumps profiles on
+# a timer. Configure jemalloc through MALLOC_CONF, e.g.
+# `prof:true,prof_active:true,prof_accum:true,lg_prof_sample:19`.
+# No effect on Windows, which uses mimalloc.
+jemalloc-prof = []
 
 [dependencies]
 application-updater = { git = "https://github.com/scryer-media/application-updater.git", tag = "v0.1.0" }
@@ -63,6 +71,26 @@ governor = { workspace = true }
 webauthn-rs = { workspace = true }
 url = "2"
 
+# Scryer does not use the system allocator anywhere. glibc's never plateaus on
+# this workload (it ratchets to ~3 GB on the 111k-item load-test library and is
+# still climbing after 30 minutes), and the measured alternatives both fix
+# that. jemalloc wins everywhere it can be used: same binary, same library,
+# ~503 MB resident against glibc's 1,382 MB with arenas capped and mimalloc's
+# 1,113 MB tuned. Windows has no jemalloc, so it gets mimalloc.
+#
+# `profiling` and `stats` are compiled in unconditionally. Both are inert until
+# `MALLOC_CONF` asks for them, and having them in every build means a
+# production instance can be profiled where it runs instead of being rebuilt
+# first. `unprefixed_malloc_on_supported_platforms` is what makes jemalloc read
+# `MALLOC_CONF` rather than `_RJEM_MALLOC_CONF`.
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = [
+    "profiling",
+    "stats",
+    "unprefixed_malloc_on_supported_platforms",
+] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std"] }
+
 [dev-dependencies]
 async-trait = { workspace = true }
 # `test-util` gives tests a paused clock: a test observes a timer by the
@@ -87,6 +115,11 @@ path = "src/tray.rs"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+# Windows' global allocator. mimalloc vendors both v2 and v3 and builds v3
+# unless the `v2` feature is set. `libmimalloc-sys/extended` is what exposes
+# `mi_option_set`, which main.rs uses to turn the decommit purge off at startup.
+mimalloc = "0.1"
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_System_Registry",

@@ -8,6 +8,7 @@
 //! import lands in and which release name it parses.
 
 use super::*;
+use crate::ImportRepository;
 use scryer_domain::{ImportDecision, ImportSkipReason};
 
 fn import_actor() -> User {
@@ -297,6 +298,279 @@ async fn attempted_import_does_not_reopen_when_durable_reason_is_stale() {
     assert_eq!(
         crate::tracked_downloads::import_blocked_reason_for_tracked(&app, &td).await,
         Some(crate::tracked_downloads::ImportBlockedReason::AfterImport)
+    );
+}
+
+#[tokio::test]
+async fn retry_skipped_import_reevaluates_instead_of_replaying_rejection() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let mut record = test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    );
+    record.result_json =
+        Some(r#"{"decision":"rejected","error_message":"old quality mismatch"}"#.into());
+    let repo = Arc::new(TestImportRepo::with_records(vec![record]));
+    let app = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    let result =
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .expect("skipped imports are retryable");
+    assert_eq!(result.skip_reason, Some(ImportSkipReason::NoVideoFiles));
+    assert_eq!(result.title_id.as_deref(), Some("title-a"));
+    assert!(!result.release_burned);
+}
+
+#[tokio::test]
+async fn retry_reconciliation_replaces_durable_burned_failure_and_survives_restart() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    )]));
+    let app = app_for_import(Arc::new(TestDownloadSubmissionRepo::default()), repo);
+    let mut td = import_pending_observation("title-a", TitleMatchType::Submission);
+    td.state = TrackedDownloadState::Failed;
+    td.burned_by_import_gate = true;
+    td.status_messages = vec!["old quality mismatch".into()];
+    assert!(
+        crate::tracked_downloads::persist_tracked_download_state_marker(
+            &app,
+            &td,
+            td.state,
+            Some("import_gate_rejected"),
+            Some("old quality mismatch"),
+        )
+        .await
+    );
+    let result =
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .unwrap();
+    let evidence =
+        serde_json::from_value(observation_evidence_json(PAPER_LANTERN_RELEASE)).unwrap();
+    crate::import_workflow::reconcile_history_retry_result(
+        &app, &mut td, &completed, &evidence, &result,
+    )
+    .await
+    .unwrap();
+    assert!(!td.burned_by_import_gate);
+    assert_ne!(td.state, TrackedDownloadState::Failed);
+    // A policy hold is terminal for this attempt, without burning the release.
+    let mut hold = result.clone();
+    hold.decision = ImportDecision::Rejected;
+    hold.skip_reason = Some(ImportSkipReason::PolicyMismatch);
+    hold.error_message = Some("release advertised 2160P but the file is 1440P".into());
+    crate::import_workflow::reconcile_history_retry_result(
+        &app, &mut td, &completed, &evidence, &hold,
+    )
+    .await
+    .unwrap();
+    let restored = crate::tracked_downloads::TrackedDownloadService::build_new_tracked_download(
+        &app,
+        td.download_id,
+        td.id.clone(),
+        td.client_item.clone(),
+    )
+    .await;
+    assert_eq!(restored.state, TrackedDownloadState::ImportBlocked);
+    assert!(!restored.burned_by_import_gate);
+    assert!(
+        restored
+            .status_messages
+            .iter()
+            .any(|message| message.contains("1440P"))
+    );
+}
+
+#[tokio::test]
+async fn verified_retry_clears_failed_state_durably() {
+    let dir = tempfile::tempdir().unwrap();
+    let completed = build_completed_download(
+        "Show.S01E01.1080p.WEB-DL",
+        dir.path().to_str().unwrap(),
+        Some("series"),
+    );
+    let submissions = Arc::new(TestDownloadSubmissionRepo::default());
+    let app = build_app_with_download_client_configs_and_submissions(
+        vec![build_title("title-1", "Show", MediaFacet::Series)],
+        vec![build_collection("season-1", "title-1", "1")],
+        vec![build_episode("ep-1", "title-1", "season-1", "1", "1", None)],
+        vec![build_artifact_with_result(
+            "dl-1",
+            Some("ep-1"),
+            "Show.S01E01.mkv",
+            "already_present",
+        )],
+        Arc::new(TestDownloadClient::default()),
+        Arc::new(NullDownloadClientConfigRepository),
+        submissions.clone(),
+    );
+    let mut td = build_tracked_download("title-1", "series", "Show.S01E01.1080p.WEB-DL");
+    td.state = TrackedDownloadState::Failed;
+    td.burned_by_import_gate = true;
+    assert!(
+        crate::tracked_downloads::persist_tracked_download_state_marker(
+            &app,
+            &td,
+            td.state,
+            Some("import_gate_rejected"),
+            Some("old quality mismatch"),
+        )
+        .await
+    );
+    let evidence =
+        serde_json::from_value(observation_evidence_json("Show.S01E01.1080p.WEB-DL")).unwrap();
+    let result = scryer_domain::ImportResult {
+        import_id: "import-1".into(),
+        decision: ImportDecision::Skipped,
+        skip_reason: Some(ImportSkipReason::AlreadyImported),
+        title_id: Some("title-1".into()),
+        source_system: Some("nzbget".into()),
+        source_ref: Some("dl-1".into()),
+        source_title: Some("Show.S01E01.1080p.WEB-DL".into()),
+        source_path: completed.dest_dir.clone(),
+        dest_path: None,
+        quality: Some("1080p".into()),
+        episode_ids: vec!["ep-1".into()],
+        file_size_bytes: None,
+        link_type: None,
+        error_message: None,
+        release_burned: false,
+        started_at: Utc::now(),
+        completed_at: Utc::now(),
+    };
+    crate::import_workflow::reconcile_history_retry_result(
+        &app, &mut td, &completed, &evidence, &result,
+    )
+    .await
+    .unwrap();
+    assert_eq!(td.state, TrackedDownloadState::Imported);
+    assert!(!td.burned_by_import_gate);
+    assert!(
+        submissions
+            .canonical_identity_tracked_state_reasons
+            .lock()
+            .await
+            .is_empty()
+    );
+    let restored = crate::tracked_downloads::TrackedDownloadService::build_new_tracked_download(
+        &app,
+        td.download_id,
+        td.id.clone(),
+        td.client_item.clone(),
+    )
+    .await;
+    assert_eq!(restored.state, TrackedDownloadState::Imported);
+    assert!(!restored.burned_by_import_gate);
+}
+
+#[tokio::test]
+async fn retry_rejects_active_and_successful_imports() {
+    for status in [
+        ImportStatus::Pending,
+        ImportStatus::Processing,
+        ImportStatus::Completed,
+    ] {
+        let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+        let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+            "import-1",
+            &source_identity(),
+            status,
+            completed_request_payload(
+                &completed,
+                observation_evidence_json(PAPER_LANTERN_RELEASE),
+                Some("title-a"),
+            ),
+        )]));
+        let app = app_for_import(Arc::new(TestDownloadSubmissionRepo::default()), repo);
+        assert!(
+            crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn retry_missing_source_preserves_the_previous_decision() {
+    let (dir, mut completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    completed.dest_dir = dir.path().join("missing").to_string_lossy().into_owned();
+    let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    )]));
+    let app = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    let error =
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .expect_err("missing source must not start an import");
+    assert!(error.to_string().contains("source is no longer available"));
+    assert_eq!(
+        repo.get_import_by_id("import-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ImportStatus::Skipped
+    );
+}
+
+#[tokio::test]
+async fn retry_cannot_overlap_an_import_of_the_same_source() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    )]));
+    let app = app_for_import(Arc::new(TestDownloadSubmissionRepo::default()), repo);
+    let permit = app
+        .runtime
+        .imports
+        .execution_coordinator
+        .try_acquire_source(&completed)
+        .await
+        .unwrap();
+    let error =
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .expect_err("active source must reject a second attempt");
+    assert!(error.to_string().contains("already being imported"));
+    drop(permit);
+    assert!(
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .is_ok()
     );
 }
 
@@ -695,4 +969,502 @@ async fn execution_error_after_the_attempt_row_exists_never_writes_failed() {
             .is_some_and(|message| message.contains("root folder")),
         "{result:?}"
     );
+}
+
+struct RetryObservationClient {
+    state: Option<DownloadQueueState>,
+    unavailable: bool,
+    unknown: bool,
+    conflicting_identity: bool,
+}
+
+#[async_trait]
+impl DownloadClient for RetryObservationClient {
+    async fn submit_download(&self, _: &DownloadClientAddRequest) -> AppResult<DownloadGrabResult> {
+        panic!("Retry import must never submit a download")
+    }
+    async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
+        Ok(vec![])
+    }
+    async fn observe_download(
+        &self,
+        _: &ClientJobLocator,
+        _: usize,
+    ) -> AppResult<crate::DownloadClientObservation> {
+        if self.unavailable {
+            return Err(AppError::Repository("client unavailable".into()));
+        }
+        if self.unknown {
+            return Ok(crate::DownloadClientObservation::Unknown {
+                reason: "history unavailable".into(),
+                next_history_offset: 0,
+            });
+        }
+        Ok(match self.state {
+            Some(state) => {
+                let mut item =
+                    build_tracked_download("title-a", "movie", PAPER_LANTERN_RELEASE).client_item;
+                item.state = state;
+                if self.conflicting_identity {
+                    item.download_client_item_id = "different-job".into();
+                }
+                crate::DownloadClientObservation::Present(Box::new(item))
+            }
+            None => crate::DownloadClientObservation::Absent,
+        })
+    }
+}
+
+fn retry_client_config() -> DownloadClientConfig {
+    DownloadClientConfig {
+        id: "client-1".into(),
+        name: "Fixture client".into(),
+        client_type: "nzbget".into(),
+        config_json: "{}".into(),
+        is_enabled: true,
+        status: scryer_domain::DownloadClientStatus::Healthy,
+        last_error: None,
+        last_seen_at: None,
+        client_priority: 0,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        proxy_config_id: None,
+    }
+}
+
+#[tokio::test]
+async fn retry_eligibility_requires_completed_or_retained_source_and_rejects_client_errors() {
+    for (state, unavailable, unknown, conflicting_identity, eligible) in [
+        (
+            Some(DownloadQueueState::Completed),
+            false,
+            false,
+            false,
+            true,
+        ),
+        (
+            Some(DownloadQueueState::ImportPending),
+            false,
+            false,
+            false,
+            true,
+        ),
+        (None, false, false, false, true),
+        (Some(DownloadQueueState::Failed), false, false, false, false),
+        (
+            Some(DownloadQueueState::Downloading),
+            false,
+            false,
+            false,
+            false,
+        ),
+        (Some(DownloadQueueState::Queued), false, false, false, false),
+        (
+            Some(DownloadQueueState::Verifying),
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            Some(DownloadQueueState::Repairing),
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            Some(DownloadQueueState::Extracting),
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            Some(DownloadQueueState::Completed),
+            false,
+            false,
+            true,
+            false,
+        ),
+        (None, true, false, false, false),
+        (None, false, true, false, false),
+    ] {
+        let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+        let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+            "import-1",
+            &source_identity(),
+            ImportStatus::Skipped,
+            completed_request_payload(
+                &completed,
+                observation_evidence_json(PAPER_LANTERN_RELEASE),
+                Some("title-a"),
+            ),
+        )]));
+        let app = build_app_with_download_client_configs_and_submissions(
+            paper_lantern_titles(),
+            vec![],
+            vec![],
+            vec![],
+            Arc::new(RetryObservationClient {
+                state,
+                unavailable,
+                unknown,
+                conflicting_identity,
+            }),
+            Arc::new(TestDownloadClientConfigRepo {
+                configs: vec![retry_client_config()],
+            }),
+            Arc::new(TestDownloadSubmissionRepo::default()),
+        )
+        .with_test_overrides(|services| services.with_imports(repo.clone()));
+        let result =
+            crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+                .await;
+        assert_eq!(
+            result.is_ok(),
+            eligible,
+            "{state:?}, unavailable={unavailable}, unknown={unknown}: {result:?}"
+        );
+        if !eligible {
+            assert_eq!(
+                repo.get_import_by_id("import-1")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ImportStatus::Skipped
+            );
+            assert!(repo.retry_claims.lock().await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_recovery_reconciles_recorded_result_without_executing_again() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    )]));
+    let app = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    repo.retry_finish_fail.store(true, Ordering::SeqCst);
+    let error =
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .unwrap_err();
+    assert!(error.to_string().contains("reconciliation failure"));
+    let before = repo.get_import_by_id("import-1").await.unwrap().unwrap();
+    let claim = repo
+        .list_import_retry_recovery(None, 25)
+        .await
+        .unwrap()
+        .remove(0);
+    repo.retry_finish_fail.store(false, Ordering::SeqCst);
+    // A new runtime has no in-memory reservation or client history.
+    let restarted = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    crate::import_workflow::recover_import_retry(&restarted, &claim)
+        .await
+        .unwrap();
+    let after = repo.get_import_by_id("import-1").await.unwrap().unwrap();
+    assert_eq!(
+        before.result_json, after.result_json,
+        "recovery must not execute import again"
+    );
+    assert!(repo.retry_claims.lock().await.is_empty());
+    assert_eq!(
+        *repo.retry_finished_states.lock().await,
+        vec![TrackedDownloadState::ImportBlocked]
+    );
+    // A stale page of recovery work must not replace the finished result.
+    crate::import_workflow::recover_import_retry(&restarted, &claim)
+        .await
+        .unwrap();
+    assert_eq!(repo.retry_finished_states.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn retry_recovery_interrupted_execution_becomes_explicitly_retryable_hold() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let payload = completed_request_payload(
+        &completed,
+        observation_evidence_json(PAPER_LANTERN_RELEASE),
+        Some("title-a"),
+    );
+    let record = test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        payload.clone(),
+    );
+    let expected = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+        .unwrap()
+        .with_timezone(&Utc);
+    let repo = Arc::new(TestImportRepo::with_records(vec![record]));
+    let claim = crate::ImportRetryClaim {
+        download_id: repo
+            .canonical_download_id_for_import("import-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        import_id: "import-1".into(),
+        attempt_id: "interrupted-attempt".into(),
+        started_at: Utc::now(),
+        source: source_identity(),
+        previous_result_json: None,
+    };
+    assert!(
+        repo.claim_import_retry(&claim, expected, &payload)
+            .await
+            .unwrap()
+            .is_claimed()
+    );
+    let app = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    crate::import_workflow::recover_import_retry(&app, &claim)
+        .await
+        .unwrap();
+    assert_eq!(
+        *repo.retry_finished_states.lock().await,
+        vec![TrackedDownloadState::ImportBlocked]
+    );
+    assert!(
+        repo.last_import_result()
+            .await
+            .unwrap()
+            .error_message
+            .unwrap()
+            .contains("interrupted")
+    );
+    assert!(Path::new(&completed.dest_dir).exists());
+    assert!(
+        crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn retry_recovery_verifies_partial_episode_artifacts_without_client_history() {
+    for complete in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let completed = build_completed_download(
+            "Show.S01E01E02.1080p.WEB-DL",
+            dir.path().to_str().unwrap(),
+            Some("series"),
+        );
+        let payload = completed_request_payload(
+            &completed,
+            observation_evidence_json("Show.S01E01E02.1080p.WEB-DL"),
+            Some("title-1"),
+        );
+        let record = test_import_record(
+            "import-1",
+            &source_identity(),
+            ImportStatus::Skipped,
+            payload.clone(),
+        );
+        let expected = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        let repo = Arc::new(TestImportRepo::with_records(vec![record]));
+        let claim = crate::ImportRetryClaim {
+            download_id: repo
+                .canonical_download_id_for_import("import-1")
+                .await
+                .unwrap()
+                .unwrap(),
+            import_id: "import-1".into(),
+            attempt_id: "interrupted-series".into(),
+            started_at: Utc::now(),
+            source: source_identity(),
+            previous_result_json: None,
+        };
+        assert!(
+            repo.claim_import_retry(&claim, expected, &payload)
+                .await
+                .unwrap()
+                .is_claimed()
+        );
+        let mut artifacts = vec![build_artifact_with_result(
+            "dl-1",
+            Some("ep-1"),
+            "Show.S01E01.mkv",
+            "already_present",
+        )];
+        if complete {
+            artifacts.push(build_artifact_with_result(
+                "dl-1",
+                Some("ep-2"),
+                "Show.S01E02.mkv",
+                "already_present",
+            ));
+        }
+        let app = build_app_with_download_client_configs_and_submissions(
+            vec![build_title("title-1", "Show", MediaFacet::Series)],
+            vec![build_collection("season-1", "title-1", "1")],
+            vec![
+                build_episode("ep-1", "title-1", "season-1", "1", "1", None),
+                build_episode("ep-2", "title-1", "season-1", "1", "2", None),
+            ],
+            artifacts,
+            Arc::new(TestDownloadClient::default()),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(TestDownloadSubmissionRepo::default()),
+        )
+        .with_test_overrides(|services| services.with_imports(repo.clone()));
+        crate::import_workflow::recover_import_retry(&app, &claim)
+            .await
+            .unwrap();
+        assert_eq!(
+            *repo.retry_finished_states.lock().await,
+            vec![if complete {
+                TrackedDownloadState::Imported
+            } else {
+                TrackedDownloadState::ImportBlocked
+            }]
+        );
+        assert!(repo.retry_claims.lock().await.is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "recovery must not create or copy files"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retry_legacy_gate_failure_is_recoverable_but_download_failure_is_not() {
+    for gate_failure in [false, true] {
+        let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+        let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+            "import-1",
+            &source_identity(),
+            ImportStatus::Failed,
+            completed_request_payload(
+                &completed,
+                observation_evidence_json(PAPER_LANTERN_RELEASE),
+                Some("title-a"),
+            ),
+        )]));
+        let submissions = Arc::new(TestDownloadSubmissionRepo::default());
+        let app = app_for_import(submissions, repo.clone());
+        let mut tracked = import_pending_observation("title-a", TitleMatchType::Submission);
+        tracked.download_id = repo
+            .canonical_download_id_for_import("import-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::tracked_downloads::persist_tracked_download_state_marker(
+                &app,
+                &tracked,
+                TrackedDownloadState::Failed,
+                gate_failure.then_some("import_gate_rejected"),
+                None
+            )
+            .await
+        );
+        let result =
+            crate::import_workflow::retry_failed_import(&app, &import_actor(), "import-1", None)
+                .await;
+        assert_eq!(result.is_ok(), gate_failure, "{result:?}");
+    }
+}
+
+#[tokio::test]
+async fn history_and_tracked_retry_share_the_same_source_reservation() {
+    let (_dir, completed) = completed_without_video(Some(PAPER_LANTERN_RELEASE));
+    let repo = Arc::new(TestImportRepo::with_records(vec![test_import_record(
+        "import-1",
+        &source_identity(),
+        ImportStatus::Skipped,
+        completed_request_payload(
+            &completed,
+            observation_evidence_json(PAPER_LANTERN_RELEASE),
+            Some("title-a"),
+        ),
+    )]));
+    let app = app_for_import(
+        Arc::new(TestDownloadSubmissionRepo::default()),
+        repo.clone(),
+    );
+    let mut tracked = import_pending_observation("title-a", TitleMatchType::Submission);
+    tracked.download_id = repo
+        .canonical_download_id_for_import("import-1")
+        .await
+        .unwrap()
+        .unwrap();
+    let _permit = app
+        .runtime
+        .imports
+        .execution_coordinator
+        .try_acquire_source(&completed)
+        .await
+        .unwrap();
+    let actor = import_actor();
+    let (history, activity) = tokio::join!(
+        crate::import_workflow::retry_failed_import(&app, &actor, "import-1", None),
+        crate::import_workflow::retry_tracked_import(&app, &actor, &tracked)
+    );
+    assert!(
+        history
+            .unwrap_err()
+            .to_string()
+            .contains("already being imported")
+    );
+    assert!(
+        activity
+            .unwrap_err()
+            .to_string()
+            .contains("already being imported")
+    );
+}
+
+#[tokio::test]
+async fn retry_verification_does_not_accept_artifacts_from_a_previous_title_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let completed = build_completed_download(
+        "Current.Movie.1080p",
+        dir.path().to_str().unwrap(),
+        Some("movie"),
+    );
+    let evidence =
+        serde_json::from_value(observation_evidence_json("Current.Movie.1080p")).unwrap();
+    for artifact_title in ["title-1", "previous-title"] {
+        let mut artifact =
+            build_artifact_with_result("dl-1", None, "Current.Movie.mkv", "imported");
+        artifact.title_id = Some(artifact_title.into());
+        let app = build_app_with_download_client_configs_and_submissions(
+            vec![build_title("title-1", "Current Movie", MediaFacet::Movie)],
+            vec![],
+            vec![],
+            vec![artifact],
+            Arc::new(TestDownloadClient::default()),
+            Arc::new(NullDownloadClientConfigRepository),
+            Arc::new(TestDownloadSubmissionRepo::default()),
+        );
+        let tracked = build_tracked_download("title-1", "movie", "Current.Movie.1080p");
+        let verified =
+            crate::completed_download_handler::verify_retry_import_with_release_evidence(
+                &app, &tracked, 0, &completed, &evidence,
+            )
+            .await
+            .unwrap();
+        assert_eq!(verified, artifact_title == "title-1");
+    }
 }

@@ -27,6 +27,11 @@ export type IndexerRecord = {
   rateLimitSeconds: number | null;
   rateLimitBurst: number | null;
   disabledUntil: string | null;
+  /**
+   * When the indexer's rate-limit cooldown lifts, or null when it is not
+   * cooling down. Not a failure: searching resumes on its own.
+   */
+  rateLimitedUntil: string | null;
   isEnabled: boolean;
   isManaged: boolean;
   managedParentConfigId: string | null;

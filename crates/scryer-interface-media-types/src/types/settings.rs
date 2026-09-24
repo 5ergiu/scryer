@@ -792,6 +792,12 @@ pub struct ServiceSettingsPayload {
     pub tls_cert_path: String,
     /// Filesystem path to the TLS private key.
     pub tls_key_path: String,
+    /// Effective trusted proxy addresses for rate limiting only.
+    pub trusted_proxy_ips: Vec<String>,
+    /// Saved override; null uses environment, an empty list trusts nobody.
+    pub trusted_proxy_override: Option<Vec<String>>,
+    /// Whether the effective policy comes from settings or environment.
+    pub trusted_proxy_source: String,
 }
 
 #[derive(InputObject, Clone)]
@@ -914,10 +920,14 @@ pub struct UpdateLibraryPathsInput {
 #[derive(InputObject, Clone)]
 /// TLS certificate and private-key filesystem paths.
 pub struct UpdateServiceSettingsInput {
-    /// Absolute TLS certificate path.
-    pub tls_cert_path: String,
-    /// Absolute TLS private-key path.
-    pub tls_key_path: String,
+    /// Absolute TLS certificate path. Omission preserves the saved path.
+    pub tls_cert_path: Option<String>,
+    /// Absolute TLS private-key path. Omission preserves the saved path.
+    pub tls_key_path: Option<String>,
+    /// Save a trusted-proxy override. Omission preserves the existing policy.
+    pub trusted_proxy_ips: Option<Vec<String>>,
+    /// Clear the saved override and use environment configuration.
+    pub reset_trusted_proxy_ips: Option<bool>,
 }
 
 #[derive(InputObject, Clone)]

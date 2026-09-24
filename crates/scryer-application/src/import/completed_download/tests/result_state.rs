@@ -612,6 +612,53 @@ async fn apply_result_treats_burned_rule_block_as_final() {
 }
 
 #[tokio::test]
+async fn quality_mismatch_hold_preserves_source_even_with_remove_failed_enabled() {
+    let settings = Arc::new(super::route_gate::RoutingSettingsRepo::default());
+    settings
+        .set_routing(
+            "movie",
+            r#"{"client-1":{"enabled":true,"removeCompleted":true,"removeFailed":true}}"#,
+        )
+        .await;
+    let app = build_app_with_download_client_configs_submissions_and_settings(
+        vec![build_title("title-1", "Fixture Movie", MediaFacet::Movie)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        TestAppRepositories {
+            download_client: Arc::new(NullDownloadClient),
+            download_client_configs: Arc::new(NullDownloadClientConfigRepository),
+            download_submissions: Arc::new(
+                crate::null_repositories::NullDownloadSubmissionRepository,
+            ),
+            settings,
+        },
+    );
+    let mut td = build_tracked_download("title-1", "movie", "Fixture.Movie.2160p");
+    let dir = tempfile::tempdir().unwrap();
+    let job = dir.path().join("job");
+    std::fs::create_dir(&job).unwrap();
+    let source = job.join("movie.mkv");
+    let unrelated = dir.path().join("unrelated.mkv");
+    std::fs::write(&source, b"source fixture").unwrap();
+    std::fs::write(&unrelated, b"unrelated fixture").unwrap();
+    let completed =
+        build_completed_download("Fixture.Movie.2160p", job.to_str().unwrap(), Some("movie"));
+    let mut result = failed_execution_result("release advertised 2160P but the file is 1440P");
+    result.decision = ImportDecision::Rejected;
+    result.skip_reason = Some(ImportSkipReason::PolicyMismatch);
+    result.release_burned = false;
+    result.source_path = source.to_string_lossy().into_owned();
+    assert!(
+        !apply_import_result_with_completed(&app, &mut td, result, 0, Some(&completed), None).await
+    );
+    assert_eq!(td.state, TrackedDownloadState::ImportBlocked);
+    assert!(!td.burned_by_import_gate);
+    assert_eq!(std::fs::read(source).unwrap(), b"source fixture");
+    assert_eq!(std::fs::read(unrelated).unwrap(), b"unrelated fixture");
+}
+
+#[tokio::test]
 async fn burned_usenet_rejection_deletes_the_mapped_job_directory() {
     let settings = Arc::new(super::route_gate::RoutingSettingsRepo::default());
     settings

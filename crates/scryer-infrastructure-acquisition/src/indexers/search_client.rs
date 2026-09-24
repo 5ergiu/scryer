@@ -167,9 +167,8 @@ struct StrategyTierContext {
     client: Arc<dyn IndexerClient>,
     search_limit: Arc<Semaphore>,
     rate_limiter: IndexerRateLimiter,
-    indexer_id: String,
     search_timeout: std::time::Duration,
-    rate_limit_seconds: Option<i64>,
+    pacing: IndexerPacing,
     category: Option<String>,
     per_indexer_categories: Option<Vec<String>>,
     /// Whether this indexer is reached through Prowlarr's newznab proxy rather
@@ -1063,6 +1062,16 @@ fn maybe_cleanup_search_diagnostics(
     });
 }
 
+/// `Some(retry_after)` when this error is a rate limit the indexer recovers
+/// from on its own — a cooldown rather than a failure, so it leaves the
+/// indexer's health, last error, and query stats alone. A quota wall that
+/// warrants the system backoff ladder is not one of these.
+fn plain_rate_limit_cooldown(error: &AppError) -> Option<Option<std::time::Duration>> {
+    rate_limit_signal_from_error(error)
+        .filter(|signal| !signal.warrants_system_backoff())
+        .map(|signal| signal.retry_after)
+}
+
 #[derive(Default)]
 struct StrategyBatchHealth {
     any_success: bool,
@@ -1134,7 +1143,7 @@ impl StrategyBatchHealth {
                 )
                 .await;
             }
-        } else if self.any_error {
+        } else if self.any_error && !self.is_cooldown_only() {
             MultiIndexerSearchClient::record_indexer_last_error(
                 indexer_configs,
                 indexer_id,
@@ -1179,12 +1188,26 @@ impl StrategyBatchHealth {
                 "proxy solver failure recorded without operational backoff"
             );
         } else if self.any_error && !self.any_success {
-            warn!(
+            info!(
                 indexer = indexer_name,
                 retry_after_secs = self.retry_after.map(|delay| delay.as_secs()),
-                "indexer rate-limit failure recorded without operational backoff"
+                cooldown_until = self
+                    .retry_after
+                    .and_then(|delay| chrono::Duration::from_std(delay).ok())
+                    .map(|delay| (chrono::Utc::now() + delay).to_rfc3339()),
+                "indexer cooling down after rate limit"
             );
         }
+    }
+
+    /// Whether every failure in this batch was a rate limit the indexer
+    /// recovers from on its own. The indexer is quiet, not broken, so its
+    /// health and last error stay as they were.
+    fn is_cooldown_only(&self) -> bool {
+        self.had_rate_limit
+            && !self.rate_limit_needs_system_backoff
+            && !self.had_solver_failure
+            && self.representative_error.is_none()
     }
 }
 
@@ -2065,10 +2088,50 @@ fn is_romanized_alias(alias: &str) -> bool {
         })
 }
 
-/// Compatibility per-indexer limiter for explicit provider config.
+/// Minimum spacing between two non-interactive requests to one indexer
+/// rate-limit domain: 0.5 requests per second.
 ///
-/// Host-level default pacing is owned by scryer-outbound-http. This limiter
-/// only applies when an indexer config/plugin declares a positive interval.
+/// The shared outbound host limiter runs at 20 rps, which is a ceiling for
+/// *any* host rather than a rate an indexer will tolerate: real indexers start
+/// answering 429 far below it, and background acquisition — a convergence
+/// backfill that walks the whole library across several strategies per indexer
+/// — has no deadline to defend. It is a trickle by design, so it pays the
+/// slower rate and leaves the fast lane to searches a user is waiting on.
+const BACKGROUND_INDEXER_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resolved request spacing for one indexer, keyed by the rate-limit domain so
+/// Prowlarr children pace independently of each other and of their parent.
+#[derive(Clone, Debug)]
+struct IndexerPacing {
+    domain_key: String,
+    interval: std::time::Duration,
+}
+
+impl IndexerPacing {
+    /// The configured interval always applies. Background intents additionally
+    /// obey the trickle floor, so a provider that declares a *slower* limit
+    /// keeps it while one that declares a faster one (or none) still trickles.
+    fn resolve(config: &IndexerConfig, intent: SchedulerIntent) -> Self {
+        let configured = std::time::Duration::from_secs(
+            config.rate_limit_seconds.unwrap_or_default().max(0) as u64,
+        );
+        let interval = if matches!(intent, SchedulerIntent::InteractiveSearch) {
+            configured
+        } else {
+            configured.max(BACKGROUND_INDEXER_REQUEST_INTERVAL)
+        };
+        Self {
+            domain_key: config.rate_limit_domain_key(),
+            interval,
+        }
+    }
+}
+
+/// Per-rate-limit-domain request spacing.
+///
+/// Host-level default pacing is owned by scryer-outbound-http; this limiter
+/// carries the per-indexer intervals that sit below it — the provider's own
+/// declared limit and the background trickle floor.
 #[derive(Clone)]
 struct IndexerRateLimiter {
     next_request: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
@@ -2081,21 +2144,19 @@ impl IndexerRateLimiter {
         }
     }
 
-    /// Wait until the configured rate limit period has elapsed for this
-    /// indexer. Missing/zero values are ignored so the shared outbound host RPS
-    /// limiter is the sole default pacing owner.
-    async fn acquire(&self, indexer_id: &str, rate_limit_seconds: Option<i64>) {
-        let interval_secs = rate_limit_seconds.unwrap_or_default().max(0) as u64;
-        if interval_secs == 0 {
+    /// Wait until this domain's next slot. A zero interval is ignored so the
+    /// shared outbound host RPS limiter stays the sole pacing owner for
+    /// interactive work against an indexer that declares no limit.
+    async fn acquire(&self, pacing: &IndexerPacing) {
+        if pacing.interval.is_zero() {
             return;
         }
 
-        let interval = std::time::Duration::from_secs(interval_secs);
         let scheduled_at = {
             let now = tokio::time::Instant::now();
             let mut map = self.next_request.lock().await;
-            let scheduled_at = map.get(indexer_id).copied().unwrap_or(now).max(now);
-            map.insert(indexer_id.to_string(), scheduled_at + interval);
+            let scheduled_at = map.get(&pacing.domain_key).copied().unwrap_or(now).max(now);
+            map.insert(pacing.domain_key.clone(), scheduled_at + pacing.interval);
             scheduled_at
         };
         tokio::time::sleep_until(scheduled_at).await;
@@ -3065,9 +3126,8 @@ impl MultiIndexerSearchClient {
                     client,
                     search_limit,
                     rate_limiter,
-                    indexer_id,
                     search_timeout,
-                    rate_limit_seconds,
+                    pacing,
                     category: _,
                     per_indexer_categories: _,
                     prowlarr_nab_proxy: _,
@@ -3078,53 +3138,57 @@ impl MultiIndexerSearchClient {
                     cancel_token,
                     deadline_at,
                 } = context;
+                // Pace before taking a concurrency permit. The background lane
+                // holds four permits for the whole process, so sitting out one
+                // indexer's interval while holding one would stall every other
+                // indexer in the same search.
+                match within_search_window(
+                    rate_limiter.acquire(&pacing),
+                    &cancel_token,
+                    deadline_at,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(SearchWindowError::Cancelled) => {
+                        return StrategyExecutionOutcome {
+                            strategy_id: strategy_id.clone(),
+                            labels: strategy_labels.clone(),
+                            label: strategy_label,
+                            title_guard_mode,
+                            request_fired: false,
+                            response: Err(AppError::canceled("indexer strategy canceled")),
+                            page_reservation: None,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out: false,
+                        };
+                    }
+                    Err(SearchWindowError::DeadlineExpired) => {
+                        return StrategyExecutionOutcome {
+                            strategy_id: strategy_id.clone(),
+                            labels: strategy_labels.clone(),
+                            label: strategy_label,
+                            title_guard_mode,
+                            request_fired: false,
+                            response: Err(AppError::Repository(
+                                "indexer search timed out before dispatch".into(),
+                            )),
+                            page_reservation: None,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out: false,
+                        };
+                    }
+                }
                 let permit = match initial_permit {
                     Some(permit) => Ok(permit),
                     None => acquire_search_permit(search_limit, &cancel_token, deadline_at).await,
                 };
                 let response = match permit {
                     Ok(_permit) => {
-                        match within_search_window(
-                            rate_limiter.acquire(&indexer_id, rate_limit_seconds),
-                            &cancel_token,
-                            deadline_at,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(SearchWindowError::Cancelled) => {
-                                return StrategyExecutionOutcome {
-                                    strategy_id: strategy_id.clone(),
-                                    labels: strategy_labels.clone(),
-                                    label: strategy_label,
-                                    title_guard_mode,
-                                    request_fired: false,
-                                    response: Err(AppError::canceled("indexer strategy canceled")),
-                                    page_reservation: None,
-                                    elapsed: std::time::Duration::ZERO,
-                                    retry_after: None,
-                                    rate_limited: false,
-                                    timed_out: false,
-                                };
-                            }
-                            Err(SearchWindowError::DeadlineExpired) => {
-                                return StrategyExecutionOutcome {
-                                    strategy_id: strategy_id.clone(),
-                                    labels: strategy_labels.clone(),
-                                    label: strategy_label,
-                                    title_guard_mode,
-                                    request_fired: false,
-                                    response: Err(AppError::Repository(
-                                        "indexer search timed out before dispatch".into(),
-                                    )),
-                                    page_reservation: None,
-                                    elapsed: std::time::Duration::ZERO,
-                                    retry_after: None,
-                                    rate_limited: false,
-                                    timed_out: false,
-                                };
-                            }
-                        }
                         let start = std::time::Instant::now();
                         let request_cancel_token = cancel_token.child_token();
                         let request_deadline =
@@ -4458,7 +4522,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let indexer_id = config.id.clone();
                 let indexer_name = config.name.clone();
                 let rate_limiter = self.rate_limiter.clone();
-                let rate_limit_seconds = config.rate_limit_seconds;
+                let pacing = IndexerPacing::resolve(config, SchedulerIntent::BackgroundRss);
                 let stats_tracker = self.stats_tracker.clone();
                 let backoff_tracker = self.backoff_tracker.clone();
                 let indexer_configs = self.indexer_configs.clone();
@@ -4500,6 +4564,25 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 );
                             }
                             results = cache_entry.cell.get_or_init(|| async {
+                                // Paced before the permit so one trickling feed
+                                // cannot hold a shared background permit idle.
+                                match within_search_window(
+                                    rate_limiter.acquire(&pacing),
+                                    &task_cancel_token,
+                                    deadline_at,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {}
+                                    Err(SearchWindowError::Cancelled) => {
+                                        return Err("RSS indexer search canceled".to_string());
+                                    }
+                                    Err(SearchWindowError::DeadlineExpired) => {
+                                        return Err(
+                                            "RSS indexer search timed out before dispatch".to_string()
+                                        );
+                                    }
+                                }
                                     let _permit = match initial_permit {
                                         Some(permit) => permit,
                                         None => match acquire_search_permit(
@@ -4528,23 +4611,6 @@ impl IndexerClient for MultiIndexerSearchClient {
                                             }
                                         },
                                     };
-                                match within_search_window(
-                                    rate_limiter.acquire(&indexer_id, rate_limit_seconds),
-                                    &task_cancel_token,
-                                    deadline_at,
-                                )
-                                .await
-                                {
-                                    Ok(()) => {}
-                                    Err(SearchWindowError::Cancelled) => {
-                                        return Err("RSS indexer search canceled".to_string());
-                                    }
-                                    Err(SearchWindowError::DeadlineExpired) => {
-                                        return Err(
-                                            "RSS indexer search timed out before dispatch".to_string()
-                                        );
-                                    }
-                                }
                                 let start = std::time::Instant::now();
                                 let request_cancel_token = task_cancel_token.child_token();
                                 let request_deadline =
@@ -4611,8 +4677,18 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         if err.is_canceled() {
                                             return Err("RSS indexer search canceled".to_string());
                                         }
-                                        warn!(indexer = indexer_name.as_str(), error = %err, "RSS feed fetch failed");
-                                        stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                        let cooldown = plain_rate_limit_cooldown(&err);
+                                        match cooldown {
+                                            Some(retry_after) => info!(
+                                                indexer = indexer_name.as_str(),
+                                                retry_after_secs = retry_after.map(|delay| delay.as_secs()),
+                                                "indexer cooling down after rate limit"
+                                            ),
+                                            None => {
+                                                warn!(indexer = indexer_name.as_str(), error = %err, "RSS feed fetch failed");
+                                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                            }
+                                        }
                                         if rate_limit_signal_from_error(&err)
                                             .is_none_or(|signal| signal.warrants_system_backoff())
                                             && !scryer_application::challenge_solver::is_solver_service_error_message(
@@ -4630,13 +4706,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                                             )
                                             .await;
                                         }
-                                        Self::record_indexer_last_error(
-                                            &indexer_configs,
-                                            &indexer_id,
-                                            &indexer_name,
-                                            Some(sanitize_indexer_error_message(&err.to_string())),
-                                        )
-                                        .await;
+                                        if cooldown.is_none() {
+                                            Self::record_indexer_last_error(
+                                                &indexer_configs,
+                                                &indexer_id,
+                                                &indexer_name,
+                                                Some(sanitize_indexer_error_message(
+                                                    &err.to_string(),
+                                                )),
+                                            )
+                                            .await;
+                                        }
                                         Err(format!("RSS feed fetch failed: {err}"))
                                     }
                                     Err(SearchWindowError::Cancelled) => {
@@ -4893,7 +4973,8 @@ impl IndexerClient for MultiIndexerSearchClient {
             let fallback_strategies = fallback_strategies.clone();
             let search_limit = search_limit.clone();
             let rate_limiter = self.rate_limiter.clone();
-            let rate_limit_seconds = config.rate_limit_seconds;
+            let pacing =
+                IndexerPacing::resolve(config, Self::scheduler_intent(mode, is_rss_request));
             let task_cancel_token = cancel_token.child_token();
             let scheduler_lease_for_task = scheduler_lease.clone();
             let live_search_admitted = scheduler_lease_for_task.is_some();
@@ -4925,9 +5006,8 @@ impl IndexerClient for MultiIndexerSearchClient {
                         client: client.clone(),
                         search_limit: search_limit.clone(),
                         rate_limiter: rate_limiter.clone(),
-                        indexer_id: indexer_id.clone(),
                         search_timeout,
-                        rate_limit_seconds,
+                        pacing: pacing.clone(),
                         category: category_for_indexer.clone(),
                         per_indexer_categories: rss_category_request.clone(),
                         prowlarr_nab_proxy,
@@ -5231,7 +5311,11 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 error = %err,
                                 "indexer search failed"
                             );
-                            stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                            // A cooldown is not a failed query: the request
+                            // never reached the indexer's own answer.
+                            if plain_rate_limit_cooldown(&err).is_none() {
+                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                            }
 
                             record_strategy_metrics(
                                 &indexer_name,
@@ -5264,9 +5348,8 @@ impl IndexerClient for MultiIndexerSearchClient {
                             client,
                             search_limit,
                             rate_limiter,
-                            indexer_id: indexer_id.clone(),
                             search_timeout,
-                            rate_limit_seconds,
+                            pacing,
                             category: category_for_indexer,
                             per_indexer_categories: rss_category_request,
                             prowlarr_nab_proxy,
@@ -5529,7 +5612,9 @@ impl IndexerClient for MultiIndexerSearchClient {
                                     error = %err,
                                     "indexer fallback search failed"
                                 );
-                                stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                if plain_rate_limit_cooldown(&err).is_none() {
+                                    stats_tracker.record_query(&indexer_id, &indexer_name, false);
+                                }
 
                                 record_strategy_metrics(
                                     &indexer_name,
@@ -6846,9 +6931,8 @@ mod tests {
             }),
             search_limit: Arc::new(Semaphore::new(1)),
             rate_limiter: IndexerRateLimiter::new(),
-            indexer_id: "indexer-1".into(),
             search_timeout: std::time::Duration::from_secs(5),
-            rate_limit_seconds: None,
+            pacing: unpaced_tier_pacing(),
             category: Some("movie".to_string()),
             per_indexer_categories: Some(vec!["2040".to_string()]),
             prowlarr_nab_proxy,
@@ -8326,9 +8410,8 @@ mod tests {
                 client,
                 search_limit: Arc::new(Semaphore::new(1)),
                 rate_limiter: IndexerRateLimiter::new(),
-                indexer_id: "indexer-1".into(),
                 search_timeout: std::time::Duration::from_secs(5),
-                rate_limit_seconds: None,
+                pacing: unpaced_tier_pacing(),
                 category: None,
                 per_indexer_categories: None,
                 prowlarr_nab_proxy: false,
@@ -8357,9 +8440,8 @@ mod tests {
             }),
             search_limit: Arc::new(Semaphore::new(1)),
             rate_limiter: IndexerRateLimiter::new(),
-            indexer_id: "indexer-1".into(),
             search_timeout: std::time::Duration::from_secs(5),
-            rate_limit_seconds: None,
+            pacing: unpaced_tier_pacing(),
             category: None,
             per_indexer_categories: None,
             prowlarr_nab_proxy: false,
@@ -11226,6 +11308,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rate_limited_batch_records_no_failure_anywhere_the_user_looks() {
+        let touched_ids = StdArc::new(StdMutex::new(Vec::new()));
+        let recorded_messages = StdArc::new(StdMutex::new(Vec::new()));
+        let cleared_ids = StdArc::new(StdMutex::new(Vec::new()));
+        let stats = Arc::new(RecordingIndexerStatsTracker::default());
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_call| {
+                Err(AppError::TemporaryUnavailable {
+                    message: "HTTP 429: slow down; retry after 120s".to_string(),
+                    retry_after: Some(std::time::Duration::from_secs(120)),
+                    rate_limit_cooldown: RateLimitCooldownAction::AlreadyRecorded,
+                })
+            }),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(RecordingTouchIndexerConfigRepository {
+                configs: vec![mock_indexer_config()],
+                touched_ids: touched_ids.clone(),
+                recorded_messages: recorded_messages.clone(),
+                cleared_ids: cleared_ids.clone(),
+            }),
+            stats.clone(),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: series_caps(),
+            }),
+        );
+
+        let _ = multi
+            .search(
+                "Signal Run S01E12".into(),
+                HashMap::from([("tvdb_id".to_string(), "78874".to_string())]),
+                Some("series".into()),
+                Some("series".into()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                Some(1),
+                Some(12),
+                None,
+                vec![],
+            )
+            .await;
+
+        assert!(
+            !calls.lock().expect("call log mutex").is_empty(),
+            "the indexer must actually have been asked"
+        );
+        // A cooldown is not a failure: no last error on the indexer row, and no
+        // failed query in the stats the dashboard counts.
+        assert!(
+            touched_ids.lock().expect("touched ids mutex").is_empty(),
+            "a rate limit must not mark the indexer unhealthy"
+        );
+        assert!(
+            recorded_messages
+                .lock()
+                .expect("recorded messages mutex")
+                .is_empty()
+        );
+        assert!(
+            stats.queries.lock().expect("stats log mutex").is_empty(),
+            "a rate limit must not be counted as a query at all, failed or not"
+        );
+        // A plain 429 also leaves the system backoff ladder alone; only a quota
+        // wall warrants that.
+        assert!(multi.backoff_tracker.is_disabled("idx-1").await.is_none());
+
+        // Control: the same machinery still records a real failure, so the
+        // assertions above are about the rate limit and not about a silent path.
+        let control_stats = Arc::new(RecordingIndexerStatsTracker::default());
+        let (control, _control_calls) =
+            scripted_search_client_with_stats(series_caps(), control_stats.clone(), |_call| {
+                Err(AppError::Repository("upstream status 503".into()))
+            });
+        let _ = control
+            .search(
+                "Signal Run S01E12".into(),
+                HashMap::from([("tvdb_id".to_string(), "78874".to_string())]),
+                Some("series".into()),
+                Some("series".into()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                Some(1),
+                Some(12),
+                None,
+                vec![],
+            )
+            .await;
+        assert!(
+            control_stats
+                .queries
+                .lock()
+                .expect("stats log mutex")
+                .iter()
+                .any(|success| !*success),
+            "a genuine failure is still a failed query"
+        );
+    }
+
+    #[tokio::test]
     async fn mixed_batch_does_not_back_off_when_any_request_succeeds() {
         let stats = Arc::new(RecordingIndexerStatsTracker::default());
         let (client, calls) =
@@ -13255,6 +13443,20 @@ mod tests {
         assert_eq!(alias.as_deref(), Some("Sora no Vale"));
     }
 
+    fn unpaced_tier_pacing() -> IndexerPacing {
+        IndexerPacing {
+            domain_key: "indexer-1".into(),
+            interval: std::time::Duration::ZERO,
+        }
+    }
+
+    fn test_pacing(domain_key: &str, interval_secs: u64) -> IndexerPacing {
+        IndexerPacing {
+            domain_key: domain_key.into(),
+            interval: std::time::Duration::from_secs(interval_secs),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn indexer_rate_limiter_reserves_concurrent_slots_for_one_indexer() {
         let limiter = IndexerRateLimiter::new();
@@ -13262,15 +13464,15 @@ mod tests {
 
         let (first, second, third) = tokio::join!(
             async {
-                limiter.acquire("idx", Some(2)).await;
+                limiter.acquire(&test_pacing("idx", 2)).await;
                 started_at.elapsed()
             },
             async {
-                limiter.acquire("idx", Some(2)).await;
+                limiter.acquire(&test_pacing("idx", 2)).await;
                 started_at.elapsed()
             },
             async {
-                limiter.acquire("idx", Some(2)).await;
+                limiter.acquire(&test_pacing("idx", 2)).await;
                 started_at.elapsed()
             },
         );
@@ -13290,26 +13492,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn indexer_rate_limiter_only_paces_explicit_intervals_per_indexer() {
+    async fn indexer_rate_limiter_only_paces_explicit_intervals_per_domain() {
         let limiter = IndexerRateLimiter::new();
+        let unpaced = test_pacing("idx", 0);
 
-        limiter.acquire("idx", None).await;
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            limiter.acquire("idx", None),
-        )
-        .await
-        .expect("missing per-indexer interval should not pace; host RPS owns default pacing");
-
-        limiter.acquire("idx", Some(1)).await;
+        limiter.acquire(&unpaced).await;
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            limiter.acquire("other-idx", Some(1)),
+            limiter.acquire(&unpaced),
         )
         .await
-        .expect("a different indexer should have an independent pacing schedule");
+        .expect("a zero interval should not pace; host RPS owns default pacing");
+
+        limiter.acquire(&test_pacing("idx", 1)).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            limiter.acquire(&test_pacing("other-idx", 1)),
+        )
+        .await
+        .expect("a different rate-limit domain should have an independent pacing schedule");
+    }
+
+    #[test]
+    fn background_intents_trickle_while_interactive_keeps_the_configured_rate() {
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition).interval,
+            BACKGROUND_INDEXER_REQUEST_INTERVAL,
+        );
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::BackgroundRss).interval,
+            BACKGROUND_INDEXER_REQUEST_INTERVAL,
+        );
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch).interval,
+            std::time::Duration::ZERO,
+            "an interactive search keeps today's behaviour: the host limiter paces it",
+        );
+    }
+
+    #[test]
+    fn a_slower_configured_limit_wins_over_the_background_trickle() {
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = Some(30);
+
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition).interval,
+            std::time::Duration::from_secs(30),
+        );
+
+        config.rate_limit_seconds = Some(1);
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition).interval,
+            BACKGROUND_INDEXER_REQUEST_INTERVAL,
+            "a faster configured limit still obeys the background floor",
+        );
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch).interval,
+            std::time::Duration::from_secs(1),
+        );
+    }
+
+    #[test]
+    fn prowlarr_children_pace_independently_of_each_other() {
+        let mut parent = mock_indexer_config();
+        parent.id = "prowlarr-1".into();
+        let mut first_child = parent.clone();
+        first_child.id = "child-1".into();
+        first_child.managed_parent_config_id = Some("prowlarr-1".into());
+        first_child.managed_child_key = Some("indexer-a.example".into());
+        let mut second_child = first_child.clone();
+        second_child.id = "child-2".into();
+        second_child.managed_child_key = Some("indexer-b.example".into());
+
+        let intent = SchedulerIntent::BackgroundAcquisition;
+        assert_ne!(
+            IndexerPacing::resolve(&first_child, intent).domain_key,
+            IndexerPacing::resolve(&second_child, intent).domain_key,
+        );
+        assert_eq!(
+            IndexerPacing::resolve(&parent, intent).domain_key,
+            parent.rate_limit_domain_key(),
+        );
     }
 
     #[test]

@@ -78,8 +78,10 @@ pub(crate) enum ObservedClientJobResolution {
 /// locator/token/name and the registry's binding state, so entries are held
 /// against [`AppRuntimeAcquisitionState::download_registry_generation`] and the
 /// whole memo is dropped the moment a binding is created, attached or ended.
-/// A resolution that was merely *unavailable* (a registry read error) or in
-/// `Conflict` (which a later tick may heal) is never memoized.
+/// A resolution that was merely *unavailable* (a registry read error) is never
+/// memoized. A `Conflict` is, because it too is a fact about the registry's
+/// current generation: only a registry write can heal it, and every registry
+/// write bumps the generation.
 ///
 /// Bindings are also created and retired inside the workflow stores' own
 /// transactions (a re-add that retires a stale terminal binding and mints its
@@ -182,6 +184,27 @@ pub(crate) fn observation_memo_key(
     }
 }
 
+/// The identity of a conflict, for warn-once bookkeeping.
+///
+/// Two conflicts are the same conflict when the same client row names the same
+/// token and is blocked by the same binding. Anything else — the row moving to
+/// another token, another binding taking the locator — is a new fact and warns
+/// again.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ConflictWarningKey {
+    client_id: Option<String>,
+    client_type: String,
+    item_id: String,
+    token_id: DownloadId,
+    binding_download_id: DownloadId,
+}
+
+/// Hard cap on the warn-once set, mirroring [`OBSERVATION_MEMO_MAX_ENTRIES`].
+/// Reaching it would mean more distinct *conflicts* than any client set can
+/// produce, so the set is dropped rather than grown without bound; the cost of
+/// being wrong is one repeated warning, not unbounded memory.
+const CONFLICT_WARNING_MAX_ENTRIES: usize = 8_192;
+
 pub(crate) fn observation_resolution_is_memoizable(
     resolution: &ObservedClientJobResolution,
 ) -> bool {
@@ -190,9 +213,22 @@ pub(crate) fn observation_resolution_is_memoizable(
         // registry's current generation; a bump retires them.
         ObservedClientJobResolution::Resolved(_)
         | ObservedClientJobResolution::BindingAlreadyEnded => true,
-        // A conflict may be healed by a later tick, and an unavailable
-        // resolution is a read failure that must be retried.
-        ObservedClientJobResolution::Conflict | ObservedClientJobResolution::Unavailable => false,
+        // So is a conflict. A conflict can only be healed by a registry write —
+        // a binding created, attached, rebound or ended — and every registry
+        // write bumps `download_registry_generation`, which drops the whole
+        // memo. [`OBSERVATION_MEMO_TTL`] is the backstop for a write path that
+        // forgets to bump, exactly as it is for `Resolved`.
+        //
+        // This used to be `false`, on the reasoning that "a later tick may heal
+        // it". A later tick heals nothing by itself: it re-runs the same read
+        // against the same rows and reaches the same answer. The exclusion
+        // therefore bought no healing and cost a `resolve_observation` write
+        // transaction, per conflicting row, per call site, per tick, forever —
+        // ~1,100 transactions/s and ~1,650 log lines/s on a load-test instance
+        // with 961 conflicting rows.
+        ObservedClientJobResolution::Conflict => true,
+        // An unavailable resolution is a read failure that must be retried.
+        ObservedClientJobResolution::Unavailable => false,
     }
 }
 
@@ -527,6 +563,32 @@ async fn heal_binding_after_completed_delete(
     true
 }
 
+/// Whether this exact conflict has not been announced yet, claiming it if so.
+async fn conflict_warning_is_first(
+    app: &AppUseCase,
+    locator: &ClientJobLocator,
+    token_id: DownloadId,
+    binding_download_id: DownloadId,
+) -> bool {
+    let key = ConflictWarningKey {
+        client_id: locator.client_id.clone(),
+        client_type: locator.client_type.clone(),
+        item_id: locator.item_id.clone(),
+        token_id,
+        binding_download_id,
+    };
+    let mut warned = app
+        .runtime
+        .acquisition
+        .warned_download_identity_conflicts
+        .lock()
+        .await;
+    if warned.len() >= CONFLICT_WARNING_MAX_ENTRIES {
+        warned.clear();
+    }
+    warned.insert(key)
+}
+
 /// Resolve an observation to the sole workflow identity.
 pub(crate) async fn resolve_observed_client_job(
     app: &AppUseCase,
@@ -595,20 +657,57 @@ pub(crate) async fn resolve_observed_client_job(
             }
             ObservedClientJobResolution::Resolved(download_id)
         }
-        Ok(ObservationResolution::Conflict {
-            token_id,
-            binding_download_id,
-        }) => {
-            tracing::warn!(
+        Ok(ObservationResolution::Rebound { download_id }) => {
+            // The binding row moved, so every memoized resolution taken against
+            // the previous registry state is retired. That also means this INFO
+            // is logged once and not again: the next tick resolves the item
+            // normally and memoizes it.
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            tracing::info!(
                 target: "download_identity_resolver",
                 token,
                 config_id,
                 client_type,
                 native_item_id,
-                token_id = %token_id,
-                binding_download_id = %binding_download_id,
-                "conflicting canonical download identity observation"
+                download_id = %download_id,
+                "rebound an ended download binding onto the client now reporting it"
             );
+            ObservedClientJobResolution::Resolved(download_id)
+        }
+        Ok(ObservationResolution::Conflict {
+            token_id,
+            binding_download_id,
+        }) => {
+            // A conflict is a standing state, so it is announced once and then
+            // kept at debug. The memo already stops most repeats; this covers
+            // the rest, because any grab bumps the generation and clears it.
+            if conflict_warning_is_first(app, &observation.locator, token_id, binding_download_id)
+                .await
+            {
+                tracing::warn!(
+                    target: "download_identity_resolver",
+                    token,
+                    config_id,
+                    client_type,
+                    native_item_id,
+                    token_id = %token_id,
+                    binding_download_id = %binding_download_id,
+                    "conflicting canonical download identity observation"
+                );
+            } else {
+                tracing::debug!(
+                    target: "download_identity_resolver",
+                    token,
+                    config_id,
+                    client_type,
+                    native_item_id,
+                    token_id = %token_id,
+                    binding_download_id = %binding_download_id,
+                    "conflicting canonical download identity observation (already reported)"
+                );
+            }
             ObservedClientJobResolution::Conflict
         }
         Ok(ObservationResolution::BindingAlreadyEnded) => {

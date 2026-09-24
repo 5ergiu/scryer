@@ -9,6 +9,7 @@ use crate::media::libraries::state_store::decode_release_decision_explanation;
 pub async fn list_wanted_items_query(
     pool: &SqlitePool,
     query: &AcquisitionScopeStatesQuery,
+    typo_ranks: &[(String, i64)],
 ) -> AppResult<Vec<AcquisitionScopeState>> {
     let AcquisitionScopeStatesQuery {
         statuses,
@@ -25,7 +26,7 @@ pub async fn list_wanted_items_query(
         .and_then(|search| super::title_search::build_title_search_plan(None, search));
     let mut builder = QueryBuilder::<Sqlite>::new("");
     if let Some(plan) = search_plan.as_ref() {
-        super::title_search::push_ranked_title_matches_cte(&mut builder, plan);
+        super::title_search::push_ranked_title_matches_cte(&mut builder, plan, typo_ranks);
     }
 
     builder.push(
@@ -151,6 +152,7 @@ pub async fn list_wanted_items_query(
 pub async fn count_wanted_items_query(
     pool: &SqlitePool,
     query: &AcquisitionScopeStatesQuery,
+    typo_ranks: &[(String, i64)],
 ) -> AppResult<i64> {
     let AcquisitionScopeStatesQuery {
         statuses,
@@ -166,7 +168,7 @@ pub async fn count_wanted_items_query(
         .and_then(|search| super::title_search::build_title_search_plan(None, search));
     let mut builder = QueryBuilder::<Sqlite>::new("");
     if let Some(plan) = search_plan.as_ref() {
-        super::title_search::push_ranked_title_matches_cte(&mut builder, plan);
+        super::title_search::push_ranked_title_matches_cte(&mut builder, plan, typo_ranks);
     }
 
     builder.push(

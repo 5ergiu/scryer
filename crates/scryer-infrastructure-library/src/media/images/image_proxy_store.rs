@@ -433,11 +433,18 @@ fn is_anilist_cdn_host(host: &str) -> bool {
 async fn persist_queued_sources(
     datastore: &StoreDatastore,
     pending: &Arc<Mutex<HashMap<String, ImageProxySourceRecord>>>,
-    records: Vec<ImageProxySourceRecord>,
+    mut records: Vec<ImageProxySourceRecord>,
 ) -> AppResult<()> {
     if records.is_empty() {
         return Ok(());
     }
+    // Two flushes can run at once (one per GraphQL request that registered
+    // images), and they overlap on tokens whenever both pages showed the same
+    // artwork. Each upsert takes a row lock the transaction holds to commit,
+    // so rows must be locked in one global order or Postgres reports a
+    // deadlock when the two walk their HashMap-ordered lists towards each
+    // other. Token order is that global order.
+    records.sort_by(|left, right| left.token.cmp(&right.token));
     let transaction_records = records.clone();
     SqlRuntime::run_in_transaction(datastore, "flush_image_proxy_sources", move |tx| {
         let records = transaction_records.clone();
@@ -1116,5 +1123,64 @@ mod tests {
                     .is_some()
             );
         }
+    }
+
+    /// Concurrent flushes deadlock on Postgres unless every flush locks the
+    /// rows in the same order. SQLite's rowid records insertion order, so it
+    /// witnesses the order the upserts were issued in.
+    #[tokio::test]
+    async fn batch_flush_writes_sources_in_token_order() {
+        const SOURCE_COUNT: usize = 48;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite image proxy order pool");
+        sqlx::query(
+            "CREATE TABLE image_proxy_sources (
+                token TEXT PRIMARY KEY,
+                upstream_url TEXT,
+                owner_type TEXT,
+                owner_id TEXT,
+                image_kind TEXT NOT NULL,
+                fallback_class TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create image proxy sources table");
+        let datastore = StoreDatastore::Sqlite {
+            pool: pool.clone(),
+            writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let store = ImageProxyStore::new(datastore);
+
+        for index in 0..SOURCE_COUNT {
+            store.register_image_source(ImageProxyRegistration {
+                upstream_url: Some(format!(
+                    "https://image.tmdb.org/t/p/original/poster-{index}.jpg"
+                )),
+                owner_type: Some("title".to_string()),
+                owner_id: Some(format!("title-{index}")),
+                image_kind: ImageProxyKind::Poster,
+                fallback_class: "portrait".to_string(),
+                default_variant: "w250".to_string(),
+            });
+        }
+        store
+            .flush_image_proxy_sources()
+            .await
+            .expect("flush queued sources");
+
+        let written: Vec<String> =
+            sqlx::query_scalar("SELECT token FROM image_proxy_sources ORDER BY rowid")
+                .fetch_all(&pool)
+                .await
+                .expect("read sources in insertion order");
+        assert_eq!(written.len(), SOURCE_COUNT);
+        let mut expected = written.clone();
+        expected.sort();
+        assert_eq!(written, expected, "upserts must be issued in token order");
     }
 }

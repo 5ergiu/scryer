@@ -1132,6 +1132,37 @@ impl AnimeNumberingBridge {
     pub fn season(&self, index: i32) -> Option<&AnimeCommunitySeason> {
         self.seasons.iter().find(|season| season.index == index)
     }
+
+    /// Every cour name the bridge carries, as tagged aliases of the title the
+    /// bridge belongs to.
+    ///
+    /// A release named after a cour (`Gasshou wo`) names the title as surely as
+    /// one of its own aliases does, so both the matcher and the persisted
+    /// search projection have to see these names. They live here, on the
+    /// bridge, so the two callers derive them the same way.
+    ///
+    /// Bridge cour names are the upstream anime dataset's, so a Latin one is a
+    /// romanization; tagging it as such is what lets the relaxed matcher treat
+    /// `Gassho o` and `Gasshou wo` as one spelling.
+    pub fn cour_title_aliases(&self) -> Vec<TaggedAlias> {
+        let mut seen = std::collections::HashSet::new();
+        let mut aliases = Vec::new();
+        for name in self.seasons.iter().flat_map(|season| &season.titles) {
+            let key = title_spelling::title_lookup_form(name);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            let language = match title_spelling::title_script(name) {
+                title_spelling::TitleScript::Latin => "x-jat",
+                _ => "ja",
+            };
+            aliases.push(TaggedAlias {
+                name: name.clone(),
+                language: language.to_string(),
+            });
+        }
+        aliases
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -7327,15 +7358,6 @@ pub fn parse_query(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-pub fn match_fuzzy(candidate: &str, query: &str) -> bool {
-    let target = parse_query(candidate);
-    let q = parse_query(query);
-    if q.is_empty() {
-        return true;
-    }
-    target.contains(&q)
-}
-
 pub fn normalize_tags(tags: &[String]) -> Vec<String> {
     let mut output = HashSet::new();
     for tag in tags {
@@ -7424,12 +7446,6 @@ mod tests {
             normalize_tags(&["Anime".into(), "anime".into(), " series ".into()]),
             vec!["anime".to_string(), "series".to_string()]
         );
-    }
-
-    #[test]
-    fn fuzzy_search_matches_partial() {
-        assert!(match_fuzzy("Velvet Comet", "come"));
-        assert!(!match_fuzzy("Velvet Comet", "harbor"));
     }
 
     #[test]

@@ -123,6 +123,37 @@ async fn import_completed_download_with_identity_policy_for_download(
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     preparation_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> AppResult<ImportResult> {
+    let _source_permit = app
+        .runtime
+        .imports
+        .execution_coordinator
+        .try_acquire_source(completed)
+        .await
+        .ok_or_else(|| AppError::Validation("this download is already being imported".into()))?;
+    let source = completed_download_identity(completed);
+    let canonical = match canonical_download_id {
+        Some(id) => Some(*id),
+        None => app
+            .services
+            .workflow
+            .download_registry
+            .find_active_binding_by_locator(&source)
+            .await?
+            .map(|binding| binding.download_id),
+    };
+    if let Some(id) = canonical
+        && app
+            .services
+            .workflow
+            .imports
+            .get_import_retry_claim(&id)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Validation(
+            "this download is awaiting import retry reconciliation".into(),
+        ));
+    }
     let request = match prepare_completed_import_request(
         app,
         completed,

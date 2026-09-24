@@ -6,7 +6,6 @@ use scryer_application::location::{
 
 #[tokio::test]
 async fn durable_resolutions_round_trip_update_and_remain_scoped_to_requested_file_page() {
-    scryer_infrastructure_datastore::register_spellfix_auto_extension().unwrap();
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")

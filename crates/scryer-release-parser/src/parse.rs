@@ -4006,6 +4006,11 @@ fn parse_numbered_special_at(
     tokens: &[Token],
     index: usize,
 ) -> Option<(ParsedSpecialKind, u32, usize)> {
+    if is_parenthesized_title_year(tokens, index) {
+        // `Doraemon (2005) (2005) - S04E11 - 121 - Special Effects ...`: the
+        // premiere year is a name qualifier, not the number of a special.
+        return None;
+    }
     let episode_hint = parse_numeric_token(tokens.get(index)?.normalized.as_str())?;
     for candidate_index in index + 1..=(index + 3).min(tokens.len().saturating_sub(1)) {
         let candidate = tokens.get(candidate_index)?;
@@ -7985,6 +7990,42 @@ fn has_batch_marker_around(tokens: &[Token], index: usize) -> bool {
         .any(|token| matches!(token.normalized.as_str(), "COMPLETE" | "BATCH"))
 }
 
+/// Is the token at `index` a four-digit year alone in its own parentheses,
+/// right after the title text (`Shin Chan (1992) - S06E28 - 241 - ...`)?
+///
+/// Sonarr, Plex and Jellyfin all disambiguate a series by writing its premiere
+/// year in that slot, so the number there is never an absolute episode number.
+/// Reading it as one drops the file's real coordinates — the standard episode
+/// token and the absolute-number slot that follow — and leaves an identity no
+/// catalog lookup can place.
+fn is_parenthesized_title_year(tokens: &[Token], index: usize) -> bool {
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    if token.separator_before != SeparatorKind::OpenParen {
+        return false;
+    }
+    if parse_year(token.normalized.as_str()).is_none() {
+        return false;
+    }
+    let Some(group_id) = token.group_id else {
+        return false;
+    };
+    // The year stands alone in its parentheses; `(1992 Remaster)` is not a
+    // bare year slot and stays on the existing path.
+    if tokens
+        .iter()
+        .filter(|candidate| candidate.group_id == Some(group_id))
+        .count()
+        != 1
+    {
+        return false;
+    }
+    // Something title-like precedes it, so the parentheses qualify a name
+    // rather than open the release string.
+    tokens[..index].iter().any(is_title_like_token)
+}
+
 fn parse_anime_absolute_at(
     tokens: &[Token],
     index: usize,
@@ -8044,6 +8085,9 @@ fn parse_anime_absolute_at(
         .get(index.saturating_sub(1))
         .is_some_and(|token| token.normalized == "SEASON")
     {
+        return None;
+    }
+    if is_parenthesized_title_year(tokens, index) {
         return None;
     }
     let token = tokens.get(index)?.normalized.as_str();

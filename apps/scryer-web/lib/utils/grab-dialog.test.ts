@@ -6,8 +6,6 @@ import type { TitleRecord } from "@/lib/types/titles";
 import {
   episodeSubjectIncomplete,
   episodeSubjectInput,
-  grabDialogCtaKey,
-  grabDialogTitleFacet,
   releaseRejectionCodes,
   titleGapLabel,
   titleHoldsFile,
@@ -38,12 +36,6 @@ function release(overrides: Partial<Release>): Release {
   };
 }
 
-test("the title picker facet follows the search kind", () => {
-  assert.equal(grabDialogTitleFacet("MOVIE"), "MOVIE");
-  assert.equal(grabDialogTitleFacet("SERIES"), "SERIES");
-  assert.equal(grabDialogTitleFacet("ANIME"), "ANIME");
-  assert.equal(grabDialogTitleFacet("RAW"), null);
-});
 
 test("an episodic title reports its missing monitored episodes", () => {
   assert.deepEqual(
@@ -116,11 +108,6 @@ test("rejection codes are de-duplicated across the batch", () => {
   assert.deepEqual(codes, ["QUALITY_NOT_ALLOWED", "SIZE_TOO_LARGE"]);
 });
 
-test("the CTA names the mode and the batch size", () => {
-  assert.equal(grabDialogCtaKey(false, 1), "grabDialog.cta.assign");
-  assert.equal(grabDialogCtaKey(false, 3), "grabDialog.cta.assignAll");
-  assert.equal(grabDialogCtaKey(true, 3), "grabDialog.cta.unlinked");
-});
 
 test("a season/episode narrowing is sent only when both halves are filled", () => {
   assert.deepEqual(episodeSubjectInput("", ""), {});

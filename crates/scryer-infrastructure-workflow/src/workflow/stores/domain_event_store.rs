@@ -2,7 +2,10 @@ use super::*;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use scryer_application::{AppError, AppResult, DashboardActivityStats, DomainEventRepository};
+use scryer_application::{
+    AppError, AppResult, DashboardActivityStats, DomainEventRepository,
+    UnfinishedLibraryScanSession,
+};
 use scryer_domain::{
     DomainEvent, DomainEventFilter, DomainEventType, NewDomainEvent, TitleHistoryEventType,
 };
@@ -47,6 +50,83 @@ impl DomainEventRepository for DomainEventStore {
         fetch_domain_events(self.datastore.read_exec(), &sql, &args).await
     }
 
+    /// Ask the log directly for scan sessions that never ended.
+    ///
+    /// The old caller paged every library-scan event in and replayed the whole
+    /// projection to count these. `library_scan_progressed` is the bulk of that
+    /// log and contributes nothing to the answer, so this reads only
+    /// `library_scan_started` rows with no terminal row in the same stream.
+    ///
+    /// The session id *is* the stream id (`DomainEventStream::LibraryScan`), so
+    /// both halves are index work: `idx_domain_events_event_type_sequence`
+    /// seeks the started rows, and `idx_domain_events_stream_sequence` (0246)
+    /// answers the `NOT EXISTS` and the last-event lookup per surviving row.
+    /// The correlated `MAX(occurred_at)` is evaluated after the filter, so it
+    /// runs only for sessions that really are unfinished — normally none.
+    async fn list_unfinished_library_scan_sessions(
+        &self,
+    ) -> AppResult<Vec<UnfinishedLibraryScanSession>> {
+        let terminal_types = [
+            DomainEventType::LibraryScanCompleted,
+            DomainEventType::LibraryScanCanceled,
+            DomainEventType::LibraryScanFailed,
+        ];
+        let sql = format!(
+            "SELECT {DOMAIN_EVENT_COLUMNS}, \
+             (SELECT MAX(last.occurred_at) FROM domain_events last \
+               WHERE last.stream_id = domain_events.stream_id) AS last_event_at \
+             FROM domain_events \
+             WHERE event_type = {{}} \
+               AND stream_id IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM domain_events terminal \
+                                WHERE terminal.stream_id = domain_events.stream_id \
+                                  AND terminal.event_type IN ({})) \
+             ORDER BY sequence",
+            placeholders(terminal_types.len())
+        );
+        let mut args = vec![SqlArg::Text(
+            DomainEventType::LibraryScanStarted.as_str().to_string(),
+        )];
+        args.extend(
+            terminal_types
+                .iter()
+                .map(|event_type| SqlArg::Text(event_type.as_str().to_string())),
+        );
+
+        SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let last_event_at = row.timestamp("last_event_at")?;
+                let event = domain_event_from_row(&row)?;
+                let session_id = match &event.stream {
+                    scryer_domain::DomainEventStream::LibraryScan { session_id } => {
+                        session_id.clone()
+                    }
+                    _ => {
+                        return Err(AppError::Repository(format!(
+                            "library scan started event {} is not on a library scan stream",
+                            event.event_id
+                        )));
+                    }
+                };
+                let library_id = match &event.payload {
+                    scryer_domain::DomainEventPayload::LibraryScanStarted(data) => {
+                        data.library_id.clone()
+                    }
+                    _ => None,
+                };
+                Ok(UnfinishedLibraryScanSession {
+                    session_id,
+                    library_id,
+                    facet: event.facet,
+                    started_at: event.occurred_at,
+                    last_event_at,
+                })
+            })
+            .collect()
+    }
+
     async fn latest_sequence(&self) -> AppResult<i64> {
         let row = SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
@@ -56,6 +136,45 @@ impl DomainEventRepository for DomainEventStore {
         .await?
         .ok_or_else(|| AppError::Repository("missing domain event sequence".into()))?;
         row.i64("sequence")
+    }
+
+    async fn recent_import_events(
+        &self,
+        library_ids: &[String],
+        before_sequence: Option<i64>,
+        limit: usize,
+    ) -> AppResult<Vec<DomainEvent>> {
+        if library_ids.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut args = Vec::new();
+        let mut branches = Vec::new();
+        // Limit each indexed event-type walk before merging; an IN predicate
+        // would otherwise sort the entire matching event history in SQLite.
+        for event_type in ["import_completed", "media_file_upgraded"] {
+            args.push(SqlArg::Text(event_type.into()));
+            args.extend(library_ids.iter().cloned().map(SqlArg::Text));
+            let mut predicate = format!(
+                "event_type = {{}} AND EXISTS (SELECT 1 FROM titles WHERE titles.id = domain_events.title_id AND library_id IN ({}))",
+                placeholders(library_ids.len()),
+            );
+            if let Some(sequence) = before_sequence {
+                predicate.push_str(" AND sequence < {}");
+                args.push(SqlArg::I64(sequence));
+            }
+            args.push(SqlArg::I64(limit.min(50) as i64));
+            branches.push(format!("SELECT * FROM (SELECT {DOMAIN_EVENT_COLUMNS} FROM domain_events WHERE {predicate} ORDER BY sequence DESC LIMIT {{}}) AS recent_{event_type}"));
+        }
+        args.push(SqlArg::I64(limit.min(50) as i64));
+        fetch_domain_events(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT * FROM ({}) AS recent_imports ORDER BY sequence DESC LIMIT {{}}",
+                branches.join(" UNION ALL ")
+            ),
+            &args,
+        )
+        .await
     }
 
     async fn count_title_history_page_events(
@@ -316,6 +435,80 @@ mod title_history_filter_tests {
         event.event_id = event_id.to_string();
         event.payload = payload;
         event
+    }
+
+    #[tokio::test]
+    async fn dashboard_recent_imports_filters_libraries_and_pages_both_event_types() {
+        let store = store().await;
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "CREATE TABLE titles (id TEXT PRIMARY KEY, library_id TEXT NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "INSERT INTO titles VALUES ('title-1', 'visible'), ('title-2', 'private')",
+            &[],
+        )
+        .await
+        .unwrap();
+        for (id, title, upgrade) in [
+            ("old", "title-1", false),
+            ("hidden", "title-2", true),
+            ("new", "title-1", true),
+        ] {
+            let payload = if upgrade {
+                DomainEventPayload::MediaFileUpgraded(scryer_domain::MediaFileUpgradedEventData {
+                    title: title_snapshot(),
+                    media_updates: vec![],
+                    episode_ids: vec![],
+                    previous_file_id: None,
+                    current_file_id: Some(id.into()),
+                    old_score: None,
+                    new_score: None,
+                    size_bytes: None,
+                })
+            } else {
+                DomainEventPayload::ImportCompleted(scryer_domain::ImportCompletedEventData {
+                    title: title_snapshot(),
+                    media_updates: vec![],
+                    imported_count: 1,
+                    import_id: None,
+                    source_system: None,
+                    source_ref: None,
+                    source_title: None,
+                    source_path: None,
+                    dest_path: None,
+                    quality: None,
+                    episode_ids: vec![],
+                    size_bytes: None,
+                })
+            };
+            let mut event = event_with_payload(id, payload);
+            event.title_id = Some(title.into());
+            store.append(event).await.unwrap();
+        }
+        store.append(download_ignored_event()).await.unwrap();
+        assert!(
+            store
+                .recent_import_events(&[], None, 15)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let page = store
+            .recent_import_events(&["visible".into()], None, 1)
+            .await
+            .unwrap();
+        assert_eq!(page[0].event_id, "new");
+        let page = store
+            .recent_import_events(&["visible".into()], Some(page[0].sequence), 15)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].event_id, "old");
     }
 
     #[tokio::test]
