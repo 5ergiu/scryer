@@ -12,22 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    compile_spellfix_extension(&manifest_dir);
     compile_migration_bundle(&manifest_dir);
-}
-
-fn compile_spellfix_extension(manifest_dir: &Path) {
-    let spellfix_source = manifest_dir.join("vendor/sqlite/ext/misc/spellfix.c");
-    println!("cargo:rerun-if-changed={}", spellfix_source.display());
-
-    let sqlite_include =
-        env::var("DEP_SQLITE3_INCLUDE").expect("DEP_SQLITE3_INCLUDE must be set by libsqlite3-sys");
-
-    cc::Build::new()
-        .file(&spellfix_source)
-        .include(sqlite_include)
-        .warnings(false)
-        .compile("scryer_spellfix1");
 }
 
 fn compile_migration_bundle(manifest_dir: &Path) {

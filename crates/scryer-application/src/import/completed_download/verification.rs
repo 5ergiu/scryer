@@ -33,6 +33,7 @@ enum ArtifactMemberCompletion {
 #[derive(Clone, Copy)]
 enum ImportVerificationMode {
     Automatic,
+    Retry,
     Manual {
         expected_mapping_count: Option<usize>,
     },
@@ -87,7 +88,7 @@ pub(super) async fn verify_import_inner(
         .await
 }
 
-pub(super) async fn verify_import_inner_with_release_evidence(
+pub(crate) async fn verify_import_inner_with_release_evidence(
     app: &AppUseCase,
     td: &TrackedDownload,
     files_imported_this_pass: usize,
@@ -106,7 +107,26 @@ pub(super) async fn verify_import_inner_with_release_evidence(
     .await
 }
 
-pub(super) async fn verify_skipped_import_with_release_evidence(
+pub(crate) async fn verify_retry_import_with_release_evidence(
+    app: &AppUseCase,
+    td: &TrackedDownload,
+    files_imported_this_pass: usize,
+    completed: &CompletedDownload,
+    release_evidence: &crate::import_workflow::ReleaseEvidence,
+) -> AppResult<bool> {
+    verify_import_with_mode(
+        app,
+        td,
+        files_imported_this_pass,
+        Some(completed),
+        Some(release_evidence),
+        ImportVerificationMode::Retry,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn verify_skipped_import_with_release_evidence(
     app: &AppUseCase,
     td: &TrackedDownload,
     files_imported_this_pass: usize,
@@ -134,7 +154,14 @@ async fn verify_import_with_mode(
     mode: ImportVerificationMode,
     require_terminal_artifact_members: bool,
 ) -> AppResult<bool> {
-    let artifacts = import_artifacts_for_completed_download(app, td, completed).await?;
+    let mut artifacts = import_artifacts_for_completed_download(app, td, completed).await?;
+    if matches!(mode, ImportVerificationMode::Retry) {
+        let Some(title_id) = tracked_title_id(td) else {
+            return Ok(false);
+        };
+        // Reassignment must not turn an earlier title's artifacts into success.
+        artifacts.retain(|artifact| artifact_matches_tracked_title(artifact, title_id));
+    }
 
     if artifacts.is_empty() {
         return Ok(false);
@@ -181,8 +208,11 @@ async fn verify_import_with_mode(
         }
     }
 
-    let all_sources_intentionally_ignored = matches!(mode, ImportVerificationMode::Automatic)
-        && artifact_members == ArtifactMemberCompletion::AllIntentionallyIgnored;
+    let all_sources_intentionally_ignored = matches!(
+        mode,
+        ImportVerificationMode::Automatic | ImportVerificationMode::Retry
+    ) && artifact_members
+        == ArtifactMemberCompletion::AllIntentionallyIgnored;
     if successful_units.is_empty() && !all_sources_intentionally_ignored {
         return Ok(false);
     }
@@ -192,7 +222,7 @@ async fn verify_import_with_mode(
     }
 
     let manual_source_coverage = match mode {
-        ImportVerificationMode::Automatic => None,
+        ImportVerificationMode::Automatic | ImportVerificationMode::Retry => None,
         ImportVerificationMode::Manual {
             expected_mapping_count,
         } => expected_mapping_count
@@ -204,7 +234,10 @@ async fn verify_import_with_mode(
 
     match expected_episode_units_with_release_evidence(app, td, release_evidence).await {
         ExpectedEpisodeResolution::Resolved(expected_episode_units) => {
-            let expected_episode_units = if matches!(mode, ImportVerificationMode::Automatic) {
+            let expected_episode_units = if matches!(
+                mode,
+                ImportVerificationMode::Automatic | ImportVerificationMode::Retry
+            ) {
                 expected_episode_units_after_ignored_unmonitored(
                     app,
                     td,
@@ -222,11 +255,15 @@ async fn verify_import_with_mode(
                 return Ok(false);
             }
 
-            if let Some(source_units_complete) = source_video_expected_units_are_complete(
-                &source_video_units,
-                &successful_units,
-                &expected_episode_units,
-            ) {
+            // A retry may have moved only part of the source before interruption.
+            // Its surviving files/artifacts cannot narrow the advertised episode set.
+            if !matches!(mode, ImportVerificationMode::Retry)
+                && let Some(source_units_complete) = source_video_expected_units_are_complete(
+                    &source_video_units,
+                    &successful_units,
+                    &expected_episode_units,
+                )
+            {
                 return Ok(source_units_complete);
             }
 
@@ -235,7 +272,10 @@ async fn verify_import_with_mode(
                 .all(|unit| successful_units.contains(unit)));
         }
         ExpectedEpisodeResolution::AtLeastOne(expected_episode_units) => {
-            let expected_episode_units = if matches!(mode, ImportVerificationMode::Automatic) {
+            let expected_episode_units = if matches!(
+                mode,
+                ImportVerificationMode::Automatic | ImportVerificationMode::Retry
+            ) {
                 expected_episode_units_after_ignored_unmonitored(
                     app,
                     td,
@@ -258,15 +298,16 @@ async fn verify_import_with_mode(
                 .any(|unit| successful_units.contains(unit)));
         }
         ExpectedEpisodeResolution::Unresolved => {
-            if successful_units.is_empty() {
+            if matches!(mode, ImportVerificationMode::Retry) || successful_units.is_empty() {
                 return Ok(false);
             }
-            if matches!(mode, ImportVerificationMode::Automatic)
-                && successful_units_cover_visible_files(
-                    successful_units.len(),
-                    current_visible_files,
-                )
-            {
+            if matches!(
+                mode,
+                ImportVerificationMode::Automatic | ImportVerificationMode::Retry
+            ) && successful_units_cover_visible_files(
+                successful_units.len(),
+                current_visible_files,
+            ) {
                 return Ok(true);
             }
 
@@ -274,6 +315,7 @@ async fn verify_import_with_mode(
                 ImportVerificationMode::Automatic => {
                     files_imported_this_pass > 0 && rejected_units.is_empty()
                 }
+                ImportVerificationMode::Retry => false,
                 ImportVerificationMode::Manual { .. } => manual_source_coverage.unwrap_or(false),
             });
         }
@@ -285,7 +327,7 @@ async fn verify_import_with_mode(
     }
 
     Ok(match mode {
-        ImportVerificationMode::Automatic => {
+        ImportVerificationMode::Automatic | ImportVerificationMode::Retry => {
             if successful_units_cover_visible_files(successful_units.len(), current_visible_files) {
                 return Ok(true);
             }
@@ -1063,6 +1105,7 @@ mod expected_episode_release_title_tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 

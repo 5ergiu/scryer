@@ -85,6 +85,7 @@ pub struct AppIntegrationServices {
     /// indexer can retain a reference to a missing or disabled proxy.
     pub(crate) proxy_assignment_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) scope_indexer_coverage: Arc<dyn ScopeIndexerCoverageRepository>,
+    pub(crate) indexer_caps_cache: Arc<crate::integration::indexer_caps_cache::CapsRequestCache>,
     pub(crate) indexer_caps_refresher: RuntimeFeature<Arc<dyn IndexerCapsSnapshotRefresher>>,
     pub(crate) indexer_client: Arc<dyn IndexerClient>,
     pub(crate) indexer_artifact_resolver: Option<Arc<dyn IndexerArtifactResolver>>,
@@ -356,6 +357,9 @@ impl AppServices {
                     null_repositories::NullScopeIndexerCoverageRepository,
                 ),
                 indexer_caps_refresher: RuntimeFeature::Disabled,
+                indexer_caps_cache: Arc::new(
+                    crate::integration::indexer_caps_cache::CapsRequestCache::default(),
+                ),
                 indexer_client,
                 download_client,
                 builtin_download_client_connection_tester: Arc::new(

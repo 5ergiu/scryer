@@ -116,7 +116,7 @@ fn download_client_routing_payload(
     entries: Vec<DownloadClientRoutingSettingsEntry>,
 ) -> AppResult<serde_json::Map<String, serde_json::Value>> {
     let mut payload = serde_json::Map::new();
-    for entry in entries {
+    for (index, entry) in entries.into_iter().enumerate() {
         let client_id = entry.client_id.trim();
         if client_id.is_empty() {
             return Err(AppError::Validation(
@@ -134,10 +134,36 @@ fn download_client_routing_payload(
                 "removeCompleted": entry.remove_completed,
                 "removeFailed": entry.remove_failed,
                 "seedingProfileId": normalize_optional_string(entry.seeding_profile_id),
+                "priority": index + 1,
             }),
         );
     }
     Ok(payload)
+}
+fn ordered_download_client_routing_entries(
+    entries: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> Vec<DownloadClientRoutingSettingsEntry> {
+    let mut entries = entries.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_id, left), (right_id, right)| {
+        let priority = |value: &serde_json::Value| {
+            value
+                .get("priority")
+                .and_then(parse_routing_priority)
+                .unwrap_or(i64::MAX)
+        };
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| left_id.cmp(right_id))
+    });
+    entries
+        .into_iter()
+        .map(|(client_id, config)| {
+            download_client_routing_settings_entry_from_domain(
+                client_id,
+                crate::catalog_helpers::parse_download_client_routing_entry(&config),
+            )
+        })
+        .collect()
 }
 fn download_client_routing_settings_entry_from_domain(
     client_id: String,
@@ -385,13 +411,7 @@ impl AppUseCase {
             );
             return Ok(None);
         };
-        let entries = entries
-            .into_iter()
-            .map(|(client_id, config)| {
-                let entry = crate::catalog_helpers::parse_download_client_routing_entry(&config);
-                download_client_routing_settings_entry_from_domain(client_id, entry)
-            })
-            .collect::<Vec<_>>();
+        let entries = ordered_download_client_routing_entries(entries);
         let routing = self
             .complete_library_download_client_routing_entries(entries)
             .await?;
@@ -473,24 +493,7 @@ impl AppUseCase {
             return Ok(Vec::new());
         };
 
-        let mut routing = entries
-            .into_iter()
-            .map(|(client_id, config)| {
-                let entry = crate::catalog_helpers::parse_download_client_routing_entry(&config);
-                DownloadClientRoutingSettingsEntry {
-                    client_id,
-                    enabled: entry.enabled,
-                    category: entry.category,
-                    recent_queue_priority: entry.recent_queue_priority,
-                    older_queue_priority: entry.older_queue_priority,
-                    remove_completed: entry.remove_completed,
-                    remove_failed: entry.remove_failed,
-                    seeding_profile_id: entry.seeding_profile_id,
-                }
-            })
-            .collect::<Vec<_>>();
-        routing.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-        Ok(routing)
+        Ok(ordered_download_client_routing_entries(entries))
     }
 }
 impl AppUseCase {
@@ -503,28 +506,7 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageCatalogSettings)
             .await?;
 
-        let mut payload = serde_json::Map::new();
-        for entry in entries {
-            let client_id = entry.client_id.trim();
-            if client_id.is_empty() {
-                return Err(AppError::Validation(
-                    "download client routing entry requires client_id".to_string(),
-                ));
-            }
-
-            payload.insert(
-                client_id.to_string(),
-                serde_json::json!({
-                    "enabled": entry.enabled,
-                    "category": normalize_optional_string(entry.category),
-                    "recentQueuePriority": normalize_optional_string(entry.recent_queue_priority),
-                    "olderQueuePriority": normalize_optional_string(entry.older_queue_priority),
-                    "removeCompleted": entry.remove_completed,
-                    "removeFailed": entry.remove_failed,
-                    "seedingProfileId": normalize_optional_string(entry.seeding_profile_id),
-                }),
-            );
-        }
+        let payload = download_client_routing_payload(entries)?;
 
         self.services
             .config
@@ -862,11 +844,8 @@ impl AppUseCase {
             .cloned()
             .collect::<std::collections::HashSet<_>>();
         for indexer_id in changed_indexers {
-            self.prune_indexer_search_learning_best_effort(
-                &indexer_id,
-                "indexer_routing_change",
-            )
-            .await;
+            self.prune_indexer_search_learning_best_effort(&indexer_id, "indexer_routing_change")
+                .await;
         }
         Ok(updated)
     }
@@ -1054,20 +1033,32 @@ mod remove_failed_default_tests {
         .expect("routing payload object")
         .clone();
 
-        assert_eq!(flip_explicit_remove_failed_defaults_in_place(&mut payload), 1);
+        assert_eq!(
+            flip_explicit_remove_failed_defaults_in_place(&mut payload),
+            1
+        );
         assert_eq!(
             payload["flip"]["removeFailed"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(payload["flip"]["enabled"], serde_json::Value::Bool(false));
-        assert_eq!(payload["flip"]["category"], serde_json::Value::String("movies".to_string()));
-        assert_eq!(payload["flip"]["removeCompleted"], serde_json::Value::Bool(false));
+        assert_eq!(
+            payload["flip"]["category"],
+            serde_json::Value::String("movies".to_string())
+        );
+        assert_eq!(
+            payload["flip"]["removeCompleted"],
+            serde_json::Value::Bool(false)
+        );
         assert_eq!(payload["flip"]["priority"], serde_json::Value::from(7));
         assert_eq!(
             payload["keep_true"]["removeFailed"],
             serde_json::Value::Bool(true)
         );
         assert!(payload["keep_missing"].get("removeFailed").is_none());
-        assert_eq!(payload["not_an_entry"], serde_json::Value::String("ignored".to_string()));
+        assert_eq!(
+            payload["not_an_entry"],
+            serde_json::Value::String("ignored".to_string())
+        );
     }
 }

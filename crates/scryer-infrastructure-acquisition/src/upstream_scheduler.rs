@@ -45,7 +45,6 @@ const LOW_QUOTA_RSS_TARGET_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const QUOTA_OBSERVATION_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 const EXHAUSTED_QUOTA_PROBE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const SCHEDULER_STATE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const RATE_LIMIT_FALLBACK_COOLDOWN: Duration = Duration::from_secs(60);
 const SCHEDULER_PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Default)]
@@ -230,13 +229,10 @@ impl UpstreamScheduler for InMemoryUpstreamScheduler {
         let cooldown_record = if matches!(feedback.outcome, SchedulerFeedbackOutcome::RateLimited)
             && feedback.cooldown_action == RateLimitCooldownAction::RecordFallback
         {
-            match feedback.retry_after.filter(|delay| !delay.is_zero()) {
-                Some(delay) => Some((delay, RetryAfterSource::Seconds)),
-                None => Some((
-                    RATE_LIMIT_FALLBACK_COOLDOWN,
-                    RetryAfterSource::FallbackBackoff,
-                )),
-            }
+            // `None` hands the wait to the registry's escalating ladder, which
+            // is also what the transport records for a bare 429, so one event
+            // cannot be sized twice by two different rules.
+            Some(feedback.retry_after.filter(|delay| !delay.is_zero()))
         } else {
             None
         };
@@ -335,10 +331,24 @@ impl UpstreamScheduler for InMemoryUpstreamScheduler {
                 state.dirty_rss_cadence.insert(key.clone());
             }
         }
-        if let Some((delay, source)) = cooldown_record {
-            let _ = RateLimitRegistry::new()
-                .record_destination_cooldown(&key.destination_key, delay, source)
-                .await;
+        if let Some(retry_after) = cooldown_record {
+            let registry = RateLimitRegistry::new();
+            let _ = match retry_after {
+                Some(delay) => {
+                    registry
+                        .record_destination_cooldown(
+                            &key.destination_key,
+                            delay,
+                            RetryAfterSource::Seconds,
+                        )
+                        .await
+                }
+                None => {
+                    registry
+                        .record_destination_fallback_cooldown(&key.destination_key)
+                        .await
+                }
+            };
         }
         Ok(())
     }

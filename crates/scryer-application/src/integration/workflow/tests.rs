@@ -193,6 +193,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 
@@ -729,6 +730,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
         let metadata = tracked_download_queue_snapshot(&tracked);
 
@@ -779,6 +781,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
         let metadata = tracked_download_queue_snapshot(&tracked);
 
@@ -828,6 +831,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
         let metadata = tracked_download_queue_snapshot(&tracked);
 
@@ -885,6 +889,7 @@ mod tests {
                 skip_reacquire_on_failure: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
+                retained_in_client_after_cleanup: false,
             }
         }
 
@@ -1026,6 +1031,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 
@@ -1417,6 +1423,7 @@ mod tests {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         };
         let metadata = tracked_download_queue_snapshot(&tracked);
 

@@ -50,11 +50,13 @@ async fn backup_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     (temp, bundle)
 }
 
+/// The titles the search projection can answer for. The fuzzy index is a
+/// derived file outside the database and is rebuilt from these rows, so the
+/// projection is what a restore has to get right.
 async fn indexed_titles(pool: &sqlx::SqlitePool) -> Vec<String> {
     sqlx::query_scalar(
-        "SELECT DISTINCT terms.title_id FROM title_search_terms terms
-         JOIN title_search_spellfix spellfix ON spellfix.rowid = terms.term_id
-         WHERE spellfix.word = terms.normalized_term ORDER BY terms.title_id",
+        "SELECT DISTINCT title_id FROM title_search_terms
+         WHERE normalized_term <> '' ORDER BY title_id",
     )
     .fetch_all(pool)
     .await

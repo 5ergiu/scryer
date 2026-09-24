@@ -1446,12 +1446,11 @@ fn landed_tier_is_worse(
 ///
 /// 1. [`crate::canonical_scoring::TruthVerdict::Blocked`] — the announcement
 ///    asserted a field and the file contradicts it: a stated codec that is not
-///    the stream's codec and is on the profile's blocklist, a measured
-///    resolution outside the profile's tiers. The release is not what it claimed
-///    and no scope should take it.
+///    the stream's codec and is on the profile's blocklist. Resolution-only
+///    refusals are held for review instead, preserving the source.
 /// 2. A `quality_contradicted:<announced>-><landed>` code whose landed tier is
-///    *worse* than the announced one. An occupied scope would refuse it on tier
-///    anyway, so naming the reason costs nothing; an empty scope keeps the file
+///    *worse* than the announced one. An occupied scope holds it for review;
+///    an empty scope keeps the file
 ///    (an honest 720p beats no episode) but must never be offered the same
 ///    release again as an upgrade.
 ///
@@ -1486,6 +1485,16 @@ pub(crate) fn resolve_truth_verdict_action_for_origin(
             ));
             rejection.blocking_rule_codes = codes.clone();
             TruthVerdictAction::Hold(rejection)
+        }
+        TruthVerdict::Blocked { codes }
+            if quality_contradiction(codes).is_some()
+                && codes.iter().all(|code| {
+                    code == "quality_not_in_profile_tiers"
+                        || code.starts_with(QUALITY_CONTRADICTED_PREFIX)
+                }) =>
+        {
+            let (announced, landed) = quality_contradiction(codes).expect("matched above");
+            quality_mismatch_hold(criteria, announced, landed, codes)
         }
         TruthVerdict::Blocked { codes } => TruthVerdictAction::Reject(ImportedFileRejection {
             message: format!(
@@ -1531,11 +1540,8 @@ pub(crate) fn resolve_truth_verdict_action_for_origin(
             if !landed_tier_is_worse(criteria, announced, landed) {
                 return TruthVerdictAction::Import;
             }
-            if origin == crate::import_decide::ImportOrigin::OperatorQueued {
-                return TruthVerdictAction::Reject(quality_downgrade_rejection(announced, landed));
-            }
-            if scope_is_occupied {
-                TruthVerdictAction::Reject(quality_downgrade_rejection(announced, landed))
+            if origin == crate::import_decide::ImportOrigin::OperatorQueued || scope_is_occupied {
+                quality_mismatch_hold(criteria, announced, landed, codes)
             } else {
                 TruthVerdictAction::ImportAndBlocklist {
                     code: TRUTH_QUALITY_DOWNGRADE_CODE,
@@ -1547,6 +1553,30 @@ pub(crate) fn resolve_truth_verdict_action_for_origin(
             }
         }
     }
+}
+
+fn quality_mismatch_hold(
+    criteria: &crate::QualityProfileCriteria,
+    announced: &str,
+    landed: &str,
+    codes: &[String],
+) -> TruthVerdictAction {
+    let requirement = if criteria.quality_tiers.iter().any(|tier| tier == landed) {
+        "the detected quality ranks below the advertised quality"
+    } else {
+        "the detected quality is not in the profile's allowed tiers"
+    };
+    TruthVerdictAction::Hold(ImportedFileRejection {
+        message: format!(
+            "release advertised {announced} but the file is {landed}; {requirement}. \
+             Current profile preference: {}. Source preserved for review; retry after correcting \
+             the profile or use manual import",
+            criteria.quality_tiers.join(" > ")
+        ),
+        recycle_reason: "quality_mismatch",
+        skip_reason: Some(ImportSkipReason::PolicyMismatch),
+        blocking_rule_codes: codes.to_vec(),
+    })
 }
 
 /// The refusal for a release whose file landed in a worse tier than it claimed.
@@ -2725,6 +2755,52 @@ mod tests {
     }
 
     #[test]
+    fn quality_mismatch_outside_profile_is_held_without_burning() {
+        for occupied in [false, true] {
+            for origin in [
+                crate::import_decide::ImportOrigin::Automatic,
+                crate::import_decide::ImportOrigin::OperatorQueued,
+            ] {
+                let action = resolve_truth_verdict_action_for_origin(
+                    &TruthVerdict::Blocked {
+                        codes: codes(&[
+                            "quality_not_in_profile_tiers",
+                            "quality_contradicted:2160P->1440P",
+                        ]),
+                    },
+                    &tiered_criteria(),
+                    occupied,
+                    origin,
+                );
+                let TruthVerdictAction::Hold(rejection) = action else {
+                    panic!("quality-only rejection must preserve the source");
+                };
+                assert_eq!(rejection.recycle_reason, "quality_mismatch");
+                assert!(rejection.message.contains("2160P"));
+                assert!(rejection.message.contains("1440P"));
+                assert!(rejection.message.contains("2160P > 1080P > 720P"));
+            }
+        }
+    }
+
+    #[test]
+    fn quality_mismatch_does_not_hide_an_independent_block() {
+        let action = resolve_truth_verdict_action_for_origin(
+            &TruthVerdict::Blocked {
+                codes: codes(&[
+                    "quality_not_in_profile_tiers",
+                    "quality_contradicted:2160P->1440P",
+                    "video_codec_blocked",
+                ]),
+            },
+            &tiered_criteria(),
+            false,
+            crate::import_decide::ImportOrigin::Automatic,
+        );
+        assert!(matches!(action, TruthVerdictAction::Reject(_)));
+    }
+
+    #[test]
     fn a_consistent_verdict_just_imports() {
         assert!(matches!(
             resolve_truth_verdict_action_for_origin(
@@ -2782,14 +2858,13 @@ mod tests {
             false,
             crate::import_decide::ImportOrigin::OperatorQueued,
         );
-        assert!(matches!(quality_lie, TruthVerdictAction::Reject(_)));
+        assert!(matches!(quality_lie, TruthVerdictAction::Hold(_)));
     }
 
     /// Advertised 1080p, landed 720p, and something already occupies the scope:
-    /// the tier gate would refuse it anyway, so name the reason and stop the
-    /// release from being offered again.
+    /// preserve the file for review rather than burning it for a quality mismatch.
     #[test]
-    fn a_quality_lie_into_an_occupied_scope_is_rejected() {
+    fn a_quality_lie_into_an_occupied_scope_is_held() {
         let action = resolve_truth_verdict_action_for_origin(
             &TruthVerdict::Contradicted {
                 codes: codes(&["size_expected", "quality_contradicted:1080P->720P"]),
@@ -2798,10 +2873,10 @@ mod tests {
             true,
             crate::import_decide::ImportOrigin::Automatic,
         );
-        let TruthVerdictAction::Reject(rejection) = action else {
+        let TruthVerdictAction::Hold(rejection) = action else {
             panic!("a landed tier below the announced one must not overwrite a file");
         };
-        assert_eq!(rejection.recycle_reason, TRUTH_QUALITY_DOWNGRADE_CODE);
+        assert_eq!(rejection.recycle_reason, "quality_mismatch");
     }
 
     /// Same lie into an empty scope: an honest 720p beats no file at all, so it

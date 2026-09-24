@@ -380,6 +380,17 @@ export function normalizeQualityTierList(raw: unknown): string[] {
   );
 }
 
+export function moveQualityTier(tiers: string[], tier: string, targetIndex: number): string[] {
+  const sourceIndex = tiers.indexOf(tier);
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= tiers.length || sourceIndex === targetIndex) {
+    return tiers;
+  }
+  const reordered = [...tiers];
+  reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, tier);
+  return reordered;
+}
+
 export function buildQualityProfileTemplate(profileId: string, profileName: string): QualityProfileDraft {
   return {
     id: profileId,

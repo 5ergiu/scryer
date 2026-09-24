@@ -1115,6 +1115,8 @@ impl crate::ImportArtifactRepository for RecordingImportArtifactRepo {
 
 #[derive(Default, Clone)]
 pub(super) struct TrackingImportRepo {
+    pub(super) retry_claims: Arc<Mutex<HashMap<String, crate::ImportRetryClaim>>>,
+    pub(super) retry_finish_fail: Arc<std::sync::atomic::AtomicBool>,
     pub(super) records: Arc<Mutex<Vec<ImportRecord>>>,
     pub(super) canonical_ids:
         Arc<Mutex<HashMap<String, scryer_domain::download_identity::DownloadId>>>,
@@ -1125,6 +1127,110 @@ pub(super) struct TrackingImportRepo {
 
 #[async_trait]
 impl ImportRepository for TrackingImportRepo {
+    async fn queue_import_request_with_identity_for_download(
+        &self,
+        source: ClientJobLocator,
+        kind: String,
+        payload: String,
+        identity: Option<DownloadSubmissionIdentity>,
+        canonical: Option<&scryer_domain::download_identity::DownloadId>,
+    ) -> AppResult<String> {
+        let id = self
+            .queue_import_request_with_identity(source, kind, payload, identity)
+            .await?;
+        if let Some(canonical) = canonical {
+            self.canonical_ids
+                .lock()
+                .await
+                .insert(id.clone(), *canonical);
+        }
+        Ok(id)
+    }
+
+    async fn claim_import_retry(
+        &self,
+        claim: &crate::ImportRetryClaim,
+        _: chrono::DateTime<Utc>,
+        payload_json: &str,
+    ) -> AppResult<crate::ImportRetryClaimOutcome> {
+        let mut claims = self.retry_claims.lock().await;
+        if claims.contains_key(&claim.import_id) {
+            return Ok(crate::ImportRetryClaimOutcome::Busy);
+        }
+        let mut records = self.records.lock().await;
+        let record = records
+            .iter_mut()
+            .find(|r| r.id == claim.import_id)
+            .unwrap();
+        if !matches!(record.status, ImportStatus::Failed | ImportStatus::Skipped) {
+            return Ok(crate::ImportRetryClaimOutcome::Busy);
+        }
+        record.status = ImportStatus::Processing;
+        record.result_json = None;
+        record.payload_json = payload_json.to_owned();
+        claims.insert(claim.import_id.clone(), claim.clone());
+        Ok(crate::ImportRetryClaimOutcome::Claimed)
+    }
+
+    async fn finish_import_retry(
+        &self,
+        claim: &crate::ImportRetryClaim,
+        state: TrackedDownloadState,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> AppResult<crate::ImportRetryFinishOutcome> {
+        if self
+            .retry_finish_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository(
+                "injected retry finalization failure".into(),
+            ));
+        }
+        let mut claims = self.retry_claims.lock().await;
+        if !claims
+            .get(&claim.import_id)
+            .is_some_and(|stored| stored.attempt_id == claim.attempt_id)
+        {
+            return Ok(crate::ImportRetryFinishOutcome::Superseded);
+        }
+        claims.remove(&claim.import_id);
+        let mut records = self.records.lock().await;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id == claim.import_id)
+            .unwrap();
+        record.status = if state.counts_as_imported() {
+            ImportStatus::Completed
+        } else if state == TrackedDownloadState::ImportBlocked {
+            ImportStatus::Skipped
+        } else {
+            ImportStatus::Failed
+        };
+        Ok(crate::ImportRetryFinishOutcome::Finalized)
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Option<crate::ImportRetryClaim>> {
+        Ok(self
+            .retry_claims
+            .lock()
+            .await
+            .values()
+            .find(|claim| &claim.download_id == id)
+            .cloned())
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        _: Option<&scryer_domain::download_identity::DownloadId>,
+        _: usize,
+    ) -> AppResult<Vec<crate::ImportRetryClaim>> {
+        Ok(self.retry_claims.lock().await.values().cloned().collect())
+    }
+
     async fn canonical_download_id_for_import(
         &self,
         id: &str,

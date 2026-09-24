@@ -122,13 +122,13 @@ pub(crate) struct ImportDecisionInput<'a> {
     /// [`crate::post_download_gate::rescore_from_mediainfo`]'d, so the announced
     /// and analyzed passes come out identical by construction: no release can be
     /// caught contradicting itself, `classify_truth` always reads `Consistent`,
-    /// and the whole verdict machinery — the blocklist for a quality lie, the
-    /// hold for an undisclosed veto — is unreachable. The prepared parse stays
+    /// and the whole verdict machinery, including a hold for a quality
+    /// mismatch, is unreachable. The prepared parse stays
     /// the right input for *paths and rename tokens*; scoring needs both halves
     /// of the evidence, and only the raw parse still has the announced half.
     ///
     /// Pinned end to end by
-    /// `a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reopened`.
+    /// `a_release_quality_mismatch_is_held_without_blocklisting_or_reopening`.
     pub parsed: &'a crate::ParsedReleaseMetadata,
     pub accepted: &'a ImportedFileAcceptance,
     pub prior_rescore_changes: &'a [String],

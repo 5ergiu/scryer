@@ -1,6 +1,73 @@
 use super::*;
 
 #[tokio::test]
+async fn download_client_routing_order_survives_save_and_reload() {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let (app, user) =
+        bootstrap_with_search_settings_and_indexer(settings.clone(), Arc::new(MockIndexerClient));
+    let entries = ["z-client", "a-client"]
+        .map(|id| DownloadClientRoutingSettingsEntry {
+            client_id: id.into(),
+            enabled: true,
+            category: Some("media".into()),
+            recent_queue_priority: Some("high".into()),
+            older_queue_priority: Some("low".into()),
+            remove_completed: false,
+            remove_failed: true,
+            seeding_profile_id: None,
+        })
+        .to_vec();
+    for scope in ["movie", "series", "anime"] {
+        let saved = app
+            .update_download_client_routing(&user, scope, entries.clone())
+            .await
+            .expect("save routing");
+        assert_eq!(saved, entries);
+        let (reopened, actor) = bootstrap_with_search_settings_and_indexer(
+            settings.clone(),
+            Arc::new(MockIndexerClient),
+        );
+        assert_eq!(
+            reopened
+                .get_download_client_routing(&actor, scope)
+                .await
+                .unwrap(),
+            entries
+        );
+        let raw = settings
+            .get_scoped_value(
+                SETTINGS_SCOPE_SYSTEM,
+                DOWNLOAD_CLIENT_ROUTING_SETTINGS_KEY,
+                scope,
+            )
+            .await
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored["z-client"]["priority"], 1);
+        assert_eq!(stored["a-client"]["priority"], 2);
+    }
+
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    app.update_library_settings(
+        &user,
+        &library_id,
+        LibrarySettingsOverrideDraft {
+            download_client_routing: Some(entries.clone()),
+            ..empty_library_settings_override()
+        },
+    )
+    .await
+    .expect("save library routing");
+    let loaded = app
+        .get_library_settings(&user, &library_id)
+        .await
+        .unwrap()
+        .download_client_routing_override
+        .unwrap();
+    assert_eq!(&loaded[..2], entries.as_slice());
+}
+
+#[tokio::test]
 async fn remove_completed_download_defaults_true_when_scope_has_no_saved_entry() {
     // Legacy-compat coverage: a stored scope JSON exists but does not include
     // an entry for "weaver". Read path must fall back to the canonical

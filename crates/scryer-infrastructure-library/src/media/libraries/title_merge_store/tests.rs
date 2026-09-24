@@ -10,14 +10,12 @@ use scryer_application::location::merge::map::MergeBlockReason;
 use scryer_application::location::merge::roles::RoleChangeReason;
 use sqlx::sqlite::SqlitePoolOptions;
 
-mod spellfix;
+mod fuzzy_queue;
 
 const SOURCE: &str = "title-source";
 const DESTINATION: &str = "title-destination";
 
 async fn test_store() -> (TitleMergeStore, StoreDatastore) {
-    scryer_infrastructure_datastore::register_spellfix_auto_extension()
-        .expect("spellfix extension should register before migrations");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")

@@ -2673,6 +2673,130 @@ type DashboardActivityStatsPayload {
 }
 
 """
+Classification of a completed dashboard import.
+"""
+enum DashboardImportKindValue {
+	"""
+	Completed import without a more specific classification.
+	"""
+	IMPORTED
+	"""
+	A newly imported media file.
+	"""
+	NEW_IMPORT
+	"""
+	An import that upgraded existing media.
+	"""
+	UPGRADE
+}
+
+"""
+Recent activity and API usage for one indexer.
+"""
+type DashboardIndexerStatsPayload {
+	"""
+	Indexer configuration identifier.
+	"""
+	indexerId: ID!
+	"""
+	Indexer display name.
+	"""
+	indexerName: String!
+	"""
+	Number of queries in the last 24 hours.
+	"""
+	queriesLast24H: Int!
+	"""
+	Number of failed queries in the last 24 hours.
+	"""
+	failedLast24H: Int!
+	"""
+	Number of grabs in the last 24 hours.
+	"""
+	grabsLast24H: Int!
+	"""
+	Current API usage reported by the indexer, when available.
+	"""
+	apiCurrent: Int
+	"""
+	API usage limit reported by the indexer, when available.
+	"""
+	apiMax: Int
+}
+
+"""
+One recent completed import shown on the dashboard.
+"""
+type DashboardRecentImportPayload {
+	"""
+	Import history identifier.
+	"""
+	id: ID!
+	"""
+	Associated title identifier, when available.
+	"""
+	titleId: ID
+	"""
+	Associated title display name, when available.
+	"""
+	titleName: String
+	"""
+	Associated library identifier, when available.
+	"""
+	libraryId: ID
+	"""
+	Media facet of the associated title.
+	"""
+	facet: MediaFacetValue
+	"""
+	Poster image URL for the associated title.
+	"""
+	posterUrl: String
+	"""
+	Associated episode details, when available.
+	"""
+	episode: EpisodePayload
+	"""
+	Classification of this import.
+	"""
+	kind: DashboardImportKindValue!
+	"""
+	Imported media quality label, when available.
+	"""
+	quality: String
+	"""
+	Imported media size in bytes, when available.
+	"""
+	sizeBytes: Long
+	"""
+	Time the import was recorded.
+	"""
+	occurredAt: DateTime!
+}
+
+"""
+Title counts and indexer activity shown on the dashboard.
+"""
+type DashboardSummaryPayload {
+	"""
+	Number of movie titles.
+	"""
+	titlesMovie: Int!
+	"""
+	Number of series titles.
+	"""
+	titlesSeries: Int!
+	"""
+	Number of anime titles.
+	"""
+	titlesAnime: Int!
+	"""
+	Recent activity and reported API usage for each indexer.
+	"""
+	indexerStats: [DashboardIndexerStatsPayload!]!
+}
+
+"""
 Calendar date scalar serialized as an ISO-8601 `YYYY-MM-DD` string without a time zone.
 """
 scalar Date
@@ -4628,6 +4752,20 @@ input DownloadClientApiKeyOverrideInput {
 	Replacement API key.
 	"""
 	apiKey: String!
+}
+
+"""
+Read-only category discovery result from a download client.
+"""
+type DownloadClientCategoriesPayload {
+	"""
+	Whether the adapter supports category discovery.
+	"""
+	supported: Boolean!
+	"""
+	Configured category names; empty when none exist or discovery is unsupported.
+	"""
+	categories: [String!]!
 }
 
 """
@@ -7606,6 +7744,12 @@ type IndexerConfigPayload {
 	"""
 	disabledUntil: DateTime
 	"""
+	UTC time until which the indexer is cooling down after asking Scryer to
+	slow down, or null when it is not. Unlike `disabledUntil` this is not a
+	failure state: searching resumes on its own.
+	"""
+	rateLimitedUntil: DateTime
+	"""
 	Whether the indexer is enabled.
 	"""
 	isEnabled: Boolean!
@@ -8021,6 +8165,42 @@ type IndexerErrorSummaryPayload {
 }
 
 """
+Eligible download destination and its effective category.
+"""
+type IndexerGrabClientPayload {
+	"""
+	Download client identity.
+	"""
+	id: ID!
+	"""
+	Display name of the download client.
+	"""
+	name: String!
+	"""
+	Effective category; null uses the client's default.
+	"""
+	category: String
+	"""
+	Whether the indexer mapping constrains this destination.
+	"""
+	mapped: Boolean!
+}
+
+"""
+Operator-selected destination for an indexer-search grab.
+"""
+input IndexerGrabSelectionInput {
+	"""
+	Eligible download client identity.
+	"""
+	clientId: ID!
+	"""
+	Omitted uses routing; empty explicitly uses the client's default.
+	"""
+	category: String
+}
+
+"""
 Query and quota counters for one indexer.
 """
 type IndexerQueryStatsPayload {
@@ -8284,6 +8464,11 @@ type InteractiveReleaseSearchIndexerPayload {
 	Failure reason, or null when the indexer did not fail.
 	"""
 	failureReason: String
+	"""
+	True when the indexer asked Scryer to slow down rather than failing.
+	Searching resumes on its own, so this reads as a cooldown, not an error.
+	"""
+	rateLimited: Boolean!
 }
 
 """
@@ -15918,6 +16103,24 @@ type MutationRoot {
 	Queue the release represented by a signed candidate token for an existing title.
 	Returns a job id when accepted or a conflict payload when the submission scope is busy.
 	"""
+	queueIndexerSearchAssignment(
+		"""
+		Signed candidate token and submission options; the token supplies the release identity.
+		"""
+		input: QueueDownloadInput!,
+		"""
+		Operator-selected client and optional category override.
+		"""
+		routing: IndexerGrabSelectionInput!,
+		"""
+		Whether this release replaces existing owned media.
+		"""
+		replacement: Boolean!
+	): QueueDownloadPayload!
+	"""
+	Queue the release represented by a signed candidate token for an existing title.
+	Returns a job id when accepted or a conflict payload when the submission scope is busy.
+	"""
 	queueExistingTitleDownload(
 		"""
 		Signed candidate token and submission options; the token supplies the release identity.
@@ -15963,11 +16166,11 @@ type MutationRoot {
 		input: BeginManualImportSelectionInput!
 	): ManualImportSelectionPayload!
 	"""
-	Retry a previously failed import, optionally with an archive password.
+	Reevaluate a failed or skipped import from an existing completed download.
 	"""
 	retryImport(
 		"""
-		Failed import identity and optional archive password used for the retry.
+		Failed or skipped import identity and optional archive password. Rechecks existing files using current policy; does not retry the download.
 		"""
 		input: RetryImportInput!
 	): ImportResultPayload!
@@ -18136,9 +18339,7 @@ type MutationRoot {
 		input: IssueInteractiveReleaseCandidateTokenInput!
 	): IndexerSearchResultPayload!
 	"""
-	Grab one release of an interactive search with no catalog title behind it: it is submitted
-	to the chosen download client and recorded orphan-scoped, so the completed download waits
-	in Activity for a manual import.
+	Submit an interactive-search release without binding a catalog title.
 	"""
 	queueUnlinkedRelease(
 		"""
@@ -18460,6 +18661,10 @@ type ParsedReleasePayload {
 	Normalized title used for matching.
 	"""
 	normalizedTitle: String!
+	"""
+	Year from the existing release parser.
+	"""
+	year: Int
 	"""
 	Release group, or null when not detected.
 	"""
@@ -20732,6 +20937,32 @@ type QueryRoot {
 		input: SearchReleasesInput!
 	): [IndexerSearchResultPayload!]!
 	"""
+	Read the currently eligible grab destinations for an authorized search result.
+	"""
+	indexerGrabClients(
+		"""
+		Interactive search containing the release.
+		"""
+		searchId: ID!,
+		"""
+		Release download URL from that search.
+		"""
+		downloadUrl: String!,
+		"""
+		Optional catalog title used to resolve assignment routing.
+		"""
+		titleId: ID
+	): [IndexerGrabClientPayload!]!
+	"""
+	Read native client category names. Unsupported clients retain custom entry.
+	"""
+	downloadClientCategories(
+		"""
+		Enabled download client to query.
+		"""
+		clientId: ID!
+	): DownloadClientCategoriesPayload!
+	"""
 	Poll an interactive release-search job; null means no visible snapshot exists.
 	"""
 	interactiveReleaseSearch(
@@ -21342,6 +21573,19 @@ type QueryRoot {
 	Lists users with authorization and authentication-factor status, excluding secret values.
 	"""
 	users: [UserPayload!]!
+	"""
+	Read title counts and indexer activity for the dashboard.
+	"""
+	dashboardSummary: DashboardSummaryPayload!
+	"""
+	List recent completed imports for the dashboard.
+	"""
+	dashboardRecentImports(
+		"""
+		Maximum number of imports to return; defaults to 15 and is limited to 1 through 50.
+		"""
+		limit: Int
+	): [DashboardRecentImportPayload!]!
 	"""
 	Return the path style supported by the running service.
 	"""
@@ -22166,9 +22410,13 @@ input QueueUnlinkedReleaseInput {
 	"""
 	downloadUrl: String!
 	"""
-	Enabled download client the release is handed to.
+	Eligible download client the release is handed to.
 	"""
 	downloadClientId: ID!
+	"""
+	Omitted uses routing; empty explicitly uses the client's default.
+	"""
+	category: String
 }
 
 """
@@ -24283,6 +24531,18 @@ type ServiceSettingsPayload {
 	Filesystem path to the TLS private key.
 	"""
 	tlsKeyPath: String!
+	"""
+	Effective trusted proxy addresses for rate limiting only.
+	"""
+	trustedProxyIps: [String!]!
+	"""
+	Saved override; null uses environment, an empty list trusts nobody.
+	"""
+	trustedProxyOverride: [String!]
+	"""
+	Whether the effective policy comes from settings or environment.
+	"""
+	trustedProxySource: String!
 }
 
 """
@@ -28780,13 +29040,21 @@ TLS certificate and private-key filesystem paths.
 """
 input UpdateServiceSettingsInput {
 	"""
-	Absolute TLS certificate path.
+	Absolute TLS certificate path. Omission preserves the saved path.
 	"""
-	tlsCertPath: String!
+	tlsCertPath: String
 	"""
-	Absolute TLS private-key path.
+	Absolute TLS private-key path. Omission preserves the saved path.
 	"""
-	tlsKeyPath: String!
+	tlsKeyPath: String
+	"""
+	Save a trusted-proxy override. Omission preserves the existing policy.
+	"""
+	trustedProxyIps: [String!]
+	"""
+	Clear the saved override and use environment configuration.
+	"""
+	resetTrustedProxyIps: Boolean
 }
 
 """

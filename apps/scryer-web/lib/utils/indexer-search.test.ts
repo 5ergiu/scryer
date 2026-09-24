@@ -67,6 +67,7 @@ function indexer(
     resultCount: 0,
     elapsedMs: 100,
     failureReason: null,
+    rateLimited: false,
     ...overrides,
   };
 }
@@ -337,6 +338,28 @@ test("health tones read slowness from elapsed time, not from a status", () => {
   );
 });
 
+test("a rate-limited indexer reads as cooling down, not as a failure", () => {
+  const cooling = indexer({
+    name: "indexer-a.example",
+    status: "FAILED",
+    rateLimited: true,
+    failureReason: "indexer is cooling down after a rate limit; retry after 120s",
+  });
+  assert.equal(indexerHealthTone(cooling), "cooling");
+  // With results already in hand the row stays partial: the user has
+  // something to look at, and partial already reads as "not everything".
+  assert.equal(indexerHealthTone({ ...cooling, resultCount: 12 }), "partial");
+  // Without the flag the same status is still a plain failure.
+  assert.equal(indexerHealthTone({ ...cooling, rateLimited: false }), "failed");
+});
+
+test("incomplete searches with results are partial and remain retryable", () => {
+  const entry = indexer({ name: "partial", status: "FAILED", resultCount: 50 });
+  assert.equal(indexerHealthTone(entry), "partial");
+  assert.equal(indexerHealthTone({ ...entry, resultCount: 0 }), "failed");
+  assert.deepEqual(summarizeIndexerHealth([entry]).failedIndexerIds, [entry.indexerId]);
+});
+
 test("the health summary counts what is still outstanding", () => {
   const summary = summarizeIndexerHealth([
     indexer({ name: "a", elapsedMs: 400 }),
@@ -452,7 +475,7 @@ test("stored saved searches survive junk in localStorage", () => {
         { query: "", kind: "MOVIE" },
       ]),
     ),
-    [{ query: "dune", kind: "MOVIE", indexerIds: ["a"], categories: [] }],
+    [{ query: "dune", kind: "RAW", indexerIds: ["a"], categories: [] }],
   );
 });
 
@@ -488,4 +511,30 @@ test("only http(s) releases can be downloaded to the browser", () => {
     ),
     [usenet.title, torrentFile.title],
   );
+});
+
+
+test("every data column sorts in both directions with missing values last", () => {
+  const a = release({ title: "alpha", source: "alpha", sizeBytes: 2, publishedAt: "2026-01-02", seeders: 2 });
+  const b = release({ title: "Beta", source: "Beta", sizeBytes: 10, publishedAt: "2026-01-01", grabs: 10 });
+  const missing = release({ title: "", source: null, sizeBytes: null, publishedAt: "invalid" });
+  for (const column of ["release", "indexer", "size", "age", "peers"] as const) {
+    assert.deepEqual(sortIndexerSearchReleases([missing, b, a], `${column}-asc`, new Map()), [a, b, missing], column);
+    assert.deepEqual(sortIndexerSearchReleases([a, missing, b], `${column}-desc`, new Map()), [b, a, missing], column);
+  }
+});
+
+test("ties use row identity independently of arrival order", () => {
+  const a = release({ title: "same", downloadUrl: "https://example.test/a" });
+  const b = release({ title: "same", downloadUrl: "https://example.test/b" });
+  for (const key of ["release-asc", "release-desc", "size-asc", "size-desc"] as const) {
+    assert.deepEqual(sortIndexerSearchReleases([b, a], key, new Map()), sortIndexerSearchReleases([a, b], key, new Map()));
+  }
+});
+
+test("saved media searches become raw while retaining explicit scope", () => {
+  for (const kind of ["MOVIE", "SERIES", "ANIME", "RAW"]) {
+    assert.deepEqual(parseSavedIndexerSearches(JSON.stringify([{ query: "example", kind, indexerIds: ["one"], categories: ["2000"] }])),
+      [{ query: "example", kind: "RAW", indexerIds: ["one"], categories: ["2000"] }]);
+  }
 });

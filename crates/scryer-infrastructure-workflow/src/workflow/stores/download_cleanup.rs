@@ -74,7 +74,7 @@ async fn resolve_legacy_cleanup_client_tx(tx: &mut SqlTx<'_>, id: &str) -> AppRe
     Ok(())
 }
 
-async fn enqueue_cleanup_tx(tx: &mut SqlTx<'_>, id: &str, state: &str) -> AppResult<()> {
+pub(super) async fn enqueue_cleanup_tx(tx: &mut SqlTx<'_>, id: &str, state: &str) -> AppResult<()> {
     if !matches!(
         state,
         "imported" | "imported_seeding" | "failed" | "ignored"
@@ -157,6 +157,7 @@ impl DownloadSubmissionStore {
              ROW_NUMBER() OVER (PARTITION BY c.client_id ORDER BY c.next_attempt_at, c.download_id) AS client_rank
              FROM download_cleanup c
              WHERE c.status = 'pending' AND c.next_attempt_at <= {{}}
+               AND c.tracked_state IN ('imported', 'imported_seeding', 'failed', 'ignored')
                AND (c.lease_until IS NULL OR c.lease_until <= {{}})) due
              ORDER BY client_rank, next_attempt_at, download_id LIMIT {{}}"
         );
@@ -180,10 +181,17 @@ impl DownloadSubmissionStore {
         SqlRuntime::run_in_transaction(&self.datastore, "claim_download_cleanup", move |tx| {
             let id = id.clone();
             Box::pin(async move {
+                super::import_store::lock_retry_download(tx, &id).await?;
+                if SqlRuntime::fetch_optional(SqlExec::Tx(tx),
+                    "SELECT id FROM download_identity_states WHERE canonical_download_id = {} AND reason = {} LIMIT 1",
+                    &[SqlArg::Text(id.clone()), SqlArg::Text(scryer_application::IMPORT_RETRY_TRACKED_STATE_REASON.into())],
+                ).await?.is_some() {
+                    return Ok(DownloadCleanupClaim::Deferred);
+                }
                 let now = Utc::now();
                 let changed = SqlRuntime::execute(SqlExec::Tx(tx),
                     "UPDATE download_cleanup SET attempts = attempts + 1, lease_until = {}, updated_at = {}
-                     WHERE download_id = {} AND status = 'pending' AND next_attempt_at <= {}
+                     WHERE download_id = {} AND status = 'pending' AND tracked_state IN ('imported', 'imported_seeding', 'failed', 'ignored') AND next_attempt_at <= {}
                        AND (lease_until IS NULL OR lease_until <= {})",
                     &[SqlArg::Timestamp(now + chrono::Duration::minutes(5)), SqlArg::Timestamp(now),
                       SqlArg::Text(id.clone()), SqlArg::Timestamp(now), SqlArg::Timestamp(now)],

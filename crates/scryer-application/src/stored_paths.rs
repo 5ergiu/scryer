@@ -153,6 +153,39 @@ pub fn folder_path_match_candidates(folder_path: &str) -> Vec<String> {
     candidates
 }
 
+/// The fold a repository applies to both sides of a narrowed folder lookup so
+/// that plain equality still accepts every spelling [`folder_paths_match`]
+/// accepts.
+///
+/// On Windows the matcher treats `/` and `\` as one separator and ignores case,
+/// so raw equality against [`folder_path_match_candidates`] misses a stored
+/// `C:\Media\Show` when a scan supplies `c:/media/show` — and a missed owner
+/// lets a second title claim an owned folder. Folding both the stored value and
+/// the candidates through this function restores the equivalence. Off Windows
+/// the matcher is case- and separator-sensitive, so the fold is the identity and
+/// the lookup keeps using the stored spelling exactly.
+///
+/// The repository's SQL twin of this is `lower(replace(folder_path, '/', '\'))`,
+/// which both dialects understand; it is only applied to plain stored paths,
+/// because the escape form is compared by exact equality instead.
+pub fn folder_path_lookup_key(folder_path: &str) -> String {
+    folder_path_lookup_key_for_platform(folder_path, cfg!(windows))
+}
+
+/// [`folder_path_lookup_key`] with the platform rule chosen explicitly, so the
+/// Windows rule can be asserted and applied from any host.
+pub fn folder_path_lookup_key_for_platform(folder_path: &str, windows: bool) -> String {
+    if !windows {
+        return folder_path.to_string();
+    }
+    folder_path.replace('/', "\\").to_lowercase()
+}
+
+/// Whether a stored path is the escape form, which the fold must not touch.
+pub fn is_escaped_stored_path(stored: &str) -> bool {
+    stored.starts_with(STORED_PATH_PREFIX)
+}
+
 /// The escape form is ASCII by construction and re-composing it would change
 /// its meaning, so it is never re-normalized.
 fn unicode_identity_forms(value: &str) -> Vec<String> {
@@ -446,6 +479,73 @@ mod tests {
         let nfd = "/Volumes/Media/TV/Poke\u{301}mon";
         assert!(super::folder_path_match_candidates(nfc).contains(&nfd.to_string()));
         assert!(super::folder_path_match_candidates(nfd).contains(&nfc.to_string()));
+    }
+
+    /// The narrowed folder-ownership lookup has to reach every row
+    /// `folder_paths_match` would accept. On Windows the matcher lowercases and
+    /// treats `/` and `\` as one separator, so a title stored as `C:\Media\Show`
+    /// has to be found when a scan or a move supplies `c:/media/show`; missing
+    /// it reports no owner and lets another title claim an owned folder.
+    ///
+    /// The Windows rule is asserted through the platform-parameterized
+    /// functions, so this runs on every host.
+    #[test]
+    fn windows_folder_lookup_keys_span_case_and_separator_spellings() {
+        let stored = r"C:\Media\Show";
+        let scanned = "c:/media/show";
+
+        // What the matcher already accepts.
+        assert_eq!(
+            super::folder_path_identity_key_for_platform(stored, true),
+            super::folder_path_identity_key_for_platform(scanned, true),
+        );
+
+        // What the narrowing has to preserve, from either spelling.
+        for (query, other) in [(scanned, stored), (stored, scanned)] {
+            let keys = super::folder_path_match_candidates(query)
+                .iter()
+                .map(|candidate| super::folder_path_lookup_key_for_platform(candidate, true))
+                .collect::<Vec<_>>();
+            assert!(
+                keys.contains(&super::folder_path_lookup_key_for_platform(other, true)),
+                "lookup keys for {query} ({keys:?}) do not reach {other}"
+            );
+        }
+    }
+
+    /// The fold widens the lookup only where the matcher is already lenient.
+    #[test]
+    fn posix_folder_lookup_keys_keep_case_and_separators() {
+        assert_eq!(
+            super::folder_path_lookup_key_for_platform(r"C:\Media\Show", false),
+            r"C:\Media\Show"
+        );
+        assert_ne!(
+            super::folder_path_lookup_key_for_platform("/library/Show", false),
+            super::folder_path_lookup_key_for_platform("/library/show", false),
+        );
+        assert_ne!(
+            super::folder_path_lookup_key_for_platform(r"/library/Show\Name", false),
+            super::folder_path_lookup_key_for_platform("/library/Show/Name", false),
+        );
+    }
+
+    /// Folding still has to separate folders the matcher separates, or the
+    /// narrowed read hands the caller an unrelated library's folder.
+    #[test]
+    fn windows_folder_lookup_keys_exclude_other_folders() {
+        let keys = super::folder_path_match_candidates(r"C:\Media\Show")
+            .iter()
+            .map(|candidate| super::folder_path_lookup_key_for_platform(candidate, true))
+            .collect::<Vec<_>>();
+        assert!(!keys.contains(&super::folder_path_lookup_key_for_platform(
+            r"C:\Media\Show 2",
+            true
+        )));
+        assert!(!keys.contains(&super::folder_path_lookup_key_for_platform(
+            r"C:\Media",
+            true
+        )));
     }
 
     #[test]

@@ -9,6 +9,7 @@ import {
   formatTerabytes,
   groupStorageRootsByLibrary,
   isBreakingVersionChange,
+  isProviderCoolingDown,
   isProviderErroring,
   summarizeIndexerHealth,
   usagePercent,
@@ -143,6 +144,34 @@ test("indexer health counts exclude disabled indexers from both sides", () => {
   ]);
 
   assert.deepEqual(summary, { healthy: 2, enabled: 3, erroring: 1 });
+});
+
+test("a cooling indexer is quiet, not erroring", () => {
+  const soon = new Date(Date.now() + 5 * 60_000).toISOString();
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const summary = summarizeIndexerHealth([
+    { isEnabled: true, lastHealthStatus: "healthy", lastErrorMessage: null },
+    // Stale error text from before the cooldown must not tip it into erroring.
+    {
+      isEnabled: true,
+      lastHealthStatus: "unhealthy",
+      lastErrorMessage: "rate limited",
+      rateLimitedUntil: soon,
+    },
+    // An elapsed cooldown counts again, the same as any other indexer.
+    {
+      isEnabled: true,
+      lastHealthStatus: "unhealthy",
+      lastErrorMessage: "auth failed",
+      rateLimitedUntil: past,
+    },
+  ]);
+
+  // Cooling still counts as enabled and healthy: it is quiet on request.
+  assert.deepEqual(summary, { healthy: 2, enabled: 3, erroring: 1 });
+  assert.equal(isProviderCoolingDown(soon), true);
+  assert.equal(isProviderCoolingDown(past), false);
+  assert.equal(isProviderCoolingDown(null), false);
 });
 
 test("per-client counts split active from queued and drop terminal rows", () => {

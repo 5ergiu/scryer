@@ -4110,3 +4110,42 @@ fn single_token_bracketed_group_with_many_trailing_brackets_is_unchanged() {
         "LANTERN VERGE FINAL CHORUS"
     );
 }
+
+/// A four-digit year alone in parentheses right after the title is a name
+/// qualifier — `Shin Chan (1992) - S06E28 - 241 - Episode 241` premiered in
+/// 1992 and holds episode 241. Reading that year as an anime absolute episode
+/// number discards the file's real coordinates; with a catalog whose episode
+/// titles are literally `Episode <absolute>`, the bogus reading even collected
+/// an episode-title match and outscored the honest one.
+#[test]
+fn a_parenthesized_series_year_is_never_an_absolute_episode_number() {
+    let mut target = context(ContextFacetHint::Anime, "Shin Chan");
+    for absolute in 1..=300u32 {
+        target.episodes.push(ContextEpisode {
+            season: Some(absolute.div_ceil(50)),
+            episode: Some((absolute - 1) % 50 + 1),
+            absolute_number: Some(absolute),
+            title: Some(format!("Episode {absolute}")),
+            ..Default::default()
+        });
+    }
+
+    let analysis = analyze_release_for_target(
+        "Shin Chan (1992) - S06E28 - 241 - Episode 241 [WEBDL-1080p]",
+        &target,
+    );
+    let candidate = analysis.best_candidate().expect("candidate");
+    let episode = candidate.projected.episode.as_ref().expect("episode");
+
+    assert_eq!(candidate.projected.year, Some(1992));
+    assert_ne!(
+        episode.absolute_episode,
+        Some(1992),
+        "the premiere year was read as an absolute episode number"
+    );
+    assert!(
+        episode.absolute_episode == Some(241)
+            || (episode.season == Some(6) && episode.episode_numbers == vec![28]),
+        "the file lost its coordinates: {episode:?}"
+    );
+}

@@ -1906,6 +1906,8 @@ export function MediaContentView({
     catalogManagedBytes: number;
     catalogHasMoreTitles: boolean;
     catalogLoadingMoreTitles: boolean;
+    catalogPageError: string | null;
+    retryCatalogPage: () => Promise<void>;
     loadMoreCatalogTitles: () => Promise<void> | void;
     titleCatalogSortKey: TitleTableSortKey;
     titleCatalogSortDirection: TitleTableSortDirection;
@@ -2185,6 +2187,8 @@ export function MediaContentView({
     catalogManagedBytes,
     catalogHasMoreTitles,
     catalogLoadingMoreTitles,
+    catalogPageError,
+    retryCatalogPage,
     loadMoreCatalogTitles,
     titleCatalogSortKey,
     titleCatalogSortDirection,
@@ -3566,7 +3570,7 @@ export function MediaContentView({
       ) : effectiveContentSettingsSection === "general" ? (
         <GeneralSettingsPanel
           activeQualityScopeId={activeQualityScopeId}
-          mediaSettingsLoading={mediaSettingsLoading}
+          mediaSettingsLoading={mediaSettingsLoading || mediaSettingsSaving}
           categoryFillerPolicies={categoryFillerPolicies}
           handleFillerPolicyChange={handleFillerPolicyChange}
           categoryRecapPolicies={categoryRecapPolicies}
@@ -4212,6 +4216,15 @@ export function MediaContentView({
                       >
                         {titleCollectionView}
                       </div>
+                      {catalogPageError ? (
+                        <div role="alert" className="sticky bottom-0 z-10 py-3">
+                          <TitleCollectionErrorState
+                            t={t}
+                            error={catalogPageError}
+                            onRetry={retryCatalogPage}
+                          />
+                        </div>
+                      ) : null}
                     </div>
                     {titleOverviewPane}
                   </div>

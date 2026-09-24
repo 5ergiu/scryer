@@ -473,5 +473,6 @@ include!("metadata.rs");
 include!("wanted.rs");
 include!("manual.rs");
 include!("results.rs");
+include!("retry.rs");
 include!("burned_source.rs");
 include!("tests.rs");

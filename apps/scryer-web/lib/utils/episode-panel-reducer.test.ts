@@ -20,6 +20,7 @@ function progress(
     resultCount: 1,
     elapsedMs: null,
     failureReason: null,
+    rateLimited: false,
   };
 }
 

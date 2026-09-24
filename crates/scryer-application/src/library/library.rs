@@ -104,13 +104,14 @@ enum LibraryScanTitleWalkMode {
     Full,
     Additive,
     OneOff,
+    FolderReconciliation,
 }
 
 impl LibraryScanTitleWalkMode {
     fn as_file_finalize_mode(self) -> LibraryScanMode {
         match self {
             Self::Additive => LibraryScanMode::Additive,
-            Self::Full | Self::OneOff => LibraryScanMode::Full,
+            Self::Full | Self::OneOff | Self::FolderReconciliation => LibraryScanMode::Full,
         }
     }
 

@@ -1804,26 +1804,6 @@ file = "postgres/migrations/0211_durable_download_cleanup.sql"
 engine = "postgres"
 scope = "all"
 
-[[baseline]]
-through_version = 140
-file = "baselines/0140_baseline.sql"
-engine = "sqlite"
-
-[[baseline]]
-through_version = 140
-file = "postgres/baselines/0140_baseline.sql"
-engine = "postgres"
-
-[[baseline]]
-through_version = 198
-file = "baselines/0198_baseline.sql"
-engine = "sqlite"
-
-[[baseline]]
-through_version = 198
-file = "postgres/baselines/0198_baseline.sql"
-engine = "postgres"
-
 [[migration]]
 version = 212
 description = "maintenance rule sets and immutable matcher revisions"
@@ -2479,3 +2459,115 @@ kind = "sql"
 file = "postgres/migrations/0249_titles_library_folder_path_index.sql"
 engine = "postgres"
 scope = "all"
+
+[[migration]]
+version = 250
+description = "persist the multilingual title spelling projection"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0250_title_search_spelling_columns.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0250_title_search_spelling_columns.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 251
+description = "index dashboard import evidence"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0251_dashboard_import_artifact_index.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0251_dashboard_import_artifact_index.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 252
+description = "title fuzzy index queue and spellfix retirement"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0252_title_fuzzy_index_queue.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0252_title_fuzzy_index_queue.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 253
+description = "finish downloads whose client config is gone"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0253_terminalise_client_less_downloads.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0253_terminalise_client_less_downloads.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 254
+description = "index the folded title folder-ownership lookup"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0254_titles_folder_path_lookup_index.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0254_titles_folder_path_lookup_index.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 255
+description = "wanted item collection scope excludes episode rows"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0255_wanted_items_collection_scope_excludes_episodes.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0255_wanted_items_collection_scope_excludes_episodes.sql"
+engine = "postgres"
+scope = "all"
+
+[[baseline]]
+through_version = 254
+file = "baselines/0254_baseline.sql"
+engine = "sqlite"
+
+[[baseline]]
+through_version = 254
+file = "postgres/baselines/0254_baseline.sql"
+engine = "postgres"

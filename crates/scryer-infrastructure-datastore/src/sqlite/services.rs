@@ -94,8 +94,6 @@ impl SqliteServices {
         data_dir: Option<PathBuf>,
         migration_progress: MigrationProgress,
     ) -> Result<Self, AppError> {
-        crate::spellfix::register_spellfix_auto_extension()?;
-
         let db_url = crate::sqlite_url_with_create(path.as_ref());
         let is_memory = db_url.contains(":memory:");
 
@@ -189,7 +187,7 @@ impl SqliteServices {
         .await
         .map_err(|err| AppError::Repository(err.to_string()))?;
         if matches!(migration_mode, MigrationMode::Apply) {
-            crate::queries::title_search::seed_title_search_projection_if_empty(&pool).await?;
+            crate::queries::title_search::seed_title_search_projection_if_stale(&pool).await?;
         }
 
         Ok(Self {

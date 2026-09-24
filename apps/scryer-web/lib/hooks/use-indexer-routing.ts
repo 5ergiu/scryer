@@ -1,4 +1,5 @@
 import * as React from "react";
+import { SettingsSaveGuard } from "@/lib/utils/settings-save-guard";
 
 import { updateIndexerRoutingMutation } from "@/lib/graphql/mutations";
 import { indexerRoutingInitQuery } from "@/lib/graphql/queries";
@@ -64,6 +65,11 @@ export function useIndexerRouting({
   const t = useTranslate();
   const client = useClient();
   const [indexers, setIndexers] = React.useState<IndexerRecord[]>([]);
+  const [saveGuards] = React.useState(() => ({
+    MOVIE: new SettingsSaveGuard(),
+    SERIES: new SettingsSaveGuard(),
+    ANIME: new SettingsSaveGuard(),
+  }));
   const [indexerRoutingByScope, setIndexerRoutingByScope] =
     React.useState<IndexerRoutingSettingsByScope>({
       MOVIE: {},
@@ -257,10 +263,19 @@ export function useIndexerRouting({
         });
         setGlobalStatus(t("settings.qualitySettingsSaved"));
       } catch (error) {
+        setIndexerRoutingByScope((previous) => ({
+          ...previous,
+          [scopeId]: indexerRoutingByScope[scopeId],
+        }));
+        setIndexerRoutingOrderByScope((previous) => ({
+          ...previous,
+          [scopeId]: indexerRoutingOrderByScope[scopeId],
+        }));
         setGlobalStatus(
           error instanceof Error ? error.message : t("status.failedToUpdate"),
         );
       } finally {
+        saveGuards[scopeId].end();
         setIndexerRoutingSaving((previous) => ({
           ...previous,
           [scopeId]: false,
@@ -269,6 +284,9 @@ export function useIndexerRouting({
     },
     [
       buildIndexerRoutingPayload,
+      saveGuards,
+      indexerRoutingByScope,
+      indexerRoutingOrderByScope,
       client,
       indexers,
       setGlobalStatus,
@@ -277,13 +295,18 @@ export function useIndexerRouting({
   );
 
   const refreshIndexerRouting = React.useCallback(async (background = false) => {
+    const guard = saveGuards[activeQualityScopeId];
+    const version = guard.readVersion();
+    if (version === null) return;
     if (!background) setIndexerRoutingLoading(true);
     try {
       const { data, error } = await client
         .query(indexerRoutingInitQuery, { scopeId: activeQualityScopeId }, { requestPolicy: "network-only" })
         .toPromise();
       if (error) throw error;
-      hydrateIndexerRouting(data.indexers || [], data.indexerRouting || []);
+      if (guard.accepts(version)) {
+        hydrateIndexerRouting(data.indexers || [], data.indexerRouting || []);
+      }
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : t("status.failedToLoad"),
@@ -291,7 +314,7 @@ export function useIndexerRouting({
     } finally {
       if (!background) setIndexerRoutingLoading(false);
     }
-  }, [activeQualityScopeId, client, hydrateIndexerRouting, setGlobalStatus, t]);
+  }, [activeQualityScopeId, client, hydrateIndexerRouting, saveGuards, setGlobalStatus, t]);
 
   const updateIndexerRoutingForScope = React.useCallback(
     async (
@@ -300,6 +323,7 @@ export function useIndexerRouting({
     ) => {
       const scopeId = activeQualityScopeId;
       const scopeDefaults = getDefaultIndexerRouting(scopeId);
+      if (!saveGuards[scopeId].begin()) return;
       const currentScopeRouting = indexerRoutingByScope[scopeId] ?? {};
       const current = currentScopeRouting[indexerId] ?? scopeDefaults;
       const nextScopeRouting = {
@@ -344,6 +368,7 @@ export function useIndexerRouting({
       indexerRoutingByScope,
       indexerRoutingOrderByScope,
       saveIndexerRoutingForScope,
+      saveGuards,
     ],
   );
 
@@ -374,6 +399,7 @@ export function useIndexerRouting({
         nextOrder[nextIndex],
         nextOrder[index],
       ];
+      if (!saveGuards[scopeId].begin()) return;
 
       setIndexerRoutingOrderByScope((previous) => {
         const previousOrder = previous[scopeId] ?? [];
@@ -394,6 +420,7 @@ export function useIndexerRouting({
       indexerRoutingByScope,
       indexerRoutingOrderByScope,
       saveIndexerRoutingForScope,
+      saveGuards,
     ],
   );
 

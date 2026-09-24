@@ -1,6 +1,6 @@
 
 import * as React from "react";
-import { ArrowLeft, ArrowRight, Edit, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowLeft, ArrowRight, GripVertical, Edit, Plus, Trash2 } from "lucide-react";
 import { AddNewButton } from "@/components/common/add-new-button";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -156,6 +156,7 @@ type SettingsQualityProfilesSectionProps = {
   ) => void;
   addQualityTier: (value: string) => void;
   removeQualityTier: (value: string) => void;
+  reorderQualityTier: (value: string, targetIndex: number) => void;
   qualityProfileInheritValue: string;
   toProfileOptions: (profiles: ParsedQualityProfile[]) => Array<{ value: string; label: string }>;
   globalQualityProfileId: string;
@@ -457,6 +458,7 @@ export function SettingsQualityProfilesSection({
   moveProfileListToDenied,
   addQualityTier,
   removeQualityTier,
+  reorderQualityTier,
   qualityProfileInheritValue,
   toProfileOptions,
   globalQualityProfileId,
@@ -722,9 +724,7 @@ export function SettingsQualityProfilesSection({
                           const criteria = getQualityProfileCriteria(profile.id) as
                             | QualityProfileCriteriaPayload
                             | undefined;
-                          const tiers = dedupeOrdered(parseStringArrayValue(criteria?.quality_tiers)).sort(
-                            sortStringByNumericDesc,
-                          );
+                          const tiers = dedupeOrdered(parseStringArrayValue(criteria?.quality_tiers));
                           if (tiers.length === 0) {
                             return <span className={`text-xs ${QUALITY_MUTED_TEXT_CLASS}`}>—</span>;
                           }
@@ -856,17 +856,52 @@ export function SettingsQualityProfilesSection({
                 <div className={`${QUALITY_EDITOR_SECTION_BODY_CLASS} space-y-4`}>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
               <div>
-                <Label className="mb-2 block text-[var(--scry-ink2)]">{t("qualityProfile.allowedQualityTiers")}</Label>
-                <div className={QUALITY_EDITOR_LIST_CLASS}>
+                <Label className="mb-2 block text-[var(--scry-ink2)]">{t("qualityProfile.qualityPreference")}</Label>
+                <p className={`mb-2 text-xs ${QUALITY_MUTED_TEXT_CLASS}`}>{t("qualityProfile.qualityPreferenceHelp")}</p>
+                <div className={QUALITY_EDITOR_LIST_CLASS} data-quality-tier-list>
                   {activeQualityProfileTierOptions.length === 0 ? (
                     <p className={`text-xs ${QUALITY_MUTED_TEXT_CLASS}`}>{t("qualityProfile.noQualityTiersSelected")}</p>
                   ) : (
-                    activeQualityProfileTierOptions.map((qualityTier) => (
+                    activeQualityProfileTierOptions.map((qualityTier, index) => (
                       <div
                         key={qualityTier}
                         className={QUALITY_EDITOR_LIST_ITEM_CLASS}
+                        data-quality-tier={qualityTier}
                       >
-                        <span className="text-xs">{getQualityTierLabel(qualityTier)}</span>
+                        <span
+                          className="cursor-grab touch-none active:cursor-grabbing"
+                          title={t("qualityProfile.dragQualityTier", { value: getQualityTierLabel(qualityTier) })}
+                          onPointerDown={(event) => {
+                            if (event.button !== 0) return;
+                            event.preventDefault();
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                          }}
+                          onPointerUp={(event) => {
+                            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                            event.currentTarget.releasePointerCapture(event.pointerId);
+                            const target = document.elementFromPoint(event.clientX, event.clientY)
+                              ?.closest<HTMLElement>("[data-quality-tier]");
+                            if (!target || target.closest("[data-quality-tier-list]") !==
+                              event.currentTarget.closest("[data-quality-tier-list]")) return;
+                            const targetIndex = activeQualityProfileTierOptions.indexOf(target.dataset.qualityTier ?? "");
+                            if (targetIndex >= 0) reorderQualityTier(qualityTier, targetIndex);
+                          }}
+                        >
+                          <GripVertical className="h-4 w-4" aria-hidden="true" />
+                        </span>
+                        <span className="flex-1 text-xs">{getQualityTierLabel(qualityTier)}</span>
+                        <Button type="button" variant="secondary" size="sm"
+                          disabled={index === 0}
+                          aria-label={t("qualityProfile.moveQualityTierUp", { value: getQualityTierLabel(qualityTier) })}
+                          onClick={() => reorderQualityTier(qualityTier, index - 1)}>
+                          <ArrowUp className="h-4 w-4" aria-hidden="true" />
+                        </Button>
+                        <Button type="button" variant="secondary" size="sm"
+                          disabled={index === activeQualityProfileTierOptions.length - 1}
+                          aria-label={t("qualityProfile.moveQualityTierDown", { value: getQualityTierLabel(qualityTier) })}
+                          onClick={() => reorderQualityTier(qualityTier, index + 1)}>
+                          <ArrowDown className="h-4 w-4" aria-hidden="true" />
+                        </Button>
                         <Button
                           id={selectorId(
                             "settings-quality-profile-tier-remove",

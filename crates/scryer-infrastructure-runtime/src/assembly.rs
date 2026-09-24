@@ -811,7 +811,18 @@ impl DatastoreAssembly {
         )
         .await?;
         let datastore = db.datastore();
-        let title_store = Arc::new(TitleStore::new(datastore.clone()));
+        // Matching must not start until the complete title index is ready.
+        let fuzzy_index = scryer_infrastructure_library_search::fuzzy::TitleFuzzyIndex::open(
+            &config.data_dir,
+            Arc::new(
+                scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+                    datastore.clone(),
+                ),
+            ),
+        )
+        .await?;
+        let title_store =
+            Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let show_store = Arc::new(ShowStore::new(datastore.clone()));
         let library_store = Arc::new(LibraryStore::new(datastore.clone()));
         let media_request_store = Arc::new(MediaRequestStore::new(datastore.clone()));
@@ -854,7 +865,8 @@ impl DatastoreAssembly {
             Arc::new(LibraryScanUnmatchedStore::new(datastore.clone()));
         let location_operation_store = Arc::new(LocationOperationStore::new(datastore.clone()));
         let media_file_store = Arc::new(MediaFileStore::new(datastore.clone()));
-        let wanted_store = Arc::new(WantedStore::new(datastore.clone()));
+        let wanted_store =
+            Arc::new(WantedStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let pending_release_store = Arc::new(PendingReleaseStore::new(
             datastore.clone(),
             db.encryption_key_state(),
@@ -951,7 +963,18 @@ impl DatastoreAssembly {
         )
         .await?;
         let datastore = db.datastore();
-        let title_store = Arc::new(TitleStore::new(datastore.clone()));
+        // Matching must not start until the complete title index is ready.
+        let fuzzy_index = scryer_infrastructure_library_search::fuzzy::TitleFuzzyIndex::open(
+            &config.data_dir,
+            Arc::new(
+                scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
+                    datastore.clone(),
+                ),
+            ),
+        )
+        .await?;
+        let title_store =
+            Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let show_store = Arc::new(ShowStore::new(datastore.clone()));
         let library_store = Arc::new(LibraryStore::new(datastore.clone()));
         let media_request_store = Arc::new(MediaRequestStore::new(datastore.clone()));
@@ -994,7 +1017,8 @@ impl DatastoreAssembly {
             Arc::new(LibraryScanUnmatchedStore::new(datastore.clone()));
         let location_operation_store = Arc::new(LocationOperationStore::new(datastore.clone()));
         let media_file_store = Arc::new(MediaFileStore::new(datastore.clone()));
-        let wanted_store = Arc::new(WantedStore::new(datastore.clone()));
+        let wanted_store =
+            Arc::new(WantedStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
         let pending_release_store = Arc::new(PendingReleaseStore::new(
             datastore.clone(),
             db.encryption_key_state(),

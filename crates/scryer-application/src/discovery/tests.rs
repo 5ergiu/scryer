@@ -229,6 +229,54 @@ fn discovery_context_fingerprint_is_stable_across_title_and_external_id_order() 
 }
 
 #[test]
+fn discovery_projected_context_preserves_identity_provenance_and_medium_mix() {
+    let mut animation = test_title(
+        "animation",
+        "Animated",
+        MediaFacet::Movie,
+        vec![("tmdb_movie", "10")],
+    );
+    animation.canonical_tags = vec![provider_genre_tag(" Animation ")];
+    let mut duplicate = animation.clone();
+    duplicate.id = "duplicate".into();
+    duplicate.library_id = "other-library".into();
+    let mut anime = test_title(
+        "anime",
+        "Anime",
+        MediaFacet::Series,
+        vec![("thetvdb", "tvdb:123")],
+    );
+    anime.canonical_tags = vec![provider_genre_tag("Animation"), provider_genre_tag("ANIME")];
+    let titles = vec![
+        animation,
+        duplicate,
+        anime,
+        test_title("unresolved", "Unresolved", MediaFacet::Anime, vec![]),
+        test_title("live", "Live", MediaFacet::Series, vec![("tmdb_tv", "456")]),
+    ];
+    let defaults = DiscoveryContextDefaults::default();
+    let original = build_discovery_library_context(&titles, defaults.clone());
+    let projected = build_projected_discovery_library_context(
+        &titles
+            .iter()
+            .rev()
+            .map(crate::DiscoveryContextTitle::from)
+            .collect::<Vec<_>>(),
+        defaults.clone(),
+    );
+    assert_eq!(projected.fingerprint, original.fingerprint);
+    assert_eq!(projected.medium_mix, original.medium_mix);
+    assert_eq!(
+        serde_json::to_value(projected.snapshot_submit_input(&defaults)).unwrap(),
+        serde_json::to_value(original.snapshot_submit_input(&defaults)).unwrap()
+    );
+    assert_eq!(
+        projected.submitted_subject_records("run").unwrap(),
+        original.submitted_subject_records("run").unwrap()
+    );
+}
+
+#[test]
 fn discovery_context_only_builds_subjects_with_smg_supported_ids() {
     let mut imdb_only = test_title(
         "imdb-only",

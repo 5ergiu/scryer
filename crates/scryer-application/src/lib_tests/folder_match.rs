@@ -10,6 +10,98 @@ use crate::location::folder_match::{
     FolderMatchOutcome, FolderMatchOwnership, FolderMatchResolution,
 };
 
+#[derive(Default)]
+struct FolderMatchAnalyzer {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl MediaAnalyzer for FolderMatchAnalyzer {
+    async fn analyze_file(&self, _path: std::path::PathBuf) -> AppResult<MediaAnalysisOutcome> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(MediaAnalysisOutcome::Valid(Box::new(MediaFileAnalysis {
+            video_width: Some(1920),
+            video_height: Some(1080),
+            duration_seconds: Some(60),
+            container_format: Some("Matroska".into()),
+            ..Default::default()
+        })))
+    }
+}
+
+#[derive(Default)]
+struct FolderMatchMetadataGateway {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl MetadataGateway for FolderMatchMetadataGateway {
+    async fn search_tvdb(
+        &self,
+        query: &str,
+        type_hint: &str,
+        year: Option<i32>,
+    ) -> AppResult<Vec<MetadataSearchItem>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway
+            .search_tvdb(query, type_hint, year)
+            .await
+    }
+    async fn search_tvdb_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        language: &str,
+    ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway
+            .search_tvdb_batch(queries, language)
+            .await
+    }
+    async fn search_tvdb_rich(
+        &self,
+        query: &str,
+        type_hint: &str,
+        limit: i32,
+        language: &str,
+        year: Option<i32>,
+    ) -> AppResult<Vec<RichMetadataSearchItem>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway
+            .search_tvdb_rich(query, type_hint, limit, language, year)
+            .await
+    }
+    async fn search_tvdb_multi(
+        &self,
+        query: &str,
+        limit: i32,
+        language: &str,
+    ) -> AppResult<MultiMetadataSearchResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway
+            .search_tvdb_multi(query, limit, language)
+            .await
+    }
+    async fn get_movie(&self, id: i64, language: &str) -> AppResult<MovieMetadata> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway.get_movie(id, language).await
+    }
+    async fn get_series(&self, id: i64, language: &str) -> AppResult<SeriesMetadata> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway.get_series(id, language).await
+    }
+    async fn get_metadata_bulk(
+        &self,
+        movies: &[i64],
+        series: &[i64],
+        language: &str,
+    ) -> AppResult<BulkMetadataResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        EmptySearchMetadataGateway
+            .get_metadata_bulk(movies, series, language)
+            .await
+    }
+}
+
 /// A scanner that answers per directory, so a title-scoped rescan sees the files
 /// under the folder the title now owns and nothing else. The shared
 /// `MutableLibraryScanner` returns one fixed list for every root, which cannot
@@ -17,6 +109,7 @@ use crate::location::folder_match::{
 #[derive(Default, Clone)]
 struct FolderScopedLibraryScanner {
     files: Arc<Mutex<Vec<LibraryFile>>>,
+    roots: Arc<Mutex<Vec<String>>>,
     /// `(folder, remaining_failures)`: make scans of one folder fail a bounded
     /// number of times. Bounded because the compensating transaction rescans the
     /// folders the titles are restored to, and a permanently broken scanner would
@@ -61,6 +154,7 @@ impl FolderScopedLibraryScanner {
     }
 
     async fn files_under(&self, root: &str) -> AppResult<Vec<LibraryFile>> {
+        self.roots.lock().await.push(root.to_string());
         self.fail_if_armed(root).await?;
         let root = Path::new(root).to_path_buf();
         Ok(self
@@ -115,6 +209,8 @@ struct FolderMatchFixture {
     titles: Arc<MockTitleRepo>,
     media_files: Arc<MockMediaFileRepo>,
     scanner: Arc<FolderScopedLibraryScanner>,
+    analyzer: Arc<FolderMatchAnalyzer>,
+    metadata: Arc<FolderMatchMetadataGateway>,
     root: tempfile::TempDir,
 }
 
@@ -135,6 +231,7 @@ impl FolderMatchFixture {
         let settings = Arc::new(StoredSettingsRepo::default());
         let path_key = match facet {
             MediaFacet::Series => "series.path",
+            MediaFacet::Anime => "anime.path",
             _ => "movies.path",
         };
         settings
@@ -145,24 +242,28 @@ impl FolderMatchFixture {
             )
             .await;
         let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+        let metadata = Arc::new(FolderMatchMetadataGateway::default());
         let (app, user, titles) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
             settings,
             Arc::new(MutableLibraryScanner::default()),
             unmatched_items.clone(),
-            Arc::new(EmptySearchMetadataGateway),
+            metadata.clone(),
         );
         app.reconcile_default_library_roots()
             .await
             .expect("reconcile library root");
         let scanner = Arc::new(FolderScopedLibraryScanner::default());
         let media_files = Arc::new(MockMediaFileRepo::default());
+        let analyzer = Arc::new(FolderMatchAnalyzer::default());
         let app = app.with_test_overrides({
             let scanner = scanner.clone();
             let media_files = media_files.clone();
+            let analyzer = analyzer.clone();
             move |services| {
                 services
                     .with_library_scanner(scanner)
                     .with_media_files(media_files)
+                    .with_media_analyzer(analyzer)
             }
         });
         Self {
@@ -173,6 +274,8 @@ impl FolderMatchFixture {
             titles,
             media_files,
             scanner,
+            analyzer,
+            metadata,
             root,
         }
     }
@@ -1341,4 +1444,289 @@ async fn a_takeover_that_fails_while_rescanning_restores_both_titles_and_queues_
             != crate::library_scan_unmatched::LIBRARY_SCAN_FOLDER_OWNERSHIP_CHANGED_BY_USER),
         "a failed takeover should queue no repair item, got {unmatched:?}"
     );
+}
+
+#[tokio::test]
+async fn folder_reconciliation_defers_analysis_and_metadata_until_refresh() {
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        let fixture = FolderMatchFixture::for_facet(facet.clone()).await;
+        let old = fixture.folder("Old");
+        let selected = fixture.folder("Selected");
+        let file = fixture.write_media(&selected, "Selected.S01E01.1080p.mkv");
+        fixture.scanner.set_files(&[&file]).await;
+        let title = fixture.create_title_with_folder("Selected", &old).await;
+        if facet != MediaFacet::Movie {
+            fixture.seed_season_with_episodes(&title.id, &[1]).await;
+        }
+        {
+            let mut titles = fixture.titles.store.lock().await;
+            let stored = titles.iter_mut().find(|row| row.id == title.id).unwrap();
+            stored.external_ids = vec![ExternalId::new("tvdb", "12345")];
+            stored.metadata_fetched_at = None;
+        }
+        let before = snapshot_tree(fixture.root.path());
+        fixture
+            .app
+            .apply_title_folder_change(
+                &fixture.user,
+                &title.id,
+                selected.to_str().unwrap(),
+                FolderMatchResolution::Assign,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.metadata.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *fixture.scanner.roots.lock().await,
+            vec![selected.to_str().unwrap()]
+        );
+        let files = fixture
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].video_width, None);
+        assert_eq!(snapshot_tree(fixture.root.path()), before);
+        // The due external ID above proves folder reconciliation never hydrates.
+        // Remove it for the media-enrichment check: this fixture's gateway has
+        // no remote metadata, while the local episode catalogue is complete.
+        fixture
+            .titles
+            .store
+            .lock()
+            .await
+            .iter_mut()
+            .find(|stored| stored.id == title.id)
+            .unwrap()
+            .external_ids
+            .clear();
+        fixture
+            .app
+            .scan_title_library(&fixture.user, &title.id)
+            .await
+            .unwrap();
+        assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 1);
+        let files = fixture
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .unwrap();
+        assert_eq!(files[0].video_width, Some(1920));
+    }
+}
+
+#[tokio::test]
+async fn folder_reconciliation_preserves_cached_analysis_on_swap_and_takeover() {
+    for resolution in [FolderMatchResolution::Swap, FolderMatchResolution::TakeOver] {
+        let fixture = FolderMatchFixture::new().await;
+        let first_folder = fixture.folder("First");
+        let second_folder = fixture.folder("Second");
+        let first_file = fixture.write_media(&first_folder, "First.2024.mkv");
+        let second_file = fixture.write_media(&second_folder, "Second.2024.mkv");
+        fixture
+            .scanner
+            .set_files(&[&first_file, &second_file])
+            .await;
+        let first = fixture
+            .create_title_with_folder("First", &first_folder)
+            .await;
+        let second = fixture
+            .create_title_with_folder("Second", &second_folder)
+            .await;
+        fixture
+            .app
+            .scan_title_library(&fixture.user, &first.id)
+            .await
+            .unwrap();
+        fixture
+            .app
+            .scan_title_library(&fixture.user, &second.id)
+            .await
+            .unwrap();
+        fixture.analyzer.calls.store(0, Ordering::SeqCst);
+        let before = snapshot_tree(fixture.root.path());
+        fixture
+            .app
+            .apply_title_folder_change(
+                &fixture.user,
+                &first.id,
+                second_folder.to_str().unwrap(),
+                resolution,
+            )
+            .await
+            .unwrap();
+        let files = fixture
+            .media_files
+            .list_media_files_for_title(&first.id)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].video_width, Some(1920));
+        assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot_tree(fixture.root.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn folder_reconciliation_leaves_unknown_episodes_unmatched() {
+    let fixture = FolderMatchFixture::new_series().await;
+    let old = fixture.folder("Old");
+    let selected = fixture.folder("Unknown");
+    let file = fixture.write_media(&selected, "Unknown.S01E01.mkv");
+    fixture.scanner.set_files(&[&file]).await;
+    let title = fixture.create_title_with_folder("Unknown", &old).await;
+    let result = fixture
+        .app
+        .apply_title_folder_change(
+            &fixture.user,
+            &title.id,
+            selected.to_str().unwrap(),
+            FolderMatchResolution::Assign,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.scan.unwrap().unmatched, 1);
+    assert!(fixture.media_paths(&title.id).await.is_empty());
+    assert!(!fixture.unmatched_items.items().await.is_empty());
+    assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.metadata.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn folder_reconciliation_work_is_scoped_to_the_selected_folder() {
+    for (file_count, unrelated_count) in [(24, 0), (24, 10_000), (1000, 10_000)] {
+        let fixture = FolderMatchFixture::new_series().await;
+        let old = fixture.folder("Old");
+        let selected = fixture.folder("Selected");
+        let title = fixture.create_title_with_folder("Selected", &old).await;
+        let episodes = (1..=file_count).collect::<Vec<u32>>();
+        fixture
+            .seed_season_with_episodes(&title.id, &episodes)
+            .await;
+        let files = episodes
+            .iter()
+            .map(|episode| {
+                fixture.write_media(&selected, &format!("Selected.S01E{episode:02}.mkv"))
+            })
+            .collect::<Vec<_>>();
+        fixture
+            .scanner
+            .set_files(&files.iter().map(|file| file.as_path()).collect::<Vec<_>>())
+            .await;
+        {
+            let mut titles = fixture.titles.store.lock().await;
+            for index in 0..unrelated_count {
+                let mut unrelated = title.clone();
+                unrelated.id = format!("unrelated-{index}");
+                unrelated.folder_path = Some(format!("/synthetic/unrelated/{index}"));
+                titles.push(unrelated);
+            }
+        }
+        let started = std::time::Instant::now();
+        let result = fixture
+            .app
+            .apply_title_folder_change(
+                &fixture.user,
+                &title.id,
+                selected.to_str().unwrap(),
+                FolderMatchResolution::Assign,
+            )
+            .await
+            .unwrap();
+        eprintln!(
+            "folder reconciliation: files={file_count} unrelated={unrelated_count} elapsed={:?}",
+            started.elapsed()
+        );
+        assert_eq!(result.scan.unwrap().scanned, file_count as usize);
+        assert_eq!(
+            *fixture.scanner.roots.lock().await,
+            vec![selected.to_str().unwrap()]
+        );
+        assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.metadata.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn folder_reconciliation_handles_empty_and_unavailable_folders() {
+    let fixture = FolderMatchFixture::new_series().await;
+    let old = fixture.folder("Old");
+    let empty = fixture.folder("Empty");
+    let title = fixture.create_title_with_folder("Selected", &old).await;
+    let result = fixture
+        .app
+        .apply_title_folder_change(
+            &fixture.user,
+            &title.id,
+            empty.to_str().unwrap(),
+            FolderMatchResolution::Assign,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.scan.unwrap().scanned, 0);
+    let unavailable = fixture.root.path().join("Unavailable");
+    assert!(
+        fixture
+            .app
+            .apply_title_folder_change(
+                &fixture.user,
+                &title.id,
+                unavailable.to_str().unwrap(),
+                FolderMatchResolution::Assign
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture.folder_path_of(&title.id).await.as_deref(),
+        empty.to_str()
+    );
+    assert!(!unavailable.exists());
+    assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.metadata.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn folder_reconciliation_does_not_reuse_analysis_for_changed_bytes() {
+    let fixture = FolderMatchFixture::new().await;
+    let old = fixture.folder("Old");
+    let selected = fixture.folder("Selected");
+    let file = fixture.write_media(&selected, "Selected.2024.mkv");
+    fixture.scanner.set_files(&[&file]).await;
+    let first = fixture.create_title_with_folder("First", &old).await;
+    let owner = fixture.create_title_with_folder("Owner", &selected).await;
+    fixture
+        .app
+        .scan_title_library(&fixture.user, &owner.id)
+        .await
+        .unwrap();
+    std::fs::write(&file, vec![9_u8; 1024]).unwrap();
+    fixture.scanner.set_files(&[&file]).await;
+    fixture.analyzer.calls.store(0, Ordering::SeqCst);
+    fixture
+        .app
+        .apply_title_folder_change(
+            &fixture.user,
+            &first.id,
+            selected.to_str().unwrap(),
+            FolderMatchResolution::TakeOver,
+        )
+        .await
+        .unwrap();
+    let files = fixture
+        .media_files
+        .list_media_files_for_title(&first.id)
+        .await
+        .unwrap();
+    assert_eq!(files[0].video_width, None);
+    assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&file).unwrap(), vec![9_u8; 1024]);
+    fixture
+        .app
+        .scan_title_library(&fixture.user, &first.id)
+        .await
+        .unwrap();
+    assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 1);
 }

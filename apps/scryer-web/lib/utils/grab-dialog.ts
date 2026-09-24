@@ -1,29 +1,5 @@
-// Pure helpers for the Indexers › Search grab dialog (spec 0002, WP5).
-//
-// Everything the dialog decides that does not need React or a network call
-// lives here so it can be tested directly: which facet the title picker filters
-// on, what gap a candidate title has, whether "replace the existing file" is
-// even meaningful for it, and which rejections the operator has to acknowledge.
-import type { InteractiveSearchKind } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types/releases";
 import type { TitleRecord } from "@/lib/types/titles";
-
-/** Facet the title picker filters on, derived from the search kind (D12). */
-export function grabDialogTitleFacet(
-  kind: InteractiveSearchKind,
-): "MOVIE" | "SERIES" | "ANIME" | null {
-  switch (kind) {
-    case "MOVIE":
-      return "MOVIE";
-    case "SERIES":
-      return "SERIES";
-    case "ANIME":
-      return "ANIME";
-    // A raw query is not bound to a media kind, so every title is a candidate.
-    case "RAW":
-      return null;
-  }
-}
 
 export type TitleGapLabel = {
   /** i18n key describing the gap. */
@@ -79,14 +55,6 @@ export function releaseRejectionCodes(releases: readonly Release[]): string[] {
     }
   }
   return [...codes];
-}
-
-/** i18n key for the primary button, by mode and batch size. */
-export function grabDialogCtaKey(unlinked: boolean, releaseCount: number): string {
-  if (unlinked) {
-    return "grabDialog.cta.unlinked";
-  }
-  return releaseCount > 1 ? "grabDialog.cta.assignAll" : "grabDialog.cta.assign";
 }
 
 /**

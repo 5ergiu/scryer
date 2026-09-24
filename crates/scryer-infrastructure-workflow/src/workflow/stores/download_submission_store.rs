@@ -319,6 +319,7 @@ async fn bound_download_is_scryer_submission_tx(
 /// End a binding inside the caller's transaction, with the same `ended_at`
 /// mechanics as the registry store's `end_binding`.
 async fn end_binding_tx(tx: &mut SqlTx<'_>, download_id: &DownloadId) -> AppResult<()> {
+    let ended_at = Utc::now();
     SqlRuntime::execute(
         SqlExec::Tx(tx),
         "UPDATE download_client_bindings
@@ -326,7 +327,22 @@ async fn end_binding_tx(tx: &mut SqlTx<'_>, download_id: &DownloadId) -> AppResu
          WHERE download_id = {}
            AND ended_at IS NULL",
         &[
-            SqlArg::Timestamp(Utc::now()),
+            SqlArg::Timestamp(ended_at),
+            SqlArg::Text(download_id.to_string()),
+        ],
+    )
+    .await?;
+    // A download whose binding ended is over, so it stamps `terminal_at` too —
+    // the registry store's `end_binding` writes both, and a download that took
+    // this exit instead was left looking open forever.
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "UPDATE downloads
+         SET terminal_at = {}
+         WHERE id = {}
+           AND terminal_at IS NULL",
+        &[
+            SqlArg::Timestamp(ended_at),
             SqlArg::Text(download_id.to_string()),
         ],
     )
@@ -1096,6 +1112,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let reason = reason.clone();
                 let detail = detail.clone();
                 Box::pin(async move {
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id).await?;
                     let now = Utc::now();
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
@@ -1333,6 +1350,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 let reason = reason.clone();
                 let detail = detail.clone();
                 Box::pin(async move {
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id).await?;
                     let previous = SqlRuntime::fetch_optional(
                         SqlExec::Tx(tx),
                         "SELECT tracked_state
@@ -1745,6 +1763,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 Box::pin(async move {
                     let canonical_download_id =
                         claim_or_create_binding_download_id_tx(tx, &identity, claim).await?;
+                    super::import_store::guard_import_retry_tx(tx, &canonical_download_id.to_string()).await?;
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
                         "INSERT INTO download_submissions

@@ -45,7 +45,7 @@ pub fn classify_indexer_http_response(
         )),
         429 => Some(http_error(
             IndexerErrorClassification::HttpRateLimited,
-            "Indexer rate limit reached",
+            "Indexer asked Scryer to slow down; searching resumes automatically",
         )),
         500..=599 => Some(http_error(
             IndexerErrorClassification::HttpServerError,

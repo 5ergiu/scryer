@@ -144,7 +144,7 @@ export const IndexerRoutingPanel = React.memo(function IndexerRoutingPanel({
                           value={routing.categories}
                           scope={activeQualityScopeId}
                           capsCategories={indexer.capsCategories}
-                          disabled={indexerRoutingLoading}
+                          disabled={indexerRoutingLoading || indexerRoutingSaving}
                           categoriesLabel={`${t("settings.indexerRoutingCategories")} (${indexer.name})`}
                           onChange={(categories) =>
                             onCategoriesChange(indexer.id, categories)

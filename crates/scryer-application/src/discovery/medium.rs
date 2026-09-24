@@ -143,19 +143,30 @@ pub(super) fn discovery_item_medium(item: &DiscoveryItemRecord) -> DiscoveryMedi
 /// The medium of an owned title. Same ladder as [`discovery_item_medium`], read
 /// off the catalog facet and the canonical tags SMG assigned to the title.
 pub(super) fn discovery_title_medium(title: &Title) -> DiscoveryMedium {
-    if title.facet == MediaFacet::Anime || owned_title_has_genre(title, "anime") {
-        return DiscoveryMedium::Anime;
-    }
-    if owned_title_has_genre(title, "animation") {
-        return DiscoveryMedium::Animation;
-    }
-    DiscoveryMedium::LiveAction
+    discovery_medium_from_genres(
+        &title.facet,
+        title
+            .canonical_tags
+            .iter()
+            .filter(|tag| tag.category.eq_ignore_ascii_case("genre"))
+            .map(|tag| tag.name.as_str()),
+    )
 }
 
-fn owned_title_has_genre(title: &Title, genre_key: &str) -> bool {
-    title
-        .canonical_tags
-        .iter()
-        .filter(|tag| tag.category.eq_ignore_ascii_case("genre"))
-        .any(|tag| normalize_discovery_affinity_key(&tag.name) == genre_key)
+pub(super) fn discovery_medium_from_genres<'a>(
+    facet: &MediaFacet,
+    genres: impl Iterator<Item = &'a str>,
+) -> DiscoveryMedium {
+    if *facet == MediaFacet::Anime {
+        return DiscoveryMedium::Anime;
+    }
+    let mut medium = DiscoveryMedium::LiveAction;
+    for genre in genres {
+        match normalize_discovery_affinity_key(genre).as_str() {
+            "anime" => return DiscoveryMedium::Anime,
+            "animation" => medium = DiscoveryMedium::Animation,
+            _ => {}
+        }
+    }
+    medium
 }

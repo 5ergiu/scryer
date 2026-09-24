@@ -251,7 +251,7 @@ async fn discovery_sync_status_returns_state_recent_runs_and_pending_count() {
 #[tokio::test]
 async fn discovery_sync_recovers_committed_unacked_snapshot_before_new_submit() {
     let gateway = Arc::new(SnapshotMetadataGateway::default());
-    let (app, _admin, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
     let discovery = Arc::new(RecordingDiscoveryRepository::default());
     let app = app.with_test_overrides(|builder| builder.with_discovery_store(discovery.clone()));
     let observed_at = Utc.timestamp_opt(1_000, 0).unwrap();
@@ -270,10 +270,25 @@ async fn discovery_sync_recovers_committed_unacked_snapshot_before_new_submit() 
     run.smg_request_id = Some("request-unacked".to_string());
     run.acknowledged_at = None;
     discovery.runs.lock().await.push(run);
+    app.runtime
+        .jobs
+        .job_run_tracker
+        .upsert_active_run(test_active_library_scan_run(observed_at))
+        .await;
 
     app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
         .await
         .expect("discovery sync should recover ack");
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        titles.list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 
     assert_eq!(
         gateway.ack_requests.lock().await.as_slice(),
@@ -3575,6 +3590,16 @@ async fn discovery_sync_initial_snapshot_waits_for_bootstrap_quiet_window() {
         .await
         .expect("discovery sync should stay scheduled");
     assert!(next_run_at >= quiet_until);
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        titles.list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 #[tokio::test]
@@ -4482,6 +4507,122 @@ async fn discovery_sync_defers_smg_work_while_library_scan_is_active() {
 }
 
 #[tokio::test]
+async fn discovery_sync_scan_start_during_context_read_blocks_submission() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let app = app.with_test_overrides(|builder| builder.with_discovery_store(discovery.clone()));
+    titles.store.lock().await.push(test_title(
+        "scan-race",
+        "Example",
+        MediaFacet::Movie,
+        vec![("tmdb_movie", "603")],
+    ));
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    *titles.discovery_read_gate.lock().await = Some(gate.clone());
+    let worker_app = app.clone();
+    let worker = tokio::spawn(async move {
+        worker_app
+            .run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::Manual)
+            .await
+    });
+    tokio::time::timeout(TEST_WAIT_DEADLINE, gate.wait())
+        .await
+        .expect("context read entered");
+    app.runtime
+        .jobs
+        .job_run_tracker
+        .upsert_active_run(test_active_library_scan_run(Utc::now()))
+        .await;
+    tokio::time::timeout(TEST_WAIT_DEADLINE, gate.wait())
+        .await
+        .expect("context read released");
+    tokio::time::timeout(TEST_WAIT_DEADLINE, worker)
+        .await
+        .expect("worker finishes")
+        .expect("worker joins")
+        .expect("evaluation succeeds");
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(gateway.submitted_inputs.lock().await.is_empty());
+    assert!(gateway.change_inputs.lock().await.is_empty());
+    assert!(discovery.commits.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn discovery_sync_repeated_active_scan_evaluations_do_not_read_titles() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let app = app.with_test_overrides(|builder| builder.with_discovery_store(discovery.clone()));
+    titles.store.lock().await.push(test_title(
+        "deferred-title",
+        "Example",
+        MediaFacet::Movie,
+        vec![("tmdb_movie", "603")],
+    ));
+    let now = Utc.timestamp_opt(10_000, 0).unwrap();
+    app.runtime.environment.set_fixed_now_for_tests(Some(now));
+    app.runtime
+        .jobs
+        .job_run_tracker
+        .upsert_active_run(test_active_library_scan_run(now))
+        .await;
+    for step in 0..3 {
+        app.runtime
+            .environment
+            .set_fixed_now_for_tests(Some(now + chrono::Duration::minutes(step * 10)));
+        app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+            .await
+            .expect("evaluation succeeds");
+    }
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        titles.list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(gateway.submitted_inputs.lock().await.is_empty());
+    assert!(gateway.change_inputs.lock().await.is_empty());
+    assert_eq!(gateway.public_feed_inputs.lock().await.len(), 1);
+    let mut finished_scan = test_active_library_scan_run(now);
+    finished_scan.status = JobRunStatus::Completed;
+    app.runtime
+        .jobs
+        .job_run_tracker
+        .upsert_active_run(finished_scan)
+        .await;
+    let next_run = app
+        .runtime
+        .jobs
+        .job_run_tracker
+        .next_run_at(JobKey::DiscoverySync)
+        .await
+        .unwrap();
+    app.runtime
+        .environment
+        .set_fixed_now_for_tests(Some(next_run));
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("eligible work resumes");
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(gateway.submitted_inputs.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
     let gateway = Arc::new(SnapshotMetadataGateway::default());
     let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
@@ -4539,6 +4680,13 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
         })
         .await
         .expect("pending change should seed");
+    // The scan itself is recent: this test is about a scan that really is
+    // running, so its events have to be inside the orphaned-session grace
+    // window. Dating them to the epoch (as this test used to) made it a test of
+    // an abandoned session that discovery kept deferring to forever, which is
+    // the defect covered by
+    // `discovery_sync_fails_an_abandoned_library_scan_session`.
+    let scan_at = Utc::now();
     let mut job_event = crate::domain_events::new_job_run_domain_event(
         crate::domain_events::DomainEventActor::system(),
         "scan-1",
@@ -4549,7 +4697,7 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
             trigger_source: JobTriggerSource::Manual.as_str().to_string(),
         }),
     );
-    job_event.occurred_at = due_at;
+    job_event.occurred_at = scan_at;
     domain_events
         .append(job_event)
         .await
@@ -4564,7 +4712,7 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
             mode: "full".to_string(),
         }),
     );
-    event.occurred_at = due_at;
+    event.occurred_at = scan_at;
     domain_events
         .append(event)
         .await
@@ -4579,6 +4727,41 @@ async fn discovery_sync_defers_smg_work_for_projected_active_scan() {
     assert!(discovery.commits.lock().await.is_empty());
     assert!(discovery.incremental_commits.lock().await.is_empty());
     assert_eq!(discovery.pending_changes.lock().await.len(), 1);
+
+    // The live session is left alone: nothing terminal was written for it.
+    assert_eq!(
+        titles
+            .discovery_context_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        titles.list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        !domain_events
+            .events
+            .lock()
+            .await
+            .iter()
+            .any(|stored| matches!(stored.payload, DomainEventPayload::LibraryScanFailed(_))),
+        "a scan inside the grace window must not be finished off"
+    );
+
+    // Counting active scans must never page the progress log: those rows are
+    // the bulk of a real library's event log and contribute nothing.
+    assert!(
+        !domain_events
+            .list_filters
+            .lock()
+            .await
+            .iter()
+            .any(|filter| filter.event_types.as_ref().is_some_and(
+                |types| types.contains(&scryer_domain::DomainEventType::LibraryScanProgressed)
+            )),
+        "no read may request library_scan_progressed rows"
+    );
 }
 
 #[tokio::test]
@@ -7467,5 +7650,130 @@ async fn discovery_reads_with_personalized_disabled_serve_public_rows_only() {
             .iter()
             .all(|group| group.surface == CatalogDiscoverySurface::Public),
         "catalog discovery must return public groups only"
+    );
+}
+
+/// A scan session that was started and never ended keeps `scans_active` true
+/// forever, so the discovery snapshot is deferred indefinitely. Nothing else
+/// ever writes the terminal event: the process that owned the session is gone.
+#[tokio::test]
+async fn discovery_sync_fails_an_abandoned_library_scan_session() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let domain_events = Arc::new(super::MockDomainEventRepo::default());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_discovery_store(discovery.clone())
+            .with_domain_events(domain_events.clone())
+    });
+    let due_at = Utc.timestamp_opt(0, 0).unwrap();
+    *discovery.state.lock().await = Some(DiscoverySyncStateRecord {
+        last_success_generation_id: Some("generation-1".to_string()),
+        last_subject_fingerprint: Some("fingerprint-generation-1".to_string()),
+        last_context_snapshot_completed_at: Some(due_at),
+        next_context_snapshot_eligible_at: Some(due_at),
+        next_incremental_reload_eligible_at: Some(due_at),
+        dirty_since: Some(due_at),
+        dirty_reason_mask: 1,
+        last_seen_domain_event_sequence: Some(12),
+        updated_at: due_at,
+        ..DiscoverySyncStateRecord::default()
+    });
+    titles.store.lock().await.push(test_title(
+        "title-1",
+        "The Example Movie",
+        MediaFacet::Movie,
+        vec![("tmdb_movie", "603")],
+    ));
+
+    // An orphan: started long ago, never ended, and a completed session beside
+    // it that must not be touched.
+    let abandoned_at = Utc::now() - chrono::Duration::hours(6);
+    let mut started = crate::domain_events::new_library_scan_domain_event(
+        crate::domain_events::DomainEventActor::system(),
+        "scan-orphan",
+        MediaFacet::Movie,
+        DomainEventPayload::LibraryScanStarted(LibraryScanStartedEventData {
+            session_id: "scan-orphan".to_string(),
+            library_id: Some("library".to_string()),
+            mode: "full".to_string(),
+        }),
+    );
+    started.occurred_at = abandoned_at;
+    domain_events
+        .append(started)
+        .await
+        .expect("abandoned scan start should append");
+
+    let mut finished_start = crate::domain_events::new_library_scan_domain_event(
+        crate::domain_events::DomainEventActor::system(),
+        "scan-done",
+        MediaFacet::Movie,
+        DomainEventPayload::LibraryScanStarted(LibraryScanStartedEventData {
+            session_id: "scan-done".to_string(),
+            library_id: Some("library".to_string()),
+            mode: "full".to_string(),
+        }),
+    );
+    finished_start.occurred_at = abandoned_at;
+    domain_events
+        .append(finished_start)
+        .await
+        .expect("completed scan start should append");
+    let mut finished = crate::domain_events::new_library_scan_domain_event(
+        crate::domain_events::DomainEventActor::system(),
+        "scan-done",
+        MediaFacet::Movie,
+        DomainEventPayload::LibraryScanCompleted(test_library_scan_completed_event("scan-done", 1)),
+    );
+    finished.occurred_at = abandoned_at;
+    domain_events
+        .append(finished)
+        .await
+        .expect("completed scan end should append");
+
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("discovery sync should evaluate");
+
+    let failed: Vec<String> = domain_events
+        .events
+        .lock()
+        .await
+        .iter()
+        .filter_map(|stored| match &stored.payload {
+            DomainEventPayload::LibraryScanFailed(data) => Some(data.session_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        vec!["scan-orphan".to_string()],
+        "exactly the abandoned session is finished off"
+    );
+
+    // And a second cycle writes nothing further: the session now has a terminal
+    // event, so it is no longer unfinished.
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("second discovery sync should evaluate");
+    let failed_again = domain_events
+        .events
+        .lock()
+        .await
+        .iter()
+        .filter(|stored| matches!(stored.payload, DomainEventPayload::LibraryScanFailed(_)))
+        .count();
+    assert_eq!(failed_again, 1, "finishing an orphan is idempotent");
+
+    // With the orphan finished, discovery is no longer deferred by a scan that
+    // will never end.
+    assert!(
+        !gateway.submitted_inputs.lock().await.is_empty()
+            || !gateway.change_inputs.lock().await.is_empty()
+            || !discovery.commits.lock().await.is_empty()
+            || !discovery.incremental_commits.lock().await.is_empty(),
+        "discovery work must resume once the abandoned scan is finished"
     );
 }

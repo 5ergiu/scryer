@@ -14,7 +14,8 @@ export type IndexerSearchSortKey =
   | "size"
   | "age"
   | "seeders"
-  | "priority";
+  | "priority"
+  | `${"release" | "indexer" | "size" | "age" | "peers"}-${"asc" | "desc"}`;
 
 export type IndexerSearchFacetGroupKey =
   | "protocol"
@@ -354,44 +355,39 @@ export function filterIndexerSearchReleases(
   });
 }
 
-function publishedAtMs(release: Release): number {
-  if (!release.publishedAt) {
-    return 0;
-  }
-  const parsed = Date.parse(release.publishedAt);
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
 export function sortIndexerSearchReleases(
   releases: Release[],
   sortKey: IndexerSearchSortKey,
   priorityByIndexer: ReadonlyMap<string, number>,
 ): Release[] {
-  const sorted = [...releases];
-  sorted.sort((left, right) => {
-    switch (sortKey) {
-      case "size":
-        return (right.sizeBytes ?? 0) - (left.sizeBytes ?? 0);
-      case "age":
-        return publishedAtMs(left) - publishedAtMs(right);
-      case "seeders":
-        return (right.seeders ?? -1) - (left.seeders ?? -1);
-      case "priority": {
-        const leftPriority =
-          priorityByIndexer.get(left.source ?? "") ?? Number.MAX_SAFE_INTEGER;
-        const rightPriority =
-          priorityByIndexer.get(right.source ?? "") ?? Number.MAX_SAFE_INTEGER;
-        if (leftPriority !== rightPriority) {
-          return leftPriority - rightPriority;
-        }
-        return publishedAtMs(right) - publishedAtMs(left);
+  const aliases: Record<string, string> = {
+    newest: "age-asc", age: "age-desc", size: "size-desc", seeders: "peers-desc",
+  };
+  const [column, direction] = (aliases[sortKey] ?? sortKey).split("-");
+  const value = (release: Release): string | number | null => {
+    switch (column) {
+      case "release": return release.title?.trim() || null;
+      case "indexer": return release.source?.trim() || null;
+      case "size": return release.sizeBytes ?? null;
+      case "peers": return release.seeders ?? release.grabs ?? null;
+      case "priority": return priorityByIndexer.get(release.source ?? "") ?? null;
+      default: {
+        const date = release.publishedAt ? Date.parse(release.publishedAt) : NaN;
+        return Number.isFinite(date) ? -date : null;
       }
-      case "newest":
-      default:
-        return publishedAtMs(right) - publishedAtMs(left);
     }
+  };
+  return [...releases].sort((left, right) => {
+    const a = value(left), b = value(right);
+    if (a == null && b != null) return 1;
+    if (b == null && a != null) return -1;
+    const compared = a == null || b == null ? 0
+      : typeof a === "string" && typeof b === "string"
+        ? a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
+        : Number(a) - Number(b);
+    return compared * (direction === "desc" ? -1 : 1)
+      || indexerSearchRowKey(left).localeCompare(indexerSearchRowKey(right));
   });
-  return sorted;
 }
 
 /**
@@ -436,14 +432,26 @@ export function mergeIndexerProgress(
   return [...merged, ...incomingById.values()];
 }
 
-export type IndexerHealthTone = "pending" | "ok" | "slow" | "failed" | "skipped";
+export type IndexerHealthTone =
+  | "pending"
+  | "ok"
+  | "slow"
+  | "partial"
+  | "failed"
+  | "skipped"
+  | "cooling";
 
 export function indexerHealthTone(
   entry: InteractiveSearchIndexerProgress,
 ): IndexerHealthTone {
   switch (entry.status) {
     case "FAILED":
-      return "failed";
+      // A cooldown outranks the failed status the snapshot carries it under:
+      // the indexer answered, it just asked to be asked again later.
+      if (entry.rateLimited) {
+        return entry.resultCount > 0 ? "partial" : "cooling";
+      }
+      return entry.resultCount > 0 ? "partial" : "failed";
     case "SKIPPED":
       return "skipped";
     case "COMPLETED":
@@ -540,8 +548,8 @@ export function parseSavedIndexerSearches(
     }
     const record = candidate as Record<string, unknown>;
     const query = typeof record.query === "string" ? record.query.trim() : "";
-    const kind = typeof record.kind === "string" ? record.kind : "";
-    if (!query || !kind) {
+    const kind = "RAW";
+    if (!query) {
       continue;
     }
     entries.push({
@@ -565,7 +573,7 @@ export function parseSavedIndexerSearches(
   return entries;
 }
 
-/** Newest first, one entry per (query, kind), capped at 20 (D10). */
+/** Newest first, one raw entry per query, capped at 20. */
 export function addSavedIndexerSearch(
   saved: SavedIndexerSearch[],
   entry: SavedIndexerSearch,
@@ -575,9 +583,9 @@ export function addSavedIndexerSearch(
     return saved;
   }
   const next = saved.filter(
-    (candidate) => candidate.query !== query || candidate.kind !== entry.kind,
+    (candidate) => candidate.query !== query,
   );
-  return [{ ...entry, query }, ...next].slice(0, MAX_SAVED_INDEXER_SEARCHES);
+  return [{ ...entry, kind: "RAW", query }, ...next].slice(0, MAX_SAVED_INDEXER_SEARCHES);
 }
 
 export function readSavedIndexerSearches(): SavedIndexerSearch[] {

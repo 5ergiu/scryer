@@ -1,4 +1,4 @@
-/// Retry a previously failed import, optionally with an archive password.
+/// Reevaluate a failed or skipped import without bypassing current policy.
 pub async fn retry_failed_import(
     app: &AppUseCase,
     actor: &User,
@@ -13,9 +13,9 @@ pub async fn retry_failed_import(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("import {import_id}")))?;
 
-    if record.status != ImportStatus::Failed {
+    if !matches!(record.status, ImportStatus::Failed | ImportStatus::Skipped) {
         return Err(AppError::Validation(format!(
-            "import {} has status '{}', only failed imports can be retried",
+            "import {} has status '{}', only failed or skipped imports can be retried",
             import_id,
             record.status.as_str()
         )));
@@ -33,10 +33,11 @@ pub async fn retry_failed_import(
     };
     remap_completed_download_for_client(app, &mut completed).await;
 
+    let download_id = validate_import_retry_source(app, &record, &completed).await?;
+
     // A live submission row is authoritative over what the failed attempt
-    // persisted (an operator may have reassigned the download since); the
-    // persisted evidence is the fallback for a lost row or a transient lookup
-    // failure only.
+    // persisted (an operator may have reassigned the download since). Lookup
+    // failures must not silently restore an obsolete assignment.
     let ImportProvenance {
         completed,
         release_evidence,
@@ -51,7 +52,7 @@ pub async fn retry_failed_import(
             requested_target_title_id: None,
             release_evidence_override: None,
             persisted: persisted.as_ref(),
-            tolerate_lookup_failure: true,
+            tolerate_lookup_failure: false,
         },
     )
     .await?;
@@ -93,17 +94,151 @@ pub async fn retry_failed_import(
         ));
     }
 
-    app.update_import_status_and_notify(import_id, ImportStatus::Processing, None)
-        .await?;
+    let source_permit = app
+        .runtime
+        .imports
+        .execution_coordinator
+        .try_acquire_source(&completed)
+        .await
+        .ok_or_else(|| AppError::Validation("this download is already being imported".into()))?;
+    let current = app
+        .services
+        .workflow
+        .imports
+        .get_import_by_id(import_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("import {import_id}")))?;
+    if current.updated_at != record.updated_at
+        || !matches!(current.status, ImportStatus::Failed | ImportStatus::Skipped)
+    {
+        return Err(AppError::Validation(
+            "the import changed while retry was requested; refresh its history".into(),
+        ));
+    }
+    if !std::path::Path::new(&completed.dest_dir).exists() {
+        return Err(AppError::Validation(
+            "the import source is no longer available; restore the download or correct its path before retrying".into(),
+        ));
+    }
 
+    // Finish reconciliation even if the requesting browser disconnects.
+    let app = app.clone();
+    let actor = actor.clone();
+    let import_id = import_id.to_string();
+    let password = password.map(str::to_string);
+    tokio::spawn(async move {
+        let _source_permit = source_permit;
+        let tracked_id = crate::tracked_downloads::tracked_download_id(
+            Some(&completed.client_id),
+            &completed.client_type,
+            &completed.download_client_item_id,
+        );
+        let handle = app.runtime.acquisition.tracked_download_handle.clone();
+        let mut tracked = if let Some(handle) = handle.as_ref() {
+            handle.begin_history_retry(tracked_id.clone()).await?
+        } else {
+            None
+        };
+        let mut finished = None;
+        let outcome = async {
+            if tracked.is_none() {
+                tracked = retry_tracked_snapshot(&app, &import_id, &completed).await?;
+            }
+            let claim = crate::ImportRetryClaim {
+                download_id,
+                import_id: import_id.clone(),
+                attempt_id: Id::new().0,
+                started_at: Utc::now(),
+                source: completed_download_identity(&completed),
+                previous_result_json: record.result_json.clone(),
+            };
+            let mut recovery_source = completed.clone();
+            // Recovery uses resolved evidence; client parameters can contain archive passwords.
+            recovery_source.parameters.clear();
+            let recovery_payload = serde_json::to_string(&CompletedImportRequestPayload {
+                completed: recovery_source,
+                release_evidence: release_evidence.clone(),
+                target_title_id: target_title_id.clone(),
+            })
+            .map_err(|e| AppError::Repository(format!("could not record retry context: {e}")))?;
+            if !app
+                .services
+                .workflow
+                .imports
+                .claim_import_retry(
+                    &claim,
+                    DateTime::parse_from_rfc3339(&record.updated_at)
+                        .map_err(|e| {
+                            AppError::Repository(format!("invalid import timestamp: {e}"))
+                        })?
+                        .with_timezone(&Utc),
+                    &recovery_payload,
+                )
+                .await?
+                .is_claimed()
+            {
+                return Err(AppError::Validation(
+                    "the download is busy or the import changed; refresh and retry".into(),
+                ));
+            }
+            if let Some(handle) = handle.as_ref() {
+                handle.publish_history_retry(tracked_id.clone()).await?;
+            }
+            let result = execute_history_retry(
+                &app,
+                &actor,
+                &import_id,
+                &completed,
+                &release_evidence,
+                target_title_id.as_deref(),
+                password.as_deref(),
+            )
+            .await?;
+            let td = tracked.as_mut().ok_or_else(|| {
+                AppError::Repository("retry download snapshot unavailable".into())
+            })?;
+            reconcile_claimed_history_retry(
+                &app,
+                td,
+                &completed,
+                &release_evidence,
+                &result,
+                &claim,
+            )
+            .await?;
+            finished = tracked.take().map(Box::new);
+            Ok(result)
+        }
+        .await;
+        // An execution or reconciliation failure leaves the durable claim for recovery.
+        if let Some(handle) = handle {
+            handle.finish_history_retry(tracked_id, finished).await?;
+        }
+        outcome
+    })
+    .await
+    .map_err(|error| AppError::Repository(format!("import retry task failed: {error}")))?
+}
+
+async fn execute_history_retry(
+    app: &AppUseCase,
+    actor: &User,
+    import_id: &str,
+    completed: &CompletedDownload,
+    release_evidence: &ReleaseEvidence,
+    target_title_id: Option<&str>,
+    password: Option<&str>,
+) -> AppResult<ImportResult> {
+    // The repository claim already persisted Processing and retained the previous result.
+    app.refresh_import_record_queue_snapshot(import_id).await;
     let started_at = Utc::now();
     match run_import(
         app,
         actor,
         import_id,
-        &completed,
-        &release_evidence,
-        target_title_id.as_deref(),
+        completed,
+        release_evidence,
+        target_title_id,
         started_at,
         password,
         None,
@@ -124,7 +259,7 @@ pub async fn retry_failed_import(
                 skip_reason,
                 error_message: Some(error.to_string()),
                 release_burned: false,
-                ..base_completed_import_result(import_id, &completed, &release_evidence, started_at)
+                ..base_completed_import_result(import_id, completed, release_evidence, started_at)
             };
             let result_json = serde_json::to_string(&result).ok();
             app.update_import_status_and_notify(import_id, ImportStatus::Failed, result_json)
@@ -133,6 +268,197 @@ pub async fn retry_failed_import(
         }
     }
 }
+async fn retry_tracked_snapshot(
+    app: &AppUseCase,
+    import_id: &str,
+    completed: &CompletedDownload,
+) -> AppResult<Option<crate::tracked_downloads::TrackedDownload>> {
+    let Some(download_id) = app
+        .services
+        .workflow
+        .imports
+        .canonical_download_id_for_import(import_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let id = crate::tracked_downloads::tracked_download_id(
+        Some(&completed.client_id),
+        &completed.client_type,
+        &completed.download_client_item_id,
+    );
+    let item = scryer_domain::DownloadQueueItem {
+        id: id.clone(),
+        title_id: None,
+        episode_id: None,
+        title_name: completed.name.clone(),
+        facet: None,
+        category: completed.category.clone(),
+        client_id: completed.client_id.clone(),
+        client_name: completed.client_id.clone(),
+        client_type: completed.client_type.clone(),
+        state: scryer_domain::DownloadQueueState::Completed,
+        progress_percent: 100,
+        import_transfer_phase: None,
+        import_transfer_bytes: None,
+        import_transfer_total_bytes: None,
+        import_transfer_started_at: None,
+        import_transfer_updated_at: None,
+        size_bytes: None,
+        remaining_seconds: None,
+        queued_at: None,
+        last_updated_at: None,
+        attention_required: false,
+        attention_reason: None,
+        download_client_item_id: completed.download_client_item_id.clone(),
+        download_id: completed.download_id.clone(),
+        import_status: None,
+        import_type: None,
+        import_error_code: None,
+        import_error_message: None,
+        imported_at: None,
+        delete_status: None,
+        delete_error_message: None,
+        is_scryer_origin: false,
+        source_provider: None,
+        tracked_state: None,
+        tracked_status: None,
+        tracked_status_messages: Vec::new(),
+        tracked_match_type: None,
+        seeding: None,
+    };
+    Ok(Some(
+        crate::tracked_downloads::TrackedDownloadService::build_new_tracked_download(
+            app,
+            download_id,
+            id,
+            item,
+        )
+        .await,
+    ))
+}
+
+async fn compute_history_retry_state(
+    app: &AppUseCase,
+    td: &mut crate::tracked_downloads::TrackedDownload,
+    completed: &CompletedDownload,
+    release_evidence: &ReleaseEvidence,
+    result: &ImportResult,
+) -> AppResult<()> {
+    let source = completed_download_identity(completed);
+    let artifacts = app
+        .services
+        .workflow
+        .import_artifacts
+        .list_by_source_identity_for_download(td.canonical_download_id(), &source)
+        .await?;
+    let count = artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.import_id.as_deref() == Some(result.import_id.as_str())
+                && artifact.result == "imported"
+        })
+        .count();
+    td.reset_for_import_retry();
+    td.import_attempted = true;
+    td.completed_source = Some(completed.clone());
+    td.title_id = result.title_id.clone().or_else(|| td.title_id.clone());
+    if let Some(title_id) = td.title_id.as_deref()
+        && let Some(title) = app.services.catalog.titles.get_by_id(title_id).await?
+    {
+        td.facet = Some(title.facet.as_str().to_string());
+    }
+    let success = result.decision == ImportDecision::Imported
+        || (result.decision == ImportDecision::Skipped
+            && result.skip_reason == Some(ImportSkipReason::AlreadyImported))
+        || ((result.skip_reason == Some(ImportSkipReason::NoVideoFiles)
+            || (result.decision == ImportDecision::Failed && result.skip_reason.is_none()))
+            && artifacts.iter().any(|artifact| {
+                matches!(artifact.result.as_str(), "imported" | "already_present")
+            }));
+    let ignored = result.decision == ImportDecision::Skipped && result.skip_reason.is_none();
+    let verified = if success {
+        crate::completed_download_handler::verify_retry_import_with_release_evidence(
+            app,
+            td,
+            count,
+            completed,
+            release_evidence,
+        )
+        .await?
+    } else if ignored {
+        crate::completed_download_handler::verify_skipped_import_with_release_evidence(
+            app,
+            td,
+            count,
+            Some(completed),
+            Some(release_evidence),
+        )
+        .await?
+    } else {
+        false
+    };
+    if verified {
+        td.state = TrackedDownloadState::Imported;
+        td.status = scryer_domain::TrackedDownloadStatus::Ok;
+        td.status_messages.clear();
+    } else if result.decision == ImportDecision::Rejected && result.release_burned {
+        // Preserve the existing disposition for independently sufficient rejections.
+        crate::completed_download_handler::apply_import_result_with_completed(
+            app,
+            td,
+            result.clone(),
+            count,
+            Some(completed),
+            Some(release_evidence),
+        )
+        .await;
+    } else {
+        td.state = TrackedDownloadState::ImportBlocked;
+        td.status = scryer_domain::TrackedDownloadStatus::Warning;
+        td.status_messages = vec![result.error_message.clone().unwrap_or_else(|| {
+            if success {
+                "Import is incomplete; review the retained files and retry import".into()
+            } else {
+                "Import could not complete; review the source and retry import".into()
+            }
+        })];
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn reconcile_history_retry_result(
+    app: &AppUseCase,
+    td: &mut crate::tracked_downloads::TrackedDownload,
+    completed: &CompletedDownload,
+    release_evidence: &ReleaseEvidence,
+    result: &ImportResult,
+) -> AppResult<()> {
+    compute_history_retry_state(app, td, completed, release_evidence, result).await?;
+    let reason = if td.state == scryer_domain::TrackedDownloadState::ImportBlocked {
+        Some(crate::tracked_downloads::ImportBlockedReason::AfterImport.as_str())
+    } else if td.burned_by_import_gate {
+        Some(crate::tracked_downloads::IMPORT_GATE_REJECTED_TRACKED_STATE_REASON)
+    } else {
+        None
+    };
+    if !crate::tracked_downloads::persist_tracked_download_state_marker(
+        app,
+        td,
+        td.state,
+        reason,
+        td.status_messages.first().map(String::as_str),
+    )
+    .await
+    {
+        return Err(AppError::Repository(
+            "could not persist the retried download state".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Identifies why a failed download reached terminal cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalFailureOrigin {

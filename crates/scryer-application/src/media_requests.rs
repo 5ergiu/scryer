@@ -577,6 +577,11 @@ impl AppUseCase {
             )
             .await?;
         drop(profile_reference_guard);
+        // The approval created (or reused) a title row in one transaction; a
+        // new row is a new matcher identity. `publish_stored_domain_event`
+        // below would do this via `TitleAdded`, but only when the event was
+        // actually stored.
+        self.invalidate_monitored_title_matcher().await;
         if let Some(event) = &added_event {
             self.publish_stored_domain_event(event).await;
         }
@@ -899,6 +904,11 @@ impl AppUseCase {
             )
             .await?;
         drop(profile_reference_guard);
+        // The approval created (or reused) a title row in one transaction; a
+        // new row is a new matcher identity. `publish_stored_domain_event`
+        // below would do this via `TitleAdded`, but only when the event was
+        // actually stored.
+        self.invalidate_monitored_title_matcher().await;
         if let Some(event) = &added_event {
             self.publish_stored_domain_event(event).await;
         }

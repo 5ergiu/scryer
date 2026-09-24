@@ -661,8 +661,12 @@ async fn title_catalog_scryer_rating_sort_uses_grouped_rating_summary() {
         TitleCatalogSort::new(TitleCatalogSortKey::RatingScryer, SortDirection::Desc),
         10,
         0,
-        false,
-        true,
+        TitleListProjection::default().without_external_ids(),
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await
     .expect("catalog rating sort should succeed");
@@ -781,8 +785,12 @@ async fn title_catalog_quality_sort_ranks_the_file_quality_the_catalog_shows() {
             TitleCatalogSort::new(TitleCatalogSortKey::Quality, direction),
             10,
             0,
-            false,
-            true,
+            TitleListProjection::default().without_external_ids(),
+            TitleCatalogAggregates {
+                total_count: true,
+                filter_counts: true,
+                managed_bytes: true,
+            },
         )
         .await
         .expect("catalog quality sort should succeed");
@@ -859,8 +867,12 @@ async fn title_catalog_profile_sort_orders_by_effective_profile_name() {
         sort,
         10,
         0,
-        false,
-        true,
+        TitleListProjection::default().without_external_ids(),
+        TitleCatalogAggregates {
+            total_count: true,
+            filter_counts: true,
+            managed_bytes: true,
+        },
     )
     .await
     .expect("catalog profile sort should succeed");
@@ -993,7 +1005,7 @@ async fn identical_metadata_identity_is_isolated_by_library_title() {
     let services = SqliteServices::new(db.to_string_lossy())
         .await
         .expect("db should initialize");
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     for id in ["movie-library-a", "movie-library-b"] {
         insert_test_library(&services, id, MediaFacet::Movie).await;
@@ -1082,8 +1094,8 @@ async fn identical_metadata_identity_is_isolated_by_library_title() {
         TitleCatalogSort::default(),
         10,
         0,
-        true,
-        false,
+        TitleListProjection::default(),
+        TitleCatalogAggregates::default(),
     )
     .await
     .expect("first library catalog should load owner tags");
@@ -1988,9 +2000,9 @@ async fn title_queries_get_by_facet_libraries_and_slug_trim_input_and_reject_dup
 }
 
 #[tokio::test]
-async fn title_query_modes_keep_spellfix_search_scoped_to_presentation_sqlite() {
+async fn title_query_modes_keep_fuzzy_search_scoped_to_presentation_sqlite() {
     let (services, db) = temp_services("scryer_title_query_mode_search_scope").await;
-    let catalog = title_store(&services);
+    let (catalog, _index_dir) = super::title_store_with_fuzzy_index(&services).await;
 
     let mut title = make_test_title("title-query-mode-search-scope", None);
     title.name = "Canonical Search Name".to_string();
@@ -2048,7 +2060,7 @@ async fn title_query_modes_keep_spellfix_search_scoped_to_presentation_sqlite() 
     .await
     .expect("library search should load");
     assert!(
-        !library_alias_hits
+        library_alias_hits
             .iter()
             .any(|candidate| candidate.id == title.id)
     );
@@ -2062,7 +2074,7 @@ async fn title_query_modes_keep_spellfix_search_scoped_to_presentation_sqlite() 
     .await
     .expect("padded library search should load");
     assert!(
-        !library_padded_name_hits
+        library_padded_name_hits
             .iter()
             .any(|candidate| candidate.id == title.id)
     );

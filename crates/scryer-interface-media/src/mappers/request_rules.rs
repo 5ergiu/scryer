@@ -547,9 +547,7 @@ pub fn submit_media_request_input_into_application(
         external_ids: input
             .external_ids
             .into_iter()
-            .map(|external_id| {
-                scryer_domain::ExternalId::new(external_id.source, external_id.value)
-            })
+            .map(|external_id| external_id.into_domain())
             .collect(),
     }
 }
@@ -575,9 +573,7 @@ pub fn request_rule_sample_into_application(
         external_ids: sample
             .external_ids
             .into_iter()
-            .map(|external_id| {
-                scryer_domain::ExternalId::new(external_id.source, external_id.value)
-            })
+            .map(|external_id| external_id.into_domain())
             .collect(),
         quality_profile_id: sample.quality_profile_id.map(String::from),
         monitor_type: sample

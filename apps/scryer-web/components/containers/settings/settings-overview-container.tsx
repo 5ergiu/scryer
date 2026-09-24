@@ -1,4 +1,5 @@
 import * as React from "react";
+import { TrustedProxiesPanel } from "@/components/containers/settings/trusted-proxies-panel";
 import { SettingsOverviewSection } from "@/components/views/settings/settings-overview-section";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import {
@@ -354,6 +355,7 @@ export function SettingsOverviewContainer({
         verificationSaving={verificationSaving}
         onVerificationDepthChange={handleVerificationDepthChange}
       />
+      <TrustedProxiesPanel />
       <ConfirmDialog
         open={experimentalFeaturesConfirmationOpen}
         title={t("settings.experimentalFeaturesLabel")}
