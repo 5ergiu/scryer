@@ -88,20 +88,20 @@ export function ConfirmDialog({
               aria-label={title}
               {...(description ? {} : { "aria-describedby": undefined })}
               className={cn(
-                "w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-lg outline-none",
+                "flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-border bg-card p-4 shadow-lg outline-none",
                 contentClassName,
               )}
             >
-              <DialogPrimitive.Title className="mb-2 text-sm font-semibold">
+              <DialogPrimitive.Title className="mb-2 shrink-0 text-sm font-semibold">
                 {title}
               </DialogPrimitive.Title>
               {description ? (
-                <DialogPrimitive.Description className="mb-3 text-xs text-muted-foreground">
+                <DialogPrimitive.Description className="mb-3 shrink-0 text-xs text-muted-foreground">
                   {description}
                 </DialogPrimitive.Description>
               ) : null}
-              {children ? <div className="mb-4">{children}</div> : null}
-              <div className="flex justify-end gap-2">
+              {children ? <div className="mb-4 min-h-0 overflow-y-auto overscroll-contain">{children}</div> : null}
+              <div className="flex shrink-0 justify-end gap-2">
                 <Button
                   id={cancelButtonId}
                   type="button"

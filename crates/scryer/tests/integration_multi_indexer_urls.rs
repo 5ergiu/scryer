@@ -68,8 +68,9 @@ const NEWZNAB_EMPTY: &str = r#"{"channel":{"item":[]}}"#;
 async fn setup() -> (
     AppUseCase,
     User,
-    MockServer, // newznab
-    MockServer, // torznab
+    MockServer,        // newznab
+    MockServer,        // torznab
+    tempfile::TempDir, // title index
 ) {
     setup_with_indexer_configs(|newznab_server, torznab_server, now| {
         vec![
@@ -91,8 +92,9 @@ async fn setup_with_indexer_configs<F>(
 ) -> (
     AppUseCase,
     User,
-    MockServer, // newznab
-    MockServer, // torznab
+    MockServer,        // newznab
+    MockServer,        // torznab
+    tempfile::TempDir, // title index
 )
 where
     F: FnOnce(&MockServer, &MockServer, chrono::DateTime<chrono::Utc>) -> Vec<IndexerConfig>,
@@ -245,7 +247,10 @@ where
         },
     );
 
-    let title_store = Arc::new(TitleStore::new(datastore.clone()));
+    let index_dir = tempfile::tempdir().expect("title index directory");
+    let fuzzy_index = common::test_title_index(&db, index_dir.path()).await;
+    let title_store =
+        Arc::new(TitleStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index.clone()));
     let show_store = Arc::new(ShowStore::new(datastore.clone()));
     let user_store = Arc::new(UserStore::new(datastore.clone()));
     let library_store = Arc::new(LibraryStore::new(datastore.clone()));
@@ -281,7 +286,7 @@ where
         quality_profile_store.clone();
 
     let library_probe_store = Arc::new(LibraryProbeStore::new(datastore.clone()));
-    let wanted_store = Arc::new(WantedStore::new(datastore.clone()));
+    let wanted_store = Arc::new(WantedStore::new(datastore.clone()).with_fuzzy_index(fuzzy_index));
     let pending_release_store = Arc::new(PendingReleaseStore::new(
         datastore.clone(),
         encryption_key_state.clone(),
@@ -396,7 +401,7 @@ where
     .await
     .expect("seed configured default quality profile");
 
-    (app, user, newznab_server, torznab_server)
+    (app, user, newznab_server, torznab_server, index_dir)
 }
 
 fn newznab_indexer_config(
@@ -599,7 +604,7 @@ fn newznab_response_with_title(title: &str, guid: &str) -> String {
 
 #[tokio::test]
 async fn protected_rar_routing_flip_uses_fresh_enabled_shared_newznab_source() {
-    let (app, user, newznab, _torznab) =
+    let (app, user, newznab, _torznab, _index_dir) =
         setup_with_indexer_configs(|newznab_server, _torznab_server, now| {
             vec![
                 newznab_indexer_config(
@@ -757,7 +762,7 @@ async fn protected_rar_routing_flip_uses_fresh_enabled_shared_newznab_source() {
 
 #[tokio::test]
 async fn multi_indexer_url_trace_anime_episode() {
-    let (app, user, newznab, torznab) = setup().await;
+    let (app, user, newznab, torznab, _index_dir) = setup().await;
     let title_id = add_search_title(
         &app,
         &user,
@@ -791,7 +796,7 @@ async fn multi_indexer_url_trace_anime_episode() {
 
 #[tokio::test]
 async fn multi_indexer_url_trace_series_episode() {
-    let (app, user, newznab, torznab) = setup().await;
+    let (app, user, newznab, torznab, _index_dir) = setup().await;
     let title_id = add_search_title(
         &app,
         &user,
@@ -828,7 +833,7 @@ async fn multi_indexer_url_trace_series_episode() {
 
 #[tokio::test]
 async fn multi_indexer_url_trace_movie() {
-    let (app, user, newznab, torznab) = setup().await;
+    let (app, user, newznab, torznab, _index_dir) = setup().await;
     let title_id = add_search_title(
         &app,
         &user,
@@ -859,7 +864,7 @@ async fn multi_indexer_url_trace_movie() {
 
 #[tokio::test]
 async fn multi_indexer_url_trace_movie_lantern_tide() {
-    let (app, user, newznab, torznab) = setup().await;
+    let (app, user, newznab, torznab, _index_dir) = setup().await;
     let title_id = add_search_title(
         &app,
         &user,

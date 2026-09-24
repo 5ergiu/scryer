@@ -1651,6 +1651,8 @@ impl SettingsMutations {
             scryer_application::UpdateServiceSettings {
                 tls_cert_path: input.tls_cert_path,
                 tls_key_path: input.tls_key_path,
+                trusted_proxy_ips: input.trusted_proxy_ips,
+                reset_trusted_proxy_ips: input.reset_trusted_proxy_ips.unwrap_or(false),
             },
         )
         .await

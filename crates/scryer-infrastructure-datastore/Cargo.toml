@@ -1,6 +1,6 @@
 [package]
 name = "scryer-infrastructure-datastore"
-version = "0.21.7"
+version = "0.21.8"
 edition.workspace = true
 publish = false
 build = "build.rs"
@@ -37,7 +37,6 @@ windows-native-keyring-store = { workspace = true }
 
 [build-dependencies]
 blake3 = "1"
-cc = "1.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11"

@@ -237,9 +237,11 @@ use medium::*;
 use records::*;
 
 pub(crate) use catalog::discovery_library_growth_warrants_snapshot;
+#[cfg(test)]
+pub(crate) use context::build_discovery_library_context;
 pub(crate) use context::{
-    build_discovery_library_context, coalesce_pending_context_change, incremental_item_records,
-    pending_context_change_from_domain_event, public_feed_item_records,
+    build_projected_discovery_library_context, coalesce_pending_context_change,
+    incremental_item_records, pending_context_change_from_domain_event, public_feed_item_records,
     public_feed_section_records, snapshot_item_records,
 };
 pub(crate) use records::{

@@ -614,6 +614,7 @@ export function HistoryEventTable({
                             variant="outline"
                             size="sm"
                             disabled={retryingId === event.id}
+                            title={t("importHistory.retryHelp")}
                             onClick={() => void handleRetry(event)}
                           >
                             {retryingId === event.id ? (
@@ -659,6 +660,7 @@ export function HistoryEventTable({
                         ) : null}
                         {retryable ? (
                           <div className="space-y-2 border-t border-border/60 pt-4">
+                            <p className="text-xs text-muted-foreground">{t("importHistory.retryHelp")}</p>
                             {event.retryRequiresPassword ? (
                               <div className="space-y-2">
                                 <p className="text-xs text-muted-foreground">

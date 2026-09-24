@@ -37,6 +37,9 @@ impl AppUseCase {
             .titles
             .update_monitored(title_id, monitored)
             .await?;
+        // The monitored flag decides whether the matcher indexes this title at
+        // all, so the cached matcher is stale the instant it flips.
+        self.invalidate_monitored_title_matcher().await;
 
         self.reconcile_series_movie_link_monitoring_for_title(&title)
             .await?;
@@ -340,6 +343,10 @@ impl AppUseCase {
                     .titles
                     .set_titles_monitored(&disable, false)
                     .await?;
+            }
+            if !enable.is_empty() || !disable.is_empty() {
+                // Same reason as `persist_title_monitoring`, once per batch.
+                self.invalidate_monitored_title_matcher().await;
             }
 
             for (title, monitored) in batch {

@@ -11,22 +11,6 @@ use crate::RebaselineArgs;
 
 const CANONICAL_ADMIN_USER_ID: &str = "00000000000000000000000000000001";
 const CANONICAL_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
-const POSTGRES_BUILTIN_BASELINE_SEED_MIN_VERSION: i64 = 140;
-const POSTGRES_BUILTIN_BASELINE_SEED_SQL: &str = r#"INSERT INTO libraries (id, facet, name, slug, is_default, created_at, updated_at) VALUES ('anime_default_library', 'anime', 'Anime', 'anime', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO libraries (id, facet, name, slug, is_default, created_at, updated_at) VALUES ('movie_default_library', 'movie', 'Movies', 'movies', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO libraries (id, facet, name, slug, is_default, created_at, updated_at) VALUES ('series_default_library', 'series', 'Series', 'series', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO library_roots (id, library_id, path, normalized_path, is_default, created_at, updated_at) VALUES ('canonical_root_for_anime_default_library', 'anime_default_library', '/data/anime', '/data/anime', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO library_roots (id, library_id, path, normalized_path, is_default, created_at, updated_at) VALUES ('canonical_root_for_movie_default_library', 'movie_default_library', '/data/movies', '/data/movies', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO library_roots (id, library_id, path, normalized_path, is_default, created_at, updated_at) VALUES ('canonical_root_for_series_default_library', 'series_default_library', '/data/series', '/data/series', true, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-INSERT INTO quality_profiles (id, name, scope, scope_id, archival_quality, allow_unknown_quality, atmos_preferred, dolby_vision_allowed, detected_hdr_allowed, prefer_remux, allow_bd_disk, allow_upgrades, created_at, prefer_dual_audio, required_audio_languages, scoring_config) VALUES ('1080p', '1080P', 'system', NULL, '1080P', false, true, true, true, true, false, true, '1970-01-01T00:00:00Z', false, '[]', '{}');
-INSERT INTO quality_profiles (id, name, scope, scope_id, archival_quality, allow_unknown_quality, atmos_preferred, dolby_vision_allowed, detected_hdr_allowed, prefer_remux, allow_bd_disk, allow_upgrades, created_at, prefer_dual_audio, required_audio_languages, scoring_config) VALUES ('4k', '4K', 'system', NULL, '2160P', false, true, true, true, true, false, true, '1970-01-01T00:00:00Z', false, '[]', '{}');
-INSERT INTO quality_profile_quality_tiers (profile_id, quality_tier, sort_order, created_at) VALUES ('1080p', '1080P', 0, '1970-01-01T00:00:00Z');
-INSERT INTO quality_profile_quality_tiers (profile_id, quality_tier, sort_order, created_at) VALUES ('1080p', '720P', 1, '1970-01-01T00:00:00Z');
-INSERT INTO quality_profile_quality_tiers (profile_id, quality_tier, sort_order, created_at) VALUES ('4k', '1080P', 1, '1970-01-01T00:00:00Z');
-INSERT INTO quality_profile_quality_tiers (profile_id, quality_tier, sort_order, created_at) VALUES ('4k', '2160P', 0, '1970-01-01T00:00:00Z');
-INSERT INTO quality_profile_quality_tiers (profile_id, quality_tier, sort_order, created_at) VALUES ('4k', '720P', 2, '1970-01-01T00:00:00Z');
-INSERT INTO users (id, username, display_name, status, password_hash, passkey_public_key, locale, created_at, updated_at, last_login_at, account_kind, auth_session_version) VALUES ('00000000000000000000000000000001', 'admin', NULL, 'active', NULL, NULL, NULL, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', NULL, 'local', NULL);
-"#;
 
 pub(crate) fn run_rebaseline(ctx: &TaskContext, args: RebaselineArgs) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
@@ -37,9 +21,6 @@ async fn run_rebaseline_inner(ctx: &TaskContext, args: RebaselineArgs) -> Result
     if args.through <= 0 {
         bail!("--through must be a positive migration version");
     }
-
-    scryer_infrastructure_datastore::register_spellfix_auto_extension()
-        .map_err(|error| anyhow!(error.to_string()))?;
 
     let db_root = ctx.path("crates/scryer/src/db");
     let sqlite_baseline_relative = baseline_relative(args.through, BaselineEngine::Sqlite);
@@ -136,10 +117,7 @@ async fn run_rebaseline_inner(ctx: &TaskContext, args: RebaselineArgs) -> Result
         )
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
-        let postgres_dump = append_postgres_builtin_baseline_seeds(
-            args.through,
-            container.schema_dump(&target_db)?,
-        );
+        let postgres_dump = container.database_dump(&target_db, &target_pool).await?;
         write_baseline_file(&postgres_baseline_path, &postgres_dump)?;
         generated_paths.push(postgres_baseline_path.clone());
     }
@@ -241,7 +219,9 @@ async fn run_rebaseline_inner(ctx: &TaskContext, args: RebaselineArgs) -> Result
         )
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
-        let reference_dump = container.schema_dump(&reference_db)?;
+        let reference_dump = container
+            .database_dump(&reference_db, &reference_pool)
+            .await?;
 
         let verification_db = format!("rebaseline_verification_{}", unique_token(args.through));
         let verification_pool = container.create_database_pool(&verification_db).await?;
@@ -253,7 +233,9 @@ async fn run_rebaseline_inner(ctx: &TaskContext, args: RebaselineArgs) -> Result
         )
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
-        let verification_dump = container.schema_dump(&verification_db)?;
+        let verification_dump = container
+            .database_dump(&verification_db, &verification_pool)
+            .await?;
 
         if reference_dump != verification_dump {
             let debug_dir = ctx.path("tmp/rebaseline-debug");
@@ -468,16 +450,28 @@ impl DockerPostgresContainer {
     }
 
     async fn create_database_pool(&self, database: &str) -> Result<sqlx::PgPool> {
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.admin_database_url())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to connect to Docker PostgreSQL admin database at {}",
-                    self.admin_database_url()
-                )
-            })?;
+        // The image restarts the server once after its first-boot setup, and
+        // the readiness probe can pass against the instance about to go away.
+        let mut attempt = 0;
+        let admin_pool = loop {
+            match PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_database_url())
+                .await
+            {
+                Err(_) if attempt < 10 => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                result => break result,
+            }
+        }
+        .with_context(|| {
+            format!(
+                "failed to connect to Docker PostgreSQL admin database at {}",
+                self.admin_database_url()
+            )
+        })?;
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE DATABASE {}",
             quote_pg_ident(database)
@@ -519,6 +513,16 @@ impl DockerPostgresContainer {
         let dump = run_capture(&mut command)
             .with_context(|| format!("failed to dump PostgreSQL schema for database {database}"))?;
         Ok(normalize_postgres_schema_dump(&dump))
+    }
+}
+
+impl DockerPostgresContainer {
+    /// The schema followed by every row the migrations left behind, so a
+    /// baseline carries the same seed data a full replay would.
+    async fn database_dump(&self, database: &str, pool: &sqlx::PgPool) -> Result<String> {
+        let mut dump = self.schema_dump(database)?;
+        dump.push_str(&postgres_data_dump(pool).await?);
+        Ok(dump)
     }
 }
 
@@ -575,17 +579,6 @@ fn normalize_postgres_schema_dump(raw: &str) -> String {
     }
 
     out
-}
-
-fn append_postgres_builtin_baseline_seeds(through_version: i64, mut dump: String) -> String {
-    if through_version < POSTGRES_BUILTIN_BASELINE_SEED_MIN_VERSION {
-        return dump;
-    }
-    if !dump.ends_with('\n') {
-        dump.push('\n');
-    }
-    dump.push_str(POSTGRES_BUILTIN_BASELINE_SEED_SQL);
-    dump
 }
 
 fn should_skip_postgres_dump_line(line: &str) -> bool {
@@ -854,54 +847,306 @@ fn sql_literal(
         }
         _ => {
             let value = row.try_get::<String, _>(index)?;
+            let library_id =
+                if table == "library_roots" && column == "id" {
+                    Some(row.try_get::<String, _>("library_id").context(
+                        "failed to load library_roots.library_id during dump normalization",
+                    )?)
+                } else {
+                    None
+                };
             Ok(quote_sql_string(&normalize_dump_text_value(
-                row,
                 table,
                 column,
                 &value,
+                library_id.as_deref(),
                 normalization,
-            )?))
+            )))
         }
     }
 }
 
+/// `library_root_owner` is the row's `library_id`, present only for
+/// `library_roots.id`, whose generated value is replaced by a stable one.
 fn normalize_dump_text_value(
-    row: &sqlx::sqlite::SqliteRow,
     table: &str,
     column: &str,
     value: &str,
+    library_root_owner: Option<&str>,
     normalization: &DumpNormalization,
-) -> Result<String> {
-    if table == "library_roots" && column == "id" {
-        let library_id = row
-            .try_get::<String, _>("library_id")
-            .context("failed to load library_roots.library_id during dump normalization")?;
-        return Ok(format!("canonical_root_for_{library_id}"));
+) -> String {
+    if table == "library_roots"
+        && column == "id"
+        && let Some(library_id) = library_root_owner
+    {
+        return format!("canonical_root_for_{library_id}");
     }
 
     if column.ends_with("_at") && looks_like_utc_timestamp(value) {
-        return Ok(CANONICAL_TIMESTAMP.to_string());
+        return CANONICAL_TIMESTAMP.to_string();
     }
 
     let Some(admin_user_id) = normalization.admin_user_id.as_deref() else {
-        return Ok(value.to_string());
+        return value.to_string();
     };
 
     if value == admin_user_id
         && ((table == "users" && column == "id") || column.ends_with("user_id"))
     {
-        Ok(CANONICAL_ADMIN_USER_ID.to_string())
+        CANONICAL_ADMIN_USER_ID.to_string()
     } else {
-        Ok(value.to_string())
+        value.to_string()
     }
 }
 
+struct PostgresColumn {
+    name: String,
+    /// Rendered without quotes: numbers and booleans.
+    bare_literal: bool,
+    /// A native timestamp. Its text form never matches the ISO shape the
+    /// SQLite dump recognizes, and a seed row's clock reading means nothing.
+    timestamp: bool,
+}
+
+/// Every row in the public schema as `INSERT` statements, normalized the same
+/// way as the SQLite dump. Tables come out parents-first so the statements
+/// replay under their foreign keys, then by name; rows by primary key.
+async fn postgres_data_dump(pool: &sqlx::PgPool) -> Result<String> {
+    let tables = sqlx::query_scalar::<_, String>(
+        "SELECT tablename::text
+           FROM pg_tables
+          WHERE schemaname = 'public'
+            AND tablename NOT LIKE '\\_sqlx\\_%'
+          ORDER BY tablename",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to enumerate PostgreSQL tables for baseline dump")?;
+
+    let dependencies = sqlx::query_as::<_, (String, String)>(
+        "SELECT child.relname::text, parent.relname::text
+           FROM pg_constraint
+           JOIN pg_class child ON child.oid = pg_constraint.conrelid
+           JOIN pg_class parent ON parent.oid = pg_constraint.confrelid
+           JOIN pg_namespace ON pg_namespace.oid = child.relnamespace
+          WHERE pg_constraint.contype = 'f'
+            AND pg_namespace.nspname = 'public'
+            AND child.oid <> parent.oid",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load PostgreSQL foreign keys for baseline dump")?;
+
+    let admin_user_id = if tables.iter().any(|table| table == "users") {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id::text FROM users WHERE username = 'admin' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .context("failed to load admin user id for PostgreSQL baseline normalization")?
+    } else {
+        None
+    };
+    let normalization = DumpNormalization { admin_user_id };
+
+    let mut out = String::new();
+    let mut seeded_tables = Vec::new();
+    for table in parents_first(&tables, &dependencies)? {
+        let columns = postgres_table_columns(pool, &table).await?;
+        if columns.is_empty() {
+            continue;
+        }
+        let order_by = postgres_order_columns(pool, &table, &columns).await?;
+        let select_sql = format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            columns
+                .iter()
+                .map(|column| format!("{}::text", quote_pg_ident(&column.name)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            quote_pg_ident(&table),
+            order_by
+                .iter()
+                .map(|column| quote_pg_ident(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*select_sql))
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("failed to dump rows from PostgreSQL table {table}"))?;
+        if rows.is_empty() {
+            continue;
+        }
+        seeded_tables.push(table.clone());
+
+        let column_sql = columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let library_id_index = columns
+            .iter()
+            .position(|column| column.name == "library_id");
+        for row in rows {
+            let library_id = match library_id_index {
+                Some(index) if table == "library_roots" => {
+                    row.try_get::<Option<String>, _>(index)?
+                }
+                _ => None,
+            };
+            let mut values = Vec::with_capacity(columns.len());
+            for (index, column) in columns.iter().enumerate() {
+                values.push(match row.try_get::<Option<String>, _>(index)? {
+                    None => "NULL".to_string(),
+                    Some(value) if column.bare_literal => value,
+                    Some(_) if column.timestamp => quote_sql_string(CANONICAL_TIMESTAMP),
+                    Some(value) => quote_sql_string(&normalize_dump_text_value(
+                        &table,
+                        &column.name,
+                        &value,
+                        library_id.as_deref(),
+                        &normalization,
+                    )),
+                });
+            }
+            out.push_str(&format!(
+                "INSERT INTO {table} ({column_sql}) VALUES ({});\n",
+                values.join(", ")
+            ));
+        }
+    }
+
+    // A seeded row that took its key from a sequence leaves the restored
+    // sequence behind it; the next insert would collide.
+    let owned_sequences = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT sequence.relname::text, owner.relname::text, pg_attribute.attname::text
+           FROM pg_class sequence
+           JOIN pg_namespace ON pg_namespace.oid = sequence.relnamespace
+           JOIN pg_depend ON pg_depend.objid = sequence.oid AND pg_depend.deptype = 'a'
+           JOIN pg_class owner ON owner.oid = pg_depend.refobjid
+           JOIN pg_attribute ON pg_attribute.attrelid = owner.oid
+                            AND pg_attribute.attnum = pg_depend.refobjsubid
+          WHERE sequence.relkind = 'S'
+            AND pg_namespace.nspname = 'public'
+          ORDER BY sequence.relname",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load PostgreSQL sequence ownership for baseline dump")?;
+    for (sequence, table, column) in owned_sequences {
+        if seeded_tables.contains(&table) {
+            out.push_str(&format!(
+                "SELECT pg_catalog.setval('{sequence}', (SELECT MAX({column}) FROM {table}));\n"
+            ));
+        }
+    }
+
+    Ok(out)
+}
+
+async fn postgres_table_columns(pool: &sqlx::PgPool, table: &str) -> Result<Vec<PostgresColumn>> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT column_name::text, data_type::text
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = $1
+            AND is_generated = 'NEVER'
+          ORDER BY ordinal_position",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load PostgreSQL columns for {table}"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(name, data_type)| PostgresColumn {
+            name,
+            bare_literal: matches!(
+                data_type.as_str(),
+                "boolean" | "smallint" | "integer" | "bigint" | "numeric"
+            ),
+            timestamp: data_type.starts_with("timestamp"),
+        })
+        .collect())
+}
+
+/// Primary-key columns, or every column for a table without one. The SQLite
+/// dump's `library_roots` ordering is kept so both engines seed alike.
+async fn postgres_order_columns(
+    pool: &sqlx::PgPool,
+    table: &str,
+    columns: &[PostgresColumn],
+) -> Result<Vec<String>> {
+    if table == "library_roots" {
+        return Ok(vec![
+            "library_id".to_string(),
+            "normalized_path".to_string(),
+        ]);
+    }
+    let primary_key = sqlx::query_scalar::<_, String>(
+        "SELECT pg_attribute.attname::text
+           FROM pg_index
+           JOIN pg_class ON pg_class.oid = pg_index.indrelid
+           JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+           JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid
+                            AND pg_attribute.attnum = ANY(pg_index.indkey)
+          WHERE pg_index.indisprimary
+            AND pg_namespace.nspname = 'public'
+            AND pg_class.relname = $1
+          ORDER BY array_position(pg_index.indkey::int2[], pg_attribute.attnum)",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load PostgreSQL primary key for {table}"))?;
+    if primary_key.is_empty() {
+        Ok(columns.iter().map(|column| column.name.clone()).collect())
+    } else {
+        Ok(primary_key)
+    }
+}
+
+/// `tables` reordered so every table follows the tables it references, ties
+/// broken by name so the dump is stable.
+fn parents_first(tables: &[String], dependencies: &[(String, String)]) -> Result<Vec<String>> {
+    let mut remaining: Vec<&String> = tables.iter().collect();
+    let mut ordered: Vec<String> = Vec::with_capacity(tables.len());
+    while !remaining.is_empty() {
+        let ready = remaining.iter().position(|table| {
+            dependencies.iter().all(|(child, parent)| {
+                child != *table || ordered.contains(parent) || !tables.contains(parent)
+            })
+        });
+        let Some(index) = ready else {
+            bail!(
+                "PostgreSQL tables reference each other in a cycle: {}",
+                remaining
+                    .iter()
+                    .map(|table| table.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        ordered.push(remaining.remove(index).clone());
+    }
+    Ok(ordered)
+}
+
 fn looks_like_utc_timestamp(value: &str) -> bool {
-    value.len() == 20
-        && value.ends_with('Z')
+    let suffix = value.get(19..).unwrap_or("invalid");
+    let valid_suffix = suffix == "Z"
+        || (value.as_bytes().get(10) == Some(&b' ') && suffix.is_empty())
+        || suffix.strip_prefix('.').is_some_and(|fraction| {
+            let digits = fraction.strip_suffix('Z').unwrap_or(fraction);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    value.len() >= 19
+        && valid_suffix
         && value.as_bytes().get(4) == Some(&b'-')
         && value.as_bytes().get(7) == Some(&b'-')
-        && value.as_bytes().get(10) == Some(&b'T')
+        && matches!(value.as_bytes().get(10), Some(b'T' | b' '))
         && value.as_bytes().get(13) == Some(&b':')
         && value.as_bytes().get(16) == Some(&b':')
 }
@@ -920,6 +1165,53 @@ mod tests {
     use scryer_infrastructure_datastore::migration_assets::{
         EngineScope, LegacySqlBlock, SourceMigrationManifest,
     };
+
+    #[tokio::test]
+    async fn sqlite_current_baseline_matches_full_migration_replay() {
+        let mut dumps = Vec::new();
+        for enable_baselines in [false, true] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            scryer_infrastructure_datastore::migrations::replay_source_catalog_for_fresh_install(
+                &pool,
+                None,
+                enable_baselines,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !sqlite_table_exists(&pool, "title_search_spellfix")
+                    .await
+                    .unwrap()
+            );
+            dumps.push(canonical_database_dump(&pool).await.unwrap());
+            pool.close().await;
+        }
+        assert_eq!(dumps[0], dumps[1]);
+    }
+
+    #[test]
+    fn baseline_timestamps_cover_sqlite_default_and_fractional_formats() {
+        for value in [
+            "2026-09-21T13:54:49Z",
+            "2026-09-21T13:54:49.500Z",
+            "2026-09-21 13:54:49",
+            "2026-09-21 13:54:49.500",
+        ] {
+            assert!(looks_like_utc_timestamp(value), "{value}");
+        }
+        for value in [
+            "",
+            "arbitrary text",
+            "2026-09-21",
+            "2026-09-21T13:54:49.fooZ",
+        ] {
+            assert!(!looks_like_utc_timestamp(value), "{value}");
+        }
+    }
 
     #[test]
     fn normalize_postgres_schema_dump_strips_runtime_noise() {
@@ -951,23 +1243,52 @@ ALTER TABLE ONLY public.download_jobs
         );
     }
 
+    /// The SQLite baseline is held to a full migration replay above; seeding
+    /// the same tables with the same number of rows ties the PostgreSQL one to
+    /// it without a database server.
     #[test]
-    fn postgres_baseline_generation_appends_builtin_seed_data() {
-        let generated =
-            append_postgres_builtin_baseline_seeds(140, "CREATE TABLE users ();\n".into());
-        assert!(generated.ends_with(POSTGRES_BUILTIN_BASELINE_SEED_SQL));
-        assert_eq!(generated.matches("INSERT INTO ").count(), 14);
+    fn checked_in_baselines_seed_the_same_rows_on_both_engines() {
+        let seeded_rows = |relative: &str| {
+            let sql = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../crates/scryer/src/db")
+                    .join(relative),
+            )
+            .expect("checked-in baseline should be readable");
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for line in sql.lines() {
+                if let Some(rest) = line.strip_prefix("INSERT INTO ") {
+                    let table = rest.split(' ').next().unwrap_or_default().trim_matches('"');
+                    *counts.entry(table.to_string()).or_default() += 1;
+                }
+            }
+            counts
+        };
+
+        let sqlite = seeded_rows("baselines/0254_baseline.sql");
+        assert!(!sqlite.is_empty());
+        assert_eq!(sqlite, seeded_rows("postgres/baselines/0254_baseline.sql"));
+    }
+
+    #[test]
+    fn parents_first_orders_tables_under_their_foreign_keys() {
+        let tables = ["quality_profile_quality_tiers", "quality_profiles", "users"]
+            .map(str::to_string)
+            .to_vec();
+        let dependencies = vec![(
+            "quality_profile_quality_tiers".to_string(),
+            "quality_profiles".to_string(),
+        )];
         assert_eq!(
-            append_postgres_builtin_baseline_seeds(139, "CREATE TABLE users ();\n".into()),
-            "CREATE TABLE users ();\n"
+            parents_first(&tables, &dependencies).unwrap(),
+            ["quality_profiles", "quality_profile_quality_tiers", "users"]
         );
 
-        let checked_in = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../crates/scryer/src/db/postgres/baselines/0198_baseline.sql"),
-        )
-        .expect("active PostgreSQL baseline should be readable");
-        assert!(checked_in.ends_with(POSTGRES_BUILTIN_BASELINE_SEED_SQL));
+        let cycle = vec![
+            ("users".to_string(), "quality_profiles".to_string()),
+            ("quality_profiles".to_string(), "users".to_string()),
+        ];
+        assert!(parents_first(&tables, &cycle).is_err());
     }
 
     #[test]

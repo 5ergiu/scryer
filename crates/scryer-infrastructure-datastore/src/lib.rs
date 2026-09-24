@@ -12,8 +12,8 @@ pub mod migration_hook_ids {
     pub use crate::migrations::hook_ids::*;
 }
 
-pub mod spellfix {
-    pub use crate::sql::spellfix::*;
+pub mod spellfix_retirement {
+    pub use crate::sql::spellfix_retirement::*;
 }
 
 pub mod sqlite_services {
@@ -43,9 +43,9 @@ pub use scryer_infrastructure_sql::types::sqlite_url_with_create;
 pub use scryer_infrastructure_sql::types::{
     EmbeddedMigrationDescriptor, MigrationMode, MigrationStatus,
 };
-pub use spellfix::register_spellfix_auto_extension;
+pub use spellfix_retirement::retire_spellfix_virtual_table;
 pub use sqlite::SqliteServices;
 
 pub mod sql {
-    pub mod spellfix;
+    pub mod spellfix_retirement;
 }

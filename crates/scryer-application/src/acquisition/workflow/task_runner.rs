@@ -1642,7 +1642,7 @@ async fn plan_series_pack_for_title(
         &owned_episode_ids,
         claimed_episode_ids,
     )
-    .await;
+    .await?;
     let session_finalized = app
         .finalize_evaluated_search_session_or_warn(
             &search_outcome.search_session_id,
@@ -2194,7 +2194,7 @@ async fn evaluate_series_pack_candidates(
     episodes: &[Episode],
     owned_episode_ids: &HashSet<String>,
     claimed_episode_ids: &HashSet<String>,
-) -> (Vec<IndexerSearchResult>, HashSet<String>) {
+) -> AppResult<(Vec<IndexerSearchResult>, HashSet<String>)> {
     let mut groups = HashMap::<Vec<String>, Vec<(usize, IndexerSearchResult)>>::new();
     let mut collection_ids = HashSet::new();
 
@@ -2252,7 +2252,7 @@ async fn evaluate_series_pack_candidates(
         scoped_subject.submission_scope = SubmissionScope::EpisodeSet { episode_ids };
         for candidate in app
             .evaluate_search_results_for_subject(title, &scoped_subject, candidates, false)
-            .await
+            .await?
         {
             let key = crate::app_usecase_discovery::release_search_key(&candidate);
             if let Some(rank) = ranks_by_key.remove(&key) {
@@ -2262,7 +2262,7 @@ async fn evaluate_series_pack_candidates(
     }
 
     evaluated.sort_by_key(|(rank, _)| *rank);
-    (
+    Ok((
         evaluated
             .into_iter()
             .filter(|(_, candidate)| {
@@ -2276,7 +2276,7 @@ async fn evaluate_series_pack_candidates(
             .map(|(_, candidate)| candidate)
             .collect(),
         collection_ids,
-    )
+    ))
 }
 
 async fn series_pack_candidate_anchors(
@@ -3171,7 +3171,7 @@ async fn process_single_target(
             item,
             episode.as_ref(),
         )
-        .await;
+        .await?;
     // Season-pack shaping only, so season 0 is excluded: the specials season is
     // not a pack an indexer publishes, and `{title} S00` is not a query worth
     // spending. The subject keeps its `Some(0)` for the acceptance veto.
@@ -3650,7 +3650,7 @@ async fn process_single_target(
     // comparator as the rest rather than appended past it.
     let results = app
         .evaluate_search_results_for_subject(&search_title, &subject, scored, false)
-        .await;
+        .await?;
     // A finalize failure withholds coverage (the scope re-searches next cycle)
     // but never the grab walk below: these are live results in hand, and
     // retention bookkeeping does not outrank acquiring with them.
@@ -4286,12 +4286,12 @@ async fn propose_covered_episode_evidence(
         .await;
     let subject = app
         .resolve_release_search_subject_for_wanted_item(title, &search_title, item, episode)
-        .await;
+        .await?;
     // One evaluation, the same one the live path runs, so a pack and an episode
     // are compared on scores produced by the same comparator.
     let results = app
         .evaluate_search_results_for_subject(&search_title, &subject, extras, false)
-        .await;
+        .await?;
 
     let failed_routes = cycle.failed_routes();
     let db_blocklist = app.load_title_release_blocklist_signatures(&title.id).await;

@@ -514,6 +514,24 @@ pub(crate) fn terminal_download_cleanup_is_complete(
             | TerminalDownloadCleanupOutcome::HandedOff
     )
 }
+
+/// Of the complete outcomes, the ones that deliberately leave the client entry
+/// where it is.
+///
+/// `Removed` and `AlreadyGone` say the entry is gone, so nothing more will ever
+/// be heard about it. The rest say Scryer finished with the download and left
+/// the client holding it — the operator removing it later is the only thing
+/// that ends its binding, and only a row still in the tracker can notice that.
+pub(crate) fn terminal_download_cleanup_leaves_entry_in_client(
+    outcome: TerminalDownloadCleanupOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        TerminalDownloadCleanupOutcome::NotConfigured
+            | TerminalDownloadCleanupOutcome::SeedingEntryKept
+            | TerminalDownloadCleanupOutcome::HandedOff
+    )
+}
 pub(crate) async fn cleanup_routing_scope_for_title_id(
     app: &AppUseCase,
     title_id: Option<&str>,

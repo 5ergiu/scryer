@@ -4,12 +4,14 @@ use crate::acquisition::submission::{
     record_grab_submission_outcome,
 };
 use crate::acquisition_decision_helpers::is_download_submit_unavailable_error;
+#[cfg(test)]
+use crate::acquisition_release_search::title_with_bridge_cour_titles;
 use crate::acquisition_release_search::{
     AutoCandidateEvaluationContext, CandidateTitleMatch, ReleaseAutoDecisionCode,
     annotate_auto_decision, candidate_presents_identity_disambiguator, canonical_title_evidence,
     context_free_identity_anchor_keys, evaluate_auto_candidate, external_id_agreement,
     parsed_release_matches_title_evidence, serialize_decision_explanation,
-    series_movie_search_title, title_with_bridge_cour_titles,
+    series_movie_search_title,
 };
 use crate::acquisition_search_queries::{
     imdb_id_from_title, tmdb_id_from_external_ids, tvdb_id_from_external_ids,
@@ -486,21 +488,59 @@ struct TitleContextCandidate {
     evidence: crate::acquisition_release_search::CanonicalTitleEvidence,
 }
 
+/// Per-release candidate discovery for the RSS cycle.
+///
+/// This used to be a bank: every monitored title in an RSS-routed scope, each
+/// with its canonical evidence, four indexes over them and a spelling index
+/// over every name in the library, assembled once per poll. It now holds a
+/// matcher — a repository handle — and the poll's scope test; each release
+/// asks the persisted title index for the few titles it could possibly name.
 struct TitleContextBank {
-    spelling_index: Arc<crate::title_matching::relaxed::SpellingIndex>,
-    candidates: Vec<TitleContextCandidate>,
-    title_id_index: HashMap<String, usize>,
-    key_index: HashMap<String, Vec<usize>>,
-    tvdb_index: HashMap<String, Vec<usize>>,
-    tmdb_index: HashMap<String, Vec<usize>>,
-    imdb_index: HashMap<String, Vec<usize>>,
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    in_scope: Box<dyn Fn(&Title) -> bool + Send + Sync>,
 }
 
-impl std::ops::Deref for TitleContextBank {
-    type Target = [TitleContextCandidate];
+impl TitleContextBank {
+    fn new(
+        matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+        in_scope: impl Fn(&Title) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            matcher,
+            in_scope: Box::new(in_scope),
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.candidates
+    /// One candidate, with the evidence the proof below needs.
+    ///
+    /// The collision guard stays global: `shared_lookup_keys` is asked of the
+    /// whole catalog, because an out-of-scope or unmonitored title is still a
+    /// collider, and dropping it would silently turn an ambiguous match into a
+    /// confident one.
+    async fn candidate(
+        &self,
+        title: &Title,
+        spelling: &Arc<crate::title_matching::relaxed::SpellingCandidates>,
+    ) -> AppResult<TitleContextCandidate> {
+        // Discovery read the index, so the proof reads the same names: a cour
+        // name lives in the index and on no title row.
+        let evidence_title = self.matcher.evidence_title(title).await?;
+        let evidence = canonical_title_evidence(&evidence_title).with_ambiguity(
+            self.matcher
+                .identity_ambiguity(&evidence_title)
+                .await?
+                .with_spelling_candidates(spelling.clone()),
+        );
+        Ok(TitleContextCandidate {
+            info: TitleMatchInfo {
+                title_id: title.id.clone(),
+                year: title.year,
+                tvdb_id: tvdb_id_from_external_ids(&title.external_ids),
+                tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
+                imdb_id: imdb_id_from_title(title),
+            },
+            evidence,
+        })
     }
 }
 
@@ -529,131 +569,34 @@ fn scope_polls_any_rss_indexer(
     })
 }
 
-/// The unscoped bank: every monitored title is a candidate.
+/// The RSS lane's own answer to "which title is this feed item", over the
+/// catalog, for tests that need the lane rather than a stand-in for it. The
+/// poll builds exactly this bank; only the scope test is simplified, because
+/// a test's titles are all in scope.
 #[cfg(test)]
-fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
-    build_scoped_title_context_bank(titles, |_| true)
+pub(crate) async fn match_rss_release_to_catalog_title(
+    titles: std::sync::Arc<dyn crate::ports::TitleRepository>,
+    release_title: &str,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(
+        crate::import_title_resolution::MonitoredTitleMatcher::new(titles),
+        |_| true,
+    );
+    Ok(
+        match_release_to_title_context(release_title, &IndexerResponseAttributes::default(), &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
 }
 
-/// The bank, with its candidate set restricted to titles `in_scope` accepts.
-///
-/// Only the candidates narrow. The spelling index and the collision guard are
-/// built over every title given, because ambiguity is a property of the whole
-/// catalog: a title that RSS will never grab still makes another title's name
-/// ambiguous, and dropping it would silently turn an ambiguous match into a
-/// confident one.
-fn build_scoped_title_context_bank(
-    titles: &[Title],
-    in_scope: impl Fn(&Title) -> bool,
-) -> TitleContextBank {
-    let spelling_index = Arc::new(crate::title_matching::relaxed::SpellingIndex::new(titles));
-    let mut candidates = titles
-        .iter()
-        .filter(|title| title.monitored && in_scope(title))
-        .map(|title| TitleContextCandidate {
-            info: TitleMatchInfo {
-                title_id: title.id.clone(),
-                year: title.year,
-                tvdb_id: tvdb_id_from_external_ids(&title.external_ids),
-                tmdb_id: tmdb_id_from_external_ids(&title.external_ids),
-                imdb_id: imdb_id_from_title(title),
-            },
-            evidence: canonical_title_evidence(title),
-        })
-        .collect::<Vec<_>>();
-
-    // Pillar A tier 0 on the RSS path: collisions are grouped over ALL input
-    // titles (an unmonitored collider is still a collider) on the
-    // year-stripped key shape, so `Tide Chart` and `Tide Chart (2023)` collide.
-    // The bank itself stays monitored-only — no extra queries either way.
-    let mut titles_per_stripped_key: HashMap<&str, HashSet<&str>> = HashMap::new();
-    let all_title_keys = titles
-        .iter()
-        .map(crate::acquisition_release_search::canonical_title_lookup_keys)
-        .collect::<Vec<_>>();
-    for (title, keys) in titles.iter().zip(&all_title_keys) {
-        for key in keys {
-            titles_per_stripped_key
-                .entry(crate::import_title_resolution::strip_trailing_year_key(key))
-                .or_default()
-                .insert(title.id.as_str());
-        }
-    }
-    let shared_stripped_keys = titles_per_stripped_key
-        .into_iter()
-        .filter(|(_, title_ids)| title_ids.len() >= 2)
-        .map(|(key, _)| key.to_string())
-        .collect::<HashSet<_>>();
-
-    if !shared_stripped_keys.is_empty() {
-        for candidate in &mut candidates {
-            candidate.evidence = candidate.evidence.clone().with_ambiguity(
-                crate::acquisition_release_search::TitleIdentityAmbiguity::from_shared_keys(
-                    candidate
-                        .evidence
-                        .lookup_keys
-                        .iter()
-                        .filter(|key| {
-                            shared_stripped_keys.contains(
-                                crate::import_title_resolution::strip_trailing_year_key(key),
-                            )
-                        })
-                        .cloned()
-                        .collect(),
-                ),
-            );
-        }
-    }
-
-    let mut key_index = HashMap::<String, Vec<usize>>::new();
-    let mut tvdb_index = HashMap::<String, Vec<usize>>::new();
-    let mut tmdb_index = HashMap::<String, Vec<usize>>::new();
-    let mut imdb_index = HashMap::<String, Vec<usize>>::new();
-    for (index, candidate) in candidates.iter().enumerate() {
-        for key in &candidate.evidence.lookup_keys {
-            for indexed_key in [
-                key.as_str(),
-                crate::import_title_resolution::strip_trailing_year_key(key),
-            ] {
-                if indexed_key.is_empty() {
-                    continue;
-                }
-                let indexes = key_index.entry(indexed_key.to_string()).or_default();
-                if !indexes.contains(&index) {
-                    indexes.push(index);
-                }
-            }
-        }
-        for (value, index_map) in [
-            (candidate.info.tvdb_id.as_ref(), &mut tvdb_index),
-            (candidate.info.tmdb_id.as_ref(), &mut tmdb_index),
-            (candidate.info.imdb_id.as_ref(), &mut imdb_index),
-        ] {
-            if let Some(value) = value {
-                index_map
-                    .entry(value.to_ascii_lowercase())
-                    .or_default()
-                    .push(index);
-            }
-        }
-    }
-
-    for candidate in &mut candidates {
-        candidate.evidence.ambiguity.spelling_index = Some(spelling_index.clone());
-    }
-    TitleContextBank {
-        spelling_index,
-        title_id_index: candidates
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| (candidate.info.title_id.clone(), index))
-            .collect(),
-        candidates,
-        key_index,
-        tvdb_index,
-        tmdb_index,
-        imdb_index,
-    }
+/// A bank over an explicitly supplied set of titles. The set is the caller's,
+/// never the catalog.
+#[cfg(test)]
+fn build_title_context_bank(titles: &[Title]) -> TitleContextBank {
+    TitleContextBank::new(
+        crate::import_title_resolution::MonitoredTitleMatcher::over_titles(titles.to_vec()),
+        |_| true,
+    )
 }
 
 /// Extract the series/movie title portion from a release name by taking
@@ -697,74 +640,88 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
 /// contextual proof in [`crate::acquisition_release_search::match_parsed_release_to_title_evidence`].
 /// `response_attributes` carries the indexer's own id assertions so a collision
 /// on a shared canonical key can still be resolved (A2(2)).
-fn match_release_to_title_context<'a>(
+async fn match_release_to_title_context(
     release_title: &str,
     response_attributes: &IndexerResponseAttributes,
-    context_bank: &'a TitleContextBank,
-) -> Option<&'a TitleMatchInfo> {
+    context_bank: &TitleContextBank,
+) -> AppResult<Option<TitleMatchInfo>> {
     let anchor_keys = context_free_identity_anchor_keys(release_title);
-    let mut candidate_indexes = Vec::<usize>::new();
     // A stacked-alias name extracts as one glued title no single key equals, so
     // candidacy also probes every token prefix of each anchor key. Discovery
     // only — each candidate still faces the full anchored proof below.
+    let mut probes = Vec::<String>::new();
     for key in &anchor_keys {
         let tokens = key.split_whitespace().collect::<Vec<_>>();
         for end in 1..=tokens.len() {
-            if let Some(indexes) = context_bank.key_index.get(&tokens[..end].join(" ")) {
-                for index in indexes {
-                    if !candidate_indexes.contains(index) {
-                        candidate_indexes.push(*index);
-                    }
-                }
+            let probe = tokens[..end].join(" ");
+            if !probe.is_empty() && !probes.contains(&probe) {
+                probes.push(probe);
             }
         }
     }
-    for (asserted_id, index_map) in [
-        (
-            response_attributes.tvdb_id.as_ref(),
-            &context_bank.tvdb_index,
-        ),
-        (
-            response_attributes.tmdb_id.as_ref(),
-            &context_bank.tmdb_index,
-        ),
-        (
-            response_attributes.imdb_id.as_ref(),
-            &context_bank.imdb_index,
-        ),
+
+    let mut discovered = Vec::<Title>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+        for title in titles {
+            if title.monitored && (context_bank.in_scope)(&title) && seen.insert(title.id.clone()) {
+                discovered.push(title);
+            }
+        }
+    };
+
+    admit(
+        context_bank
+            .matcher
+            .titles_naming_key_shapes(&probes)
+            .await?,
+        &mut discovered,
+    );
+
+    for (source, asserted_id) in [
+        ("tvdb", response_attributes.tvdb_id.as_ref()),
+        ("tmdb", response_attributes.tmdb_id.as_ref()),
+        ("imdb", response_attributes.imdb_id.as_ref()),
     ] {
-        if let Some(asserted_id) = asserted_id
-            && let Some(indexes) = index_map.get(&asserted_id.to_ascii_lowercase())
-        {
-            for index in indexes {
-                if !candidate_indexes.contains(index) {
-                    candidate_indexes.push(*index);
-                }
-            }
-        }
+        let Some(asserted_id) = asserted_id else {
+            continue;
+        };
+        admit(
+            context_bank
+                .matcher
+                .monitored_titles_by_external_id(source, asserted_id)
+                .await?,
+            &mut discovered,
+        );
     }
+
     let (spelling_anchors, _) =
-        crate::title_matching::relaxed::neutral_spelling_anchors(release_title);
-    let spelling_ids = context_bank
-        .spelling_index
-        .candidates(&spelling_anchors, None);
-    for id in spelling_ids {
-        if let Some(&index) = context_bank.title_id_index.get(&id)
-            && !candidate_indexes.contains(&index)
-        {
-            candidate_indexes.push(index);
-        }
+        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
+    let spelling = context_bank
+        .matcher
+        .spelling_candidates(&spelling_anchors, None)
+        .await?;
+    let spelling_ids = spelling
+        .candidates(&spelling_anchors, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    admit(
+        context_bank.matcher.titles_by_ids(&spelling_ids).await?,
+        &mut discovered,
+    );
+
+    if discovered.is_empty() {
+        return Ok(None);
     }
-    if candidate_indexes.is_empty() {
-        return None;
+
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for title in &discovered {
+        candidates.push(context_bank.candidate(title, &spelling).await?);
     }
 
     let mut best: Option<(&TitleMatchInfo, i32, bool)> = None;
     let mut titles_per_matched_key: HashMap<String, HashSet<&str>> = HashMap::new();
-    for index in candidate_indexes {
-        let Some(candidate) = context_bank.candidates.get(index) else {
-            continue;
-        };
+    for candidate in &candidates {
         // The target-biased parse supplies year/projection semantics (it knows
         // when a year token is part of the title, as in `Signal Runner 2049`);
         // identity still anchors on the context-free extraction inside
@@ -858,10 +815,25 @@ fn match_release_to_title_context<'a>(
             title_count = colliding_titles.len(),
             "RSS sync: skipping release — shared canonical key matches multiple titles with no disambiguator"
         );
-        return None;
+        return Ok(None);
     }
 
-    best.map(|(info, _, _)| info)
+    Ok(best.map(|(info, _, _)| info.clone()))
+}
+
+/// The RSS cycle's title match over a repository-backed matcher, every title
+/// in scope: the same path a poll takes, for tests that own a catalog.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_release(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    Ok(
+        match_release_to_title_context(release_title, &IndexerResponseAttributes::default(), &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
 }
 
 #[cfg(test)]
@@ -1051,71 +1023,52 @@ impl AppUseCase {
 
         debug!("starting RSS sync cycle");
 
-        // Load all monitored titles for matching
-        let titles = self
+        // The scopes that hold monitored titles, as one grouped read. This
+        // used to be every title row in the catalog, kept for the whole cycle
+        // so a bank could be indexed over it.
+        let library_scopes = self
             .services
             .catalog
             .titles
-            .list_for_matching(None, None)
+            .monitored_library_scopes()
             .await?;
 
         // Union each monitored library's effective routing. Its overrides have
         // already replaced facet defaults and must not be re-enabled by them.
         //
-        // Resolved before the bank is built, because a scope whose routing
+        // Resolved before matching begins, because a scope whose routing
         // enables no indexer contributes no feed for its titles to match
-        // against: carrying them through the bank (and, for anime, querying a
-        // numbering bridge per title per cycle) is work with no possible
-        // outcome.
+        // against.
         let mut rss_plans = Vec::new();
-        let mut rss_covered_scopes: HashSet<(&str, &str)> = HashSet::new();
-        let library_scopes: std::collections::BTreeSet<_> = titles
-            .iter()
-            .filter(|title| title.monitored)
-            .map(|title| (title.library_id.as_str(), title.facet.as_str()))
-            .collect();
-        for (library_id, scope) in library_scopes {
+        let mut rss_covered_scopes: HashSet<(String, String)> = HashSet::new();
+        for (library_id, scope) in &library_scopes {
             let plan = self
                 .resolve_indexer_routing(Some(library_id), Some(scope))
                 .await;
             if scope_polls_any_rss_indexer(plan.as_ref(), &known_indexers) {
-                rss_covered_scopes.insert((library_id, scope));
+                rss_covered_scopes.insert((library_id.clone(), scope.clone()));
             }
-            rss_plans.push((scope, plan));
+            rss_plans.push((scope.as_str(), plan));
         }
         let rss_routing = merge_rss_indexer_routing(rss_plans);
-        let title_is_rss_covered = |title: &Title| {
-            rss_covered_scopes.contains(&(title.library_id.as_str(), title.facet.as_str()))
-        };
-
-        // A feed item named after an anime cour carries a name the catalog
-        // keeps only in the numbering bridge, so the bank is built over titles
-        // whose bridge names have been folded in. `titles` itself stays as the
-        // catalog gave it: routing and scoping below are about the title rows.
-        let mut bridged_titles = Vec::with_capacity(titles.len());
-        for title in &titles {
-            let bridge = if title.monitored
-                && title.facet == MediaFacet::Anime
-                && title_is_rss_covered(title)
-            {
-                self.services
-                    .catalog
-                    .shows
-                    .get_anime_numbering_bridge(&title.id)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                None
-            };
-            bridged_titles.push(title_with_bridge_cour_titles(title, bridge.as_ref()));
-        }
-        // Candidates are scoped; the collision guard and the spelling index
+        let covered = rss_covered_scopes.clone();
+        // Candidates are scoped; the collision guard and the spelling lane
         // stay global, because an out-of-scope title is still a collider and
         // still a near-spelling of an in-scope one.
-        let title_context_bank =
-            build_scoped_title_context_bank(&bridged_titles, title_is_rss_covered);
+        //
+        // A feed item named after an anime cour carries a name the catalog
+        // keeps only in the numbering bridge. The projection carries those
+        // names now, so the cycle no longer reads a bridge per anime title.
+        let title_context_bank = TitleContextBank::new(
+            crate::import_title_resolution::MonitoredTitleMatcher::new(
+                self.services.catalog.titles.clone(),
+            ),
+            move |title: &Title| {
+                covered.contains(&(title.library_id.clone(), title.facet.as_str().to_string()))
+            },
+        );
 
-        if title_context_bank.is_empty() {
+        if rss_covered_scopes.is_empty() {
             debug!("RSS sync: no monitored titles in an RSS-routed scope, skipping");
             metrics::counter!("scryer_rss_sync_total", "outcome" => "no_titles").increment(1);
             metrics::histogram!("scryer_rss_sync_duration_seconds")
@@ -1269,7 +1222,9 @@ impl AppUseCase {
                 &result.title,
                 &result.response_attributes,
                 &title_context_bank,
-            ) {
+            )
+            .await?
+            {
                 matched_count += 1;
                 matched_by_title
                     .entry(title_info.title_id.clone())
@@ -2153,9 +2108,16 @@ impl AppUseCase {
             };
 
             let search_title = series_movie_search_title(title, &link);
-            let subject = self
+            let subject = match self
                 .resolve_release_search_subject_for_wanted_item(title, &search_title, &wanted, None)
-                .await;
+                .await
+            {
+                Ok(subject) => subject,
+                Err(error) => {
+                    tracing::error!(%error, title_id = %title.id, "RSS series movie: title index unavailable");
+                    continue;
+                }
+            };
             let matched_releases = releases
                 .iter()
                 .filter(|release| {
@@ -2344,14 +2306,21 @@ impl AppUseCase {
         let search_title = self
             .release_search_title_for_wanted_item(title, &wanted, episode.as_ref())
             .await;
-        let mut subject = self
+        let mut subject = match self
             .resolve_release_search_subject_for_wanted_item(
                 title,
                 &search_title,
                 &wanted,
                 episode.as_ref(),
             )
-            .await;
+            .await
+        {
+            Ok(subject) => subject,
+            Err(error) => {
+                tracing::error!(%error, title_id = %title.id, "RSS acquisition: title index unavailable");
+                return;
+            }
+        };
         if let Some(scope) = scope_override.as_ref() {
             subject.submission_scope = scope.clone();
         }
@@ -3513,8 +3482,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn multilingual_spelling_rss_retains_raw_id_proof() {
+    #[tokio::test]
+    async fn multilingual_spelling_rss_retains_raw_id_proof() {
         let mut title = make_title("popes", "Die zwei Päpste", Some(2019));
         title.metadata_language = Some("deu".into());
         title.imdb_id = Some("tt8404614".into());
@@ -3523,16 +3492,23 @@ mod tests {
         let mut attributes = IndexerResponseAttributes::default();
         assert_eq!(
             match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
                 .expect("raw ID")
                 .title_id,
             title.id
         );
         attributes.imdb_id = Some("tt0000001".into());
-        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+        assert!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
+                .is_none()
+        );
     }
 
-    #[test]
-    fn multilingual_spelling_rss_rejects_a_different_roman_volume() {
+    #[tokio::test]
+    async fn multilingual_spelling_rss_rejects_a_different_roman_volume() {
         let mut title = make_title("volume-one", "Nymphomaniac Volume I", Some(2013));
         title.metadata_language = Some("eng".into());
         let bank = build_title_context_bank(&[title]);
@@ -3542,12 +3518,14 @@ mod tests {
                 &IndexerResponseAttributes::default(),
                 &bank
             )
+            .await
+            .expect("match release")
             .is_none()
         );
     }
 
-    #[test]
-    fn multilingual_spelling_rss_discovers_german_release_and_rejects_collision() {
+    #[tokio::test]
+    async fn multilingual_spelling_rss_discovers_german_release_and_rejects_collision() {
         let mut title = make_title("popes", "Die zwei Päpste", Some(2019));
         title.metadata_language = Some("deu".to_string());
         let raw = "Die.zwei.Paepste.2019.GERMAN.DL.1080p.HDR.WEB.H265-TSCC";
@@ -3555,6 +3533,8 @@ mod tests {
         let attributes = IndexerResponseAttributes::default();
         assert_eq!(
             match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
                 .expect("RSS spelling match")
                 .title_id,
             title.id
@@ -3562,11 +3542,16 @@ mod tests {
         let mut rival = make_title("other", "Die zwei Paepste", Some(2019));
         rival.monitored = false;
         let bank = build_title_context_bank(&[title, rival]);
-        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+        assert!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
+                .is_none()
+        );
     }
 
-    #[test]
-    fn multilingual_spelling_rss_native_typo_requires_consistent_ids() {
+    #[tokio::test]
+    async fn multilingual_spelling_rss_native_typo_requires_consistent_ids() {
         let mut title = make_title("native", "静かな夜に遠い空を見上げる物語", Some(2019));
         title.metadata_language = Some("jpn".to_string());
         title.imdb_id = Some("tt1234567".to_string());
@@ -3577,11 +3562,26 @@ mod tests {
         let bank = build_title_context_bank(std::slice::from_ref(&title));
         let raw = "静かな夜に遠い海を見上げる物語.2019.1080p.WEB.H265-GRP";
         let mut attributes = IndexerResponseAttributes::default();
-        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+        assert!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
+                .is_none()
+        );
         attributes.imdb_id = title.imdb_id.clone();
-        assert!(match_release_to_title_context(raw, &attributes, &bank).is_some());
+        assert!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
+                .is_some()
+        );
         attributes.tmdb_id = Some("99".to_string());
-        assert!(match_release_to_title_context(raw, &attributes, &bank).is_none());
+        assert!(
+            match_release_to_title_context(raw, &attributes, &bank)
+                .await
+                .expect("match release")
+                .is_none()
+        );
     }
 
     fn make_title(id: &str, name: &str, year: Option<i32>) -> Title {
@@ -3861,18 +3861,37 @@ mod tests {
 
     // ── build_title_context_bank ────────────────────────────────────
 
-    #[test]
-    fn context_bank_indexes_by_primary_name() {
+    /// The evidence the bank builds for one title, as the poll builds it.
+    async fn bank_candidate(bank: &TitleContextBank, title: &Title) -> TitleContextCandidate {
+        let spelling = Arc::new(
+            crate::title_matching::relaxed::SpellingCandidates::from_titles(std::slice::from_ref(
+                title,
+            )),
+        );
+        bank.candidate(title, &spelling)
+            .await
+            .expect("bank candidate")
+    }
+
+    #[tokio::test]
+    async fn context_bank_indexes_by_primary_name() {
         let titles = vec![make_title("t1", "Neon Cipher", Some(2010))];
         let bank = build_title_context_bank(&titles);
-        assert_eq!(bank.len(), 1);
-        assert_eq!(bank[0].info.title_id, "t1");
+        let candidate = bank_candidate(&bank, &titles[0]).await;
+        assert_eq!(candidate.info.title_id, "t1");
         assert!(
-            bank[0]
+            candidate
                 .evidence
                 .lookup_keys
                 .iter()
                 .any(|key| key == "neon cipher")
+        );
+        assert_eq!(
+            match_release("Neon.Cipher.2010.1080p.BluRay.x264", &bank)
+                .await
+                .expect("primary name is discoverable")
+                .title_id,
+            "t1"
         );
     }
 
@@ -3903,47 +3922,70 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn the_bank_narrows_to_scoped_titles_but_ambiguity_stays_global() {
+    #[tokio::test]
+    async fn the_bank_narrows_to_scoped_titles_but_ambiguity_stays_global() {
         let covered = make_title("t1", "Tide Chart", Some(2023));
         let mut out_of_scope = make_title("t2", "Tide Chart", Some(1999));
         out_of_scope.library_id = "library-out-of-scope".to_string();
 
         let titles = vec![covered.clone(), out_of_scope.clone()];
-        let bank = build_scoped_title_context_bank(&titles, |title| title.id == "t1");
+        // The matcher always sees the whole catalog; only the scope test narrows.
+        let scoped = TitleContextBank::new(
+            crate::import_title_resolution::MonitoredTitleMatcher::over_titles(titles.clone()),
+            |title| title.id == "t1",
+        );
 
-        assert_eq!(bank.len(), 1, "an unrouted scope contributes no candidate");
-        assert_eq!(bank[0].info.title_id, "t1");
+        assert_eq!(
+            match_release("Tide.Chart.2023.1080p.WEB.H264-GRP", &scoped)
+                .await
+                .expect("the covered title still matches")
+                .title_id,
+            "t1"
+        );
         assert!(
-            !bank[0].evidence.ambiguity.shared_lookup_keys.is_empty(),
+            match_release("Tide.Chart.1999.1080p.WEB.H264-GRP", &scoped)
+                .await
+                .is_none(),
+            "an unrouted scope contributes no candidate"
+        );
+
+        let scoped_ambiguity = bank_candidate(&scoped, &covered)
+            .await
+            .evidence
+            .ambiguity
+            .shared_lookup_keys;
+        assert!(
+            !scoped_ambiguity.is_empty(),
             "an out-of-scope title is still a collider: dropping it would turn an \
              ambiguous match into a confident one"
         );
 
         let unscoped = build_title_context_bank(&titles);
-        assert_eq!(unscoped.len(), 2);
         assert_eq!(
-            unscoped
-                .iter()
-                .find(|candidate| candidate.info.title_id == "t1")
-                .expect("covered title should be a candidate")
+            bank_candidate(&unscoped, &covered)
+                .await
                 .evidence
                 .ambiguity
                 .shared_lookup_keys,
-            bank[0].evidence.ambiguity.shared_lookup_keys,
+            scoped_ambiguity,
             "scoping must not change what the guard sees"
         );
     }
 
-    #[test]
-    fn context_bank_skips_unmonitored() {
+    #[tokio::test]
+    async fn context_bank_skips_unmonitored() {
         let titles = vec![make_unmonitored("t1", "Neon Cipher")];
         let bank = build_title_context_bank(&titles);
-        assert!(bank.is_empty());
+        assert!(
+            match_release("Neon.Cipher.2010.1080p.BluRay.x264", &bank)
+                .await
+                .is_none(),
+            "an unmonitored title is never a candidate"
+        );
     }
 
-    #[test]
-    fn context_bank_indexes_aliases() {
+    #[tokio::test]
+    async fn context_bank_indexes_aliases() {
         let titles = vec![make_title_with_aliases(
             "t1",
             "Lantern Tide",
@@ -3951,87 +3993,110 @@ mod tests {
             vec!["Lantern Tide: Hidden Current"],
         )];
         let bank = build_title_context_bank(&titles);
-        assert_eq!(bank.len(), 1);
+        let candidate = bank_candidate(&bank, &titles[0]).await;
         assert!(
-            bank[0]
+            candidate
                 .evidence
                 .lookup_keys
                 .iter()
                 .any(|key| key == "lantern tide")
         );
         assert!(
-            bank[0]
+            candidate
                 .evidence
                 .lookup_keys
                 .iter()
                 .any(|key| key == "lantern tide hidden current")
         );
+        for raw in [
+            "Lantern.Tide.2001.1080p.WEB.H264-GRP",
+            "Lantern.Tide.Hidden.Current.2001.1080p.WEB.H264-GRP",
+        ] {
+            assert_eq!(
+                match_release(raw, &bank)
+                    .await
+                    .unwrap_or_else(|| panic!("{raw} should match through the alias index"))
+                    .title_id,
+                "t1"
+            );
+        }
     }
 
-    #[test]
-    fn context_bank_keeps_multiple_titles_same_normalized_name() {
+    #[tokio::test]
+    async fn context_bank_keeps_multiple_titles_same_normalized_name() {
         let titles = vec![
             make_title("t1", "Glass Harbor", Some(1984)),
             make_title("t2", "Glass Harbor", Some(2021)),
         ];
         let bank = build_title_context_bank(&titles);
-        assert_eq!(bank.len(), 2);
+        for (year, expected) in [(1984, "t1"), (2021, "t2")] {
+            assert_eq!(
+                match_release(&format!("Glass.Harbor.{year}.1080p.WEB.H264-GRP"), &bank)
+                    .await
+                    .unwrap_or_else(|| panic!("{year} twin should stay discoverable"))
+                    .title_id,
+                expected,
+                "both same-name titles remain candidates"
+            );
+        }
     }
 
     // ── match_release_to_title_context ──────────────────────────────
 
     /// Title matching without any indexer id assertion — the shape almost every
     /// matcher test wants. Tests that exercise A2(2) call the real function.
-    fn match_release<'a>(
+    async fn match_release(
         release_title: &str,
-        context_bank: &'a TitleContextBank,
-    ) -> Option<&'a TitleMatchInfo> {
+        context_bank: &TitleContextBank,
+    ) -> Option<TitleMatchInfo> {
         match_release_to_title_context(
             release_title,
             &IndexerResponseAttributes::default(),
             context_bank,
         )
+        .await
+        .expect("match release")
     }
 
-    #[test]
-    fn match_exact_title() {
+    #[tokio::test]
+    async fn match_exact_title() {
         let titles = vec![make_title("t1", "Neon Cipher", Some(2010))];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Neon.Cipher.2010.1080p.BluRay.x264", &bank);
+        let result = match_release("Neon.Cipher.2010.1080p.BluRay.x264", &bank).await;
         assert!(result.is_some(), "exact match should succeed");
         assert_eq!(result.unwrap().title_id, "t1");
     }
 
-    #[test]
-    fn match_prefers_year_match() {
+    #[tokio::test]
+    async fn match_prefers_year_match() {
         let titles = vec![
             make_title("t1", "Glass Harbor", Some(1984)),
             make_title("t2", "Glass Harbor", Some(2021)),
         ];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Glass.Harbor.2021.1080p.BluRay.x264", &bank);
+        let result = match_release("Glass.Harbor.2021.1080p.BluRay.x264", &bank).await;
         assert!(result.is_some(), "result was None");
         assert_eq!(result.unwrap().title_id, "t2");
     }
 
-    #[test]
-    fn match_with_year_stripped_from_release() {
+    #[tokio::test]
+    async fn match_with_year_stripped_from_release() {
         // Release has "Title 2010", lookup only has "Title" (with year in metadata)
         let t = make_title("t1", "Neon Cipher", Some(2010));
         // Name doesn't include the year
         let titles = vec![t];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Neon.Cipher.2010.1080p.BluRay", &bank);
+        let result = match_release("Neon.Cipher.2010.1080p.BluRay", &bank).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
     }
 
-    #[test]
-    fn match_release_title_without_year_finds_title_with_year() {
+    #[tokio::test]
+    async fn match_release_title_without_year_finds_title_with_year() {
         // Lookup has "title 2024", release only has "title"
         let titles = vec![make_title("t1", "Glass Harbor 2024", Some(2024))];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Glass Harbor", &bank);
+        let result = match_release("Glass Harbor", &bank).await;
         // Should match via the reverse year-addition path
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
@@ -4041,8 +4106,8 @@ mod tests {
     /// than the catalog does (`Gasshou wo` against `Gassho o`). The canonical
     /// relaxed matcher knows those are the same romanization, so RSS must not
     /// drop the release.
-    #[test]
-    fn match_romanized_release_to_a_tagged_romaji_alias() {
+    #[tokio::test]
+    async fn match_romanized_release_to_a_tagged_romaji_alias() {
         let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
         title.facet = MediaFacet::Anime;
         title.metadata_language = Some("eng".into());
@@ -4064,10 +4129,10 @@ mod tests {
         let result = match_release(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
             &bank,
-        );
+        ).await;
 
         assert_eq!(
-            result.map(|info| info.title_id.as_str()),
+            result.map(|info| info.title_id).as_deref(),
             Some("t1"),
             "a romanized cour alias spelling must still resolve to the title"
         );
@@ -4077,8 +4142,8 @@ mod tests {
     /// only in the anime numbering bridge. A release named after the cour has
     /// to reach title matching with that name in evidence, or it is dropped
     /// before numbering is ever consulted.
-    #[test]
-    fn match_romanized_release_to_a_bridge_cour_title() {
+    #[tokio::test]
+    async fn match_romanized_release_to_a_bridge_cour_title() {
         let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
         title.facet = MediaFacet::Anime;
         title.metadata_language = Some("eng".into());
@@ -4102,10 +4167,10 @@ mod tests {
         let result = match_release(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
             &bank,
-        );
+        ).await;
 
         assert_eq!(
-            result.map(|info| info.title_id.as_str()),
+            result.map(|info| info.title_id).as_deref(),
             Some("t1"),
             "a bridge cour name must be title-matching evidence for its title"
         );
@@ -4114,8 +4179,8 @@ mod tests {
     /// The bridge is the only source allowed to add these names: a title with
     /// no bridge keeps exactly the aliases the catalog gave it, and a release
     /// named after a cour it does not carry still matches nothing.
-    #[test]
-    fn a_title_without_a_bridge_keeps_its_own_aliases_only() {
+    #[tokio::test]
+    async fn a_title_without_a_bridge_keeps_its_own_aliases_only() {
         let mut title = make_title("t1", "Fullmetal Alchemist Brotherhood", Some(2009));
         title.facet = MediaFacet::Anime;
         let bridged = title_with_bridge_cour_titles(&title, None);
@@ -4126,31 +4191,31 @@ mod tests {
         let result = match_release(
             "Hagane no Renkinjutsushi Saigo no Gasshou wo Utau Toki no Hikari to Kage no Uta - 23.720p.WEB-DL.AV1.AAC2.0-NTb",
             &bank,
-        );
+        ).await;
         assert!(
             result.is_none(),
             "without a bridge there is no cour name to match on"
         );
     }
 
-    #[test]
-    fn match_no_match_returns_none() {
+    #[tokio::test]
+    async fn match_no_match_returns_none() {
         let titles = vec![make_title("t1", "Neon Cipher", Some(2010))];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Totally.Unknown.Movie.2024.1080p", &bank);
+        let result = match_release("Totally.Unknown.Movie.2024.1080p", &bank).await;
         assert!(result.is_none());
     }
 
-    #[test]
-    fn match_empty_release_title_returns_none() {
+    #[tokio::test]
+    async fn match_empty_release_title_returns_none() {
         let titles = vec![make_title("t1", "Neon Cipher", Some(2010))];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("", &bank);
+        let result = match_release("", &bank).await;
         assert!(result.is_none());
     }
 
-    #[test]
-    fn match_via_alias() {
+    #[tokio::test]
+    async fn match_via_alias() {
         let titles = vec![make_title_with_aliases(
             "t1",
             "Lantern Tide",
@@ -4158,13 +4223,13 @@ mod tests {
             vec!["Hoshi to Kaze no Shirabe"],
         )];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Hoshi.to.Kaze.no.Shirabe", &bank);
+        let result = match_release("Hoshi.to.Kaze.no.Shirabe", &bank).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
     }
 
-    #[test]
-    fn match_via_release_aka_title_variant() {
+    #[tokio::test]
+    async fn match_via_release_aka_title_variant() {
         let titles = vec![make_title_with_aliases(
             "t1",
             "My Lighthouse",
@@ -4175,13 +4240,14 @@ mod tests {
         let result = match_release(
             "Mon.Phare.A.K.A.My.Lighthouse.2020.1080p.BluRay.x264-GRP",
             &bank,
-        );
+        )
+        .await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
     }
 
-    #[test]
-    fn match_via_release_slash_title_variant() {
+    #[tokio::test]
+    async fn match_via_release_slash_title_variant() {
         let titles = vec![make_title_with_aliases(
             "t1",
             "My Lighthouse",
@@ -4192,7 +4258,8 @@ mod tests {
         let result = match_release(
             "Mon Phare / My Lighthouse 2020 1080p BluRay x264-GRP",
             &bank,
-        );
+        )
+        .await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().title_id, "t1");
     }
@@ -4206,8 +4273,8 @@ mod tests {
         t
     }
 
-    #[test]
-    fn single_token_title_rejects_mid_name_containment_junk() {
+    #[tokio::test]
+    async fn single_token_title_rejects_mid_name_containment_junk() {
         let titles = vec![make_series_title("pals", "Pals", Some(1994))];
         let bank = build_title_context_bank(&titles);
         for junk in [
@@ -4218,29 +4285,30 @@ mod tests {
             "ToonsHub.My.Pals.Little.Cousin.Has.A.Grudge.S01E09.1080p.CR.WEB-DL.AAC2.0.H264",
         ] {
             assert!(
-                match_release(junk, &bank).is_none(),
+                match_release(junk, &bank).await.is_none(),
                 "containment junk must not match single-token title: {junk}"
             );
         }
     }
 
-    #[test]
-    fn single_token_title_still_matches_head_anchored_release() {
+    #[tokio::test]
+    async fn single_token_title_still_matches_head_anchored_release() {
         let titles = vec![make_series_title("pals", "Pals", Some(1994))];
         let bank = build_title_context_bank(&titles);
         let result = match_release(
             "Pals.S01E10.The.One.With.The.Parrot.1080p.BluRay.x264-GRP",
             &bank,
-        );
+        )
+        .await;
         assert!(result.is_some(), "head-anchored release must still match");
         assert_eq!(result.unwrap().title_id, "pals");
     }
 
-    #[test]
-    fn single_token_title_matches_with_year_corroboration() {
+    #[tokio::test]
+    async fn single_token_title_matches_with_year_corroboration() {
         let titles = vec![make_series_title("pals", "Pals", Some(1994))];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("Pals.1994.S02E14.1080p.WEB-DL.x264-GRP", &bank);
+        let result = match_release("Pals.1994.S02E14.1080p.WEB-DL.x264-GRP", &bank).await;
         assert!(result.is_some(), "year-corroborated release must match");
     }
 
@@ -4257,19 +4325,21 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn shared_bare_key_collision_skips_release_without_disambiguator() {
+    #[tokio::test]
+    async fn shared_bare_key_collision_skips_release_without_disambiguator() {
         // Two library titles answer to the same bare key and nothing separates
         // them, so assigning by score/title-id tiebreak would be a coin flip.
         let bank = tide_chart_rss_bank();
         assert!(
-            match_release("Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP", &bank).is_none(),
+            match_release("Tide.Chart.S02E01.1080p.WEB-DL.x264-GRP", &bank)
+                .await
+                .is_none(),
             "colliding bare key with no disambiguator must skip the release"
         );
     }
 
-    #[test]
-    fn shared_bare_key_collision_assigns_when_a_response_id_disambiguates() {
+    #[tokio::test]
+    async fn shared_bare_key_collision_assigns_when_a_response_id_disambiguates() {
         // A2(2) on the RSS lane: the release name is the same coin flip, but the
         // indexer asserted the live-action title's own TVDB id.
         let mut live_action = make_series_title("tide-chart-live", "Tide Chart", Some(2023));
@@ -4288,21 +4358,23 @@ mod tests {
                 ..Default::default()
             },
             &bank,
-        );
+        )
+        .await
+        .expect("match release");
 
         assert_eq!(
-            result.map(|info| info.title_id.as_str()),
+            result.map(|info| info.title_id).as_deref(),
             Some("tide-chart-live"),
             "an indexer-asserted id resolves the collision instead of skipping"
         );
     }
 
-    #[test]
-    fn shared_bare_key_collision_assigns_when_year_disambiguates() {
+    #[tokio::test]
+    async fn shared_bare_key_collision_assigns_when_year_disambiguates() {
         let bank = tide_chart_rss_bank();
-        let result = match_release("Tide.Chart.2023.S02E01.1080p.WEB-DL.x264-GRP", &bank);
+        let result = match_release("Tide.Chart.2023.S02E01.1080p.WEB-DL.x264-GRP", &bank).await;
         assert_eq!(
-            result.map(|info| info.title_id.as_str()),
+            result.map(|info| info.title_id).as_deref(),
             Some("tide-chart-live"),
             "a year-stamped release names exactly one of the colliding titles"
         );
@@ -4320,8 +4392,8 @@ mod tests {
         assert!(!parsed_release_matches_title_evidence(&parsed, &evidence));
     }
 
-    #[test]
-    fn electric_bloom_cannot_prove_the_bloom_alias() {
+    #[tokio::test]
+    async fn electric_bloom_cannot_prove_the_bloom_alias() {
         let titles = vec![make_title_with_aliases(
             "quiet-meadow",
             "The Quiet Meadow Blooms with Splendor",
@@ -4332,13 +4404,13 @@ mod tests {
         let release = "Electric.Bloom.S01E09.How.it.all.came.out.of.the.wash.MULTI.1080p.DSNP.WEB-DL.DDP5.1.H.264";
 
         assert!(
-            match_release(release, &bank).is_none(),
+            match_release(release, &bank).await.is_none(),
             "a partial alias must not project the target over an unexplained title token"
         );
     }
 
-    #[test]
-    fn one_word_alias_requires_year_or_external_id() {
+    #[tokio::test]
+    async fn one_word_alias_requires_year_or_external_id() {
         let titles = vec![make_title_with_aliases(
             "quiet-meadow",
             "The Quiet Meadow Blooms with Splendor",
@@ -4347,10 +4419,16 @@ mod tests {
         )];
         let bank = build_title_context_bank(&titles);
 
-        assert!(match_release("Bloom.S01E01.1080p.WEB-DL", &bank).is_none());
+        assert!(
+            match_release("Bloom.S01E01.1080p.WEB-DL", &bank)
+                .await
+                .is_none()
+        );
         assert_eq!(
             match_release("Bloom.2025.S01E01.1080p.WEB-DL", &bank)
-                .map(|info| info.title_id.as_str()),
+                .await
+                .map(|info| info.title_id)
+                .as_deref(),
             Some("quiet-meadow")
         );
     }
@@ -4364,30 +4442,32 @@ mod tests {
         assert!(parsed_release_matches_title_evidence(&parsed, &evidence));
     }
 
-    #[test]
-    fn multi_token_title_matches_with_unbracketed_group_prefix() {
+    #[tokio::test]
+    async fn multi_token_title_matches_with_unbracketed_group_prefix() {
         // One leading release-group token before the title, no year in the
         // release name — must still head-anchor within the tolerance window.
         let titles = vec![make_series_title("cookxfamily", "Cook x Family", None)];
         let bank = build_title_context_bank(&titles);
+        let candidate = bank_candidate(&bank, &titles[0]).await;
         let parsed = crate::parse_release_metadata_for_target(
             "ToonsHub.Cook.x.Family.S03E07.1080p.AMZN.WEB-DL.DDP2.0.H264",
-            &bank[0].evidence.parse_context,
+            &candidate.evidence.parse_context,
         );
         assert!(parsed_release_matches_title_evidence(
             &parsed,
-            &bank[0].evidence
+            &candidate.evidence
         ));
         let result = match_release(
             "ToonsHub.Cook.x.Family.S03E07.1080p.AMZN.WEB-DL.DDP2.0.H264",
             &bank,
-        );
+        )
+        .await;
         assert!(result.is_some(), "group-prefixed release must still match");
         assert_eq!(result.unwrap().title_id, "cookxfamily");
     }
 
-    #[test]
-    fn unknown_unbracketed_prefix_does_not_count_as_a_release_group() {
+    #[tokio::test]
+    async fn unknown_unbracketed_prefix_does_not_count_as_a_release_group() {
         let titles = vec![make_series_title("cookxfamily", "Cook x Family", None)];
         let bank = build_title_context_bank(&titles);
 
@@ -4396,12 +4476,13 @@ mod tests {
                 "RandomTag.Cook.x.Family.S03E07.1080p.AMZN.WEB-DL.DDP2.0.H264",
                 &bank,
             )
+            .await
             .is_none()
         );
     }
 
-    #[test]
-    fn title_matches_with_bracketed_group_prefix() {
+    #[tokio::test]
+    async fn title_matches_with_bracketed_group_prefix() {
         let titles = vec![make_series_title(
             "kagerou",
             "Kagerou Kanmuri no Koubou",
@@ -4411,7 +4492,8 @@ mod tests {
         let result = match_release(
             "[SubsPlease] Kagerou Kanmuri no Koubou - 12 (720p) [53B226F0]",
             &bank,
-        );
+        )
+        .await;
         assert!(
             result.is_some(),
             "bracket-group release must strip to a head-anchored title"
@@ -4419,8 +4501,8 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "kagerou");
     }
 
-    #[test]
-    fn hyphenated_bracket_group_prefix_matches() {
+    #[tokio::test]
+    async fn hyphenated_bracket_group_prefix_matches() {
         let titles = vec![make_series_title(
             "hoshiba",
             "Hoshiba Kaisei Nameless Wanderer",
@@ -4430,7 +4512,7 @@ mod tests {
         let result = match_release(
             "[Erai-raws] Hoshiba Kaisei Nameless Wanderer S03E05 [1080p CR WEB-DL AVC AAC][MultiSub]",
             &bank,
-        );
+        ).await;
         assert!(
             result.is_some(),
             "multi-token bracket group must strip out of the title span"
@@ -4438,8 +4520,8 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "hoshiba");
     }
 
-    #[test]
-    fn two_token_bracket_group_prefix_matches() {
+    #[tokio::test]
+    async fn two_token_bracket_group_prefix_matches() {
         let titles = vec![make_series_title(
             "silver-vale",
             "Silver Horizon Distant Vale",
@@ -4449,7 +4531,7 @@ mod tests {
         let result = match_release(
             "[Anime Time] Silver Horizon Distant Vale - 05 [1080p][HEVC 10bit x265][AAC][Multi Sub]",
             &bank,
-        );
+        ).await;
         assert!(
             result.is_some(),
             "space-separated bracket group must strip out of the title span"
@@ -4457,8 +4539,8 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "silver-vale");
     }
 
-    #[test]
-    fn known_release_group_dotted_prefix_matches() {
+    #[tokio::test]
+    async fn known_release_group_dotted_prefix_matches() {
         let titles = vec![make_series_title(
             "hoshiba",
             "Hoshiba Kaisei Nameless Wanderer",
@@ -4468,7 +4550,8 @@ mod tests {
         let result = match_release(
             "Erai-raws.Hoshiba.Kaisei.Nameless.Wanderer.S03E05.1080p.CR.WEB-DL",
             &bank,
-        );
+        )
+        .await;
         assert!(
             result.is_some(),
             "an unbracketed known release-group run must anchor past the prefix"
@@ -4476,8 +4559,8 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "hoshiba");
     }
 
-    #[test]
-    fn unknown_multi_token_prefix_still_rejects() {
+    #[tokio::test]
+    async fn unknown_multi_token_prefix_still_rejects() {
         let titles = vec![make_series_title(
             "hoshiba",
             "Hoshiba Kaisei Nameless Wanderer",
@@ -4489,13 +4572,14 @@ mod tests {
                 "Totally.Unknown.Grp.Hoshiba.Kaisei.Nameless.Wanderer.S03E05.1080p.WEB-DL",
                 &bank,
             )
+            .await
             .is_none(),
             "an unknown multi-token prefix is containment junk, not a group tag"
         );
     }
 
-    #[test]
-    fn bare_release_between_year_twins_keeps_deterministic_winner() {
+    #[tokio::test]
+    async fn bare_release_between_year_twins_keeps_deterministic_winner() {
         // A bare release naming two year-distinguished twins must resolve the
         // same way it always has — smallest title id — so the ambiguity
         // parking downstream has a stable subject. The year-suffixed lookup
@@ -4508,9 +4592,9 @@ mod tests {
             vec![reboot.clone(), classic.clone()],
         ] {
             let bank = build_title_context_bank(&titles);
-            let result = match_release("HarborTales.S01E01.1080p.WEB-DL.AAC2.0.H.264", &bank);
+            let result = match_release("HarborTales.S01E01.1080p.WEB-DL.AAC2.0.H.264", &bank).await;
             assert_eq!(
-                result.map(|info| info.title_id.as_str()),
+                result.map(|info| info.title_id).as_deref(),
                 Some("harbortales-1987"),
                 "bare twin release must keep the deterministic title-id tiebreak"
             );
@@ -4518,18 +4602,18 @@ mod tests {
 
         // The year-stamped control still resolves by year, not by tiebreak.
         let bank = build_title_context_bank(&[classic, reboot]);
-        let result = match_release("HarborTales.2017.S01E03.1080p.WEB-DL", &bank);
+        let result = match_release("HarborTales.2017.S01E03.1080p.WEB-DL", &bank).await;
         assert_eq!(
-            result.map(|info| info.title_id.as_str()),
+            result.map(|info| info.title_id).as_deref(),
             Some("harbortales-2017"),
         );
     }
 
-    #[test]
-    fn bracket_styled_title_matches() {
+    #[tokio::test]
+    async fn bracket_styled_title_matches() {
         let titles = vec![make_series_title("nagi-no-ko", "Nagi no Ko", None)];
         let bank = build_title_context_bank(&titles);
-        let result = match_release("[Nagi no Ko].S02E01.1080p.WEB-DL.AAC2.0.H.264", &bank);
+        let result = match_release("[Nagi no Ko].S02E01.1080p.WEB-DL.AAC2.0.H.264", &bank).await;
         assert!(
             result.is_some(),
             "a bracket-styled title with no title text after the brackets must match"
@@ -4537,25 +4621,28 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "nagi-no-ko");
     }
 
-    #[test]
-    fn bracket_group_before_unknown_title_still_rejects() {
+    #[tokio::test]
+    async fn bracket_group_before_unknown_title_still_rejects() {
         let titles = vec![make_series_title("judas", "Judas", Some(2021))];
         let bank = build_title_context_bank(&titles);
         assert!(
-            match_release("[Judas].Some.Other.Show.S01E01.1080p.WEB-DL", &bank).is_none(),
+            match_release("[Judas].Some.Other.Show.S01E01.1080p.WEB-DL", &bank)
+                .await
+                .is_none(),
             "a bracket group followed by another show's title text is a tag, not the subject"
         );
     }
 
-    #[test]
-    fn stacked_alias_release_matches_via_bank() {
+    #[tokio::test]
+    async fn stacked_alias_release_matches_via_bank() {
         let mut title = make_series_title("vale", "Silver Horizon Beyond the Vale", Some(2023));
         title.aliases = vec!["Sora no Vale".to_string()];
         let bank = build_title_context_bank(&[title]);
         let result = match_release(
             "[SubsPlease] Sora.no.Vale.Silver.Horizon.Beyond.the.Vale.-.01.[1080p].[HEVC]",
             &bank,
-        );
+        )
+        .await;
         assert!(
             result.is_some(),
             "a name stacking two alias forms of the same subject must anchor"
@@ -4563,8 +4650,8 @@ mod tests {
         assert_eq!(result.unwrap().title_id, "vale");
     }
 
-    #[test]
-    fn trailing_year_title_matches_with_and_without_release_year() {
+    #[tokio::test]
+    async fn trailing_year_title_matches_with_and_without_release_year() {
         let titles = vec![make_series_title(
             "sr2049",
             "Signal Runner 2049",
@@ -4575,7 +4662,7 @@ mod tests {
             "Signal.Runner.2049.2017.2160p.WEB-DL.DDP5.1.HDR.HEVC",
             "Signal.Runner.2049.1080p.BluRay.x264",
         ] {
-            let result = match_release(release, &bank);
+            let result = match_release(release, &bank).await;
             assert!(
                 result.is_some(),
                 "year-suffixed title must anchor even when the boundary heuristic splits it: {release}"

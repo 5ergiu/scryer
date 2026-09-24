@@ -25,6 +25,24 @@ pub const DASHBOARD_ACTIVITY_MIN_WINDOW_HOURS: i64 = 1;
 /// practical ceiling for an interactive dashboard read.
 pub const DASHBOARD_ACTIVITY_MAX_WINDOW_HOURS: i64 = 168;
 
+fn dashboard_import_kind(
+    event_type: &TitleHistoryEventType,
+    evidence: Option<&crate::DashboardImportEvidence>,
+) -> Option<crate::DashboardImportKind> {
+    use crate::DashboardImportKind;
+    if *event_type == TitleHistoryEventType::FileUpgraded {
+        Some(DashboardImportKind::Upgrade)
+    } else {
+        match evidence {
+            // Upgrade facts commit before completion artifacts. Suppress the
+            // duplicate completion even when historical artifacts lack file IDs.
+            Some(evidence) if evidence.is_upgrade => None,
+            Some(_) => Some(DashboardImportKind::NewImport),
+            None => Some(DashboardImportKind::Imported),
+        }
+    }
+}
+
 async fn load_library_scan_visibility(
     app: &AppUseCase,
     actor: &User,
@@ -1514,6 +1532,137 @@ impl AppUseCase {
         self.subscribe_job_run_events(actor).await
     }
 
+    pub async fn dashboard_recent_imports(
+        &self,
+        actor: &User,
+        limit: usize,
+    ) -> AppResult<Vec<crate::DashboardRecentImport>> {
+        let limit = limit.clamp(1, 50);
+        let library_ids = self
+            .authorized_library_ids(actor, None, LibraryPermission::View)
+            .await?;
+        let mut items = Vec::with_capacity(limit);
+        let mut before = None;
+        let mut seen_files = HashSet::new();
+        // Bound even pathological legacy logs with repeated facts. Normal pages
+        // need one batch; paired completion/upgrade facts may need another.
+        for _ in 0..25 {
+            let events = self
+                .services
+                .events
+                .domain_events
+                .recent_import_events(&library_ids, before, 8)
+                .await?;
+            if events.is_empty() {
+                break;
+            }
+            before = events.last().map(|event| event.sequence);
+            'events: for event in &events {
+                let file_id = match &event.payload {
+                    DomainEventPayload::MediaFileUpgraded(data) => data.current_file_id.clone(),
+                    _ => None,
+                };
+                let Some(mut base) = title_history_record_from_domain_event(event) else {
+                    continue;
+                };
+                let mut episode_ids = std::mem::take(&mut base.episode_ids)
+                    .into_iter()
+                    .map(Some)
+                    .collect::<Vec<_>>();
+                if episode_ids.len() > 1 {
+                    base.size_bytes = None;
+                }
+                base.data_json = None;
+                if episode_ids.is_empty() {
+                    episode_ids.push(None);
+                }
+                let import_ids = base.import_id.clone().into_iter().collect::<Vec<_>>();
+                // Process mixed packs in small evidence batches before limiting
+                // accepted rows, so upgrades cannot hide later new episodes.
+                for chunk in episode_ids.chunks(50) {
+                    let ids = chunk.iter().flatten().cloned().collect::<Vec<_>>();
+                    let artifacts = self
+                        .services
+                        .workflow
+                        .import_artifacts
+                        .dashboard_import_artifacts(&import_ids, &ids)
+                        .await?;
+                    for episode_id in chunk {
+                        let artifact = artifacts.iter().find(|artifact| {
+                            artifact.import_id == base.import_id
+                                && artifact.title_id == base.title_id
+                                && artifact.episode_id == *episode_id
+                        });
+                        let Some(kind) = dashboard_import_kind(&base.event_type, artifact) else {
+                            continue;
+                        };
+                        let identity = file_id
+                            .clone()
+                            .or_else(|| artifact.and_then(|a| a.imported_media_file_id.clone()));
+                        if let Some(identity) = identity
+                            && !seen_files.insert((identity, episode_id.clone()))
+                        {
+                            continue;
+                        }
+                        let mut record = base.clone();
+                        record.episode_id = episode_id.clone();
+                        record.id =
+                            format!("{}:{}", record.id, episode_id.as_deref().unwrap_or("movie"));
+                        items.push(crate::DashboardRecentImport {
+                            record,
+                            episode: None,
+                            kind,
+                        });
+                        if items.len() == limit {
+                            break 'events;
+                        }
+                    }
+                }
+            }
+            if items.len() == limit || events.len() < 8 {
+                break;
+            }
+        }
+        let title_ids = items
+            .iter()
+            .filter_map(|i| i.record.title_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let episode_ids = items
+            .iter()
+            .filter_map(|i| i.record.episode_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let titles = self.services.catalog.titles.get_by_ids(&title_ids).await?;
+        let episodes = self
+            .services
+            .catalog
+            .shows
+            .get_episodes_by_ids(&episode_ids)
+            .await?;
+        // Recheck current library ownership after hydration, including moves
+        // racing the event read. Never expose metadata from a different title.
+        items.retain_mut(|item| {
+            let Some(title) = titles.iter().find(|t| {
+                Some(&t.id) == item.record.title_id.as_ref() && library_ids.contains(&t.library_id)
+            }) else {
+                return false;
+            };
+            item.record.title_name = Some(title.name.clone());
+            item.record.library_id = Some(title.library_id.clone());
+            item.record.facet = Some(title.facet.clone());
+            item.record.poster_url = title.poster_url.clone();
+            item.episode = episodes
+                .iter()
+                .find(|e| Some(&e.id) == item.record.episode_id.as_ref() && e.title_id == title.id)
+                .cloned();
+            true
+        });
+        Ok(items)
+    }
+
     pub async fn list_title_history(
         &self,
         actor: &User,
@@ -1663,6 +1812,35 @@ impl AppUseCase {
 #[cfg(test)]
 mod title_history_request_filter_tests {
     use super::*;
+
+    #[test]
+    fn dashboard_import_classification_preserves_legacy_and_suppresses_upgrade_duplicates() {
+        use crate::DashboardImportKind::{Imported, NewImport, Upgrade};
+        let mut evidence = crate::DashboardImportEvidence {
+            import_id: Some("attempt".into()),
+            title_id: Some("title".into()),
+            episode_id: Some("episode".into()),
+            is_upgrade: true,
+            imported_media_file_id: None,
+        };
+        assert_eq!(
+            dashboard_import_kind(&TitleHistoryEventType::Imported, None),
+            Some(Imported)
+        );
+        assert_eq!(
+            dashboard_import_kind(&TitleHistoryEventType::Imported, Some(&evidence)),
+            None
+        );
+        assert_eq!(
+            dashboard_import_kind(&TitleHistoryEventType::FileUpgraded, Some(&evidence)),
+            Some(Upgrade)
+        );
+        evidence.is_upgrade = false;
+        assert_eq!(
+            dashboard_import_kind(&TitleHistoryEventType::Imported, Some(&evidence)),
+            Some(NewImport)
+        );
+    }
 
     fn filter(event_types: Option<Vec<TitleHistoryEventType>>) -> TitleHistoryFilter {
         TitleHistoryFilter {

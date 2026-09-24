@@ -9,6 +9,7 @@ import {
   FileVideo,
   FolderInput,
   HardDrive,
+  Hourglass,
   Inbox,
   Puzzle,
   Trash2,
@@ -83,15 +84,18 @@ import {
   attentionTotal,
   compareProviderRows,
   formatCompactAge,
+  formatCompactCountdown,
   formatTerabytes,
   groupStorageRootsByLibrary,
+  isProviderCoolingDown,
   isProviderErroring,
   summarizeIndexerHealth,
   usagePercent,
   usageTone,
 } from "@/lib/utils/dashboard";
 import { selectPosterVariantUrl } from "@/lib/utils/poster-images";
-import { buildViewPath } from "@/lib/utils/routing";
+import type { DashboardPanelState, DashboardPanelStates } from "@/lib/utils/dashboard-refresh";
+import { buildOverviewDetailPath, buildViewPath } from "@/lib/utils/routing";
 
 /** Rows visible before the top panels start scrolling. */
 const PREVIEW_PANE_CLASS = "max-h-[172px] overflow-y-auto";
@@ -116,7 +120,8 @@ const TABLE_HEAD_RIGHT_CLASS =
   "sticky top-0 z-10 h-8 bg-card px-3 text-right text-[10px] uppercase";
 
 export type DashboardViewProps = {
-  loading: boolean;
+  panels: DashboardPanelStates;
+  storageRoots: DashboardStorageRoot[];
   overview: DashboardOverview | null;
   requests: DashboardRequest[];
   importActivity: DownloadQueueItem[];
@@ -138,8 +143,16 @@ export type DashboardViewProps = {
   onUpdateAllPlugins: () => void;
 };
 
+function DashboardPanelLoad({ state, children }: { state: DashboardPanelState; children: React.ReactNode }) {
+  return <div className="min-w-0" aria-busy={state.loading}>
+    {state.error ? <p role="alert" className="p-3 text-sm text-destructive">{state.error}</p> : null}
+    {state.ready ? children : state.loading ? <Skeleton className="h-48 w-full" /> : null}
+  </div>;
+}
+
 export function DashboardView({
-  loading,
+  panels,
+  storageRoots,
   overview,
   requests,
   importActivity,
@@ -164,9 +177,6 @@ export function DashboardView({
     [overview?.indexers],
   );
 
-  if (loading && !overview) {
-    return <DashboardSkeleton />;
-  }
 
   return (
     <div className="flex w-full flex-col gap-3 px-5 pb-10 pt-4">
@@ -185,9 +195,10 @@ export function DashboardView({
         onUpdateAllPlugins={onUpdateAllPlugins}
       />
 
-      <StatsRow overview={overview} />
+      <DashboardPanelLoad state={panels.overview}><StatsRow overview={overview} /></DashboardPanelLoad>
 
       <div className="grid grid-cols-1 gap-3 min-[1241px]:grid-cols-2 min-[1501px]:grid-cols-3">
+        <DashboardPanelLoad state={panels.requests}>
         <RequestsPanel
           requests={requests}
           totalCount={overview?.pendingRequestCount ?? requests.length}
@@ -195,6 +206,8 @@ export function DashboardView({
           onApprove={onApproveRequest}
           onDismiss={onDismissRequest}
         />
+        </DashboardPanelLoad>
+        <DashboardPanelLoad state={panels.imports}>
         <ManualImportsPanel
           items={importActivity}
           totalCount={importActivityTotal}
@@ -203,17 +216,18 @@ export function DashboardView({
           onMarkFailed={onMarkImportFailed}
           onRemove={onRemoveImportItem}
         />
-        <RecentlyImportedPanel items={recentImports} />
+        </DashboardPanelLoad>
+        <DashboardPanelLoad state={panels.recent}><RecentlyImportedPanel items={recentImports} /></DashboardPanelLoad>
       </div>
 
       <div className="grid grid-cols-1 gap-3 min-[1241px]:grid-cols-2">
-        <IndexersPanel overview={overview} />
-        <DownloadClientsPanel overview={overview} queueItems={queueItems} />
+        <DashboardPanelLoad state={panels.overview}><IndexersPanel overview={overview} /></DashboardPanelLoad>
+        <DashboardPanelLoad state={panels.overview}><DownloadClientsPanel overview={overview} queueItems={queueItems} /></DashboardPanelLoad>
       </div>
 
       <div className="grid grid-cols-1 gap-3 min-[1241px]:grid-cols-2">
-        <StoragePanel overview={overview} />
-        <ActiveQueuePanel items={queueItems} totalCount={queueTotal} />
+        <DashboardPanelLoad state={panels.storage}><StoragePanel roots={storageRoots} /></DashboardPanelLoad>
+        <DashboardPanelLoad state={panels.queue}><ActiveQueuePanel items={queueItems} totalCount={queueTotal} /></DashboardPanelLoad>
       </div>
     </div>
   );
@@ -794,21 +808,21 @@ type RecentlyImportedHoverPreview = {
 function calendarEpisodeForImportedItem(item: DashboardImportedItem): CalendarEpisodeItem {
   const facet = normalizeFacet(item.facet)?.toLowerCase() ?? "series";
   return {
-    id: item.id,
+    id: item.episode?.id ?? item.id,
     titleId: item.titleId,
     libraryId: item.libraryId ?? "Unknown library",
     libraryName: item.libraryId,
     titleName: item.titleName ?? item.titleId,
     titleFacet: facet,
-    seasonNumber: null,
-    episodeNumber: null,
-    episodeTitle: item.quality,
-    overview: formatBytes(item.sizeBytes),
-    imageUrl: item.posterUrl,
-    airDate: item.occurredAt,
+    seasonNumber: item.episode?.seasonNumber ?? null,
+    episodeNumber: item.episode?.episodeNumber ?? null,
+    episodeTitle: item.episode?.title ?? null,
+    overview: item.episode?.overview ?? null,
+    imageUrl: item.episode?.imageUrl ?? null,
+    airDate: item.episode?.airDate ?? null,
     monitored: true,
     playbackLinks: [],
-    mediaAvailability: { state: "UNMONITORED", primaryQualityLabel: null },
+    mediaAvailability: { state: "AVAILABLE", primaryQualityLabel: item.quality },
   };
 }
 
@@ -886,12 +900,16 @@ function RecentlyImportedPanel({ items }: { items: DashboardImportedItem[] }) {
                   className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-[7px] last:border-b-0"
                   onMouseEnter={(event) => handleRowMouseEnter(item, event.currentTarget)}
                   onMouseLeave={scheduleHoverPreviewClose}
+                  onFocus={(event) => handleRowMouseEnter(item, event.currentTarget)}
+                  onBlur={scheduleHoverPreviewClose}
+                  onKeyDown={(event) => { if (event.key === "Escape") setHoverPreview(null); }}
                 >
                   <RowPoster posterUrl={item.posterUrl} facet={facet} />
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-[12px] font-medium text-[var(--scry-ink2)]">
+                    <Link className="truncate text-[12px] font-medium text-[var(--scry-ink2)] hover:underline" to={`${buildOverviewDetailPath(facet === "MOVIE" ? "movies" : facet === "ANIME" ? "anime" : "series", null, null)}?id=${encodeURIComponent(item.titleId)}${item.episode ? `&episodeId=${encodeURIComponent(item.episode.id)}` : ""}`}>
                       {item.titleName ?? item.titleId}
-                    </span>
+                    </Link>
+                    {item.episode ? <span className="truncate text-[11px]">{`S${item.episode.seasonNumber ?? "?"}E${item.episode.episodeNumber ?? "?"}`} {item.episode.title}</span> : null}
                     <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--scry-muted2)]">
                       {facet ? <FacetChip facet={facet} /> : null}
                       {item.quality ? (
@@ -900,12 +918,14 @@ function RecentlyImportedPanel({ items }: { items: DashboardImportedItem[] }) {
                       <span className="tabular-nums">{formatBytes(item.sizeBytes)}</span>
                     </span>
                   </span>
-                  {item.eventType === "FILE_UPGRADED" ? (
+                  {item.kind === "UPGRADE" ? (
                     <Badge tone="info" className="shrink-0 px-1 py-0 text-[10px]">
                       <ArrowUp className="h-2.5 w-2.5" aria-hidden="true" />
                       {t("dashboard.upgradeBadge")}
                     </Badge>
-                  ) : null}
+                  ) : (
+                    <Badge className="shrink-0 px-1 py-0 text-[10px]">{t(item.kind === "NEW_IMPORT" ? "dashboard.newImportBadge" : "history.imported")}</Badge>
+                  )}
                   <AgeLabel isoDate={item.occurredAt} />
                 </li>
               );
@@ -916,6 +936,7 @@ function RecentlyImportedPanel({ items }: { items: DashboardImportedItem[] }) {
       {!isMobile && hoverPreview ? (
         <CalendarEventHoverCard
           key={hoverPreview.item.id}
+          posterFallbackUrl={hoverPreview.item.posterUrl}
           preview={{ episode: calendarEpisodeForImportedItem(hoverPreview.item), anchor: hoverPreview.anchor }}
           onMouseEnter={clearHoverTimer}
           onMouseLeave={scheduleHoverPreviewClose}
@@ -951,11 +972,13 @@ function IndexersPanel({ overview }: { overview: DashboardOverview | null }) {
   // healthy one, and unused healthy ones settle to the bottom.
   const sortedIndexers = React.useMemo(() => {
     const entry = (indexer: (typeof indexers)[number]) => ({
-      needsAttention: isProviderErroring(
-        indexer.isEnabled,
-        indexer.lastHealthStatus,
-        indexer.lastErrorMessage,
-      ),
+      needsAttention:
+        !isProviderCoolingDown(indexer.rateLimitedUntil) &&
+        isProviderErroring(
+          indexer.isEnabled,
+          indexer.lastHealthStatus,
+          indexer.lastErrorMessage,
+        ),
       usage:
         (statsById.get(indexer.id)?.queriesLast24H ?? 0) +
         (statsById.get(indexer.id)?.grabsLast24H ?? 0),
@@ -1063,6 +1086,7 @@ function IndexersPanel({ overview }: { overview: DashboardOverview | null }) {
                       lastHealthStatus={indexer.lastHealthStatus}
                       lastError={indexer.lastErrorMessage}
                       lastErrorAt={indexer.lastErrorAt}
+                      rateLimitedUntil={indexer.rateLimitedUntil}
                       onOpenErrorHistory={
                         canViewErrorHistory
                           ? () => setErrorHistoryIndexer({
@@ -1134,12 +1158,14 @@ function ProviderStatus({
   lastHealthStatus,
   lastError,
   lastErrorAt,
+  rateLimitedUntil,
   onOpenErrorHistory,
 }: {
   isEnabled: boolean;
   lastHealthStatus: string | null;
   lastError: string | null;
   lastErrorAt?: string | null;
+  rateLimitedUntil?: string | null;
   onOpenErrorHistory?: () => void;
 }) {
   const t = useTranslate();
@@ -1148,6 +1174,24 @@ function ProviderStatus({
     return (
       <span className="text-[11px] text-[var(--scry-muted2)]">
         {t("label.disabled")}
+      </span>
+    );
+  }
+
+  // A cooldown outranks whatever error text is still on file: the indexer
+  // asked for the pause and it lifts without anyone doing anything.
+  if (isProviderCoolingDown(rateLimitedUntil)) {
+    return (
+      <span
+        className="flex items-center gap-1 text-[11px] text-[var(--scry-muted)]"
+        title={t("settings.indexerCoolingDownHelp")}
+      >
+        <Hourglass className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">
+          {t("settings.indexerCoolingDownUntil", {
+            time: formatCompactCountdown(rateLimitedUntil) ?? "",
+          })}
+        </span>
       </span>
     );
   }
@@ -1333,12 +1377,8 @@ function DownloadClientsPanel({
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
-function StoragePanel({ overview }: { overview: DashboardOverview | null }) {
+function StoragePanel({ roots }: { roots: DashboardStorageRoot[] }) {
   const t = useTranslate();
-  const roots = React.useMemo(
-    () => overview?.storageRoots ?? [],
-    [overview?.storageRoots],
-  );
   const groups = React.useMemo(() => groupStorageRootsByLibrary(roots), [roots]);
 
   return (
@@ -1573,26 +1613,4 @@ function normalizeFacet(value: string | null): Facet | null {
     default:
       return null;
   }
-}
-
-function DashboardSkeleton() {
-  return (
-    <div className="flex w-full flex-col gap-3 px-5 pb-10 pt-4">
-      <Skeleton className="h-9 w-64" />
-      <div className="grid grid-cols-1 gap-3 min-[701px]:grid-cols-2 min-[1081px]:grid-cols-3">
-        <Skeleton className="h-14" />
-        <Skeleton className="h-14" />
-        <Skeleton className="h-14" />
-      </div>
-      <div className="grid grid-cols-1 gap-3 min-[1241px]:grid-cols-2 min-[1501px]:grid-cols-3">
-        <Skeleton className="h-52" />
-        <Skeleton className="h-52" />
-        <Skeleton className="h-52" />
-      </div>
-      <div className="grid grid-cols-1 gap-3 min-[1241px]:grid-cols-2">
-        <Skeleton className="h-48" />
-        <Skeleton className="h-48" />
-      </div>
-    </div>
-  );
 }

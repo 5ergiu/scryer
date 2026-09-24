@@ -23,7 +23,12 @@ import type {
   ProviderTypeInfo,
   IndexerDownloadClientMappingCatalog,
   IndexerDownloadClientMappingCatalogResource,
+  IndexerCategoryRoutingSettings,
+  IndexerRoutingEntry,
+  IndexerRoutingSettingsByIndexer,
+  IndexerRoutingSettingsByScope,
 } from "@/lib/types";
+import type { ViewCategoryId } from "@/lib/types/quality-profiles";
 import {
   isConfigFieldRequired,
   isConfigFieldVisible,
@@ -41,6 +46,7 @@ import {
   proxyConfigsQuery,
   indexersInitQuery,
   indexersQuery,
+  indexerRoutingAllScopesQuery,
 } from "@/lib/graphql/queries";
 import {
   createIndexerMutation,
@@ -50,12 +56,14 @@ import {
   setIndexerSeedingProfileMutation,
   testIndexerConnectionMutation,
   updateIndexerMutation,
+  updateIndexerRoutingMutation,
 } from "@/lib/graphql/mutations";
 import {
   providerConfigRecordToValues,
   providerConfigValuesToRecord,
 } from "@/lib/utils/provider-config";
 import { useSeedingProfileOptions } from "@/lib/hooks/use-seeding-profile-options";
+import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 
 type SettingsIndexersSectionProps = ComponentProps<
   typeof SettingsIndexersSection
@@ -223,17 +231,37 @@ type SettingsIndexersContainerProps = {
   refreshIndexerDownloadClientMappingCatalog: () => Promise<void>;
 };
 
-const EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG: IndexerDownloadClientMappingCatalog = {
-  clients: [],
-  indexers: [],
-  providerCompatibility: [],
-};
+const EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG: IndexerDownloadClientMappingCatalog =
+  {
+    clients: [],
+    indexers: [],
+    providerCompatibility: [],
+  };
 
 type PendingIndexerEditorAction =
   | { type: "create" }
   | { type: "edit"; indexer: IndexerRecord }
   | { type: "close" }
   | null;
+
+function emptyIndexerRoutingByScope(): IndexerRoutingSettingsByScope {
+  return { MOVIE: {}, SERIES: {}, ANIME: {} };
+}
+
+function indexerRoutingEntriesToMap(
+  entries: IndexerRoutingEntry[] | null | undefined,
+): IndexerRoutingSettingsByIndexer {
+  return Object.fromEntries(
+    (entries ?? []).map((entry) => [
+      entry.indexerId,
+      {
+        categories: entry.categories,
+        enabled: entry.enabled,
+        priority: entry.priority,
+      },
+    ]),
+  ) as IndexerRoutingSettingsByIndexer;
+}
 
 function cloneIndexerDraft(
   draft: SettingsIndexersSectionProps["indexerDraft"],
@@ -259,17 +287,28 @@ export function SettingsIndexersContainer({
   const indexerDownloadClientMappingCatalog =
     indexerDownloadClientMappingCatalogResource.catalog ??
     EMPTY_INDEXER_DOWNLOAD_CLIENT_MAPPING_CATALOG;
-  const [mutatingIndexerMappingIds, setMutatingIndexerMappingIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [mutatingIndexerMappingIds, setMutatingIndexerMappingIds] = useState<
+    Set<string>
+  >(() => new Set());
   const { options: seedingProfileOptions } = useSeedingProfileOptions();
   const [
     mutatingIndexerSeedingProfileIds,
     setMutatingIndexerSeedingProfileIds,
   ] = useState<Set<string>>(() => new Set());
-  const [proxyConfigs, setProxyConfigs] = useState<
-    ProxyRecord[]
+  const [mutatingIndexerProxyIds, setMutatingIndexerProxyIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [proxyConfigs, setProxyConfigs] = useState<ProxyRecord[]>([]);
+  const [indexerRoutingByScope, setIndexerRoutingByScope] =
+    useState<IndexerRoutingSettingsByScope>(emptyIndexerRoutingByScope);
+  const [indexerRoutingIndexerIds, setIndexerRoutingIndexerIds] = useState<
+    string[]
   >([]);
+  const [indexerRoutingLoaded, setIndexerRoutingLoaded] = useState(false);
+  const [indexerRoutingLoading, setIndexerRoutingLoading] = useState(false);
+  const [mutatingIndexerRoutingScopes, setMutatingIndexerRoutingScopes] =
+    useState<Set<ViewCategoryId>>(() => new Set());
+  const indexerRoutingLoadPromiseRef = useRef<Promise<void> | null>(null);
   const [settingsIndexerFilter, setSettingsIndexerFilter] = useState("");
   const [mutatingIndexerId, setMutatingIndexerId] = useState<string | null>(
     null,
@@ -331,11 +370,15 @@ export function SettingsIndexersContainer({
   const refreshIndexers = useCallback(async () => {
     try {
       const { data, error } = await client
-        .query(indexersQuery, {
-          providerType: settingsIndexerFilter || undefined,
-        }, {
-          requestPolicy: "network-only",
-        })
+        .query(
+          indexersQuery,
+          {
+            providerType: settingsIndexerFilter || undefined,
+          },
+          {
+            requestPolicy: "network-only",
+          },
+        )
         .toPromise();
       if (error) throw error;
       setSettingsIndexers(data.indexers || []);
@@ -359,6 +402,131 @@ export function SettingsIndexersContainer({
       );
     }
   }, [client, setGlobalStatus, t]);
+
+  const loadIndexerRouting = useCallback(async () => {
+    if (indexerRoutingLoaded) {
+      return;
+    }
+    if (indexerRoutingLoadPromiseRef.current) {
+      return indexerRoutingLoadPromiseRef.current;
+    }
+
+    setIndexerRoutingLoading(true);
+    const request = (async () => {
+      try {
+        const { data, error } = await client
+          .query(
+            indexerRoutingAllScopesQuery,
+            {},
+            { requestPolicy: "network-only" },
+          )
+          .toPromise();
+        if (error) throw error;
+
+        setIndexerRoutingByScope({
+          MOVIE: indexerRoutingEntriesToMap(data?.movie),
+          SERIES: indexerRoutingEntriesToMap(data?.series),
+          ANIME: indexerRoutingEntriesToMap(data?.anime),
+        });
+        setIndexerRoutingIndexerIds(
+          (data?.indexers ?? []).map((indexer: { id: string }) => indexer.id),
+        );
+        setIndexerRoutingLoaded(true);
+      } catch (error) {
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToLoad")),
+        );
+      } finally {
+        setIndexerRoutingLoading(false);
+        indexerRoutingLoadPromiseRef.current = null;
+      }
+    })();
+    indexerRoutingLoadPromiseRef.current = request;
+    return request;
+  }, [client, indexerRoutingLoaded, setGlobalStatus, t]);
+
+  const updateIndexerRoutingForScope = useCallback(
+    async (
+      scope: ViewCategoryId,
+      indexerId: string,
+      nextValue: Partial<IndexerCategoryRoutingSettings>,
+    ) => {
+      const previousScopeRouting = indexerRoutingByScope[scope] ?? {};
+      const currentRouting =
+        previousScopeRouting[indexerId] ?? getDefaultIndexerRouting(scope);
+      const nextRouting = { ...currentRouting, ...nextValue };
+      const nextScopeRouting = {
+        ...previousScopeRouting,
+        [indexerId]: nextRouting,
+      };
+
+      setIndexerRoutingByScope((previous) => ({
+        ...previous,
+        [scope]: nextScopeRouting,
+      }));
+      setMutatingIndexerRoutingScopes((previous) => {
+        const next = new Set(previous);
+        next.add(scope);
+        return next;
+      });
+
+      try {
+        const indexerIds = new Set([
+          ...indexerRoutingIndexerIds,
+          ...settingsIndexers.map((indexer) => indexer.id),
+        ]);
+        const { data, error } = await client
+          .mutation(updateIndexerRoutingMutation, {
+            input: {
+              scope,
+              entries: Array.from(indexerIds, (id) => {
+                const routing =
+                  id === indexerId
+                    ? nextRouting
+                    : (nextScopeRouting[id] ?? getDefaultIndexerRouting(scope));
+                return {
+                  indexerId: id,
+                  enabled: routing.enabled,
+                  categories: routing.categories,
+                  // Inline changes intentionally retain the server's priority.
+                  priority: routing.priority,
+                };
+              }),
+            },
+          })
+          .toPromise();
+        if (error) throw error;
+
+        setIndexerRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: indexerRoutingEntriesToMap(data?.updateIndexerRouting),
+        }));
+        setGlobalStatus(t("settings.qualitySettingsSaved"));
+      } catch (error) {
+        setIndexerRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: previousScopeRouting,
+        }));
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")),
+        );
+      } finally {
+        setMutatingIndexerRoutingScopes((previous) => {
+          const next = new Set(previous);
+          next.delete(scope);
+          return next;
+        });
+      }
+    },
+    [
+      client,
+      indexerRoutingByScope,
+      indexerRoutingIndexerIds,
+      setGlobalStatus,
+      settingsIndexers,
+      t,
+    ],
+  );
 
   const refreshProviderTypes = useCallback(async () => {
     const { data, error } = await client
@@ -509,9 +677,12 @@ export function SettingsIndexersContainer({
 
   const submitIndexer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
+    const normalizedProviderType = indexerDraft.providerType
+      .trim()
+      .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ?? null;
+      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
+      null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so
@@ -550,7 +721,9 @@ export function SettingsIndexersContainer({
     }
 
     if (missingRequiredConfigField) {
-      setGlobalStatus(`${missingRequiredConfigField.label}: ${t("setup.required")}`);
+      setGlobalStatus(
+        `${missingRequiredConfigField.label}: ${t("setup.required")}`,
+      );
       return;
     }
 
@@ -577,7 +750,8 @@ export function SettingsIndexersContainer({
         const existingIndexer = settingsIndexers.find(
           (indexer) => indexer.id === editingIndexerId,
         );
-        const existingDownloadClientId = existingIndexer?.downloadClientId ?? null;
+        const existingDownloadClientId =
+          existingIndexer?.downloadClientId ?? null;
         const { error } = await client
           .mutation(updateIndexerMutation, {
             input: {
@@ -600,7 +774,8 @@ export function SettingsIndexersContainer({
         // through its own mutation so the torrent-capability check stays
         // single-sourced server-side.
         if (
-          payload.seedingProfileId !== (existingIndexer?.seedingProfileId ?? null)
+          payload.seedingProfileId !==
+          (existingIndexer?.seedingProfileId ?? null)
         ) {
           await applyIndexerSeedingProfile(
             editingIndexerId,
@@ -625,8 +800,7 @@ export function SettingsIndexersContainer({
           .toPromise();
         if (error) throw error;
         const createdIndexerId = data?.createIndexerConfig?.id as
-          | string
-          | undefined;
+          string | undefined;
         if (payload.seedingProfileId && createdIndexerId) {
           await applyIndexerSeedingProfile(
             createdIndexerId,
@@ -652,43 +826,50 @@ export function SettingsIndexersContainer({
     }
   };
 
-  const editIndexer = useCallback((indexer: IndexerRecord) => {
-    if (indexer.isManaged) {
-      setGlobalStatus(t("settings.managedIndexerReadOnly"));
-      return;
-    }
-    const selectedProvider =
-      providerTypes.find(
-        (providerType) =>
-          providerType.providerType === indexer.providerType.trim().toLowerCase(),
-      ) ?? null;
-    const parsedConfigValues = providerConfigValuesToRecord(indexer.config);
-    setEditingIndexerId(indexer.id);
-    setIndexerDraft({
-      name: indexer.name,
-      providerType: indexer.providerType,
-      proxyConfigId: indexer.proxyConfigId ?? null,
-      downloadClientId: indexer.downloadClientId ?? null,
-      seedingProfileId: indexer.seedingProfileId ?? null,
-      storedSecretKeys: indexer.storedSecretKeys,
-      isEnabled: indexer.isEnabled,
-      enableInteractiveSearch: indexer.enableInteractiveSearch,
-      enableAutoSearch: indexer.enableAutoSearch,
-      configValues: buildDraftConfigValues(
-        selectedProvider?.configFields ?? [],
-        parsedConfigValues,
-        indexer.storedSecretKeys,
-      ),
-    });
-    setGlobalStatus(t("status.editingIndexer", { name: indexer.name }));
-  }, [providerTypes, setGlobalStatus, t]);
+  const editIndexer = useCallback(
+    (indexer: IndexerRecord) => {
+      if (indexer.isManaged) {
+        setGlobalStatus(t("settings.managedIndexerReadOnly"));
+        return;
+      }
+      const selectedProvider =
+        providerTypes.find(
+          (providerType) =>
+            providerType.providerType ===
+            indexer.providerType.trim().toLowerCase(),
+        ) ?? null;
+      const parsedConfigValues = providerConfigValuesToRecord(indexer.config);
+      setEditingIndexerId(indexer.id);
+      setIndexerDraft({
+        name: indexer.name,
+        providerType: indexer.providerType,
+        proxyConfigId: indexer.proxyConfigId ?? null,
+        downloadClientId: indexer.downloadClientId ?? null,
+        seedingProfileId: indexer.seedingProfileId ?? null,
+        storedSecretKeys: indexer.storedSecretKeys,
+        isEnabled: indexer.isEnabled,
+        enableInteractiveSearch: indexer.enableInteractiveSearch,
+        enableAutoSearch: indexer.enableAutoSearch,
+        configValues: buildDraftConfigValues(
+          selectedProvider?.configFields ?? [],
+          parsedConfigValues,
+          indexer.storedSecretKeys,
+        ),
+      });
+      setGlobalStatus(t("status.editingIndexer", { name: indexer.name }));
+    },
+    [providerTypes, setGlobalStatus, t],
+  );
 
-  const openEditEditor = useCallback((indexer: IndexerRecord) => {
-    editIndexer(indexer);
-    setEditorMode("edit");
-    setIsEditorOpen(true);
-    setAwaitingBaselineSync(true);
-  }, [editIndexer]);
+  const openEditEditor = useCallback(
+    (indexer: IndexerRecord) => {
+      editIndexer(indexer);
+      setEditorMode("edit");
+      setIsEditorOpen(true);
+      setAwaitingBaselineSync(true);
+    },
+    [editIndexer],
+  );
 
   const requestCreateEditor = useCallback(() => {
     if (!isEditorOpen || !isDraftDirty) {
@@ -699,14 +880,17 @@ export function SettingsIndexersContainer({
     setPendingEditorAction({ type: "create" });
   }, [isDraftDirty, isEditorOpen, openCreateEditor]);
 
-  const requestEditIndexer = useCallback((indexer: IndexerRecord) => {
-    if (!isEditorOpen || !isDraftDirty) {
-      openEditEditor(indexer);
-      return;
-    }
+  const requestEditIndexer = useCallback(
+    (indexer: IndexerRecord) => {
+      if (!isEditorOpen || !isDraftDirty) {
+        openEditEditor(indexer);
+        return;
+      }
 
-    setPendingEditorAction({ type: "edit", indexer });
-  }, [isDraftDirty, isEditorOpen, openEditEditor]);
+      setPendingEditorAction({ type: "edit", indexer });
+    },
+    [isDraftDirty, isEditorOpen, openEditEditor],
+  );
 
   const requestCloseEditor = useCallback(() => {
     if (!isEditorOpen) {
@@ -741,7 +925,12 @@ export function SettingsIndexersContainer({
     }
 
     setPendingEditorAction(null);
-  }, [openCreateEditor, openEditEditor, pendingEditorAction, resetIndexerDraft]);
+  }, [
+    openCreateEditor,
+    openEditEditor,
+    pendingEditorAction,
+    resetIndexerDraft,
+  ]);
 
   const deleteIndexer = async (indexer: IndexerRecord) => {
     if (indexer.isManaged) {
@@ -759,7 +948,8 @@ export function SettingsIndexersContainer({
       const previousMapping = indexerDownloadClientMappingCatalog.indexers.find(
         (entry) => entry.id === indexerId,
       );
-      const previousDownloadClientId = previousMapping?.downloadClientId ?? null;
+      const previousDownloadClientId =
+        previousMapping?.downloadClientId ?? null;
       const selectedClient = downloadClientId
         ? indexerDownloadClientMappingCatalog.clients.find(
             (clientRecord) => clientRecord.id === downloadClientId,
@@ -770,7 +960,11 @@ export function SettingsIndexersContainer({
         updatePendingIndexerMappingIds(previous, indexerId, true),
       );
       updateIndexerDownloadClientMappingCatalog((previous) =>
-        updateIndexerDownloadClientMapping(previous, indexerId, downloadClientId),
+        updateIndexerDownloadClientMapping(
+          previous,
+          indexerId,
+          downloadClientId,
+        ),
       );
       if (selectedClient?.isEnabled === false) {
         setGlobalStatus(
@@ -794,7 +988,7 @@ export function SettingsIndexersContainer({
 
         const response = data?.setIndexerDownloadClientMapping;
         const resolvedDownloadClientId = response
-          ? response.downloadClientId ?? null
+          ? (response.downloadClientId ?? null)
           : downloadClientId;
         updateIndexerDownloadClientMappingCatalog((previous) =>
           updateIndexerDownloadClientMapping(
@@ -898,16 +1092,66 @@ export function SettingsIndexersContainer({
     [client, setGlobalStatus, settingsIndexers, t],
   );
 
-  const toggleIndexerEnabled = useCallback(
-    async (indexer: IndexerRecord) => {
-      const nextIsEnabled = !indexer.isEnabled;
+  const setIndexerProxyAssignment = useCallback(
+    async (indexerId: string, proxyConfigId: string | null) => {
+      const indexer = settingsIndexers.find((entry) => entry.id === indexerId);
+      const previousProxyConfigId = indexer?.proxyConfigId ?? null;
+
+      setMutatingIndexerProxyIds((previous) =>
+        updatePendingIndexerMappingIds(previous, indexerId, true),
+      );
+      setSettingsIndexers((previous) =>
+        previous.map((entry) =>
+          entry.id === indexerId ? { ...entry, proxyConfigId } : entry,
+        ),
+      );
+
+      try {
+        const { error } = await client
+          .mutation(updateIndexerMutation, {
+            input: { id: indexerId, proxyConfigId },
+          })
+          .toPromise();
+        if (error) throw error;
+        setGlobalStatus(t("status.indexerUpdated"));
+        await refreshIndexers();
+      } catch (error) {
+        setSettingsIndexers((previous) =>
+          previous.map((entry) =>
+            entry.id === indexerId
+              ? { ...entry, proxyConfigId: previousProxyConfigId }
+              : entry,
+          ),
+        );
+        setGlobalStatus(
+          userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")),
+        );
+      } finally {
+        setMutatingIndexerProxyIds((previous) =>
+          updatePendingIndexerMappingIds(previous, indexerId, false),
+        );
+      }
+    },
+    [client, refreshIndexers, setGlobalStatus, settingsIndexers, t],
+  );
+
+  const updateIndexerToggles = useCallback(
+    async (
+      indexer: IndexerRecord,
+      nextValue: Partial<
+        Pick<
+          IndexerRecord,
+          "isEnabled" | "enableInteractiveSearch" | "enableAutoSearch"
+        >
+      >,
+    ) => {
       setMutatingIndexerId(indexer.id);
       try {
         const { error } = await client
           .mutation(updateIndexerMutation, {
             input: {
               id: indexer.id,
-              isEnabled: nextIsEnabled,
+              ...nextValue,
             },
           })
           .toPromise();
@@ -983,9 +1227,12 @@ export function SettingsIndexersContainer({
   };
 
   const testIndexerConnection = async () => {
-    const normalizedProviderType = indexerDraft.providerType.trim().toLowerCase();
+    const normalizedProviderType = indexerDraft.providerType
+      .trim()
+      .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ?? null;
+      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
+      null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so
@@ -1018,7 +1265,9 @@ export function SettingsIndexersContainer({
       return;
     }
     if (missingRequiredConfigField) {
-      setGlobalStatus(`${missingRequiredConfigField.label}: ${t("setup.required")}`);
+      setGlobalStatus(
+        `${missingRequiredConfigField.label}: ${t("setup.required")}`,
+      );
       return;
     }
     setIsTestingConnection(true);
@@ -1082,9 +1331,17 @@ export function SettingsIndexersContainer({
         seedingProfileOptions={seedingProfileOptions}
         mutatingIndexerSeedingProfileIds={mutatingIndexerSeedingProfileIds}
         setIndexerSeedingProfile={setIndexerSeedingProfile}
+        mutatingIndexerProxyIds={mutatingIndexerProxyIds}
+        setIndexerProxyAssignment={setIndexerProxyAssignment}
         proxyConfigs={proxyConfigs}
+        indexerRoutingByScope={indexerRoutingByScope}
+        indexerRoutingLoaded={indexerRoutingLoaded}
+        indexerRoutingLoading={indexerRoutingLoading}
+        mutatingIndexerRoutingScopes={mutatingIndexerRoutingScopes}
+        loadIndexerRouting={loadIndexerRouting}
+        updateIndexerRoutingForScope={updateIndexerRoutingForScope}
         editIndexer={requestEditIndexer}
-        toggleIndexerEnabled={toggleIndexerEnabled}
+        updateIndexerToggles={updateIndexerToggles}
         deleteIndexer={deleteIndexer}
         syncIndexer={syncIndexer}
         providerTypes={providerTypes}

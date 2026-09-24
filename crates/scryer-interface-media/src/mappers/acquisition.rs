@@ -207,6 +207,7 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
     ParsedReleasePayload {
         raw_title: result.raw_title,
         normalized_title: result.normalized_title,
+        year: result.year,
         release_group: result.release_group,
         quality: result.quality,
         source: result.source.map(|source| source.to_string()),

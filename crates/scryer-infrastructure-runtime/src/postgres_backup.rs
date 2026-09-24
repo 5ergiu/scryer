@@ -15,16 +15,13 @@ use scryer_application::{
     LogicalBackupExporter, PreparedBackupBundleDirectory, backup_table_part_filename,
     prepare_backup_restore_payload,
 };
-use scryer_domain::MediaFacet;
 
 use crate::backup_import_normalization::{
     ImportColumnKind, ImportColumnRule, normalize_import_object_for_target,
     strip_nonportable_backup_fields, validate_restore_manifest_table_set,
 };
 use crate::postgres::PostgresServices;
-use crate::queries::title_search::{
-    TitleSearchProjectionSource, replace_title_search_projection_pg_source_tx,
-};
+use crate::queries::title_search::rebuild_title_search_projection_pg_on_connection;
 
 const EXPORT_BATCH_SIZE: i64 = 500;
 
@@ -898,55 +895,21 @@ async fn repair_sequences(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> App
     Ok(())
 }
 
+/// Rebuild the restored database's title-search projection.
+///
+/// Delegates to the search crate's paged rebuild so restore and start-up share
+/// one implementation: the same columns, the same collation-version stamp, and
+/// a catalog read in pages rather than one `fetch_all` of every title.
 async fn rebuild_title_search_projection(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> AppResult<()> {
-    let rows = sqlx::query(
-        "SELECT id, facet, name, sort_title, slug, aliases, tagged_aliases_json
-           FROM titles
-          ORDER BY id",
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        AppError::Repository(format!(
-            "failed to read restored titles for PostgreSQL search rebuild: {error}"
-        ))
-    })?;
-
-    sqlx::query("DELETE FROM title_search_terms")
-        .execute(&mut **tx)
+    rebuild_title_search_projection_pg_on_connection(&mut *tx)
         .await
         .map_err(|error| {
             AppError::Repository(format!(
-                "failed to clear PostgreSQL title search projection: {error}"
+                "failed to rebuild PostgreSQL title search projection: {error}"
             ))
-        })?;
-
-    for row in rows {
-        let facet_raw: String = row.try_get("facet").map_err(repo_err)?;
-        let facet = MediaFacet::parse(&facet_raw)
-            .ok_or_else(|| AppError::Repository(format!("unknown media facet '{facet_raw}'")))?;
-        let source = TitleSearchProjectionSource {
-            title_id: row.try_get("id").map_err(repo_err)?,
-            facet,
-            name: row.try_get("name").map_err(repo_err)?,
-            sort_title: row.try_get("sort_title").unwrap_or(None),
-            slug: row.try_get("slug").unwrap_or(None),
-            aliases: json_row_value(&row, "aliases")?,
-            tagged_aliases: json_row_value(&row, "tagged_aliases_json")?,
-        };
-        replace_title_search_projection_pg_source_tx(tx, &source)
-            .await
-            .map_err(|error| {
-                AppError::Repository(format!(
-                    "failed to rebuild PostgreSQL title search projection for {}: {error}",
-                    source.title_id
-                ))
-            })?;
-    }
-
-    Ok(())
+        })
 }
 
 fn quote_identifier(value: &str) -> String {
@@ -956,12 +919,4 @@ fn quote_identifier(value: &str) -> String {
 
 fn repo_err(error: impl std::fmt::Display) -> AppError {
     AppError::Repository(error.to_string())
-}
-
-fn json_row_value<T>(row: &PgRow, column: &str) -> AppResult<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let value: JsonValue = row.try_get(column).map_err(repo_err)?;
-    serde_json::from_value(value).map_err(repo_err)
 }

@@ -32,6 +32,7 @@ export function SettingsQualityProfilesContainer() {
     moveProfileListToDenied,
     addQualityTier,
     removeQualityTier,
+    reorderQualityTier,
     updateQualityProfilesGlobal,
     saveGlobalQualityProfile,
     saveGlobalScoringPersona,
@@ -75,6 +76,7 @@ export function SettingsQualityProfilesContainer() {
       moveProfileListToDenied={moveProfileListToDenied}
       addQualityTier={addQualityTier}
       removeQualityTier={removeQualityTier}
+      reorderQualityTier={reorderQualityTier}
       qualityProfileInheritValue={QUALITY_PROFILE_INHERIT_VALUE}
       toProfileOptions={toProfileOptions}
       globalQualityProfileId={globalQualityProfileId}

@@ -5,7 +5,6 @@ import type {
   DownloadClientRoutingSettings,
   DownloadClientRoutingSettingsByClient,
 } from "@/lib/types";
-import { buildRoutingOrder } from "@/lib/utils/media-content";
 
 const DOWNLOAD_CLIENT_ROUTING_DISABLED: DownloadClientRoutingSettings = {
   ...DOWNLOAD_CLIENT_ROUTING_EMPTY,
@@ -53,10 +52,12 @@ export function buildDownloadClientRoutingState(
 
   return {
     routing,
-    order: buildRoutingOrder(
-      clients.map((client) => client.id),
-      routing,
-    ),
+    order: [
+      ...new Set(routingEntries
+        .map((entry) => entry.clientId)
+        .filter((id) => clients.some((client) => client.id === id))),
+      ...clients.filter((client) => !parsedRouting[client.id]).map((client) => client.id),
+    ],
   };
 }
 

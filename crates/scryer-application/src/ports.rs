@@ -948,8 +948,285 @@ impl TitleListProjection {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TitleCounts {
+    pub total: usize,
+    pub monitored: usize,
+    pub movie: usize,
+    pub series: usize,
+    pub anime: usize,
+}
+
+/// One projected name, as the relaxed spelling lane compares it.
+///
+/// These rows are the persisted replacement for the per-process spelling
+/// index: every name the catalog answers to, with the forms the comparison
+/// needs already computed.
+#[derive(Clone, Debug)]
+pub struct TitleNameCandidate {
+    pub title_id: String,
+    pub facet: String,
+    /// The name as the catalog wrote it. Only the numbers guard reads this:
+    /// the Roman-numeral rule decides `Rocky II` from letter case, which the
+    /// forms below have lowercased away.
+    pub raw_term: String,
+    /// The full lookup form, a trailing year included.
+    pub literal_term: String,
+    /// The form the spelling lane compares: the lookup form without a name's
+    /// own trailing year.
+    pub match_term: String,
+    /// The year this name asserts, its own or the title's.
+    pub match_year: Option<i32>,
+    pub language_tag: Option<String>,
+}
+
+/// One bucket of the persisted name index: a single facet, script and numbers
+/// guard, which is exactly the key the in-memory index bucketed on.
+#[derive(Clone, Debug)]
+pub struct TitleNameBucketQuery<'a> {
+    /// `None` searches every facet, as the matcher does when no facet hint
+    /// narrows the release.
+    pub facet: Option<&'a str>,
+    pub script: &'a str,
+    pub numbers_key: &'a str,
+    /// The bounded-distance lane: the widest edit distance a caller will
+    /// admit for this anchor, discovery and collision guard together. `None`
+    /// asks for the equality lanes only.
+    ///
+    /// A store serves this from the persisted fuzzy index, not from SQL:
+    /// "within n edits of" is not an equality, and no index on a text column
+    /// answers it. A store with no index attached answers the equality lanes
+    /// alone, which is a narrower result, never a wrong one.
+    pub typo_distance: Option<u8>,
+    /// Equality lanes. No length band bounds these: a romanization or a
+    /// locale-equal spelling can differ from the observed name by any number
+    /// of characters, so they are fetched by key.
+    pub match_term: &'a str,
+    pub romanization_key: Option<&'a str>,
+    pub collation_keys: &'a [(&'static str, Vec<u8>)],
+    /// Guard on how many index hits are hydrated, so a pathological bucket
+    /// cannot turn one release into a catalog-sized read. The equality lanes
+    /// are never capped.
+    pub limit: i64,
+}
+
+/// Name, aliases and tagged aliases in their lookup form, deduplicated. This
+/// is what the persisted projection keys its exact lane on.
+pub fn title_lookup_forms(title: &Title) -> Vec<String> {
+    let mut forms = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for name in std::iter::once(title.name.as_str())
+        .chain(title.aliases.iter().map(String::as_str))
+        .chain(title.tagged_aliases.iter().map(|alias| alias.name.as_str()))
+    {
+        let form = scryer_domain::title_spelling::title_lookup_form(name);
+        if !form.is_empty() && seen.insert(form.clone()) {
+            forms.push(form);
+        }
+    }
+    forms
+}
+
+/// The projection rows a title would produce, derived in memory.
+///
+/// The SQL store reads these from `title_search_terms`; this is the same
+/// derivation for repositories that have no projection behind them, and the
+/// reason both agree is that the forms come from one place in the domain.
+pub fn title_name_candidates(title: &Title) -> Vec<TitleNameCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    title
+        .tagged_aliases
+        .iter()
+        .map(|alias| (alias.name.as_str(), Some(alias.language.as_str())))
+        .chain(std::iter::once((
+            title.name.as_str(),
+            title.metadata_language.as_deref(),
+        )))
+        .chain(
+            title
+                .aliases
+                .iter()
+                .map(|name| (name.as_str(), title.metadata_language.as_deref())),
+        )
+        .filter_map(|(name, language)| {
+            let literal_term = scryer_domain::title_spelling::title_lookup_form(name);
+            if literal_term.is_empty() || !seen.insert(literal_term.clone()) {
+                return None;
+            }
+            let (match_term, match_year) =
+                scryer_domain::title_spelling::title_match_form(name, &title.name, title.year);
+            (!match_term.is_empty()).then(|| TitleNameCandidate {
+                title_id: title.id.clone(),
+                facet: title.facet.as_str().to_string(),
+                raw_term: name.to_string(),
+                literal_term,
+                match_term,
+                match_year,
+                language_tag: language.map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// The in-memory half of the candidate-discovery port.
+///
+/// Repositories with no projection behind them — the null repository, the test
+/// fakes, a matcher over an explicitly supplied set of titles — answer from
+/// these, and the SQL store answers the same questions with indexed queries.
+/// One derivation, two readers.
+pub fn titles_matching_lookup_keys(titles: Vec<Title>, keys: &[String]) -> Vec<Title> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let wanted = keys.iter().collect::<std::collections::HashSet<_>>();
+    titles
+        .into_iter()
+        .filter(|title| {
+            title_lookup_forms(title)
+                .iter()
+                .any(|form| wanted.contains(form))
+        })
+        .collect()
+}
+
+/// Like [`titles_matching_lookup_keys`], but a name matches when either its
+/// lookup form or its year-stripped shape is asked for: an RSS anchor of
+/// `tide chart` has to reach a catalog name of `Tide Chart 2023`.
+pub fn titles_matching_lookup_key_shapes(titles: Vec<Title>, keys: &[String]) -> Vec<Title> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let wanted = keys.iter().collect::<std::collections::HashSet<_>>();
+    titles
+        .into_iter()
+        .filter(|title| {
+            title_lookup_forms(title).iter().any(|form| {
+                wanted.contains(form)
+                    || wanted.contains(
+                        &scryer_domain::title_spelling::strip_trailing_year(form).to_string(),
+                    )
+            })
+        })
+        .collect()
+}
+
+pub fn titles_matching_external_id(titles: Vec<Title>, source: &str, value: &str) -> Vec<Title> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    titles
+        .into_iter()
+        .filter(|title| {
+            title.external_ids.iter().any(|external_id| {
+                external_id.source.eq_ignore_ascii_case(source)
+                    && external_id.value.trim().eq_ignore_ascii_case(value)
+            })
+        })
+        .collect()
+}
+
+pub fn lookup_keys_claimed_by_others(
+    titles: &[Title],
+    title_id: &str,
+    keys: &[String],
+) -> Vec<String> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let mut claimed = std::collections::HashSet::new();
+    for title in titles.iter().filter(|title| title.id != title_id) {
+        for form in title_lookup_forms(title) {
+            claimed.insert(scryer_domain::title_spelling::strip_trailing_year(&form).to_string());
+        }
+    }
+    keys.iter()
+        .filter(|key| claimed.contains(scryer_domain::title_spelling::strip_trailing_year(key)))
+        .cloned()
+        .collect()
+}
+
+/// The whole bucket, uncapped: an in-memory set is the caller's own and is
+/// never the catalog, so there is nothing to bound it against.
+pub fn name_candidates_in_bucket(
+    titles: &[Title],
+    query: &TitleNameBucketQuery<'_>,
+) -> Vec<TitleNameCandidate> {
+    let mut candidates = Vec::new();
+    for title in titles {
+        if query
+            .facet
+            .is_some_and(|facet| facet != title.facet.as_str())
+        {
+            continue;
+        }
+        for candidate in title_name_candidates(title) {
+            let script =
+                scryer_domain::title_spelling::title_script(&candidate.match_term).as_str();
+            let numbers_key = scryer_domain::title_spelling::title_numbers_key(&candidate.raw_term);
+            if script != query.script || numbers_key != query.numbers_key {
+                continue;
+            }
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryContextTitle {
+    pub id: String,
+    pub library_id: String,
+    pub name: String,
+    pub facet: MediaFacet,
+    pub external_ids: Vec<scryer_domain::ExternalId>,
+    pub genres: Vec<String>,
+}
+
+impl From<&Title> for DiscoveryContextTitle {
+    fn from(title: &Title) -> Self {
+        Self {
+            id: title.id.clone(),
+            library_id: title.library_id.clone(),
+            name: title.name.clone(),
+            facet: title.facet.clone(),
+            external_ids: title.external_ids.clone(),
+            genres: title
+                .canonical_tags
+                .iter()
+                .filter(|tag| tag.category.eq_ignore_ascii_case("genre"))
+                .map(|tag| tag.name.clone())
+                .collect(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait TitleRepository: Send + Sync {
+    /// Identity and genre evidence for discovery, without presentation metadata.
+    async fn list_discovery_context_titles(&self) -> AppResult<Vec<DiscoveryContextTitle>> {
+        Ok(self
+            .list(None, None)
+            .await?
+            .iter()
+            .map(DiscoveryContextTitle::from)
+            .collect())
+    }
+
+    /// Aggregate counts without hydrating catalog records. SQL stores override this.
+    async fn title_counts(&self) -> AppResult<TitleCounts> {
+        let mut counts = TitleCounts::default();
+        for title in self.list(None, None).await? {
+            counts.total += 1;
+            counts.monitored += usize::from(title.monitored);
+            match title.facet {
+                MediaFacet::Movie => counts.movie += 1,
+                MediaFacet::Series => counts.series += 1,
+                MediaFacet::Anime => counts.anime += 1,
+            }
+        }
+        Ok(counts)
+    }
     async fn list(&self, facet: Option<MediaFacet>, query: Option<String>)
     -> AppResult<Vec<Title>>;
     /// Counts titles whose quality-profile structured tag resolves to the
@@ -1129,7 +1406,12 @@ pub trait TitleRepository: Send + Sync {
     /// whole library back. The candidates are a filter and not the decision:
     /// the caller applies `folder_paths_match` to every row returned, so a
     /// repository is free to ignore them and return every title in the library,
-    /// which is exactly what this default does.
+    /// which is exactly what this default does. A narrowing repository must
+    /// compare at least as loosely as `folder_paths_match` does: on Windows
+    /// that means folding both sides through
+    /// [`crate::stored_paths::folder_path_lookup_key`] (case and separator
+    /// insensitive) rather than plain equality, or a stored `C:\Media\Show`
+    /// is invisible to a scan that supplies `c:/media/show`.
     ///
     /// Rows keep the list order (`LOWER(name)`, then id) so the caller's
     /// "first owner wins" stays stable.
@@ -1235,8 +1517,8 @@ pub trait TitleRepository: Send + Sync {
         sort: TitleCatalogSort,
         limit: usize,
         offset: usize,
-        include_external_ids: bool,
-        include_catalog_counts: bool,
+        projection: crate::TitleListProjection,
+        aggregates: crate::TitleCatalogAggregates,
     ) -> AppResult<TitleCatalogResult> {
         if library_ids.is_empty() {
             return Ok(TitleCatalogResult {
@@ -1250,13 +1532,13 @@ pub trait TitleRepository: Send + Sync {
             });
         }
 
-        let mut titles = if include_external_ids {
+        let mut titles = if projection.include_external_ids {
             self.list_for_libraries(facet, library_ids, query).await?
         } else {
             self.list_for_libraries_without_external_ids(facet, library_ids, query)
                 .await?
         };
-        let filter_counts = if include_catalog_counts {
+        let filter_counts = if aggregates.filter_counts {
             title_catalog_filter_counts(&titles, &filter)
         } else {
             TitleCatalogFilterCounts::default()
@@ -1264,18 +1546,23 @@ pub trait TitleRepository: Send + Sync {
         titles.retain(|title| title_matches_catalog_filter(title, &filter));
         sort_titles_for_catalog(&mut titles, &sort);
 
-        let total_count = if include_catalog_counts {
+        let total_count = if aggregates.total_count {
             titles.len()
         } else {
             0
         };
-        let items = titles
+        let has_more = limit > 0 && titles.len().saturating_sub(offset) > limit;
+        let mut items = titles
             .into_iter()
             .skip(offset)
             .take(limit)
             .collect::<Vec<_>>();
-        let has_more = include_catalog_counts && offset.saturating_add(items.len()) < total_count;
 
+        if !projection.include_canonical_tags {
+            for title in &mut items {
+                title.canonical_tags.clear();
+            }
+        }
         Ok(TitleCatalogResult {
             items,
             limit,
@@ -1459,6 +1746,117 @@ pub trait TitleRepository: Send + Sync {
         facet: Option<MediaFacet>,
         query: Option<String>,
     ) -> AppResult<Vec<Title>>;
+
+    /// Titles that answer to any of `keys`, compared on the persisted lookup
+    /// form of their name, aliases and tagged aliases.
+    ///
+    /// This is the exact lane of release and import resolution. It used to be
+    /// a `HashMap` rebuilt from the whole catalog per process; the SQL store
+    /// answers it from the title-search projection instead, so nothing the
+    /// size of the library is ever resident. The default below is the
+    /// in-memory derivation, for repositories with no projection behind them.
+    async fn find_titles_by_lookup_keys(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(titles_matching_lookup_keys(
+            self.list_for_matching(None, None).await?,
+            keys,
+        ))
+    }
+
+    /// Titles answering to any of `keys` on either their lookup form or its
+    /// year-stripped shape. The RSS cycle's anchor probe: a release named
+    /// `Tide Chart` has to reach a catalog title named `Tide Chart 2023`.
+    async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(titles_matching_lookup_key_shapes(
+            self.list_for_matching(None, None).await?,
+            keys,
+        ))
+    }
+
+    /// The distinct (library, facet) scopes that hold at least one monitored
+    /// title. The RSS cycle resolves indexer routing per scope, and used to
+    /// derive them by reading every title row in the catalog.
+    async fn monitored_library_scopes(&self) -> AppResult<Vec<(String, String)>> {
+        let mut scopes = self
+            .list_for_matching(None, None)
+            .await?
+            .into_iter()
+            .filter(|title| title.monitored)
+            .map(|title| (title.library_id.clone(), title.facet.as_str().to_string()))
+            .collect::<Vec<_>>();
+        scopes.sort();
+        scopes.dedup();
+        Ok(scopes)
+    }
+
+    /// Titles carrying `value` for external id `source` (`imdb`, `tmdb`).
+    async fn find_titles_by_external_id(&self, source: &str, value: &str) -> AppResult<Vec<Title>> {
+        Ok(titles_matching_external_id(
+            self.list_for_matching(None, None).await?,
+            source,
+            value,
+        ))
+    }
+
+    /// The subset of `keys` that some title other than `title_id` also claims,
+    /// compared on the year-stripped shape so `X` collides with `X <year>`.
+    ///
+    /// A grouped count over one indexed column in the SQL store, not a
+    /// catalog-wide collision map held in memory.
+    async fn lookup_keys_claimed_by_other_titles(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(lookup_keys_claimed_by_others(
+            &self.list_for_matching(None, None).await?,
+            title_id,
+            keys,
+        ))
+    }
+
+    /// One bucket of the persisted name index, for the relaxed spelling lane.
+    ///
+    /// The equality lanes (same match form, same romanization, equal under a
+    /// collation profile) are SQL and are exhaustive. The bounded-distance
+    /// lane is the fuzzy index; an in-memory repository has neither and
+    /// answers with its whole bucket, which the caller's spelling comparison
+    /// filters exactly as it filters a fetched one.
+    async fn find_title_name_candidates(
+        &self,
+        query: TitleNameBucketQuery<'_>,
+    ) -> AppResult<Vec<TitleNameCandidate>> {
+        Ok(name_candidates_in_bucket(
+            &self.list_for_matching(None, None).await?,
+            &query,
+        ))
+    }
+
+    /// Every name the persisted index holds for one title.
+    ///
+    /// The index is the whole of what a title answers to: its catalog names
+    /// and the names written beside them, such as an anime numbering bridge's
+    /// cour names, which no title row carries. A matcher that found a title
+    /// through the index proves the match against these, never against the
+    /// row alone, or a name that discovered the title could not also prove it.
+    async fn list_title_index_names(&self, title_id: &str) -> AppResult<Vec<TitleNameCandidate>> {
+        Ok(self
+            .list_for_matching(None, None)
+            .await?
+            .iter()
+            .filter(|title| title.id == title_id)
+            .flat_map(title_name_candidates)
+            .collect())
+    }
+
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>>;
     async fn get_by_id_without_external_ids(&self, id: &str) -> AppResult<Option<Title>> {
         self.get_by_id(id).await
@@ -3745,8 +4143,48 @@ pub trait TotpRepository: Send + Sync {
     async fn clear_failed_attempts(&self, user_id: &str) -> AppResult<u64>;
 }
 
+/// A library-scan session the event log records as started and never ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnfinishedLibraryScanSession {
+    pub session_id: String,
+    pub library_id: Option<String>,
+    pub facet: Option<scryer_domain::MediaFacet>,
+    /// When the session's `library_scan_started` was recorded.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// The most recent event of any kind in the session's stream. This is what
+    /// a staleness rule has to judge: a scan that is still working keeps
+    /// writing progress, so a long gap means the process that owned it is gone.
+    pub last_event_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Event types the fallback replay of
+/// [`DomainEventRepository::list_unfinished_library_scan_sessions`] needs.
+fn unfinished_library_scan_replay_event_types() -> Vec<DomainEventType> {
+    vec![
+        DomainEventType::LibraryScanStarted,
+        DomainEventType::LibraryScanProgressed,
+        DomainEventType::LibraryScanCompleted,
+        DomainEventType::LibraryScanCanceled,
+        DomainEventType::LibraryScanFailed,
+    ]
+}
+
+const UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT: usize = 500;
+
 #[async_trait]
 pub trait DomainEventRepository: Send + Sync {
+    /// A library-scoped, count-free page of import facts, newest sequence first.
+    async fn recent_import_events(
+        &self,
+        _library_ids: &[String],
+        _before_sequence: Option<i64>,
+        _limit: usize,
+    ) -> AppResult<Vec<DomainEvent>> {
+        Err(AppError::Repository(
+            "recent import preview is not configured".into(),
+        ))
+    }
+
     async fn append(&self, event: NewDomainEvent) -> AppResult<DomainEvent>;
     /// Append by stable event ID, returning the original event on replay.
     async fn append_once(&self, _event: NewDomainEvent) -> AppResult<DomainEvent> {
@@ -3794,6 +4232,60 @@ pub trait DomainEventRepository: Send + Sync {
         after_sequence: i64,
         limit: usize,
     ) -> AppResult<Vec<DomainEvent>>;
+    /// Library-scan sessions that were started and never ended.
+    ///
+    /// The caller wants a count of scans still believed to be running, and the
+    /// identity of any that have to be finished off. That is a question about
+    /// `library_scan_started` rows and the absence of a terminal row for the
+    /// same session — `library_scan_progressed` contributes nothing to it, and
+    /// on a large library it is essentially all of the log (251,594 of 251,634
+    /// library-scan rows on the 111k-title load-test instance).
+    ///
+    /// The default implementation is the honest, slow answer: page the whole
+    /// projection in and replay it. Stores that can ask the question directly
+    /// override it; the default exists so an in-memory or partial
+    /// implementation is still correct, never so the real store can skip it.
+    async fn list_unfinished_library_scan_sessions(
+        &self,
+    ) -> AppResult<Vec<UnfinishedLibraryScanSession>> {
+        let mut events = Vec::new();
+        let mut after_sequence = 0i64;
+        loop {
+            let batch = self
+                .list(&DomainEventFilter {
+                    after_sequence: Some(after_sequence),
+                    event_types: Some(unfinished_library_scan_replay_event_types()),
+                    limit: UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT,
+                    ..DomainEventFilter::default()
+                })
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            after_sequence = batch
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(after_sequence);
+            let count = batch.len();
+            events.extend(batch);
+            if count < UNFINISHED_LIBRARY_SCAN_REPLAY_BATCH_LIMIT {
+                break;
+            }
+        }
+        Ok(
+            crate::events::event_views::replay_library_scan_state(&events)
+                .into_values()
+                .filter(|session| !session.status.is_terminal())
+                .map(|session| UnfinishedLibraryScanSession {
+                    session_id: session.session_id,
+                    library_id: session.library_id,
+                    facet: Some(session.facet),
+                    started_at: session.started_at,
+                    last_event_at: session.updated_at,
+                })
+                .collect(),
+        )
+    }
     async fn delete_for_title_ids(&self, title_ids: &[String]) -> AppResult<u32>;
     async fn get_subscriber_offset(&self, subscriber: &str) -> AppResult<i64>;
     async fn set_subscriber_offset(&self, subscriber: &str, sequence: i64) -> AppResult<()>;
@@ -3853,6 +4345,29 @@ pub trait IndexerConfigRepository: Send + Sync {
     async fn clear_last_error(&self, _id: &str) -> AppResult<()> {
         Ok(())
     }
+    /// Apply a validation result only while its settings and observed health still match.
+    async fn set_last_error_if_unchanged(
+        &self,
+        expected: &IndexerConfig,
+        message: Option<String>,
+    ) -> AppResult<bool> {
+        let Some(current) = self.get_by_id(&expected.id).await? else {
+            return Ok(false);
+        };
+        if current.updated_at != expected.updated_at
+            || current.last_error_at != expected.last_error_at
+            || current.last_error_message != expected.last_error_message
+            || current.last_health_status != expected.last_health_status
+        {
+            return Ok(false);
+        }
+        if message.is_some() {
+            self.record_last_error(&expected.id, message).await?;
+        } else {
+            self.clear_last_error(&expected.id).await?;
+        }
+        Ok(true)
+    }
     async fn list_system_backoffs(
         &self,
     ) -> AppResult<std::collections::HashMap<String, IndexerSystemBackoff>> {
@@ -3865,6 +4380,33 @@ pub trait IndexerConfigRepository: Send + Sync {
         Ok(())
     }
     async fn update(&self, update: IndexerConfigUpdate) -> AppResult<IndexerConfig>;
+    /// Reject an edit based on an older configuration revision.
+    async fn update_if_unchanged(
+        &self,
+        update: IndexerConfigUpdate,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<IndexerConfig> {
+        let current = self
+            .get_by_id(&update.id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("indexer configuration".into()))?;
+        if current.updated_at != expected_updated_at {
+            return Err(AppError::Validation(
+                "Indexer settings changed during validation; reload and try again".into(),
+            ));
+        }
+        self.update(update).await
+    }
+
+    /// Publish caps only if the configuration and previous snapshot still match.
+    async fn save_caps_if_unchanged(
+        &self,
+        _expected: &IndexerConfig,
+        _snapshot: &str,
+    ) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn set_download_client_mapping(
         &self,
         indexer_id: &str,
@@ -4583,6 +5125,23 @@ pub trait DownloadRegistryRepository: Send + Sync {
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
 
+    /// Active bindings Scryer created by submitting a grab, created before
+    /// `created_before`, whose download no client listing has ever carried.
+    ///
+    /// The absence prune works from the in-memory tracker, and only a listed
+    /// job is ever tracked. A job its client dropped before the first listing
+    /// therefore never reaches the prune; this is the durable side of the same
+    /// question, so the poller can ask it of a client that answered.
+    ///
+    /// The default is empty so repositories with no durable bindings (the null
+    /// repository, test fakes) need not implement it.
+    async fn list_never_observed_submission_bindings(
+        &self,
+        _created_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadClientBindingRecord>> {
+        Ok(Vec::new())
+    }
+
     /// Refresh the observation timestamps of already-resolved downloads.
     ///
     /// A client tick re-observes the same rows every 10 s, but a binding's
@@ -5077,6 +5636,14 @@ pub trait DownloadSubmissionRepository: Send + Sync {
 
 #[async_trait]
 pub trait ImportArtifactRepository: Send + Sync {
+    async fn dashboard_import_artifacts(
+        &self,
+        _import_ids: &[String],
+        _episode_ids: &[String],
+    ) -> AppResult<Vec<crate::DashboardImportEvidence>> {
+        Ok(Vec::new())
+    }
+
     async fn insert_artifact(&self, artifact: ImportArtifact) -> AppResult<()>;
 
     /// Canonical-aware artifact writer for a completed download already
@@ -5535,6 +6102,61 @@ impl LocationOwnershipOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportRetryClaimOutcome {
+    Claimed,
+    Busy,
+}
+impl ImportRetryClaimOutcome {
+    pub fn is_claimed(self) -> bool {
+        self == Self::Claimed
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportRetryFinishOutcome {
+    Finalized,
+    Superseded,
+}
+impl ImportRetryFinishOutcome {
+    pub fn is_finalized(self) -> bool {
+        self == Self::Finalized
+    }
+}
+
+/// Durable ownership of a completed-source retry, retained until reconciliation finishes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportRetryClaim {
+    pub download_id: DownloadId,
+    pub import_id: String,
+    pub attempt_id: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(with = "import_retry_locator")]
+    pub source: ClientJobLocator,
+    pub previous_result_json: Option<String>,
+}
+
+mod import_retry_locator {
+    use super::ClientJobLocator;
+    use serde::{Deserialize, Serialize};
+
+    pub fn serialize<S: serde::Serializer>(
+        source: &ClientJobLocator,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (&source.client_id, &source.client_type, &source.item_id).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ClientJobLocator, D::Error> {
+        let (client, kind, item) = <(Option<String>, String, String)>::deserialize(deserializer)?;
+        Ok(ClientJobLocator::new(client.as_deref(), &kind, &item))
+    }
+}
+
+pub const IMPORT_RETRY_TRACKED_STATE_REASON: &str = "import_retry_recovery";
+
 #[async_trait]
 pub trait ImportRepository: Send + Sync {
     async fn queue_import_request(
@@ -5581,6 +6203,46 @@ pub trait ImportRepository: Send + Sync {
     /// one was available while it was queued.
     async fn canonical_download_id_for_import(&self, _id: &str) -> AppResult<Option<DownloadId>> {
         Ok(None)
+    }
+
+    /// Atomically reserve an eligible attempt and its canonical download against cleanup.
+    async fn claim_import_retry(
+        &self,
+        _claim: &ImportRetryClaim,
+        _expected_updated_at: DateTime<Utc>,
+        _payload_json: &str,
+    ) -> AppResult<ImportRetryClaimOutcome> {
+        Err(AppError::Repository(
+            "durable import retry is unavailable".into(),
+        ))
+    }
+
+    /// Finalize only the attempt that still owns the durable recovery marker.
+    async fn finish_import_retry(
+        &self,
+        _claim: &ImportRetryClaim,
+        _state: scryer_domain::TrackedDownloadState,
+        _reason: Option<&str>,
+        _detail: Option<&str>,
+    ) -> AppResult<ImportRetryFinishOutcome> {
+        Err(AppError::Repository(
+            "durable import retry is unavailable".into(),
+        ))
+    }
+
+    async fn get_import_retry_claim(
+        &self,
+        _download_id: &DownloadId,
+    ) -> AppResult<Option<ImportRetryClaim>> {
+        Ok(None)
+    }
+
+    async fn list_import_retry_recovery(
+        &self,
+        _after_download_id: Option<&DownloadId>,
+        _limit: usize,
+    ) -> AppResult<Vec<ImportRetryClaim>> {
+        Ok(Vec::new())
     }
 
     async fn update_import_status(
@@ -9161,8 +9823,58 @@ pub trait IndexerArtifactResolver: Send + Sync {
     ) -> AppResult<PreparedIndexerArtifact>;
 }
 
+/// An eligible grab destination, ordered by the effective routing policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerGrabClient {
+    pub id: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub mapped: bool,
+}
+
+/// None keeps effective routing; an empty category explicitly selects client default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerGrabSelection {
+    pub client_id: String,
+    pub category: Option<String>,
+}
+
+impl IndexerGrabSelection {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.client_id.trim().is_empty() {
+            return Err(AppError::Validation("select a download client".into()));
+        }
+        if self
+            .category
+            .as_ref()
+            .is_some_and(|category| category.len() > 255 || category.chars().any(char::is_control))
+        {
+            return Err(AppError::Validation(
+                "category must be at most 255 bytes without control characters".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
+    async fn indexer_grab_clients(
+        &self,
+        _title: &Title,
+        _indexer_id: Option<&str>,
+        _source_kind: DownloadSourceKind,
+    ) -> AppResult<Vec<IndexerGrabClient>> {
+        Err(AppError::Validation(
+            "client routing discovery is unsupported".into(),
+        ))
+    }
+
+    /// None explicitly denotes unsupported discovery; an empty list is supported.
+    async fn discover_categories(&self, _client_id: &str) -> AppResult<Option<Vec<String>>> {
+        Ok(None)
+    }
+
     /// Whether this adapter can delete payloads through its native API.
     fn supports_native_data_removal(&self) -> bool {
         false

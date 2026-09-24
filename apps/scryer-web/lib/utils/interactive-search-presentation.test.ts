@@ -16,6 +16,7 @@ function indexer(
     resultCount: 0,
     elapsedMs: null,
     failureReason: null,
+    rateLimited: false,
   };
 }
 

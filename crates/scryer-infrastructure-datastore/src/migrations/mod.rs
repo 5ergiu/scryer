@@ -177,7 +177,6 @@ async fn replay_catalog_into_fresh_db_with_context(
     enable_baselines: bool,
     hook_context: &MigrationHookContext,
 ) -> AppResult<()> {
-    crate::spellfix::register_spellfix_auto_extension()?;
     ensure_migration_ledger_shape(pool).await?;
 
     let applied = load_applied_migrations(pool).await?;
@@ -200,6 +199,11 @@ async fn replay_catalog_into_fresh_db_with_context(
         apply_baseline(pool, catalog, payload_bytes, baseline).await?;
         start_version = baseline.through_version + 1;
     }
+
+    // Record the baseline first so snapshots past migration 0252 do not
+    // recreate its retired table. Older snapshots and full replay still need
+    // the stand-in for the historical spellfix statements.
+    crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
 
     apply_version_range(
         pool,
@@ -257,6 +261,12 @@ pub async fn run_migrations_with_hook_context(
             .await?;
         }
         MigrationInstallKind::Upgrade => {
+            // An upgrade from before the fuzzy lane moved to tantivy still
+            // has the spellfix1 virtual table in its schema, and the
+            // migrations between here and 0252 still reference it. Retire
+            // the module-backed object and stand a plain table in for it
+            // before a single one of them runs.
+            crate::sql::spellfix_retirement::retire_spellfix_virtual_table(pool).await?;
             apply_version_range(
                 pool,
                 &catalog,

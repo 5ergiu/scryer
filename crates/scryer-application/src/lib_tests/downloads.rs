@@ -2263,6 +2263,7 @@ async fn tracked_title_assignment_fixture() -> TrackedTitleAssignmentFixture {
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     });
     let submission = DownloadSubmission {
         download_id: scryer_domain::download_identity::DownloadId::new(),
@@ -4675,6 +4676,7 @@ async fn failed_tracked_cleanup_uses_facet_routing_and_exact_client_id() {
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     };
 
     let outcome = crate::import::import::reconcile_terminal_download_cleanup_for_tracked(
@@ -11814,6 +11816,7 @@ impl DispositionFixture {
             skip_reacquire_on_failure: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
+            retained_in_client_after_cleanup: false,
         }
     }
 
@@ -12073,12 +12076,10 @@ async fn primary_movie_files(fixture: &DispositionFixture) -> Vec<crate::TitleMe
         .collect()
 }
 
-/// **`Blocklist`.** The release advertised 1080p and the file measures 720p, in
-/// a profile that ranks 1080P above 720P and a scope that already holds a 1080p
-/// file. The release lied, so it is burned and the scope re-opened to look for
-/// a different candidate.
+/// A resolution mismatch holds the source without burning the release or
+/// replacing the existing higher-quality file.
 #[tokio::test]
-async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reopened() {
+async fn a_release_quality_mismatch_is_held_without_blocklisting_or_reopening() {
     let release_title = "Quality Lie Movie.2026.1080p.WEB-DL.x264-GRP";
     let fixture = disposition_fixture("Quality Lie Movie", release_title).await;
     let incumbent_id =
@@ -12097,29 +12098,23 @@ async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reop
         },
     );
 
-    let result = crate::import_workflow::import_completed_download(
-        &fixture.app,
-        &fixture.user,
-        &fixture.completed,
-    )
-    .await
-    .expect("the import runs to a decision");
-
-    assert_eq!(
-        result.decision,
-        scryer_domain::ImportDecision::Rejected,
-        "{result:?}"
-    );
-    let expected = crate::normalize_release_name(Some(release_title)).unwrap_or_default();
+    let mut tracked = fixture.tracked_import_pending();
     assert!(
-        fixture.blocklisted_titles().await.contains(&expected),
-        "a proven quality lie must be blocklisted, got {:?}",
-        fixture.blocklisted_titles().await
+        !crate::completed_download_handler::import(&fixture.app, &fixture.user, &mut tracked).await
     );
+    let result = fixture.latest_import_result().await;
+    assert_eq!(result.decision, scryer_domain::ImportDecision::Skipped);
+    assert!(!result.release_burned, "{result:?}");
+    assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+    assert!(fixture.blocklisted_titles().await.is_empty());
     assert_eq!(
         fixture.scope_status().await,
-        AcquisitionScopeStatus::Wanted,
-        "the scope must reopen so convergence looks for a different release"
+        AcquisitionScopeStatus::Grabbed
+    );
+    assert!(
+        PathBuf::from(&fixture.completed.dest_dir)
+            .join(format!("{release_title}.mkv"))
+            .exists()
     );
     let primaries = primary_movie_files(&fixture).await;
     assert_eq!(
@@ -12128,6 +12123,106 @@ async fn a_release_that_lied_about_its_quality_is_blocklisted_and_the_scope_reop
         "the incumbent must stand alone: {primaries:?}"
     );
     assert_eq!(primaries[0].id, incumbent_id);
+}
+
+#[tokio::test]
+async fn quality_mismatch_retry_uses_the_current_profile_and_fresh_probe() {
+    let release_title = "Profile Retry Movie.2026.2160p.WEB-DL.x264-GRP";
+    let mut fixture = disposition_fixture("Profile Retry Movie", release_title).await;
+    let profiles = Arc::new(StoredQualityProfileRepo::default());
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let mut profile = crate::builtin_default_quality_profile();
+    profile.criteria.quality_tiers = vec!["2160P".into(), "1080P".into()];
+    profiles.set_profiles(vec![profile.clone()]).await;
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            QUALITY_PROFILE_ID_KEY,
+            &serde_json::to_string(&profile.id).unwrap(),
+        )
+        .await;
+    fixture.app.services.config.quality_profiles = profiles.clone();
+    fixture.app.services.config.settings = settings;
+    let source = PathBuf::from(&fixture.completed.dest_dir).join(format!("{release_title}.mkv"));
+    let unrelated = PathBuf::from(&fixture.completed.dest_dir).join("operator-note.txt");
+    std::fs::write(&unrelated, "preserve this").unwrap();
+    let mut tracked = fixture.tracked_import_pending();
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        assert!(
+            !crate::completed_download_handler::import(&fixture.app, &fixture.user, &mut tracked)
+                .await
+        );
+    }
+    let held = fixture.latest_import_result().await;
+    assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+    assert!(!held.release_burned);
+    assert!(source.exists());
+    assert!(fixture.blocklisted_titles().await.is_empty());
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        let still_held = crate::import_workflow::retry_failed_import(
+            &fixture.app,
+            &fixture.user,
+            &held.import_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(still_held.decision, scryer_domain::ImportDecision::Skipped);
+        assert!(!still_held.release_burned);
+        assert!(source.exists());
+    }
+    profile.criteria.quality_tiers.push("1440P".into());
+    profiles.set_profiles(vec![profile]).await;
+    {
+        let _probe = probe_agrees_with_the_name(2560, 1440);
+        fixture
+            .import_repo
+            .retry_finish_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = crate::import_workflow::retry_failed_import(
+            &fixture.app,
+            &fixture.user,
+            &held.import_id,
+            None,
+        )
+        .await
+        .expect_err("inject failure after file import but before finalization");
+        assert!(error.to_string().contains("finalization failure"));
+        let imported = fixture.latest_import_result().await;
+        assert_eq!(
+            imported.decision,
+            scryer_domain::ImportDecision::Imported,
+            "{imported:?}"
+        );
+    }
+    let before_recovery = primary_movie_files(&fixture).await;
+    assert_eq!(before_recovery.len(), 1);
+    let claim = fixture
+        .import_repo
+        .retry_claims
+        .lock()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    fixture
+        .import_repo
+        .retry_finish_fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    fixture.app.runtime.imports.execution_coordinator = Default::default();
+    crate::import_workflow::recover_import_retry(&fixture.app, &claim)
+        .await
+        .unwrap();
+    assert!(fixture.import_repo.retry_claims.lock().await.is_empty());
+    assert_eq!(
+        primary_movie_files(&fixture).await[0].id,
+        before_recovery[0].id
+    );
+    assert_eq!(primary_movie_files(&fixture).await.len(), 1);
+    assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "preserve this");
 }
 
 /// A file rule the operator wrote vetoes the file over something the release name
@@ -12758,6 +12853,27 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
             .with_blocklist_repo(blocklist_repo.clone())
     });
 
+    let policy = scryer_rules::UserPolicy {
+        id: "no_probe_files".to_string(),
+        name: "No probe files".to_string(),
+        rego_source: scryer_rules::rewrite_package_declaration(
+            r#"
+score_entry["operator_refuses_this_file"] := -10000 if {
+    input.file != null
+}
+"#,
+            "no_probe_files",
+        ),
+        origin: scryer_rules::PolicyOrigin::User,
+        applied_facets: vec!["anime".to_string()],
+    };
+    *app.services
+        .customization
+        .user_rules
+        .write()
+        .expect("user rules lock") =
+        scryer_rules::UserRulesEngine::build(&[policy]).expect("rule fixture should compile");
+
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
@@ -12795,8 +12911,7 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
         .await
         .expect("create series movie link");
 
-    // Occupied at 1080p, so a landed 720p is a refusal rather than an
-    // import-and-blocklist.
+    // The existing linked file must not change when the file-only rule vetoes the import.
     std::fs::create_dir_all(&title_folder).expect("create title folder");
     let incumbent_path = title_folder.join("Refused Link Import - 1080p.mkv");
     std::fs::File::create(&incumbent_path)
@@ -12935,13 +13050,14 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
 
     let mut analysis = crate::post_download_gate::build_stream_pointer_media_file_analysis();
     analysis.video_codec = crate::release_parser::VideoCodec::parse("h264");
-    analysis.video_width = Some(1280);
-    analysis.video_height = Some(720);
+    analysis.video_width = Some(1920);
+    analysis.video_height = Some(1080);
+    let rule_file_doc = crate::user_rule_input::file_doc_from_analysis(&analysis);
     let _probe = crate::post_download_gate::probe_override::install(
         crate::post_download_gate::ImportedFileAcceptance {
             analysis: Some(analysis),
             scan_error: None,
-            rule_file_doc: None,
+            rule_file_doc: Some(rule_file_doc),
             audio_language_warning: None,
         },
     );
@@ -12955,12 +13071,18 @@ async fn a_refused_link_import_blocklists_and_reopens_the_link_scope() {
         "{result:?}"
     );
 
+    assert!(result.release_burned, "{result:?}");
+    assert!(
+        incumbent_path.exists(),
+        "the linked incumbent survives the veto"
+    );
+
     let entries = blocklist_repo.entries.lock().await.clone();
     let expected = crate::normalize_release_name(Some(release_title)).unwrap_or_default();
     entries
         .iter()
         .find(|entry| entry.normalized_release_name == expected)
-        .expect("the lying release is blocklisted for the title");
+        .expect("the file-rule veto is blocklisted for the title");
 
     let reopened = app
         .services
@@ -14956,9 +15078,19 @@ async fn enabling_a_disabled_indexer_revalidates_its_retained_proxy_after_connec
         update_app
             .update_indexer_config(
                 &update_user,
+                // Enabling alone no longer probes: a save only validates the
+                // connection when the connection changed. The rotated key is
+                // that change, so the probe reads the retained proxy first.
                 IndexerConfigUpdate {
                     id: "disabled-indexer".to_string(),
                     is_enabled: Some(true),
+                    config_json: Some(
+                        serde_json::json!({
+                            "base_url": "https://api.nzbgeek.info",
+                            "api_key": "rotated-secret"
+                        })
+                        .to_string(),
+                    ),
                     ..Default::default()
                 },
             )
@@ -16231,6 +16363,65 @@ async fn tracking_unchanged_client_rows_resolves_each_observation_once() {
     assert_eq!(
         resolutions.load(std::sync::atomic::Ordering::SeqCst),
         settled + items.len()
+    );
+}
+
+/// A conflict is a fact about the registry's generation, like any other
+/// resolution, so it is memoized.
+///
+/// Before this, `Conflict` was the one resolution the memo refused to hold, on
+/// the reasoning that a later tick might heal it. A later tick heals nothing by
+/// itself, so the exclusion cost a `resolve_observation` write transaction per
+/// conflicting row per call site per tick, forever — a load-test instance with
+/// 961 conflicting rows ran ~1,100 of them a second and logged ~1,650 WARN
+/// lines a second, indefinitely.
+#[tokio::test]
+async fn tracking_memoizes_a_conflicting_row_until_the_registry_moves() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry {
+        strict_conflicts: true,
+        ..Default::default()
+    });
+    let resolutions = registry.resolutions.clone();
+    let mut item = foreign_client_history_item("conflict-row");
+    let locator = ClientJobLocator::new(
+        Some(item.client_id.as_str()),
+        item.client_type.as_str(),
+        item.download_client_item_id.as_str(),
+    );
+    // The locator is already held by one download; the row reports another.
+    registry
+        .bind(locator, scryer_domain::download_identity::DownloadId::new())
+        .await;
+    item.download_id = Some(scryer_domain::download_identity::DownloadId::new().to_wire());
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+
+    tracker.track(&app, item.clone()).await;
+    let after_first = resolutions.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(after_first, 1, "the first sighting must reach the store");
+
+    // Steady state: the same conflicting row costs no further store call.
+    for _ in 0..5 {
+        tracker.track(&app, item.clone()).await;
+    }
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        after_first,
+        "a memoized conflict must not re-enter the registry every tick"
+    );
+
+    // A registry write is the only thing that can heal a conflict, and every
+    // registry write bumps the generation — which retires the memo.
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
+    tracker.track(&app, item).await;
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        after_first + 1,
+        "a generation bump must make the conflict re-resolve"
     );
 }
 

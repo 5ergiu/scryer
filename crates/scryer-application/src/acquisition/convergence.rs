@@ -144,14 +144,21 @@ impl AppUseCase {
                     .flatten(),
                 None => None,
             };
-            let subject = self
+            let subject = match self
                 .resolve_release_search_subject_for_wanted_item(
                     &title,
                     &title,
                     &item,
                     episode.as_ref(),
                 )
-                .await;
+                .await
+            {
+                Ok(subject) => subject,
+                Err(error) => {
+                    tracing::error!(%error, "convergence seed: title index unavailable");
+                    return;
+                }
+            };
             let Some(convergence) = self.resolve_scope_convergence(&title, &subject).await else {
                 continue;
             };

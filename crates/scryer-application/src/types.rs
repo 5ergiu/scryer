@@ -1222,6 +1222,13 @@ pub enum TitleCatalogContentStatus {
     Ended,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TitleCatalogAggregates {
+    pub total_count: bool,
+    pub filter_counts: bool,
+    pub managed_bytes: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TitleCatalogResult {
     pub items: Vec<Title>,
@@ -3567,12 +3574,15 @@ pub fn derive_primary_quality_label(
     quality_label: Option<&str>,
     resolution: Option<&str>,
 ) -> Option<String> {
-    match video_width.filter(|width| *width > 0) {
-        Some(width) if width >= 3840 => return Some("4K".to_string()),
-        Some(width) if width >= 1920 => return Some("1080p".to_string()),
-        Some(width) if width >= 1280 => return Some("720p".to_string()),
+    // Use the scan's dimension thresholds so cropped HD files keep their quality tier.
+    match crate::media::release_labels::quality_from_video_dimensions(video_width, video_height) {
+        Some("2160p") => return Some("4K".to_string()),
+        Some(quality @ ("4320p" | "1440p" | "1080p" | "720p")) => {
+            return Some(quality.to_string());
+        }
         _ => {}
     }
+    // Preserve exact-height labels for SD and other non-HD dimensions.
     if let Some(height) = video_height.filter(|height| *height > 0) {
         return Some(format!("{height}p"));
     }
@@ -3588,6 +3598,26 @@ mod primary_quality_label_tests {
     use super::derive_primary_quality_label;
 
     #[test]
+    fn cropped_and_padded_dimensions_use_the_scanned_quality_tier() {
+        for (width, height, expected) in [
+            (1916, 1076, "1080p"),
+            (1920, 1088, "1080p"),
+            (1920, 800, "1080p"),
+            (1280, 720, "720p"),
+            (1276, 716, "720p"),
+            (2560, 1440, "1440p"),
+            (3836, 2156, "4K"),
+            (7680, 4320, "4320p"),
+        ] {
+            assert_eq!(
+                derive_primary_quality_label(Some(width), Some(height), Some("720p"), None),
+                Some(expected.to_string()),
+                "dimensions {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
     fn prefers_dimensions_then_stored_quality_metadata() {
         assert_eq!(
             derive_primary_quality_label(Some(3840), Some(1080), Some("1080p"), None),
@@ -3599,7 +3629,7 @@ mod primary_quality_label_tests {
         );
         assert_eq!(
             derive_primary_quality_label(Some(1280), Some(1080), Some("1080p"), None),
-            Some("720p".to_string())
+            Some("1080p".to_string())
         );
         assert_eq!(
             derive_primary_quality_label(None, Some(576), Some("1080p"), None),
@@ -3666,6 +3696,29 @@ mod runtime_path_style_tests {
     fn current_is_windows_on_windows() {
         assert_eq!(RuntimePathStyle::current(), RuntimePathStyle::Windows);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DashboardImportKind {
+    Imported,
+    NewImport,
+    Upgrade,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardImportEvidence {
+    pub import_id: Option<String>,
+    pub title_id: Option<String>,
+    pub episode_id: Option<String>,
+    pub is_upgrade: bool,
+    pub imported_media_file_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardRecentImport {
+    pub record: scryer_domain::TitleHistoryRecord,
+    pub episode: Option<scryer_domain::Episode>,
+    pub kind: DashboardImportKind,
 }
 
 #[derive(Clone, Debug)]

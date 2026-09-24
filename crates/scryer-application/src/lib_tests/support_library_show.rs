@@ -287,6 +287,11 @@ pub(super) struct MockShowRepo {
     pub(super) series_movie_links: Arc<Mutex<Vec<scryer_domain::SeriesMovieLink>>>,
     pub(super) collection_external_ids: Arc<Mutex<Vec<ScopedExternalId>>>,
     pub(super) episode_external_ids: Arc<Mutex<Vec<ScopedExternalId>>>,
+    /// The title store this show store shares a database with, when the
+    /// fixture wires one. The real store refreshes a title's search names in
+    /// the same transaction that writes its numbering bridge, so a fake that
+    /// keeps the bridge to itself would hide every cour name from matching.
+    pub(super) titles: Option<Arc<super::support_catalog::MockTitleRepo>>,
 }
 
 #[async_trait]
@@ -318,6 +323,23 @@ impl ShowRepository for MockShowRepo {
             bridges.insert(title_id.to_string(), bridge.clone());
         } else {
             bridges.remove(title_id);
+        }
+        drop(bridges);
+        // Mirror `refresh_title_search_projection_tx`: the bridge's cour names
+        // become names the index holds for the title — and only the index.
+        // The real store never writes them onto the title row, so neither
+        // does this: a matcher that proves against the row alone must fail
+        // here exactly as it fails in production.
+        if let Some(titles) = &self.titles {
+            let aliases = bridge
+                .map(scryer_domain::AnimeNumberingBridge::cour_title_aliases)
+                .unwrap_or_default();
+            let mut index_only_names = titles.index_only_names.lock().await;
+            if aliases.is_empty() {
+                index_only_names.remove(title_id);
+            } else {
+                index_only_names.insert(title_id.to_string(), aliases);
+            }
         }
         Ok(())
     }

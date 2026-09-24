@@ -100,143 +100,181 @@ pub async fn start_background_download_delete_poller(
                 continue;
             }
 
-            let source_identity = crate::ClientJobLocator::new(
+            execute_delete_command(&app, &worker, &command).await;
+        }
+    }
+}
+
+/// Execute one queued user delete: remove the client entry, finalize the
+/// download as ignored, drop the local submission and end its binding.
+///
+/// Split out of the poller loop so the settle side effects a delete owes the
+/// rest of the process can be exercised without driving the timer.
+async fn execute_delete_command(
+    app: &AppUseCase,
+    worker: &PollingWorker,
+    command: &crate::DownloadQueueCommandRecord,
+) {
+    let source_identity = crate::ClientJobLocator::new(
+        command.client_id.as_deref(),
+        &command.client_type,
+        &command.download_client_item_id,
+    );
+    let canonical_download_id = delete_command_download_id(app, command, &source_identity).await;
+    // Read the owning title before the row goes: once the submission is
+    // deleted there is nothing left to key the guard caches on, and they
+    // hold this download as in flight for up to 30s.
+    let deleted_title_id = match app
+        .services
+        .workflow
+        .download_submissions
+        .find_by_client_item_id_for_download(canonical_download_id.as_ref(), &source_identity)
+        .await
+    {
+        Ok(submission) => submission
+            .map(|submission| submission.title_id)
+            .filter(|title_id| !title_id.trim().is_empty()),
+        Err(error) => {
+            worker.warn_error("find_delete_command_submission", &error);
+            None
+        }
+    };
+
+    let result = if let Some(client_id) = command.client_id.as_deref() {
+        app.services
+            .integrations
+            .download_client
+            .delete_queue_item_for_client_id(
+                client_id,
+                &command.download_client_item_id,
+                command.is_history,
+                false,
+            )
+            .await
+    } else {
+        app.services
+            .integrations
+            .download_client
+            .delete_queue_item_for_client(
+                &command.client_type,
+                &command.download_client_item_id,
+                command.is_history,
+                false,
+            )
+            .await
+    };
+
+    if let Err(error) = result {
+        tracing::warn!(
+            client_id = ?command.client_id,
+            client_type = %command.client_type,
+            download_client_item_id = %command.download_client_item_id,
+            error = %error,
+            "download client delete failed; completing local queue deletion"
+        );
+    }
+
+    let actor = command
+        .requested_by_user_id
+        .clone()
+        .map(crate::domain_events::DomainEventActor::user_id)
+        .unwrap_or_else(crate::domain_events::DomainEventActor::system);
+    match crate::integration::workflow::finalize_scryer_download_ignored_for_download(
+        app,
+        actor,
+        canonical_download_id.as_ref(),
+        source_identity.clone(),
+    )
+    .await
+    {
+        Ok(crate::integration::workflow::FinalizeIgnoredOutcome::Finalized)
+        | Ok(crate::integration::workflow::FinalizeIgnoredOutcome::NoSubmission) => {}
+        Ok(crate::integration::workflow::FinalizeIgnoredOutcome::PreservedTerminal(state)) => {
+            tracing::debug!(
+                client_type = %command.client_type,
+                download_client_item_id = %command.download_client_item_id,
+                preserved_state = %state,
+                "delete finalization preserved existing terminal download state"
+            );
+        }
+        Err(error) => {
+            worker.warn_error("finalize_scryer_download_ignored", &error);
+        }
+    }
+    let local_delete_succeeded = match app
+        .services
+        .workflow
+        .download_submissions
+        .delete_by_client_item_id(&source_identity)
+        .await
+    {
+        Ok(()) => {
+            // The delete ends this item's binding inside the store.
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            // The same settle the terminal transition performs: without
+            // it a search for this scope inside the cache window still
+            // sees the deleted submission and refuses the new grab as a
+            // non-replaceable conflict.
+            if let Some(title_id) = deleted_title_id.as_deref() {
+                app.runtime
+                    .acquisition
+                    .download_submission_guards
+                    .forget_settled_download(title_id);
+            }
+            true
+        }
+        Err(error) => {
+            worker.warn_error("delete_download_submission", &error);
+            false
+        }
+    };
+    if let Some(handle) = app.runtime.acquisition.tracked_download_handle.as_ref()
+        && let Err(error) = handle
+            .forget(crate::tracked_downloads::tracked_download_id(
                 command.client_id.as_deref(),
                 &command.client_type,
                 &command.download_client_item_id,
-            );
-            let canonical_download_id =
-                delete_command_download_id(&app, &command, &source_identity).await;
-
-            let result = if let Some(client_id) = command.client_id.as_deref() {
-                app.services
-                    .integrations
-                    .download_client
-                    .delete_queue_item_for_client_id(
-                        client_id,
-                        &command.download_client_item_id,
-                        command.is_history,
-                        false,
-                    )
-                    .await
-            } else {
-                app.services
-                    .integrations
-                    .download_client
-                    .delete_queue_item_for_client(
-                        &command.client_type,
-                        &command.download_client_item_id,
-                        command.is_history,
-                        false,
-                    )
-                    .await
-            };
-
-            if let Err(error) = result {
-                tracing::warn!(
-                    client_id = ?command.client_id,
-                    client_type = %command.client_type,
-                    download_client_item_id = %command.download_client_item_id,
-                    error = %error,
-                    "download client delete failed; completing local queue deletion"
-                );
-            }
-
-            let actor = command
-                .requested_by_user_id
-                .clone()
-                .map(crate::domain_events::DomainEventActor::user_id)
-                .unwrap_or_else(crate::domain_events::DomainEventActor::system);
-            match crate::integration::workflow::finalize_scryer_download_ignored_for_download(
-                &app,
-                actor,
-                canonical_download_id.as_ref(),
-                source_identity.clone(),
-            )
+            ))
             .await
-            {
-                Ok(crate::integration::workflow::FinalizeIgnoredOutcome::Finalized)
-                | Ok(crate::integration::workflow::FinalizeIgnoredOutcome::NoSubmission) => {}
-                Ok(crate::integration::workflow::FinalizeIgnoredOutcome::PreservedTerminal(
-                    state,
-                )) => {
-                    tracing::debug!(
-                        client_type = %command.client_type,
-                        download_client_item_id = %command.download_client_item_id,
-                        preserved_state = %state,
-                        "delete finalization preserved existing terminal download state"
-                    );
-                }
-                Err(error) => {
-                    worker.warn_error("finalize_scryer_download_ignored", &error);
-                }
-            }
-            let local_delete_succeeded = match app
-                .services
-                .workflow
-                .download_submissions
-                .delete_by_client_item_id(&source_identity)
-                .await
-            {
-                Ok(()) => {
-                    // The delete ends this item's binding inside the store.
-                    app.runtime
-                        .acquisition
-                        .invalidate_download_registry_observations();
-                    true
-                }
-                Err(error) => {
-                    worker.warn_error("delete_download_submission", &error);
-                    false
-                }
-            };
-            if let Some(handle) = app.runtime.acquisition.tracked_download_handle.as_ref()
-                && let Err(error) = handle
-                    .forget(crate::tracked_downloads::tracked_download_id(
-                        command.client_id.as_deref(),
-                        &command.client_type,
-                        &command.download_client_item_id,
-                    ))
-                    .await
-            {
-                worker.warn_error("forget_tracked_download", &error);
-            }
-            app.runtime
+    {
+        worker.warn_error("forget_tracked_download", &error);
+    }
+    app.runtime
+        .acquisition
+        .download_queue_snapshot
+        .stage_remove(
+            command.client_id.as_deref(),
+            &command.client_type,
+            &command.download_client_item_id,
+        )
+        .await;
+    if !local_delete_succeeded {
+        return;
+    }
+    if let Err(error) = app
+        .services
+        .workflow
+        .download_queue_commands
+        .mark_delete_command_completed(&command.id)
+        .await
+    {
+        worker.warn_error("mark_delete_command_completed", &error);
+    }
+    if let Some(canonical_download_id) = canonical_download_id.as_ref() {
+        match app
+            .services
+            .workflow
+            .download_registry
+            .end_binding(canonical_download_id)
+            .await
+        {
+            Ok(()) => app
+                .runtime
                 .acquisition
-                .download_queue_snapshot
-                .stage_remove(
-                    command.client_id.as_deref(),
-                    &command.client_type,
-                    &command.download_client_item_id,
-                )
-                .await;
-            if !local_delete_succeeded {
-                continue;
-            }
-            if let Err(error) = app
-                .services
-                .workflow
-                .download_queue_commands
-                .mark_delete_command_completed(&command.id)
-                .await
-            {
-                worker.warn_error("mark_delete_command_completed", &error);
-            }
-            if let Some(canonical_download_id) = canonical_download_id.as_ref() {
-                match app
-                    .services
-                    .workflow
-                    .download_registry
-                    .end_binding(canonical_download_id)
-                    .await
-                {
-                    Ok(()) => app
-                        .runtime
-                        .acquisition
-                        .invalidate_download_registry_observations(),
-                    Err(error) => worker.warn_error("end_delete_command_download_binding", &error),
-                }
-            }
+                .invalidate_download_registry_observations(),
+            Err(error) => worker.warn_error("end_delete_command_download_binding", &error),
         }
     }
 }

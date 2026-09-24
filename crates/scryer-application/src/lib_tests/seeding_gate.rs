@@ -138,6 +138,7 @@ fn tracked_for(
         skip_reacquire_on_failure: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
+        retained_in_client_after_cleanup: false,
     }
 }
 
@@ -2490,6 +2491,96 @@ async fn a_torrent_with_removal_disabled_is_left_alone_without_engaging_the_gate
     // `Imported` rather than being parked in `ImportedSeeding` forever.
     assert_eq!(outcome, TerminalDownloadCleanupOutcome::NotConfigured);
     assert!(crate::import::import::terminal_download_cleanup_is_complete(outcome.outcome));
+    assert!(
+        crate::import::import::terminal_download_cleanup_leaves_entry_in_client(outcome.outcome)
+    );
+}
+
+/// The gate's most common retained shape: a torrent client with no removal
+/// configured and no seeding profile at all. It settles as `policy_retained`,
+/// which is complete — but the torrent is still sitting in the client, so the
+/// row has to stay tracked or nothing ends its binding when it is removed.
+#[tokio::test]
+async fn a_torrent_retained_by_policy_stays_tracked_so_its_removal_still_lands() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (app, user, _) = bootstrap_with_torrent_clients(download_client.clone());
+    let config = create_enabled_download_client_config(&app, &user, "qBit", "qbittorrent").await;
+    set_download_client_cleanup_routing(&app, &user, "movie", &config.id, false, true).await;
+    let title = movie_title(&app, &user, "Retained By Policy").await;
+
+    let tracked = tracked_for(
+        &config.id,
+        "qbittorrent",
+        "torrent-policy-retained-1",
+        &title,
+        TrackedDownloadState::Imported,
+        true,
+    );
+    let id = tracked.id.clone();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    tracker.insert_for_tests(tracked);
+
+    crate::app_usecase_integration::finalize_tracked_terminal_state(
+        &app,
+        &mut tracker,
+        &id,
+        TrackedDownloadState::Imported,
+    )
+    .await;
+
+    let retained = tracker
+        .find(&id)
+        .expect("a torrent retained by policy stays tracked");
+    assert_eq!(retained.state, TrackedDownloadState::Imported);
+    assert!(retained.retained_in_client_after_cleanup);
+
+    // The reconcile tick has nothing left to do with it.
+    crate::app_usecase_integration::reconcile_terminal_tracked_downloads(&app, &mut tracker).await;
+    assert!(
+        tracker
+            .find(&id)
+            .is_some_and(|tracked| tracked.retained_in_client_after_cleanup),
+        "the reconcile tick must not drop or re-settle a retained row"
+    );
+    assert!(download_client.deleted_requests.lock().await.is_empty());
+    assert!(download_client.paused_requests.lock().await.is_empty());
+}
+
+/// The same policy on a Usenet client must not retain: its history is a
+/// rolling window, so the entry leaving is the window scrolling rather than
+/// the operator removing anything.
+#[tokio::test]
+async fn a_usenet_import_retained_by_policy_still_stops_being_tracked() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (app, user, _) = bootstrap_with_torrent_clients(download_client.clone());
+    let config = create_enabled_download_client_config(&app, &user, "NZBGet", "nzbget").await;
+    set_download_client_cleanup_routing(&app, &user, "movie", &config.id, false, true).await;
+    let title = movie_title(&app, &user, "Usenet Retained By Policy").await;
+
+    let tracked = tracked_for(
+        &config.id,
+        "nzbget",
+        "nzb-policy-retained-1",
+        &title,
+        TrackedDownloadState::Imported,
+        true,
+    );
+    let id = tracked.id.clone();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    tracker.insert_for_tests(tracked);
+
+    crate::app_usecase_integration::finalize_tracked_terminal_state(
+        &app,
+        &mut tracker,
+        &id,
+        TrackedDownloadState::Imported,
+    )
+    .await;
+
+    assert!(
+        tracker.find(&id).is_none(),
+        "a Usenet history entry rolling off is not the operator removing it"
+    );
 }
 
 // ── import mode ───────────────────────────────────────────────────────────
@@ -4224,6 +4315,70 @@ async fn a_stop_seeding_profile_pauses_the_torrent_instead_of_removing_it() {
     );
 }
 
+/// The gate released the torrent but left the entry in the client, so the row
+/// cannot simply be forgotten: nothing else would notice the operator removing
+/// the entry later, and its binding would never end. It stays tracked and out
+/// of the gate's way.
+#[tokio::test]
+async fn a_released_torrent_left_in_the_client_stays_tracked_without_re_running_the_gate() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let (app, mut tracked) = torrent_cleanup_fixture(
+        download_client.clone(),
+        "Kept After Seeding",
+        "torrent-live-kept-1",
+        Some(PersistedSeedGoals {
+            goal_met_action: Some(scryer_domain::SeedGoalMetAction::StopSeeding),
+            ..persisted_goals(false)
+        }),
+    )
+    .await;
+    observed(
+        DownloadSeedingSnapshot {
+            can_remove: Some(false),
+            can_move_files: Some(true),
+            seed_ratio: Some(2.5),
+            ..DownloadSeedingSnapshot::default()
+        },
+        &mut tracked,
+    );
+    let id = tracked.id.clone();
+    let mut tracker = crate::tracked_downloads::TrackedDownloadService::new();
+    tracker.insert_for_tests(tracked);
+
+    crate::app_usecase_integration::finalize_tracked_terminal_state(
+        &app,
+        &mut tracker,
+        &id,
+        TrackedDownloadState::ImportedSeeding,
+    )
+    .await;
+
+    let retained = tracker
+        .find(&id)
+        .expect("an entry the gate left in the client stays tracked");
+    assert_eq!(retained.state, TrackedDownloadState::Imported);
+    assert!(retained.retained_in_client_after_cleanup);
+    assert!(
+        download_client.deleted_requests.lock().await.is_empty(),
+        "the entry was kept, not removed"
+    );
+    assert_eq!(download_client.paused_requests.lock().await.len(), 1);
+
+    // The reconcile tick must leave it alone: the gate already released it, so
+    // re-offering would pause the torrent again once per poll.
+    crate::app_usecase_integration::reconcile_terminal_tracked_downloads(&app, &mut tracker).await;
+
+    assert!(
+        tracker.find(&id).is_some(),
+        "the reconcile tick must not drop a retained row"
+    );
+    assert_eq!(
+        download_client.paused_requests.lock().await.len(),
+        1,
+        "a released entry must not be re-released on the next poll"
+    );
+}
+
 // ── queue projection: goals joined beside the observation ─────────────────
 
 #[tokio::test]
@@ -4979,9 +5134,13 @@ async fn a_handoff_profile_settles_an_imported_torrent_without_touching_the_clie
     )
     .await;
 
+    // The entry stays in the client, so the row stays in the cache — inert,
+    // purely so the operator removing the torrent later still ends its binding.
     assert!(
-        tracker.find(&id).is_none(),
-        "a handed-off torrent stops being tracked and leaves the queue"
+        tracker
+            .find(&id)
+            .is_some_and(|tracked| tracked.retained_in_client_after_cleanup),
+        "a handed-off torrent is retained only to notice the entry going away"
     );
     assert!(
         download_client.deleted_requests.lock().await.is_empty(),
@@ -5046,7 +5205,11 @@ async fn a_re_offered_handed_off_row_settles_again_without_recording_another_eve
     )
     .await;
 
-    assert!(tracker.find(&id).is_none());
+    assert!(
+        tracker
+            .find(&id)
+            .is_some_and(|tracked| tracked.retained_in_client_after_cleanup)
+    );
     assert!(download_client.deleted_requests.lock().await.is_empty());
     assert_eq!(
         seeding_history_events(&app).await.len(),

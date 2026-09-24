@@ -1105,8 +1105,9 @@ const it: LocaleDictionary = {
     "Rimuovere questo download dal downloader? Verrà ignorato quando il downloader conferma la rimozione.",
   "queue.manualUnavailableForResult":
     "L'accodamento manuale non è disponibile per questo risultato.",
-  "importHistory.retry": "Riprova",
-  "importHistory.retryWithPassword": "Riprova con password",
+  "importHistory.retry": "Riprova importazione",
+  "importHistory.retryHelp": "Rivaluta i file già scaricati con l’assegnazione e il profilo di qualità attuali. Non avvia un nuovo download.",
+  "importHistory.retryWithPassword": "Riprova importazione con password",
   "importHistory.passwordRequired": "Password richiesta",
   "importHistory.passwordPlaceholder": "Password dell'archivio",
   "importHistory.retrySuccess": "Reimportazione avviata",
@@ -1144,6 +1145,8 @@ const it: LocaleDictionary = {
   "settings.indexerAutoSearch": "Automatica",
   "settings.indexerStatus": "Stato",
   "settings.indexerDisabledUntil": "Backoff {{time}}",
+  "settings.indexerCoolingDownUntil": "In pausa · riprende {{time}}",
+  "settings.indexerCoolingDownHelp": "L’indexer ha chiesto a Scryer di rallentare. La ricerca riprende automaticamente.",
   "settings.indexerLastError": "Errore {{time}}",
   "settings.indexerLastSearched": "Cercato {{time}}",
   "settings.indexerNoActivity": "Nessuna attività",
@@ -2478,6 +2481,7 @@ const it: LocaleDictionary = {
   "indexerSearch.health.stillSearching":
     "{{count}} di {{total}} ancora in ricerca",
   "indexerSearch.health.failed": "non riuscito",
+  "indexerSearch.health.coolingDown": "in pausa",
   "indexerSearch.health.skipped": "saltato",
   "indexerSearch.health.retryFailed": "Riprova i falliti",
   "indexerSearch.refine.title": "Affina",

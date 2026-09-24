@@ -366,7 +366,7 @@ mod tests {
             app: ctx.app.clone(),
             schema: ctx.schema.clone(),
             auth_runtime: ctx.auth_runtime.clone(),
-            rate_limiter: ScryerRateLimiter::from_env(),
+            rate_limiter: ScryerRateLimiter::from_env(Default::default()),
             ws_origin_policy: WebSocketOriginPolicy::default(),
             authless_web_client_proof: AuthlessWebClientProofState::new(),
         };

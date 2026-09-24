@@ -2,7 +2,6 @@ use unicode_normalization::UnicodeNormalization;
 
 pub(crate) mod relaxed;
 
-const TRAILING_ARTICLES: &[&str] = &["a", "an", "the"];
 const MOVIE_LOW_SIGNAL_TOKENS: &[&str] = &[
     "a",
     "an",
@@ -25,13 +24,12 @@ pub(crate) enum TitleMatchProfile {
     Movie,
 }
 
+/// The catalog's lookup form, owned by the domain so that release/import
+/// resolution, the persisted search projection and the UI all key on one
+/// normalizer. Kept as a local alias because most of this crate reads better
+/// calling it a lookup key.
 pub(crate) fn canonical_lookup_key(title: &str) -> String {
-    let tokens = reorder_trailing_article(canonical_tokens(title));
-    if tokens.is_empty() {
-        return String::new();
-    }
-
-    tokens.join(" ")
+    scryer_domain::title_spelling::title_lookup_form(title)
 }
 
 pub(crate) fn reduced_comparison_key(title: &str, profile: TitleMatchProfile) -> String {
@@ -72,30 +70,6 @@ fn cleaned_search_title(title: &str) -> String {
         .join(" ")
         .trim()
         .to_string()
-}
-
-fn canonical_tokens(title: &str) -> Vec<String> {
-    scryer_domain::title_spelling::normalize_title_spelling(title)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect()
-}
-
-fn reorder_trailing_article(mut tokens: Vec<String>) -> Vec<String> {
-    if tokens.len() < 2 {
-        return tokens;
-    }
-
-    if let Some(article) = tokens.last().cloned()
-        && TRAILING_ARTICLES.contains(&article.as_str())
-    {
-        tokens.pop();
-        let mut reordered = vec![article];
-        reordered.extend(tokens);
-        return reordered;
-    }
-
-    tokens
 }
 
 /// Levenshtein distance between two strings, or `None` once it is certain the

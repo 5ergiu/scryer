@@ -99,9 +99,7 @@ impl InteractiveSearchMutations {
         Ok(crate::mappers::from_search_result(result))
     }
 
-    /// Grab one release of an interactive search with no catalog title behind it: it is submitted
-    /// to the chosen download client and recorded orphan-scoped, so the completed download waits
-    /// in Activity for a manual import.
+    /// Submit an interactive-search release without binding a catalog title.
     async fn queue_unlinked_release(
         &self,
         ctx: &Context<'_>,
@@ -116,13 +114,15 @@ impl InteractiveSearchMutations {
             search_id,
             download_url,
             download_client_id,
+            category,
         } = input;
         let outcome = app
-            .queue_unlinked_release(
+            .queue_unlinked_release_with_category(
                 &actor,
                 search_id.as_ref(),
                 &download_url,
                 download_client_id.as_ref(),
+                category,
             )
             .await
             .map_err(to_gql_error)?;

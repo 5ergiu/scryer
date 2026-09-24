@@ -836,7 +836,10 @@ pub async fn recover_stale_processing_imports(
                  updated_at = {{}}
              WHERE status = 'processing'
                {type_filter}
-               AND updated_at < {{}}"
+               AND updated_at < {{}}
+               AND NOT EXISTS (SELECT 1 FROM download_identity_states st
+                   WHERE st.canonical_download_id = imports.canonical_download_id
+                     AND st.reason = 'import_retry_recovery')"
         ),
         args,
     )

@@ -493,6 +493,10 @@ impl AppUseCase {
             .titles
             .update_metadata(id, name, facet, tags, None)
             .await?;
+        // Name/facet/tag edits change the matcher's keys. Invalidated here and
+        // not only through the `TitleUpdated` event below, because that append
+        // is best-effort while the matcher's freshness is not.
+        self.invalidate_monitored_title_matcher().await;
         self.emit_title_updated_activity(actor, &title).await;
         Ok(title)
     }
@@ -628,6 +632,8 @@ impl AppUseCase {
             .titles
             .update_metadata(id, name, facet, tags, resolved_root_folder_id)
             .await?;
+        // See `apply_title_metadata_update`.
+        self.invalidate_monitored_title_matcher().await;
 
         self.reconcile_series_movie_link_monitoring_for_title(&title)
             .await?;
@@ -964,6 +970,8 @@ impl AppUseCase {
                 )
                 .await?
         };
+        // A rematch replaces the external ids and tags the matcher indexes.
+        self.invalidate_monitored_title_matcher().await;
 
         reset_title.folder_path = existing_title.folder_path.clone();
 

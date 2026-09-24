@@ -203,7 +203,10 @@ pub struct RequestPolicy {
     pub max_retries: u32,
     pub base_backoff: Duration,
     pub max_backoff: Duration,
-    pub max_retry_after: Duration,
+    /// Longest this caller will wait in-line for an active destination
+    /// cooldown before failing fast with [`OutboundHttpError::RateLimited`].
+    /// It does not shorten the recorded cooldown.
+    pub max_inline_cooldown_wait: Duration,
     pub redirect_mode: RedirectMode,
     pub host_rps_override: Option<HostRpsRequestOverride>,
     pub destination_cooldown_override: Option<DestinationKey>,
@@ -228,7 +231,7 @@ impl RequestPolicy {
             max_retries,
             base_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
-            max_retry_after: default_max_retry_after(),
+            max_inline_cooldown_wait: default_max_inline_cooldown_wait(),
             redirect_mode: RedirectMode::TrustedFollow {
                 max_hops: DEFAULT_TRUSTED_REDIRECT_HOPS,
             },
@@ -269,8 +272,8 @@ impl RequestPolicy {
         self
     }
 
-    pub fn with_max_retry_after(mut self, max_retry_after: Duration) -> Self {
-        self.max_retry_after = max_retry_after;
+    pub fn with_max_inline_cooldown_wait(mut self, max_inline_cooldown_wait: Duration) -> Self {
+        self.max_inline_cooldown_wait = max_inline_cooldown_wait;
         self
     }
 
@@ -308,6 +311,47 @@ impl RequestPolicy {
     fn backoff_for_retry(&self, retry_index: u32) -> Duration {
         bounded_exponential_backoff(self.base_backoff, self.max_backoff, retry_index)
     }
+}
+
+/// Longest cooldown a destination can be held under, however long the server
+/// asked for. A `Retry-After` is an instruction, not a suggestion — a daily
+/// quota legitimately resets a day out — so the ceiling only guards against a
+/// nonsense header parking a destination forever.
+pub const MAX_DESTINATION_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What a destination waits out after a 429 that named no `Retry-After`, per
+/// consecutive rate limit.
+///
+/// The server said "slow down" and nothing else, so the only honest answer is
+/// to keep asking later and later until it stops saying it. One success is not
+/// that: a sliding-window quota lets a request or two through as soon as the
+/// wait ends and then refuses again, so the rung only clears once the
+/// destination has answered normally for as long as the wait it just served.
+const RATE_LIMIT_FALLBACK_COOLDOWN_LADDER: [Duration; 5] = [
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(10 * 60),
+    Duration::from_secs(20 * 60),
+];
+
+/// The one-based ladder rung a persisted fallback cooldown was cut from, so an
+/// escalation survives a restart without a column of its own.
+/// A destination's place on the fallback ladder.
+#[derive(Clone, Copy)]
+struct FallbackRung {
+    /// One-based index into [`RATE_LIMIT_FALLBACK_COOLDOWN_LADDER`].
+    level: usize,
+    /// When a normal answer counts as recovery: the end of the cooldown plus a
+    /// clean stretch as long as the cooldown itself.
+    proven_at: Instant,
+}
+
+fn fallback_cooldown_level_for(delay: Duration) -> Option<usize> {
+    RATE_LIMIT_FALLBACK_COOLDOWN_LADDER
+        .iter()
+        .rposition(|rung| *rung <= delay)
+        .map(|index| index + 1)
 }
 
 pub const DEFAULT_HOST_RPS: f64 = 20.0;
@@ -467,6 +511,9 @@ struct RateLimitRegistryState {
     destination_deadlines: Mutex<HashMap<DestinationKey, Instant>>,
     destination_cooldowns: Mutex<HashMap<DestinationKey, PersistedDestinationCooldown>>,
     dirty_destination_cooldowns: Mutex<HashMap<DestinationKey, PersistedDestinationCooldown>>,
+    /// Which rung of [`RATE_LIMIT_FALLBACK_COOLDOWN_LADDER`] each destination
+    /// currently sits on. An absent entry is "not backing off".
+    destination_fallback_levels: Mutex<HashMap<DestinationKey, FallbackRung>>,
 }
 
 #[derive(Clone)]
@@ -610,6 +657,11 @@ impl RateLimitRegistry {
             .destination_cooldowns
             .lock()
             .expect("destination cooldown metadata lock poisoned");
+        let mut levels = self
+            .state
+            .destination_fallback_levels
+            .lock()
+            .expect("destination fallback level lock poisoned");
 
         for cooldown in cooldowns {
             let Ok(delay) = (cooldown.cooldown_until - now_wall).to_std() else {
@@ -617,6 +669,21 @@ impl RateLimitRegistry {
             };
             if delay.is_zero() {
                 continue;
+            }
+            // The rung is read back out of the wait it produced, so a restart
+            // resumes the ladder where it left off without persisting a level.
+            if cooldown.source == RetryAfterSource::FallbackBackoff
+                && let Some(level) = cooldown.retry_after.and_then(fallback_cooldown_level_for)
+            {
+                levels.insert(
+                    cooldown.destination_key.clone(),
+                    FallbackRung {
+                        level,
+                        proven_at: now_instant
+                            + delay
+                            + RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[level - 1],
+                    },
+                );
             }
             deadlines.insert(cooldown.destination_key.clone(), now_instant + delay);
             record_destination_cooldown_until(&cooldown.destination_key, cooldown.cooldown_until);
@@ -832,20 +899,78 @@ impl RateLimitRegistry {
         self.record_destination_cooldown_inner(destination, delay, source)
     }
 
+    /// Records the escalating cooldown for a rate limit that named no delay of
+    /// its own. The ladder rung is the registry's to pick, so callers that only
+    /// know "this destination said no" do not each invent a wait.
+    pub async fn record_destination_fallback_cooldown(
+        &self,
+        destination: &DestinationKey,
+    ) -> (Duration, RetryAfterSource) {
+        self.record_destination_cooldown_inner(
+            destination,
+            Duration::ZERO,
+            RetryAfterSource::FallbackBackoff,
+        )
+    }
+
+    /// Clears a destination's fallback escalation once it has answered
+    /// normally for long enough to call it recovered. An earlier success keeps
+    /// the rung, so the next refusal climbs instead of starting over.
+    pub fn note_destination_success(&self, destination: &DestinationKey) {
+        let mut levels = self
+            .state
+            .destination_fallback_levels
+            .lock()
+            .expect("destination fallback level lock poisoned");
+        if levels
+            .get(destination)
+            .is_some_and(|rung| Instant::now() >= rung.proven_at)
+        {
+            levels.remove(destination);
+        }
+    }
+
+    /// The next fallback cooldown for this destination.
+    ///
+    /// Escalation is per *run* of rate limits, not per recorded 429: while a
+    /// cooldown is already running the rung stands, so one request that is both
+    /// recorded by the transport and reported again by its caller cannot skip a
+    /// step. A 429 that arrives after the previous cooldown expired is the
+    /// consecutive one the ladder is for.
+    fn escalated_fallback_cooldown(
+        &self,
+        destination: &DestinationKey,
+        already_cooling: bool,
+    ) -> Duration {
+        let mut levels = self
+            .state
+            .destination_fallback_levels
+            .lock()
+            .expect("destination fallback level lock poisoned");
+        let current = levels.get(destination).map_or(0, |rung| rung.level);
+        if already_cooling && current > 0 {
+            return RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[current - 1];
+        }
+        let level = (current + 1).min(RATE_LIMIT_FALLBACK_COOLDOWN_LADDER.len());
+        let wait = RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[level - 1];
+        levels.insert(
+            destination.clone(),
+            FallbackRung {
+                level,
+                proven_at: Instant::now() + wait + wait,
+            },
+        );
+        wait
+    }
+
     fn record_destination_cooldown_inner(
         &self,
         destination: &DestinationKey,
         delay: Duration,
         source: RetryAfterSource,
     ) -> (Duration, RetryAfterSource) {
-        let delay = delay.min(default_max_retry_after());
-        if delay.is_zero() {
-            return (Duration::ZERO, source);
-        }
-
         let now_instant = Instant::now();
         let observed_at = Utc::now();
-        let new_deadline = now_instant + delay;
         let mut deadlines = self
             .state
             .destination_deadlines
@@ -856,6 +981,17 @@ impl RateLimitRegistry {
             .get(destination)
             .copied()
             .filter(|deadline| *deadline > now_instant);
+
+        let delay = if source == RetryAfterSource::FallbackBackoff {
+            self.escalated_fallback_cooldown(destination, existing_deadline.is_some())
+        } else {
+            delay
+        }
+        .min(MAX_DESTINATION_COOLDOWN);
+        if delay.is_zero() {
+            return (Duration::ZERO, source);
+        }
+        let new_deadline = now_instant + delay;
 
         let effective_deadline = match existing_deadline {
             Some(existing) if existing > new_deadline => existing,
@@ -2099,13 +2235,15 @@ pub async fn send_reqwest_request(request: RequestBuilder) -> Result<Response, r
     }
 
     let response = request.send().await?;
-    if response.status() == StatusCode::TOO_MANY_REQUESTS
-        && let Some(destination) = destination_key_from_url(response.url()).or(destination)
-    {
-        let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
-        let _ = registry
-            .record_destination_cooldown(&destination, delay, source)
-            .await;
+    if let Some(destination) = destination_key_from_url(response.url()).or(destination) {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
+            let _ = registry
+                .record_destination_cooldown(&destination, delay, source)
+                .await;
+        } else {
+            registry.note_destination_success(&destination);
+        }
     }
     Ok(response)
 }
@@ -2146,13 +2284,15 @@ pub async fn send_reqwest_request_with_cooldown_budget(
         let _ = registry.acquire_host_rps(host).await;
     }
     let response = request.send().await?;
-    if response.status() == StatusCode::TOO_MANY_REQUESTS
-        && let Some(destination) = destination_key_from_url(response.url()).or(destination)
-    {
-        let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
-        let _ = registry
-            .record_destination_cooldown(&destination, delay, source)
-            .await;
+    if let Some(destination) = destination_key_from_url(response.url()).or(destination) {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
+            let _ = registry
+                .record_destination_cooldown(&destination, delay, source)
+                .await;
+        } else {
+            registry.note_destination_success(&destination);
+        }
     }
     Ok(response)
 }
@@ -2171,21 +2311,13 @@ pub enum AsyncOutboundHttpError {
     },
 }
 
+/// Sends a blocking request under the default in-line cooldown budget. A
+/// destination cooling for longer than that is reported rather than slept
+/// through, because the caller owns a thread for the whole wait.
 pub fn send_blocking_reqwest_request(
     request: reqwest::blocking::RequestBuilder,
-) -> Result<reqwest::blocking::Response, reqwest::Error> {
-    send_blocking_reqwest_request_with_cooldown_budget(request, None).map_err(|error| match error {
-        BlockingOutboundHttpError::Request(error) => error,
-        BlockingOutboundHttpError::CooldownBudgetExceeded { .. } => {
-            unreachable!("unbounded blocking request cannot exhaust cooldown budget")
-        }
-        BlockingOutboundHttpError::DeadlineExceeded => {
-            unreachable!("unbounded blocking request has no dispatch deadline")
-        }
-        BlockingOutboundHttpError::DispatchRejected => {
-            unreachable!("unobserved blocking request cannot reject its dispatch")
-        }
-    })
+) -> Result<reqwest::blocking::Response, BlockingOutboundHttpError> {
+    send_blocking_reqwest_request_with_cooldown_budget(request, None)
 }
 
 pub fn send_blocking_reqwest_request_with_cooldown_budget(
@@ -2282,9 +2414,10 @@ fn send_blocking_reqwest_request_with_cooldown_policy_inner(
 
     if let Some(destination) = destination.as_ref() {
         if let Some(remaining) = registry.active_destination_cooldown(destination) {
-            if let Some(max_wait) = max_cooldown_wait
-                && remaining > max_wait
-            {
+            // No budget still means a bounded wait: this thread is blocked for
+            // every second of it, and a recorded cooldown can run for hours.
+            let max_wait = max_cooldown_wait.unwrap_or_else(default_max_inline_cooldown_wait);
+            if remaining > max_wait {
                 return Err(BlockingOutboundHttpError::CooldownBudgetExceeded {
                     destination: destination.clone(),
                     remaining,
@@ -2322,11 +2455,13 @@ fn send_blocking_reqwest_request_with_cooldown_policy_inner(
     } else {
         destination_key_from_url(response.url()).or(destination)
     };
-    if response.status() == StatusCode::TOO_MANY_REQUESTS
-        && let Some(destination) = response_destination
-    {
-        let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
-        let _ = registry.record_destination_cooldown_blocking(&destination, delay, source);
+    if let Some(destination) = response_destination {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let (delay, source) = retry_after_delay(response.headers(), Duration::from_secs(1));
+            let _ = registry.record_destination_cooldown_blocking(&destination, delay, source);
+        } else {
+            registry.note_destination_success(&destination);
+        }
     }
     Ok(response)
 }
@@ -2604,6 +2739,37 @@ impl OutboundHttpClient {
                 .or_else(|| destination_key_from_url(&dispatch_url));
 
             if let Some(destination) = request_destination.as_ref()
+                && let Some(remaining) = self.registry.active_destination_cooldown(destination)
+                && remaining > policy.max_inline_cooldown_wait
+            {
+                // A recorded cooldown may run for hours; nothing waits that out
+                // in-line. The caller is told how long is left and decides.
+                counter!(
+                    "scryer_outbound_http_rate_limited_total",
+                    "scope" => policy.scope.to_string(),
+                    "request_label" => policy.request_label.to_string(),
+                    "source" => retry_after_source_label(RetryAfterSource::ExistingCooldown)
+                        .to_string()
+                )
+                .increment(1);
+                debug!(
+                    destination = %destination,
+                    request_label = policy.request_label.as_ref(),
+                    remaining_ms = remaining.as_millis(),
+                    "outbound HTTP destination cooldown exceeds in-line wait budget"
+                );
+                return Err(OutboundRequestError::Http(OutboundHttpError::RateLimited(
+                    RateLimitedError {
+                        scope: policy.scope.clone(),
+                        retry_after: Some(remaining),
+                        attempts: attempt,
+                        retry_after_source: RetryAfterSource::ExistingCooldown,
+                        request_label: policy.request_label.clone(),
+                    },
+                )));
+            }
+
+            if let Some(destination) = request_destination.as_ref()
                 && let Some(wait_duration) = self
                     .registry
                     .wait_for_destination_if_needed(destination)
@@ -2676,6 +2842,14 @@ impl OutboundHttpClient {
 
             match send_result {
                 Ok(response) if response.status() != StatusCode::TOO_MANY_REQUESTS => {
+                    if let Some(destination) = policy
+                        .destination_cooldown_override
+                        .clone()
+                        .or_else(|| destination_key_from_url(response.url()))
+                        .or(request_destination)
+                    {
+                        self.registry.note_destination_success(&destination);
+                    }
                     return Ok(response);
                 }
                 Ok(response) => {
@@ -2683,7 +2857,6 @@ impl OutboundHttpClient {
                     let fallback_backoff = policy.backoff_for_retry(retry_index);
                     let (candidate_delay, candidate_source) =
                         retry_after_delay(response.headers(), fallback_backoff);
-                    let candidate_delay = candidate_delay.min(policy.max_retry_after);
                     let response_destination =
                         policy.destination_cooldown_override.clone().or_else(|| {
                             destination_key_from_url(response.url()).or(request_destination)
@@ -2836,14 +3009,21 @@ fn retry_after_delay(
     parse_retry_after(raw_value).unwrap_or((fallback_delay, RetryAfterSource::FallbackBackoff))
 }
 
-fn default_max_retry_after() -> Duration {
-    const DEFAULT_MAX_RETRY_AFTER_SECS: u64 = 5 * 60;
+/// How long a request will sit waiting for an active destination cooldown
+/// before it gives up and reports [`OutboundHttpError::RateLimited`].
+///
+/// This bounds *waiting*, not the cooldown itself: a server that asks for two
+/// hours gets two hours of quiet (see [`MAX_DESTINATION_COOLDOWN`]), but no
+/// caller holds a task, a thread, or a user's request open for it.
+/// `SCRYER_OUTBOUND_RETRY_AFTER_MAX_SECS` overrides the default.
+fn default_max_inline_cooldown_wait() -> Duration {
+    const DEFAULT_MAX_INLINE_COOLDOWN_WAIT_SECS: u64 = 5 * 60;
     std::env::var("SCRYER_OUTBOUND_RETRY_AFTER_MAX_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_MAX_RETRY_AFTER_SECS))
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_MAX_INLINE_COOLDOWN_WAIT_SECS))
 }
 
 pub fn parse_retry_after(raw_value: &str) -> Option<(Duration, RetryAfterSource)> {
@@ -3917,6 +4097,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_long_retry_after_is_honoured_up_to_a_day() {
+        let registry = RateLimitRegistry::isolated();
+        let two_hours: DestinationKey = "two-hours.example".into();
+        let forever: DestinationKey = "forever.example".into();
+
+        let (recorded, _) = registry
+            .record_destination_cooldown(
+                &two_hours,
+                Duration::from_secs(2 * 60 * 60),
+                RetryAfterSource::Seconds,
+            )
+            .await;
+        assert_eq!(recorded, Duration::from_secs(2 * 60 * 60));
+
+        let (capped, _) = registry
+            .record_destination_cooldown(
+                &forever,
+                Duration::from_secs(7 * 24 * 60 * 60),
+                RetryAfterSource::HttpDate,
+            )
+            .await;
+        assert_eq!(capped, MAX_DESTINATION_COOLDOWN);
+    }
+
+    #[tokio::test]
+    async fn a_cooldown_past_the_in_line_budget_fails_fast_instead_of_waiting() {
+        let (url, hits) = spawn_http_server(vec![http_response(200, &[], "ok")]).await;
+        let registry = RateLimitRegistry::isolated();
+        let destination = destination_key_from_url(&reqwest::Url::parse(&url).unwrap())
+            .expect("server URL has a destination key");
+        let _ = registry
+            .record_destination_cooldown(
+                &destination,
+                Duration::from_secs(2 * 60 * 60),
+                RetryAfterSource::Seconds,
+            )
+            .await;
+
+        let client = OutboundHttpClient::new(generic_reqwest_client(), registry);
+        let policy = RequestPolicy::safe_read("test-server", "budget-bound")
+            .with_max_inline_cooldown_wait(Duration::from_millis(50));
+
+        let started_at = std::time::Instant::now();
+        let error = client
+            .send(policy, || client.client().get(&url))
+            .await
+            .expect_err("a two-hour cooldown must not be slept through");
+
+        match error {
+            OutboundHttpError::RateLimited(rate_limited) => {
+                assert_eq!(
+                    rate_limited.retry_after_source,
+                    RetryAfterSource::ExistingCooldown
+                );
+                assert!(
+                    rate_limited
+                        .retry_after
+                        .is_some_and(|remaining| remaining > Duration::from_secs(60 * 60)),
+                    "the caller is told how long is actually left: {rate_limited:?}"
+                );
+            }
+            other => panic!("expected rate limited error, got {other:?}"),
+        }
+        assert!(started_at.elapsed() < Duration::from_secs(5));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fallback_cooldown_ladder_escalates_and_resets_on_success() {
+        let registry = RateLimitRegistry::isolated();
+        let destination: DestinationKey = "indexer-a.example".into();
+
+        let mut rungs = Vec::new();
+        for _ in 0..6 {
+            let (delay, _) = registry
+                .record_destination_fallback_cooldown(&destination)
+                .await;
+            rungs.push(delay);
+            // Expire the cooldown so the next 429 is a consecutive one rather
+            // than a second report of the same event.
+            registry
+                .state
+                .destination_deadlines
+                .lock()
+                .unwrap()
+                .remove(&destination);
+        }
+
+        assert_eq!(
+            rungs,
+            vec![
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(300),
+                Duration::from_secs(600),
+                Duration::from_secs(1200),
+                Duration::from_secs(1200),
+            ]
+        );
+
+        // A request let through right after the wait is not recovery: a
+        // sliding-window quota does exactly that before refusing again.
+        registry.note_destination_success(&destination);
+        let (after_early_success, _) = registry
+            .record_destination_fallback_cooldown(&destination)
+            .await;
+        assert_eq!(after_early_success, Duration::from_secs(1200));
+        registry
+            .state
+            .destination_deadlines
+            .lock()
+            .unwrap()
+            .remove(&destination);
+
+        // Answering normally for as long as the wait it served is.
+        tokio::time::advance(Duration::from_secs(2 * 1200)).await;
+        registry.note_destination_success(&destination);
+        let (after_recovery, _) = registry
+            .record_destination_fallback_cooldown(&destination)
+            .await;
+        assert_eq!(after_recovery, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_that_names_its_delay_does_not_move_the_ladder() {
+        let registry = RateLimitRegistry::isolated();
+        let destination: DestinationKey = "indexer-b.example".into();
+
+        for _ in 0..3 {
+            let _ = registry
+                .record_destination_cooldown(
+                    &destination,
+                    Duration::from_secs(45),
+                    RetryAfterSource::Seconds,
+                )
+                .await;
+            registry
+                .state
+                .destination_deadlines
+                .lock()
+                .unwrap()
+                .remove(&destination);
+        }
+
+        let (fallback, _) = registry
+            .record_destination_fallback_cooldown(&destination)
+            .await;
+        assert_eq!(
+            fallback,
+            Duration::from_secs(60),
+            "the ladder counts rate limits that said nothing, not every 429"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_fallback_cooldown_resumes_its_ladder_rung() {
+        let registry = RateLimitRegistry::isolated();
+        let destination: DestinationKey = "indexer-c.example".into();
+
+        registry.hydrate_destination_cooldowns(vec![PersistedDestinationCooldown {
+            destination_key: destination.clone(),
+            cooldown_until: Utc::now() + chrono::Duration::seconds(30),
+            retry_after: Some(Duration::from_secs(300)),
+            source: RetryAfterSource::FallbackBackoff,
+            status_code: Some(429),
+            message: None,
+            observed_at: Utc::now(),
+        }]);
+        registry
+            .state
+            .destination_deadlines
+            .lock()
+            .unwrap()
+            .remove(&destination);
+
+        let (next, _) = registry
+            .record_destination_fallback_cooldown(&destination)
+            .await;
+        assert_eq!(
+            next,
+            Duration::from_secs(600),
+            "a restart resumes the ladder above the rung it had already reached"
+        );
+    }
+
+    #[tokio::test]
     async fn destination_cooldown_records_dirty_persisted_state() {
         let registry = RateLimitRegistry::isolated();
         let destination: DestinationKey = "example.test".into();
@@ -3956,18 +4322,17 @@ mod tests {
         let older = registry.drain_dirty_destination_cooldowns();
 
         let _ = registry
-            .record_destination_cooldown(
-                &destination,
-                Duration::from_secs(120),
-                RetryAfterSource::FallbackBackoff,
-            )
+            .record_destination_fallback_cooldown(&destination)
             .await;
         registry.requeue_dirty_destination_cooldowns(older);
 
         let dirty = registry.drain_dirty_destination_cooldowns();
         assert_eq!(dirty.len(), 1);
         assert_eq!(dirty[0].destination_key, destination);
-        assert_eq!(dirty[0].retry_after, Some(Duration::from_secs(120)));
+        assert_eq!(
+            dirty[0].retry_after,
+            Some(RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[0])
+        );
         assert_eq!(dirty[0].source, RetryAfterSource::FallbackBackoff);
     }
 
@@ -4206,7 +4571,12 @@ mod tests {
                     rate_limited.retry_after_source,
                     RetryAfterSource::FallbackBackoff
                 );
-                assert_eq!(rate_limited.retry_after, Some(Duration::from_millis(5)));
+                assert_eq!(
+                    rate_limited.retry_after,
+                    Some(RATE_LIMIT_FALLBACK_COOLDOWN_LADDER[0]),
+                    "a 429 that names no usable delay takes the first ladder rung, not the \
+                     transport's own retry backoff"
+                );
             }
             other => panic!("expected rate limited error, got {other:?}"),
         }

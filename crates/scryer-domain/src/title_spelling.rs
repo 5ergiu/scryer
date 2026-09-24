@@ -25,6 +25,77 @@ pub enum TitleScript {
     Other,
 }
 
+impl TitleScript {
+    /// Stable spelling for a persisted column. Parsed back by
+    /// [`TitleScript::parse`], so the two must move together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Latin => "latin",
+            Self::Cyrillic => "cyrillic",
+            Self::Cjk => "cjk",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "latin" => Self::Latin,
+            "cyrillic" => Self::Cyrillic,
+            "cjk" => Self::Cjk,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// `Title (Year)` and bare `Title` are the same identity for collision
+/// purposes: the matching loop bridges the two shapes, so the collision
+/// detector and the persisted collision key must too, or a year-suffixed
+/// alias reads as "unique".
+pub fn strip_trailing_year(key: &str) -> &str {
+    if let Some((head, tail)) = key.rsplit_once(' ')
+        && tail.len() == 4
+        && tail.chars().all(|c| c.is_ascii_digit())
+        && (tail.starts_with("19") || tail.starts_with("20"))
+        && !head.is_empty()
+    {
+        return head;
+    }
+    key
+}
+
+/// The form a name is *compared* in, and the year it then carries.
+///
+/// A name that ends in its own year (`Tide Chart 2023`) is compared without it
+/// and asserts that year; every other name is compared whole and inherits the
+/// title's year. The trailing four digits are only read as a year when they
+/// agree with the title's own year, or when the name is not simply the title's
+/// name with a year glued on — otherwise `Blade Runner 2049` would lose its
+/// number.
+///
+/// One function because two places need the same answer: the persisted search
+/// projection stores this form, and the matcher compares against it. A
+/// disagreement between them is a silent lookup miss.
+pub fn title_match_form(
+    name: &str,
+    title_name: &str,
+    title_year: Option<i32>,
+) -> (String, Option<i32>) {
+    let key = title_lookup_form(name);
+    let stripped = strip_trailing_year(&key);
+    let canonical = title_lookup_form(title_name);
+    let canonical_shape = strip_trailing_year(&canonical);
+    let explicit_year = (stripped != key)
+        .then(|| key.rsplit_once(' ').and_then(|(_, year)| year.parse().ok()))
+        .flatten()
+        .filter(|year| {
+            Some(*year) == title_year || (key != canonical && stripped != canonical_shape)
+        });
+    match explicit_year {
+        Some(year) => (stripped.to_string(), Some(year)),
+        None => (key, title_year),
+    }
+}
+
 pub fn title_script(value: &str) -> TitleScript {
     let mut script = None;
     for ch in value.chars().filter(|ch| ch.is_alphabetic()) {
@@ -104,6 +175,276 @@ pub fn normalize_title_spelling(value: &str) -> String {
     result.trim().to_string()
 }
 
+/// Articles a catalog writes at the end of a name (`Lantern, The`). The
+/// lookup form moves them back to the front so both spellings are one key.
+const TRAILING_ARTICLES: &[&str] = &["a", "an", "the"];
+
+/// The catalog's lookup form for one name: [`normalize_title_spelling`] with a
+/// trailing article moved to the front.
+///
+/// This is *the* normalizer. Release/import resolution keys its identities on
+/// this form, the persisted search projection stores it verbatim, and the UI's
+/// lenient form ([`title_search_lenient_form`]) is derived from it rather than
+/// computed by a second routine. Diacritics and native letters survive: two
+/// spellings that differ only by an accent are equated by collation, not by
+/// throwing the accent away.
+///
+/// Distinct from `catalog_sort_key`, which *drops* leading articles for
+/// display ordering. Reordering is reversible and identity-preserving;
+/// dropping is not.
+pub fn title_lookup_form(value: &str) -> String {
+    let mut tokens = normalize_title_spelling(value)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return tokens.join(" ");
+    }
+    if let Some(article) = tokens.last().cloned()
+        && TRAILING_ARTICLES.contains(&article.as_str())
+    {
+        tokens.pop();
+        let mut reordered = vec![article];
+        reordered.extend(tokens);
+        return reordered.join(" ");
+    }
+    tokens.join(" ")
+}
+
+/// The form a person typing into the library search box is matched against:
+/// [`normalize_title_spelling`] with diacritics folded away and two
+/// affordances a keyboard needs.
+///
+/// The deliberate differences from [`title_lookup_form`]:
+///
+/// * Combining marks are dropped (NFD, then discard), so `muller` finds
+///   `Müller` without the typist reaching for an umlaut. The lookup form keeps
+///   them, because `ano` and `año` are different words and identity matching
+///   must not conflate them.
+/// * `ß` becomes `ss`. NFD leaves it alone — it has no decomposition — so a
+///   searcher typing `Strasse` would otherwise never reach `Straße` in this
+///   lane. The lookup form keeps `ß`; the German phonebook collation key is
+///   what equates the two spellings for identity matching.
+/// * `&` becomes the word `and`, because that is what people type.
+/// * Every other symbol the normalizer does not list as a separator (`#`,
+///   `%`, `@`, …) becomes a space rather than vanishing, so `Title#2` is two
+///   tokens to a searcher. The lookup form leaves them out entirely; changing
+///   that would move every resolver key.
+/// * Runs of single characters are joined (`s h i e l d` -> `shield`), so an
+///   initialism typed either way finds the title.
+///
+/// No article reordering: a searcher typing `lantern` expects a prefix hit on
+/// `Lantern, The`, and reordering would demote it to a substring hit.
+pub fn title_search_lenient_form(value: &str) -> String {
+    let mut widened = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == '&' {
+            widened.push_str(" and ");
+        } else if ch.is_alphanumeric() || is_combining_mark(ch) || ch.is_whitespace() {
+            widened.push(ch);
+        } else {
+            widened.push(' ');
+        }
+    }
+    let mut stripped = String::with_capacity(widened.len());
+    for ch in normalize_title_spelling(&widened)
+        .nfd()
+        .filter(|ch| !is_combining_mark(*ch))
+    {
+        // `normalize_title_spelling` has already lowercased, so `ẞ` arrives
+        // here as `ß`.
+        if ch == 'ß' {
+            stripped.push_str("ss");
+        } else {
+            stripped.push(ch);
+        }
+    }
+    collapse_initialisms(&stripped)
+}
+
+fn collapse_initialisms(raw: &str) -> String {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let is_initial = |token: &str| {
+        token.chars().count() == 1 && token.chars().next().is_some_and(char::is_alphanumeric)
+    };
+    let mut collapsed: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if !is_initial(tokens[index]) {
+            collapsed.push(tokens[index].to_string());
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < tokens.len() && is_initial(tokens[index]) {
+            index += 1;
+        }
+        if index - start >= 2 {
+            collapsed.push(tokens[start..index].concat());
+        } else {
+            collapsed.push(tokens[start].to_string());
+        }
+    }
+    collapsed.join(" ")
+}
+
+/// Words that introduce a lower-case Roman numeral in a title.
+const NUMERAL_CONTEXT_WORDS: &[&str] = &["part", "season", "chapter", "vol"];
+
+/// Every number a name carries, in the shape the resolver guards on: bare
+/// digit runs, plus Roman numerals tagged so `II` cannot be edited into `I`.
+///
+/// **Pass the name as written.** The Roman-numeral rule reads letter case, so
+/// a lowercased lookup form answers differently from the source spelling, and
+/// the two sides of one comparison must be fed the same way. The digit half
+/// is case-free, so it does not care.
+///
+/// A token counts as a Roman numeral only when the Roman pattern matches *and*
+/// one of these holds:
+///
+/// * every letter in it is upper case in the source — `Rocky II`, `Part III`;
+/// * it is a run of one `i`, `v` or `x` directly after `part`, `season`,
+///   `chapter` or `vol` — `part ii`, `season iv` is not a run and is caught by
+///   the upper-case rule instead when written `IV`.
+///
+/// Without that, the pattern alone reads ordinary words as numerals: `mix` is
+/// a valid Roman numeral (1009), and a spurious number in the guard splits a
+/// title from its own aliases. Known residue: a name shouted in full upper
+/// case (`MIX`) still reads as a numeral, because at that point the source
+/// carries no signal to tell the two apart.
+///
+/// NFKC has already folded Unicode Roman numerals into the ASCII spelling by
+/// the time a name reaches this.
+pub fn title_numbers(value: &str) -> Vec<String> {
+    static ROMAN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
+            .expect("valid Roman numeral pattern")
+    });
+
+    fn word(token: &str) -> &str {
+        token.trim_matches(|ch: char| !ch.is_alphanumeric())
+    }
+
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let mut romans = Vec::new();
+    for (position, token) in tokens.iter().enumerate() {
+        let token = word(token);
+        if token.is_empty() {
+            continue;
+        }
+        let lowered = token.to_lowercase();
+        if !ROMAN.is_match(&lowered) {
+            continue;
+        }
+        let shouted = token
+            .chars()
+            .all(|ch| !ch.is_alphabetic() || ch.is_uppercase());
+        let repeated_letter = lowered
+            .chars()
+            .next()
+            .is_some_and(|first| matches!(first, 'i' | 'v' | 'x'))
+            && lowered.chars().all(|ch| lowered.starts_with(ch));
+        let after_context = position > 0
+            && NUMERAL_CONTEXT_WORDS
+                .iter()
+                .any(|marker| word(tokens[position - 1]).eq_ignore_ascii_case(marker));
+        if shouted || (repeated_letter && after_context) {
+            romans.push(format!("roman:{lowered}"));
+        }
+    }
+
+    value
+        .split(|ch: char| !ch.is_numeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .chain(romans)
+        .collect()
+}
+
+/// [`title_numbers`] as one comparable string, for a persisted column and an
+/// index. Order follows [`title_numbers`], which is the order the in-memory
+/// guard compares, so equality of this key is equality of that guard.
+///
+/// Takes the name as written, for the reason [`title_numbers`] gives.
+pub fn title_numbers_key(value: &str) -> String {
+    title_numbers(value).join("\u{1f}")
+}
+
+/// Fingerprint of the collation data this build will produce sort keys with.
+///
+/// Persisting [`title_spelling_key`] output is only sound while the ICU/CLDR
+/// data behind it is unchanged: an `icu_collator` bump can silently move every
+/// stored key, and a lookup computed with new data would then miss rows
+/// written with the old. Rather than trusting a hand-maintained constant, this
+/// hashes the actual sort keys of a probe corpus across every profile the
+/// catalog uses. Any change to the data, the strength options, or the profile
+/// list moves the fingerprint, and the consumer that stamped its rows with the
+/// old one rebuilds them.
+///
+/// This is what makes persisting [`title_spelling_key`] output sound: the
+/// keys are stored *with* this stamp, and a mismatch is a rebuild rather than
+/// a silent miss.
+///
+/// Limitation: the probes are a sample, so a data change that leaves every
+/// probe's key byte-identical while moving some other name's key is not
+/// detected. The dependency versions below narrow that: the build script
+/// reads `icu_collator` and `icu_collator_data` out of `Cargo.lock` and they
+/// go into the hash, so a crate bump moves the fingerprint whether or not the
+/// probes notice. What neither covers is a data change with no version change,
+/// which the registry does not permit for a published crate.
+pub fn title_collation_data_version() -> &'static str {
+    static VERSION: LazyLock<String> = LazyLock::new(|| {
+        const PROBES: &[&str] = &[
+            "muller",
+            "müller",
+            "strasse",
+            "straße",
+            "grüße",
+            "le cœur de chloé",
+            "майский вечер",
+            "流浪地球2",
+            "ガラスの城",
+            "한글",
+        ];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"title-spelling-collation-v1");
+        hasher.update(env!("SCRYER_ICU_COLLATOR_VERSIONS").as_bytes());
+        for tag in COLLATION_PROFILES {
+            hasher.update(tag.as_bytes());
+            for probe in PROBES {
+                match title_spelling_key(probe, tag) {
+                    Some(key) => {
+                        hasher.update(&(key.len() as u32).to_le_bytes());
+                        hasher.update(&key);
+                    }
+                    None => {
+                        hasher.update(b"\xff");
+                    }
+                }
+            }
+        }
+        hasher.finalize().to_hex()[..16].to_string()
+    });
+    VERSION.as_str()
+}
+
+/// Every profile tag [`title_spelling_profiles`] can return. Kept next to it:
+/// a new tag there must be added here or the fingerprint stops covering it.
+pub const COLLATION_PROFILES: &[&str] = &[
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "ru",
+    "ja",
+    "ko",
+    "zh",
+    "und",
+    "de-u-co-phonebk",
+];
+
 type MatchCollator = Arc<CollatorBorrowed<'static>>;
 static COLLATOR_CACHE: LazyLock<Mutex<HashMap<&'static str, MatchCollator>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -167,8 +508,15 @@ pub fn title_spelling_profiles(value: &str, language: Option<&str>) -> Vec<&'sta
     profiles
 }
 
-/// Ephemeral lookup key for spelling discovery. Never persist these keys or
-/// use catalog-sort keys, whose article handling has different semantics.
+/// Lookup key for spelling discovery. Never use catalog-sort keys here: their
+/// article handling has different semantics.
+///
+/// These bytes are only comparable against keys written by the same collation
+/// data. Persisting them is sound only alongside
+/// [`title_collation_data_version`], which fingerprints that data so a
+/// projection written by another build is rebuilt rather than silently
+/// mis-compared; `title_search_meta.collation_version` is where the projection
+/// records it.
 pub fn title_spelling_key(value: &str, profile: &'static str) -> Option<Vec<u8>> {
     let mut key = Vec::new();
     collator(profile)?.write_sort_key_to(value, &mut key).ok()?;
@@ -309,6 +657,52 @@ mod tests {
     }
 
     #[test]
+    fn roman_numerals_are_read_from_the_source_spelling() {
+        // Upper case in the source is the signal.
+        assert_eq!(title_numbers("Rocky II"), vec!["roman:ii".to_string()]);
+        assert_eq!(title_numbers("Part III"), vec!["roman:iii".to_string()]);
+        assert_eq!(title_numbers("Season IV"), vec!["roman:iv".to_string()]);
+        // Lower case needs a counting word in front of a single-letter run.
+        assert_eq!(title_numbers("part ii"), vec!["roman:ii".to_string()]);
+        assert_eq!(title_numbers("vol iii"), vec!["roman:iii".to_string()]);
+        assert_eq!(title_numbers("chapter x"), vec!["roman:x".to_string()]);
+        // Ordinary words are not numerals, whatever the pattern says. `mix`
+        // parses as 1009 and used to poison the guard.
+        for word in [
+            "Mix",
+            "Did",
+            "Mid",
+            "Dim",
+            "Civil",
+            "The Mix Tape",
+            "A Civil Action",
+        ] {
+            assert!(
+                title_numbers(word).is_empty(),
+                "{word} must not read as a numeral"
+            );
+        }
+        // Neither is a lower-case numeral with no counting word.
+        assert!(title_numbers("rocky ii").is_empty());
+        // Digits never depend on case.
+        assert_eq!(title_numbers("Rocky 4"), vec!["4".to_string()]);
+        assert_eq!(title_numbers("Blade Runner 2049"), vec!["2049".to_string()]);
+        // The guard that started all this: II cannot be edited into I.
+        assert_ne!(title_numbers("Rocky II"), title_numbers("Rocky I"));
+    }
+
+    #[test]
+    fn the_lenient_form_folds_eszett_and_the_lookup_form_keeps_it() {
+        assert_eq!(title_search_lenient_form("Straße"), "strasse");
+        assert_eq!(title_search_lenient_form("Strasse"), "strasse");
+        assert_eq!(title_lookup_form("Straße"), "straße");
+        assert_ne!(title_lookup_form("Strasse"), title_lookup_form("Straße"));
+        // Folding is confined to ß; other German spellings stay distinct in
+        // the lookup form and are equated by the phonebook collation instead.
+        assert_eq!(title_search_lenient_form("Grüße"), "grusse");
+    }
+
+    #[test]
     fn romanization_folding_stays_off_other_languages_and_other_names() {
         // Folding is scoped to Japanese-romanized names.
         assert_eq!(
@@ -367,5 +761,223 @@ mod tests {
         assert_eq!(compare_title_spelling("harbor", "hаrbor", Some("en")), None);
         assert_eq!(compare_title_spelling("かく", "がく", Some("ru")), None);
         assert_eq!(compare_title_spelling("маи", "май", Some("ja")), None);
+    }
+
+    /// The romanization axes a catalog and a release group each choose
+    /// independently for one Japanese name. Every pair here is the same name,
+    /// so a consumer that resolves one spelling must resolve all of them.
+    ///
+    /// Measured and not folded, and so not asserted here: kunrei-shiki
+    /// consonants (`si`/`shi`, `ti`/`chi`, `tu`/`tsu`, `zi`/`ji`, `sya`/`sha`,
+    /// `hu`/`fu`), the particles written `ha`/`wa` and `he`/`e`, `dzu`/`zu`,
+    /// `v`/`b` for katakana `v`, the syllabic apostrophe in `jun'ichi`, and
+    /// hyphenation. Release groups overwhelmingly write Hepburn, so those stay
+    /// out of the fold rather than widening it. What the fold's own doc
+    /// comment promises and the code does not deliver is pinned separately, in
+    /// `the_fold_covers_every_spelling_its_doc_claims`.
+    #[test]
+    fn japanese_romanization_folds_the_axes_it_implements() {
+        for (axis, left, right) in [
+            // Long o: macron, `ou`, `oo` and bare are one vowel.
+            (
+                "macron o against ou",
+                "toukyou monogatari",
+                "tōkyō monogatari",
+            ),
+            (
+                "macron o against bare",
+                "tokyo monogatari",
+                "tōkyō monogatari",
+            ),
+            ("ou against bare", "gasshou no uta", "gassho no uta"),
+            ("oo against bare", "gasshoo no uta", "gassho no uta"),
+            ("ou against oo", "gasshou no uta", "gasshoo no uta"),
+            // The same `ou` inside ordinary words, which is where a group
+            // meets it rather than in a constructed stem.
+            ("ou in sayounara", "sayounara no uta", "sayonara no uta"),
+            ("ou against oo in ohayou", "ohayou no uta", "ohayoo no uta"),
+            // A long vowel that opens the word, where the `oo` spelling is the
+            // one a group reaches for. All three spellings of Ōsaka agree.
+            ("word-initial oo", "oosaka monogatari", "osaka monogatari"),
+            (
+                "word-initial macron against oo",
+                "ōsaka monogatari",
+                "oosaka monogatari",
+            ),
+            (
+                "word-initial macron against bare",
+                "ōsaka monogatari",
+                "osaka monogatari",
+            ),
+            // Long u: macron, `uu` and bare.
+            ("macron u against uu", "yuusha no uta", "yūsha no uta"),
+            ("macron u against bare", "yusha no uta", "yūsha no uta"),
+            ("uu against bare", "yuusha no uta", "yusha no uta"),
+            // The particle written `wo` and the particle written `o`.
+            ("wo particle", "hikari wo utau", "hikari o utau"),
+            // `m` before a labial is the same syllable as `n`.
+            ("m before b", "yuusha no shimbun", "yusha no shinbun"),
+            ("m before p", "sempai no uta", "senpai no uta"),
+            // Several axes at once, which is what a real name looks like.
+            (
+                "every axis together",
+                "saigo no gasshou wo utau yuusha no shimbun",
+                "saigo no gassho o utau yūsha no shinbun",
+            ),
+        ] {
+            for language in ["x-jat", "ja", "jpn", "ja-Latn"] {
+                let result = compare_title_spelling(left, right, Some(language));
+                assert!(
+                    matches!(
+                        result,
+                        Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+                    ),
+                    "{language} / {axis}: {left} / {right}: {result:?}"
+                );
+            }
+        }
+
+        // The axes no diacritic fold can answer — a doubled vowel, a particle
+        // spelled two ways, a labial `m` — are the romanization lane's own, so
+        // they must be reported as such and not merely equated by collation.
+        for (axis, left, right) in [
+            ("ou against bare", "gasshou no uta", "gassho no uta"),
+            ("oo against bare", "gasshoo no uta", "gassho no uta"),
+            ("uu against bare", "yuusha no uta", "yusha no uta"),
+            ("ou in sayounara", "sayounara no uta", "sayonara no uta"),
+            ("word-initial oo", "oosaka monogatari", "osaka monogatari"),
+            ("wo particle", "hikari wo utau", "hikari o utau"),
+            ("m before b", "yuusha no shimbun", "yusha no shinbun"),
+            ("m before p", "sempai no uta", "senpai no uta"),
+        ] {
+            assert_eq!(
+                compare_title_spelling(left, right, Some("x-jat")),
+                Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG)),
+                "{axis}: {left} / {right} is the romanization lane's answer"
+            );
+        }
+
+        // A circumflex is the other way a macron gets typed, and the
+        // transliteration tag an anime catalog actually carries reads it. The
+        // plain `ja` tag does not; that inconsistency is pinned in
+        // `doubled_long_vowels_fold_for_every_vowel`.
+        assert!(
+            matches!(
+                compare_title_spelling("tôkyô monogatari", "tōkyō monogatari", Some("x-jat")),
+                Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+            ),
+            "a circumflex is a macron under the romanization tag"
+        );
+
+        // The fold equates spellings of one name, never two names. A vowel
+        // length that is the whole difference between two words stays a
+        // difference.
+        for (left, right) in [
+            ("hikari no uta", "kage no uta"),
+            ("yuusha no uta", "yuurei no uta"),
+            ("toukyou monogatari", "toukyou monogatori"),
+        ] {
+            assert_eq!(
+                compare_title_spelling(left, right, Some("x-jat")),
+                Some(SpellingEquivalence::Different),
+                "{left} / {right} are different names"
+            );
+        }
+    }
+
+    /// Where `romanized_japanese_spelling` does less than its own doc comment
+    /// says. It claims to fold "long vowels written with a macron, doubled, or
+    /// bare (`Gasshō` / `Gasshou` / `Gassho`), the `wo`/`o` particle, and `m`
+    /// before a labial (`Shimbun` / `Shinbun`)". Two of those three are
+    /// narrower in the code than in the sentence.
+    ///
+    /// *Doubled long vowels.* The macron arm folds all five vowels; the
+    /// doubling arm matches only `('o', 'u' | 'o')` and `('u', 'u')`. So `ā`
+    /// equals `a` while `aa` does not:
+    ///
+    /// * `okāsan` folds to `okasan`, `okaasan` stays `okaasan`
+    /// * `nīsan` folds to `nisan`, `niisan` stays `niisan`
+    /// * `onēsan` folds to `onesan`, `oneesan` stays `oneesan`
+    ///
+    /// Long `e` written `ei` is not read as a long vowel at all, so `sensei`,
+    /// `sensee` and `sensē` are three spellings of one word that compare as
+    /// three different words; so do `keiki` and `kēki`. This is the harder
+    /// half: `ei` is a true diphthong in some words, so folding it costs
+    /// precision. That cost is already being paid by the rule next to it — the
+    /// `ou` arm equates `koui` (行為) with `koi` (恋), two unrelated words — so
+    /// consistency with the rest of the fold is not an argument for leaving
+    /// `ei` alone.
+    ///
+    /// *`m` before a labial.* The arm matches `('m', Some('b' | 'p'))`. `m` is
+    /// itself a labial, so `mm` is missed and `Gumma`, the traditional Hepburn
+    /// spelling of 群馬, does not reach `Gunma`.
+    ///
+    /// Ignored until the code covers what the sentence promises; the
+    /// assertions below are what it should answer.
+    #[test]
+    #[ignore = "doubled aa/ii/ee, long e written ei, and m before m are not folded; see the comment above"]
+    fn the_fold_covers_every_spelling_its_doc_claims() {
+        for (axis, language, left, right) in [
+            (
+                "macron a against aa",
+                "x-jat",
+                "okaasan no uta",
+                "okāsan no uta",
+            ),
+            (
+                "aa against bare",
+                "x-jat",
+                "okaasan no uta",
+                "okasan no uta",
+            ),
+            (
+                "macron i against ii",
+                "x-jat",
+                "niisan no uta",
+                "nīsan no uta",
+            ),
+            ("ii against bare", "x-jat", "niisan no uta", "nisan no uta"),
+            (
+                "macron e against ee",
+                "x-jat",
+                "oneesan no uta",
+                "onēsan no uta",
+            ),
+            (
+                "ee against bare",
+                "x-jat",
+                "oneesan no uta",
+                "onesan no uta",
+            ),
+            // Long e written `ei`, the Hepburn spelling and so the one a
+            // group ships.
+            (
+                "ei against macron e",
+                "x-jat",
+                "sensei no uta",
+                "sensē no uta",
+            ),
+            ("ei against ee", "x-jat", "sensei no uta", "sensee no uta"),
+            (
+                "ee against macron e",
+                "x-jat",
+                "sensee no uta",
+                "sensē no uta",
+            ),
+            ("ei against macron e in keiki", "x-jat", "keiki", "kēki"),
+            // `m` before `m`, which is a labial like `b` and `p`.
+            ("m before m", "x-jat", "gumma no uta", "gunma no uta"),
+            // And a circumflex should read as a macron under every Japanese
+            // tag, not only `x-jat`.
+            ("circumflex", "ja", "tôkyô monogatari", "tōkyō monogatari"),
+        ] {
+            assert!(
+                matches!(
+                    compare_title_spelling(left, right, Some(language)),
+                    Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale(_))
+                ),
+                "{axis} under {language}: {left} / {right}"
+            );
+        }
     }
 }

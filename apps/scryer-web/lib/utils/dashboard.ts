@@ -110,6 +110,37 @@ export function formatCompactAge(
 }
 
 /**
+ * Compact time until an instant: `now`, `in 41m`, `in 6h`, `in 3d` — the
+ * forward-looking twin of {@link formatCompactAge}, phrased the same way as the
+ * settings tables so one string can describe a wait in either place.
+ */
+export function formatCompactCountdown(
+  isoDate: string | null | undefined,
+  nowMs: number = Date.now(),
+): string | null {
+  if (!isoDate) {
+    return null;
+  }
+  const parsed = Date.parse(isoDate);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  const remainingMs = parsed - nowMs;
+  if (remainingMs < 60_000) {
+    return "now";
+  }
+  const minutes = Math.floor(remainingMs / 60_000);
+  if (minutes < 60) {
+    return `in ${minutes}m`;
+  }
+  const hours = Math.floor(remainingMs / 3_600_000);
+  if (hours < 24) {
+    return `in ${hours}h`;
+  }
+  return `in ${Math.floor(remainingMs / 86_400_000)}d`;
+}
+
+/**
  * True when moving from `from` to `to` crosses a major version, which is the
  * only plugin update the strip flags as breaking. Unparseable versions are
  * treated as non-breaking: a bad version string is not evidence of a break.
@@ -224,6 +255,7 @@ export type IndexerHealthInput = {
   isEnabled: boolean;
   lastHealthStatus: string | null;
   lastErrorMessage: string | null;
+  rateLimitedUntil?: string | null;
 };
 
 export type IndexerHealthSummary = {
@@ -262,8 +294,25 @@ export function isProviderErroring(
 }
 
 /**
+ * True while an indexer is waiting out a rate-limit cooldown it will come out
+ * of by itself.
+ */
+export function isProviderCoolingDown(
+  rateLimitedUntil: string | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!rateLimitedUntil) {
+    return false;
+  }
+  const until = Date.parse(rateLimitedUntil);
+  return Number.isFinite(until) && until > now.getTime();
+}
+
+/**
  * Header counts for the indexer panel. Disabled indexers are excluded from both
- * sides: they are not broken, they are switched off.
+ * sides: they are not broken, they are switched off. A cooling indexer is
+ * excluded from `erroring` for the same reason: the indexer asked for the
+ * pause and it ends on its own.
  */
 export function summarizeIndexerHealth(
   indexers: readonly IndexerHealthInput[],
@@ -275,6 +324,9 @@ export function summarizeIndexerHealth(
       continue;
     }
     enabled += 1;
+    if (isProviderCoolingDown(indexer.rateLimitedUntil)) {
+      continue;
+    }
     if (
       isProviderErroring(
         indexer.isEnabled,

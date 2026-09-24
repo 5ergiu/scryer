@@ -24,6 +24,10 @@ export type ProxyAssignmentSelectProps = {
   value: string | null;
   onChange: (proxyConfigId: string | null) => void;
   disabled?: boolean;
+  /** Hide the visual label when the surrounding table supplies the header. */
+  showLabel?: boolean;
+  /** Keep the control to one table-cell line without secondary guidance. */
+  compact?: boolean;
   /** Extra guidance rendered under the select, above any warning. */
   helpText?: string;
 };
@@ -41,6 +45,8 @@ export function ProxyAssignmentSelect({
   value,
   onChange,
   disabled,
+  showLabel = true,
+  compact = false,
   helpText,
 }: ProxyAssignmentSelectProps) {
   const t = useTranslate();
@@ -59,8 +65,8 @@ export function ProxyAssignmentSelect({
   );
 
   return (
-    <div className="space-y-2">
-      <Label className="block" htmlFor={selectId}>
+    <div className={compact ? "min-w-0" : "space-y-2"}>
+      <Label className={showLabel ? "block" : "sr-only"} htmlFor={selectId}>
         {label}
       </Label>
       <Select
@@ -70,10 +76,16 @@ export function ProxyAssignmentSelect({
           onChange(next === NO_PROXY_VALUE ? null : next)
         }
       >
-        <SelectTrigger id={selectId} className="w-full">
+        <SelectTrigger
+          id={selectId}
+          className={compact ? "w-full max-w-36" : "w-full"}
+        >
           <SelectValue placeholder={t("settings.proxyDirect")} />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent
+          position="popper"
+          className="w-80 max-w-[var(--radix-select-content-available-width)]"
+        >
           <SelectItem value={NO_PROXY_VALUE}>{t("settings.proxyDirect")}</SelectItem>
           {isMissing ? (
             <SelectItem value={value ?? "missing"} disabled>
@@ -98,14 +110,14 @@ export function ProxyAssignmentSelect({
           ))}
         </SelectContent>
       </Select>
-      {helpText ? (
+      {!compact && helpText ? (
         <p className="text-xs text-muted-foreground">{helpText}</p>
       ) : null}
-      {isMissing ? (
+      {!compact && isMissing ? (
         <p className="text-xs text-[var(--scry-warning-text)]">
           {t("settings.proxyMissingHelp")}
         </p>
-      ) : assigned && !assigned.isEnabled ? (
+      ) : !compact && assigned && !assigned.isEnabled ? (
         <p className="text-xs text-[var(--scry-warning-text)]">
           {t("settings.proxyDisabledHelp")}
         </p>

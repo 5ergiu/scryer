@@ -9,6 +9,7 @@ mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
+pub mod rate_limit_proxy_policy;
 
 /// Completed-history rows the poller considers each cycle.
 ///
@@ -89,6 +90,7 @@ mod polling_worker;
 mod ports;
 pub use acquisition::anime_numbering::{ExactCourTitleMatch, exact_cour_title_match};
 pub use ports::ObservationTouch;
+pub use ports::UnfinishedLibraryScanSession;
 pub use ports::{
     AnimeSearchNumberingContext, CatalogOwnedExternalIdRecord, CatalogOwnedTitleRecord,
     IndexerSearchNumberingContext, TitleOptionsPatch,
@@ -550,11 +552,11 @@ pub use null_repositories::{NullMediaServerSignalRepository, NullMediaServerSign
 pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, BlocklistRepository, BuiltinDownloadClientConnectionTester,
-    DatastoreInfo, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
-    DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
-    DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
-    DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,
-    EmbyApiKeyExchangeCleanup, EmbyAvatar, EmbyConnectAddressStatus,
+    DatastoreInfo, DiscoveryContextTitle, DomainEventRepository, DownloadClient,
+    DownloadClientConfigRepository, DownloadClientFeedbackScope, DownloadClientListing,
+    DownloadClientPluginProvider, DownloadClientSnapshotOutcome, DownloadClientStatusRepository,
+    DownloadQueueCommandRepository, DownloadRegistryRepository, DownloadSubmissionRepository,
+    EmbyApiKeyExchange, EmbyApiKeyExchangeCleanup, EmbyAvatar, EmbyConnectAddressStatus,
     EmbyConnectIdentityVerification, EmbyConnectServer, EmbyConnectUserType, EmbyServerIdentity,
     EmbyServerUser, ExternalIdentityVerifier, ExternalImportMonitorSnapshotRepository,
     ExternalImportSetupInstanceApiKeyDraft, ExternalImportSetupSecretDraft,
@@ -562,20 +564,21 @@ pub use ports::{
     ExternalImportSetupSecretDraftSaveResult, ExternalImportSetupSecretDraftStatus,
     ExternalImportSetupSecretInstanceKind, ExternalImportSetupSecretOverrideDraft,
     ExternalPluginWasm, FileImporter, HousekeepingMediaFileRootRow, HousekeepingRepository,
-    IdentityTrackedStateTarget, ImageProxyCacheControl, ImageProxyCacheEntryRecord,
-    ImageProxyCacheUsage, ImageProxyKind, ImageProxyRegistration, ImageProxyRepository,
-    ImageProxySourceRecord, ImportArtifactRepository, ImportFileExecutionContext,
-    ImportFilePermissions, ImportFileTransferProgress, ImportFileTransferProgressSender,
-    ImportRepository, IndexerAccountingContext, IndexerArtifactResolver,
+    IMPORT_RETRY_TRACKED_STATE_REASON, IdentityTrackedStateTarget, ImageProxyCacheControl,
+    ImageProxyCacheEntryRecord, ImageProxyCacheUsage, ImageProxyKind, ImageProxyRegistration,
+    ImageProxyRepository, ImageProxySourceRecord, ImportArtifactRepository,
+    ImportFileExecutionContext, ImportFilePermissions, ImportFileTransferProgress,
+    ImportFileTransferProgressSender, ImportRepository, ImportRetryClaim, ImportRetryClaimOutcome,
+    ImportRetryFinishOutcome, IndexerAccountingContext, IndexerArtifactResolver,
     IndexerCapsSnapshotRefresher, IndexerClient, IndexerConfigRepository, IndexerDispatchGate,
-    IndexerManagementClient, IndexerPluginProvider, IndexerSearchCandidateWrite,
-    IndexerSearchLearningContext, IndexerSearchLearningKey, IndexerSearchLearningRecord,
-    IndexerSearchLearningRepository, IndexerSearchRunWrite, IndexerStatsTracker,
-    IndexerSystemBackoff, JellyfinServerUser, JobRunRepository, LibraryProbeRepository,
-    LibraryRepository, LibraryScanUnmatchedItemRepository, LifecycleActionRunRepository,
-    LifecycleClaimRepository, LocationOperationProgress, LocationOperationRepository,
-    LocationOwnershipClaim, LocationOwnershipOutcome, LogicalBackupExporter,
-    MaintenanceActionJobReceiptClaim, MaintenanceActionJobReceiptTransition,
+    IndexerGrabClient, IndexerGrabSelection, IndexerManagementClient, IndexerPluginProvider,
+    IndexerSearchCandidateWrite, IndexerSearchLearningContext, IndexerSearchLearningKey,
+    IndexerSearchLearningRecord, IndexerSearchLearningRepository, IndexerSearchRunWrite,
+    IndexerStatsTracker, IndexerSystemBackoff, JellyfinServerUser, JobRunRepository,
+    LibraryProbeRepository, LibraryRepository, LibraryScanUnmatchedItemRepository,
+    LifecycleActionRunRepository, LifecycleClaimRepository, LocationOperationProgress,
+    LocationOperationRepository, LocationOwnershipClaim, LocationOwnershipOutcome,
+    LogicalBackupExporter, MaintenanceActionJobReceiptClaim, MaintenanceActionJobReceiptTransition,
     MaintenanceActionStepCandidateKey, MaintenanceActionStepClaim, MaintenanceActionStepRepository,
     MaintenanceCandidateQuery, MaintenanceCandidateRepository, MaintenanceEvaluationRepository,
     MaintenanceEvaluationRunRepository, MaintenanceExclusionRepository,
@@ -601,13 +604,16 @@ pub use ports::{
     SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
     SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
     SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
-    TitleImageRepository, TitleListProjection, TitleRepository, TotpRepository,
-    UserExternalAccountRepository, UserRepository, VerifiedExternalIdentity, WebauthnRepository,
-    WorkflowOperationInfo, WorkflowOperationRepository,
+    TitleImageRepository, TitleListProjection, TitleNameBucketQuery, TitleNameCandidate,
+    TitleRepository, TotpRepository, UserExternalAccountRepository, UserRepository,
+    VerifiedExternalIdentity, WebauthnRepository, WorkflowOperationInfo,
+    WorkflowOperationRepository,
 };
 pub use ports::{
     ConnectionPlaybackActivity, MediaServerPlaybackProbe, PlaybackActivitySnapshot,
-    PlaybackProbeStatus,
+    PlaybackProbeStatus, lookup_keys_claimed_by_others, name_candidates_in_bucket,
+    title_lookup_forms, titles_matching_external_id, titles_matching_lookup_key_shapes,
+    titles_matching_lookup_keys,
 };
 pub use ports::{MediaServerSignalRepository, MediaServerSignalSource, ProviderPlayedItem};
 pub use quality::release_parser::{
@@ -628,7 +634,7 @@ pub use quality_profile::{
     ScoringEntryKind, ScoringSource, builtin_4k_profile, builtin_8k_profile, builtin_1080p_profile,
     builtin_anime_profile, builtin_default_quality_profile, parse_profile_catalog_from_json,
 };
-pub use rate_limit_signal::{RateLimitSignal, RateLimitSignalSource};
+pub use rate_limit_signal::{RateLimitSignal, RateLimitSignalSource, destination_cooldown_until};
 pub use services::{
     AppServices, AppServicesBuilder, AppUseCase, ExternalImportArrSourceKind,
     ExternalImportArrSourceSeriesEntry, ExternalImportArrSourceWarmupResult,
@@ -724,13 +730,13 @@ pub use types::{
     ReleaseDecision, ReleaseDownloadAttemptOutcome, ReleaseDownloadFailureRecord,
     ReleaseDownloadFailureSignature, ResolvePendingImportResult, RuntimePathStyle,
     ScopedExternalId, SortDirection, SystemHealth, TitleAcquisitionDiagnostics, TitleAward,
-    TitleCatalogContentStatus, TitleCatalogFilter, TitleCatalogFilterCounts,
-    TitleCatalogFilterOptions, TitleCatalogProfileNames, TitleCatalogResult, TitleCatalogSort,
-    TitleCatalogSortKey, TitleCatalogTagFilterOption, TitleCredit, TitleEpisodeProgressSummary,
-    TitleExternalRating, TitleImageBlob, TitleImageKind, TitleImageSourceResult,
-    TitleImageSyncTask, TitleImageVariantRecord, TitleImageVariantSpec, TitleMediaFile,
-    TitleMediaSizeSummary, TitleMetadataUpdate, TitleMovieMediaSummary, TitleQualitySummary,
-    TitleRatingSummary, TitleReleaseBlocklistEntry, TitleTagDefinitionSummary,
+    TitleCatalogAggregates, TitleCatalogContentStatus, TitleCatalogFilter,
+    TitleCatalogFilterCounts, TitleCatalogFilterOptions, TitleCatalogProfileNames,
+    TitleCatalogResult, TitleCatalogSort, TitleCatalogSortKey, TitleCatalogTagFilterOption,
+    TitleCredit, TitleEpisodeProgressSummary, TitleExternalRating, TitleImageBlob, TitleImageKind,
+    TitleImageSourceResult, TitleImageSyncTask, TitleImageVariantRecord, TitleImageVariantSpec,
+    TitleMediaFile, TitleMediaSizeSummary, TitleMetadataUpdate, TitleMovieMediaSummary,
+    TitleQualitySummary, TitleRatingSummary, TitleReleaseBlocklistEntry, TitleTagDefinitionSummary,
     TitleTagDefinitionUpdate, TitleTagMembershipCounts, TitleTagRewriteCounts,
     TotpCredentialRecord, TotpEnrollmentChallengeRecord, TotpEnrollmentComplete,
     TotpEnrollmentStart, TotpFailedAttemptRecord, TotpRecoveryCodeRecord, TotpStatus,
@@ -1069,3 +1075,6 @@ impl AppError {
 pub(crate) mod lib_tests;
 #[cfg(test)]
 pub(crate) mod test_wait;
+
+pub use ports::TitleCounts;
+pub use types::{DashboardImportEvidence, DashboardImportKind, DashboardRecentImport};

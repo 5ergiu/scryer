@@ -352,6 +352,19 @@ pub struct DownloadRecord {
     pub created_at: DateTime<Utc>,
     pub first_observed_at: Option<DateTime<Utc>>,
     pub last_observed_at: Option<DateTime<Utc>>,
+    /// When this canonical identity was finished, and the marker the product
+    /// treats as "this download is done with".
+    ///
+    /// Set exactly where a download reaches an end state Scryer decided on: a
+    /// completed queue or history delete, a removal from the client, an import,
+    /// a failure, or the deletion of the client config that owned it. It is
+    /// never set merely because a binding was ended — a binding can end while
+    /// the job itself is still live in a client that Scryer has lost sight of.
+    ///
+    /// The observation resolver reads it to tell those two apart: a token whose
+    /// binding is ended resolves to
+    /// [`ObservationResolution::BindingAlreadyEnded`] when the download is
+    /// terminal, and is rebound onto the observing client when it is not.
     pub terminal_at: Option<DateTime<Utc>>,
 }
 
@@ -416,6 +429,21 @@ pub enum ObservationResolution {
         download_id: scryer_domain::download_identity::DownloadId,
         newly_foreign: bool,
         attached: bool,
+    },
+    /// A Scryer-minted token whose binding had been ended, re-activated onto
+    /// the client that is reporting it now.
+    ///
+    /// Sonarr keys a tracked download on the client's download id alone and
+    /// overwrites the client on every observation
+    /// (`TrackedDownloadService.TrackDownload`, `_cache.Set(downloadId, …)`),
+    /// so a job that reappears under a re-added client is simply tracked again.
+    /// Scryer's binding is a durable row rather than a cache entry, so the
+    /// equivalent is this: the same canonical download, re-pointed at the
+    /// observed client config and native item. Only a *terminal* download
+    /// (see [`DownloadRecord::terminal_at`]) refuses, as Sonarr's terminal
+    /// history states do.
+    Rebound {
+        download_id: scryer_domain::download_identity::DownloadId,
     },
     Conflict {
         token_id: scryer_domain::download_identity::DownloadId,

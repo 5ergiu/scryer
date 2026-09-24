@@ -1020,6 +1020,8 @@ async fn process_tracked_download_snapshot(
     // transaction rather than one per row inside a resolution transaction.
     crate::download_identity::flush_shared_observation_touches(app).await;
 
+    let full_authoritative_listing =
+        matches!(prune, TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes);
     let unavailable_sources = match prune {
         TrackedDownloadSnapshotPrune::GlobalExcludingClientTypes => runtime
             .tracker
@@ -1040,6 +1042,17 @@ async fn process_tracked_download_snapshot(
 
     for source_identity in unavailable_sources {
         drop_source_removed_from_client(app, &source_identity).await;
+    }
+
+    if full_authoritative_listing && let Some(authoritative_client_ids) = authoritative_client_ids
+    {
+        drop_submissions_never_listed_by_client(
+            app,
+            &items,
+            authoritative_client_ids,
+            excluded_client_type_refs,
+        )
+        .await;
     }
 
     reconcile_terminal_tracked_downloads(app, &mut runtime.tracker).await;
@@ -1340,6 +1353,102 @@ pub(crate) async fn drop_source_removed_from_client(
     );
 }
 
+/// How long a submitted job may go unlisted before its absence is believed.
+///
+/// A client does not always list a job the instant it accepts it — SABnzbd is
+/// still fetching the NZB, qBittorrent is still resolving a magnet — so a
+/// submission gets this long to show up once before "never listed" means gone.
+const NEVER_LISTED_SUBMISSION_GRACE_SECS: i64 = 60;
+
+/// A job its client dropped before Scryer ever saw it is gone too.
+///
+/// The prune above only knows jobs the tracker has tracked, and the tracker
+/// only tracks what a listing carried. A submission the client stopped listing
+/// before the first poll was never tracked, so nothing ended its binding and
+/// its scope stayed claimed indefinitely. The durable registry knows which
+/// submissions no listing has ever carried; once the grace has passed and
+/// their client has answered a full listing without them, they take the same
+/// exit as every other vanished job.
+async fn drop_submissions_never_listed_by_client(
+    app: &AppUseCase,
+    items: &[DownloadQueueItem],
+    authoritative_client_ids: &HashSet<String>,
+    excluded_client_types: &[&str],
+) {
+    let created_before =
+        chrono::Utc::now() - chrono::Duration::seconds(NEVER_LISTED_SUBMISSION_GRACE_SECS);
+    let bindings = match app
+        .services
+        .workflow
+        .download_registry
+        .list_never_observed_submission_bindings(created_before)
+        .await
+    {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to list submissions their client never listed"
+            );
+            return;
+        }
+    };
+    let listed_jobs = items
+        .iter()
+        .map(|item| listed_job_key(&item.client_id, &item.download_client_item_id))
+        .collect::<HashSet<_>>();
+    for locator in never_listed_submission_locators(
+        &bindings,
+        &listed_jobs,
+        authoritative_client_ids,
+        excluded_client_types,
+    ) {
+        drop_source_removed_from_client(app, &locator).await;
+    }
+}
+
+/// The never-observed bindings this listing is entitled to call gone: their
+/// client answered in full, its type is polled here, and the listing in hand
+/// does not carry the job after all.
+fn never_listed_submission_locators(
+    bindings: &[crate::DownloadClientBindingRecord],
+    listed_jobs: &HashSet<(String, String)>,
+    authoritative_client_ids: &HashSet<String>,
+    excluded_client_types: &[&str],
+) -> Vec<crate::ClientJobLocator> {
+    bindings
+        .iter()
+        .filter_map(|binding| {
+            let client_id = binding.client_config_id.as_deref()?;
+            let client_type = binding.client_type_snapshot.as_deref()?;
+            let item_id = binding.native_item_id.as_deref()?;
+            if !authoritative_client_ids.contains(client_id)
+                || crate::tracked_downloads::tracked_client_type_is_excluded(
+                    client_type,
+                    excluded_client_types,
+                )
+                || listed_jobs.contains(&listed_job_key(client_id, item_id))
+            {
+                return None;
+            }
+            Some(crate::ClientJobLocator::new(
+                Some(client_id),
+                client_type,
+                item_id,
+            ))
+        })
+        .collect()
+}
+
+/// Clients do not agree with themselves on the casing of a native id (a
+/// qBittorrent hash comes back in either), so a listed job is keyed without it.
+fn listed_job_key(client_id: &str, item_id: &str) -> (String, String) {
+    (
+        client_id.trim().to_string(),
+        item_id.trim().to_ascii_lowercase(),
+    )
+}
+
 fn tracked_download_snapshot_projection_key(
     scope: &crate::tracked_downloads::TrackedDownloadSnapshotScope,
 ) -> Option<DownloadQueueProjectionSource> {
@@ -1553,6 +1662,7 @@ pub async fn start_download_queue_poller_with_options(
                 }
             }
             _ = interval.tick() => {
+                crate::import_workflow::schedule_import_retry_recovery(&app);
                 let active_bridged_client_types = bridged_client_types.snapshot();
                 remove_ended_bridge_projections(
                     &mut runtime,
@@ -1805,6 +1915,49 @@ async fn handle_tracked_download_command(
     use scryer_domain::{TrackedDownloadState, TrackedDownloadStatus};
 
     match command {
+        TrackedDownloadCommand::BeginHistoryRetry { id, reply } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            if tracked_work_in_flight.contains(&id) {
+                let _ = reply.send(Err(AppError::Validation(
+                    "this download is already being processed".into(),
+                )));
+                return;
+            }
+            let snapshot = tracker.find(&id).cloned();
+            if snapshot.is_some() {
+                tracked_work_in_flight.insert(id.clone());
+            }
+            if reply.send(Ok(snapshot)).is_err() {
+                tracked_work_in_flight.remove(&id);
+            }
+        }
+        TrackedDownloadCommand::PublishHistoryRetry { id, reply } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            if let Some(td) = tracker.find_mut(&id) {
+                td.reset_for_import_retry();
+                td.state = TrackedDownloadState::Importing;
+                td.status_messages = vec!["Retrying import from the completed source".into()];
+            }
+            let item = tracker.find(&id).map(tracked_download_activity_queue_item);
+            publish_runtime_tracked_download_and_activity_item(app, tracker, item).await;
+            let _ = reply.send(Ok(()));
+        }
+        TrackedDownloadCommand::FinishHistoryRetry {
+            id,
+            finished,
+            reply,
+        } => {
+            let id = resolve_tracked_command_id(tracker, &id);
+            tracked_work_in_flight.remove(&id);
+            if let Some(finished) = finished {
+                if let Some(td) = tracker.find_mut(&id) {
+                    merge_tracked_download_background_work_state(td, *finished);
+                }
+                let item = tracker.find(&id).map(tracked_download_activity_queue_item);
+                publish_runtime_tracked_download_and_activity_item(app, tracker, item).await;
+            }
+            let _ = reply.send(Ok(()));
+        }
         TrackedDownloadCommand::ReconcileManualImport {
             id,
             canonical_download_id,
@@ -2097,20 +2250,19 @@ async fn handle_tracked_download_command(
                 ))));
                 return;
             }
-            let result = if let Some(td) = tracker.find_mut(&id) {
-                td.reset_for_import_retry();
-                Ok(())
-            } else {
-                Err(AppError::NotFound(format!(
+            let Some(td) = tracker.find(&id).cloned() else {
+                let _ = reply.send(Err(AppError::NotFound(format!(
                     "tracked download {requested_id}"
-                )))
+                ))));
+                return;
             };
-            if result.is_ok() {
-                let activity_item = tracker.find(&id).map(tracked_download_activity_queue_item);
-                publish_runtime_tracked_download_and_activity_item(app, tracker, activity_item)
-                    .await;
-            }
-            let _ = reply.send(result);
+            let app = app.clone();
+            let actor = actor.clone();
+            // Execute outside the command loop: the common retry path reserves this tracker.
+            tokio::spawn(async move {
+                let result = crate::import_workflow::retry_tracked_import(&app, &actor, &td).await;
+                let _ = reply.send(result.map(|_| ()));
+            });
         }
         TrackedDownloadCommand::AssignTitle {
             id,
@@ -2898,6 +3050,25 @@ async fn apply_terminal_cleanup_outcome(
         if state == TrackedDownloadState::ImportedSeeding {
             promote_imported_seeding_to_imported(app, tracker, id).await;
         }
+        // An entry cleanup deliberately left in the client is not gone, so the
+        // row cannot be forgotten: nothing else would notice the operator
+        // removing it later, and its binding and `terminal_at` would stay open
+        // forever. Keep it tracked and non-actionable — `Imported` is terminal,
+        // so it is never re-offered for import — and let the absence prune end
+        // the binding when the client stops listing it.
+        //
+        // Torrent clients only. A Usenet client's history is a rolling window:
+        // an imported job leaving it is the window scrolling, not the operator
+        // removing anything, and treating that as absence would end bindings on
+        // a timer and churn the identity rows behind them.
+        if crate::import::import::terminal_download_cleanup_leaves_entry_in_client(cleanup.outcome)
+            && let Some(td) = tracker.find_mut(id)
+            && crate::seeding_gate::client_type_is_torrent(app, &td.client_type)
+        {
+            td.completed_source = None;
+            td.retained_in_client_after_cleanup = true;
+            return;
+        }
         tracker.stop_tracking(id);
     } else if let Some(td) = tracker.find_mut(id) {
         td.completed_source = None;
@@ -3056,7 +3227,7 @@ async fn promote_imported_seeding_to_imported(
         .persist_terminal_state(app, &snapshot.id, TrackedDownloadState::Imported)
         .await;
 }
-async fn reconcile_terminal_tracked_downloads(
+pub(crate) async fn reconcile_terminal_tracked_downloads(
     app: &AppUseCase,
     tracker: &mut crate::tracked_downloads::TrackedDownloadService,
 ) {
@@ -3135,7 +3306,9 @@ async fn reconcile_terminal_tracked_downloads(
         let retained: Vec<_> = tracker
             .get_all()
             .into_iter()
-            .filter(|tracked| tracked.state.is_import_settled())
+            .filter(|tracked| {
+                tracked.state.is_import_settled() && !tracked.retained_in_client_after_cleanup
+            })
             .map(|tracked| (tracked.id.clone(), tracked.download_id, tracked.state))
             .collect();
         for (id, download_id, state) in retained {
@@ -3159,11 +3332,15 @@ async fn reconcile_terminal_tracked_downloads(
 
     // `ImportedSeeding` is not terminal, but it has to be re-offered to the
     // gate on every poll — that re-evaluation is what eventually releases the
-    // torrent once its goal is met.
+    // torrent once its goal is met. A row the gate already released and left in
+    // the client is done with the gate; it stays tracked only so its absence is
+    // noticed.
     let settled: Vec<&TrackedDownload> = tracker
         .get_all()
         .into_iter()
-        .filter(|tracked| tracked.state.is_import_settled())
+        .filter(|tracked| {
+            tracked.state.is_import_settled() && !tracked.retained_in_client_after_cleanup
+        })
         .collect();
     if settled.is_empty() {
         return;
@@ -3626,6 +3803,67 @@ mod ignored_submission_scope_release_tests {
         assert_eq!(
             released_ids(&submission, &rows),
             vec!["scope-ep-1".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod never_listed_submission_tests {
+    use std::collections::HashSet;
+
+    use super::{listed_job_key, never_listed_submission_locators};
+    use crate::DownloadClientBindingRecord;
+
+    fn binding(client_id: &str, client_type: &str, item_id: &str) -> DownloadClientBindingRecord {
+        DownloadClientBindingRecord {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            client_config_id: Some(client_id.to_string()),
+            client_type_snapshot: Some(client_type.to_string()),
+            client_name_snapshot: None,
+            native_item_id: Some(item_id.to_string()),
+            created_at: chrono::Utc::now(),
+            last_seen_at: None,
+            ended_at: None,
+        }
+    }
+
+    fn clients(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_submission_its_answering_client_never_listed_is_gone() {
+        let gone = never_listed_submission_locators(
+            &[binding("qbit", "qbittorrent", "ABCDEF")],
+            &HashSet::new(),
+            &clients(&["qbit"]),
+            &[],
+        );
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].client_id.as_deref(), Some("qbit"));
+        assert_eq!(gone[0].client_type, "qbittorrent");
+        assert_eq!(gone[0].item_id, "ABCDEF");
+    }
+
+    #[test]
+    fn silence_and_other_pollers_are_not_absence() {
+        let bindings = [
+            // Its client did not answer this tick: an outage ends nothing.
+            binding("sab", "sabnzbd", "nzo_1"),
+            // A bridged client type is not this poller's to judge.
+            binding("weaver", "weaver", "job-1"),
+            // The listing in hand carries it after all, in the other casing.
+            binding("qbit", "qbittorrent", "ABCDEF"),
+        ];
+        let listed = HashSet::from([listed_job_key("qbit", "abcdef")]);
+        assert!(
+            never_listed_submission_locators(
+                &bindings,
+                &listed,
+                &clients(&["qbit", "weaver"]),
+                &["weaver"],
+            )
+            .is_empty()
         );
     }
 }

@@ -2222,4 +2222,151 @@ mod tests {
         );
         assert_eq!(parse.target_episodes()[0].id, "ep-2-1");
     }
+
+    /// Seasons of an anime catalog, as `(episode count, first absolute
+    /// number)` pairs, with TVDB's own episode titles.
+    fn anime_catalog(
+        seasons: &[(u32, u32)],
+        episode_title: impl Fn(u32, u32, u32) -> String,
+    ) -> Vec<Episode> {
+        let mut episodes = Vec::new();
+        for (index, (length, absolute_start)) in seasons.iter().enumerate() {
+            let season = u32::try_from(index).expect("small index") + 1;
+            for number in 1..=*length {
+                let absolute = absolute_start + number - 1;
+                let mut entry = episode(
+                    &format!("ep-{season}-{number}"),
+                    &season.to_string(),
+                    &number.to_string(),
+                );
+                entry.absolute_number = Some(absolute.to_string());
+                entry.title = Some(episode_title(season, number, absolute));
+                episodes.push(entry);
+            }
+        }
+        episodes
+    }
+
+    /// Sonarr writes `Show (Year) - SxxEyy - NNN - Episode Title`, and the
+    /// parenthesized premiere year is a name qualifier, never a coordinate.
+    /// Reading it as an anime absolute episode number threw away both real
+    /// coordinates — the `SxxEyy` token and the absolute-number slot — so the
+    /// file resolved to nothing, took the unmatched branch and never got a
+    /// `media_files` row (issue: 474 anime files lost on a fresh 38,077-file
+    /// scan, 471 of them one long-running series).
+    ///
+    /// The bogus reading only outscored the real one when the trailing episode
+    /// title also matched the catalog, which is why it hit the files whose
+    /// TVDB title is literally `Episode <absolute>`.
+    #[test]
+    fn title_scan_never_reads_a_parenthesized_series_year_as_an_absolute_episode() {
+        // Per-season `(episode count, first absolute number)` taken from the
+        // TVDB records of the four affected series.
+        let shin_chan_seasons: Vec<(u32, u32)> = {
+            let mut seasons = Vec::new();
+            let mut absolute = 1;
+            for length in [
+                52_u32, 52, 49, 18, 42, 45, 42, 43, 39, 40, 35, 31, 28, 36, 35, 29, 37, 35, 33, 34,
+                35, 28, 29, 34, 36, 34, 35, 39, 52, 50, 51, 51, 51, 52, 34,
+            ] {
+                seasons.push((length, absolute));
+                absolute += length;
+            }
+            seasons
+        };
+
+        struct SonarrAnimeFile<'a> {
+            title_name: &'a str,
+            seasons: &'a [(u32, u32)],
+            title_dir: &'a str,
+            display_name: &'a str,
+            expected_episode: &'a str,
+        }
+
+        let cases = [
+            SonarrAnimeFile {
+                title_name: "Shin Chan",
+                seasons: shin_chan_seasons.as_slice(),
+                title_dir: "Shin Chan (1992) {tvdb-79654}",
+                display_name: "Shin Chan (1992) - S06E28 - 241 - Episode 241 [WEBDL-1080p]",
+                expected_episode: "ep-6-28",
+            },
+            SonarrAnimeFile {
+                title_name: "Shin Chan",
+                seasons: shin_chan_seasons.as_slice(),
+                title_dir: "Shin Chan (1992) {tvdb-79654}",
+                display_name: "Shin Chan (1992) - S07E42 - 300 - Episode 300 [WEBDL-1080p]",
+                expected_episode: "ep-7-42",
+            },
+            SonarrAnimeFile {
+                title_name: "Shin Chan",
+                seasons: shin_chan_seasons.as_slice(),
+                title_dir: "Shin Chan (1992) {tvdb-79654}",
+                display_name: "Shin Chan (1992) - S08E01 - 301 - Episode 301 [WEBDL-1080p]",
+                expected_episode: "ep-8-1",
+            },
+            SonarrAnimeFile {
+                title_name: "Digimon: Digital Monsters",
+                seasons: &[(54, 2), (50, 57)],
+                title_dir: "Digimon - Digital Monsters (1999) {tvdb-72241}",
+                display_name: "Digimon - Digital Monsters (1999) - S01E11 - 012 - The Dancing Digimon [WEBDL-1080p]",
+                expected_episode: "ep-1-11",
+            },
+            SonarrAnimeFile {
+                title_name: "Fist of the North Star",
+                seasons: &[(22, 1), (35, 23), (25, 58), (27, 83), (13, 110), (30, 123)],
+                title_dir: "Fist of the North Star (1984) {tvdb-79156}",
+                display_name: "Fist of the North Star (1984) - S06E28 - 150 - The Final Chapter - The Last Three Episodes! Here is the 2,000 Year-old History [WEBDL-1080p]",
+                expected_episode: "ep-6-28",
+            },
+            SonarrAnimeFile {
+                title_name: "Doraemon (2005)",
+                seasons: &[(32, 1), (42, 33), (36, 75), (44, 111)],
+                title_dir: "Doraemon (2005) (2005) {tvdb-281405}",
+                display_name: "Doraemon (2005) (2005) - S04E11 - 121 - Special Effects Ultra Dora-Man + Doraemon - Nobita's New Great Adventure into th [WEBDL-1080p]",
+                expected_episode: "ep-4-11",
+            },
+        ];
+
+        for case in cases {
+            let SonarrAnimeFile {
+                title_name,
+                seasons,
+                title_dir,
+                display_name,
+                expected_episode,
+            } = case;
+            let title = title(title_name, MediaFacet::Anime);
+            let episodes = anime_catalog(seasons, |_, _, absolute| format!("Episode {absolute}"));
+            let path = format!("/library/{title_dir}/Season 01/{display_name}.mkv");
+            let path = Path::new(&path);
+            let input = LibraryFilenameParseInput {
+                path,
+                display_name: None,
+                library_root: Some(Path::new("/library")),
+                title: Some(&title),
+                facet: Some(&title.facet),
+                collections: &[],
+                series_movie_links: &[],
+                episodes: &episodes,
+                existing_record: None,
+                anime_numbering_bridge: None,
+                mode: LibraryFilenameParseMode::TitleScan,
+                fallback_policy: LibraryFilenameFallbackPolicy::NeedReleaseMetadata,
+            };
+
+            let parse = parse_library_filename(&input);
+
+            assert_eq!(parse.unmatched_reason(), None, "{display_name} was refused");
+            assert_eq!(
+                parse
+                    .target_episodes()
+                    .iter()
+                    .map(|episode| episode.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected_episode],
+                "{display_name} resolved to the wrong episodes"
+            );
+        }
+    }
 }

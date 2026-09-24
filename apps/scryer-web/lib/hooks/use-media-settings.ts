@@ -1,4 +1,5 @@
 import * as React from "react";
+import { SettingsSaveGuard } from "@/lib/utils/settings-save-guard";
 import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
@@ -46,6 +47,11 @@ import {
 } from "@/lib/utils/quality-profiles";
 import {
   facetScopedMediaSettingsScopeId,
+  normalizeAnimeMediaSettings,
+  normalizeFillerPolicy,
+  normalizeRecapPolicy,
+  normalizeRenameCollisionPolicy,
+  normalizeRenameMissingMetadataPolicy,
   updateFacetScopedStringArrayRecord,
   updateFacetScopedStringRecord,
 } from "@/lib/utils/media-settings-scope";
@@ -160,7 +166,7 @@ export type UseMediaSettingsResult = {
   setFolderChmod: React.Dispatch<React.SetStateAction<Record<ViewCategoryId, string>>>;
   chownGroup: Record<ViewCategoryId, string>;
   setChownGroup: React.Dispatch<React.SetStateAction<Record<ViewCategoryId, string>>>;
-  saveSetting: (scope: string, scopeId: string | undefined, keyName: string, value: string) => void;
+  saveSetting: (scope: string, scopeId: string | undefined, keyName: string, value: string) => Promise<void> | void;
   saveCategoryQualityProfileOverride: (value: string) => Promise<void> | void;
   saveCategoryScoringPersonaOverride: (
     persona: ScoringPersonaId | null,
@@ -175,18 +181,7 @@ export type UseMediaSettingsResult = {
 const DEFAULT_RENAME_COLLISION_POLICY = "SKIP";
 const DEFAULT_RENAME_MISSING_METADATA_POLICY = "FALLBACK_TITLE";
 const DEFAULT_FILLER_POLICY = "DOWNLOAD_ALL";
-const ALLOWED_RENAME_COLLISION_POLICIES = new Set([
-  "SKIP",
-  "ERROR",
-  "REPLACE_IF_BETTER",
-]);
-const ALLOWED_RENAME_MISSING_METADATA_POLICIES = new Set([
-  "SKIP",
-  "FALLBACK_TITLE",
-]);
-const ALLOWED_FILLER_POLICIES = new Set(["DOWNLOAD_ALL", "SKIP_FILLER"]);
 const DEFAULT_RECAP_POLICY = "DOWNLOAD_ALL";
-const ALLOWED_RECAP_POLICIES = new Set(["DOWNLOAD_ALL", "SKIP_RECAP"]);
 const DEFAULT_FOLDER_TEMPLATE = "{title} ({year})";
 const DEFAULT_SEASON_FOLDER_TEMPLATE = "Season {season}";
 const DEFAULT_SPECIALS_FOLDER_TEMPLATE = "Specials";
@@ -400,6 +395,7 @@ export function useMediaSettings({
     [activeQualityScopeId, client, setGlobalStatus],
   );
 
+  const [generalSaveGuard] = React.useState(() => new SettingsSaveGuard());
   const saveSetting = React.useCallback(
     (_scope: string, _scopeId: string | undefined, keyName: string, value: string) => {
       const boolValue = value.trim().toLowerCase() === "true";
@@ -497,14 +493,51 @@ export function useMediaSettings({
         return;
       }
 
-      client
+      const scope = input.scope as ViewCategoryId;
+      const field = Object.keys(input).find((key) => key !== "scope")!;
+      const fields: Record<string, [string, (value: string) => void]> = {
+        fillerPolicy: [categoryFillerPolicies[scope], (next) => setCategoryFillerPolicies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        recapPolicy: [categoryRecapPolicies[scope], (next) => setCategoryRecapPolicies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        monitorSpecials: [categoryMonitorSpecials[scope], (next) => setCategoryMonitorSpecials((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        interSeasonMovies: [categoryInterSeasonMovies[scope], (next) => setCategoryInterSeasonMovies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        monitorFillerMovies: [categoryMonitorFillerMovies[scope], (next) => setCategoryMonitorFillerMovies((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        nfoWriteOnImport: [nfoWriteOnImport[scope], (next) => setNfoWriteOnImport((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        plexmatchWriteOnImport: [plexmatchWriteOnImport[scope], (next) => setPlexmatchWriteOnImport((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        renameEnabled: [categoryRenameEnabled[scope], (next) => setCategoryRenameEnabled((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        importMode: [importMode[scope], (next) => setImportMode((prev) => ({ ...prev, [scope]: next as ImportMode }))],
+        setPermissionsLinux: [setPermissionsLinux[scope], (next) => setSetPermissionsLinux((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        fileChmod: [fileChmod[scope], (next) => setFileChmod((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        folderChmod: [folderChmod[scope], (next) => setFolderChmod((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+        chownGroup: [chownGroup[scope], (next) => setChownGroup((prev) => updateFacetScopedStringRecord(prev, scope, next))],
+      };
+      const [previousValue, restore] = fields[field];
+      if (!generalSaveGuard.begin()) {
+        restore(previousValue);
+        return;
+      }
+      setMediaSettingsSaving(true);
+      return client
         .mutation(updateMediaSettingsMutation, { input })
         .toPromise()
-        .then(({ error }) => {
-          if (error) setGlobalStatus(error.message);
+        .then(({ data, error }) => {
+          if (error) throw error;
+          const savedValue = data?.updateMediaSettings?.[field];
+          restore(savedValue === undefined ? String(input[field]) : String(savedValue ?? ""));
+        })
+        .catch((error: unknown) => {
+          restore(previousValue);
+          setGlobalStatus(error instanceof Error ? error.message : t("status.failedToUpdate"));
+        })
+        .finally(() => {
+          generalSaveGuard.end();
+          setMediaSettingsSaving(false);
         });
     },
-    [activeQualityScopeId, client, setGlobalStatus],
+    [activeQualityScopeId, client, setGlobalStatus, generalSaveGuard, t,
+      categoryFillerPolicies, categoryRecapPolicies, categoryMonitorSpecials,
+      categoryInterSeasonMovies, categoryMonitorFillerMovies, nfoWriteOnImport,
+      plexmatchWriteOnImport, categoryRenameEnabled, importMode,
+      setPermissionsLinux, fileChmod, folderChmod, chownGroup],
   );
 
   const normalizeQualityProfiles = React.useCallback(
@@ -525,46 +558,6 @@ export function useMediaSettings({
       return resolved.profiles;
     },
     [t],
-  );
-
-  const normalizeRenameCollisionPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RENAME_COLLISION_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RENAME_COLLISION_POLICY;
-    },
-    [],
-  );
-
-  const normalizeRenameMissingMetadataPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RENAME_MISSING_METADATA_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RENAME_MISSING_METADATA_POLICY;
-    },
-    [],
-  );
-
-  const normalizeFillerPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_FILLER_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_FILLER_POLICY;
-    },
-    [],
-  );
-
-  const normalizeRecapPolicy = React.useCallback(
-    (rawValue: string | null | undefined) => {
-      const normalized = (rawValue || "").trim().toLowerCase();
-      return ALLOWED_RECAP_POLICIES.has(normalized)
-        ? normalized
-        : DEFAULT_RECAP_POLICY;
-    },
-    [],
   );
 
   const applyMediaSettingsFromPayload = React.useCallback(
@@ -600,59 +593,62 @@ export function useMediaSettings({
         });
       }
 
-      const nextProfileText = qualityProfileSettingsToCatalogText(qualityProfileSettings);
-      const nextProfiles = normalizeQualityProfiles(nextProfileText);
+      if (qualityProfileSettings) {
+        const nextProfileText = qualityProfileSettingsToCatalogText(qualityProfileSettings);
+        const nextProfiles = normalizeQualityProfiles(nextProfileText);
 
-      const rawGlobalProfileId =
-        coerceProfileSetting(
-          qualityProfileSettings?.globalProfileId ?? "",
-        ) || "";
-      const resolvedGlobalId =
-        rawGlobalProfileId &&
-        nextProfiles.some((p) => p.id === rawGlobalProfileId)
-          ? rawGlobalProfileId
-          : (nextProfiles[0]?.id ?? "");
-      setGlobalQualityProfileId((current) =>
-        current === resolvedGlobalId ? current : resolvedGlobalId,
-      );
-      setGlobalScoringPersona((current) =>
-        current === (qualityProfileSettings?.globalScoringPersona ?? "BALANCED")
-          ? current
-          : (qualityProfileSettings?.globalScoringPersona ?? "BALANCED"),
-      );
+        const rawGlobalProfileId =
+          coerceProfileSetting(
+            qualityProfileSettings?.globalProfileId ?? "",
+          ) || "";
+        const resolvedGlobalId =
+          rawGlobalProfileId &&
+          nextProfiles.some((p) => p.id === rawGlobalProfileId)
+            ? rawGlobalProfileId
+            : (nextProfiles[0]?.id ?? "");
+        setGlobalQualityProfileId((current) =>
+          current === resolvedGlobalId ? current : resolvedGlobalId,
+        );
+        setGlobalScoringPersona((current) =>
+          current === (qualityProfileSettings?.globalScoringPersona ?? "BALANCED")
+            ? current
+            : (qualityProfileSettings?.globalScoringPersona ?? "BALANCED"),
+        );
 
-      setQualityProfiles((currentProfiles) =>
-        currentProfiles.length === nextProfiles.length &&
-        currentProfiles.every(
-          (profile, index) =>
-            profile.id === nextProfiles[index]?.id &&
-            profile.name === nextProfiles[index]?.name,
-        )
-          ? currentProfiles
-          : nextProfiles,
-      );
+        setQualityProfiles((currentProfiles) =>
+          currentProfiles.length === nextProfiles.length &&
+          currentProfiles.every(
+            (profile, index) =>
+              profile.id === nextProfiles[index]?.id &&
+              profile.name === nextProfiles[index]?.name,
+          )
+            ? currentProfiles
+            : nextProfiles,
+        );
 
-      const nextOverrides = qualityProfileSettingsToCategoryOverrides(qualityProfileSettings);
-      setCategoryQualityProfileOverrides((previous) =>
-        QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => previous[scopeId] === nextOverrides[scopeId])
-          ? previous
-          : nextOverrides,
-      );
-      const nextPersonaSelections =
-        qualityProfileSettingsToCategoryPersonaSelections(qualityProfileSettings);
-      setCategoryPersonaSelections((previous) =>
-        QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => {
-          const current = previous[scopeId];
-          const next = nextPersonaSelections[scopeId];
-          return (
-            current.overridePersona === next.overridePersona &&
-            current.effectivePersona === next.effectivePersona &&
-            current.inheritsGlobal === next.inheritsGlobal
-          );
-        })
-          ? previous
-          : nextPersonaSelections,
-      );
+        const nextOverrides = qualityProfileSettingsToCategoryOverrides(qualityProfileSettings);
+        setCategoryQualityProfileOverrides((previous) =>
+          QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => previous[scopeId] === nextOverrides[scopeId])
+            ? previous
+            : nextOverrides,
+        );
+        const nextPersonaSelections =
+          qualityProfileSettingsToCategoryPersonaSelections(qualityProfileSettings);
+        setCategoryPersonaSelections((previous) =>
+          QUALITY_PROFILE_SCOPE_IDS.every((scopeId) => {
+            const current = previous[scopeId];
+            const next = nextPersonaSelections[scopeId];
+            return (
+              current.overridePersona === next.overridePersona &&
+              current.effectivePersona === next.effectivePersona &&
+              current.inheritsGlobal === next.inheritsGlobal
+            );
+          })
+            ? previous
+            : nextPersonaSelections,
+        );
+
+      }
 
       if (mediaSettings) {
         const mediaSettingsScopeId = facetScopedMediaSettingsScopeId(mediaSettings);
@@ -732,36 +728,22 @@ export function useMediaSettings({
         });
 
         if (mediaSettings.scope === "ANIME") {
-          setCategoryFillerPolicies((previous) => {
-            const nextPolicy = normalizeFillerPolicy(mediaSettings.fillerPolicy);
-            return previous.ANIME === nextPolicy
-              ? previous
-              : { ...previous, anime: nextPolicy };
-          });
-          setCategoryRecapPolicies((previous) => {
-            const nextPolicy = normalizeRecapPolicy(mediaSettings.recapPolicy);
-            return previous.ANIME === nextPolicy
-              ? previous
-              : { ...previous, anime: nextPolicy };
-          });
-          setCategoryMonitorSpecials((previous) => {
-            const nextValue = mediaSettings.monitorSpecials ? "true" : "false";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
-          setCategoryInterSeasonMovies((previous) => {
-            const nextValue = mediaSettings.interSeasonMovies === false ? "false" : "true";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
-          setCategoryMonitorFillerMovies((previous) => {
-            const nextValue = mediaSettings.monitorFillerMovies ? "true" : "false";
-            return previous.ANIME === nextValue
-              ? previous
-              : { ...previous, anime: nextValue };
-          });
+          const animeSettings = normalizeAnimeMediaSettings(mediaSettings);
+          setCategoryFillerPolicies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.fillerPolicy),
+          );
+          setCategoryRecapPolicies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.recapPolicy),
+          );
+          setCategoryMonitorSpecials((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.monitorSpecials),
+          );
+          setCategoryInterSeasonMovies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.interSeasonMovies),
+          );
+          setCategoryMonitorFillerMovies((previous) =>
+            updateFacetScopedStringRecord(previous, mediaSettingsScopeId, animeSettings.monitorFillerMovies),
+          );
         }
 
         setNfoWriteOnImport((previous) => {
@@ -824,16 +806,14 @@ export function useMediaSettings({
     },
     [
       normalizeQualityProfiles,
-      normalizeRenameCollisionPolicy,
-      normalizeRenameMissingMetadataPolicy,
-      normalizeFillerPolicy,
-      normalizeRecapPolicy,
       setGlobalScoringPersona,
       view,
     ],
   );
 
   const refreshMediaSettings = React.useCallback(async () => {
+    const version = generalSaveGuard.readVersion();
+    if (version === null) return;
     setMediaSettingsLoading(true);
     try {
       const variables = buildMediaSettingsInitVariables(activeQualityScopeId);
@@ -841,6 +821,7 @@ export function useMediaSettings({
         .query(mediaSettingsInitQuery, variables)
         .toPromise();
       if (error) throw error;
+      if (!generalSaveGuard.accepts(version)) return;
 
       setLocalPathStyle(
         localPathStyleFromRuntimeValue(data?.runtimeInfo?.runtimePathStyle),
@@ -859,6 +840,7 @@ export function useMediaSettings({
   }, [
     activeQualityScopeId,
     applyMediaSettingsFromPayload,
+    generalSaveGuard,
     client,
     setGlobalStatus,
     t,
@@ -1206,10 +1188,6 @@ export function useMediaSettings({
       nfoWriteOnImport,
       plexmatchWriteOnImport,
       applyMediaSettingsFromPayload,
-      normalizeFillerPolicy,
-      normalizeRecapPolicy,
-      normalizeRenameCollisionPolicy,
-      normalizeRenameMissingMetadataPolicy,
       client,
       setGlobalStatus,
       t,

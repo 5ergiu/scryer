@@ -432,6 +432,9 @@ impl MediaFileRepository for MediaFileStore {
             return Ok(Vec::new());
         }
 
+        let episode_ids = episode_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
         let dialect = dialect_for_datastore(&self.datastore);
         let placeholders = placeholders(episode_ids.len());
         let sql = format!(
@@ -440,25 +443,33 @@ impl MediaFileRepository for MediaFileStore {
                     {} AS episode_ids_json,
                     {} AS primary_episode_ids_json
              FROM media_files mf
-             INNER JOIN file_episode_map fem_target ON fem_target.file_id = mf.id
+             INNER JOIN (
+                 SELECT file_id, MAX(CASE WHEN role = 'primary' THEN 1 ELSE 0 END) AS has_primary
+                 FROM file_episode_map
+                 WHERE episode_id IN ({placeholders})
+                 GROUP BY file_id
+             ) fem_target ON fem_target.file_id = mf.id
              LEFT JOIN file_episode_map fem_all ON fem_all.file_id = mf.id
              WHERE mf.title_id = {{}}
                AND {}
-               AND fem_target.episode_id IN ({placeholders})
              GROUP BY mf.id
              ORDER BY mf.created_at DESC",
             media_file_select_columns(
                 dialect,
                 "NULL",
-                "CASE WHEN MAX(CASE WHEN fem_target.role = 'primary' THEN 1 ELSE 0 END) = 1
+                "CASE WHEN MAX(fem_target.has_primary) = 1
                       THEN 'primary' ELSE 'additional' END"
             ),
             episode_ids_aggregate(dialect),
             primary_episode_ids_aggregate(dialect),
             live_media_file_predicate(dialect, "mf")
         );
-        let mut args = vec![SqlArg::Text(title_id.to_string())];
-        args.extend(episode_ids.iter().cloned().map(SqlArg::Text));
+        let mut args = episode_ids
+            .into_iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
+        args.push(SqlArg::Text(title_id.to_string()));
         SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
             .await?
             .iter()
@@ -5156,6 +5167,38 @@ mod tests {
             .await
             .expect("episode scoped query should succeed");
 
+        let duplicated = media_files
+            .list_live_media_files_for_episode_ids(
+                &title.id,
+                &[
+                    episode_one.id.clone(),
+                    episode_two.id.clone(),
+                    episode_one.id.clone(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicated.len(), scoped.len());
+        assert_eq!(duplicated[0].media_file.id, scoped[0].media_file.id);
+        assert_eq!(duplicated[0].episode_ids, scoped[0].episode_ids);
+        assert!(
+            media_files
+                .list_live_media_files_for_episode_ids(&title.id, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            media_files
+                .list_live_media_files_for_episode_ids(
+                    "different-title",
+                    std::slice::from_ref(&episode_one.id)
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].media_file.id, pack_file_id);
         assert_eq!(
@@ -5197,6 +5240,23 @@ mod tests {
             )
             .await
             .expect("promoted episode scoped query should succeed");
+        let requested_additional = media_files
+            .list_live_media_files_for_episode_ids(&title.id, std::slice::from_ref(&episode_two.id))
+            .await
+            .unwrap();
+        let requested_pack = requested_additional
+            .iter()
+            .find(|file| file.media_file.id == pack_file_id)
+            .unwrap();
+        assert!(!requested_pack.media_file.role.is_primary());
+        assert_eq!(
+            requested_pack.episode_ids,
+            vec![episode_one.id.clone(), episode_two.id.clone()]
+        );
+        assert_eq!(
+            requested_pack.primary_episode_ids,
+            vec![episode_one.id.clone()]
+        );
         let pack = scoped
             .iter()
             .find(|file| file.media_file.id == pack_file_id)

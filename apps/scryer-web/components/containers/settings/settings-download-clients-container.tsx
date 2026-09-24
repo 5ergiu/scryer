@@ -11,9 +11,11 @@ import {
   reorderDownloadClientsMutation,
   testDownloadClientConnectionMutation,
   updateDownloadClientMutation,
+  updateDownloadClientRoutingMutation,
 } from "@/lib/graphql/mutations";
 import {
   downloadClientProviderTypesQuery,
+  downloadClientRoutingAllScopesQuery,
   downloadClientsInitQuery,
   settingsDownloadClientsQuery,
 } from "@/lib/graphql/queries";
@@ -47,13 +49,36 @@ import {
 import type {
   DownloadClientRecord,
   DownloadClientDraft,
+  DownloadClientRoutingSettings,
+  DownloadClientRoutingSettingsByScope,
   DownloadClientTypeOption,
   ProviderTypeInfo,
   ProxyRecord,
 } from "@/lib/types";
+import type { ViewCategoryId } from "@/lib/types/quality-profiles";
+import { DOWNLOAD_CLIENT_ROUTING_EMPTY } from "@/lib/constants/nzbget";
+import {
+  buildDownloadClientRoutingState,
+  serializeDownloadClientRoutingEntries,
+} from "@/lib/utils/download-client-routing";
 
 type SettingsDownloadClientsSectionProps = ComponentProps<typeof SettingsDownloadClientsSection>;
 const DOWNLOAD_CLIENT_ADJACENT_PLUGIN_TYPES = ["archive_extractor"] as const;
+
+const EMPTY_DOWNLOAD_CLIENT_ROUTING_BY_SCOPE: DownloadClientRoutingSettingsByScope = {
+  MOVIE: {},
+  SERIES: {},
+  ANIME: {},
+};
+
+const EMPTY_DOWNLOAD_CLIENT_ROUTING_ORDER_BY_SCOPE: Record<
+  ViewCategoryId,
+  string[]
+> = {
+  MOVIE: [],
+  SERIES: [],
+  ANIME: [],
+};
 
 type SettingsDownloadClientsContainerProps = {
   providerCatalogVersion?: number;
@@ -103,6 +128,23 @@ export function SettingsDownloadClientsContainer({
   const [localPathStyle, setLocalPathStyle] =
     useState<LocalPathStyle | undefined>(undefined);
   const [proxyConfigs, setProxyConfigs] = useState<ProxyRecord[]>([]);
+  const [downloadClientRoutingByScope, setDownloadClientRoutingByScope] =
+    useState<DownloadClientRoutingSettingsByScope>(
+      EMPTY_DOWNLOAD_CLIENT_ROUTING_BY_SCOPE,
+    );
+  const [downloadClientRoutingOrderByScope, setDownloadClientRoutingOrderByScope] =
+    useState<Record<ViewCategoryId, string[]>>(
+      EMPTY_DOWNLOAD_CLIENT_ROUTING_ORDER_BY_SCOPE,
+    );
+  const [downloadClientRoutingLoaded, setDownloadClientRoutingLoaded] =
+    useState(false);
+  const [downloadClientRoutingLoading, setDownloadClientRoutingLoading] =
+    useState(false);
+  const [mutatingDownloadClientRoutingScopes, setMutatingDownloadClientRoutingScopes] =
+    useState<Set<ViewCategoryId>>(() => new Set());
+  const downloadClientRoutingLoadPromiseRef = useRef<Promise<void> | null>(
+    null,
+  );
   const [pendingEditorAction, setPendingEditorAction] =
     useState<PendingDownloadClientEditorAction>(null);
   const [draftBaseline, setDraftBaseline] = useState<DownloadClientDraft>(() =>
@@ -163,6 +205,164 @@ export function SettingsDownloadClientsContainer({
       ),
     );
   }, [client]);
+
+  const loadDownloadClientRouting = useCallback(async () => {
+    if (downloadClientRoutingLoaded) {
+      return;
+    }
+    if (downloadClientRoutingLoadPromiseRef.current) {
+      return downloadClientRoutingLoadPromiseRef.current;
+    }
+
+    setDownloadClientRoutingLoading(true);
+    const request = (async () => {
+      try {
+        const { data, error } = await client
+          .query(
+            downloadClientRoutingAllScopesQuery,
+            {},
+            { requestPolicy: "network-only" },
+          )
+          .toPromise();
+        if (error) throw error;
+
+        const movie = buildDownloadClientRoutingState(
+          settingsDownloadClients,
+          data?.movie ?? [],
+        );
+        const series = buildDownloadClientRoutingState(
+          settingsDownloadClients,
+          data?.series ?? [],
+        );
+        const anime = buildDownloadClientRoutingState(
+          settingsDownloadClients,
+          data?.anime ?? [],
+        );
+        setDownloadClientRoutingByScope({
+          MOVIE: movie.routing,
+          SERIES: series.routing,
+          ANIME: anime.routing,
+        });
+        setDownloadClientRoutingOrderByScope({
+          MOVIE: movie.order,
+          SERIES: series.order,
+          ANIME: anime.order,
+        });
+        setDownloadClientRoutingLoaded(true);
+      } catch (error) {
+        setGlobalStatus(
+          error instanceof Error ? error.message : t("status.failedToLoad"),
+        );
+      } finally {
+        setDownloadClientRoutingLoading(false);
+        downloadClientRoutingLoadPromiseRef.current = null;
+      }
+    })();
+    downloadClientRoutingLoadPromiseRef.current = request;
+    return request;
+  }, [client, downloadClientRoutingLoaded, setGlobalStatus, settingsDownloadClients, t]);
+
+  const updateDownloadClientRoutingForScope = useCallback(
+    async (
+      scope: ViewCategoryId,
+      clientId: string,
+      nextValue: Partial<DownloadClientRoutingSettings>,
+      options?: { save?: boolean },
+    ) => {
+      const previousScopeRouting = downloadClientRoutingByScope[scope] ?? {};
+      const currentRouting =
+        previousScopeRouting[clientId] ?? DOWNLOAD_CLIENT_ROUTING_EMPTY;
+      const nextRouting = { ...currentRouting, ...nextValue };
+      const nextScopeRouting = {
+        ...previousScopeRouting,
+        [clientId]: nextRouting,
+      };
+      const previousOrder = downloadClientRoutingOrderByScope[scope] ?? [];
+      const nextOrder = previousOrder.includes(clientId)
+        ? previousOrder
+        : [...previousOrder, clientId];
+
+      setDownloadClientRoutingByScope((previous) => ({
+        ...previous,
+        [scope]: nextScopeRouting,
+      }));
+      if (!previousOrder.includes(clientId)) {
+        setDownloadClientRoutingOrderByScope((previous) => ({
+          ...previous,
+          [scope]: nextOrder,
+        }));
+      }
+      if (options?.save === false) {
+        return;
+      }
+
+      setMutatingDownloadClientRoutingScopes((previous) => {
+        const next = new Set(previous);
+        next.add(scope);
+        return next;
+      });
+      try {
+        const { data, error } = await client
+          .mutation(updateDownloadClientRoutingMutation, {
+            input: {
+              scope,
+              entries: serializeDownloadClientRoutingEntries(
+                settingsDownloadClients,
+                nextScopeRouting,
+                nextOrder,
+              ),
+            },
+          })
+          .toPromise();
+        if (error) throw error;
+
+        const saved = buildDownloadClientRoutingState(
+          settingsDownloadClients,
+          data?.updateDownloadClientRouting ?? [],
+        );
+        setDownloadClientRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: saved.routing,
+        }));
+        setDownloadClientRoutingOrderByScope((previous) => ({
+          ...previous,
+          [scope]: saved.order,
+        }));
+        const clientName =
+          settingsDownloadClients.find((entry) => entry.id === clientId)?.name ??
+          t("label.unknown");
+        setGlobalStatus(
+          t("settings.downloadClientRoutingSavedFor", { name: clientName }),
+        );
+      } catch (error) {
+        setDownloadClientRoutingByScope((previous) => ({
+          ...previous,
+          [scope]: previousScopeRouting,
+        }));
+        setDownloadClientRoutingOrderByScope((previous) => ({
+          ...previous,
+          [scope]: previousOrder,
+        }));
+        setGlobalStatus(
+          error instanceof Error ? error.message : t("status.failedToUpdate"),
+        );
+      } finally {
+        setMutatingDownloadClientRoutingScopes((previous) => {
+          const next = new Set(previous);
+          next.delete(scope);
+          return next;
+        });
+      }
+    },
+    [
+      client,
+      downloadClientRoutingByScope,
+      downloadClientRoutingOrderByScope,
+      setGlobalStatus,
+      settingsDownloadClients,
+      t,
+    ],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -665,6 +865,16 @@ export function SettingsDownloadClientsContainer({
         mutatingDownloadClientId={mutatingDownloadClientId}
         resetDownloadClientDraft={requestCloseEditor}
         settingsDownloadClients={settingsDownloadClients}
+        downloadClientRoutingByScope={downloadClientRoutingByScope}
+        downloadClientRoutingLoaded={downloadClientRoutingLoaded}
+        downloadClientRoutingLoading={downloadClientRoutingLoading}
+        mutatingDownloadClientRoutingScopes={
+          mutatingDownloadClientRoutingScopes
+        }
+        loadDownloadClientRouting={loadDownloadClientRouting}
+        updateDownloadClientRoutingForScope={
+          updateDownloadClientRoutingForScope
+        }
         editDownloadClient={requestEditDownloadClient}
         toggleDownloadClientEnabled={toggleDownloadClientEnabled}
         deleteDownloadClient={deleteDownloadClient}

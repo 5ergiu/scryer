@@ -1212,6 +1212,33 @@ fn normalize_nzbget_append_match_name(value: &str) -> String {
 
 #[async_trait]
 impl DownloadClient for NzbgetDownloadClient {
+    async fn discover_categories(&self, _client_id: &str) -> AppResult<Option<Vec<String>>> {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            #[serde(rename = "Name")]
+            name: String,
+            #[serde(rename = "Value")]
+            value: String,
+        }
+        let entries: Vec<Entry> = serde_json::from_value(self.rpc_call("config", vec![]).await?)
+            .map_err(|error| AppError::Repository(format!("invalid NZBGet categories: {error}")))?;
+        Ok(Some(
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .name
+                        .strip_prefix("Category")
+                        .and_then(|suffix| suffix.strip_suffix(".Name"))
+                        .is_some_and(|number| {
+                            !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+                        })
+                })
+                .map(|entry| entry.value)
+                .collect(),
+        ))
+    }
+
     async fn submit_download(
         &self,
         request: &DownloadClientAddRequest,
@@ -1264,10 +1291,12 @@ impl DownloadClient for NzbgetDownloadClient {
         // NZBGet stores them as {"Name":…,"Value":…} in responses, but
         // accepts {"*key": "val"} in the append request.
         let mut parameters: Vec<Value> = vec![
-            json!({"*scryer_title_id": title.id.clone()}),
             json!({"*scryer_facet": facet_str}),
             json!({"*scryer_import_purpose": request.purpose.as_str()}),
         ];
+        if !title.id.is_empty() {
+            parameters.insert(0, json!({"*scryer_title_id": title.id.clone()}));
+        }
         if let Some(download_id) = request.download_id {
             parameters.push(json!({"*scryer_download_id": download_id.to_wire()}));
         }
@@ -2768,5 +2797,33 @@ mod tests {
         assert_eq!(nzbget_queue_priority(Some("low")), -50);
         assert_eq!(nzbget_queue_priority(Some("very low")), -100);
         assert_eq!(nzbget_queue_priority(None), 0);
+    }
+    #[tokio::test]
+    async fn category_discovery_reads_names_and_rejects_malformed_payloads() {
+        for (result, expected) in [
+            (
+                json!([{"Name":"Category1.Name","Value":"movies"},{"Name":"Category1.DestDir","Value":"/fixture"}]),
+                Some(vec!["movies"]),
+            ),
+            (json!([]), Some(vec![])),
+            (json!([{"Name":"Category1.Name","Value":7}]), None),
+            (json!({}), None),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(body_partial_json(json!({"method":"config"})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result":result})))
+                .mount(&server)
+                .await;
+            let client = NzbgetDownloadClient::new(server.uri(), None, None, "SCORE".into());
+            let result = client.discover_categories("client").await;
+            match expected {
+                Some(names) => assert_eq!(
+                    result.unwrap(),
+                    Some(names.into_iter().map(str::to_string).collect())
+                ),
+                None => assert!(result.is_err()),
+            }
+        }
     }
 }

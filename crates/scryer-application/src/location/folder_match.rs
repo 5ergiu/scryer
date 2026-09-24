@@ -414,6 +414,7 @@ impl AppUseCase {
         folder_path: &str,
         resolution: FolderMatchResolution,
     ) -> AppResult<ChangeTitleFolderResult> {
+        let started = std::time::Instant::now();
         let context = self
             .resolve_folder_match_context(actor, title_id, folder_path)
             .await?;
@@ -435,7 +436,25 @@ impl AppUseCase {
         )
         .await?;
 
-        match (context.ownership(), resolution) {
+        let mut affected_ids = vec![title_id.to_string()];
+        if let Some(owner) = context.owner.as_ref() {
+            affected_ids.push(owner.id.clone());
+        }
+        let cached_media = if context.ownership() != FolderMatchOwnership::OwnedByThisTitle {
+            self.services
+                .library
+                .media_files
+                .list_media_files_for_titles(&affected_ids)
+                .await?
+        } else {
+            Vec::new()
+        };
+        tracing::info!(
+            title_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "folder change validation completed"
+        );
+        let result = match (context.ownership(), resolution) {
             // FR-005: an explicit no-op with an explanation, whatever the caller
             // asked for. Nothing is submitted.
             (FolderMatchOwnership::OwnedByThisTitle, _) => Ok(ChangeTitleFolderResult {
@@ -472,13 +491,28 @@ impl AppUseCase {
             (FolderMatchOwnership::OwnedByAnotherTitle, FolderMatchResolution::TakeOver) => {
                 self.apply_folder_takeover(actor, context).await
             }
+        };
+        if !cached_media.is_empty()
+            && let Err(error) = self
+                .restore_folder_reconciliation_analysis(&affected_ids, &cached_media)
+                .await
+        {
+            tracing::warn!(title_id, %error, "could not restore cached folder analysis; normal scan can rebuild it");
         }
+        tracing::info!(
+            title_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            succeeded = result.is_ok(),
+            "folder change completed"
+        );
+        result
     }
 
     /// Write (or clear) a title's owned folder. The single commit primitive every
     /// path below uses, so compensation is always the same call in reverse.
     async fn commit_title_folder(&self, title_id: &str, folder: Option<&str>) -> AppResult<()> {
-        match folder {
+        let started = std::time::Instant::now();
+        let result = match folder {
             Some(folder) => {
                 self.services
                     .catalog
@@ -493,7 +527,14 @@ impl AppUseCase {
                     .clear_folder_path(title_id)
                     .await
             }
-        }
+        };
+        tracing::info!(
+            title_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            succeeded = result.is_ok(),
+            "folder ownership write completed"
+        );
+        result
     }
 
     /// Put a title's folder back and rebuild what the failed attempt detached.
@@ -513,7 +554,7 @@ impl AppUseCase {
         if folder.is_none() {
             return;
         }
-        if let Err(error) = self.scan_title_library(actor, title_id).await {
+        if let Err(error) = self.reconcile_title_folder(actor, title_id).await {
             tracing::error!(
                 title_id = %title_id,
                 %error,
@@ -564,7 +605,7 @@ impl AppUseCase {
             return Err(error);
         }
 
-        let scan = match self.scan_title_library(actor, &title_id).await {
+        let scan = match self.reconcile_title_folder(actor, &title_id).await {
             Ok(scan) => scan,
             Err(error) => {
                 self.restore_title_folder(actor, &title_id, previous_folder.as_deref())
@@ -672,8 +713,8 @@ impl AppUseCase {
         detached +=
             detach_title_media_in_folder(self, owner_id, &stored_path_to_path_buf(owner_folder))
                 .await?;
-        let scan = self.scan_title_library(actor, title_id).await?;
-        let owner_scan = self.scan_title_library(actor, owner_id).await?;
+        let scan = self.reconcile_title_folder(actor, title_id).await?;
+        let owner_scan = self.reconcile_title_folder(actor, owner_id).await?;
         Ok((detached, scan, owner_scan))
     }
 
@@ -776,7 +817,7 @@ impl AppUseCase {
                 detach_title_media_in_folder(self, title_id, &stored_path_to_path_buf(previous))
                     .await?;
         }
-        let scan = self.scan_title_library(actor, title_id).await?;
+        let scan = self.reconcile_title_folder(actor, title_id).await?;
         Ok((detached, scan))
     }
 

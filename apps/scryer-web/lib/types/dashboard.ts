@@ -33,6 +33,11 @@ export type DashboardIndexer = {
   lastHealthStatus: string | null;
   lastErrorMessage: string | null;
   lastErrorAt: string | null;
+  /**
+   * When this indexer's rate-limit cooldown lifts, or null when it is not
+   * cooling down. A cooling indexer is quiet, not broken.
+   */
+  rateLimitedUntil: string | null;
 };
 
 export type DashboardDownloadClient = {
@@ -107,8 +112,16 @@ export type DashboardImportedItem = {
   posterUrl: string | null;
   facet: string | null;
   libraryId: string | null;
-  /** `FILE_UPGRADED` rows carry the upgrade badge. */
-  eventType: string;
+  kind: "IMPORTED" | "NEW_IMPORT" | "UPGRADE";
+  episode: {
+    id: string;
+    seasonNumber: string | null;
+    episodeNumber: string | null;
+    title: string | null;
+    overview: string | null;
+    imageUrl: string | null;
+    airDate: string | null;
+  } | null;
   quality: string | null;
   sizeBytes: number | null;
   occurredAt: string;
