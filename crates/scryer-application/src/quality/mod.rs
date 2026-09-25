@@ -20,6 +20,9 @@ pub(crate) mod profile;
 pub mod release_dedup;
 pub(crate) mod release_group_db;
 pub(crate) mod release_parser;
+// Not read by any scoring lane yet; the grab path starts capturing snapshots next.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod release_listing;
 pub(crate) mod scoring_weights;
 
 /// The hand-authored TRaSH ranking corpus. It spans the parser, the profile
