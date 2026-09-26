@@ -2191,6 +2191,12 @@ ${JOB_RUN_FIELDS}
   }
 }`;
 
+export const latestJobRunsQuery = `query LatestJobRuns {
+  latestJobRuns {
+${JOB_RUN_FIELDS}
+  }
+}`;
+
 export const jobRunEventsSubscription = `subscription JobRunEvents {
   jobRunEvents {
 ${JOB_RUN_FIELDS}

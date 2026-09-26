@@ -5,7 +5,12 @@ import { retryImportMutation } from "@/lib/graphql/mutations";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
 import type { LibraryRecord, TitleHistoryEvent, TitleHistoryPage, TitleRecord } from "@/lib/types";
-import { WANTED_HISTORY_FILTERS } from "@/components/common/title-history-event-meta";
+import {
+  domainEventTypesForHistoryEvents,
+  WANTED_HISTORY_FILTERS,
+} from "@/components/common/title-history-event-meta";
+import { useReactiveRefresh } from "@/lib/context/reactive-refresh-context";
+import { forEventTypes } from "@/lib/reactive/domain-event-feed";
 import { TitleHistoryView } from "@/components/views/title-history-view";
 import {
   normalizeLibraryFilterSelection,
@@ -118,6 +123,31 @@ export function TitleHistoryContainer({
   React.useEffect(() => {
     void fetchHistory();
   }, [fetchHistory]);
+
+  // The page only reloads on its own inputs, so a new event would otherwise
+  // stay hidden until a manual refresh. Refetch the page as it is currently
+  // filtered whenever an event that could add one of its rows arrives.
+  const { registerReactiveRefresh } = useReactiveRefresh();
+  const fetchHistoryRef = React.useRef(fetchHistory);
+  React.useEffect(() => {
+    fetchHistoryRef.current = fetchHistory;
+  });
+  const refreshAliasId = React.useId();
+  const refreshDomainEventTypes = React.useMemo(
+    () => domainEventTypesForHistoryEvents(selectedEventTypes),
+    [selectedEventTypes],
+  );
+  React.useEffect(
+    () =>
+      registerReactiveRefresh({
+        aliasKey: `title-history:${refreshAliasId}`,
+        predicate: forEventTypes(...refreshDomainEventTypes),
+        run: () => {
+          void fetchHistoryRef.current();
+        },
+      }),
+    [refreshAliasId, refreshDomainEventTypes, registerReactiveRefresh],
+  );
 
   const toggleFilter = React.useCallback((eventType: string) => {
     setPage(0);

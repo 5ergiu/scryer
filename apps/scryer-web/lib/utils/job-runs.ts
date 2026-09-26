@@ -277,3 +277,25 @@ export function preferJobRunSnapshot(
   }
   return incoming;
 }
+
+/**
+ * Fold one run into the latest run kept per job. A newer snapshot of the kept
+ * run replaces it; a different run replaces it only when it started no earlier.
+ */
+export function mergeLatestJobRun(
+  current: Partial<Record<JobKey, JobRun>>,
+  run: JobRun,
+): Partial<Record<JobKey, JobRun>> {
+  const existing = current[run.jobKey];
+  let next: JobRun;
+  if (!existing) {
+    next = run;
+  } else if (existing.id === run.id) {
+    next = preferJobRunSnapshot(existing, run);
+  } else if (Date.parse(run.startedAt) >= Date.parse(existing.startedAt)) {
+    next = run;
+  } else {
+    return current;
+  }
+  return next === existing ? current : { ...current, [run.jobKey]: next };
+}

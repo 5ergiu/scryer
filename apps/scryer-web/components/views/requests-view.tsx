@@ -56,6 +56,11 @@ import {
 } from "@/components/ui/select";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
+import {
+  requestCountByFacet,
+  requestCountByStatus,
+  requestsWithStatus,
+} from "@/lib/utils/media-request-filters";
 import type { LibraryRecord, MediaRequestRecord } from "@/lib/types";
 import type {
   RequestRuleDecisionRecord,
@@ -408,22 +413,6 @@ function statusFilterOptions(mode: RequestsMode): Array<{
   ];
 }
 
-function requestCountByFacet(
-  requests: MediaRequestRecord[],
-  facet: RequestFacetFilter,
-): number {
-  return requests.filter((request) => request.facet === facet).length;
-}
-
-function requestCountByStatus(
-  requests: MediaRequestRecord[],
-  status: RequestStatusFilter,
-): number {
-  if (status === "all") {
-    return requests.length;
-  }
-  return requests.filter((request) => request.status === status).length;
-}
 
 
 /// How long the media is held for, in one badge. "Requested" is a window nobody
@@ -747,12 +736,16 @@ export function RequestsView({
   const [adminFacetFilters, setAdminFacetFilters] = React.useState<
     Record<RequestFacetFilter, boolean>
   >({ MOVIE: true, SERIES: true, ANIME: true });
+  const statusRequests = React.useMemo(
+    () => requestsWithStatus(requests, statusFilter),
+    [requests, statusFilter],
+  );
   const displayedRequests = React.useMemo(
     () =>
       mode === "admin"
-        ? requests.filter((request) => adminFacetFilters[request.facet])
-        : requests,
-    [adminFacetFilters, mode, requests],
+        ? statusRequests.filter((request) => adminFacetFilters[request.facet])
+        : statusRequests,
+    [adminFacetFilters, mode, statusRequests],
   );
   const [approvalRequest, setApprovalRequest] =
     React.useState<MediaRequestRecord | null>(null);
@@ -1397,7 +1390,7 @@ export function RequestsView({
                     key={facet}
                     selected={adminFacetFilters[facet]}
                     label={label}
-                    count={requestCountByFacet(requests, facet)}
+                    count={requestCountByFacet(statusRequests, facet)}
                     aria-pressed={adminFacetFilters[facet]}
                     onClick={() =>
                       setAdminFacetFilters((current) => ({

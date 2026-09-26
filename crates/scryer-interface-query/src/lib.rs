@@ -2666,6 +2666,17 @@ impl JobAndDownloadQueries {
         Ok(runs.into_iter().map(from_job_run).collect())
     }
 
+    /// List the most recent run of each scheduled job; jobs that have never run are absent.
+    async fn latest_job_runs(&self, ctx: &Context<'_>) -> GqlResult<Vec<JobRunPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let runs = app
+            .list_latest_job_runs(&actor)
+            .await
+            .map_err(to_gql_error)?;
+        Ok(runs.into_iter().map(from_job_run).collect())
+    }
+
     /// Return discovery home results using optional facet, filter, and pagination input.
     async fn discovery_home(
         &self,

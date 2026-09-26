@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseFullHashBackfillFailures } from "./job-runs.ts";
+import { mergeLatestJobRun, parseFullHashBackfillFailures } from "./job-runs.ts";
+import type { JobRun } from "../types/jobs.ts";
 
 test("full-hash backfill failures are read with their path and reason", () => {
   const parsed = parseFullHashBackfillFailures({
@@ -61,4 +62,52 @@ test("garbage, legacy, and other jobs' summaries yield no failures", () => {
     }),
     empty,
   );
+});
+
+function jobRun(overrides: Partial<JobRun> & Pick<JobRun, "id" | "jobKey" | "startedAt">): JobRun {
+  return {
+    displayName: overrides.jobKey,
+    category: "SYSTEM",
+    section: "PRIMARY",
+    status: "COMPLETED",
+    triggerSource: "SCHEDULED_INTERVAL",
+    completedAt: overrides.startedAt,
+    summaryJson: null,
+    summaryText: null,
+    errorText: null,
+    progressJson: null,
+    libraryScanProgress: null,
+    ...overrides,
+  } as JobRun;
+}
+
+test("each job keeps its own latest run however often another job runs", () => {
+  let latest: Partial<Record<JobRun["jobKey"], JobRun>> = {};
+  latest = mergeLatestJobRun(
+    latest,
+    jobRun({ id: "housekeeping-1", jobKey: "HOUSEKEEPING", startedAt: "2026-01-01T00:00:00Z" }),
+  );
+  for (let minute = 10; minute < 60; minute += 1) {
+    latest = mergeLatestJobRun(
+      latest,
+      jobRun({ id: `rss-${minute}`, jobKey: "RSS_SYNC", startedAt: `2026-01-01T00:${minute}:00Z` }),
+    );
+  }
+  assert.equal(latest.HOUSEKEEPING?.id, "housekeeping-1");
+  assert.equal(latest.RSS_SYNC?.id, "rss-59");
+});
+
+test("an older run never displaces a newer one, and a snapshot updates its own run", () => {
+  const running = jobRun({
+    id: "rss-2",
+    jobKey: "RSS_SYNC",
+    startedAt: "2026-01-01T00:02:00Z",
+    status: "RUNNING",
+    completedAt: null,
+  });
+  let latest = mergeLatestJobRun({}, running);
+  const older = jobRun({ id: "rss-1", jobKey: "RSS_SYNC", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(mergeLatestJobRun(latest, older), latest);
+  latest = mergeLatestJobRun(latest, { ...running, status: "COMPLETED", completedAt: "2026-01-01T00:03:00Z" });
+  assert.equal(latest.RSS_SYNC?.status, "COMPLETED");
 });

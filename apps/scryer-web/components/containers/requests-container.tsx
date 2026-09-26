@@ -150,6 +150,23 @@ function collapseMediaRequests(requests: MediaRequestRecord[]): MediaRequestReco
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
+/// Overlapping requests only merge within one status: a pending request and an
+/// already-approved one for the same media stay separate rows on their own tabs.
+function collapseMediaRequestsPerStatus(requests: MediaRequestRecord[]): MediaRequestRecord[] {
+  const byStatus = new Map<MediaRequestRecord["status"], MediaRequestRecord[]>();
+  for (const request of requests) {
+    const group = byStatus.get(request.status);
+    if (group) {
+      group.push(request);
+    } else {
+      byStatus.set(request.status, [request]);
+    }
+  }
+  return Array.from(byStatus.values())
+    .flatMap(collapseMediaRequests)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
 const RECENT_ACTION_EVENT_WINDOW_MS = 10_000;
 
 export function RequestsContainer({ facet }: RequestsContainerProps) {
@@ -188,7 +205,9 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
   const adminLibrariesRef = React.useRef<LibraryRecord[]>([]);
   const requesterLibrariesRef = React.useRef<LibraryRecord[]>([]);
   const requestFacet = facet ?? null;
-  const refreshContextKey = `${user?.id ?? ""}|${requestFacet ?? "all"}|${mode}|${statusFilter}`;
+  // Every status is loaded at once (the view filters by tab), so switching tabs
+  // does not start a new load and each tab's count is read from the same list.
+  const refreshContextKey = `${user?.id ?? ""}|${requestFacet ?? "all"}|${mode}`;
   const refreshContextRef = React.useRef(refreshContextKey);
   // Libraries only change with the viewer or the facet, so they are fetched
   // once per key and every other refresh (pulses, subscription events, filter
@@ -311,14 +330,13 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
       }
 
       const requestsQuery = nextMode === "admin" ? mediaRequestsQuery : myMediaRequestsQuery;
-      const requestStatus = statusFilter === "all" ? null : statusFilter;
       const requestsResult = await client.query(requestsQuery, {
         facet: requestFacet,
         libraryIds:
           normalizedSelectedLibraryIds.length > 0
             ? normalizedSelectedLibraryIds
             : null,
-        status: requestStatus,
+        status: null,
       }).toPromise();
       if (
         refreshSeq !== refreshSeqRef.current ||
@@ -336,7 +354,7 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
           : requestsResult.data?.myMediaRequests;
       setRequests(
         nextMode === "admin"
-          ? collapseMediaRequests((loadedRequests ?? []) as MediaRequestRecord[])
+          ? collapseMediaRequestsPerStatus((loadedRequests ?? []) as MediaRequestRecord[])
           : ((loadedRequests ?? []) as MediaRequestRecord[]),
       );
     } catch (error) {
@@ -349,7 +367,7 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
         setLoading(false);
       }
     }
-  }, [client, librariesKey, mode, refreshContextKey, requestFacet, selectedLibraryIds, setGlobalStatus, statusFilter, t]);
+  }, [client, librariesKey, mode, refreshContextKey, requestFacet, selectedLibraryIds, setGlobalStatus, t]);
 
   const refreshQualityProfileOptions = React.useCallback(async () => {
     try {

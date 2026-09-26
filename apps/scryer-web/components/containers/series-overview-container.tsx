@@ -77,7 +77,11 @@ import type {
 } from "@/lib/types/titles";
 import { useDeletePreview } from "@/lib/hooks/use-delete-preview";
 import { normalizeJobRun } from "@/lib/utils/job-runs";
-import { mediaFileOwnerKeys } from "@/lib/utils/media-file-owners";
+import {
+  deletedMediaFileIds,
+  dropDeletedMediaFiles,
+  mediaFileOwnerKeys,
+} from "@/lib/utils/media-file-owners";
 import type { JobRun } from "@/lib/types/jobs";
 import {
   episodeIdsCoveredByEpisodeFileDelete,
@@ -369,32 +373,6 @@ function retainEquivalentSnapshot<T>(current: T, next: T): T {
     return current;
   }
   return next;
-}
-
-/**
- * Read the media-file ids a finished episode-file deletion run reports removing.
- * Returns null when the run carried no usable summary, so the caller can fall
- * back to dropping the whole cached episode instead of trusting a partial list.
- */
-function readDeletedFileIds(summaryJson: unknown): Set<string> | null {
-  const parsed =
-    typeof summaryJson === "string"
-      ? (() => {
-          try {
-            return JSON.parse(summaryJson) as unknown;
-          } catch {
-            return null;
-          }
-        })()
-      : summaryJson;
-  if (!parsed || typeof parsed !== "object") {
-    return null;
-  }
-  const ids = (parsed as { deletedFileIds?: unknown }).deletedFileIds;
-  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
-    return null;
-  }
-  return new Set(ids as string[]);
 }
 
 /**
@@ -1584,22 +1562,11 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
       // The run's summary names the files it actually removed. When it is
       // missing or unparseable, drop the cached files for every targeted
       // episode instead so nothing stale is shown.
-      const deletedFileIds = readDeletedFileIds(run.summaryJson);
+      const deletedFileIds = deletedMediaFileIds(run);
       const dropCachedFiles = (
         current: Record<string, EpisodeMediaFile[]>,
-      ): Record<string, EpisodeMediaFile[]> => {
-        if (deletedFileIds) {
-          return Object.fromEntries(
-            Object.entries(current).map(([key, files]) => [
-              key,
-              files.filter((file) => !deletedFileIds.has(file.id)),
-            ]),
-          );
-        }
-        return Object.fromEntries(
-          Object.entries(current).filter(([key]) => !targetedEpisodeIds.has(key)),
-        );
-      };
+      ): Record<string, EpisodeMediaFile[]> =>
+        dropDeletedMediaFiles(current, deletedFileIds, targetedEpisodeIds);
       setMediaFilesByEpisode(dropCachedFiles);
       setMediaFilesBySeriesMovieLink(dropCachedFiles);
       await refreshTitleDetail();

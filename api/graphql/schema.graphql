@@ -22669,6 +22669,10 @@ type QueryRoot {
 		limit: Int
 	): [JobRunPayload!]!
 	"""
+	List the most recent run of each scheduled job; jobs that have never run are absent.
+	"""
+	latestJobRuns: [JobRunPayload!]!
+	"""
 	Return discovery home results using optional facet, filter, and pagination input.
 	"""
 	discoveryHome(

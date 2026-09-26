@@ -663,6 +663,70 @@ async fn job_history_reads_do_not_replay_domain_events_when_tracker_is_empty() {
 }
 
 #[tokio::test]
+async fn latest_job_runs_report_each_job_even_when_another_fills_the_recent_window() {
+    let job_runs = Arc::new(RecordingJobRunRepo::default());
+    let (base_app, admin) = bootstrap();
+    let app = base_app.with_test_overrides(|services| services.with_job_runs(job_runs.clone()));
+    let now = chrono::Utc::now();
+
+    job_runs
+        .seed(test_job_run_record(
+            "older-housekeeping",
+            JobKey::Housekeeping,
+            JobRunStatus::Completed,
+            now - chrono::Duration::hours(2),
+            None,
+        ))
+        .await;
+    job_runs
+        .seed(test_job_run_record(
+            "newest-housekeeping",
+            JobKey::Housekeeping,
+            JobRunStatus::Completed,
+            now - chrono::Duration::hours(1),
+            None,
+        ))
+        .await;
+    for index in 0..5 {
+        job_runs
+            .seed(test_job_run_record(
+                &format!("rss-{index}"),
+                JobKey::RssSync,
+                JobRunStatus::Completed,
+                now - chrono::Duration::minutes(index),
+                None,
+            ))
+            .await;
+    }
+
+    let recent_runs = app
+        .list_recent_job_runs(&admin, 3)
+        .await
+        .expect("list recent job runs");
+    assert!(
+        recent_runs.iter().all(|run| run.job_key == JobKey::RssSync),
+        "the frequent job fills the recent window"
+    );
+
+    let mut latest = app
+        .list_latest_job_runs(&admin)
+        .await
+        .expect("list latest job runs")
+        .into_iter()
+        .map(|run| (run.job_key, run.id))
+        .collect::<Vec<_>>();
+    latest.sort_by_key(|(job_key, _)| job_key.as_str());
+
+    assert_eq!(
+        latest,
+        vec![
+            (JobKey::Housekeeping, "newest-housekeeping".to_string()),
+            (JobKey::RssSync, "rss-0".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn actor_scoped_job_history_reads_do_not_replay_domain_events() {
     let job_runs = Arc::new(RecordingJobRunRepo::default());
     let domain_events = Arc::new(MockDomainEventRepo::default());
