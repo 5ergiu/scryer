@@ -1919,6 +1919,7 @@ mod tests {
             &title,
             true,
             &parse.parsed_release,
+            None,
             "mkv",
             Path::new("/downloads/[Group] Re:ZERO Season 3 - 01.mkv"),
             Path::new("/library/Re ZERO"),
