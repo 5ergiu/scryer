@@ -17,6 +17,7 @@ use super::release_search::{
 use crate::acquisition::submission::{GrabTrigger, record_direct_grab_outcome};
 use crate::acquisition_release_search::ResolvedReleaseSearchSubject;
 use crate::domain_events::{new_global_domain_event, title_context_snapshot};
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use scryer_logging::{ActorContext, LogContext, ResourceContext, WorkflowContext, context_span};
 use std::sync::Arc;
@@ -1414,8 +1415,8 @@ impl AppUseCase {
                     MediaFacet::Movie
                 }
             });
-        let stand_in_title =
-            unlinked_grab_title(&result.title, facet.clone(), self.runtime.environment.now());
+        let now = self.runtime.environment.now();
+        let stand_in_title = unlinked_grab_title(&result.title, facet.clone(), now);
         let download_id = scryer_domain::download_identity::DownloadId::new();
         let info_hash_hint = result
             .extra
@@ -1509,7 +1510,9 @@ impl AppUseCase {
             request_signature: None,
             purpose: DownloadSubmissionPurpose::OperatorQueued,
             scope: SubmissionScope::Orphan,
-            release_listing_json: None,
+            release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                &result, now,
+            ),
         };
         let wire_id = download_id.to_wire();
         let identity = crate::download_identity::accepted_download_submission_identity(

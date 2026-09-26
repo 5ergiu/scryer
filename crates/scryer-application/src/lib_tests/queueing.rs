@@ -6505,3 +6505,318 @@ async fn a_failed_queue_row_is_replaced_without_asking_for_snapshot_authority() 
         1
     );
 }
+
+struct ListingTokenFixture {
+    app: AppUseCase,
+    operator: User,
+    title: scryer_domain::Title,
+    submissions: Arc<TrackingDownloadSubmissionRepo>,
+}
+
+async fn listing_token_fixture() -> ListingTokenFixture {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let (app, admin) = bootstrap_with_cleanup_tracking(
+        download_client,
+        submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    );
+    app.create_download_client_config(
+        &admin,
+        NewDownloadClientConfig {
+            name: "NZBGet".to_string(),
+            client_type: "nzbget".to_string(),
+            config_json: "{}".to_string(),
+            client_priority: 1,
+            is_enabled: true,
+            proxy_config_id: None,
+        },
+    )
+    .await
+    .expect("create download client config");
+    let title = app
+        .add_title(
+            &admin,
+            NewTitle {
+                name: "Listing Ticket".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    let (_created, operator) = create_authenticated_user(
+        &app,
+        &admin,
+        "listing_ticket_user",
+        "password123",
+        vec![
+            TestPermissionPreset::CatalogView,
+            TestPermissionPreset::TitleManagement,
+        ],
+    )
+    .await;
+    ListingTokenFixture {
+        app,
+        operator,
+        title,
+        submissions,
+    }
+}
+
+fn fixed_instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .expect("fixed instant")
+        .with_timezone(&chrono::Utc)
+}
+
+/// Offers one listing-rich result through the search's token step at
+/// `offered_at`, returning the result as offered (token attached).
+async fn offer_listing_with_token(
+    fixture: &ListingTokenFixture,
+    offered_at: chrono::DateTime<chrono::Utc>,
+) -> IndexerSearchResult {
+    fixture
+        .app
+        .runtime
+        .environment
+        .set_fixed_now_for_tests(Some(offered_at));
+    let subject = fixture
+        .app
+        .resolve_release_search_subject_for_title(&fixture.title)
+        .await
+        .expect("resolve search subject");
+    let mut results = vec![
+        FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP")
+            .with_listing_facts()
+            .release(),
+    ];
+    fixture
+        .app
+        .attach_candidate_tokens(
+            &fixture.operator,
+            &fixture.title,
+            &subject,
+            &mut results,
+            false,
+        )
+        .await;
+    let offered = results.remove(0);
+    assert!(offered.candidate_token.is_some(), "{offered:?}");
+    offered
+}
+
+async fn persisted_listing(fixture: &ListingTokenFixture) -> Option<String> {
+    let submissions = fixture.submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    submissions[0].release_listing_json.clone()
+}
+
+#[tokio::test]
+async fn a_token_grab_persists_the_offered_listing_anchored_at_the_grab() {
+    let offered_at = fixed_instant("2026-05-01T10:00:00Z");
+    let grabbed_at = fixed_instant("2026-05-01T10:07:30Z");
+
+    for replacement in [false, true] {
+        let fixture = listing_token_fixture().await;
+        let offered = offer_listing_with_token(&fixture, offered_at).await;
+        let token = offered.candidate_token.clone().expect("token");
+        fixture
+            .app
+            .runtime
+            .environment
+            .set_fixed_now_for_tests(Some(grabbed_at));
+
+        let outcome = if replacement {
+            fixture
+                .app
+                .queue_replacement_release_from_candidate_token(
+                    &fixture.operator,
+                    &fixture.title.id,
+                    &token,
+                    SubmissionConflictPolicy::Abort,
+                    None,
+                )
+                .await
+        } else {
+            fixture
+                .app
+                .queue_existing_title_download_from_candidate_token(
+                    &fixture.operator,
+                    &fixture.title.id,
+                    &token,
+                    SubmissionScope::Title,
+                    SubmissionConflictPolicy::Abort,
+                )
+                .await
+        }
+        .expect("token grab");
+        assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+
+        let expected =
+            crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                &offered, grabbed_at,
+            );
+        assert_eq!(expected.thumbs_up, Some(7));
+        assert_eq!(
+            persisted_listing(&fixture).await,
+            Some(expected.to_json_string()),
+            "the offered facts persist, anchored at the grab (replacement: {replacement})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_grab_whose_listing_ticket_is_gone_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    // What a restart or eviction leaves behind: a valid token, no ticket.
+    fixture
+        .app
+        .runtime
+        .acquisition
+        .release_candidate_listings
+        .lock()
+        .expect("listing tickets")
+        .clear();
+
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            offered.candidate_token.as_deref().expect("token"),
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a lost ticket never fails the grab");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(persisted_listing(&fixture).await, None);
+}
+
+#[tokio::test]
+async fn a_token_minted_without_a_listing_ticket_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    fixture
+        .app
+        .runtime
+        .environment
+        .set_fixed_now_for_tests(Some(fixed_instant("2026-05-01T10:00:00Z")));
+    let token = fixture
+        .app
+        .issue_release_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &SubmissionScope::Title,
+            &QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/no-ticket.nzb".into()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Listing.Ticket.2026.720p.WEB-DL-GRP".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("issue token");
+
+    fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &token,
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("token grab");
+    assert_eq!(persisted_listing(&fixture).await, None);
+}
+
+#[test]
+fn listing_tickets_drop_expired_then_oldest_at_the_cap() {
+    use crate::services::{ReleaseCandidateListingTicket, ReleaseCandidateListingTickets};
+    let now = fixed_instant("2026-05-01T10:00:00Z");
+    let ticket = |expires_at| ReleaseCandidateListingTicket {
+        actor_id: "actor".into(),
+        title_id: "title".into(),
+        scope_kind: "title".into(),
+        scope_id: None,
+        source_hint: "https://example.invalid/ticket.nzb".into(),
+        source_title: "Listing.Ticket.2026.1080p.WEB-DL-GRP".into(),
+        listing:
+            crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                &FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP").release(),
+                now,
+            ),
+        expires_at,
+    };
+    let live = now + chrono::Duration::minutes(30);
+    let mut tickets = ReleaseCandidateListingTickets::default();
+
+    tickets.insert("first".into(), ticket(live), now, 2);
+    tickets.insert("second".into(), ticket(live), now, 2);
+    tickets.insert("third".into(), ticket(live), now, 2);
+    assert_eq!(tickets.len(), 2);
+    assert!(!tickets.contains("first"), "the oldest ticket is evicted");
+    assert!(tickets.contains("second") && tickets.contains("third"));
+
+    let mut tickets = ReleaseCandidateListingTickets::default();
+    tickets.insert(
+        "expired".into(),
+        ticket(now - chrono::Duration::seconds(1)),
+        now,
+        2,
+    );
+    tickets.insert("older-live".into(), ticket(live), now, 2);
+    tickets.insert("newer-live".into(), ticket(live), now, 2);
+    assert!(!tickets.contains("expired"), "expired tickets go first");
+    assert!(tickets.contains("older-live") && tickets.contains("newer-live"));
+    assert!(tickets.get("older-live", now).is_some());
+    assert!(
+        tickets.get("older-live", live).is_none(),
+        "a ticket is unreadable once it expires"
+    );
+}
+
+#[tokio::test]
+async fn a_token_whose_listing_ticket_fails_its_binding_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    let offered_token = offered.candidate_token.as_deref().expect("token");
+    // A validly signed token that presents the offered ticket's reference
+    // for a different source: the ticket exists but is bound elsewhere.
+    let mut claims = jsonwebtoken::dangerous::insecure_decode::<
+        crate::types::ReleaseCandidateTokenClaims,
+    >(offered_token)
+    .expect("decode offered token")
+    .claims;
+    assert!(claims.listing_ref.is_some(), "the offer holds a ticket");
+    claims.source_hint = "https://example.invalid/another-source.nzb".to_string();
+    let signing_key = fixture
+        .app
+        .release_candidate_signing_key_for_actor(&fixture.operator)
+        .await
+        .expect("signing key");
+    let rebound_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(&signing_key),
+    )
+    .expect("sign rebound token");
+
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &rebound_token,
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a mismatched ticket never fails the grab");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(persisted_listing(&fixture).await, None);
+}

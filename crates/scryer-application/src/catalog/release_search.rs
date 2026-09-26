@@ -1966,6 +1966,8 @@ impl AppUseCase {
             subject.absolute_episode,
         );
 
+        let now = self.runtime.environment.now();
+
         for result in results.iter_mut() {
             let scope = if preserve_subject_scope {
                 subject.submission_scope.clone()
@@ -2009,6 +2011,11 @@ impl AppUseCase {
                     &title.id,
                     &scope,
                     &selection,
+                    Some(
+                        crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                            result, now,
+                        ),
+                    ),
                     &signing_key,
                 ) {
                     Ok(token) => Some(token),

@@ -1248,6 +1248,7 @@ impl TrackedDownloadService {
                     info_hash: None,
                     request_signature: None,
                     scope: SubmissionScope::Orphan,
+                    // Adopted from the client, so there is no indexer listing.
                     release_listing_json: None,
                 })
                 .await

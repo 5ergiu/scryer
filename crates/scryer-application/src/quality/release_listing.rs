@@ -92,6 +92,28 @@ impl ReleaseListingSnapshot {
         }
     }
 
+    /// The persisted form of [`Self::capture_from_search_result`], shaped for
+    /// the `release_listing_json` column of a submission or pending row.
+    pub(crate) fn capture_json_from_search_result(
+        result: &crate::IndexerSearchResult,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        Some(Self::capture_from_search_result(result, now).to_json_string())
+    }
+
+    /// The snapshot a grab from a persisted pending row carries: the row's own
+    /// frozen snapshot when it has one, else a best-effort capture from the
+    /// row for rows written before snapshots were stored.
+    pub(crate) fn json_for_pending_release(
+        release: &crate::PendingRelease,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        release
+            .release_listing_json
+            .clone()
+            .or_else(|| Some(Self::capture_from_pending_release(release, now).to_json_string()))
+    }
+
     /// Best-effort snapshot for a pending release that has no persisted one.
     /// A pending row keeps only its publish time and its normalized
     /// `source_password`. Normalization keeps a real password but turns the
@@ -164,6 +186,15 @@ impl ReleaseListingSnapshot {
     }
 }
 
+/// When a persisted snapshot was captured, for tests that compare it with a
+/// fresh capture at the lane's own timestamp.
+#[cfg(test)]
+pub(crate) fn captured_at_of(json: Option<&str>) -> DateTime<Utc> {
+    ReleaseListingSnapshot::from_json_str(json.expect("a listing snapshot was persisted"))
+        .expect("the persisted listing snapshot is readable")
+        .captured_at
+}
+
 /// The deleted grab-path derivation of `is_password_protected` from an
 /// indexer password field: a real password or a "protected" flag means
 /// protected, an explicit "not protected" flag means not, empty means unknown.
@@ -218,11 +249,20 @@ fn serialized_map_len(entry_lens_total: usize, entries: usize) -> usize {
 ///   entries with the longest serialized `"key":value` are dropped first, ties
 ///   by ascending key.
 ///
+/// Scryer's own RSS replay markers (`_rss_` keys) are not indexer facts and
+/// never enter a snapshot.
+///
 /// Deterministic regardless of the input map's iteration order, and
 /// idempotent: a bounded map is returned unchanged.
 pub(crate) fn bounded_extra(raw: &HashMap<String, Value>) -> BTreeMap<String, Value> {
-    bound_extra_entries(raw.iter().map(|(key, value)| (key.clone(), value.clone())))
+    bound_extra_entries(
+        raw.iter()
+            .filter(|(key, _)| !key.starts_with(RSS_REPLAY_MARKER_PREFIX))
+            .map(|(key, value)| (key.clone(), value.clone())),
+    )
 }
+
+const RSS_REPLAY_MARKER_PREFIX: &str = "_rss_";
 
 fn bound_extra_entries(
     entries: impl IntoIterator<Item = (String, Value)>,
@@ -423,6 +463,26 @@ mod tests {
             json!("x".repeat(MAX_EXTRA_SERIALIZED_BYTES - overhead + 1)),
         );
         assert!(bounded_extra(&raw).is_empty());
+    }
+
+    #[test]
+    fn rss_replay_markers_never_enter_a_snapshot() {
+        let mut result = search_result();
+        result
+            .extra
+            .insert("_rss_reconstructed_pending".to_string(), json!(true));
+        result
+            .extra
+            .insert("_rss_reconstructed_pending_id".to_string(), json!("row-1"));
+        result
+            .extra
+            .insert("synthetic_attribute".to_string(), json!("kept"));
+
+        let snapshot = ReleaseListingSnapshot::capture_from_search_result(&result, at(2026, 1, 1));
+        assert_eq!(
+            snapshot.extra.keys().collect::<Vec<_>>(),
+            ["synthetic_attribute"]
+        );
     }
 
     #[test]
@@ -699,6 +759,29 @@ mod tests {
             release_age_unknown: false,
             release_listing_json: None,
         }
+    }
+
+    #[test]
+    fn pending_grab_keeps_the_rows_frozen_snapshot() {
+        let mut release = pending_release(None);
+        let frozen = full_snapshot().to_json_string();
+        release.release_listing_json = Some(frozen.clone());
+        assert_eq!(
+            ReleaseListingSnapshot::json_for_pending_release(&release, at(2024, 6, 1)),
+            Some(frozen)
+        );
+    }
+
+    #[test]
+    fn pending_grab_without_a_snapshot_captures_from_the_row() {
+        let release = pending_release(Some("synthetic-secret"));
+        assert_eq!(
+            ReleaseListingSnapshot::json_for_pending_release(&release, at(2024, 6, 1)),
+            Some(
+                ReleaseListingSnapshot::capture_from_pending_release(&release, at(2024, 6, 1))
+                    .to_json_string()
+            )
+        );
     }
 
     #[test]

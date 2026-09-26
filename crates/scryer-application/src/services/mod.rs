@@ -29,7 +29,8 @@ use runtime::normalize_supported_plugin_required_features;
 
 pub(crate) use runtime::{
     CachedWantedProjection, CompletedDownloadAdmission, DownloadQueueReadModel,
-    ReleaseCandidatePasswordTicket, download_observation_is_admitted,
+    ReleaseCandidateListingTicket, ReleaseCandidateListingTickets, ReleaseCandidatePasswordTicket,
+    download_observation_is_admitted,
     normalize_download_client_category,
 };
 

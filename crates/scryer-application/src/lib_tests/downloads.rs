@@ -2355,6 +2355,8 @@ async fn assign_tracked_download_title_serializes_submission_and_runtime_assignm
     assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
 }
 
+const GRAB_TIME_LISTING: &str = r#"{"v":1,"thumbs_up":4,"captured_at":"2026-08-01T00:00:00Z"}"#;
+
 #[tokio::test]
 async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_honors_scope() {
     // A reassignment must not destroy the indexer release name the grab
@@ -2365,6 +2367,7 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
     let mut grabbed = fixture.submission.clone();
     grabbed.title_id = "some-other-title".to_string();
     grabbed.source_title = Some("Grabbed.Release.2026.1080p.WEB-DL-GRP".to_string());
+    grabbed.release_listing_json = Some(GRAB_TIME_LISTING.to_string());
     fixture
         .submissions
         .record_submission(grabbed)
@@ -2401,6 +2404,11 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
         row.source_title.as_deref(),
         Some("Grabbed.Release.2026.1080p.WEB-DL-GRP"),
         "the grab-time release name survives the reassignment"
+    );
+    assert_eq!(
+        row.release_listing_json.as_deref(),
+        Some(GRAB_TIME_LISTING),
+        "the grab-time listing snapshot survives the reassignment"
     );
     assert_eq!(
         row.scope,
