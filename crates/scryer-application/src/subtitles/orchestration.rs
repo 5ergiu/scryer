@@ -2661,6 +2661,7 @@ mod tests {
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         }
     }
 

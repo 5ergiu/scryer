@@ -2151,6 +2151,7 @@ pub(super) fn pending_movie_release(
         },
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     }
 }
 

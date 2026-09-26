@@ -431,6 +431,7 @@ fn exact_submission_episode_fallback_requires_one_episode_and_one_video() {
         source_title: Some("Test.Series.S01E01.1080p.WEB-DL.x264".to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope,
     };
@@ -740,6 +741,7 @@ fn bluey_submission_evidence(release_title: &str, scope: SubmissionScope) -> Rel
         source_title: Some(release_title.to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope,
     }
@@ -986,6 +988,7 @@ fn episode_identity_pack_member_resolves_anime_absolute_numbering_with_title_con
         source_title: Some(release_title.to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope: SubmissionScope::Collection {
             collection_id: "season-1".to_string(),
@@ -1960,6 +1963,7 @@ fn scoped_media_file(
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         },
         title_role: crate::MediaFileRole::Primary,
         episode_ids: episode_ids

@@ -916,6 +916,10 @@ pub struct TitleMediaFile {
     pub edition: Option<String>,
     pub original_file_path: Option<String>,
     pub release_hash: Option<String>,
+    /// The frozen indexer listing snapshot the grab read, as opaque JSON.
+    /// `None` for rows written before the column existed, scanned files, and
+    /// adopted downloads.
+    pub release_listing_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1709,6 +1713,10 @@ pub struct PendingRelease {
     pub role: PendingReleaseRole,
     pub last_decision_code: Option<String>,
     pub release_age_unknown: bool,
+    /// The indexer listing snapshot captured when the release was parked, as
+    /// opaque JSON, so the delayed grab submits the same listing facts the
+    /// park-time decision read. `None` for rows parked before the column.
+    pub release_listing_json: Option<String>,
 }
 
 impl PendingReleaseObservation {

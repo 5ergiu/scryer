@@ -38,6 +38,9 @@ pub(crate) struct PreparedImportCandidate {
     pub accepted: Box<ImportedFileAcceptance>,
     pub rescore_changes: Vec<String>,
     pub source_snapshot: scryer_domain::ImportSourceSnapshot,
+    /// The listing snapshot of the Scryer grab this file came from; `None`
+    /// for scans and adopted downloads.
+    pub release_listing_json: Option<String>,
 }
 
 pub(crate) struct PostDownloadAcquisitionDecision {
@@ -1134,6 +1137,7 @@ pub(crate) async fn prepare_import_candidate(
     existing_score: Option<i32>,
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     prepare_import_candidate_with_disc_selection(
         app,
@@ -1147,6 +1151,7 @@ pub(crate) async fn prepare_import_candidate(
         is_filler,
         runtime_sample_validation,
         None,
+        release_listing_json,
     )
     .await
 }
@@ -1167,6 +1172,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     if disc_selection.is_some() && !scryer_domain::is_disc_image(path) {
         return Err(disc_review_rejection(
@@ -1238,6 +1244,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
                 accepted,
                 rescore_changes,
                 source_snapshot: source_snapshot_after,
+                release_listing_json: release_listing_json.map(str::to_string),
             })
         }
     }

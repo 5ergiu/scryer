@@ -411,6 +411,7 @@ async fn list_download_submissions_for_client_items_handles_large_batched_lookup
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             })
             .await
             .expect("record submission should succeed");
@@ -464,6 +465,7 @@ async fn download_submission_identity_does_not_fall_back_to_legacy_rows() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("legacy submission should persist");
@@ -519,6 +521,7 @@ async fn record_download_submission_persists_episode_set_scope() {
             scope: SubmissionScope::EpisodeSet {
                 episode_ids: vec!["ep-13".to_string(), "ep-1".to_string()],
             },
+            release_listing_json: None,
         })
         .await
         .expect("record submission should succeed");
@@ -575,6 +578,7 @@ async fn download_submission_signature_lookup_matches_scope() {
                 scope: SubmissionScope::Episode {
                     episode_id: episode_id.to_string(),
                 },
+                release_listing_json: None,
             })
             .await
             .expect("record submission should succeed");

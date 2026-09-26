@@ -2056,6 +2056,7 @@ mod queue_query_unit_tests {
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         }
     }
 

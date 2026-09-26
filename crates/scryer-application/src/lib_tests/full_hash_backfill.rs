@@ -70,6 +70,7 @@ pub(super) fn seed_row(id: &str, path: &Path, title_id: &str) -> TitleMediaFile 
         edition: None,
         original_file_path: None,
         release_hash: None,
+        release_listing_json: None,
     }
 }
 

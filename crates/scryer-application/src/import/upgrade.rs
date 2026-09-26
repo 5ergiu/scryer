@@ -1090,6 +1090,7 @@ async fn prepare_replacement_before_old_removal(
         original_file_path: Some(source_path_string.to_string()),
         acquisition_score: Some(final_score),
         scoring_log: Some(scoring_log.to_string()),
+        release_listing_json: prepared.release_listing_json.clone(),
         ..Default::default()
     };
     let persistence = match file_result

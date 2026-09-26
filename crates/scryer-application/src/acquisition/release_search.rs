@@ -3758,6 +3758,7 @@ mod tests {
                 "/nzbget-downloads/completed/{release_title}/{release_title}.mkv"
             )),
             release_hash: None,
+            release_listing_json: None,
         }
     }
 

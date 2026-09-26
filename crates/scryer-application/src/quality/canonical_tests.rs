@@ -671,6 +671,7 @@ fn media_row_as_import_would_write(
         edition: stored_parse.edition.clone(),
         original_file_path: None,
         release_hash: None,
+        release_listing_json: None,
     }
 }
 
