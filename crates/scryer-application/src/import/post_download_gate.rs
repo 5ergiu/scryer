@@ -2377,6 +2377,106 @@ mod tests {
         assert_eq!(input.release.languages_audio, vec!["jpn"]);
     }
 
+    /// The gate's blocking-rule pass for one file, from the persisted listing
+    /// JSON the gate is handed: grabbed listing facts, `from_listing`, rule
+    /// input, user-rule evaluation, and the post-download score finalization.
+    #[cfg(feature = "runtime-media-analysis")]
+    fn post_download_listing_rule_pass(
+        engine: &scryer_rules::UserRulesEngine,
+        release_listing_json: Option<&str>,
+    ) -> Vec<String> {
+        let profile = crate::QualityProfile::default();
+        let parsed = crate::parse_release_metadata("Listing.Gate.2024.1080p.WEB-DL.H.264-GRP");
+        let analysis = build_synthetic_media_file_analysis(&parsed, Some("mkv".to_string()));
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
+        let mut decision = build_import_profile_decision(
+            &profile,
+            &parsed,
+            "movie",
+            crate::quality_profile::CoverageSizeBasis::default(),
+            Some(4_000_000_000),
+            false,
+        );
+        let input = crate::user_rule_input::build_rule_input(
+            &parsed,
+            &profile,
+            &decision,
+            crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                Some(4_000_000_000),
+                listing.as_ref(),
+            ),
+            crate::user_rule_input::RuleContextInfo {
+                title_id: Some("title-listing-gate"),
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: false,
+                existing_score: None,
+                search_mode: "post_download",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: Some(1),
+                is_filler: false,
+            },
+            Some(crate::user_rule_input::file_doc_from_analysis(&analysis)),
+        );
+        let result = engine
+            .evaluator()
+            .evaluate(&input, "movie")
+            .expect("rule evaluation succeeds");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        finalize_post_download_rule_scores(&profile, &mut decision, result.entries)
+    }
+
+    #[cfg(feature = "runtime-media-analysis")]
+    #[test]
+    fn a_listing_based_blocking_rule_blocks_the_import_only_with_a_snapshot() {
+        use chrono::TimeZone;
+
+        let engine = scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "listing_password".to_string(),
+            name: "Listing password".to_string(),
+            rego_source: r#"
+                package scryer.rules.user.listing_password
+                import rego.v1
+
+                score_entry["listing_password"] := scryer.block_score() if {
+                    input.release.is_password_protected == true
+                }
+            "#
+            .to_string(),
+            origin: scryer_rules::PolicyOrigin::User,
+            applied_facets: vec![],
+        }])
+        .expect("rule builds");
+        let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+            published_at: Some("2024-01-02T03:04:05Z".to_string()),
+            thumbs_up: None,
+            thumbs_down: None,
+            is_password_protected: Some(true),
+            indexer_languages: Vec::new(),
+            extra: Default::default(),
+            captured_at: chrono::Utc.with_ymd_and_hms(2024, 2, 1, 12, 0, 0).unwrap(),
+        }
+        .to_json_string();
+
+        let blocked = post_download_listing_rule_pass(&engine, Some(&snapshot));
+        assert!(
+            blocked.iter().any(|code| code == "listing_password"),
+            "a protected listing blocks the import: {blocked:?}"
+        );
+
+        let unblocked = post_download_listing_rule_pass(&engine, None);
+        assert!(
+            unblocked.is_empty(),
+            "without a snapshot the listing is unknown and the rule does not fire: {unblocked:?}"
+        );
+    }
+
     /// The tier comparison behind a `quality_contradicted:` blocklist. It reads
     /// the *profile's* ordering, not a global one, so its edge cases are the
     /// profile's: an unlisted quality, a single-tier profile, and the casing the

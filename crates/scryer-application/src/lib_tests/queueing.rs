@@ -6780,6 +6780,31 @@ fn listing_tickets_drop_expired_then_oldest_at_the_cap() {
         tickets.get("older-live", live).is_none(),
         "a ticket is unreadable once it expires"
     );
+
+    // Far below the cap, an expired ticket is still purged by the next insert.
+    let mut tickets = ReleaseCandidateListingTickets::default();
+    let soon = now + chrono::Duration::minutes(1);
+    tickets.insert("short-lived".into(), ticket(soon), now, 4096);
+    tickets.insert("long-lived".into(), ticket(live), now, 4096);
+    assert_eq!(tickets.len(), 2, "nothing has expired yet");
+    let later = soon + chrono::Duration::seconds(1);
+    tickets.insert(
+        "fresh".into(),
+        ticket(later + chrono::Duration::minutes(30)),
+        later,
+        4096,
+    );
+    assert!(
+        !tickets.contains("short-lived"),
+        "an expired ticket is gone after the next insert"
+    );
+    assert!(tickets.contains("long-lived") && tickets.contains("fresh"));
+    assert_eq!(tickets.len(), 2);
+    assert_eq!(
+        tickets.order_len(),
+        2,
+        "its eviction-order slot went with it"
+    );
 }
 
 #[tokio::test]

@@ -1516,11 +1516,16 @@ impl ReleaseCandidateListingTickets {
         now: DateTime<Utc>,
         max_entries: usize,
     ) {
-        if self.entries.len() >= max_entries {
-            self.entries.retain(|_, ticket| ticket.expires_at > now);
+        // Expired tickets can never be read again, so they go on every insert
+        // rather than lingering until the store fills.
+        let before = self.entries.len();
+        self.entries.retain(|_, ticket| ticket.expires_at > now);
+        if self.entries.len() != before {
             self.order
                 .retain(|reference| self.entries.contains_key(reference));
         }
+        // Second line of defence: a store full of live tickets drops the
+        // oldest.
         let mut evicted = 0usize;
         while self.entries.len() >= max_entries.max(1) {
             let Some(oldest) = self.order.pop_front() else {
@@ -1560,6 +1565,11 @@ impl ReleaseCandidateListingTickets {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn order_len(&self) -> usize {
+        self.order.len()
     }
 
     #[cfg(test)]

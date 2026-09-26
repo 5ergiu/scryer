@@ -28,6 +28,12 @@ const MAX_EXTRA_KEYS: usize = 64;
 /// Largest compact-JSON size, in bytes, of the kept `extra` map.
 const MAX_EXTRA_SERIALIZED_BYTES: usize = 8 * 1024;
 
+/// Most entries a snapshot keeps from the indexer's language list.
+const MAX_INDEXER_LANGUAGES: usize = 32;
+
+/// Longest single indexer language entry, in bytes after trimming.
+const MAX_INDEXER_LANGUAGE_BYTES: usize = 64;
+
 /// Listing facts about a release as the indexer reported them at the moment
 /// Scryer evaluated it for grab. Frozen: captured once, persisted with the
 /// submission, copied to the media row, never re-read from a live listing.
@@ -42,7 +48,8 @@ pub(crate) struct ReleaseListingSnapshot {
     pub thumbs_down: Option<i32>,
     #[serde(default)]
     pub is_password_protected: Option<bool>,
-    /// Empty when the indexer reported none.
+    /// Empty when the indexer reported none. Bounded by
+    /// [`bounded_indexer_languages`].
     #[serde(default, deserialize_with = "null_as_default")]
     pub indexer_languages: Vec<String>,
     /// Indexer-specific scalars, bounded by [`bounded_extra`].
@@ -86,7 +93,7 @@ impl ReleaseListingSnapshot {
             thumbs_up: result.thumbs_up,
             thumbs_down: result.thumbs_down,
             is_password_protected,
-            indexer_languages: result.indexer_languages.clone().unwrap_or_default(),
+            indexer_languages: bounded_indexer_languages(result.indexer_languages.iter().flatten()),
             extra: bounded_extra(&result.extra),
             captured_at: now,
         }
@@ -207,9 +214,10 @@ impl ReleaseListingSnapshot {
 
     /// Read a snapshot written by [`Self::to_json_string`]. Unknown fields are
     /// ignored, a missing `"v"` is read as the current version, and a `null`
-    /// `indexer_languages` or `extra` reads as empty. The stored `extra` is
-    /// bounded again with [`bounded_extra`], so a row from any writer cannot
-    /// carry nested values or an oversized map into rule input. Anything
+    /// `indexer_languages` or `extra` reads as empty. The stored `extra` and
+    /// `indexer_languages` are bounded again with [`bounded_extra`] and
+    /// [`bounded_indexer_languages`], so a row from any writer cannot carry
+    /// nested values or an oversized map or list into rule input. Anything
     /// unreadable — malformed JSON, a missing `captured_at`, a mistyped field or
     /// a version this build does not know — yields `None`.
     pub(crate) fn from_json_str(raw: &str) -> Option<Self> {
@@ -224,6 +232,7 @@ impl ReleaseListingSnapshot {
         let mut snapshot: Self = serde_json::from_value(Value::Object(object)).ok()?;
         let stored = std::mem::take(&mut snapshot.extra);
         snapshot.extra = bound_extra_entries(stored);
+        snapshot.indexer_languages = bounded_indexer_languages(&snapshot.indexer_languages);
         Some(snapshot)
     }
 }
@@ -342,6 +351,30 @@ pub(crate) fn bounded_extra(raw: &HashMap<String, Value>) -> BTreeMap<String, Va
 }
 
 const RSS_REPLAY_MARKER_PREFIX: &str = "_rss_";
+
+/// Bound an indexer language list: each entry trimmed, blanks and entries
+/// longer than [`MAX_INDEXER_LANGUAGE_BYTES`] dropped, repeats dropped after
+/// the first, original order kept, at most [`MAX_INDEXER_LANGUAGES`] entries.
+/// Idempotent: a bounded list is returned unchanged.
+pub(crate) fn bounded_indexer_languages<S: AsRef<str>>(
+    languages: impl IntoIterator<Item = S>,
+) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for language in languages {
+        if kept.len() >= MAX_INDEXER_LANGUAGES {
+            break;
+        }
+        let trimmed = language.as_ref().trim();
+        if trimmed.is_empty()
+            || trimmed.len() > MAX_INDEXER_LANGUAGE_BYTES
+            || kept.iter().any(|existing| existing == trimmed)
+        {
+            continue;
+        }
+        kept.push(trimmed.to_string());
+    }
+    kept
+}
 
 fn bound_extra_entries(
     entries: impl IntoIterator<Item = (String, Value)>,
@@ -609,6 +642,85 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&left).unwrap(),
             serde_json::to_string(&right).unwrap()
+        );
+    }
+
+    #[test]
+    fn language_bounding_caps_entry_count_in_original_order() {
+        let raw: Vec<String> = (0..50).map(|index| format!("lang{index}")).collect();
+        let bounded = bounded_indexer_languages(&raw);
+        assert_eq!(bounded.len(), MAX_INDEXER_LANGUAGES);
+        assert_eq!(bounded, raw[..MAX_INDEXER_LANGUAGES].to_vec());
+    }
+
+    #[test]
+    fn language_bounding_drops_over_length_entries() {
+        let at_limit = "a".repeat(MAX_INDEXER_LANGUAGE_BYTES);
+        let over_limit = "b".repeat(MAX_INDEXER_LANGUAGE_BYTES + 1);
+        // Multi-byte characters count by bytes, not chars.
+        let over_limit_multibyte = "é".repeat(MAX_INDEXER_LANGUAGE_BYTES / 2 + 1);
+        let raw = vec![
+            over_limit,
+            at_limit.clone(),
+            over_limit_multibyte,
+            format!("  {at_limit}x  "),
+            "en".to_string(),
+        ];
+        assert_eq!(
+            bounded_indexer_languages(&raw),
+            vec![at_limit, "en".to_string()]
+        );
+    }
+
+    #[test]
+    fn language_bounding_trims_drops_blanks_and_repeats() {
+        let raw = ["  en ", "", "   ", "fr", "en", "\tfr\n", "de"];
+        assert_eq!(bounded_indexer_languages(raw), vec!["en", "fr", "de"]);
+    }
+
+    #[test]
+    fn language_bounding_counts_only_kept_entries_toward_the_cap() {
+        let mut raw: Vec<String> = vec![" ".to_string(); 40];
+        raw.extend((0..40).map(|index| format!("lang{index}")));
+        let bounded = bounded_indexer_languages(&raw);
+        assert_eq!(bounded.len(), MAX_INDEXER_LANGUAGES);
+        assert_eq!(bounded.first().map(String::as_str), Some("lang0"));
+    }
+
+    #[test]
+    fn language_bounding_is_idempotent_through_capture_and_read() {
+        let mut raw: Vec<String> = (0..40).map(|index| format!(" lang{index} ")).collect();
+        raw.push("x".repeat(MAX_INDEXER_LANGUAGE_BYTES + 5));
+        raw.push("lang3".to_string());
+        let once = bounded_indexer_languages(&raw);
+        assert_eq!(bounded_indexer_languages(&once), once);
+
+        let mut result = search_result();
+        result.indexer_languages = Some(raw);
+        let captured = ReleaseListingSnapshot::capture_from_search_result(&result, at(2024, 3, 1));
+        assert_eq!(captured.indexer_languages, once);
+        let parsed = ReleaseListingSnapshot::from_json_str(&captured.to_json_string()).unwrap();
+        assert_eq!(parsed.indexer_languages, once);
+    }
+
+    #[test]
+    fn from_json_str_rebounds_stored_languages() {
+        let languages: Vec<String> = (0..40)
+            .map(|index| format!(" lang{index} "))
+            .chain(["".to_string(), "lang1".to_string()])
+            .collect();
+        let stored = serde_json::to_string(&json!({
+            "v": 1,
+            "indexer_languages": languages,
+            "captured_at": "2024-02-01T12:00:00Z",
+        }))
+        .unwrap();
+        let parsed = ReleaseListingSnapshot::from_json_str(&stored).unwrap();
+        assert_eq!(parsed.indexer_languages.len(), MAX_INDEXER_LANGUAGES);
+        assert_eq!(parsed.indexer_languages[0], "lang0");
+        assert_eq!(
+            parsed.indexer_languages,
+            bounded_indexer_languages(&languages)
         );
     }
 

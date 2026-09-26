@@ -7,7 +7,9 @@ use scryer_domain::{AppPermission, Id, MediaFacet, RuleSet, User};
 use serde_json::Value;
 
 use crate::canonical_scoring::ListingFacts;
-use crate::quality::release_listing::{ReleaseListingSnapshot, bounded_extra};
+use crate::quality::release_listing::{
+    ReleaseListingSnapshot, bounded_extra, bounded_indexer_languages,
+};
 use crate::{AppError, AppResult, AppUseCase};
 
 /// The unsaved fields from the scoring-rule editor.
@@ -89,14 +91,7 @@ impl RuleSetTestListingInput {
             thumbs_up: self.thumbs_up,
             thumbs_down: self.thumbs_down,
             is_password_protected: self.is_password_protected,
-            indexer_languages: self
-                .indexer_languages
-                .iter()
-                .flatten()
-                .map(|language| language.trim())
-                .filter(|language| !language.is_empty())
-                .map(str::to_string)
-                .collect(),
+            indexer_languages: bounded_indexer_languages(self.indexer_languages.iter().flatten()),
             extra: bounded_extra(&extra),
             captured_at: now,
         }
