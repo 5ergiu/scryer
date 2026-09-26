@@ -25,12 +25,24 @@
 //!   upgrade deltas and cooldowns belong to admission, not to a release's
 //!   intrinsic worth. A file's persisted score must not depend on what happened
 //!   to be on disk the day it landed, or it is useless as the next bar.
-//! - **Listing metadata.** Release age, indexer votes, password hints, indexer
-//!   priority and pack-coverage preferences describe a *listing*, not a
-//!   release. They cannot be reconstructed from a media row, so admitting them
-//!   here would make a stored score unreproducible. They belong to search rank.
+//! - **Live listing metadata.** Indexer priority, peers, freshness and
+//!   pack-coverage preferences describe how a *search* ranked a listing. They
+//!   are never persisted, so admitting them here would make a stored score
+//!   unreproducible. They belong to search rank.
 //! - **Mandatory failures as numbers.** Explicit requirements carry zero-point
 //!   rejection entries. Numeric penalties remain recoverable. See [`TruthVerdict`].
+//!
+//! ## Frozen listing facts
+//!
+//! The listing facts user rules read — publish time, indexer votes, password
+//! protection, indexer languages and the indexer's `extra` scalars — are
+//! scored, but only from a [`ReleaseListingSnapshot`] frozen when the release
+//! was evaluated for grab. The snapshot is persisted with the submission and
+//! copied to the media row, so a row carries every listing fact its score read
+//! and the score stays reproducible from the row. See [`ListingFacts`] for how
+//! release age is anchored so it does not drift after the grab. A row without a
+//! snapshot scores exactly as it did before snapshots existed: every listing
+//! fact unknown.
 //!
 //! ## Where this sits in the loop
 //!
@@ -47,11 +59,13 @@
 //! the media row through this same function, which is why a stored score is
 //! display-only and cannot become the source of truth for later comparisons.
 
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use crate::quality_profile::{
     QualityProfileDecision, ScoringEntry, ScoringSource, apply_min_score_gate,
     evaluate_profile_requirements, normalize_quality_tier,
 };
 use crate::{MediaFileAnalysis, ParsedReleaseMetadata, QualityProfile};
+use chrono::{DateTime, Utc};
 
 /// Clamp on the informational difference between announced and analyzed scores.
 /// Customizable arithmetic cannot establish factual contradictions.
@@ -76,15 +90,71 @@ pub(crate) struct AnalyzedFacts {
     pub rule_file_doc: Option<scryer_rules::FileDoc>,
 }
 
+/// The frozen listing facts a release is scored with, and the instant its age
+/// is measured at.
+///
+/// The anchor is what keeps release age from drifting:
+///
+/// - a candidate that has not been grabbed (search, RSS, a parked pending row)
+///   is measured against the lane's own `now` — "how old is it right now";
+/// - once grabbed, the snapshot's `captured_at` *is* the grab instant, and it
+///   is the anchor for every later read (the import gate, the incumbent bar,
+///   the Wanted page). Those lanes never read the clock, so the same row scores
+///   the same for as long as it exists.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListingFacts {
+    pub snapshot: ReleaseListingSnapshot,
+    pub anchor: DateTime<Utc>,
+}
+
+impl ListingFacts {
+    /// A candidate not yet grabbed: its age is measured at the lane's `now`.
+    pub(crate) fn candidate(snapshot: ReleaseListingSnapshot, now: DateTime<Utc>) -> Self {
+        Self {
+            snapshot,
+            anchor: now,
+        }
+    }
+
+    /// A grabbed release: its age is fixed at the grab instant.
+    pub(crate) fn grabbed(snapshot: ReleaseListingSnapshot) -> Self {
+        let anchor = snapshot.captured_at;
+        Self { snapshot, anchor }
+    }
+
+    /// A parked pending row re-evaluated at `now`. It has not been grabbed, so
+    /// its age is measured at `now`; its facts are the row's frozen snapshot,
+    /// or a best-effort capture from the row when it has no readable one.
+    pub(crate) fn parked(release: &crate::PendingRelease, now: DateTime<Utc>) -> Self {
+        let snapshot = release
+            .release_listing_json
+            .as_deref()
+            .and_then(ReleaseListingSnapshot::from_json_str)
+            .unwrap_or_else(|| ReleaseListingSnapshot::capture_from_pending_release(release, now));
+        Self::candidate(snapshot, now)
+    }
+
+    /// A grabbed release read back from its persisted snapshot. `None` when the
+    /// row has no snapshot or it is unreadable, which scores as before
+    /// snapshots existed.
+    pub(crate) fn grabbed_from_json(raw: Option<&str>) -> Option<Self> {
+        raw.and_then(ReleaseListingSnapshot::from_json_str)
+            .map(Self::grabbed)
+    }
+}
+
 /// Everything intrinsic to a release, at whatever evidence level is available.
 ///
 /// `analyzed` is `None` before the bytes exist. It is the only field that
 /// differs between a grab-time and an import-time view of the same release.
+/// `listing` is the release's frozen listing snapshot; it is identical in both
+/// views, because the import reads the snapshot the grab persisted.
 #[derive(Debug, Clone)]
 pub(crate) struct ReleaseEvidence {
     pub parsed: ParsedReleaseMetadata,
     pub announced_size_bytes: Option<i64>,
     pub analyzed: Option<AnalyzedFacts>,
+    pub listing: Option<ListingFacts>,
 }
 
 impl ReleaseEvidence {
@@ -94,11 +164,17 @@ impl ReleaseEvidence {
             parsed,
             announced_size_bytes: size_bytes,
             analyzed: None,
+            listing: None,
         }
     }
 
     pub(crate) fn with_analysis(mut self, analyzed: AnalyzedFacts) -> Self {
         self.analyzed = Some(analyzed);
+        self
+    }
+
+    pub(crate) fn with_listing(mut self, listing: Option<ListingFacts>) -> Self {
+        self.listing = listing;
         self
     }
 }
@@ -398,6 +474,7 @@ fn score_disc_scope_with_rules(
                 actual_size_bytes: analyzed.actual_size_bytes,
                 rule_file_doc,
             }),
+            listing: evidence.listing.clone(),
         };
         scores.push(score_single_release_with_rules(&scoped, ctx, rules));
     }
@@ -458,6 +535,7 @@ fn score_unresolved_disc(
         parsed: evidence.parsed.clone(),
         announced_size_bytes: evidence.announced_size_bytes,
         analyzed: None,
+        listing: evidence.listing.clone(),
     };
     let mut score = score_single_release_with_rules(&announced, ctx, rules);
     score.truth_verdict = TruthVerdict::ReviewRequired {
@@ -480,10 +558,12 @@ fn score_single_release_with_rules(
         .analyzed
         .as_ref()
         .is_some_and(|facts| facts.analysis.container_format.as_deref() == Some("strm"));
+    let listing = evidence.listing.as_ref();
     let announced_decision = run_term_pipeline(
         &evidence.parsed,
         evidence.announced_size_bytes.filter(|_| !is_stream_pointer),
         None,
+        listing,
         ctx,
         rules,
     );
@@ -491,7 +571,7 @@ fn score_single_release_with_rules(
     // Preserve the acquisition score while comparing only facts measurable for
     // this playback title. Filesystem overhead and other cuts have no title size.
     let comparable_announcement =
-        is_disc.then(|| run_term_pipeline(&evidence.parsed, None, None, ctx, rules));
+        is_disc.then(|| run_term_pipeline(&evidence.parsed, None, None, listing, ctx, rules));
 
     let mut analyzed_decision = None;
     let mut analyzed_quality = None;
@@ -509,6 +589,7 @@ fn score_single_release_with_rules(
                 &analyzed_parsed,
                 (!is_disc && !is_stream_pointer).then_some(analyzed.actual_size_bytes),
                 analyzed.rule_file_doc.clone(),
+                listing,
                 ctx,
                 rules,
             );
@@ -617,6 +698,7 @@ fn run_term_pipeline(
     parsed: &ParsedReleaseMetadata,
     size_bytes: Option<i64>,
     file_doc: Option<scryer_rules::FileDoc>,
+    listing: Option<&ListingFacts>,
     ctx: &ScoringContext<'_>,
     rules: &mut RuleEvaluationBatch,
 ) -> QualityProfileDecision {
@@ -636,15 +718,17 @@ fn run_term_pipeline(
         ctx.size_basis,
     );
 
-    // Deliberately absent: apply_age_scoring. Release age is listing metadata,
-    // and a freshness bonus makes a same-size re-grab read as an upgrade —
-    // wasted bandwidth cycling equivalent files.
+    // Deliberately absent: apply_age_scoring. The built-in freshness bonus is
+    // search rank, and it makes a same-size re-grab read as an upgrade —
+    // wasted bandwidth cycling equivalent files. A user rule may still read the
+    // frozen, anchored release age.
 
     append_rule_scores(
         parsed,
         &resolved_profile,
         size_bytes,
         file_doc,
+        listing,
         &mut decision,
         ctx,
         rules,
@@ -653,13 +737,16 @@ fn run_term_pipeline(
     decision
 }
 
-/// Evaluate score-bearing user and system rules with listing metadata stripped
-/// and incumbent state absent, so the result is reproducible from a media row.
+/// Evaluate score-bearing user and system rules with incumbent state absent and
+/// listing metadata read only from the frozen snapshot, so the result is
+/// reproducible from a media row: the snapshot survives on the row, and release
+/// age is measured at the snapshot's anchor rather than the clock.
 fn append_rule_scores(
     parsed: &ParsedReleaseMetadata,
     profile: &QualityProfile,
     size_bytes: Option<i64>,
     file_doc: Option<scryer_rules::FileDoc>,
+    listing: Option<&ListingFacts>,
     decision: &mut QualityProfileDecision,
     ctx: &ScoringContext<'_>,
     rules: &mut RuleEvaluationBatch,
@@ -680,17 +767,8 @@ fn append_rule_scores(
         parsed,
         profile,
         decision,
-        crate::user_rule_input::ReleaseRuntimeInfo {
-            size_bytes,
-            // Listing metadata, all withheld: none of it is a property of the
-            // release, and none of it survives on a media row.
-            published_at: None,
-            thumbs_up: None,
-            thumbs_down: None,
-            is_password_protected: None,
-            extra: None,
-            indexer_languages: None,
-        },
+        // Listing facts come only from the frozen snapshot.
+        crate::user_rule_input::ReleaseRuntimeInfo::from_listing(size_bytes, listing),
         crate::user_rule_input::RuleContextInfo {
             title_id: ctx.title_id,
             library_name: ctx.library_name,
@@ -1050,12 +1128,19 @@ pub(crate) fn size_basis_bytes(landed: i64, announced: Option<i64>) -> i64 {
 /// reproduce the import score. A row that remembers no announced size —
 /// every row written before the column existed, a scanned file, an adopted
 /// download — is scored on its real size, exactly as before.
+///
+/// The row's listing snapshot is the one the grab persisted, aged at the grab
+/// instant, so the bar never moves with the clock. A row without a snapshot
+/// scores with every listing fact unknown, exactly as before.
 pub(crate) fn evidence_from_media_file(file: &crate::TitleMediaFile) -> ReleaseEvidence {
     ReleaseEvidence::announced(
         announced_parse_from_media_file(file),
         Some(size_basis_bytes(file.size_bytes, file.announced_size_bytes)),
     )
     .with_analysis(analyzed_facts_from_media_file(file))
+    .with_listing(ListingFacts::grabbed_from_json(
+        file.release_listing_json.as_deref(),
+    ))
 }
 
 /// Re-derive a stored file's canonical score.

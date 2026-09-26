@@ -386,6 +386,137 @@ async fn queued_grab_claims_merge_same_release_episode_coverage() {
     );
 }
 
+/// A grab the ledger still claims scores with the listing facts its grab
+/// froze. Scoring it without them while the same release is offered with them
+/// would let a listing rule make a same-release re-grab read as an upgrade.
+#[tokio::test]
+async fn a_ledger_claim_scores_with_the_listing_its_grab_froze() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, _user) =
+        bootstrap_with_cleanup_tracking(download_client, download_submissions, pending_releases);
+    let scope_states = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let app = base_app.with_test_overrides(|services| {
+        services.with_acquisition_scope_states(scope_states.clone())
+    });
+    *app.services.customization.user_rules.write().unwrap() =
+        scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "freeleech".into(),
+            name: "Freeleech".into(),
+            applied_facets: vec![],
+            origin: scryer_rules::PolicyOrigin::User,
+            rego_source: scryer_rules::rewrite_package_declaration(
+                "score_entry[\"freeleech\"] := 500 if { input.release.extra.freeleech == true }",
+                "freeleech",
+            ),
+        }])
+        .expect("freeleech rule compiles");
+    let title = make_due_hydration_title("title-claim-listing", MediaFacet::Movie, 1);
+    let context = app
+        .resolve_canonical_scoring_context(&title, &crate::builtin_default_quality_profile())
+        .await;
+    let membership = app
+        .scope_membership_for(&title, &SubmissionScope::Title)
+        .await;
+    let release = "Claimed.Movie.2024.1080p.WEB-DL-GRP";
+    let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+        published_at: None,
+        thumbs_up: None,
+        thumbs_down: None,
+        is_password_protected: None,
+        indexer_languages: Vec::new(),
+        extra: [("freeleech".to_string(), serde_json::Value::Bool(true))]
+            .into_iter()
+            .collect(),
+        captured_at: chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    };
+    let grabbed_release = |listing: Option<String>| {
+        serde_json::json!({
+            "title": release,
+            "score": 0,
+            "grabbed_at": "2026-09-07T00:00:00Z",
+            "release_listing_json": listing,
+        })
+        .to_string()
+    };
+    let claim_score = |grabbed_release: String| {
+        let app = &app;
+        let scope_states = &scope_states;
+        let title = &title;
+        let membership = &membership;
+        let context = &context;
+        async move {
+            scope_states
+                .upsert_acquisition_scope_state(&AcquisitionScopeState {
+                    id: "scope-claim".to_string(),
+                    title_id: title.id.clone(),
+                    title_name: Some(title.name.clone()),
+                    title_slug: None,
+                    title_facet: None,
+                    library_id: None,
+                    library_name: None,
+                    library_slug: None,
+                    episode_id: None,
+                    collection_id: None,
+                    series_movie_link_id: None,
+                    season_number: None,
+                    episode_number: None,
+                    media_type: "movie".to_string(),
+                    last_search_at: None,
+                    status: AcquisitionScopeStatus::Grabbed,
+                    grabbed_release: Some(grabbed_release),
+                    landed_bar: None,
+                    latest_release_decision: None,
+                    mismatch_recovery_eligible: false,
+                    created_at: "2026-09-07T00:00:00Z".to_string(),
+                    updated_at: "2026-09-07T00:00:00Z".to_string(),
+                })
+                .await
+                .expect("seed grabbed scope");
+            let claims = app
+                .grabbed_release_claims_for_scope(title, &membership.view(), context, &[], &[])
+                .await;
+            assert_eq!(claims.len(), 1, "{claims:?}");
+            assert!(claims[0].tier_index.is_some(), "the claim is re-derived");
+            claims[0].score
+        }
+    };
+
+    // The same release offered again, a year on, with the same listing facts.
+    let candidate = crate::quality::canonical_context::score_parked_release_title(
+        &title,
+        release,
+        None,
+        Some(crate::canonical_scoring::ListingFacts::candidate(
+            snapshot.clone(),
+            snapshot.captured_at + chrono::Duration::days(365),
+        )),
+        &[],
+        &[],
+        &context,
+    );
+
+    let claimed = claim_score(grabbed_release(Some(snapshot.to_json_string()))).await;
+    assert!(
+        candidate.score <= claimed,
+        "the same release must not out-score its own claim: candidate {}, claim {claimed}",
+        candidate.score
+    );
+    assert_eq!(candidate.score, claimed);
+
+    // A record written before grabs kept their listing scores as it always
+    // did: every listing fact unknown, so the rule does not fire.
+    let legacy = claim_score(grabbed_release(None)).await;
+    assert_eq!(
+        legacy + 500,
+        claimed,
+        "the freeleech rule fires on the claim"
+    );
+}
+
 #[tokio::test]
 async fn failed_client_poll_does_not_end_bindings_or_clean_manual_import_records() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -5858,6 +5989,7 @@ async fn unknown_program_video_codec_is_held_for_review_across_production_paths(
         false,
         crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
         None,
+        None,
     )
     .await;
     let crate::post_download_gate::ImportedFileGateDecision::Rejected(rejection) = decision else {
@@ -5909,6 +6041,7 @@ async fn catalog_scan_and_final_import_join_the_same_native_probe() {
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         ),
         async {
@@ -5966,6 +6099,7 @@ async fn shared_native_probe_rejects_source_changes_in_both_production_paths() {
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         ),
         async {
@@ -6082,6 +6216,7 @@ async fn canonical_catalog_and_import_paths_preserve_the_same_analysis_contract(
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         )
         .await;

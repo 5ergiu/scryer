@@ -1322,6 +1322,7 @@ async fn post_download_score_uses_rescored_quality_and_records_downgrade_audit()
             5 * 1024 * 1024,
             &[],
             false,
+            None,
         );
         (result, announced_score)
     };
@@ -1420,6 +1421,7 @@ async fn post_download_score_preserves_prepared_rescore_changes_when_parsed_alre
             5 * 1024 * 1024,
             &first_pass_changes,
             false,
+            None,
         )
     };
 
@@ -1490,6 +1492,7 @@ score_entry["dv_profile_bonus"] := 123 if {
             5 * 1024 * 1024,
             &[],
             false,
+            None,
         )
     };
 

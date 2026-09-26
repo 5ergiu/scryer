@@ -545,6 +545,7 @@ async fn execute_resolved_episode_import(
         parsed: &announced_parsed,
         accepted: prepared.accepted.as_ref(),
         prior_rescore_changes: &prepared.rescore_changes,
+        release_listing_json: prepared.release_listing_json.as_deref(),
         landed_size_bytes: source_size,
         announced_size_bytes,
         is_filler,

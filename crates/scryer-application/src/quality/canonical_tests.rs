@@ -2171,3 +2171,179 @@ fn a_stream_pointer_is_not_rejected_for_the_size_of_its_url() {
             .any(|e| e.code.starts_with("size_"))
     );
 }
+
+/// The listing facts a grab froze, captured at a fixed instant so the tests
+/// can move `now` around it.
+fn frozen_listing() -> crate::quality::release_listing::ReleaseListingSnapshot {
+    crate::quality::release_listing::ReleaseListingSnapshot {
+        published_at: Some("2024-01-02T00:00:00Z".into()),
+        thumbs_up: Some(7),
+        thumbs_down: Some(1),
+        is_password_protected: Some(false),
+        indexer_languages: vec!["French".into()],
+        extra: [("freeleech".to_string(), serde_json::Value::Bool(true))]
+            .into_iter()
+            .collect(),
+        captured_at: chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    }
+}
+
+/// One rule per listing fact a user rule can read, each with its own code.
+fn listing_rule_engine() -> scryer_rules::UserRulesEngine {
+    rule_engine(
+        "listing_facts",
+        r#"
+score_entry["listing_age"] := input.release.age_days if { input.release.age_days != null }
+score_entry["listing_thumbs"] := 11 if { input.release.thumbs_up >= 5 }
+score_entry["listing_unlocked"] := 13 if { input.release.is_password_protected == false }
+score_entry["listing_freeleech"] := 17 if { input.release.extra.freeleech == true }
+score_entry["listing_french"] := 19 if { "fra" in input.release.languages_audio }
+"#,
+    )
+}
+
+fn listing_entries(decision: &crate::QualityProfileDecision) -> Vec<(String, i32)> {
+    decision
+        .scoring_log
+        .iter()
+        .filter(|entry| entry.code.starts_with("listing_"))
+        .map(|entry| (entry.code.clone(), entry.delta))
+        .collect()
+}
+
+/// **The frozen-listing invariant.** A rule on a listing fact scores the same
+/// number at the grab, at the import gate, and on the incumbent's row.
+///
+/// The import gate and the row take no clock: their age anchor is the
+/// snapshot's `captured_at`, so there is no later `now` this test could hand
+/// them. Their time independence holds by construction, not by the assertions
+/// here. What the test does show is that the age rule is live: the same listing
+/// offered as a candidate a year on scores 365 higher, so the grab/import/bar
+/// equality is not an age rule that never fired.
+#[test]
+fn listing_fact_rules_score_the_same_at_grab_import_and_as_a_bar() {
+    let engine = listing_rule_engine();
+    let profile = movie_profile();
+    let mut context = ctx(&profile, &[]);
+    context.rules = Some(&engine);
+    let snapshot = frozen_listing();
+    let grabbed_at = snapshot.captured_at;
+    let submission_json = snapshot.to_json_string();
+
+    // (a) The search lane scores the candidate at its own `now`, which is the
+    // instant the snapshot it persists was captured.
+    let at_grab = score_release(
+        &announced(8.0).with_listing(Some(ListingFacts::candidate(snapshot.clone(), grabbed_at))),
+        &context,
+    );
+    let grab_entries = listing_entries(&at_grab.announced_decision);
+    assert_eq!(
+        grab_entries.len(),
+        5,
+        "every listing rule must fire: {grab_entries:?}"
+    );
+    assert!(
+        grab_entries.contains(&("listing_age".to_string(), 789)),
+        "age is days from publish to the lane now: {grab_entries:?}"
+    );
+
+    // (b) The import gate reads the submission's snapshot. It runs whenever the
+    // download finishes and never reads the clock for the age.
+    let import_evidence = announced(8.0)
+        .with_listing(ListingFacts::grabbed_from_json(Some(&submission_json)))
+        .with_analysis(analyzed(8.0, Some("h264")));
+    let at_import = score_release(&import_evidence, &context);
+    assert_eq!(at_import.release_score, at_grab.release_score);
+    assert_eq!(
+        listing_entries(at_import.analyzed_decision.as_ref().unwrap()),
+        grab_entries
+    );
+
+    // (c) The incumbent bar re-derived from the row import wrote, which carries
+    // the same JSON.
+    let mut row = media_row_as_import_would_write(&import_evidence, &at_import);
+    row.release_listing_json = Some(submission_json.clone());
+    let as_bar = score_media_file(&row, &context);
+    assert_eq!(as_bar.total, at_import.total);
+    assert_eq!(
+        listing_entries(as_bar.analyzed_decision.as_ref().unwrap()),
+        grab_entries
+    );
+
+    // A candidate ages with its lane's `now`.
+    let a_year_later = grabbed_at + chrono::Duration::days(365);
+    let re_offered = score_release(
+        &announced(8.0).with_listing(Some(ListingFacts::candidate(
+            snapshot.clone(),
+            a_year_later,
+        ))),
+        &context,
+    );
+    assert_eq!(re_offered.release_score, at_grab.release_score + 365);
+}
+
+/// A candidate that has not been grabbed ages with the lane: its age is days
+/// from publish to the lane's `now`, not to when the listing was first seen.
+#[test]
+fn an_age_rule_on_a_candidate_uses_the_lane_now() {
+    let engine = rule_engine(
+        "listing_age",
+        r#"score_entry["listing_stale"] := -50 if { input.release.age_days >= 1000 }"#,
+    );
+    let profile = movie_profile();
+    let mut context = ctx(&profile, &[]);
+    context.rules = Some(&engine);
+    let snapshot = frozen_listing();
+
+    let seen_now = score_release(
+        &announced(8.0).with_listing(Some(ListingFacts::candidate(
+            snapshot.clone(),
+            snapshot.captured_at,
+        ))),
+        &context,
+    );
+    assert!(listing_entries(&seen_now.announced_decision).is_empty());
+
+    let seen_later = score_release(
+        &announced(8.0).with_listing(Some(ListingFacts::candidate(
+            snapshot.clone(),
+            snapshot.captured_at + chrono::Duration::days(365),
+        ))),
+        &context,
+    );
+    assert_eq!(
+        listing_entries(&seen_later.announced_decision),
+        vec![("listing_stale".to_string(), -50)]
+    );
+}
+
+/// A row imported before listings were stored scores exactly as it did: no
+/// listing fact reaches the rules, and the score and log equal the listing-free
+/// evidence the row was written from.
+#[test]
+fn a_row_without_a_listing_scores_as_before() {
+    let engine = listing_rule_engine();
+    let profile = movie_profile();
+    let mut context = ctx(&profile, &[]);
+    context.rules = Some(&engine);
+
+    let evidence = announced(8.0).with_analysis(analyzed(7.2, None));
+    let at_import = score_release(&evidence, &context);
+    let row = media_row_as_import_would_write(&evidence, &at_import);
+    assert_eq!(row.release_listing_json, None);
+
+    let re_derived = score_media_file(&row, &context);
+    assert_eq!(re_derived.total, at_import.total);
+    assert_eq!(
+        re_derived.analyzed_decision.as_ref().unwrap().scoring_log,
+        at_import.analyzed_decision.as_ref().unwrap().scoring_log
+    );
+    assert!(listing_entries(re_derived.analyzed_decision.as_ref().unwrap()).is_empty());
+
+    // The listing rules add nothing to a listing-free row: the score equals the
+    // same row scored without them.
+    let without_rules = score_media_file(&row, &ctx(&profile, &[]));
+    assert_eq!(re_derived.total, without_rules.total);
+}

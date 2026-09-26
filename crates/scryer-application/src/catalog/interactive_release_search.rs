@@ -749,6 +749,7 @@ impl AppUseCase {
                                 child_token,
                                 Some(HashSet::from([indexer_id.clone()])),
                                 None,
+                                app.runtime.environment.now(),
                             )
                             .await
                         {
@@ -1040,6 +1041,8 @@ impl AppUseCase {
         let rules = self.user_rules_engine_snapshot();
         let judge = judge.cloned();
         let indexer_id = indexer_id.to_string();
+        // Not grabbed: listing age is measured at this search's own instant.
+        let now = self.runtime.environment.now();
         let results = tokio::task::spawn_blocking(move || {
             // Reuse one evaluator for this response and keep synchronous rule
             // evaluation off the async worker handling requests/cancellation.
@@ -1082,17 +1085,26 @@ impl AppUseCase {
                     {
                         // No title or incumbent context exists yet. Still collect
                         // every applicable contribution before judging eligibility.
+                        let listing =
+                            crate::quality::release_listing::ReleaseListingSnapshot::for_scoring(
+                                &result, now,
+                            );
+                        let listing_json = listing.to_json_string();
                         result.quality_profile_decision = Some(
                             crate::canonical_scoring::score_release_in_batch(
                                 &crate::canonical_scoring::ReleaseEvidence::announced(
                                     parsed.clone(),
                                     result.size_bytes,
-                                ),
+                                )
+                                .with_listing(Some(
+                                    crate::canonical_scoring::ListingFacts::candidate(listing, now),
+                                )),
                                 context,
                                 evaluator,
                             )
                             .announced_decision,
                         );
+                        result.release_listing_json = Some(listing_json);
                     }
                     result.parsed_release_metadata = Some(parsed);
                     result

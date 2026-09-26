@@ -1496,6 +1496,7 @@ fn host_search_response(
                 auto_eligible: None,
                 auto_decision_code: None,
                 auto_decision_summary: None,
+                release_listing_json: None,
             }
         })
         .collect();

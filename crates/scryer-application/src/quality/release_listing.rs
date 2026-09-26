@@ -101,17 +101,59 @@ impl ReleaseListingSnapshot {
         Some(Self::capture_from_search_result(result, now).to_json_string())
     }
 
-    /// The snapshot a grab from a persisted pending row carries: the row's own
-    /// frozen snapshot when it has one, else a best-effort capture from the
-    /// row for rows written before snapshots were stored.
+    /// The snapshot a search or RSS candidate is scored with, at the lane's
+    /// `now`. A candidate that already carries a snapshot (a replayed pending
+    /// row, or a result scored before) keeps those frozen facts; a fresh
+    /// listing is captured. Either way `captured_at` is `now`, the instant its
+    /// age was measured at, so a grab that persists this snapshot anchors
+    /// every later read on the same instant the grab scored.
+    pub(crate) fn for_scoring(result: &crate::IndexerSearchResult, now: DateTime<Utc>) -> Self {
+        match result
+            .release_listing_json
+            .as_deref()
+            .and_then(Self::from_json_str)
+        {
+            Some(frozen) => frozen.stamped_at(now),
+            None => Self::capture_from_search_result(result, now),
+        }
+    }
+
+    /// The persisted snapshot a grab or park of a search or RSS candidate
+    /// carries: the one its scoring pass attached, so what is stored is what
+    /// was scored. A candidate no scoring pass has seen is captured at `now`.
+    pub(crate) fn json_for_candidate(
+        result: &crate::IndexerSearchResult,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        result
+            .release_listing_json
+            .clone()
+            .or_else(|| Self::capture_json_from_search_result(result, now))
+    }
+
+    /// The snapshot a grab from a persisted pending row carries. A grab is the
+    /// instant age is anchored at from then on, so the row's frozen facts are
+    /// re-stamped with `captured_at = now`. A row without a readable snapshot
+    /// (written before snapshots were stored) gets a best-effort capture.
     pub(crate) fn json_for_pending_release(
         release: &crate::PendingRelease,
         now: DateTime<Utc>,
     ) -> Option<String> {
-        release
+        let snapshot = release
             .release_listing_json
-            .clone()
-            .or_else(|| Some(Self::capture_from_pending_release(release, now).to_json_string()))
+            .as_deref()
+            .and_then(Self::from_json_str)
+            .map(|frozen| frozen.stamped_at(now))
+            .unwrap_or_else(|| Self::capture_from_pending_release(release, now));
+        Some(snapshot.to_json_string())
+    }
+
+    /// The same listing facts, captured at `at`.
+    fn stamped_at(self, at: DateTime<Utc>) -> Self {
+        Self {
+            captured_at: at,
+            ..self
+        }
     }
 
     /// Best-effort snapshot for a pending release that has no persisted one.
@@ -350,6 +392,7 @@ mod tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
     }
 
@@ -762,13 +805,72 @@ mod tests {
     }
 
     #[test]
-    fn pending_grab_keeps_the_rows_frozen_snapshot() {
+    fn pending_grab_keeps_the_rows_facts_stamped_at_the_grab() {
         let mut release = pending_release(None);
-        let frozen = full_snapshot().to_json_string();
-        release.release_listing_json = Some(frozen.clone());
+        release.release_listing_json = Some(full_snapshot().to_json_string());
+        let grabbed = ReleaseListingSnapshot::json_for_pending_release(&release, at(2024, 6, 1))
+            .expect("a pending grab always carries a snapshot");
+        assert_eq!(
+            ReleaseListingSnapshot::from_json_str(&grabbed),
+            Some(ReleaseListingSnapshot {
+                captured_at: at(2024, 6, 1),
+                ..full_snapshot()
+            })
+        );
+    }
+
+    #[test]
+    fn pending_grab_with_an_unreadable_snapshot_captures_from_the_row() {
+        let mut release = pending_release(Some("synthetic-secret"));
+        release.release_listing_json = Some("not json".to_string());
         assert_eq!(
             ReleaseListingSnapshot::json_for_pending_release(&release, at(2024, 6, 1)),
-            Some(frozen)
+            Some(
+                ReleaseListingSnapshot::capture_from_pending_release(&release, at(2024, 6, 1))
+                    .to_json_string()
+            )
+        );
+    }
+
+    #[test]
+    fn scoring_captures_a_fresh_listing_at_the_lane_now() {
+        let mut result = search_result();
+        result.thumbs_up = Some(3);
+        let scored = ReleaseListingSnapshot::for_scoring(&result, at(2024, 3, 1));
+        assert_eq!(
+            scored,
+            ReleaseListingSnapshot::capture_from_search_result(&result, at(2024, 3, 1))
+        );
+    }
+
+    #[test]
+    fn scoring_keeps_a_carried_snapshot_and_stamps_it_at_the_lane_now() {
+        let mut result = search_result();
+        // The synthetic listing a replay is rebuilt from must not leak in.
+        result.thumbs_up = Some(99);
+        result.release_listing_json = Some(full_snapshot().to_json_string());
+        assert_eq!(
+            ReleaseListingSnapshot::for_scoring(&result, at(2024, 3, 1)),
+            ReleaseListingSnapshot {
+                captured_at: at(2024, 3, 1),
+                ..full_snapshot()
+            }
+        );
+    }
+
+    #[test]
+    fn a_candidate_persists_the_snapshot_it_was_scored_with() {
+        let mut result = search_result();
+        let scored = ReleaseListingSnapshot::for_scoring(&result, at(2024, 3, 1)).to_json_string();
+        result.release_listing_json = Some(scored.clone());
+        assert_eq!(
+            ReleaseListingSnapshot::json_for_candidate(&result, at(2024, 9, 1)),
+            Some(scored)
+        );
+        result.release_listing_json = None;
+        assert_eq!(
+            ReleaseListingSnapshot::json_for_candidate(&result, at(2024, 9, 1)),
+            ReleaseListingSnapshot::capture_json_from_search_result(&result, at(2024, 9, 1))
         );
     }
 

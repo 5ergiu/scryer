@@ -183,10 +183,21 @@ pub(crate) struct ParkedReleaseFacts {
 /// else. Passing an empty catalog is legitimate for a caller that only needs the
 /// tier, the revision and the score — the parse degrades to numbering-only,
 /// which none of those depend on.
+///
+/// `listing` is the release's frozen listing snapshot with its age anchor: a
+/// parked row is aged at the lane's `now`, a queued submission or a ledger
+/// claim at its grab.
+/// `None` scores with every listing fact unknown.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a parked release is scored from its title, size, listing snapshot and the \
+              caller's catalog rows and context, all already in the caller's hand"
+)]
 pub(crate) fn score_parked_release_title(
     title: &Title,
     release_title: &str,
     size_bytes: Option<i64>,
+    listing: Option<crate::canonical_scoring::ListingFacts>,
     catalog_episodes: &[scryer_domain::Episode],
     catalog_collections: &[scryer_domain::Collection],
     context: &ResolvedScoringContext,
@@ -217,7 +228,8 @@ pub(crate) fn score_parked_release_title(
         parsed.quality.as_deref(),
     );
     let scored = crate::canonical_scoring::score_release(
-        &crate::canonical_scoring::ReleaseEvidence::announced(parsed, size_bytes),
+        &crate::canonical_scoring::ReleaseEvidence::announced(parsed, size_bytes)
+            .with_listing(listing),
         &context.view(size_basis, false),
     );
 
@@ -799,6 +811,10 @@ impl AppUseCase {
                     // already in flight. `None` on pre-0.18 rows, which then
                     // compare size-less on both sides of the term.
                     submission.release_size_bytes,
+                    // Already grabbed: aged at the grab, never the clock.
+                    crate::canonical_scoring::ListingFacts::grabbed_from_json(
+                        submission.release_listing_json.as_deref(),
+                    ),
                     catalog_episodes,
                     catalog_collections,
                     context,
@@ -873,10 +889,17 @@ impl AppUseCase {
             })
             .filter_map(|state| {
                 let record = grabbed_release_record(state)?;
+                // The claim scores with the facts its grab froze, as the
+                // candidate beside it does; a record written before grabs kept
+                // their snapshot scores with every listing fact unknown.
+                let listing = crate::canonical_scoring::ListingFacts::grabbed_from_json(
+                    record.release_listing_json.as_deref(),
+                );
                 let facts = score_parked_release_title(
                     title,
                     &record.title,
                     None,
+                    listing,
                     catalog_episodes,
                     catalog_collections,
                     context,
@@ -1018,6 +1041,9 @@ pub(crate) struct GrabbedReleaseRecord {
     pub title: String,
     pub score: i32,
     pub grabbed_at: chrono::DateTime<chrono::Utc>,
+    /// The listing snapshot the grab submitted. `None` on records written
+    /// before grabs kept one.
+    pub release_listing_json: Option<String>,
 }
 
 /// The scope a state row anchors, in the vocabulary the queue comparison uses.
@@ -1068,10 +1094,15 @@ pub(crate) fn grabbed_release_record(
         .and_then(serde_json::Value::as_str)
         .and_then(crate::quality_profile::parse_published_at)
         .or_else(|| crate::quality_profile::parse_published_at(&state.updated_at))?;
+    let release_listing_json = value
+        .get("release_listing_json")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     Some(GrabbedReleaseRecord {
         title,
         score,
         grabbed_at,
+        release_listing_json,
     })
 }
 
