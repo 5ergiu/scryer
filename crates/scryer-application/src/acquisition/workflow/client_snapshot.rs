@@ -137,8 +137,19 @@ pub(crate) enum StandbyRecoveryOutcome {
     /// again. Returning the submitted scope lets the cursor suppress exactly
     /// the recovered pack's coverage without reparsing the saved release.
     Recovered { scope: SubmissionScope },
-    /// The saved release is already active in a download client.
-    Active { scope: SubmissionScope },
+    /// Nothing was grabbed because the scope is already covered: a saved
+    /// release is already active in a download client, or a release queued or
+    /// grabbed for the scope is equal or better than the first saved result
+    /// judged for it. Saved rows within a covered scope are then left alone,
+    /// unjudged, and stay `Standby` for that release's failure; only rows that
+    /// reach beyond every covered scope are still walked. Not a grab, and not
+    /// counted as one. Sources whose artifact vanished earlier in the same
+    /// walk are returned, as for `Exhausted`: their rows are expired and no
+    /// later walk reports them again.
+    Active {
+        scope: SubmissionScope,
+        stale_indexer_ids: Vec<String>,
+    },
     /// The download client could not be consulted; the list is left intact for
     /// the next cycle. `refused` is set when a saved result was actually
     /// submitted and refused — an acquisition job counts that as a failed
@@ -1531,6 +1542,12 @@ async fn prune_standby_candidates(app: &AppUseCase) {
 /// `try_grab_pending_release` — the swarm and admission policy. Rows that no
 /// longer qualify are expired and skipped; the rows after a successful grab stay
 /// `Standby`, so if that grab fails too the walk continues down the same list.
+///
+/// A row refused because a queued release already covers its scope marks that
+/// scope covered. Later rows within a covered scope are skipped without being
+/// claimed or judged, so a covered scope costs one judged row per cycle; a
+/// row reaching beyond every covered scope (a pack with members still
+/// missing) is judged as usual.
 pub(crate) async fn try_saved_candidates(
     app: &AppUseCase,
     item: &AcquisitionScopeState,
@@ -1680,6 +1697,18 @@ pub(crate) async fn try_saved_candidates(
                     standby_releases.push(pending);
                 }
             }
+            // Client-refused rows are `waiting`, not `standby`, so the
+            // title-wide read above never saw them. Parse them the same way:
+            // a refused pack keeps its own span for the covered-scope skip
+            // rather than borrowing the walked episode's.
+            for pending in &standby_releases {
+                if title_standby_metadata.contains_key(&pending.id) {
+                    continue;
+                }
+                let metadata = parse_coverage(pending);
+                standby_scopes.insert(pending.id.clone(), metadata.3.clone());
+                title_standby_metadata.insert(pending.id.clone(), metadata);
+            }
 
             season_pack_ids.extend(
                 standby_releases
@@ -1715,12 +1744,25 @@ pub(crate) async fn try_saved_candidates(
         .load_title_release_blocklist_signatures(&item.title_id)
         .await;
     let mut stale_indexer_ids = HashSet::new();
+    let mut covered_scopes: Vec<SubmissionScope> = Vec::new();
 
     for standby in standby_releases {
         let standby_scope = standby_scopes
             .get(&standby.id)
             .cloned()
             .unwrap_or_else(|| item.submission_scope());
+        // A series pack's span may be unresolved (it then carries the walked
+        // item's scope) and can reach seasons no queued release covers, so it
+        // is always judged.
+        if !series_pack_ids.contains(&standby.id)
+            && covered_scopes
+                .iter()
+                .any(|covered| standby_scope_within(&standby_scope, covered))
+        {
+            // A queued release already covers everything this row would
+            // fetch. Leave it `Standby`, unclaimed and unjudged.
+            continue;
+        }
         if series_pack_ids.contains(&standby.id)
             && excluded_episode_ids.is_some_and(|excluded| {
                 episode_ids_for_scope(&standby_scope)
@@ -1816,6 +1858,7 @@ pub(crate) async fn try_saved_candidates(
                 .await;
             return StandbyRecoveryOutcome::Active {
                 scope: standby_scope,
+                stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
             };
         }
 
@@ -1897,6 +1940,35 @@ pub(crate) async fn try_saved_candidates(
                     refused,
                 };
             }
+            Ok(super::pending::PendingGrabOutcome::QueueCovered {
+                queued_release,
+                reason,
+                message,
+            }) => {
+                // Only a strict upgrade is fetched beside a queued release. This
+                // one is not, but it stays walkable: if the queued release fails,
+                // it is the next saved result for the scope. Every later row
+                // within this scope is skipped unjudged: a strict upgrade saved
+                // below this row waits until the queued release leaves the
+                // queue, rather than costing a claim, a submissions read and an
+                // admission pass each cycle. Rows reaching beyond the scope are
+                // still judged.
+                debug!(
+                    title_id = item.title_id.as_str(),
+                    standby_release = standby.release_title.as_str(),
+                    queued_release = queued_release.as_str(),
+                    reason = ?reason,
+                    detail = message.as_str(),
+                    "saved search result not grabbed: a queued release already covers this scope"
+                );
+                let _ = app
+                    .services
+                    .workflow
+                    .pending_releases
+                    .update_pending_release_status(&standby.id, PendingReleaseStatus::Standby, None)
+                    .await;
+                covered_scopes.push(standby_scope);
+            }
             Ok(super::pending::PendingGrabOutcome::Parked) => {
                 return StandbyRecoveryOutcome::Parked {
                     scope: Some(standby_scope),
@@ -1924,8 +1996,47 @@ pub(crate) async fn try_saved_candidates(
         }
     }
 
-    StandbyRecoveryOutcome::Exhausted {
-        stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
+    let stale_indexer_ids = stale_indexer_ids.into_iter().collect();
+    match covered_scopes.into_iter().next() {
+        Some(scope) => StandbyRecoveryOutcome::Active {
+            scope,
+            stale_indexer_ids,
+        },
+        None => StandbyRecoveryOutcome::Exhausted { stale_indexer_ids },
+    }
+}
+
+/// Whether a saved row's scope fetches nothing beyond a scope a queued release
+/// already covers. Decided from the scopes alone, with no catalog read: a
+/// single episode is never broader than the season it was saved under, and an
+/// episode set can span seasons so only a subset of a covered set counts. A
+/// title-scoped row is refused by any equal-or-better queued release that
+/// overlaps the title, whether or not that release covers every episode, so a
+/// covered title scope hides only another title-scoped row. A row that is not
+/// within is judged as usual, so an unknown pairing errs toward judging.
+fn standby_scope_within(row: &SubmissionScope, covered: &SubmissionScope) -> bool {
+    match covered {
+        SubmissionScope::Title => row == covered,
+        SubmissionScope::Collection { .. } => {
+            matches!(row, SubmissionScope::Episode { .. }) || row == covered
+        }
+        SubmissionScope::EpisodeSet { episode_ids } => match row {
+            SubmissionScope::Episode { episode_id } => episode_ids.contains(episode_id),
+            SubmissionScope::EpisodeSet {
+                episode_ids: row_ids,
+            } => row_ids.iter().all(|id| episode_ids.contains(id)),
+            _ => false,
+        },
+        SubmissionScope::Episode { episode_id } => match row {
+            SubmissionScope::Episode {
+                episode_id: row_id,
+            } => row_id == episode_id,
+            SubmissionScope::EpisodeSet {
+                episode_ids: row_ids,
+            } => row_ids.iter().all(|id| id == episode_id),
+            _ => false,
+        },
+        SubmissionScope::SeriesMovie { .. } | SubmissionScope::Orphan => row == covered,
     }
 }
 

@@ -1,6 +1,7 @@
 //! In-memory title comparisons. These are deliberately independent of persisted
 //! catalog ordering: sorting may remove articles, identity matching must not.
 
+use crate::title_normalization::{self, LanguageRules, romanization_key};
 use icu_collator::{
     Collator, CollatorBorrowed,
     options::{CollatorOptions, Strength},
@@ -130,49 +131,58 @@ pub fn title_script(value: &str) -> TitleScript {
 pub fn normalize_title_spelling(value: &str) -> String {
     let mut result = String::new();
     for ch in value.nfkc().flat_map(char::to_lowercase) {
-        if ch.is_alphanumeric() || is_combining_mark(ch) {
+        if is_word_separator(ch) {
+            if !result.ends_with(' ') && !result.is_empty() {
+                result.push(' ');
+            }
+        } else if ch.is_alphanumeric() || is_combining_mark(ch) {
             result.push(ch);
-        } else if (ch.is_whitespace()
-            || matches!(
-                ch,
-                '.' | ','
-                    | ':'
-                    | ';'
-                    | '-'
-                    | '_'
-                    | '/'
-                    | '\\'
-                    | '&'
-                    | '+'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '\''
-                    | '"'
-                    | '!'
-                    | '?'
-                    | '~'
-                    | '’'
-                    | '‘'
-                    | '“'
-                    | '”'
-                    | '–'
-                    | '—'
-                    | '−'
-                    | '・'
-                    | '。'
-                    | '、'
-            ))
-            && !result.ends_with(' ')
-            && !result.is_empty()
-        {
-            result.push(' ');
         }
     }
     result.trim().to_string()
+}
+
+/// Punctuation and whitespace that end a word. Checked before the
+/// alphanumeric test: the modifier letter apostrophe (U+02BC), the recommended
+/// Ukrainian apostrophe (`пʼять`), is a letter to Unicode, but it separates
+/// words here the same way the ASCII and typographic apostrophes do, so every
+/// spelling of the apostrophe is one lookup form.
+fn is_word_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '.' | ','
+                | ':'
+                | ';'
+                | '-'
+                | '_'
+                | '/'
+                | '\\'
+                | '&'
+                | '+'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '\''
+                | '"'
+                | '!'
+                | '?'
+                | '~'
+                | '\u{02bc}'
+                | '’'
+                | '‘'
+                | '“'
+                | '”'
+                | '–'
+                | '—'
+                | '−'
+                | '・'
+                | '。'
+                | '、'
+        )
 }
 
 /// Articles a catalog writes at the end of a name (`Lantern, The`). The
@@ -393,29 +403,29 @@ pub fn title_numbers_key(value: &str) -> String {
 /// probes notice. What neither covers is a data change with no version change,
 /// which the registry does not permit for a published crate.
 ///
-/// The index also persists the Japanese romanization key, so the fingerprint
-/// hashes that fold's output for [`ROMANIZATION_PROBES`], which exercise every
-/// fold rule. Changing a rule changes some probe's key and rebuilds the index.
+/// The index also persists the romanization key, so the fingerprint hashes
+/// every registered [`LanguageRules`] set's tag and its probes' keys; each
+/// set's probes exercise every rule it has. Changing a rule changes some
+/// probe's key and rebuilds the index.
 pub fn title_collation_data_version() -> &'static str {
     static VERSION: LazyLock<String> =
-        LazyLock::new(|| title_spelling_fingerprint(romanized_japanese_spelling));
+        LazyLock::new(|| title_spelling_fingerprint(title_normalization::RULES));
     VERSION.as_str()
 }
 
-/// Probes run through the romanization fold for the index fingerprint. Each
-/// fold rule must change at least one of them: long vowels (macron, doubled),
-/// the `wo` particle, `m` before a labial, and the topic-particle join.
-const ROMANIZATION_PROBES: &[&str] = &[
-    "gasshou wo de wa shimbun",
-    "tōkyō yuusha oo",
-    "kāsan onīsan sūji onēsan sampo",
-    "kimi to wa",
-    "machi ni wa",
-    "sorairo e wa",
-    "dewa to wa",
-];
+/// Bumped whenever the fingerprint must move for a reason its probes cannot
+/// show, so every installed index rebuilds once.
+const TITLE_SPELLING_SEED: &[u8] = b"title-spelling-collation-v3";
 
-fn title_spelling_fingerprint(romanize: fn(&str) -> String) -> String {
+pub(crate) fn title_spelling_fingerprint(romanization: &[&dyn LanguageRules]) -> String {
+    title_spelling_fingerprint_seeded(TITLE_SPELLING_SEED, COLLATION_PROFILES, romanization)
+}
+
+fn title_spelling_fingerprint_seeded(
+    seed: &[u8],
+    profiles: &[&'static str],
+    romanization: &[&dyn LanguageRules],
+) -> String {
     const PROBES: &[&str] = &[
         "muller",
         "müller",
@@ -424,14 +434,15 @@ fn title_spelling_fingerprint(romanize: fn(&str) -> String) -> String {
         "grüße",
         "le cœur de chloé",
         "майский вечер",
+        "ґанок їжака",
         "流浪地球2",
         "ガラスの城",
         "한글",
     ];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"title-spelling-collation-v2");
+    hasher.update(seed);
     hasher.update(env!("SCRYER_ICU_COLLATOR_VERSIONS").as_bytes());
-    for tag in COLLATION_PROFILES {
+    for tag in profiles {
         hasher.update(tag.as_bytes());
         for probe in PROBES {
             match title_spelling_key(probe, tag) {
@@ -445,11 +456,13 @@ fn title_spelling_fingerprint(romanize: fn(&str) -> String) -> String {
             }
         }
     }
-    hasher.update(JAPANESE_ROMANIZATION_TAG.as_bytes());
-    for probe in ROMANIZATION_PROBES {
-        let key = romanize(probe);
-        hasher.update(&(key.len() as u32).to_le_bytes());
-        hasher.update(key.as_bytes());
+    for rules in romanization {
+        hasher.update(rules.equivalence_tag().as_bytes());
+        for probe in rules.probes() {
+            let key = rules.fold(probe);
+            hasher.update(&(key.len() as u32).to_le_bytes());
+            hasher.update(key.as_bytes());
+        }
     }
     hasher.finalize().to_hex()[..16].to_string()
 }
@@ -464,6 +477,7 @@ pub const COLLATION_PROFILES: &[&str] = &[
     "it",
     "pt",
     "ru",
+    "uk",
     "ja",
     "ko",
     "zh",
@@ -480,6 +494,10 @@ fn collator(tag: &'static str) -> Option<MatchCollator> {
         return Some(cached.clone());
     }
     let mut options = CollatorOptions::default();
+    // Ukrainian stays at primary strength: its tailoring gives `ґ` and `ї`
+    // primary weights of their own (the root order files them under `г` and
+    // `і` with a mark), so primary already keeps every Ukrainian letter apart
+    // and equates only case and marks such as stress accents.
     options.strength = Some(match tag {
         "ru" => Strength::Secondary,
         "ja" | "ko" | "zh" => Strength::Tertiary,
@@ -506,6 +524,7 @@ fn profile(language: Option<&str>, script: TitleScript) -> Option<&'static str> 
         "it" | "ita" => Some("it"),
         "pt" | "por" | "pob" => Some("pt"),
         "ru" | "rus" => Some("ru"),
+        "uk" | "ukr" => Some("uk"),
         "ja" | "jpn" => Some("ja"),
         "ko" | "kor" => Some("ko"),
         "zh" | "zho" | "chi" => Some("zh"),
@@ -522,7 +541,7 @@ pub fn title_spelling_profiles(value: &str, language: Option<&str>) -> Vec<&'sta
         return Vec::new();
     };
     if script == TitleScript::Other
-        || (script == TitleScript::Cyrillic && tag != "ru")
+        || (script == TitleScript::Cyrillic && !matches!(tag, "ru" | "uk"))
         || (script == TitleScript::Cjk && !matches!(tag, "ja" | "ko" | "zh"))
     {
         return Vec::new();
@@ -572,115 +591,45 @@ pub fn compare_title_spelling(
             return Some(SpellingEquivalence::Locale(tag));
         }
     }
-    if let Some(right_key) = japanese_romanization_key(right, language)
-        && romanized_japanese_spelling(left) == right_key
+    if let Some(rules) = title_normalization::rules_for(language)
+        && let Some(right_key) = romanization_key(right, language)
+        && rules.fold(left) == right_key
     {
-        return Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG));
+        return Some(SpellingEquivalence::Locale(rules.equivalence_tag()));
     }
     Some(SpellingEquivalence::Different)
-}
-
-/// The comparison-only romanization key of a Japanese-romanized name, or
-/// `None` when the language tag does not mark the name as one. Indexes that
-/// need to find every spelling of a name must key on this as well as on the
-/// literal and collation keys: romanization variance is not a bounded edit
-/// distance, so a Levenshtein-shaped candidate filter can miss it.
-pub fn japanese_romanization_key(value: &str, language: Option<&str>) -> Option<String> {
-    (title_script(value) == TitleScript::Latin && is_japanese_romanization(language))
-        .then(|| romanized_japanese_spelling(value))
-}
-
-/// The locale reported for two spellings that agree only once romanization
-/// variance is folded away.
-pub const JAPANESE_ROMANIZATION_TAG: &str = "ja-latn";
-
-/// Whether a catalog language tag marks a Latin-script name as a romanization
-/// of a Japanese one. Catalogs write these as `ja`, `jpn`, `ja-Latn`, or the
-/// AniDB/TVDB transliteration tag `x-jat`.
-fn is_japanese_romanization(language: Option<&str>) -> bool {
-    let language = language
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    let root = language.split('-').next().unwrap_or("");
-    matches!(root, "ja" | "jpn") || language.starts_with("x-jat")
-}
-
-/// Fold the romanization variance a catalog and a release group can each pick
-/// for one Japanese name: long vowels written with a macron, doubled, or bare
-/// (`Gasshō` / `Gasshou` / `Gassho`), the `wo`/`o` particle, `m` before a
-/// labial (`Shimbun` / `Shinbun`), and a topic-particle compound written as
-/// one word or two (`de wa` / `dewa`, likewise `to wa`, `ni wa`, `e wa`),
-/// which folds to the joined form.
-///
-/// This reduction is applied to both sides of one comparison and only to
-/// Japanese-romanized names, so it can equate two spellings of the same name
-/// and nothing else; the caller still has to prove no other library identity
-/// answers to that spelling. The title search index also persists its output
-/// as a key, so [`title_collation_data_version`] hashes probes through it: a
-/// rule change here moves the fingerprint and rebuilds the index.
-fn romanized_japanese_spelling(value: &str) -> String {
-    let mut words = String::with_capacity(value.len());
-    let mut source = value
-        .split_whitespace()
-        .map(|word| if word == "wo" { "o" } else { word })
-        .peekable();
-    while let Some(word) = source.next() {
-        if !words.is_empty() {
-            words.push(' ');
-        }
-        words.push_str(word);
-        let is_particle = ["de", "to", "ni", "e"]
-            .iter()
-            .any(|particle| word.eq_ignore_ascii_case(particle));
-        if is_particle
-            && source
-                .peek()
-                .is_some_and(|next| next.eq_ignore_ascii_case("wa"))
-        {
-            words.push_str(source.next().unwrap_or_default());
-        }
-    }
-    let characters = words.chars().collect::<Vec<_>>();
-    let mut folded = String::with_capacity(words.len());
-    let mut index = 0;
-    while index < characters.len() {
-        let character = match characters[index] {
-            'ā' => 'a',
-            'ī' => 'i',
-            'ū' => 'u',
-            'ē' => 'e',
-            'ō' => 'o',
-            other => other,
-        };
-        match (character, characters.get(index + 1).copied()) {
-            ('o', Some('u' | 'o')) => {
-                folded.push('o');
-                index += 2;
-                continue;
-            }
-            ('u', Some('u')) => {
-                folded.push('u');
-                index += 2;
-                continue;
-            }
-            ('m', Some('b' | 'p')) => {
-                folded.push('n');
-                index += 1;
-                continue;
-            }
-            _ => {}
-        }
-        folded.push(character);
-        index += 1;
-    }
-    folded
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::title_normalization::JAPANESE_ROMANIZATION_TAG;
+    use crate::title_normalization::japanese::{FoldedWith, JapaneseRomanization, Switches};
+
+    /// The Japanese rule set with its fold replaced, to show the fingerprint
+    /// notices a fold change.
+    struct FoldWith(fn(&str) -> String);
+
+    impl LanguageRules for FoldWith {
+        fn equivalence_tag(&self) -> &'static str {
+            JapaneseRomanization.equivalence_tag()
+        }
+        fn applies_to(&self, language: &str) -> bool {
+            JapaneseRomanization.applies_to(language)
+        }
+        fn sample_tags(&self) -> &'static [&'static str] {
+            JapaneseRomanization.sample_tags()
+        }
+        fn script(&self) -> TitleScript {
+            JapaneseRomanization.script()
+        }
+        fn fold(&self, value: &str) -> String {
+            (self.0)(value)
+        }
+        fn probes(&self) -> &'static [&'static str] {
+            JapaneseRomanization.probes()
+        }
+    }
 
     #[test]
     fn japanese_romanization_variance_is_one_spelling() {
@@ -772,37 +721,80 @@ mod tests {
 
     #[test]
     fn collation_fingerprint_covers_the_romanization_fold() {
-        let current = title_spelling_fingerprint(romanized_japanese_spelling);
+        let current = title_spelling_fingerprint(title_normalization::RULES);
         assert_eq!(current, title_collation_data_version());
-        // Folding each word on its own keeps every rule except the particle
-        // join, which is what the fold did before that rule existed. The
-        // persisted keys differ, so the fingerprint must too.
-        let without_particle_join: fn(&str) -> String = |value| {
-            value
-                .split_whitespace()
-                .map(romanized_japanese_spelling)
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        assert_ne!(current, title_spelling_fingerprint(without_particle_join));
+        // No fold at all, and the fold without its word join (what it did
+        // before names split into words and joined became one key), both
+        // persist different keys, so the fingerprint must move for each. The
+        // Japanese rule set's own tests turn off every other rule in turn.
         let no_fold: fn(&str) -> String = |value| value.to_string();
-        assert_ne!(current, title_spelling_fingerprint(no_fold));
-        // Every probe exercises the fold, and the particle probes join.
-        for probe in ROMANIZATION_PROBES {
-            assert_ne!(&romanized_japanese_spelling(probe), probe);
-        }
-        assert_eq!(
-            romanized_japanese_spelling("gasshou wo de wa shimbun"),
-            "gassho o dewa shinbun"
+        assert_ne!(current, title_spelling_fingerprint(&[&FoldWith(no_fold)]));
+        let unjoined = Switches::one_rule_off()
+            .into_iter()
+            .find_map(|(rule, switches)| (rule == "word join").then_some(switches))
+            .expect("the word join is a rule");
+        assert_ne!(
+            current,
+            title_spelling_fingerprint(&[&FoldedWith(unjoined)])
         );
         assert_eq!(
-            romanized_japanese_spelling("kāsan onīsan sūji onēsan sampo"),
-            "kasan onisan suji onesan sanpo"
+            JapaneseRomanization.fold("gasshou wo shimbun sampo"),
+            "gasshooshinbunsanpo"
+        );
+        assert_eq!(
+            JapaneseRomanization.fold("kāsan onīsan sūji onēsan"),
+            "kasanonisansujionesan"
         );
     }
 
     #[test]
-    fn particle_spacing_folds_only_inside_the_japanese_lane() {
+    fn the_fingerprint_moves_off_every_v2_stamp() {
+        let current = title_collation_data_version();
+        // The stamp the v2 fold wrote with this build's collation data.
+        assert_ne!(current, "a50088d190aa24f7");
+        // And the seed alone moves it, whatever the collation data.
+        assert_ne!(
+            current,
+            title_spelling_fingerprint_seeded(
+                b"title-spelling-collation-v2",
+                COLLATION_PROFILES,
+                title_normalization::RULES
+            )
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_covers_every_registered_rule_set() {
+        struct Other;
+        impl LanguageRules for Other {
+            fn equivalence_tag(&self) -> &'static str {
+                "zz-latn"
+            }
+            fn applies_to(&self, language: &str) -> bool {
+                language == "zz"
+            }
+            fn sample_tags(&self) -> &'static [&'static str] {
+                &["zz"]
+            }
+            fn script(&self) -> TitleScript {
+                TitleScript::Latin
+            }
+            fn fold(&self, value: &str) -> String {
+                value.replace('q', "k")
+            }
+            fn probes(&self) -> &'static [&'static str] {
+                &["qara"]
+            }
+        }
+        let with_other: &[&dyn LanguageRules] = &[&JapaneseRomanization, &Other];
+        assert_ne!(
+            title_spelling_fingerprint(with_other),
+            title_spelling_fingerprint(title_normalization::RULES)
+        );
+    }
+
+    #[test]
+    fn word_spacing_folds_only_inside_the_japanese_lane() {
         for (left, right) in [
             ("hoshizora de wa nemurenai", "hoshizora dewa nemurenai"),
             ("kumori to wa iwanai", "kumori towa iwanai"),
@@ -818,25 +810,22 @@ mod tests {
     }
 
     #[test]
-    fn particle_spacing_leaves_other_wa_words_alone() {
-        // `wa` inside a word, or a standalone `wa` after a non-particle word,
-        // is not a topic-particle compound.
-        assert_eq!(
-            romanized_japanese_spelling("minato kawa sewa"),
-            "minato kawa sewa"
-        );
-        assert_eq!(romanized_japanese_spelling("sora wa aoi"), "sora wa aoi");
-        assert_eq!(romanized_japanese_spelling("dewa kawa"), "dewa kawa");
+    fn a_wa_word_joins_like_any_other_word() {
+        // A `wa` particle, or `wa` inside a word, joins its neighbours through
+        // the word join: a romanized name written as one word or two is one
+        // name.
         assert_eq!(
             compare_title_spelling("minato kawa", "minatokawa", Some("x-jat")),
-            Some(SpellingEquivalence::Different)
+            Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG))
         );
         assert_eq!(
             compare_title_spelling("sora wa aoi", "sorawa aoi", Some("x-jat")),
-            Some(SpellingEquivalence::Different)
+            Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG))
         );
-        // The join is case-insensitive and keeps each word's own case.
-        assert_eq!(romanized_japanese_spelling("De Wa kawa"), "DeWa kawa");
+        assert_eq!(
+            compare_title_spelling("hoshizora de wa", "hoshizora dewa", Some("x-jat")),
+            Some(SpellingEquivalence::Locale(JAPANESE_ROMANIZATION_TAG))
+        );
     }
 
     #[test]
@@ -884,6 +873,169 @@ mod tests {
         assert_eq!(compare_title_spelling("harbor", "hаrbor", Some("en")), None);
         assert_eq!(compare_title_spelling("かく", "がく", Some("ru")), None);
         assert_eq!(compare_title_spelling("маи", "май", Some("ja")), None);
+    }
+
+    #[test]
+    fn ukrainian_collation_data_is_bundled_and_tailored() {
+        // An unknown locale silently falls back to the root order, so a
+        // `Some` key alone proves nothing. The Ukrainian tailoring is what
+        // gives `ґ` and `ї` their own primary weights; root and Russian file
+        // them under `г` and `і`, so under root `ґа` sorts before `гя`.
+        let order = |tag: &'static str, left: &str, right: &str| {
+            let left = title_spelling_key(left, tag).expect("key");
+            let right = title_spelling_key(right, tag).expect("key");
+            left.cmp(&right)
+        };
+        assert_eq!(order("uk", "ґа", "гя"), std::cmp::Ordering::Greater);
+        assert_eq!(order("und", "ґа", "гя"), std::cmp::Ordering::Less);
+        assert_eq!(order("uk", "їа", "ія"), std::cmp::Ordering::Greater);
+        assert_eq!(order("und", "їа", "ія"), std::cmp::Ordering::Less);
+        assert_ne!(
+            title_spelling_key("ґанок їжака", "uk"),
+            title_spelling_key("ґанок їжака", "ru")
+        );
+    }
+
+    #[test]
+    fn ukrainian_names_use_the_ukrainian_profile() {
+        for language in ["uk", "ukr", "uk-UA", "UKR"] {
+            assert_eq!(
+                title_spelling_profiles("Вигадана річка", Some(language)),
+                vec!["uk"],
+                "{language}"
+            );
+        }
+        // Cyrillic without a Cyrillic-language tag still has no profile.
+        assert!(title_spelling_profiles("Вигадана річка", Some("pl")).is_empty());
+
+        for (left, right) in [
+            // Stress accents and case are not spelling differences.
+            ("За\u{301}мок на ґа\u{301}нку", "замок на ґанку"),
+            ("ЇЖАК І ЄНОТ", "їжак і єнот"),
+            // A decomposed `ї` is the same letter.
+            ("і\u{308}жак", "їжак"),
+        ] {
+            let result = compare_title_spelling(
+                &normalize_title_spelling(left),
+                &normalize_title_spelling(right),
+                Some("uk"),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Some(SpellingEquivalence::Exact | SpellingEquivalence::Locale("uk"))
+                ),
+                "{left} / {right}: {result:?}"
+            );
+        }
+        for (left, right) in [
+            ("гава", "ґава"),
+            ("іжак", "їжак"),
+            ("синій", "сіній"),
+            ("есень", "єсень"),
+            ("мій", "міи"),
+        ] {
+            assert_eq!(
+                compare_title_spelling(left, right, Some("uk")),
+                Some(SpellingEquivalence::Different),
+                "{left} / {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn ukrainian_apostrophes_in_the_lookup_form() {
+        // A word-internal apostrophe is written with the ASCII, the
+        // typographic or the modifier-letter mark; all separate words, so
+        // every spelling is one key.
+        for apostrophe in ['\'', '\u{2019}', '\u{02bc}'] {
+            assert_eq!(
+                title_lookup_form(&format!("Тінь м{apostrophe}ятного саду")),
+                "тінь м ятного саду",
+                "{apostrophe:?}"
+            );
+        }
+        assert_eq!(
+            title_search_lenient_form("Тінь м\u{02bc}ятного саду"),
+            title_search_lenient_form("Тінь м'ятного саду")
+        );
+    }
+
+    #[test]
+    fn every_profile_a_name_can_select_is_fingerprinted() {
+        // The fingerprint only covers `COLLATION_PROFILES`; a tag `profile()`
+        // or the phonebook fallback can return outside it would persist keys
+        // no fingerprint change ever invalidates.
+        let languages = [
+            None,
+            Some(""),
+            Some("en"),
+            Some("eng"),
+            Some("en-GB"),
+            Some("de"),
+            Some("deu"),
+            Some("ger"),
+            Some("fr"),
+            Some("fra"),
+            Some("fre"),
+            Some("es"),
+            Some("spa"),
+            Some("it"),
+            Some("ita"),
+            Some("pt"),
+            Some("por"),
+            Some("pob"),
+            Some("pt_BR"),
+            Some("ru"),
+            Some("rus"),
+            Some("uk"),
+            Some("ukr"),
+            Some("uk-UA"),
+            Some("ja"),
+            Some("jpn"),
+            Some("ja-Latn"),
+            Some("x-jat"),
+            Some("ko"),
+            Some("kor"),
+            Some("zh"),
+            Some("zho"),
+            Some("chi"),
+            Some("zh-Hant"),
+            Some("pl"),
+            Some("und"),
+        ];
+        let scripts = [
+            TitleScript::Latin,
+            TitleScript::Cyrillic,
+            TitleScript::Cjk,
+            TitleScript::Other,
+        ];
+        let names = [
+            "Lantern Orchard",
+            "Müller Straße",
+            "Вигадана річка",
+            "ガラスの城",
+            "한글",
+            "Ελληνικά",
+        ];
+        for language in languages {
+            for script in scripts {
+                if let Some(tag) = profile(language, script) {
+                    assert!(
+                        COLLATION_PROFILES.contains(&tag),
+                        "{language:?} {script:?} -> {tag}"
+                    );
+                }
+            }
+            for name in names {
+                for tag in title_spelling_profiles(name, language) {
+                    assert!(
+                        COLLATION_PROFILES.contains(&tag),
+                        "{language:?} {name} -> {tag}"
+                    );
+                }
+            }
+        }
     }
 
     /// The romanization axes a catalog and a release group each choose
@@ -1008,7 +1160,7 @@ mod tests {
         }
     }
 
-    /// Where `romanized_japanese_spelling` does less than its own doc comment
+    /// Where the Japanese romanization fold did less than its own doc comment
     /// says. It claims to fold "long vowels written with a macron, doubled, or
     /// bare (`Gasshō` / `Gasshou` / `Gassho`), the `wo`/`o` particle, and `m`
     /// before a labial (`Shimbun` / `Shinbun`)". Two of those three are

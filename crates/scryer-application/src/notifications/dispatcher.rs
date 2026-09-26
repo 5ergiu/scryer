@@ -4,18 +4,19 @@ use crate::{
     NotificationEpisodePayload, NotificationExternalIdsPayload, NotificationFilePayload,
     NotificationImportPayload, NotificationMediaFilePayload, NotificationMediaUpdatePayload,
     NotificationMediaUpdateTypePayload, NotificationPayload, NotificationReleasePayload,
-    NotificationSeverityPayload, NotificationTitlePayload,
+    NotificationSeverityPayload, NotificationTitleMovePayload, NotificationTitlePayload,
 };
 use scryer_domain::{
     DomainEvent, DomainEventFilter, DomainEventPayload, DomainEventType, DomainExternalIds,
     DownloadFailedEventData, Episode, ExternalId, ImportCompletedEventData,
-    ImportRejectedEventData, MediaFileDeletedEventData, MediaFileDeletedReason,
-    MediaFileRenamedEventData, MediaFileUpgradedEventData, MediaPathUpdate,
-    MediaRequestResolvedEventData, MediaRequestSubmittedEventData, MediaUpdateType,
-    NotificationEventType, NotificationTargetKind, PostProcessingCompletedEventData,
-    PostProcessingResult, ReleaseGrabbedEventData, SubtitleDownloadedEventData,
-    SubtitleSearchFailedEventData, Title, TitleAddedEventData, TitleContextSnapshot,
-    TitleDeletedEventData,
+    ImportRejectedEventData, ListRequestSubmittedEventData, ListSyncFailedEventData,
+    ListTitleAddedEventData, ListTitleLeftEventData, ListUnfollowedEventData,
+    MediaFileDeletedEventData, MediaFileDeletedReason, MediaFileRenamedEventData,
+    MediaFileUpgradedEventData, MediaPathUpdate, MediaRequestResolvedEventData,
+    MediaRequestSubmittedEventData, MediaUpdateType, NotificationEventType, NotificationTargetKind,
+    PostProcessingCompletedEventData, PostProcessingResult, ReleaseGrabbedEventData,
+    SubtitleDownloadedEventData, SubtitleSearchFailedEventData, Title, TitleAddedEventData,
+    TitleContextSnapshot, TitleDeletedEventData, TitleMovedEventData,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +33,7 @@ macro_rules! notification_event_mappings {
             import_space_restored => DomainEventPayload::ImportSpaceRestored(_) => DomainEventPayload::ImportSpaceRestored(data) => DomainEventType::ImportSpaceRestored => NotificationEventType::HealthRestored => build_import_space_notification(data),
             title_added => DomainEventPayload::TitleAdded(_) => DomainEventPayload::TitleAdded(data) => DomainEventType::TitleAdded => NotificationEventType::TitleAdded => build_title_added_notification(data),
             title_deleted => DomainEventPayload::TitleDeleted(_) => DomainEventPayload::TitleDeleted(data) => DomainEventType::TitleDeleted => NotificationEventType::TitleDeleted => build_title_deleted_notification(data),
+            title_moved => DomainEventPayload::TitleMoved(_) => DomainEventPayload::TitleMoved(data) => DomainEventType::TitleMoved => NotificationEventType::TitleMoved => build_title_moved_notification(data),
             release_grabbed => DomainEventPayload::ReleaseGrabbed(_) => DomainEventPayload::ReleaseGrabbed(data) => DomainEventType::ReleaseGrabbed => NotificationEventType::Grab => build_release_grabbed_notification(data),
             download_failed => DomainEventPayload::DownloadFailed(_) => DomainEventPayload::DownloadFailed(data) => DomainEventType::DownloadFailed => NotificationEventType::Download => build_download_failed_notification(data),
             import_completed => DomainEventPayload::ImportCompleted(_) => DomainEventPayload::ImportCompleted(data) => DomainEventType::ImportCompleted => NotificationEventType::ImportComplete => build_import_completed_notification(data),
@@ -47,6 +49,12 @@ macro_rules! notification_event_mappings {
             media_request_approved => DomainEventPayload::MediaRequestApproved(_) => DomainEventPayload::MediaRequestApproved(data) => DomainEventType::MediaRequestApproved => NotificationEventType::MediaRequestApproved => build_media_request_resolved_notification(data, NotificationEventType::MediaRequestApproved),
             media_request_rejected => DomainEventPayload::MediaRequestRejected(_) => DomainEventPayload::MediaRequestRejected(data) => DomainEventType::MediaRequestRejected => NotificationEventType::MediaRequestRejected => build_media_request_resolved_notification(data, NotificationEventType::MediaRequestRejected),
             media_request_canceled => DomainEventPayload::MediaRequestCanceled(_) => DomainEventPayload::MediaRequestCanceled(data) => DomainEventType::MediaRequestCanceled => NotificationEventType::MediaRequestCanceled => build_media_request_resolved_notification(data, NotificationEventType::MediaRequestCanceled),
+            list_title_added => DomainEventPayload::ListTitleAdded(_) => DomainEventPayload::ListTitleAdded(data) => DomainEventType::ListTitleAdded => NotificationEventType::ListTitleAdded => build_list_title_added_notification(data),
+            list_item_held => DomainEventPayload::ListRequestSubmitted(ListRequestSubmittedEventData { held: true, .. }) => DomainEventPayload::ListRequestSubmitted(data @ ListRequestSubmittedEventData { held: true, .. }) => DomainEventType::ListRequestSubmitted => NotificationEventType::ListItemHeld => build_list_request_submitted_notification(data, NotificationEventType::ListItemHeld),
+            list_request_submitted => DomainEventPayload::ListRequestSubmitted(ListRequestSubmittedEventData { held: false, .. }) => DomainEventPayload::ListRequestSubmitted(data @ ListRequestSubmittedEventData { held: false, .. }) => DomainEventType::ListRequestSubmitted => NotificationEventType::ListRequestSubmitted => build_list_request_submitted_notification(data, NotificationEventType::ListRequestSubmitted),
+            list_title_left => DomainEventPayload::ListTitleLeft(_) => DomainEventPayload::ListTitleLeft(data) => DomainEventType::ListTitleLeft => NotificationEventType::ListTitleLeft => build_list_title_left_notification(data),
+            list_sync_failed => DomainEventPayload::ListSyncFailed(_) => DomainEventPayload::ListSyncFailed(data) => DomainEventType::ListSyncFailed => NotificationEventType::ListSyncFailed => build_list_sync_failed_notification(data),
+            list_unfollowed => DomainEventPayload::ListUnfollowed(_) => DomainEventPayload::ListUnfollowed(data) => DomainEventType::ListUnfollowed => NotificationEventType::ListUnfollowed => build_list_unfollowed_notification(data),
         }
     };
 }
@@ -567,16 +575,73 @@ fn build_title_added_notification(data: &TitleAddedEventData) -> BuiltNotificati
 }
 
 fn build_title_deleted_notification(data: &TitleDeletedEventData) -> BuiltNotification {
+    // The removed files ride the same `file.media_updates` a single-file
+    // delete uses, so media-server channels refresh the paths that went away.
+    let deleted = data
+        .deleted_paths
+        .iter()
+        .map(|path| MediaPathUpdate {
+            path: path.clone(),
+            update_type: MediaUpdateType::Deleted,
+        })
+        .collect::<Vec<_>>();
+    let message = if deleted.is_empty() {
+        format!("Deleted '{}' from Scryer.", data.title.title_name)
+    } else {
+        format!(
+            "Deleted '{}' from Scryer and {} media file{} from disk.",
+            data.title.title_name,
+            deleted.len(),
+            if deleted.len() == 1 { "" } else { "s" }
+        )
+    };
     BuiltNotification {
         payload: base_notification_payload(
             NotificationEventType::TitleDeleted,
             format!("Deleted: {}", data.title.title_name),
-            format!("Deleted '{}' from Scryer.", data.title.title_name),
+            message,
             Some(&data.title),
             &[],
-            &[],
+            &deleted,
         ),
     }
+}
+
+fn build_title_moved_notification(data: &TitleMovedEventData) -> BuiltNotification {
+    let destination = data
+        .destination_path
+        .as_deref()
+        .unwrap_or(data.destination_library_name.as_str());
+    let message = if data.source_library_id == data.destination_library_id {
+        format!("Moved '{}' to {destination}.", data.title.title_name)
+    } else {
+        format!(
+            "Moved '{}' from {} to {} ({destination}).",
+            data.title.title_name, data.source_library_name, data.destination_library_name
+        )
+    };
+    let mut payload = base_notification_payload(
+        NotificationEventType::TitleMoved,
+        format!("Moved: {}", data.title.title_name),
+        message,
+        Some(&data.title),
+        &[],
+        &data.media_updates,
+    );
+    payload.title_move = Some(NotificationTitleMovePayload {
+        operation_id: Some(data.operation_id.clone()),
+        operation_type: Some(data.operation_type.clone()),
+        mode: Some(data.mode.clone()),
+        source_library_id: Some(data.source_library_id.clone()),
+        source_library_name: Some(data.source_library_name.clone()),
+        destination_library_id: Some(data.destination_library_id.clone()),
+        destination_library_name: Some(data.destination_library_name.clone()),
+        source_path: data.source_path.clone(),
+        destination_path: data.destination_path.clone(),
+        completed_with_warnings: data.completed_with_warnings,
+        detail: data.detail.clone(),
+    });
+    BuiltNotification { payload }
 }
 
 fn build_release_grabbed_notification(data: &ReleaseGrabbedEventData) -> BuiltNotification {
@@ -937,6 +1002,101 @@ fn build_media_request_resolved_notification(
     BuiltNotification { payload }
 }
 
+fn build_list_title_added_notification(data: &ListTitleAddedEventData) -> BuiltNotification {
+    BuiltNotification {
+        payload: base_notification_payload(
+            NotificationEventType::ListTitleAdded,
+            format!("Added from a list: {}", data.title.title_name),
+            format!(
+                "The list '{}' added '{}'.",
+                data.list.list_name, data.title.title_name
+            ),
+            Some(&data.title),
+            &[],
+            &[],
+        ),
+    }
+}
+
+fn build_list_request_submitted_notification(
+    data: &ListRequestSubmittedEventData,
+    event_type: NotificationEventType,
+) -> BuiltNotification {
+    let title = TitleContextSnapshot {
+        title_name: data.title_name.clone(),
+        facet: data.facet.clone(),
+        external_ids: DomainExternalIds::default(),
+        poster_url: None,
+        year: data.year,
+    };
+    let summary_title = if data.held {
+        format!("List item waiting for review: {}", data.title_name)
+    } else {
+        format!("Requested from a list: {}", data.title_name)
+    };
+    let mut payload = base_notification_payload(
+        event_type,
+        summary_title,
+        crate::events::event_views::list_request_submitted_message(data),
+        Some(&title),
+        &[],
+        &[],
+    );
+    payload.media_request = Some(NotificationMediaRequestPayload {
+        request_id: Some(data.request_id.clone()),
+        library_id: Some(data.library_id.clone()),
+        status: Some("pending".to_string()),
+        facet: Some(data.facet.as_str().to_string()),
+        ..Default::default()
+    });
+    BuiltNotification { payload }
+}
+
+fn build_list_title_left_notification(data: &ListTitleLeftEventData) -> BuiltNotification {
+    BuiltNotification {
+        payload: base_notification_payload(
+            NotificationEventType::ListTitleLeft,
+            format!("Left a list: {}", data.title.title_name),
+            crate::events::event_views::list_title_left_message(data),
+            Some(&data.title),
+            &[],
+            &[],
+        ),
+    }
+}
+
+fn build_list_sync_failed_notification(data: &ListSyncFailedEventData) -> BuiltNotification {
+    BuiltNotification {
+        payload: base_notification_payload(
+            NotificationEventType::ListSyncFailed,
+            format!("List sync failed: {}", data.list.list_name),
+            format!(
+                "The list '{}' could not sync: {}",
+                data.list.list_name, data.reason
+            ),
+            None,
+            &[],
+            &[],
+        ),
+    }
+}
+
+fn build_list_unfollowed_notification(data: &ListUnfollowedEventData) -> BuiltNotification {
+    BuiltNotification {
+        payload: base_notification_payload(
+            NotificationEventType::ListUnfollowed,
+            format!("List unfollowed: {}", data.list.list_name),
+            format!(
+                "Stopped following the list '{}'. Titles it added stay in the library.",
+                data.list.list_name
+            ),
+            None,
+            &[],
+            &[],
+        ),
+    }
+}
+
 fn base_notification_payload(
     event_type: NotificationEventType,
     summary_title: String,
@@ -972,6 +1132,7 @@ fn base_notification_payload(
         application_update: None,
         manual_interaction: None,
         media_request: None,
+        title_move: None,
     }
 }
 
@@ -1138,7 +1299,9 @@ fn notification_severity(event_type: NotificationEventType) -> NotificationSever
         NotificationEventType::Download
         | NotificationEventType::ImportRejected
         | NotificationEventType::SubtitleSearchFailed => NotificationSeverityPayload::Error,
-        NotificationEventType::HealthIssue => NotificationSeverityPayload::Warning,
+        NotificationEventType::HealthIssue | NotificationEventType::ListSyncFailed => {
+            NotificationSeverityPayload::Warning
+        }
         _ => NotificationSeverityPayload::Info,
     }
 }
@@ -1230,20 +1393,44 @@ async fn resolve_notification_media_files(
         }
     }
 
-    for path in notification_media_update_paths(file_summary) {
-        match app
-            .services
-            .library
-            .media_files
-            .get_media_file_by_path(&path)
-            .await
-        {
-            Ok(Some(media_file)) => {
+    let paths = notification_media_update_paths(file_summary);
+    if paths.is_empty() {
+        return media_files;
+    }
+    // One batch read per notification: a title delete or move can carry
+    // hundreds of paths. Results are keyed by the requested path and walked in
+    // entry order, so each entry resolves exactly as a single lookup would.
+    let tracked = match app
+        .services
+        .library
+        .media_files
+        .list_media_files_by_paths(&paths)
+        .await
+    {
+        Ok(found) => {
+            let mut by_path = BTreeMap::new();
+            for (requested, media_file) in found {
+                by_path.entry(requested).or_insert(media_file);
+            }
+            by_path
+        }
+        Err(error) => {
+            warn!(
+                paths = paths.len(),
+                error = %error,
+                "failed to load notification media files by path"
+            );
+            return media_files;
+        }
+    };
+    for path in paths {
+        match tracked.get(&path) {
+            Some(media_file) => {
                 if seen_paths.insert(media_file.file_path.clone()) {
-                    media_files.push(media_file_payload_from_record(&media_file));
+                    media_files.push(media_file_payload_from_record(media_file));
                 }
             }
-            Ok(None) => {
+            None => {
                 if seen_paths.insert(path.clone()) {
                     media_files.push(NotificationMediaFilePayload {
                         path,
@@ -1251,11 +1438,6 @@ async fn resolve_notification_media_files(
                     });
                 }
             }
-            Err(error) => warn!(
-                path,
-                error = %error,
-                "failed to load notification media file by path"
-            ),
         }
     }
 
@@ -1704,6 +1886,7 @@ fn notification_scope_facet(event: &DomainEvent) -> Option<&str> {
         .map(|facet| facet.as_str())
         .or_else(|| match &event.payload {
             DomainEventPayload::MediaRequestSubmitted(data) => Some(data.facet.as_str()),
+            DomainEventPayload::ListRequestSubmitted(data) => Some(data.facet.as_str()),
             DomainEventPayload::MediaRequestApproved(data)
             | DomainEventPayload::MediaRequestRejected(data)
             | DomainEventPayload::MediaRequestCanceled(data) => Some(data.facet.as_str()),
@@ -1747,7 +1930,7 @@ mod tests {
         MediaFileDeletedEventData, MediaFileRenamedEventData, MediaFileUpgradedEventData,
         MediaUpdateType, PostProcessingCompletedEventData, ReleaseGrabbedEventData,
         SubtitleDownloadedEventData, SubtitleSearchFailedEventData, TitleAddedEventData,
-        TitleDeletedEventData,
+        TitleDeletedEventData, TitleMovedEventData,
     };
 
     fn title_context(name: &str, facet: MediaFacet) -> TitleContextSnapshot {
@@ -1837,6 +2020,9 @@ mod tests {
                 stream: scryer_domain::DomainEventStream::Global,
                 payload: DomainEventPayload::TitleDeleted(TitleDeletedEventData {
                     title: title_context("Deleted Movie", MediaFacet::Movie),
+                    deleted_paths: vec![
+                        "/library/Deleted Movie (2024)/Deleted.Movie.2024.mkv".to_string(),
+                    ],
                 }),
             },
             DomainEvent {
@@ -2211,7 +2397,268 @@ mod tests {
                     approved_quality_profile_name: None,
                 }),
             },
+            DomainEvent {
+                sequence: 17,
+                event_id: "evt-title-moved".to_string(),
+                occurred_at: Utc::now(),
+                actor_kind: DomainEventActorKind::System,
+                actor_user_id: None,
+                actor_display_name: "System".to_string(),
+                title_id: Some("title-1".to_string()),
+                facet: Some(MediaFacet::Movie),
+                correlation_id: Some("operation-1".to_string()),
+                causation_id: None,
+                schema_version: 1,
+                stream: scryer_domain::DomainEventStream::Global,
+                payload: DomainEventPayload::TitleMoved(title_moved_sample()),
+            },
+            list_sample_event(
+                18,
+                DomainEventPayload::ListTitleAdded(scryer_domain::ListTitleAddedEventData {
+                    list: list_sample_subject(),
+                    title: title_context("Listed Movie", MediaFacet::Movie),
+                    library_id: "library-movies".to_string(),
+                    searched: true,
+                }),
+            ),
+            list_sample_event(19, list_sample_request(false)),
+            list_sample_event(20, list_sample_request(true)),
+            list_sample_event(
+                21,
+                DomainEventPayload::ListTitleLeft(scryer_domain::ListTitleLeftEventData {
+                    list: list_sample_subject(),
+                    title: title_context("Listed Movie", MediaFacet::Movie),
+                    action: scryer_domain::ListOnLeave::Unmonitor,
+                }),
+            ),
+            list_sample_event(
+                22,
+                DomainEventPayload::ListSyncFailed(scryer_domain::ListSyncFailedEventData {
+                    list: list_sample_subject(),
+                    reason: "The list no longer exists or is private.".to_string(),
+                    failure_class: "not_found".to_string(),
+                }),
+            ),
+            list_sample_event(
+                23,
+                DomainEventPayload::ListUnfollowed(scryer_domain::ListUnfollowedEventData {
+                    list: list_sample_subject(),
+                }),
+            ),
         ]
+    }
+
+    fn title_moved_sample() -> TitleMovedEventData {
+        TitleMovedEventData {
+            title: title_context("Moved Movie", MediaFacet::Movie),
+            operation_id: "operation-1".to_string(),
+            operation_type: "cross_library_transfer".to_string(),
+            mode: "move_with_scryer".to_string(),
+            source_title_id: "title-1".to_string(),
+            source_title_name: "Moved Movie".to_string(),
+            source_library_id: "library-a".to_string(),
+            source_library_name: "Library A".to_string(),
+            destination_library_id: "library-b".to_string(),
+            destination_library_name: "Library B".to_string(),
+            source_root_id: "root-a".to_string(),
+            destination_root_id: "root-b".to_string(),
+            source_path: Some("/root-a/Moved Movie (2024)".to_string()),
+            destination_path: Some("/root-b/Moved Movie (2024)".to_string()),
+            completed_with_warnings: false,
+            detail: None,
+            media_updates: vec![
+                MediaPathUpdate {
+                    path: "/root-a/Moved Movie (2024)/Moved.Movie.2024.mkv".to_string(),
+                    update_type: MediaUpdateType::Deleted,
+                },
+                MediaPathUpdate {
+                    path: "/root-b/Moved Movie (2024)/Moved.Movie.2024.mkv".to_string(),
+                    update_type: MediaUpdateType::Created,
+                },
+            ],
+        }
+    }
+
+    fn list_sample_subject() -> scryer_domain::ListEventSubject {
+        scryer_domain::ListEventSubject {
+            subscription_id: "list-1".to_string(),
+            list_name: "Fixture Picks".to_string(),
+            provider: "fixture-lists".to_string(),
+        }
+    }
+
+    fn list_sample_request(held: bool) -> DomainEventPayload {
+        DomainEventPayload::ListRequestSubmitted(ListRequestSubmittedEventData {
+            list: list_sample_subject(),
+            request_id: format!("request-list-{held}"),
+            library_id: "library-movies".to_string(),
+            facet: MediaFacet::Movie,
+            title_name: "Listed Movie".to_string(),
+            year: Some(2031),
+            held,
+        })
+    }
+
+    fn list_sample_event(sequence: i64, payload: DomainEventPayload) -> DomainEvent {
+        DomainEvent {
+            sequence,
+            event_id: format!("evt-list-{sequence}"),
+            occurred_at: Utc::now(),
+            actor_kind: DomainEventActorKind::System,
+            actor_user_id: None,
+            actor_display_name: "System".to_string(),
+            title_id: None,
+            facet: None,
+            correlation_id: None,
+            causation_id: None,
+            schema_version: 1,
+            stream: scryer_domain::DomainEventStream::Global,
+            payload,
+        }
+    }
+
+    #[test]
+    fn title_moved_maps_to_its_notification_with_paths() {
+        let data = title_moved_sample();
+        let payload = DomainEventPayload::TitleMoved(data.clone());
+        assert_eq!(
+            notification_event_type(&payload),
+            Some(NotificationEventType::TitleMoved)
+        );
+        assert_eq!(NotificationEventType::TitleMoved.as_str(), "title_moved");
+        assert!(supported_notification_event_types().contains(&NotificationEventType::TitleMoved));
+
+        let built = build_title_moved_notification(&data).payload;
+        assert_eq!(built.event_type, NotificationEventType::TitleMoved);
+        let title_move = built.title_move.expect("move context");
+        assert_eq!(
+            title_move.operation_type.as_deref(),
+            Some("cross_library_transfer")
+        );
+        assert_eq!(title_move.mode.as_deref(), Some("move_with_scryer"));
+        assert_eq!(title_move.source_library_name.as_deref(), Some("Library A"));
+        assert_eq!(
+            title_move.destination_library_name.as_deref(),
+            Some("Library B")
+        );
+        assert_eq!(
+            title_move.source_path.as_deref(),
+            Some("/root-a/Moved Movie (2024)")
+        );
+        assert_eq!(
+            title_move.destination_path.as_deref(),
+            Some("/root-b/Moved Movie (2024)")
+        );
+        let file = built.file.expect("moved files");
+        assert_eq!(
+            file.primary_path.as_deref(),
+            Some("/root-b/Moved Movie (2024)/Moved.Movie.2024.mkv")
+        );
+        assert_eq!(
+            file.media_updates
+                .iter()
+                .map(|update| (update.path.as_str(), update.update_type))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "/root-a/Moved Movie (2024)/Moved.Movie.2024.mkv",
+                    NotificationMediaUpdateTypePayload::Deleted
+                ),
+                (
+                    "/root-b/Moved Movie (2024)/Moved.Movie.2024.mkv",
+                    NotificationMediaUpdateTypePayload::Created
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn title_deleted_notification_carries_deleted_paths() {
+        let data = TitleDeletedEventData {
+            title: title_context("Deleted Movie", MediaFacet::Movie),
+            deleted_paths: vec![
+                "/library/Deleted Movie (2024)/a.mkv".to_string(),
+                "/library/Deleted Movie (2024)/b.mkv".to_string(),
+            ],
+        };
+        let built = build_title_deleted_notification(&data).payload;
+        let file = built.file.expect("deleted files");
+        assert_eq!(
+            file.media_updates
+                .iter()
+                .map(|update| (update.path.clone(), update.update_type))
+                .collect::<Vec<_>>(),
+            data.deleted_paths
+                .iter()
+                .map(|path| (path.clone(), NotificationMediaUpdateTypePayload::Deleted))
+                .collect::<Vec<_>>()
+        );
+        assert!(built.summary_message.contains("2 media files"));
+
+        let catalog_only = TitleDeletedEventData {
+            deleted_paths: Vec::new(),
+            ..data
+        };
+        let built = build_title_deleted_notification(&catalog_only).payload;
+        assert!(built.file.is_none());
+        assert_eq!(
+            built.summary_message,
+            "Deleted 'Deleted Movie' from Scryer."
+        );
+    }
+
+    #[test]
+    fn list_events_build_plain_words_notifications() {
+        let events = notification_sample_events();
+        let built = events[17..23]
+            .iter()
+            .map(|event| build_notification(event).expect("list event builds"))
+            .map(|built| {
+                (
+                    built.payload.event_type,
+                    built.payload.summary_message.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            built,
+            vec![
+                (
+                    NotificationEventType::ListTitleAdded,
+                    "The list 'Fixture Picks' added 'Listed Movie'.".to_string()
+                ),
+                (
+                    NotificationEventType::ListRequestSubmitted,
+                    "The list 'Fixture Picks' requested 'Listed Movie'.".to_string()
+                ),
+                (
+                    NotificationEventType::ListItemHeld,
+                    "The list 'Fixture Picks' requested 'Listed Movie'; the request waits for review."
+                        .to_string()
+                ),
+                (
+                    NotificationEventType::ListTitleLeft,
+                    "'Listed Movie' left the list 'Fixture Picks'; it is no longer monitored."
+                        .to_string()
+                ),
+                (
+                    NotificationEventType::ListSyncFailed,
+                    "The list 'Fixture Picks' could not sync: The list no longer exists or is private."
+                        .to_string()
+                ),
+                (
+                    NotificationEventType::ListUnfollowed,
+                    "Stopped following the list 'Fixture Picks'. Titles it added stay in the library."
+                        .to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            notification_severity(NotificationEventType::ListSyncFailed),
+            NotificationSeverityPayload::Warning
+        );
+        assert_eq!(notification_scope_facet(&events[18]), Some("movie"));
     }
 
     #[test]

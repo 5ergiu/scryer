@@ -181,11 +181,24 @@ pub struct CutoffUnmetPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecycleBinSettings {
     pub enabled: bool,
+    /// Custom recycle-bin directory; `None` means `.scryer-recycle` under
+    /// each library root.
+    pub path: Option<String>,
+    pub retention_days: u32,
+    /// Directories deleted files are moved to, one per distinct bin.
+    pub effective_paths: Vec<String>,
+    /// Why the configured bin cannot be purged, when it cannot.
+    pub validation_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A partial update: `None` fields keep their stored value.
+#[derive(Default)]
 pub struct UpdateRecycleBinSettings {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
+    /// `Some(None)` or a blank path restores the per-root default.
+    pub path: Option<Option<String>>,
+    pub retention_days: Option<i64>,
 }
 
 /// How thoroughly a download-client completed-download copy is proven before
@@ -4563,6 +4576,7 @@ mod indexer_search_identity_tests {
             api_key_encrypted: Some("secret-a".into()),
             rate_limit_seconds: None,
             rate_limit_burst: None,
+            max_queries_per_minute: None,
             disabled_until: None,
             is_enabled: true,
             enable_interactive_search: true,

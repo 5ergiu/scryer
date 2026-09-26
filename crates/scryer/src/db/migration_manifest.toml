@@ -2598,18 +2598,52 @@ scope = "all"
 
 [[migration]]
 version = 258
-description = "release listing snapshot on submissions, pending releases and media files"
+description = "indexer query budget"
 checksum_algo = "blake3"
 
 [[migration.steps]]
 kind = "sql"
-file = "migrations/0258_release_listing_snapshot.sql"
+file = "migrations/0258_indexer_query_budget.sql"
 engine = "sqlite"
 scope = "all"
 
 [[migration.steps]]
 kind = "sql"
-file = "postgres/migrations/0258_release_listing_snapshot.sql"
+file = "postgres/migrations/0258_indexer_query_budget.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 259
+description = "list subscriptions, memberships, exclusions, member accounts and policies, request origin"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0259_list_subscriptions.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0259_list_subscriptions.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 260
+description = "release listing snapshot on submissions, pending releases and media files"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0260_release_listing_snapshot.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0260_release_listing_snapshot.sql"
 engine = "postgres"
 scope = "all"
 

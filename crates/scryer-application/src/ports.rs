@@ -1002,7 +1002,10 @@ pub struct TitleNameBucketQuery<'a> {
     /// locale-equal spelling can differ from the observed name by any number
     /// of characters, so they are fetched by key.
     pub match_term: &'a str,
-    pub romanization_key: Option<&'a str>,
+    /// The observed name's key under every registered romanization rule set
+    /// that reads its script; a release name carries no language tag to pick
+    /// one. Empty when none applies.
+    pub romanization_keys: &'a [String],
     pub collation_keys: &'a [(&'static str, Vec<u8>)],
     /// Guard on how many index hits are hydrated, so a pathological bucket
     /// cannot turn one release into a catalog-sized read. The equality lanes
@@ -2522,6 +2525,7 @@ pub struct NewMediaRequest {
     pub metadata_snapshot_json: String,
     pub external_ids: Vec<ExternalId>,
     pub created_by_user_id: String,
+    pub origin: scryer_domain::MediaRequestOrigin,
 }
 
 #[derive(Clone, Debug)]
@@ -5581,6 +5585,17 @@ pub trait DownloadSubmissionRepository: Send + Sync {
     ) -> AppResult<Option<String>> {
         self.get_identity_tracked_state(identity, source_identity)
             .await
+    }
+
+    /// Remove every durable tracked-state row recorded against these
+    /// canonical downloads, returning how many rows went. Retiring a deleted
+    /// title's downloads uses this so a later observation of the same client
+    /// item cannot revive the dead download's terminal state.
+    async fn delete_identity_tracked_states_for_downloads(
+        &self,
+        _download_ids: &[DownloadId],
+    ) -> AppResult<u32> {
+        Ok(0)
     }
 
     async fn get_identity_tracked_state_reason(
@@ -9392,6 +9407,22 @@ pub struct NotificationManualInteractionPayload {
     pub link: Option<String>,
 }
 
+/// Where a moved title came from and went to; carried by `title_moved`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationTitleMovePayload {
+    pub operation_id: Option<String>,
+    pub operation_type: Option<String>,
+    pub mode: Option<String>,
+    pub source_library_id: Option<String>,
+    pub source_library_name: Option<String>,
+    pub destination_library_id: Option<String>,
+    pub destination_library_name: Option<String>,
+    pub source_path: Option<String>,
+    pub destination_path: Option<String>,
+    pub completed_with_warnings: bool,
+    pub detail: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotificationMediaRequestPayload {
     pub request_id: Option<String>,
@@ -9431,6 +9462,7 @@ pub struct NotificationPayload {
     pub application_update: Option<NotificationApplicationUpdatePayload>,
     pub manual_interaction: Option<NotificationManualInteractionPayload>,
     pub media_request: Option<NotificationMediaRequestPayload>,
+    pub title_move: Option<NotificationTitleMovePayload>,
 }
 
 #[async_trait]

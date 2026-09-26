@@ -74,6 +74,8 @@ mod library_scan_titles;
 #[path = "library/scan/unmatched.rs"]
 mod library_scan_unmatched;
 pub mod lifecycle_claims;
+pub mod lists;
+pub use lists::{ListPluginProvider, ListProviderClient, NullListPluginProvider};
 pub mod location;
 pub mod maintenance_rules;
 mod media;
@@ -391,8 +393,8 @@ pub use media_requests::snapshot::{
 };
 pub use media_requests::{
     ApproveMediaRequestOutcome, CLAIM_RELEASE_REQUEST_CANCELED, CLAIM_RELEASE_REQUEST_REJECTED,
-    ListMediaRequestsInput, SubmitMediaRequestInput, SubmitMediaRequestOutcome,
-    UpdateMediaRequestInput,
+    ListMediaRequestsInput, MediaRequestAdmission, SubmitMediaRequestInput,
+    SubmitMediaRequestOutcome, UpdateMediaRequestInput,
 };
 pub use media_servers::{
     EmbyConnectionMode, EmbyLocalSetupMethod, MediaServerConnectionDraft,
@@ -502,7 +504,7 @@ pub use library_scan::{
     LibraryScanSummary, LibraryScanner, MetadataGateway, MetadataSearchItem, MetadataSearchQuery,
     MovieMetadata, MovieTitleBulkResult, MovieTitleRef, MultiMetadataSearchResult,
     RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls, SeriesMetadata, TitleArtworkUrls,
-    TitleRecommendationsInput, TitleResolution,
+    TitleExternalRef, TitleRecommendationsInput, TitleResolution,
 };
 pub use library_scan_progress::{
     LibraryScanMode, LibraryScanPhaseProgress, LibraryScanSession, LibraryScanStatus,
@@ -598,15 +600,15 @@ pub use ports::{
     NotificationManualInteractionPayload, NotificationMediaFilePayload,
     NotificationMediaUpdatePayload, NotificationMediaUpdateTypePayload, NotificationPayload,
     NotificationPluginProvider, NotificationReleasePayload, NotificationSeverityPayload,
-    NotificationSubscriptionRepository, NotificationTitlePayload, OAuthRepository,
-    PendingReleaseRepository, PlexServerDiscovery, PlexServerUser, PluginDescriptorLoader,
-    PluginHttpTrustConfigRuntime, PluginInstallationRepository, PostProcessingScriptRepository,
-    PrefetchedCompletedDownloads, ProxyConfigRepository, QualityProfileRepository,
-    ReleaseAttemptRepository, RequestRuleDecisionRepository, RequestRuleSetRepository,
-    ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy, RuleSetRepository,
-    RuntimePluginLoad, ScopeCoverageRow, ScopeIndexerCoverageRepository, SeedingProfileRepository,
-    SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
-    SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
+    NotificationSubscriptionRepository, NotificationTitleMovePayload, NotificationTitlePayload,
+    OAuthRepository, PendingReleaseRepository, PlexServerDiscovery, PlexServerUser,
+    PluginDescriptorLoader, PluginHttpTrustConfigRuntime, PluginInstallationRepository,
+    PostProcessingScriptRepository, PrefetchedCompletedDownloads, ProxyConfigRepository,
+    QualityProfileRepository, ReleaseAttemptRepository, RequestRuleDecisionRepository,
+    RequestRuleSetRepository, ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy,
+    RuleSetRepository, RuntimePluginLoad, ScopeCoverageRow, ScopeIndexerCoverageRepository,
+    SeedingProfileRepository, SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage,
+    StagedNzbStore, SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
     SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
     TitleImageRepository, TitleListProjection, TitleNameBucketQuery, TitleNameCandidate,
     TitleRepository, TotpRepository, UserExternalAccountRepository, UserRepository,

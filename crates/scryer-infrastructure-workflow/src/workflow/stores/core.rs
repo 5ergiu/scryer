@@ -1811,7 +1811,7 @@ pub fn persisted_episode_set_ids(scope: &SubmissionScope) -> &[String] {
     }
 }
 
-const DOWNLOAD_SUBMISSION_BATCH_LOOKUP_CHUNK_SIZE: usize = 400;
+pub(crate) const DOWNLOAD_SUBMISSION_BATCH_LOOKUP_CHUNK_SIZE: usize = 400;
 
 pub fn chunk_download_submission_client_items(
     client_items: &[ClientJobLocator],

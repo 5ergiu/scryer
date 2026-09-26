@@ -635,6 +635,26 @@ mod tests {
                 EngineScope::Postgres,
                 "postgres/migrations/0257_import_space_attempts_and_member_age.sql",
             ),
+            (
+                258,
+                EngineScope::Sqlite,
+                "migrations/0258_indexer_query_budget.sql",
+            ),
+            (
+                258,
+                EngineScope::Postgres,
+                "postgres/migrations/0258_indexer_query_budget.sql",
+            ),
+            (
+                259,
+                EngineScope::Sqlite,
+                "migrations/0259_list_subscriptions.sql",
+            ),
+            (
+                259,
+                EngineScope::Postgres,
+                "postgres/migrations/0259_list_subscriptions.sql",
+            ),
         ] {
             let migration = bundle
                 .catalog
@@ -655,16 +675,16 @@ mod tests {
         let bundle = compile_source_bundle(&source_db_root()).expect("compile migration catalog");
         let migration = bundle
             .catalog
-            .find_migration(258)
+            .find_migration(260)
             .expect("release listing snapshot migration registered");
         for (expected_engine, expected_file) in [
             (
                 EngineScope::Sqlite,
-                "migrations/0258_release_listing_snapshot.sql",
+                "migrations/0260_release_listing_snapshot.sql",
             ),
             (
                 EngineScope::Postgres,
-                "postgres/migrations/0258_release_listing_snapshot.sql",
+                "postgres/migrations/0260_release_listing_snapshot.sql",
             ),
         ] {
             assert!(
