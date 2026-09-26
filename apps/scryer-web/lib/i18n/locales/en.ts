@@ -3262,6 +3262,7 @@ const en: LocaleDictionary = {
   "settings.notificationEvent.fileDeleted": "File Deleted",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "File Deleted For Upgrade",
+  "settings.notificationEvent.fileRestored": "File Restored",
   "settings.notificationEvent.postProcessingCompleted":
     "Post-Processing Completed",
   "settings.notificationEvent.subtitleDownloaded": "Subtitle Downloaded",
@@ -3670,6 +3671,7 @@ const en: LocaleDictionary = {
   "history.fileUpgraded": "Upgraded",
   "history.fileRecycled": "Recycled",
   "history.fileDeleted": "Deleted",
+  "history.fileRestored": "Restored",
   "history.fileRenamed": "Renamed",
   "history.titleMoved": "Moved",
   "history.rematched": "Rematched",

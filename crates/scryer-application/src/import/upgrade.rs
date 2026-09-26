@@ -927,6 +927,9 @@ async fn dispose_same_path_guard_after_confirmed_db_swap(
             size_bytes: manifest.old_size_bytes,
             title_id: &manifest.title_id,
             media_root: Some(&manifest.media_root),
+            // The same-path guard manifest does not record the old row, which
+            // is already gone by the time the guard disposes of the backup.
+            media_row: None,
         };
         let recycle_result = recycle_bin::recycle_replaced_media_file(
             &recycle_config,
@@ -1314,6 +1317,9 @@ async fn prepare_old_file_disposition_for_upgrade(
             size_bytes: existing_file.size_bytes as u64,
             title_id: &title.id,
             media_root,
+            media_row: Some(recycle_bin::RecycledMediaRowSnapshot::from_media_file(
+                existing_file,
+            )),
         };
         return recycle_bin::recycle_replaced_media_file(
             recycle_config,
@@ -1659,6 +1665,9 @@ async fn dispose_old_file_after_verified_upgrade(
         size_bytes: existing_file.size_bytes as u64,
         title_id: &title.id,
         media_root,
+        media_row: Some(recycle_bin::RecycledMediaRowSnapshot::from_media_file(
+            existing_file,
+        )),
     };
     let recycle_result = recycle_bin::recycle_replaced_media_file(
         recycle_config,

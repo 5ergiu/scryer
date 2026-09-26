@@ -943,6 +943,11 @@ async fn cleanup_superseded_episode_incumbents(
                 size_bytes: incumbent.media_file.size_bytes as u64,
                 title_id: &title.id,
                 media_root: Some(old_file_recycle_context.media_root.as_str()),
+                media_row: Some(
+                    crate::recycle_bin::RecycledMediaRowSnapshot::from_media_file(
+                        &incumbent.media_file,
+                    ),
+                ),
             };
 
             match crate::recycle_bin::recycle_replaced_media_file(

@@ -11,6 +11,7 @@ import {
   Share2,
   SkipForward,
   Trash2,
+  Undo2,
   XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -27,6 +28,7 @@ export const TITLE_HISTORY_FILTERS = [
   "file_upgraded",
   "file_recycled",
   "file_deleted",
+  "file_restored",
   "file_renamed",
   "title_moved",
   "rematched",
@@ -111,6 +113,12 @@ const eventMeta: Record<string, EventMeta> = {
     iconClassName: "text-[var(--scry-danger-text-soft)]",
     labelKey: "history.fileDeleted",
     badgeClassName: "border-[var(--scry-danger-border)] bg-[var(--scry-danger-bg)] text-[var(--scry-danger-text)]",
+  },
+  file_restored: {
+    icon: Undo2,
+    iconClassName: "text-[var(--scry-success-text-soft)]",
+    labelKey: "history.fileRestored",
+    badgeClassName: "border-[var(--scry-success-border)] bg-[var(--scry-success-bg)] text-[var(--scry-success-text)]",
   },
   file_renamed: {
     icon: FileEdit,

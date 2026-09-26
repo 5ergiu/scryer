@@ -7242,6 +7242,19 @@ pub trait MediaFileRepository: Send + Sync {
         Ok(false)
     }
 
+    /// Fill the acquisition-time columns of a row a recycle-bin restore
+    /// recreated from what the recycled row recorded. Only columns the row has
+    /// no value for are written, so anything the rescan did establish stands.
+    /// Returns whether the row exists.
+    async fn restore_media_file_acquisition_metadata(
+        &self,
+        file_id: &str,
+        snapshot: &crate::recycle_bin::RecycledMediaRowSnapshot,
+    ) -> AppResult<bool> {
+        let _ = (file_id, snapshot);
+        Ok(false)
+    }
+
     async fn update_media_file_path(&self, file_id: &str, file_path: &str) -> AppResult<()>;
 
     async fn set_media_file_roles_for_title(

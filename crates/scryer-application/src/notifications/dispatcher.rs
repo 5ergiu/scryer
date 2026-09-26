@@ -13,11 +13,12 @@ use scryer_domain::{
     ImportRejectedEventData, ListRequestSubmittedEventData, ListSyncFailedEventData,
     ListTitleAddedEventData, ListTitleLeftEventData, ListUnfollowedEventData,
     MediaFileDeletedEventData, MediaFileDeletedReason, MediaFileRenamedEventData,
-    MediaFileUpgradedEventData, MediaPathUpdate, MediaRequestResolvedEventData,
-    MediaRequestSubmittedEventData, MediaUpdateType, NotificationEventType, NotificationTargetKind,
-    PostProcessingCompletedEventData, PostProcessingResult, ReleaseGrabbedEventData,
-    SubtitleDownloadedEventData, SubtitleSearchFailedEventData, Title, TitleAddedEventData,
-    TitleContextSnapshot, TitleDeletedEventData, TitleMovedEventData,
+    MediaFileRestoredEventData, MediaFileUpgradedEventData, MediaPathUpdate,
+    MediaRequestResolvedEventData, MediaRequestSubmittedEventData, MediaUpdateType,
+    NotificationEventType, NotificationTargetKind, PostProcessingCompletedEventData,
+    PostProcessingResult, ReleaseGrabbedEventData, SubtitleDownloadedEventData,
+    SubtitleSearchFailedEventData, Title, TitleAddedEventData, TitleContextSnapshot,
+    TitleDeletedEventData, TitleMovedEventData,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,7 @@ macro_rules! notification_event_mappings {
             media_file_renamed => DomainEventPayload::MediaFileRenamed(_) => DomainEventPayload::MediaFileRenamed(data) => DomainEventType::MediaFileRenamed => NotificationEventType::Rename => build_media_file_renamed_notification(data),
             media_file_deleted_upgrade => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeletedForUpgrade => build_media_file_deleted_notification(data, NotificationEventType::FileDeletedForUpgrade),
             media_file_deleted => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeleted => build_media_file_deleted_notification(data, NotificationEventType::FileDeleted),
+            media_file_restored => DomainEventPayload::MediaFileRestored(_) => DomainEventPayload::MediaFileRestored(data) => DomainEventType::MediaFileRestored => NotificationEventType::FileRestored => build_media_file_restored_notification(data),
             post_processing_completed => DomainEventPayload::PostProcessingCompleted(_) => DomainEventPayload::PostProcessingCompleted(data) => DomainEventType::PostProcessingCompleted => NotificationEventType::PostProcessingCompleted => build_post_processing_completed_notification(data),
             subtitle_downloaded => DomainEventPayload::SubtitleDownloaded(_) => DomainEventPayload::SubtitleDownloaded(data) => DomainEventType::SubtitleDownloaded => NotificationEventType::SubtitleDownloaded => build_subtitle_downloaded_notification(data),
             subtitle_search_failed => DomainEventPayload::SubtitleSearchFailed(_) => DomainEventPayload::SubtitleSearchFailed(data) => DomainEventType::SubtitleSearchFailed => NotificationEventType::SubtitleSearchFailed => build_subtitle_search_failed_notification(data),
@@ -860,6 +862,24 @@ fn build_media_file_deleted_notification(
             event_type,
             title,
             body,
+            Some(&data.title),
+            &data.episode_ids,
+            &data.media_updates,
+        ),
+    }
+}
+
+fn build_media_file_restored_notification(data: &MediaFileRestoredEventData) -> BuiltNotification {
+    let restored_path = data
+        .media_updates
+        .first()
+        .map(|update| update.path.as_str())
+        .unwrap_or("(path unavailable)");
+    BuiltNotification {
+        payload: base_notification_payload(
+            NotificationEventType::FileRestored,
+            format!("File restored: {}", data.title.title_name),
+            format!("Restored media file from the recycle bin: {restored_path}"),
             Some(&data.title),
             &data.episode_ids,
             &data.media_updates,
@@ -1807,6 +1827,9 @@ fn padded_number(value: &str) -> String {
 fn notification_file_ids(event: &DomainEvent) -> Vec<String> {
     match &event.payload {
         DomainEventPayload::MediaFileDeleted(data) => {
+            data.file_id.iter().cloned().collect::<Vec<_>>()
+        }
+        DomainEventPayload::MediaFileRestored(data) => {
             data.file_id.iter().cloned().collect::<Vec<_>>()
         }
         DomainEventPayload::MediaFileUpgraded(data) => {
@@ -2926,6 +2949,31 @@ mod tests {
     #[test]
     fn notification_filter_list_matches_buildable_payloads() {
         let mut supported_events = notification_sample_events();
+        supported_events.push(DomainEvent {
+            sequence: 9,
+            event_id: "evt-media-restored".to_string(),
+            occurred_at: Utc::now(),
+            actor_kind: DomainEventActorKind::System,
+            actor_user_id: None,
+            actor_display_name: "System".to_string(),
+            title_id: Some("title-1".to_string()),
+            facet: Some(MediaFacet::Movie),
+            correlation_id: None,
+            causation_id: None,
+            schema_version: 1,
+            stream: scryer_domain::DomainEventStream::Global,
+            payload: DomainEventPayload::MediaFileRestored(MediaFileRestoredEventData {
+                title: title_context("Restored Movie", MediaFacet::Movie),
+                media_updates: vec![MediaPathUpdate {
+                    path: "/library/Restored Movie/Restored Movie.mkv".to_string(),
+                    update_type: MediaUpdateType::Created,
+                }],
+                file_id: Some("file-restored".to_string()),
+                original_path: Some("/library/Restored Movie/Restored Movie.mkv".to_string()),
+                recycle_entry_id: Some("entry-1".to_string()),
+                episode_ids: Vec::new(),
+            }),
+        });
         for recovered in [false, true] {
             let mut event = supported_events[0].clone();
             let data = scryer_domain::import_space::SpaceIncidentEvent {

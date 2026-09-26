@@ -1178,6 +1178,7 @@ async fn notification_event_types_query_returns_only_dispatchable_subscription_e
             "rename",
             "file_deleted_for_upgrade",
             "file_deleted",
+            "file_restored",
             "post_processing_completed",
             "subtitle_downloaded",
             "subtitle_search_failed",

@@ -54,6 +54,60 @@ pub struct RecycleManifest {
     pub replacement_file_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement_path: Option<String>,
+    /// Decision-time columns of the media row that tracked the recycled file.
+    /// A rescan of the restored file can re-parse its name and re-probe its
+    /// streams, but it cannot recover what the file scored when it was grabbed,
+    /// so a restore copies these back onto the recreated row. Entries recycled
+    /// before this was recorded have none; their restored rows stay unscored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_row: Option<RecycledMediaRowSnapshot>,
+}
+
+/// The parts of a `media_files` row that were decided at acquisition time and
+/// that a library scan cannot recompute from the file on disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecycledMediaRowSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_score: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexer_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grabbed_release_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grabbed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_hash: Option<String>,
+}
+
+impl RecycledMediaRowSnapshot {
+    pub fn from_media_file(file: &crate::TitleMediaFile) -> Self {
+        Self {
+            acquisition_score: file.acquisition_score,
+            scoring_log: file.scoring_log.clone(),
+            announced_size_bytes: file.announced_size_bytes,
+            scene_name: file.scene_name.clone(),
+            release_group: file.release_group.clone(),
+            indexer_source: file.indexer_source.clone(),
+            grabbed_release_title: file.grabbed_release_title.clone(),
+            grabbed_at: file.grabbed_at.clone(),
+            edition: file.edition.clone(),
+            release_hash: file.release_hash.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Result of a successful recycle operation.
@@ -71,6 +125,7 @@ pub(crate) struct ReplacedMediaRecycleMetadata<'a> {
     pub size_bytes: u64,
     pub title_id: &'a str,
     pub media_root: Option<&'a str>,
+    pub media_row: Option<RecycledMediaRowSnapshot>,
 }
 
 /// A committed recycle entry that passed local recycle-root checks.
@@ -127,6 +182,7 @@ impl RecycleManifest {
             status: Some(RECYCLE_STATUS_PENDING.to_string()),
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         }
     }
 
@@ -369,13 +425,14 @@ pub(crate) async fn recycle_replaced_media_file(
     metadata: ReplacedMediaRecycleMetadata<'_>,
     commit_after_move: bool,
 ) -> AppResult<Option<RecycleResult>> {
-    let manifest = RecycleManifest::pending_upgrade(
+    let mut manifest = RecycleManifest::pending_upgrade(
         metadata.original_path.to_string(),
         metadata.original_file_id.to_string(),
         metadata.size_bytes,
         metadata.title_id.to_string(),
         metadata.media_root.map(str::to_string),
     );
+    manifest.media_row = metadata.media_row;
     let payload_name_path = crate::stored_paths::stored_path_to_path_buf(metadata.original_path);
     recycle_file_inner(
         config,
@@ -1564,6 +1621,7 @@ mod tests {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         }
     }
 
@@ -1588,6 +1646,7 @@ mod tests {
             status: Some(RECYCLE_STATUS_COMMITTED.to_string()),
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         }
     }
 
@@ -1838,6 +1897,32 @@ mod tests {
             quarantined.status.as_deref(),
             Some(RECYCLE_STATUS_QUARANTINED)
         );
+    }
+
+    #[test]
+    fn recycle_manifest_media_row_round_trips_and_legacy_manifests_parse() {
+        let mut manifest = test_manifest();
+        manifest.media_row = Some(RecycledMediaRowSnapshot {
+            acquisition_score: Some(512),
+            scoring_log: Some("invented scoring log".to_string()),
+            ..Default::default()
+        });
+        let encoded = serde_json::to_value(&manifest).unwrap();
+        let decoded: RecycleManifest = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.media_row, manifest.media_row);
+
+        let mut legacy = serde_json::to_value(test_manifest()).unwrap();
+        assert!(
+            legacy.get("media_row").is_none(),
+            "an absent snapshot is not written"
+        );
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("schema".to_string(), RECYCLE_MANIFEST_SCHEMA.into());
+        let parsed: RecycleManifest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.media_row, None);
+        assert_eq!(parsed.schema.as_deref(), Some(RECYCLE_MANIFEST_SCHEMA));
     }
 
     #[tokio::test]

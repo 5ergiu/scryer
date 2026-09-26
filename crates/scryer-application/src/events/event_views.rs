@@ -181,6 +181,19 @@ pub(crate) fn activity_event_from_domain_event(event: &DomainEvent) -> Option<Ac
                 })
                 .unwrap_or_else(|| format!("Deleted media file for '{}'.", data.title.title_name)),
         ),
+        DomainEventPayload::MediaFileRestored(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Info,
+            data.media_updates
+                .first()
+                .map(|update| format!("Restored media file from the recycle bin: {}", update.path))
+                .unwrap_or_else(|| {
+                    format!(
+                        "Restored media file from the recycle bin for '{}'.",
+                        data.title.title_name
+                    )
+                }),
+        ),
         DomainEventPayload::MediaFileUpgraded(data) => (
             ActivityKind::FileUpgraded,
             ActivitySeverity::Success,
@@ -730,6 +743,31 @@ pub(crate) fn title_history_record_from_domain_event(
             None,
             None,
         ),
+        DomainEventPayload::MediaFileRestored(data) => (
+            Some(data.title.title_name.clone()),
+            Some(data.title.facet.clone()),
+            TitleHistoryEventType::FileRestored,
+            (data.media_updates.len() == 1)
+                .then(|| data.media_updates.first().map(|update| update.path.clone()))
+                .flatten(),
+            (data.media_updates.len() == 1)
+                .then(|| data.media_updates.first().map(|update| update.path.clone()))
+                .flatten(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            data.original_path.clone(),
+            data.media_updates.first().map(|update| update.path.clone()),
+        ),
         DomainEventPayload::MediaFileRenamed(data) => (
             Some(data.title.title_name.clone()),
             Some(data.title.facet.clone()),
@@ -998,6 +1036,7 @@ fn event_episode_ids(event: &DomainEvent) -> Vec<String> {
         DomainEventPayload::MediaFileAnalyzed(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileRenamed(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileDeleted(data) => data.episode_ids.iter(),
+        DomainEventPayload::MediaFileRestored(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileUpgraded(data) => data.episode_ids.iter(),
         _ => return ids,
     };

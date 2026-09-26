@@ -438,6 +438,7 @@ fn map_event_type(event_type: DomainNotificationEventType) -> NotificationEventT
         DomainNotificationEventType::FileDeletedForUpgrade => {
             NotificationEventType::FileDeletedForUpgrade
         }
+        DomainNotificationEventType::FileRestored => NotificationEventType::FileRestored,
         DomainNotificationEventType::PostProcessingCompleted => {
             NotificationEventType::PostProcessingCompleted
         }

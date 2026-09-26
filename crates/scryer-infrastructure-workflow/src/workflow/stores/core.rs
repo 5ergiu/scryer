@@ -1124,6 +1124,12 @@ pub fn build_title_history_filter_sql(
                             MediaFileDeletedReason::UpgradeCleanup.as_str().into(),
                         ));
                     }
+                    TitleHistoryEventType::FileRestored => {
+                        parts.push("event_type = {}".to_string());
+                        args.push(SqlArg::Text(
+                            DomainEventType::MediaFileRestored.as_str().into(),
+                        ));
+                    }
                     TitleHistoryEventType::FileRenamed => {
                         parts.push("event_type = {}".to_string());
                         args.push(SqlArg::Text(
@@ -1278,6 +1284,7 @@ pub const TITLE_HISTORY_PAGE_DOMAIN_EVENT_TYPES: &[DomainEventType] = &[
     DomainEventType::MediaFileAnalyzed,
     DomainEventType::MediaFileUpgraded,
     DomainEventType::MediaFileDeleted,
+    DomainEventType::MediaFileRestored,
     DomainEventType::MediaFileRenamed,
     DomainEventType::SeedingStarted,
     DomainEventType::SeedingCompleted,
