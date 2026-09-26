@@ -131,49 +131,58 @@ pub fn title_script(value: &str) -> TitleScript {
 pub fn normalize_title_spelling(value: &str) -> String {
     let mut result = String::new();
     for ch in value.nfkc().flat_map(char::to_lowercase) {
-        if ch.is_alphanumeric() || is_combining_mark(ch) {
+        if is_word_separator(ch) {
+            if !result.ends_with(' ') && !result.is_empty() {
+                result.push(' ');
+            }
+        } else if ch.is_alphanumeric() || is_combining_mark(ch) {
             result.push(ch);
-        } else if (ch.is_whitespace()
-            || matches!(
-                ch,
-                '.' | ','
-                    | ':'
-                    | ';'
-                    | '-'
-                    | '_'
-                    | '/'
-                    | '\\'
-                    | '&'
-                    | '+'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '\''
-                    | '"'
-                    | '!'
-                    | '?'
-                    | '~'
-                    | '’'
-                    | '‘'
-                    | '“'
-                    | '”'
-                    | '–'
-                    | '—'
-                    | '−'
-                    | '・'
-                    | '。'
-                    | '、'
-            ))
-            && !result.ends_with(' ')
-            && !result.is_empty()
-        {
-            result.push(' ');
         }
     }
     result.trim().to_string()
+}
+
+/// Punctuation and whitespace that end a word. Checked before the
+/// alphanumeric test: the modifier letter apostrophe (U+02BC), the recommended
+/// Ukrainian apostrophe (`пʼять`), is a letter to Unicode, but it separates
+/// words here the same way the ASCII and typographic apostrophes do, so every
+/// spelling of the apostrophe is one lookup form.
+fn is_word_separator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '.' | ','
+                | ':'
+                | ';'
+                | '-'
+                | '_'
+                | '/'
+                | '\\'
+                | '&'
+                | '+'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '\''
+                | '"'
+                | '!'
+                | '?'
+                | '~'
+                | '\u{02bc}'
+                | '’'
+                | '‘'
+                | '“'
+                | '”'
+                | '–'
+                | '—'
+                | '−'
+                | '・'
+                | '。'
+                | '、'
+        )
 }
 
 /// Articles a catalog writes at the end of a name (`Lantern, The`). The
@@ -936,15 +945,19 @@ mod tests {
 
     #[test]
     fn ukrainian_apostrophes_in_the_lookup_form() {
-        // A word-internal apostrophe is written with the ASCII or the
-        // typographic mark; both separate words, so both spellings are one key.
+        // A word-internal apostrophe is written with the ASCII, the
+        // typographic or the modifier-letter mark; all separate words, so
+        // every spelling is one key.
+        for apostrophe in ['\'', '\u{2019}', '\u{02bc}'] {
+            assert_eq!(
+                title_lookup_form(&format!("Тінь м{apostrophe}ятного саду")),
+                "тінь м ятного саду",
+                "{apostrophe:?}"
+            );
+        }
         assert_eq!(
-            title_lookup_form("Тінь м'ятного саду"),
-            "тінь м ятного саду"
-        );
-        assert_eq!(
-            title_lookup_form("Тінь м\u{2019}ятного саду"),
-            "тінь м ятного саду"
+            title_search_lenient_form("Тінь м\u{02bc}ятного саду"),
+            title_search_lenient_form("Тінь м'ятного саду")
         );
     }
 
