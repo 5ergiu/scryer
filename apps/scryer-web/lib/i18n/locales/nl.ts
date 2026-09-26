@@ -1782,7 +1782,7 @@ const nl: LocaleDictionary = {
   "settings.refReleaseThumbsDown":
     "Indexer thumbs-down-stemmen. Een indexer-listinggegeven dat is vastgelegd toen de release werd gegrabd; null wanneer de indexer geen stemmen meldde, en null voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
   "settings.refReleaseExtra":
-    "Indexerspecifieke listingattributen (platte waarden en lijsten van waarden), leesbaar als input.release.extra.<key>. Indexer-listinggegevens die zijn vastgelegd toen de release werd gegrabd; leeg (elke sleutel null) voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
+    "Indexerspecifieke listingattributen (platte waarden en lijsten van waarden), leesbaar als input.release.extra.<key>. Indexer-listinggegevens die zijn vastgelegd toen de release werd gegrabd; een leeg object voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard, dus elke opzoeking van input.release.extra.<key> is undefined (niet null) en een vergelijking zoals == null komt niet overeen",
 
   "settings.refSectionProfile": "— Actieve kwaliteitsprofielconfiguratie",
   "settings.refProfileId": "Unieke profielidentifier",

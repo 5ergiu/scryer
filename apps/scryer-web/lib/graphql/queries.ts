@@ -465,7 +465,6 @@ const WANTED_ITEM_FIELDS = `
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       sourceProvider
       currentScore
       convergenceState
@@ -3441,7 +3440,6 @@ export const wantedItemsQuery = `query WantedItems($wantedKind: WantedKindValue!
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       currentScore
       standbyCount
       latestReleaseDecision {

@@ -7,6 +7,13 @@
 //! submission, copied to the media row, and read back from this snapshot; they
 //! are never re-read from an indexer.
 //!
+//! A snapshot never holds a secret. The indexer `extra` map can carry an
+//! archive password, magnet and comment links with a tracker passkey, and
+//! other key- or token-bearing values; those entries are dropped both when a
+//! snapshot is captured and when a stored one is read, because the snapshot
+//! is persisted on several rows and shown to anyone who can view the library.
+//! The `password_protected` flag stays: it is a boolean fact, not a secret.
+//!
 //! Everything here is pure: capture, bounding and age computation take the
 //! current time as an argument and never read the clock.
 
@@ -327,7 +334,11 @@ fn serialized_map_len(entry_lens_total: usize, entries: usize) -> usize {
     2 + entry_lens_total + entries.saturating_sub(1)
 }
 
-/// Keep only scalars and all-scalar arrays from an indexer `extra` map, then
+/// Drop every entry that could carry a credential or a credential-bearing
+/// link (see [`is_secret_extra_entry`]: the exact keys in
+/// [`SECRET_EXACT_KEYS`], any key containing a [`SECRET_KEY_FRAGMENTS`]
+/// fragment, a URL-valued `guid`, and a `password_protected` that is not a
+/// boolean), keep only scalars and all-scalar arrays from the rest, then
 /// apply two caps:
 ///
 /// - at most [`MAX_EXTRA_KEYS`] keys: over it, the lexicographically last keys
@@ -339,6 +350,9 @@ fn serialized_map_len(entry_lens_total: usize, entries: usize) -> usize {
 ///
 /// Scryer's own RSS replay markers (`_rss_` keys) are not indexer facts and
 /// never enter a snapshot.
+///
+/// The secret rule also runs when a stored snapshot is read back, so a row
+/// written before it existed never serves a secret either.
 ///
 /// Deterministic regardless of the input map's iteration order, and
 /// idempotent: a bounded map is returned unchanged.
@@ -376,16 +390,82 @@ pub(crate) fn bounded_indexer_languages<S: AsRef<str>>(
     kept
 }
 
+/// Keys dropped by exact name because the value is, or can be, a credential
+/// or a link that embeds one:
+///
+/// - `password`: the newznab plugins store the real archive password here;
+/// - `magnet_url`, `magnet_uri`: a private tracker's magnet carries its
+///   passkey in the `tr=` announce URL;
+/// - `comment_url`, `download_url`, `link`: indexer links that can carry an
+///   API key or passkey in the query string.
+///
+/// Most of these are also caught by [`SECRET_KEY_FRAGMENTS`]; they are named
+/// here so the known offenders stay dropped whatever the fragment list says.
+const SECRET_EXACT_KEYS: &[&str] = &[
+    "password",
+    "magnet_url",
+    "magnet_uri",
+    "comment_url",
+    "download_url",
+    "link",
+];
+
+/// A key whose lowercased form contains any of these is dropped: it names a
+/// link or a credential, and a rule has no business reading either. Matching
+/// is by substring, so it fails closed on unrelated keys that happen to
+/// contain a fragment (an `author` key, for instance).
+const SECRET_KEY_FRAGMENTS: &[&str] = &[
+    "url", "uri", "apikey", "api_key", "passkey", "token", "secret", "password", "cookie", "auth",
+];
+
+/// The one password-named key that is a fact, not a secret: the indexer's
+/// protected flag. Kept only while its value is a boolean.
+const PASSWORD_PROTECTED_FLAG_KEY: &str = "password_protected";
+
+/// Whether an `extra` entry could carry a credential or a credential-bearing
+/// link, and so must never be stored in, or read back from, a snapshot. The
+/// snapshot is persisted on several rows and served to every viewer of the
+/// library, so a secret in it would leak far past the indexer settings.
+fn is_secret_extra_entry(key: &str, value: &Value) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    if lowered == PASSWORD_PROTECTED_FLAG_KEY {
+        return !value.is_boolean();
+    }
+    if SECRET_EXACT_KEYS.contains(&lowered.as_str()) {
+        return true;
+    }
+    if SECRET_KEY_FRAGMENTS
+        .iter()
+        .any(|fragment| lowered.contains(fragment))
+    {
+        return true;
+    }
+    // A `guid` is usually an opaque id, but some indexers use the item's
+    // download or details URL, which can embed a key.
+    lowered == "guid" && value.as_str().is_some_and(is_url_like)
+}
+
+fn is_url_like(raw: &str) -> bool {
+    let lowered = raw.trim().to_ascii_lowercase();
+    lowered.contains("://") || lowered.starts_with("magnet:")
+}
+
 fn bound_extra_entries(
     entries: impl IntoIterator<Item = (String, Value)>,
 ) -> BTreeMap<String, Value> {
     let mut seen = 0usize;
+    let mut dropped_secret = 0usize;
     let mut kept: BTreeMap<String, Value> = entries
         .into_iter()
         .inspect(|_| seen += 1)
+        .filter(|(key, value)| {
+            let secret = is_secret_extra_entry(key, value);
+            dropped_secret += usize::from(secret);
+            !secret
+        })
         .filter(|(_, value)| is_bounded_value(value))
         .collect();
-    let dropped_unsupported = seen - kept.len();
+    let dropped_unsupported = seen - dropped_secret - kept.len();
 
     let mut dropped_for_count = 0usize;
     while kept.len() > MAX_EXTRA_KEYS {
@@ -411,8 +491,13 @@ fn bound_extra_entries(
         dropped_for_size += 1;
     }
 
-    if dropped_unsupported > 0 || dropped_for_count > 0 || dropped_for_size > 0 {
+    if dropped_secret > 0
+        || dropped_unsupported > 0
+        || dropped_for_count > 0
+        || dropped_for_size > 0
+    {
         tracing::debug!(
+            dropped_secret,
             dropped_unsupported,
             dropped_for_count,
             dropped_for_size,
@@ -596,6 +681,77 @@ mod tests {
             snapshot.extra.keys().collect::<Vec<_>>(),
             ["synthetic_attribute"]
         );
+    }
+
+    #[test]
+    fn secret_bearing_keys_never_enter_a_snapshot() {
+        let mut result = search_result();
+        for (key, value) in [
+            (
+                "magnet_uri",
+                json!(
+                    "magnet:?xt=urn:btih:0000&tr=https%3A%2F%2Ftracker.example%2Fsynthetic-passkey%2Fannounce"
+                ),
+            ),
+            ("password", json!("synthetic-archive-password")),
+            (
+                "comment_url",
+                json!("https://indexer.example/details/1?apikey=synthetic"),
+            ),
+            ("tracker_passkey", json!("synthetic-passkey")),
+            ("api_token", json!("synthetic-token")),
+            (
+                "guid",
+                json!("https://indexer.example/details/1?apikey=synthetic"),
+            ),
+            ("tags", json!(["synthetic-tag"])),
+            ("freeleech", json!(true)),
+        ] {
+            result.extra.insert(key.to_string(), value);
+        }
+
+        let snapshot = ReleaseListingSnapshot::capture_from_search_result(&result, at(2026, 1, 1));
+        assert_eq!(
+            snapshot.extra.keys().collect::<Vec<_>>(),
+            ["freeleech", "tags"]
+        );
+    }
+
+    #[test]
+    fn opaque_guid_is_kept() {
+        let mut raw = HashMap::new();
+        raw.insert("guid".to_string(), json!("synthetic-guid-0001"));
+        assert_eq!(
+            bounded_extra(&raw).get("guid"),
+            Some(&json!("synthetic-guid-0001"))
+        );
+    }
+
+    #[test]
+    fn password_protected_flag_survives_only_as_a_boolean() {
+        let mut raw = HashMap::new();
+        raw.insert("password_protected".to_string(), json!(true));
+        assert_eq!(
+            bounded_extra(&raw).get("password_protected"),
+            Some(&json!(true))
+        );
+
+        raw.insert(
+            "password_protected".to_string(),
+            json!("synthetic-archive-password"),
+        );
+        assert!(bounded_extra(&raw).is_empty());
+    }
+
+    #[test]
+    fn from_json_str_scrubs_secrets_from_a_stored_snapshot() {
+        let raw = r#"{"v":1,"captured_at":"2024-02-01T12:00:00Z","extra":{"password":"synthetic-archive-password","magnet_url":"magnet:?xt=urn:btih:0000","password_protected":true,"freeleech":true}}"#;
+        let parsed = ReleaseListingSnapshot::from_json_str(raw).unwrap();
+        assert_eq!(
+            parsed.extra.keys().collect::<Vec<_>>(),
+            ["freeleech", "password_protected"]
+        );
+        assert_eq!(parsed.extra["password_protected"], json!(true));
     }
 
     #[test]

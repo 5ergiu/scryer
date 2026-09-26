@@ -533,6 +533,16 @@ export function formatListingExtraValue(value: unknown): string | null {
   return null;
 }
 
+/** `extra` keys whose facts already have a named row, so they are not repeated raw. */
+const LISTING_EXTRA_KEYS_SHOWN_AS_NAMED_ROWS = new Set([
+  "thumbs_up",
+  "thumbs_down",
+  "thumbsup",
+  "thumbsdown",
+  "password_protected",
+  "password",
+]);
+
 /**
  * The indexer listing facts frozen at grab time. Absent entirely when the
  * file has no listing snapshot; `extra` entries follow the named facts, keyed
@@ -545,6 +555,7 @@ export function mediaInfoReleaseListingSection(
   const listing = file.releaseListing;
   if (!listing) return null;
   const extraRows = Object.keys(listing.extra ?? {})
+    .filter((key) => !LISTING_EXTRA_KEYS_SHOWN_AS_NAMED_ROWS.has(key))
     .sort()
     .map((key): MediaInfoRow | null => {
       const value = formatListingExtraValue(listing.extra[key]);

@@ -820,9 +820,7 @@ fn validate_preview_request(request: &RuleSetTestRequest) -> AppResult<()> {
     const MAX_INDEXER_LANGUAGES: usize = 64;
     const MAX_INDEXER_LANGUAGE_BYTES: usize = 64;
     if request.title_id.trim().is_empty() {
-        return Err(AppError::Validation(
-            "title and release name are required".into(),
-        ));
+        return Err(AppError::Validation("a title is required".into()));
     }
     let release_name = request
         .release_name

@@ -664,9 +664,12 @@ export function RuleSetTestPanel({
                       </div>
                     ))}
                     <div>
-                      <Label className="mb-1 block">
+                      <p
+                        id="settings-rule-test-listing-password-protected"
+                        className="mb-1 block text-sm leading-none font-medium select-none"
+                      >
                         {t("settings.ruleTestListingPasswordProtected")}
-                      </Label>
+                      </p>
                       <ToggleGroup
                         type="single"
                         variant="outline"
@@ -678,9 +681,7 @@ export function RuleSetTestPanel({
                             value === "true" || value === "false" ? value : "",
                           )
                         }
-                        aria-label={t(
-                          "settings.ruleTestListingPasswordProtected",
-                        )}
+                        aria-labelledby="settings-rule-test-listing-password-protected"
                       >
                         <ToggleGroupItem value="unknown" variant="outline" size="sm">
                           {t("settings.ruleTestListingUnknown")}

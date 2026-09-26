@@ -301,7 +301,17 @@ test("the release listing section shows the frozen listing facts, extras last in
       thumbsDown: 0,
       isPasswordProtected: false,
       indexerLanguages: ["English", "German"],
-      extra: { zeta_flag: true, grabs: 40, tags: ["internal", "proper"], nested: { a: 1 }, empty: null },
+      extra: {
+        zeta_flag: true,
+        grabs: 40,
+        tags: ["internal", "proper"],
+        nested: { a: 1 },
+        empty: null,
+        // Already shown as named rows, so never repeated as raw extras.
+        thumbs_up: 12,
+        thumbsdown: 0,
+        password_protected: false,
+      },
       capturedAt: "2026-03-11T06:00:00+00:00",
     },
   });

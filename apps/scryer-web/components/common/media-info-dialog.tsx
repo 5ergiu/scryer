@@ -90,7 +90,11 @@ export function MediaInfoDialog({
       ? formatUiDate(listing.capturedAt, dateTimeFormat, { fallback: listing.capturedAt })
       : null,
     listingAgeAtGrab:
-      listing?.ageDaysAtGrab == null ? null : t("mediaInfo.listingAgeDays", { count: listing.ageDaysAtGrab }),
+      listing?.ageDaysAtGrab == null
+        ? null
+        : t(listing.ageDaysAtGrab === 1 ? "mediaInfo.listingAgeDay" : "mediaInfo.listingAgeDays", {
+            count: listing.ageDaysAtGrab,
+          }),
     yes: t("label.yes"),
     no: t("label.no"),
   };
