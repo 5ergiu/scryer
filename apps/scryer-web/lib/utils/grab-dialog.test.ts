@@ -4,6 +4,7 @@ import test from "node:test";
 import type { Release } from "@/lib/types";
 import type { TitleRecord } from "@/lib/types/titles";
 import {
+  grabActionAllowed,
   episodeSubjectIncomplete,
   episodeSubjectInput,
   releaseRejectionCodes,
@@ -35,6 +36,16 @@ function release(overrides: Partial<Release>): Release {
     ...overrides,
   };
 }
+
+test("partial-batch retries cannot change the selected import purpose", () => {
+  const actions = ["UNLINKED", "STANDARD", "ADDITIONAL_FILE"] as const;
+  for (const action of actions) {
+    assert.equal(grabActionAllowed(action, null), true);
+    for (const frozen of actions) {
+      assert.equal(grabActionAllowed(action, frozen), action === frozen);
+    }
+  }
+});
 
 
 test("an episodic title reports its missing monitored episodes", () => {

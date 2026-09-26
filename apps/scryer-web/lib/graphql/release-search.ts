@@ -42,6 +42,8 @@ export type InteractiveSearchProgress = {
   releases: Release[];
   indexers: InteractiveSearchIndexerProgress[];
   state: "RUNNING" | "COMPLETED" | "CANCELLED";
+  startedAt?: string;
+  completedAt?: string | null;
 };
 
 export {
@@ -55,6 +57,8 @@ type InteractiveReleaseSearchJobPayload = {
   state: InteractiveSearchProgress["state"];
   results: Release[] | null;
   indexers: InteractiveSearchIndexerProgress[] | null;
+  startedAt?: string;
+  completedAt?: string | null;
 };
 
 const POLL_INTERVAL_MS = 1_000;
@@ -109,6 +113,8 @@ export async function runIterativeReleaseSearch(
       releases,
       indexers: job.indexers ?? [],
       state: job.state,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
     });
   };
 

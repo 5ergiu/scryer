@@ -1052,6 +1052,7 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
             issued.size_bytes,
             SubmissionConflictPolicy::from_replace_flag(false),
             false,
+            crate::DownloadSubmissionPurpose::Standard,
             crate::IndexerGrabSelection {
                 client_id: "stale-client".into(),
                 category: Some("custom".into()),
@@ -1061,6 +1062,24 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
         .expect_err("stale selection must be rejected before submission");
     assert!(matches!(denied, AppError::Validation(_)));
     assert!(requests.lock().await.is_empty());
+    let conflicting = app
+        .queue_indexer_search_assignment(
+            &operator,
+            &title.id,
+            token,
+            issued.size_bytes,
+            SubmissionConflictPolicy::Abort,
+            true,
+            crate::DownloadSubmissionPurpose::AdditionalFile,
+            crate::IndexerGrabSelection {
+                client_id: "fixture-client".into(),
+                category: None,
+            },
+        )
+        .await
+        .expect_err("additional imports must not replace primary files");
+    assert!(matches!(conflicting, AppError::Validation(_)));
+    assert!(requests.lock().await.is_empty());
     let outcome = app
         .queue_indexer_search_assignment(
             &operator,
@@ -1069,6 +1088,7 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
             issued.size_bytes,
             SubmissionConflictPolicy::from_replace_flag(false),
             false,
+            crate::DownloadSubmissionPurpose::AdditionalFile,
             crate::IndexerGrabSelection {
                 client_id: "fixture-client".into(),
                 category: Some(String::new()),
@@ -1089,6 +1109,10 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
     let recorded = submissions.store.lock().await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].title_id, title.id);
+    assert_eq!(
+        recorded[0].purpose,
+        crate::DownloadSubmissionPurpose::AdditionalFile
+    );
     drop(recorded);
 
     let missing = app
@@ -1839,6 +1863,7 @@ async fn an_assigned_grab_needs_only_title_management() {
             release.size_bytes,
             SubmissionConflictPolicy::from_replace_flag(false),
             false,
+            crate::DownloadSubmissionPurpose::Standard,
             crate::IndexerGrabSelection {
                 client_id: "fixture-client".into(),
                 category: None,
