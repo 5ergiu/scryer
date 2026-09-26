@@ -1456,31 +1456,46 @@ impl AppUseCase {
         username: &str,
         password: &str,
     ) -> AppResult<User> {
-        self.authenticate_local_credentials(username, password)
+        self.authenticate_local_credentials(username, password, None)
             .await
             .map(|verified| verified.user)
     }
 
+    /// `client_ip` is only used to attribute failed attempts in the log.
     pub async fn authenticate_local_credentials(
         &self,
         username: &str,
         password: &str,
+        client_ip: Option<std::net::IpAddr>,
     ) -> AppResult<crate::types::VerifiedLocalCredentials> {
         let started_at = Instant::now();
         let username = Self::normalize_local_username(username);
+        // One stable line per failed attempt so operators can grep and alert on
+        // it. Never add the password or its hash here.
+        let log_failure = |reason: &'static str| {
+            tracing::warn!(
+                username,
+                client_ip = client_ip.map(|ip| ip.to_string()),
+                reason,
+                "login failed"
+            );
+        };
         if username.is_empty() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("missing_username");
             return Err(AppError::Validation("username is required".into()));
         }
         if password.is_empty() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("missing_password");
             return Err(AppError::Validation("password is required".into()));
         }
         if Self::is_reserved_recovery_username(username) && !self.recovery_admin_login_enabled() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("recovery_login_disabled");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         }
 
@@ -1493,6 +1508,7 @@ impl AppUseCase {
         else {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("unknown_user");
             return Err(AppError::NotFound(format!("user {username} not found")));
         };
         let user = snapshot.user;
@@ -1510,12 +1526,14 @@ impl AppUseCase {
                 Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at)
                     .await;
             }
+            log_failure("account_disabled");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         }
 
         let Some(password_hash) = user.password_hash.as_ref() else {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("no_local_password");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         };
 
@@ -1525,6 +1543,7 @@ impl AppUseCase {
                 started_at,
             )
             .await;
+            log_failure("invalid_password");
             return Err(AppError::Unauthorized("invalid credentials".into()));
         }
 

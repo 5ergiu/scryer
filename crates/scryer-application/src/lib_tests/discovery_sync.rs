@@ -4995,6 +4995,75 @@ async fn discovery_sync_unchanged_fingerprint_clears_pending_without_smg() {
 }
 
 #[tokio::test]
+async fn discovery_sync_quiet_run_does_not_report_an_elapsed_incremental_window() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let job_runs = Arc::new(super::support_catalog::RecordingJobRunRepo::default());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_discovery_store(discovery.clone())
+            .with_job_runs(job_runs.clone())
+    });
+    let now = Utc.timestamp_opt(100_000, 0).unwrap();
+    app.runtime.environment.set_fixed_now_for_tests(Some(now));
+    let fingerprint = crate::discovery::build_discovery_library_context(
+        &[],
+        crate::discovery::DiscoveryContextDefaults::default(),
+    )
+    .fingerprint;
+    let elapsed_window = now - chrono::Duration::hours(5);
+    let seeded_state = DiscoverySyncStateRecord {
+        last_success_generation_id: Some("generation-1".to_string()),
+        last_subject_fingerprint: Some(fingerprint),
+        last_context_snapshot_completed_at: Some(now - chrono::Duration::hours(6)),
+        next_context_snapshot_eligible_at: Some(now + chrono::Duration::days(1)),
+        next_incremental_reload_eligible_at: Some(elapsed_window),
+        last_public_feed_generation_id: Some("public-1".to_string()),
+        next_public_feed_eligible_at: Some(now + chrono::Duration::days(1)),
+        updated_at: now - chrono::Duration::hours(5),
+        ..DiscoverySyncStateRecord::default()
+    };
+    *discovery.state.lock().await = Some(seeded_state.clone());
+
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("discovery sync should run");
+
+    assert!(gateway.submitted_inputs.lock().await.is_empty());
+    assert!(gateway.change_inputs.lock().await.is_empty());
+    let runs =
+        crate::JobRunRepository::list_job_runs(job_runs.as_ref(), Some(JobKey::DiscoverySync), 10)
+            .await
+            .expect("job runs should list");
+    assert_eq!(runs.len(), 1);
+    let summary = runs[0]
+        .summary_text
+        .as_deref()
+        .expect("discovery sync should record a summary");
+    assert!(
+        !summary.contains(&elapsed_window.to_rfc3339()),
+        "summary must not report an elapsed window: {summary}"
+    );
+    assert!(
+        summary.contains("incremental reload window is open"),
+        "summary should say the window is open: {summary}"
+    );
+    // Only the message changes: the persisted gate is left for the next
+    // completed reload to advance.
+    let state = discovery
+        .state
+        .lock()
+        .await
+        .clone()
+        .expect("state should persist");
+    assert_eq!(
+        state.next_incremental_reload_eligible_at,
+        Some(elapsed_window)
+    );
+}
+
+#[tokio::test]
 async fn discovery_sync_reads_more_than_1000_pending_rows_for_incremental_eligibility() {
     let gateway = Arc::new(SnapshotMetadataGateway::default());
     let (app, _admin, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());

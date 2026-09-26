@@ -31,7 +31,7 @@ use scryer_interface_core::{
     interactive_session_actor_from_ctx, login_attempt_limiter_from_ctx,
     login_verification_required_gql_error, mfa_enrollment_actor_from_ctx,
     mfa_verification_from_ctx, password_change_required_actor_from_ctx, persist_session_or_default,
-    require_config_app_permission, to_gql_error, to_login_gql_error,
+    request_client_ip_from_ctx, require_config_app_permission, to_gql_error, to_login_gql_error,
     to_login_gql_error_after_timing, totp_enrollment_actor_from_ctx,
     totp_management_actor_from_ctx,
 };
@@ -2411,7 +2411,11 @@ impl SettingsMutations {
             limiter.check(principal)?;
         }
         let verified = match app
-            .authenticate_local_credentials(&input.username, &input.password)
+            .authenticate_local_credentials(
+                &input.username,
+                &input.password,
+                request_client_ip_from_ctx(ctx),
+            )
             .await
         {
             Ok(verified) => {
