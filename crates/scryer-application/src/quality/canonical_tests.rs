@@ -291,6 +291,42 @@ fn incumbent_policy_cannot_change_the_score() {
     assert!(on.announced_decision.allowed && off.announced_decision.allowed);
 }
 
+/// The x265 override reaches the scorer at grab and at import alike, so an
+/// operator who allows HEVC below 4K never sees it penalized in either pass.
+#[test]
+fn allow_x265_non4k_reaches_the_announced_and_analyzed_passes() {
+    let tags: Vec<String> = Vec::new();
+    let penalized = profile(
+        r#"{"id":"t","name":"T","criteria":{"quality_tiers":["2160P","1080P"],"allow_upgrades":true}}"#,
+    );
+    let allowed = profile(
+        r#"{"id":"t","name":"T","criteria":{"quality_tiers":["2160P","1080P"],"allow_upgrades":true,"scoring_overrides":{"allow_x265_non4k":true}}}"#,
+    );
+    let evidence = ReleaseEvidence::announced(
+        parse_release_metadata("Quiet.Meridian.2024.1080p.WEB-DL.x265-FICTGRP"),
+        Some(4 * GIB),
+    )
+    .with_analysis(analyzed(4.0, Some("hevc")));
+
+    let entry = |decision: &crate::quality_profile::QualityProfileDecision| {
+        decision
+            .scoring_log
+            .iter()
+            .filter(|entry| entry.code == "video_codec_hevc_below_4k")
+            .map(|entry| entry.delta)
+            .collect::<Vec<_>>()
+    };
+    let off = score_release(&evidence, &ctx(&penalized, &tags));
+    let on = score_release(&evidence, &ctx(&allowed, &tags));
+
+    assert_eq!(entry(&off.announced_decision), vec![-80]);
+    assert_eq!(entry(off.analyzed_decision.as_ref().unwrap()), vec![-80]);
+    assert!(entry(&on.announced_decision).is_empty());
+    assert!(entry(on.analyzed_decision.as_ref().unwrap()).is_empty());
+    assert_eq!(on.release_score - off.release_score, 80);
+    assert_eq!(on.total - off.total, 80);
+}
+
 /// Release age is listing metadata and must not be scored. A freshness bonus
 /// makes a same-size re-grab read as an upgrade — pure bandwidth churn.
 #[test]
