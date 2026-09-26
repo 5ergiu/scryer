@@ -414,6 +414,26 @@ fn next_hash_jittered_bucket(
         .unwrap_or_else(|| now + chrono::Duration::seconds(cadence))
 }
 
+/// The persisted incremental gate only advances when a reload or snapshot
+/// completes, so on quiet runs it can sit hours in the past. Printing it then
+/// would claim a "next" window that already elapsed; the gate is simply open.
+fn discovery_sync_evaluated_message(
+    subject_count: usize,
+    next_incremental: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    if next_incremental > now {
+        format!(
+            "Discovery sync evaluated {subject_count} local subjects; next incremental reload window at {}",
+            next_incremental.to_rfc3339()
+        )
+    } else {
+        format!(
+            "Discovery sync evaluated {subject_count} local subjects; incremental reload window is open"
+        )
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 struct HealthChecksSummary {
     total: usize,
@@ -2597,10 +2617,10 @@ impl AppUseCase {
 
         Ok(JobExecutionOutcome::new(
             Some(if personalized_discovery_enabled {
-                format!(
-                    "Discovery sync evaluated {} local subjects; next incremental reload window at {}",
+                discovery_sync_evaluated_message(
                     library_context.subjects.len(),
-                    effective_next_incremental.to_rfc3339()
+                    effective_next_incremental,
+                    now,
                 )
             } else {
                 format!(

@@ -2095,7 +2095,7 @@ async fn verified_old_password_cannot_continue_after_password_epoch_changes() {
     .await
     .expect("create user");
     let verified = app
-        .authenticate_local_credentials("password_epoch_race", "before-pass")
+        .authenticate_local_credentials("password_epoch_race", "before-pass", None)
         .await
         .expect("verify old password");
 
@@ -2118,7 +2118,7 @@ async fn verified_old_password_cannot_continue_after_password_epoch_changes() {
         "the paused old-password request must not issue a token or challenge"
     );
     assert!(
-        app.authenticate_local_credentials("password_epoch_race", "after-pass")
+        app.authenticate_local_credentials("password_epoch_race", "after-pass", None)
             .await
             .is_ok(),
         "the replacement password should authenticate normally"
@@ -2273,4 +2273,108 @@ async fn token_permission_claims_do_not_override_database_authorization() {
         .await
         .expect("token identity should authenticate from DB permissions");
     assert_eq!(authenticated.id, user.id);
+}
+
+/// Records every event's fields; enough of a subscriber to assert on what a
+/// login failure writes to the log without pulling in tracing-subscriber.
+#[derive(Clone, Default)]
+struct CapturedEvents(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+
+struct CapturedEventFields<'a>(&'a mut std::collections::BTreeMap<String, String>);
+
+impl tracing::field::Visit for CapturedEventFields<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+impl tracing::Subscriber for CapturedEvents {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = std::collections::BTreeMap::new();
+        event.record(&mut CapturedEventFields(&mut fields));
+        self.0.lock().unwrap().push(fields);
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn failed_local_login_logs_username_client_ip_and_reason_without_the_password() {
+    let (app, _) = bootstrap();
+    let stored_hash = app
+        .hash_password("correct-password-marker-3K")
+        .expect("hash stored password");
+    app.services
+        .identity
+        .users
+        .create(User {
+            id: "user-failed-login-log".to_string(),
+            username: "failed_login_log".to_string(),
+            password_hash: Some(stored_hash.clone()),
+            password_change_required: false,
+            account_kind: Default::default(),
+            authorization: Default::default(),
+        })
+        .await
+        .unwrap();
+    let captured = CapturedEvents::default();
+    let submitted_password = "wrong-password-marker-7Q";
+    let client_ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+
+    // The test runtime is single-threaded, so the thread-local default
+    // subscriber sees every event the login emits.
+    let guard = tracing::subscriber::set_default(captured.clone());
+    let result = app
+        .authenticate_local_credentials("  failed_login_log  ", submitted_password, Some(client_ip))
+        .await;
+    drop(guard);
+
+    assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    let events = captured.0.lock().unwrap().clone();
+    let failures = events
+        .iter()
+        .filter(|fields| fields.get("message").map(String::as_str) == Some("login failed"))
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "exactly one failure line: {events:?}");
+    let failure = failures[0];
+    assert_eq!(
+        failure.get("username").map(String::as_str),
+        Some("failed_login_log")
+    );
+    assert_eq!(
+        failure.get("client_ip").map(String::as_str),
+        Some("203.0.113.7")
+    );
+    assert_eq!(
+        failure.get("reason").map(String::as_str),
+        Some("invalid_password")
+    );
+    for fields in &events {
+        for value in fields.values() {
+            assert!(
+                !value.contains(submitted_password),
+                "password leaked: {fields:?}"
+            );
+            assert!(!value.contains(&stored_hash), "hash leaked: {fields:?}");
+        }
+    }
 }

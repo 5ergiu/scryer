@@ -24,7 +24,7 @@ use scryer_domain::{ActorCapabilityMask, AppPermissionMask, Id};
 use scryer_interface::RequestLoaders;
 use scryer_interface::context::{
     ApiKeyManagementSession, AuthRuntimeStateHandle, AuthlessDefaultSession, ConnectionAuthEpoch,
-    InteractiveSession, LoginAttemptLimiter, MfaVerification, OAuthActorSession,
+    InteractiveSession, LoginAttemptLimiter, MfaVerification, OAuthActorSession, RequestClientIp,
     RequestSessionPersistence,
 };
 use scryer_logging::{ActorContext, LogContext, RequestContext, context_span, update_context};
@@ -1719,13 +1719,16 @@ pub(crate) async fn graphql_handler(
 
     let batch = match batch {
         async_graphql::BatchRequest::Single(req) => async_graphql::BatchRequest::Single(
-            req.data(session_persistence).data(login_attempt_limiter),
+            req.data(session_persistence)
+                .data(login_attempt_limiter)
+                .data(RequestClientIp(client_ip)),
         ),
         async_graphql::BatchRequest::Batch(reqs) => async_graphql::BatchRequest::Batch(
             reqs.into_iter()
                 .map(|req| {
                     req.data(session_persistence)
                         .data(login_attempt_limiter.clone())
+                        .data(RequestClientIp(client_ip))
                 })
                 .collect(),
         ),

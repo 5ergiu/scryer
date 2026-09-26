@@ -21,8 +21,7 @@ const AUTO_BACKUP_PREVIOUS_VERSION_RETENTION_COUNT: usize = 1;
 const BACKUP_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 const BACKUP_STALE_TIMEOUT_MINUTES: i64 = 30;
 const BACKUP_TIMEOUT_ERROR_MESSAGE: &str = "backup bundle creation timed out after 30 minutes";
-const AUTO_BACKUP_INVALID_VERSION_ERROR_MESSAGE: &str =
-    "automatic backup was created by an older Scryer version and is no longer valid";
+const AUTO_BACKUP_INVALID_VERSION_ERROR_MESSAGE: &str = "automatic backups are only kept for the Scryer version that made them, because restoring across versions is unsupported";
 
 static CURRENT_SCRYER_VERSION: LazyLock<Version> = LazyLock::new(|| {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION must be a valid semver")
