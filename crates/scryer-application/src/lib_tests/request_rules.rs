@@ -18,8 +18,8 @@ use scryer_domain::{
 use scryer_rules::request::{RequestRuleDecision, RequestVote};
 
 use crate::request_rules::arbitration::{
-    FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_NO_RULE_MATCHED, FALLBACK_RULE_MANUAL,
-    LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
+    FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_LIBRARY_PERMISSION, FALLBACK_NO_RULE_MATCHED,
+    FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
 };
 use crate::request_rules::{
     RequestRuleDraft, RequestRuleGatesUpdate, RequestRulePreviewMatcher, RequestRulePreviewRequest,
@@ -209,7 +209,7 @@ fn arbitration_follows_deny_then_manual_then_approve() {
             errors: Vec::new(),
             permission: true,
             outcome: RequestDecisionOutcome::AutoApprove,
-            fallback: None,
+            fallback: Some(FALLBACK_LIBRARY_PERMISSION),
             deciders: vec![LIBRARY_PERMISSION_DECIDER],
         },
         Case {
@@ -1242,6 +1242,213 @@ async fn preflight_requires_the_request_permission() {
         .await
         .expect_err("a preview is not an oracle for a library you may not ask about");
     assert!(matches!(error, AppError::Unauthorized(_)));
+}
+
+// ── The Auto-Approve Requests permission ────────────────────────────────────
+
+fn auto_approve_requester(library_id: &str) -> User {
+    library_permission_user(
+        "auto-approve-requester",
+        library_id,
+        &[scryer_domain::LibraryPermission::AutoApproveRequests],
+    )
+}
+
+async fn submit_as(
+    harness: &MediaRequestTestHarness,
+    requester: &User,
+    library_id: &str,
+    tvdb_id: i64,
+) -> String {
+    harness
+        .app
+        .submit_media_request(
+            requester,
+            media_request_input(library_id.to_string(), tvdb_id),
+        )
+        .await
+        .expect("submit should succeed")
+        .request_id
+}
+
+fn approved_event_data(
+    events: &[scryer_domain::DomainEvent],
+) -> scryer_domain::MediaRequestResolvedEventData {
+    events
+        .iter()
+        .find_map(|event| match &event.payload {
+            scryer_domain::DomainEventPayload::MediaRequestApproved(data) => Some(data.clone()),
+            _ => None,
+        })
+        .expect("an approval event is published")
+}
+
+#[tokio::test]
+async fn the_auto_approve_permission_approves_a_real_request_and_says_so() {
+    let harness = bootstrap_media_request_app();
+    enable_gate(&harness).await;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let requester = auto_approve_requester(&library_id);
+
+    let preflight = harness
+        .app
+        .preview_my_request_decision(&requester, media_request_input(library_id.clone(), 9960))
+        .await
+        .expect("pre-flight should answer");
+    assert_eq!(preflight.outcome, RequestDecisionOutcome::AutoApprove);
+    assert_eq!(
+        preflight.fallback_reason.as_deref(),
+        Some(FALLBACK_LIBRARY_PERMISSION)
+    );
+
+    let request_id = submit_as(&harness, &requester, &library_id, 9960).await;
+
+    let titles = harness.titles.store.lock().await;
+    assert_eq!(titles.len(), 1, "the approval adds the title");
+    let title_id = titles[0].id.clone();
+    drop(titles);
+
+    let requests = harness.media_requests.requests.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| request.id == request_id)
+        .expect("the request row exists");
+    assert_eq!(request.status, MediaRequestStatus::Approved);
+    assert_eq!(request.created_by_user_id, requester.id);
+    assert_eq!(request.created_title_id.as_deref(), Some(title_id.as_str()));
+    assert_eq!(
+        request.decided_by_rule_set_ids,
+        vec![LIBRARY_PERMISSION_DECIDER.to_string()]
+    );
+    drop(requests);
+
+    let events = harness.domain_events.events.lock().await;
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        scryer_domain::DomainEventPayload::MediaRequestSubmitted(data) if data.request_id == request_id
+    )));
+    let approved = approved_event_data(&events);
+    assert_eq!(approved.request_id, request_id);
+    assert_eq!(
+        approved.decided_by_rule_set_ids,
+        vec![LIBRARY_PERMISSION_DECIDER.to_string()]
+    );
+    drop(events);
+
+    let traces = harness.request_rule_decisions.recorded().await;
+    let trace = traces
+        .iter()
+        .find(|trace| trace.request_id == request_id)
+        .expect("the submit is traced while the gate is armed");
+    assert_eq!(trace.effective_outcome, RequestDecisionOutcome::AutoApprove);
+    assert_eq!(
+        trace.fallback_reason.as_deref(),
+        Some(FALLBACK_LIBRARY_PERMISSION)
+    );
+}
+
+#[tokio::test]
+async fn an_enforced_denial_beats_the_auto_approve_permission() {
+    let harness = bootstrap_media_request_app();
+    let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
+    arm(
+        &harness,
+        &detail.rule_set.id,
+        RequestRuleEvaluationMode::Enforce,
+    )
+    .await;
+    enable_gate(&harness).await;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let requester = auto_approve_requester(&library_id);
+
+    let preflight = harness
+        .app
+        .preview_my_request_decision(&requester, media_request_input(library_id.clone(), 9961))
+        .await
+        .expect("pre-flight should answer");
+    assert_eq!(preflight.outcome, RequestDecisionOutcome::Deny);
+
+    submit_as(&harness, &requester, &library_id, 9961).await;
+
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].status, MediaRequestStatus::Rejected);
+    assert_eq!(
+        requests[0].decided_by_rule_set_ids,
+        vec![detail.rule_set.id.clone()]
+    );
+    drop(requests);
+    assert!(harness.titles.store.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_shadow_denial_leaves_the_permission_approval_credited_to_the_permission() {
+    let harness = bootstrap_media_request_app();
+    let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
+    arm(
+        &harness,
+        &detail.rule_set.id,
+        RequestRuleEvaluationMode::Shadow,
+    )
+    .await;
+    enable_gate(&harness).await;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let requester = auto_approve_requester(&library_id);
+
+    let request_id = submit_as(&harness, &requester, &library_id, 9962).await;
+
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].status, MediaRequestStatus::Approved);
+    assert_eq!(
+        requests[0].decided_by_rule_set_ids,
+        vec![LIBRARY_PERMISSION_DECIDER.to_string()],
+        "a shadow rule acted on nothing, so it is not the decider"
+    );
+    drop(requests);
+
+    let events = harness.domain_events.events.lock().await;
+    let approved = approved_event_data(&events);
+    assert_eq!(
+        approved.decided_by_rule_set_ids,
+        vec![LIBRARY_PERMISSION_DECIDER.to_string()]
+    );
+    assert!(
+        approved.decision_reason_codes.is_empty(),
+        "the shadow denial's reason must not ride on the approval"
+    );
+    drop(events);
+
+    let traces = harness.request_rule_decisions.recorded().await;
+    let trace = traces
+        .iter()
+        .find(|trace| trace.request_id == request_id)
+        .expect("the submit is traced");
+    assert_eq!(trace.policy_outcome, RequestDecisionOutcome::Deny);
+    assert_eq!(trace.effective_outcome, RequestDecisionOutcome::AutoApprove);
+    assert_eq!(
+        trace.fallback_reason.as_deref(),
+        Some(FALLBACK_LIBRARY_PERMISSION)
+    );
+}
+
+#[tokio::test]
+async fn a_held_admission_waits_for_review_despite_the_auto_approve_permission() {
+    let harness = bootstrap_media_request_app();
+    enable_gate(&harness).await;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let requester = auto_approve_requester(&library_id);
+    let mut input = media_request_input(library_id, 9963);
+    input.admission = crate::MediaRequestAdmission::HoldForReview;
+
+    harness
+        .app
+        .submit_media_request(&requester, input)
+        .await
+        .expect("a held request is admitted");
+
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].status, MediaRequestStatus::Pending);
+    drop(requests);
+    assert!(harness.titles.store.lock().await.is_empty());
 }
 
 // ── Human approval, cancellation, and administrator claim operations ─────────

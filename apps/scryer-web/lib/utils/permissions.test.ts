@@ -148,6 +148,33 @@ test("non-administrators only hold explicitly granted library permissions", () =
   assert.equal(hasAnyLibraryPermission(user, LIBRARY_PERMISSIONS.manageTitles), false);
 });
 
+// Discovery and search offer the add-to-catalog flow on Manage Titles and the
+// request dialog on Request. An Auto-Approve holder must land on the request
+// dialog so their approval is a recorded request, not a bare title add.
+test("an Auto-Approve Requests grant routes to requesting, not adding", () => {
+  const user = normalizeJwtPermissionClaims(
+    [],
+    [
+      {
+        libraryId: "library-primary",
+        // The stored form: Auto-Approve strips the Request bit it implies.
+        permissions: normalizeLibraryPermissionsForStorage([
+          LIBRARY_PERMISSIONS.view,
+          LIBRARY_PERMISSIONS.request,
+          LIBRARY_PERMISSIONS.autoApproveRequests,
+        ]),
+      },
+    ],
+  );
+
+  assert.equal(hasAnyLibraryPermission(user, LIBRARY_PERMISSIONS.request), true);
+  assert.equal(
+    hasLibraryPermission(user, "library-primary", LIBRARY_PERMISSIONS.autoApproveRequests),
+    true,
+  );
+  assert.equal(hasAnyLibraryPermission(user, LIBRARY_PERMISSIONS.manageTitles), false);
+});
+
 test("Manage Titles shadows the request pair and Manage Subtitles", () => {
   const expanded = libraryPermissionsWithRequestShadowing([
     LIBRARY_PERMISSIONS.view,
