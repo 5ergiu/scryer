@@ -1157,7 +1157,7 @@ async fn import_additional_movie_download(
         canonical_dest_path.to_path_buf()
     } else {
         let ext = import_video_destination_extension(source_video, content_qualified).to_string();
-        let tokens = build_rename_tokens(title, parsed, &ext);
+        let tokens = build_rename_tokens(title, parsed, None, &ext);
         let rendered_filename = if rename_enabled {
             render_rename_template(rename_template, &tokens)
         } else {
@@ -1600,7 +1600,12 @@ async fn import_movie_download(
 
     let ext =
         import_video_destination_extension(&source_video, largest.content_qualified).to_string();
-    let tokens = build_rename_tokens(title, &prepared.parsed, &ext);
+    let tokens = build_rename_tokens(
+        title,
+        &prepared.parsed,
+        prepared.accepted.analysis.as_ref(),
+        &ext,
+    );
     let rendered_filename = if rename_enabled {
         render_rename_template(&rename_template, &tokens)
     } else {

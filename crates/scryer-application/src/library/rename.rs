@@ -3073,21 +3073,66 @@ fn title_external_id_value(title: &Title, source: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn resolved_analysis_labels_for_media_file(
-    media_file: &TitleMediaFile,
-) -> crate::media::release_labels::ResolvedAnalysisReleaseLabels {
-    resolve_release_labels_from_analysis(
-        media_file.video_width,
-        media_file.video_height,
-        media_file.video_codec.as_ref(),
-        media_file.audio_codec.as_deref(),
-        media_file.audio_profile.as_deref(),
-        media_file.audio_channels,
-        &media_file.audio_streams,
-        &media_file.analysis_details,
-    )
+/// What a media file's rename tokens are read from: the probe's labels first,
+/// then what was recorded for the file, then its parsed name.
+///
+/// Import and library rename both build this, so a file renders the same name
+/// whichever pass names it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RenameMediaEvidence {
+    analyzed: crate::media::release_labels::ResolvedAnalysisReleaseLabels,
+    quality_label: Option<String>,
+    source_type: Option<String>,
+    video_codec_parsed: Option<crate::release_parser::VideoCodec>,
+    audio_codec_parsed: Option<String>,
+    audio_channels_parsed: Option<String>,
+    release_group: Option<String>,
+    edition: Option<String>,
 }
 
+impl RenameMediaEvidence {
+    pub(crate) fn from_media_file(media_file: &TitleMediaFile) -> Self {
+        Self {
+            analyzed: resolve_release_labels_from_analysis(
+                media_file.video_width,
+                media_file.video_height,
+                media_file.video_codec.as_ref(),
+                media_file.audio_codec.as_deref(),
+                media_file.audio_profile.as_deref(),
+                media_file.audio_channels,
+                &media_file.audio_streams,
+                &media_file.analysis_details,
+            ),
+            quality_label: non_empty_owned(media_file.quality_label.clone()),
+            source_type: non_empty_owned(media_file.source_type.clone()),
+            video_codec_parsed: media_file.video_codec_parsed,
+            audio_codec_parsed: non_empty_owned(media_file.audio_codec_parsed.clone()),
+            audio_channels_parsed: non_empty_owned(media_file.audio_channels_parsed.clone()),
+            release_group: non_empty_owned(media_file.release_group.clone()),
+            edition: non_empty_owned(media_file.edition.clone()),
+        }
+    }
+
+    /// A file still being imported has its probe but no recorded row yet; the
+    /// parsed release name supplies everything the probe cannot.
+    pub(crate) fn from_analysis(analysis: &crate::MediaFileAnalysis) -> Self {
+        Self {
+            analyzed: resolve_release_labels_from_analysis(
+                analysis.video_width,
+                analysis.video_height,
+                analysis.video_codec.as_ref(),
+                analysis.audio_codec.as_deref(),
+                analysis.audio_profile.as_deref(),
+                analysis.audio_channels,
+                &analysis.audio_streams,
+                &analysis.details,
+            ),
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
 fn resolve_rename_common_metadata(
     media_file: Option<&TitleMediaFile>,
     parsed_current: &ParsedReleaseMetadata,
@@ -3095,43 +3140,63 @@ fn resolve_rename_common_metadata(
     year_token: Option<&str>,
     extension: &str,
 ) -> ResolvedRenameCommonMetadata {
-    let analyzed = media_file
-        .map(resolved_analysis_labels_for_media_file)
+    let evidence = media_file
+        .map(RenameMediaEvidence::from_media_file)
         .unwrap_or_default();
+    resolve_rename_common_metadata_from_evidence(
+        evidence,
+        parsed_current,
+        title_token,
+        year_token,
+        extension,
+    )
+}
+
+fn resolve_rename_common_metadata_from_evidence(
+    evidence: RenameMediaEvidence,
+    parsed_current: &ParsedReleaseMetadata,
+    title_token: &str,
+    year_token: Option<&str>,
+    extension: &str,
+) -> ResolvedRenameCommonMetadata {
+    let RenameMediaEvidence {
+        analyzed,
+        quality_label,
+        source_type,
+        video_codec_parsed,
+        audio_codec_parsed,
+        audio_channels_parsed,
+        release_group,
+        edition,
+    } = evidence;
 
     let quality = analyzed
         .quality
-        .or_else(|| media_file.and_then(|file| non_empty_owned(file.quality_label.clone())))
+        .or(quality_label)
         .or_else(|| parsed_current.quality.clone())
         .unwrap_or_default();
-    let source = media_file
-        .and_then(|file| non_empty_owned(file.source_type.clone()))
+    let source = source_type
         .or_else(|| parsed_current.source.as_ref().map(ToString::to_string))
         .unwrap_or_default();
     let video_codec = analyzed
         .video_codec
-        .map(|codec| codec.to_string())
-        .or_else(|| {
-            media_file.and_then(|file| file.video_codec_parsed.map(|codec| codec.to_string()))
-        })
+        .or_else(|| video_codec_parsed.map(|codec| codec.to_string()))
         .or_else(|| parsed_current.video_codec.map(|codec| codec.to_string()))
         .unwrap_or_default();
     let audio_codec = analyzed
         .audio_codec
-        .or_else(|| media_file.and_then(|file| non_empty_owned(file.audio_codec_parsed.clone())))
+        .or(audio_codec_parsed)
         .or_else(|| parsed_current.audio.as_ref().map(ToString::to_string))
         .unwrap_or_default();
     let audio_channels = analyzed
         .audio_channels
-        .or_else(|| media_file.and_then(|file| non_empty_owned(file.audio_channels_parsed.clone())))
+        .or(audio_channels_parsed)
         .or_else(|| parsed_current.audio_channels.clone())
         .unwrap_or_default();
-    let group = media_file
-        .and_then(|file| non_empty_owned(file.release_group.clone()))
+    let group = release_group
         .or_else(|| parsed_current.release_group.clone())
         .unwrap_or_default();
-    let edition = media_file
-        .and_then(|file| non_empty_owned(file.edition.clone()))
+    let edition = edition
         .or_else(|| {
             parsed_current
                 .parse_hints
@@ -3155,6 +3220,60 @@ fn resolve_rename_common_metadata(
         },
         edition,
     }
+}
+
+/// The tokens every rename template can use for `title`'s file: title, year,
+/// media labels, extension, and the title's external ids.
+///
+/// The second value is the file's edition, which only movie templates render.
+pub(crate) fn title_rename_tokens(
+    title: &Title,
+    evidence: Option<RenameMediaEvidence>,
+    parsed_current: &ParsedReleaseMetadata,
+    extension: &str,
+) -> (BTreeMap<String, String>, String) {
+    let (title_token, year_token) = split_title_and_year_hint(&title.name);
+    let fallback_year = title.year.map(|value| value.to_string());
+    let common = resolve_rename_common_metadata_from_evidence(
+        evidence.unwrap_or_default(),
+        parsed_current,
+        &title_token,
+        year_token.as_deref().or(fallback_year.as_deref()),
+        extension,
+    );
+    let mut tokens = BTreeMap::new();
+    insert_common_rename_tokens(&mut tokens, common.common);
+    insert_title_external_id_tokens(&mut tokens, title);
+    (tokens, common.edition)
+}
+
+/// The episode-numbering tokens of a series file.
+pub(crate) struct SeriesRenameNumbering<'a> {
+    pub(crate) season: &'a str,
+    pub(crate) season_order: &'a str,
+    pub(crate) episode: &'a str,
+    pub(crate) absolute_episode: &'a str,
+    pub(crate) episode_title: &'a str,
+}
+
+pub(crate) fn insert_series_rename_tokens(
+    tokens: &mut BTreeMap<String, String>,
+    numbering: SeriesRenameNumbering<'_>,
+) {
+    tokens.insert("season".to_string(), numbering.season.to_string());
+    tokens.insert(
+        "season_order".to_string(),
+        numbering.season_order.to_string(),
+    );
+    tokens.insert("episode".to_string(), numbering.episode.to_string());
+    tokens.insert(
+        "absolute_episode".to_string(),
+        numbering.absolute_episode.to_string(),
+    );
+    tokens.insert(
+        "episode_title".to_string(),
+        numbering.episode_title.to_string(),
+    );
 }
 
 fn resolve_rendered_rename_filename(
@@ -3395,33 +3514,13 @@ fn build_series_media_file_rename_plan_item(
         &source,
         &parsed,
     );
-    let (title_token, year_token) = split_title_and_year_hint(&title.name);
-    let fallback_year = title.year.map(|value| value.to_string());
-    let extension = source_file.extension.clone();
-    let common = resolve_rename_common_metadata(
-        Some(&source.file),
+    let (title_token, _) = split_title_and_year_hint(&title.name);
+    let tokens = series_media_file_rename_tokens(
+        title,
+        &source.file,
         &parsed,
-        &title_token,
-        year_token.as_deref().or(fallback_year.as_deref()),
-        &extension,
-    );
-
-    let mut tokens = BTreeMap::new();
-    insert_common_rename_tokens(&mut tokens, common.common);
-    insert_title_external_id_tokens(&mut tokens, title);
-    tokens.insert("season".to_string(), rename_metadata.season.clone());
-    tokens.insert(
-        "season_order".to_string(),
-        rename_metadata.season_order.clone(),
-    );
-    tokens.insert("episode".to_string(), rename_metadata.episode.clone());
-    tokens.insert(
-        "absolute_episode".to_string(),
-        rename_metadata.absolute_episode.clone(),
-    );
-    tokens.insert(
-        "episode_title".to_string(),
-        rename_metadata.episode_title.clone(),
+        &source_file.extension,
+        &rename_metadata,
     );
 
     let item_ids = RenamePlanItemIds {
@@ -3452,6 +3551,32 @@ fn build_series_media_file_rename_plan_item(
     );
 
     finalize_rename_plan_item(&source_file, item_ids, target_parent, rendered, planning)
+}
+
+fn series_media_file_rename_tokens(
+    title: &Title,
+    media_file: &TitleMediaFile,
+    parsed: &ParsedReleaseMetadata,
+    extension: &str,
+    rename_metadata: &ResolvedSeriesRenameMetadata,
+) -> BTreeMap<String, String> {
+    let (mut tokens, _) = title_rename_tokens(
+        title,
+        Some(RenameMediaEvidence::from_media_file(media_file)),
+        parsed,
+        extension,
+    );
+    insert_series_rename_tokens(
+        &mut tokens,
+        SeriesRenameNumbering {
+            season: &rename_metadata.season,
+            season_order: &rename_metadata.season_order,
+            episode: &rename_metadata.episode,
+            absolute_episode: &rename_metadata.absolute_episode,
+            episode_title: &rename_metadata.episode_title,
+        },
+    );
+    tokens
 }
 
 fn resolve_series_rename_metadata(
@@ -3666,7 +3791,9 @@ fn non_empty_owned(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn normalize_absolute_episode_token(value: Option<String>) -> Option<String> {
+/// Absolute episode numbers render zero-padded to three digits in every pass,
+/// matching the names existing libraries already hold.
+pub(crate) fn normalize_absolute_episode_token(value: Option<String>) -> Option<String> {
     non_empty_owned(value).map(|value| match value.parse::<u32>() {
         Ok(number) => format!("{number:03}"),
         Err(_) => value,
@@ -3752,28 +3879,23 @@ fn build_movie_rename_plan_item(
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
     let parsed = parse_release_metadata(current_stem);
-    let (title_token, year_token) = split_title_and_year_hint(&title.name);
-    let fallback_year = title.year.map(|value| value.to_string());
-    let extension = source_file.extension.clone();
-    let mut common = resolve_rename_common_metadata(
-        media_file,
+    let (title_token, _) = split_title_and_year_hint(&title.name);
+    let (mut tokens, edition) = title_rename_tokens(
+        title,
+        media_file.map(RenameMediaEvidence::from_media_file),
         &parsed,
-        &title_token,
-        year_token.as_deref().or(fallback_year.as_deref()),
-        &extension,
+        &source_file.extension,
     );
-    if common.common.quality.is_empty() {
-        common.common.quality = collection
-            .label
-            .clone()
-            .or(parsed.quality.clone())
-            .unwrap_or_default();
+    if tokens.get("quality").is_none_or(String::is_empty) {
+        tokens.insert(
+            "quality".to_string(),
+            collection
+                .label
+                .clone()
+                .or(parsed.quality.clone())
+                .unwrap_or_default(),
+        );
     }
-
-    let mut tokens = BTreeMap::new();
-    let edition = common.edition.clone();
-    insert_common_rename_tokens(&mut tokens, common.common);
-    insert_title_external_id_tokens(&mut tokens, title);
     tokens.insert("edition".to_string(), edition);
     let rendered = match resolve_rendered_rename_filename(
         &source_file,

@@ -1146,7 +1146,7 @@ fn use_season_folders_false_case_insensitive() {
 fn build_rename_tokens_includes_title_and_year() {
     let title = test_title(MediaFacet::Movie);
     let parsed = test_parsed();
-    let tokens = build_rename_tokens(&title, &parsed, "mkv");
+    let tokens = build_rename_tokens(&title, &parsed, None, "mkv");
     assert_eq!(tokens.get("title").map(String::as_str), Some("Test Movie"));
     assert_eq!(tokens.get("ext").map(String::as_str), Some("mkv"));
     assert_eq!(tokens.get("year").map(String::as_str), Some("2024"));
@@ -1156,7 +1156,7 @@ fn build_rename_tokens_includes_title_and_year() {
 fn build_rename_tokens_falls_back_to_title_year_when_release_year_is_missing() {
     let title = test_title(MediaFacet::Movie);
     let parsed = crate::parse_release_metadata("obfuscated.release.name");
-    let tokens = build_rename_tokens(&title, &parsed, "mkv");
+    let tokens = build_rename_tokens(&title, &parsed, None, "mkv");
     assert_eq!(tokens.get("year").map(String::as_str), Some("2024"));
 }
 
@@ -1164,7 +1164,7 @@ fn build_rename_tokens_falls_back_to_title_year_when_release_year_is_missing() {
 fn build_rename_tokens_includes_quality() {
     let title = test_title(MediaFacet::Movie);
     let parsed = test_parsed();
-    let tokens = build_rename_tokens(&title, &parsed, "mkv");
+    let tokens = build_rename_tokens(&title, &parsed, None, "mkv");
     assert_eq!(tokens.get("quality").map(String::as_str), Some("1080p"));
 }
 
@@ -1524,6 +1524,7 @@ fn episode_import_dest_path_uses_rescored_parsed_quality_without_override() {
         &title,
         true,
         &rescored,
+        None,
         "mkv",
         std::path::Path::new("/downloads/obfuscated.release.name.mkv"),
         std::path::Path::new("/library/Test Show"),
@@ -1554,6 +1555,7 @@ fn episode_import_dest_path_preserves_source_filename_when_renamer_disabled() {
         &title,
         true,
         &parsed,
+        None,
         "mkv",
         std::path::Path::new("/downloads/Obfuscated.Source.Name.mkv"),
         std::path::Path::new("/library/Test Show"),
@@ -1586,6 +1588,7 @@ fn episode_import_dest_path_uses_configured_regular_and_specials_folders() {
         &title,
         true,
         &parsed,
+        None,
         "mkv",
         source,
         title_folder,
@@ -1608,6 +1611,7 @@ fn episode_import_dest_path_uses_configured_regular_and_specials_folders() {
         &title,
         true,
         &parsed,
+        None,
         "mkv",
         source,
         title_folder,
@@ -1631,6 +1635,7 @@ fn episode_import_dest_path_uses_configured_regular_and_specials_folders() {
         &title,
         false,
         &parsed,
+        None,
         "mkv",
         source,
         title_folder,
@@ -1651,21 +1656,87 @@ fn episode_import_dest_path_uses_configured_regular_and_specials_folders() {
 }
 
 #[test]
-fn build_rename_tokens_episode_is_empty_for_movie() {
+fn build_rename_tokens_leave_episode_numbering_to_the_series_path() {
     let title = test_title(MediaFacet::Movie);
     let parsed = test_parsed();
-    let tokens = build_rename_tokens(&title, &parsed, "mkv");
-    assert_eq!(tokens.get("season").map(String::as_str), Some(""));
-    assert_eq!(tokens.get("episode").map(String::as_str), Some(""));
+    let tokens = build_rename_tokens(&title, &parsed, None, "mkv");
+    assert_eq!(tokens.get("season"), None);
+    assert_eq!(tokens.get("episode"), None);
 }
 
 #[test]
-fn build_rename_tokens_episode_metadata_for_series() {
+fn episode_import_rename_tokens_use_the_resolved_episode_numbering() {
     let title = test_title(MediaFacet::Series);
     let parsed = crate::parse_release_metadata("Show.S02E05.720p.HDTV.mkv");
-    let tokens = build_rename_tokens(&title, &parsed, "mkv");
+    let tokens =
+        episode_import_rename_tokens(&title, &parsed, None, "mkv", 2, "5", None, None, None);
     assert_eq!(tokens.get("season").map(String::as_str), Some("2"));
     assert_eq!(tokens.get("episode").map(String::as_str), Some("5"));
+}
+
+fn probed_episode_analysis(channels: i32, layout: &str) -> crate::MediaFileAnalysis {
+    let mut analysis = test_media_analysis(Some(1080));
+    analysis.audio_channels = Some(channels);
+    analysis.audio_streams = vec![crate::AudioStreamDetail {
+        codec: Some("aac".to_string()),
+        profile: None,
+        channels: Some(channels),
+        language: Some("eng".to_string()),
+        name: None,
+        bitrate_kbps: None,
+    }];
+    analysis.details = scryer_media_types::AnalysisDetails {
+        revision: scryer_media_types::ANALYSIS_REVISION,
+        streams: vec![scryer_media_types::StreamDetail {
+            kind: scryer_media_types::StreamKind::Audio,
+            codec: Some("aac".to_string()),
+            channels: Some(channels),
+            metadata: scryer_media_types::StreamMetadata {
+                channel_layout: Some(layout.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    analysis
+}
+
+#[test]
+fn episode_import_renders_probed_audio_tokens_and_padded_absolute_episode() {
+    let mut title = test_title(MediaFacet::Anime);
+    title.name = "Lantern Harbor".to_string();
+    let parsed = crate::parse_release_metadata("obfuscated.release.name");
+    let template = "{title} - S{season:2}E{episode:2} ({absolute_episode}) [{audio_codec} {audio_channels}].{ext}";
+
+    for (channels, layout, expected) in [(2, "stereo", "AAC 2.0"), (6, "5.1(side)", "AAC 5.1")] {
+        let analysis = probed_episode_analysis(channels, layout);
+        let dest_path = episode_import_dest_path(
+            &title,
+            true,
+            &parsed,
+            Some(&analysis),
+            "mkv",
+            std::path::Path::new("/downloads/obfuscated.release.name.mkv"),
+            std::path::Path::new("/library/Lantern Harbor"),
+            true,
+            template,
+            "Season {season:2}",
+            "Specials",
+            1,
+            "1",
+            Some("1"),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            dest_path,
+            std::path::PathBuf::from(format!(
+                "/library/Lantern Harbor/Season 01/Lantern Harbor - S01E01 (001) [{expected}].mkv"
+            ))
+        );
+    }
 }
 
 // ── find_video_files ──────────────────────────────────────────────────────────
