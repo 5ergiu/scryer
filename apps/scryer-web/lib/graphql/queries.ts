@@ -441,7 +441,17 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       grabbedAt
       edition
       originalFilePath
-      releaseHash`;
+      releaseHash
+      releaseListing {
+        publishedAt
+        ageDaysAtGrab
+        thumbsUp
+        thumbsDown
+        isPasswordProtected
+        indexerLanguages
+        extra
+        capturedAt
+      }`;
 
 const WANTED_ITEM_FIELDS = `
       id

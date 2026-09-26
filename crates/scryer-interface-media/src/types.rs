@@ -535,6 +535,30 @@ pub struct TitleMediaFilePayload {
     pub original_file_path: Option<String>,
     /// Release identity hash, or null when unavailable.
     pub release_hash: Option<String>,
+    /// Indexer listing facts frozen when the release was grabbed, or null when
+    /// the file was not grabbed by Scryer or the stored snapshot is unreadable.
+    pub release_listing: Option<ReleaseListingPayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Indexer listing facts about a grabbed release, as captured at grab time.
+pub struct ReleaseListingPayload {
+    /// Publish time the indexer reported, in UTC, or null when unknown.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Whole days from publish to capture, or null when the publish time is unknown.
+    pub age_days_at_grab: Option<i32>,
+    /// Positive votes the indexer reported, or null when unreported.
+    pub thumbs_up: Option<i32>,
+    /// Negative votes the indexer reported, or null when unreported.
+    pub thumbs_down: Option<i32>,
+    /// Whether the release was reported password protected, or null when unknown.
+    pub is_password_protected: Option<bool>,
+    /// Languages the indexer reported for the release.
+    pub indexer_languages: Vec<String>,
+    /// Indexer-specific scalar attributes, as a JSON object.
+    pub extra: Json<serde_json::Value>,
+    /// Time when the listing facts were captured, in UTC.
+    pub captured_at: DateTime<Utc>,
 }
 
 #[derive(SimpleObject, Clone)]
