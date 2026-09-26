@@ -1361,9 +1361,16 @@ async fn preview_manual_import(
                 }
             }
 
-            // Anime absolute fallback
+            // Anime absolute fallback. A resolved numbering already named the
+            // catalog episode, and the absolute it stamped is the raw rendering
+            // number rather than the title's matching scale, so it must not be
+            // looked up again here.
             if suggested_episode_id.is_none()
                 && !numbering_ambiguous
+                && !matches!(
+                    numbering,
+                    crate::anime_numbering::NumberingResolution::Resolved(_)
+                )
                 && let Some(abs) = ep_meta.absolute_episode
             {
                 let abs_str = abs.to_string();
@@ -1375,7 +1382,8 @@ async fn preview_manual_import(
                     .await
                 {
                     suggested_episode_id = Some(episode.id.clone());
-                    suggested_episode_label = Some(manual_import_episode_label(&episode));
+                    suggested_episode_label =
+                        Some(manual_import_absolute_match_label(&episode, abs));
                 }
             }
         }
@@ -1676,6 +1684,26 @@ fn manual_import_multi_episode_label(episodes: &[scryer_domain::Episode]) -> Str
         numbering
     } else {
         format!("{numbering} · {titles}")
+    }
+}
+
+/// The label for a suggestion found by the file's absolute number. The label
+/// renders the episode's raw absolute like every other renderer; when the
+/// title matches on its contiguous scale and the file's number differs from
+/// that raw number, the label also names the number the file was matched on,
+/// so `- 51` suggesting `S01E51 · Absolute 53` does not read as a mismatch.
+fn manual_import_absolute_match_label(episode: &scryer_domain::Episode, matched: u32) -> String {
+    let label = manual_import_episode_label(episode);
+    let raw = episode
+        .absolute_number
+        .as_deref()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if raw.is_none_or(|raw| raw == matched) {
+        return label;
+    }
+    match label.split_once(" — ") {
+        Some((numbering, title)) => format!("{numbering} (file {matched}) — {title}"),
+        None => format!("{label} (file {matched})"),
     }
 }
 
@@ -4199,6 +4227,28 @@ mod manual_preview_suggestion_tests {
         assert_eq!(
             manual_import_episode_label(&decorated),
             "S??E?? · Absolute 19 — Episode Title"
+        );
+    }
+
+    #[test]
+    fn manual_absolute_match_label_names_the_matched_number_when_it_is_not_the_raw_one() {
+        // Re:ZERO S01E51 carries raw absolute 53 but contiguous 51; a file
+        // named `- 51` matched it on the contiguous scale.
+        let mut episode = episode_for_label(Some("53"));
+        episode.episode_number = Some("51".to_string());
+        episode.contiguous_absolute_number = Some(51);
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 51),
+            "S01E51 · Absolute 53 (file 51) — Episode Title"
+        );
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 53),
+            "S01E51 · Absolute 53 — Episode Title"
+        );
+        episode.title = None;
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 51),
+            "S01E51 · Absolute 53 (file 51)"
         );
     }
 

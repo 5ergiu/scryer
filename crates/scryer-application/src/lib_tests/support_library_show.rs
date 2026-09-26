@@ -752,6 +752,10 @@ impl ShowRepository for MockShowRepo {
         } else if let Some(value) = update.image_url {
             item.image_url = Some(value);
         }
+        // `Some(None)` clears the column, as the SQL store does.
+        if let Some(value) = update.contiguous_absolute_number {
+            item.contiguous_absolute_number = value;
+        }
 
         Ok(item.clone())
     }

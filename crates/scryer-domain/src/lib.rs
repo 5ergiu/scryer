@@ -1195,7 +1195,9 @@ pub struct AnimeCommunitySeason {
     pub absolute_start: Option<i32>,
     /// Contiguous absolute number of community episode 1: the same episode on
     /// the scale that skips specials interleaved into TVDB's absolute order.
-    /// `None` when unknown, and on every row stored before SMG served it.
+    /// SMG reads it off that anchor episode's own contiguous number, so it is
+    /// `None` while the anchor is unplaced, when otherwise unknown, and on
+    /// every row stored before SMG served it.
     #[serde(default)]
     pub contiguous_absolute_start: Option<i32>,
     /// Closed episode count; `None` when the source range is open-ended.

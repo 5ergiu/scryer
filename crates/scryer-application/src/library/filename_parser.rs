@@ -214,10 +214,7 @@ pub(crate) fn parse_library_filename(
             .iter()
             .find(|episode| episode.id == episode_id)
     {
-        let episode_identity = parsed_episode_metadata_from_episode(
-            episode,
-            scryer_domain::AbsoluteScale::for_catalog(input.episodes),
-        );
+        let episode_identity = parsed_episode_metadata_from_episode(episode);
         parsed_release =
             synthesize_release_metadata(&raw_name, input, Some(episode_identity.clone()));
         return LibraryFilenameParse {
@@ -289,12 +286,10 @@ pub(crate) fn parse_library_filename(
         && !raw_name_has_explicit_episode_marker(&raw_name)
         && let Some(series_movie) = resolve_series_movie_from_name(input, &raw_name, fallback.year)
     {
-        let episode_identity = series_movie.linked_episode.as_ref().map(|episode| {
-            parsed_episode_metadata_from_episode(
-                episode,
-                scryer_domain::AbsoluteScale::for_catalog(input.episodes),
-            )
-        });
+        let episode_identity = series_movie
+            .linked_episode
+            .as_ref()
+            .map(parsed_episode_metadata_from_episode);
         fallback.episode = episode_identity.clone();
         return LibraryFilenameParse {
             query_evidence: query_build.evidence,
@@ -353,12 +348,10 @@ pub(crate) fn parse_library_filename(
     }
 
     if let Some(series_movie) = resolve_series_movie_from_name(input, &raw_name, fallback.year) {
-        let episode_identity = series_movie.linked_episode.as_ref().map(|episode| {
-            parsed_episode_metadata_from_episode(
-                episode,
-                scryer_domain::AbsoluteScale::for_catalog(input.episodes),
-            )
-        });
+        let episode_identity = series_movie
+            .linked_episode
+            .as_ref()
+            .map(parsed_episode_metadata_from_episode);
         if fallback.episode.is_none() {
             fallback.episode = episode_identity.clone();
         }
@@ -1171,13 +1164,15 @@ fn synthesize_release_metadata(
     parsed
 }
 
-/// The parse a stored episode stands for. Its absolute number is read on the
-/// title's absolute `scale`, the one every later absolute lookup matches on.
-fn parsed_episode_metadata_from_episode(
-    episode: &Episode,
-    scale: scryer_domain::AbsoluteScale,
-) -> crate::ParsedEpisodeMetadata {
-    let absolute = scale.episode_absolute(episode);
+/// The parse a stored episode stands for. It carries the episode's *raw*
+/// absolute number, the one every renderer writes: an identity names its
+/// catalog episode by season and episode, which lookups read before any
+/// absolute, so the matching scale never needs to travel with it.
+fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpisodeMetadata {
+    let absolute = episode
+        .absolute_number
+        .as_deref()
+        .and_then(|value| value.trim().parse::<u32>().ok());
     crate::ParsedEpisodeMetadata {
         season: episode
             .season_number
@@ -1725,8 +1720,17 @@ mod tests {
 
     /// Re:ZERO-shaped bridge: TVDB keeps every cour in season 1, and the third
     /// community season starts at story episode 51 on the contiguous scale.
-    fn re_zero_bridge() -> scryer_domain::AnimeNumberingBridge {
-        let season = |index: i32, start: i32, length: i32, raw_start: i32| {
+    ///
+    /// SMG reads a community season's contiguous start off its anchor
+    /// episode's own contiguous number, so a season whose anchor SMG has not
+    /// placed yet (the anchor lies past `contiguous_through`) carries no
+    /// contiguous start at all. `newest_cour_open` leaves the third season's
+    /// range without an end, as for a cour that is still airing.
+    fn re_zero_bridge(
+        contiguous_through: u32,
+        newest_cour_open: bool,
+    ) -> scryer_domain::AnimeNumberingBridge {
+        let season = |index: i32, start: i32, length: i32, raw_start: i32, open: bool| {
             scryer_domain::AnimeCommunitySeason {
                 index,
                 anidb_id: None,
@@ -1735,14 +1739,16 @@ mod tests {
                 titles: vec![format!("Re:ZERO Season {index}")],
                 ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
                     community_episode_start: 1,
-                    community_episode_end: Some(length),
+                    community_episode_end: (!open).then_some(length),
                     tvdb_season: 1,
                     tvdb_episode_start: start,
-                    tvdb_episode_end: Some(start + length - 1),
+                    tvdb_episode_end: (!open).then_some(start + length - 1),
                 }],
                 absolute_start: Some(raw_start),
-                contiguous_absolute_start: Some(start),
-                episode_count: Some(length),
+                contiguous_absolute_start: u32::try_from(start)
+                    .is_ok_and(|anchor| anchor <= contiguous_through)
+                    .then_some(start),
+                episode_count: (!open).then_some(length),
             }
         };
         scryer_domain::AnimeNumberingBridge {
@@ -1750,9 +1756,9 @@ mod tests {
             generated_on: "2026-09-25".to_string(),
             corroborating_order: None,
             seasons: vec![
-                season(1, 1, 25, 1),
-                season(2, 26, 25, 27),
-                season(3, 51, 16, 53),
+                season(1, 1, 25, 1, false),
+                season(2, 26, 25, 27, false),
+                season(3, 51, 16, 53, newest_cour_open),
             ],
         }
     }
@@ -1784,9 +1790,12 @@ mod tests {
         episodes
     }
 
-    fn scan_re_zero_file(episodes: &[Episode], file_name: &str) -> Vec<String> {
+    fn scan_re_zero(
+        episodes: &[Episode],
+        bridge: &scryer_domain::AnimeNumberingBridge,
+        file_name: &str,
+    ) -> LibraryFilenameParse {
         let title = title("Re:ZERO", MediaFacet::Anime);
-        let bridge = re_zero_bridge();
         let path = format!("/library/Re ZERO/Season 01/{file_name}");
         let input = LibraryFilenameParseInput {
             path: Path::new(&path),
@@ -1798,11 +1807,15 @@ mod tests {
             series_movie_links: &[],
             episodes,
             existing_record: None,
-            anime_numbering_bridge: Some(&bridge),
+            anime_numbering_bridge: Some(bridge),
             mode: LibraryFilenameParseMode::TitleScan,
             fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
         };
         parse_library_filename(&input)
+    }
+
+    fn target_ids(parse: &LibraryFilenameParse) -> Vec<String> {
+        parse
             .target_episodes()
             .iter()
             .map(|episode| episode.id.clone())
@@ -1813,22 +1826,149 @@ mod tests {
     fn title_scan_files_an_absolute_numbered_file_on_the_contiguous_scale() {
         // Raw absolute 51 is story episode 49; the contiguous 51 is S01E51.
         let episodes = re_zero_episodes(66);
+        let bridge = re_zero_bridge(66, false);
 
         assert_eq!(
-            scan_re_zero_file(&episodes, "[Group] Re:ZERO - 51.mkv"),
+            target_ids(&scan_re_zero(
+                &episodes,
+                &bridge,
+                "[Group] Re:ZERO - 51.mkv"
+            )),
             vec!["ep-51".to_string()]
         );
     }
 
     #[test]
-    fn title_scan_files_an_unplaced_absolute_through_the_contiguous_bridge_start() {
-        // SMG has not placed the newest cour on the contiguous scale yet, so
-        // the bridge's contiguous start carries `- 51` onto S01E51.
+    fn title_scan_leaves_an_absolute_unmatched_when_its_cour_anchor_is_unplaced() {
+        // SMG has not placed the newest cour on the contiguous scale yet. Its
+        // anchor is exactly the unplaced episode, so SMG serves no contiguous
+        // start for that cour and nothing can place `- 51`. The file stays
+        // unmatched rather than falling back to raw 51, which is S01E49.
         let episodes = re_zero_episodes(50);
+        let bridge = re_zero_bridge(50, false);
+        assert_eq!(bridge.seasons[2].contiguous_absolute_start, None);
+
+        let parse = scan_re_zero(&episodes, &bridge, "[Group] Re:ZERO - 51.mkv");
+
+        assert!(target_ids(&parse).is_empty());
+        assert!(
+            matches!(
+                parse.target,
+                LibraryFilenameTarget::Unmatched {
+                    reason: "episode_lookup_failed"
+                }
+            ),
+            "unexpected target: {:?}",
+            parse.target
+        );
+    }
+
+    #[test]
+    fn title_scan_files_an_unplaced_absolute_inside_an_open_cour_with_a_placed_anchor() {
+        // SMG placed the airing cour's anchor (S01E51) and its first episodes
+        // but not the newest ones; the cour's range is still open. The
+        // contiguous start carries `- 60` onto S01E60.
+        let episodes = re_zero_episodes(58);
+        let bridge = re_zero_bridge(58, true);
+        assert_eq!(bridge.seasons[2].contiguous_absolute_start, Some(51));
 
         assert_eq!(
-            scan_re_zero_file(&episodes, "[Group] Re:ZERO - 51.mkv"),
-            vec!["ep-51".to_string()]
+            target_ids(&scan_re_zero(
+                &episodes,
+                &bridge,
+                "[Group] Re:ZERO - 60.mkv"
+            )),
+            vec!["ep-60".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolved_community_numbering_renders_the_catalog_raw_absolute_on_import_and_rename() {
+        // `Season 3 - 01` is S01E51, whose raw absolute is 53 while the title
+        // matches on the contiguous 51. Matching reads the contiguous scale;
+        // every renderer writes the raw number, so the import's parse path
+        // and a later rename produce the same file name.
+        let episodes = re_zero_episodes(66);
+        let bridge = re_zero_bridge(66, false);
+        let parse = scan_re_zero(&episodes, &bridge, "[Group] Re:ZERO Season 3 - 01.mkv");
+
+        assert_eq!(target_ids(&parse), vec!["ep-51".to_string()]);
+        let resolved = parse.target_episodes()[0].clone();
+        assert_eq!(resolved.absolute_number.as_deref(), Some("53"));
+        let parsed_episode = parse
+            .parsed_release
+            .episode
+            .as_ref()
+            .expect("the scan keeps the resolved episode parse");
+        assert_eq!(parsed_episode.season, Some(1));
+        assert_eq!(parsed_episode.episode_numbers, vec![51]);
+        assert_eq!(
+            parsed_episode.absolute_episode,
+            Some(53),
+            "the resolved parse carries the raw rendering absolute"
+        );
+
+        let title = title("Re:ZERO", MediaFacet::Anime);
+        let template = "{title} - S{season_order:2}E{episode:2} ({absolute_episode:3}) - {episode_title}.{ext}";
+        let absolute = crate::import_workflow::import_absolute_episode_token(
+            Some(&resolved),
+            parsed_episode.absolute_episode,
+        );
+        assert_eq!(absolute.as_deref(), Some("53"));
+        let imported = crate::import_workflow::episode_import_dest_path(
+            &title,
+            true,
+            &parse.parsed_release,
+            "mkv",
+            Path::new("/downloads/[Group] Re:ZERO Season 3 - 01.mkv"),
+            Path::new("/library/Re ZERO"),
+            true,
+            template,
+            "Season {season:2}",
+            "Specials",
+            1,
+            "51",
+            absolute.as_deref(),
+            resolved.title.as_deref(),
+            None,
+        );
+        let imported_name = imported
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("import renders a file name")
+            .to_string();
+        assert!(
+            imported_name.contains("(053)"),
+            "import rendered {imported_name}"
+        );
+
+        let media_file = crate::TitleMediaFile {
+            id: "file-51".to_string(),
+            title_id: title.id.clone(),
+            episode_id: Some(resolved.id.clone()),
+            file_path: imported.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut planning = crate::library_rename::RenamePlanningState::default();
+        let items = crate::library_rename::build_series_rename_plan_items_from_media_files(
+            &title,
+            true,
+            Vec::new(),
+            episodes.clone(),
+            vec![media_file],
+            "/library",
+            "{title}",
+            "Season {season:2}",
+            "Specials",
+            template,
+            &crate::library_rename::RenameMissingMetadataPolicy::default(),
+            &mut planning,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].normalized_filename.as_deref(),
+            Some(imported_name.as_str()),
+            "rename must render the imported file's own name"
         );
     }
 

@@ -148,6 +148,133 @@ async fn series_hydration_persists_and_clears_episode_image_url() {
 }
 
 #[tokio::test]
+async fn series_hydration_clears_the_contiguous_number_of_episodes_it_no_longer_names() {
+    let (app, user) = bootstrap();
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Renumbered Cour".into(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                tags: vec![],
+                external_ids: vec![ExternalId::new("tvdb_id", "880188")],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let seasons = vec![SeasonMetadata {
+        tvdb_id: 880_002,
+        number: 1,
+        label: "Season 1".into(),
+        episode_type: "official".into(),
+    }];
+    let episode = |number: i32, contiguous: Option<i32>| EpisodeMetadata {
+        tvdb_id: 880_200 + i64::from(number),
+        episode_number: number,
+        name: format!("Episode {number}"),
+        aired: "2026-01-01".into(),
+        runtime_minutes: 24,
+        is_filler: false,
+        is_recap: false,
+        overview: String::new(),
+        absolute_number: number.to_string(),
+        contiguous_absolute_number: contiguous,
+        season_number: 1,
+        image_url: String::new(),
+    };
+    let contiguous_by_number = |episodes: &[Episode]| {
+        let mut rows = episodes
+            .iter()
+            .map(|episode| {
+                (
+                    episode.episode_number.clone().unwrap_or_default(),
+                    episode.absolute_number.clone(),
+                    episode.contiguous_absolute_number,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+
+    app.create_series_seasons_and_episodes(
+        &title,
+        &seasons,
+        &[
+            episode(1, Some(1)),
+            episode(2, Some(2)),
+            episode(3, Some(3)),
+        ],
+        &[],
+        &[],
+    )
+    .await;
+    let collection = app
+        .list_collections(&user, &title.id)
+        .await
+        .expect("list collections")
+        .into_iter()
+        .next()
+        .expect("collection created");
+
+    // TVDB renumbered E03 away and the story episode now sits at E04, which
+    // carries contiguous 3. The stale row must not keep 3 alongside it.
+    app.create_series_seasons_and_episodes(
+        &title,
+        &seasons,
+        &[
+            episode(1, Some(1)),
+            episode(2, Some(2)),
+            episode(4, Some(3)),
+        ],
+        &[],
+        &[],
+    )
+    .await;
+    let renumbered = app
+        .list_episodes(&user, &collection.id)
+        .await
+        .expect("list episodes after renumbering");
+    assert_eq!(
+        contiguous_by_number(&renumbered),
+        vec![
+            ("1".to_string(), Some("1".to_string()), Some(1)),
+            ("2".to_string(), Some("2".to_string()), Some(2)),
+            // Only the contiguous column is cleared; raw keeps its value.
+            ("3".to_string(), Some("3".to_string()), None),
+            ("4".to_string(), Some("4".to_string()), Some(3)),
+        ]
+    );
+    assert_eq!(
+        app.services
+            .catalog
+            .shows
+            .find_episode_by_title_and_absolute_number(&title.id, "3")
+            .await
+            .expect("absolute lookup")
+            .and_then(|episode| episode.episode_number),
+        Some("4".to_string()),
+        "the contiguous 3 names exactly one episode"
+    );
+
+    // A response naming no episodes says nothing about the stored ones.
+    app.create_series_seasons_and_episodes(&title, &seasons, &[], &[], &[])
+        .await;
+    let after_empty = app
+        .list_episodes(&user, &collection.id)
+        .await
+        .expect("list episodes after an empty response");
+    assert_eq!(
+        contiguous_by_number(&after_empty),
+        contiguous_by_number(&renumbered)
+    );
+}
+
+#[tokio::test]
 async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
     let (app, user) = bootstrap();
     let app = app.with_test_overrides(|services| {

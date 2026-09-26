@@ -1414,6 +1414,12 @@ fn single_season_projection(matches: &[&Episode]) -> Option<(u32, Vec<u32>, Vec<
 /// contiguous scale episode by episode and leaves a trailing episode it cannot
 /// number yet empty, so a contiguous catalog defers for the numbers it does not
 /// carry; the ones it carries are answered by the catalog itself.
+///
+/// Deferring helps only inside a community season whose anchor episode SMG
+/// *has* numbered and whose range is still open: SMG reads a season's
+/// contiguous start off its anchor's own contiguous number, so a season whose
+/// anchor is itself unplaced carries no contiguous start and the release stays
+/// unplaced rather than being filed by a raw number.
 fn absolute_start_applies(episodes: &[Episode], scale: AbsoluteScale, absolutes: &[u32]) -> bool {
     match scale {
         AbsoluteScale::Raw => !episodes.iter().any(|episode| {
@@ -1593,6 +1599,14 @@ pub(crate) fn translate_parsed_episode_numbering(
 /// downstream admission check reads. Absolute coordinates are trustworthy only
 /// when every resolved catalog episode supplies one positive, distinct value;
 /// the parser's raw evidence remains untouched.
+///
+/// The stamped absolute is the catalog episode's *raw* `absolute_number`, never
+/// its contiguous one: matching reads the title's `AbsoluteScale`, but every
+/// renderer (import, rename, manual-import labels) writes the raw number, so
+/// the parse path of an import must hand them the same value the catalog path
+/// and a later rename would. Downstream matching is unaffected because a
+/// resolved parse always carries the catalog season and episode numbers, which
+/// coverage and the numbering veto read before any absolute.
 fn apply_resolved_catalog_coordinates(
     parsed: &mut ParsedEpisodeMetadata,
     candidate: &NumberingCandidate,
@@ -1617,7 +1631,6 @@ fn apply_resolved_catalog_coordinates(
         };
     }
 
-    let scale = AbsoluteScale::for_catalog(episodes);
     let absolute_numbers = candidate
         .episode_ids
         .iter()
@@ -1626,7 +1639,7 @@ fn apply_resolved_catalog_coordinates(
             let episode = episodes.iter().find(|episode| episode.id == *episode_id)?;
             (parse_u32(episode.season_number.as_deref()) == Some(candidate.season)
                 && parse_u32(episode.episode_number.as_deref()) == Some(*expected_number))
-            .then(|| scale.episode_absolute(episode))?
+            .then(|| parse_u32(episode.absolute_number.as_deref()))?
             .filter(|absolute| *absolute > 0)
         })
         .collect::<Option<Vec<_>>>()

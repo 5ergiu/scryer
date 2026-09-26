@@ -1711,7 +1711,7 @@ async fn import_single_episode_file(
             &episode_numbers,
             resolved_episode.and_then(|episode| episode.episode_number.as_deref()),
         );
-        let absolute_number = resolved_episode.and_then(|episode| episode.absolute_number.clone());
+        let absolute_number = import_absolute_episode_token(resolved_episode, None);
         (season, episode_number, absolute_number)
     } else {
         let (ep_meta, _) = identity_episode.expect("the parse path resolved episode metadata");
@@ -1720,10 +1720,7 @@ async fn import_single_episode_file(
             &ep_meta.episode_numbers,
             resolved_episode.and_then(|episode| episode.episode_number.as_deref()),
         );
-        let absolute_number = ep_meta
-            .absolute_episode
-            .map(|number| number.to_string())
-            .or_else(|| resolved_episode.and_then(|episode| episode.absolute_number.clone()));
+        let absolute_number = import_absolute_episode_token(resolved_episode, ep_meta.absolute_episode);
         (season, episode_number, absolute_number)
     };
     let post_processing_episode = if uses_catalog_identity {
@@ -2093,6 +2090,24 @@ pub(crate) fn use_season_folders(title: &scryer_domain::Title) -> bool {
 /// files where no per-season episode number is known).
 /// `quality_override` replaces the filename-parsed quality token when the
 /// caller supplies an explicit label (e.g. manual import).
+/// The `absolute_episode` token an episode import renders.
+///
+/// Every renderer writes the catalog episode's *raw* absolute number — the one
+/// rename renders too — so an import never writes a name the next rename
+/// changes. The parsed absolute may sit on the title's contiguous matching
+/// scale, so it is only a fallback for catalog rows that carry no absolute.
+pub(crate) fn import_absolute_episode_token(
+    resolved_episode: Option<&scryer_domain::Episode>,
+    parsed_absolute: Option<u32>,
+) -> Option<String> {
+    resolved_episode
+        .and_then(|episode| episode.absolute_number.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| parsed_absolute.map(|number| number.to_string()))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "episode rename rendering uses the full canonical token set explicitly"

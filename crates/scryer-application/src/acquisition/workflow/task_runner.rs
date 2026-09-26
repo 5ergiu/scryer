@@ -3006,14 +3006,25 @@ async fn prune_stale_standby_coverage(
     let search_title = app
         .release_search_title_for_wanted_item(title, item, episode, Some(&context.reads))
         .await;
-    let pending_subject = app
+    let pending_subject = match app
         .resolve_pending_release_search_subject_for_wanted_item(
             title,
             &search_title,
             item,
             episode,
         )
-        .await;
+        .await
+    {
+        Ok(pending_subject) => pending_subject,
+        Err(error) => {
+            warn!(
+                title_id = title.id.as_str(),
+                error = %error,
+                "background acquisition: could not resolve the search subject; leaving stale standby coverage for a later cycle"
+            );
+            return;
+        }
+    };
     let Some(convergence) = app
         .resolve_scope_convergence_memoized(
             &search_title,
@@ -3334,7 +3345,7 @@ async fn process_single_target(
             item,
             episode.as_ref(),
         )
-        .await;
+        .await?;
     // Season-pack shaping only, so season 0 is excluded: the specials season is
     // not a pack an indexer publishes, and `{title} S00` is not a query worth
     // spending. The subject keeps its `Some(0)` for the acceptance veto.

@@ -1444,14 +1444,15 @@ async fn find_episode_by_title_and_numbers_query(
 }
 
 /// The same rule as [`AbsoluteScale::for_catalog`], answered without loading
-/// the catalog.
+/// the catalog. An existence probe: no row's identity is read, so it needs no
+/// ordering and stops at the first match.
 async fn absolute_scale_for_title_query(
     target: SqlTarget<'_>,
     title_id: &str,
 ) -> AppResult<AbsoluteScale> {
     let row = SqlRuntime::fetch_optional(
         SqlExec::Target(target),
-        "SELECT id FROM episodes WHERE title_id = {} AND contiguous_absolute_number > 0 LIMIT 1",
+        "SELECT 1 AS present FROM episodes WHERE title_id = {} AND contiguous_absolute_number > 0 LIMIT 1",
         &[SqlArg::Text(title_id.to_string())],
     )
     .await?;
@@ -1463,6 +1464,8 @@ async fn absolute_scale_for_title_query(
 }
 
 /// The episode carrying `absolute_number` on the title's own absolute scale.
+/// Should a stale row share the number, the pick is still deterministic: the
+/// lowest (season, episode, id) wins.
 async fn find_episode_by_title_and_absolute_number_query(
     target: SqlTarget<'_>,
     title_id: &str,
@@ -1471,7 +1474,7 @@ async fn find_episode_by_title_and_absolute_number_query(
     let row = match absolute_scale_for_title_query(target, title_id).await? {
         AbsoluteScale::Raw => {
             let sql = format!(
-                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND absolute_number = {{}} LIMIT 1"
+                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND absolute_number = {{}} ORDER BY season_number, episode_number, id LIMIT 1"
             );
             SqlRuntime::fetch_optional(
                 SqlExec::Target(target),
@@ -1488,7 +1491,7 @@ async fn find_episode_by_title_and_absolute_number_query(
                 return Ok(None);
             };
             let sql = format!(
-                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND contiguous_absolute_number = {{}} LIMIT 1"
+                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND contiguous_absolute_number = {{}} ORDER BY season_number, episode_number, id LIMIT 1"
             );
             SqlRuntime::fetch_optional(
                 SqlExec::Target(target),

@@ -2645,10 +2645,7 @@ impl AppUseCase {
         // Every absolute number this search carries is on the title's one
         // absolute scale; see `AbsoluteScale`.
         let absolute_scale = self
-            .services
-            .catalog
-            .shows
-            .absolute_scale_for_title(&title.id)
+            .release_search_absolute_scale(title, episode_record.as_ref())
             .await?;
         let absolute_episode = episode_record
             .as_ref()
@@ -2955,7 +2952,7 @@ impl AppUseCase {
             item,
             episode,
         )
-        .await
+        .await?
         .resolve(self)
         .await
     }
@@ -2969,7 +2966,7 @@ impl AppUseCase {
         search_title: &Title,
         item: &AcquisitionScopeState,
         episode: Option<&Episode>,
-    ) -> PendingReleaseSearchSubject {
+    ) -> AppResult<PendingReleaseSearchSubject> {
         // Anime whose community numbering differs from TVDB's needs the extra
         // community-numbered query forms; every other title reads `None` here
         // and searches exactly as before.
@@ -2981,15 +2978,12 @@ impl AppUseCase {
             .await
             .unwrap_or_default();
         // Every absolute number this subject carries is on the title's one
-        // absolute scale; see `AbsoluteScale`. A failed read keeps the raw
-        // scale, the same degraded answer a failed bridge read gives.
+        // absolute scale; see `AbsoluteScale`. A failed read fails this item
+        // rather than guessing the raw scale: a contiguous title searched on
+        // raw numbers vetoes its own correct absolute-numbered releases.
         let absolute_scale = self
-            .services
-            .catalog
-            .shows
-            .absolute_scale_for_title(&search_title.id)
-            .await
-            .unwrap_or_default();
+            .release_search_absolute_scale(search_title, episode)
+            .await?;
         let query_result = build_search_queries(
             search_title,
             item,
@@ -3010,7 +3004,7 @@ impl AppUseCase {
         let evidence_title =
             title_with_bridge_cour_titles(search_title, anime_numbering_bridge.as_ref());
 
-        PendingReleaseSearchSubject {
+        Ok(PendingReleaseSearchSubject {
             subject: ResolvedReleaseSearchSubject {
                 title_id: owner_title.id.clone(),
                 title_tags: owner_title.tags.clone(),
@@ -3045,8 +3039,50 @@ impl AppUseCase {
                 submission_scope: direct_download_submission_scope_for_wanted_item(item, episode),
             },
             evidence: PendingTitleEvidence::Ambiguity(search_title.clone()),
+        })
+    }
+
+    /// The absolute scale a search subject's numbers are read on, the same
+    /// rule as [`AbsoluteScale::for_catalog`](scryer_domain::AbsoluteScale::for_catalog).
+    /// The catalog is only asked when the answer is not already known; see
+    /// [`absolute_scale_known_without_lookup`].
+    async fn release_search_absolute_scale(
+        &self,
+        title: &Title,
+        episode: Option<&Episode>,
+    ) -> AppResult<scryer_domain::AbsoluteScale> {
+        match absolute_scale_known_without_lookup(title, episode) {
+            Some(scale) => Ok(scale),
+            None => {
+                self.services
+                    .catalog
+                    .shows
+                    .absolute_scale_for_title(&title.id)
+                    .await
+            }
         }
     }
+}
+
+/// The search absolute scale when it needs no catalog read.
+///
+/// A searched episode that carries a contiguous number settles it: one such
+/// episode puts the whole title on the contiguous scale. Otherwise only anime
+/// is worth the read — absolute-numbered releases and the absolute query forms
+/// are an anime convention, so every other title keeps the raw scale it always
+/// searched on, without a query per wanted item.
+fn absolute_scale_known_without_lookup(
+    title: &Title,
+    episode: Option<&Episode>,
+) -> Option<scryer_domain::AbsoluteScale> {
+    let contiguous = scryer_domain::AbsoluteScale::Contiguous;
+    if episode
+        .and_then(|episode| contiguous.episode_absolute(episode))
+        .is_some_and(|number| number > 0)
+    {
+        return Some(contiguous);
+    }
+    (title.facet != MediaFacet::Anime).then_some(scryer_domain::AbsoluteScale::Raw)
 }
 
 /// The season number of an operator's whole-season search. Only a plain
@@ -4436,6 +4472,48 @@ mod tests {
             updated_at: String::new(),
         };
         (item, episode)
+    }
+
+    #[test]
+    fn the_search_absolute_scale_reads_the_catalog_only_for_anime_it_cannot_settle() {
+        use scryer_domain::AbsoluteScale;
+        let anime = make_title();
+        let (_, mut episode) = specials_wanted_item(&anime, "1", "51");
+        episode.absolute_number = Some("53".into());
+
+        // An anime episode without a contiguous number cannot settle the
+        // title's scale: another episode may carry one, so the catalog is read.
+        assert_eq!(
+            absolute_scale_known_without_lookup(&anime, Some(&episode)),
+            None
+        );
+        assert_eq!(absolute_scale_known_without_lookup(&anime, None), None);
+
+        // One contiguous episode puts the whole title on the contiguous scale.
+        episode.contiguous_absolute_number = Some(51);
+        assert_eq!(
+            absolute_scale_known_without_lookup(&anime, Some(&episode)),
+            Some(AbsoluteScale::Contiguous)
+        );
+
+        // Every other facet keeps the raw scale without a catalog read.
+        let mut series = make_title();
+        series.facet = MediaFacet::Series;
+        episode.contiguous_absolute_number = None;
+        assert_eq!(
+            absolute_scale_known_without_lookup(&series, Some(&episode)),
+            Some(AbsoluteScale::Raw)
+        );
+        assert_eq!(
+            absolute_scale_known_without_lookup(&series, None),
+            Some(AbsoluteScale::Raw)
+        );
+        let mut movie = make_title();
+        movie.facet = MediaFacet::Movie;
+        assert_eq!(
+            absolute_scale_known_without_lookup(&movie, None),
+            Some(AbsoluteScale::Raw)
+        );
     }
 
     /// The source of the regression: the specials season used to be folded into
