@@ -8,15 +8,7 @@ import { LoadingMark } from "@/components/common/loading-mark";
 
 export type AcquisitionSettings = {
   enabled: boolean;
-  upgradeCooldownHours: number;
   sameTierMinDelta: number;
-  /**
-   * Deprecated and inert: tier is compared before score, so no cross-tier
-   * delta is ever consulted. Kept so the stored value round-trips through the
-   * settings mutation unchanged; no control is rendered for it.
-   */
-  crossTierMinDelta: number;
-  forcedUpgradeDeltaBypass: number;
   pollIntervalSeconds: number;
   longTailBackfillMaxScopesPerCycle: number;
   longTailReconvergeDays: number;
@@ -120,35 +112,12 @@ export function SettingsAcquisitionSection({
           {t("settings.acquisitionThresholds")}
         </h2>
         <NumberField
-          id="settings-acquisition-upgrade-cooldown"
-          label={t("settings.acquisitionUpgradeCooldownHours")}
-          help={t("settings.acquisitionUpgradeCooldownHoursHelp")}
-          value={draft.upgradeCooldownHours}
-          disabled={disabled}
-          onChange={(upgradeCooldownHours) => update({ upgradeCooldownHours })}
-        />
-        <NumberField
           id="settings-acquisition-same-tier-delta"
           label={t("settings.acquisitionSameTierMinDelta")}
           help={t("settings.acquisitionSameTierMinDeltaHelp")}
           value={draft.sameTierMinDelta}
           disabled={disabled}
           onChange={(sameTierMinDelta) => update({ sameTierMinDelta })}
-        />
-        {/*
-          The cross-tier minimum delta control is deliberately absent. Quality
-          tier is compared before score, so no score delta ever sees a
-          cross-tier comparison and the setting is inert; the value is still
-          carried in `AcquisitionSettings` so the saved draft round-trips the
-          stored (ignored) number until the field is removed from the API.
-        */}
-        <NumberField
-          id="settings-acquisition-forced-upgrade-bypass"
-          label={t("settings.acquisitionForcedUpgradeDeltaBypass")}
-          help={t("settings.acquisitionForcedUpgradeDeltaBypassHelp")}
-          value={draft.forcedUpgradeDeltaBypass}
-          disabled={disabled}
-          onChange={(forcedUpgradeDeltaBypass) => update({ forcedUpgradeDeltaBypass })}
         />
       </div>
 

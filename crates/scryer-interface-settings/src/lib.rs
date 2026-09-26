@@ -259,10 +259,11 @@ fn from_acquisition_settings(
 ) -> AcquisitionSettingsPayload {
     AcquisitionSettingsPayload {
         enabled: settings.enabled,
-        upgrade_cooldown_hours: settings.upgrade_cooldown_hours,
+        // Deprecated no-op fields: nothing backs them, so they report 0.
+        upgrade_cooldown_hours: 0,
         same_tier_min_delta: settings.same_tier_min_delta,
-        cross_tier_min_delta: settings.cross_tier_min_delta,
-        forced_upgrade_delta_bypass: settings.forced_upgrade_delta_bypass,
+        cross_tier_min_delta: 0,
+        forced_upgrade_delta_bypass: 0,
         poll_interval_seconds: settings.poll_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,

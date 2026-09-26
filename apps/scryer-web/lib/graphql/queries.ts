@@ -2806,10 +2806,7 @@ export const tlsSettingsQuery = `query TlsSettings {
 export const acquisitionSettingsQuery = `query AcquisitionSettings {
   acquisitionSettings {
     enabled
-    upgradeCooldownHours
     sameTierMinDelta
-    crossTierMinDelta
-    forcedUpgradeDeltaBypass
     pollIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays

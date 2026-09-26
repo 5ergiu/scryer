@@ -6239,14 +6239,9 @@ mod tests {
         };
 
         // A true upgrade: every member is occupied and the pack clears the
-        // same-tier delta but not the old forced bypass — the exact shape the
-        // cooldown used to refuse, on a scope whose members landed an hour ago.
+        // same-tier delta by the smallest admitting margin — the shape a recency
+        // cooldown would refuse, on a scope whose members landed an hour ago.
         let upgrade = pack_scoring(incumbent_score + thresholds.same_tier_min_delta);
-        assert!(
-            thresholds.same_tier_min_delta < thresholds.forced_upgrade_delta_bypass,
-            "the upgrade case needs a delta that admits but would not have forced past \
-             the old cooldown"
-        );
         let fully_occupied = pack_admission(&episode_ids);
         assert_eq!(
             decide(&upgrade, &fully_occupied),

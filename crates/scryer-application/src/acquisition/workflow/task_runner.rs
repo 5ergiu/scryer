@@ -5081,10 +5081,7 @@ pub async fn start_background_acquisition_poller(
             warn!(error = %err, "failed to load acquisition settings, using defaults");
             crate::AcquisitionSettings {
                 enabled: true,
-                upgrade_cooldown_hours: 24,
                 same_tier_min_delta: 120,
-                cross_tier_min_delta: 30,
-                forced_upgrade_delta_bypass: 400,
                 poll_interval_seconds: 60,
                 long_tail_backfill_max_scopes_per_cycle:
                     crate::acquisition::convergence::DEFAULT_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE

@@ -104,24 +104,25 @@ type AcquisitionSettingsPayload {
 	"""
 	enabled: Boolean!
 	"""
-	Upgrade cooldown in hours.
+	Deprecated and inert. There is no upgrade cooldown; this always
+	returns 0 and the value carries no meaning.
 	"""
-	upgradeCooldownHours: Int!
+	upgradeCooldownHours: Int! @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
 	Minimum score delta for same-tier upgrades.
 	"""
 	sameTierMinDelta: Int!
 	"""
 	Deprecated and inert. Quality tier is compared before score, so no
-	score delta ever sees a cross-tier comparison; the stored value is
-	returned unchanged and ignored by acquisition. Scheduled for removal in
-	a later minor.
+	cross-tier delta is consulted; this always returns 0 and the value
+	carries no meaning.
 	"""
-	crossTierMinDelta: Int! @deprecated(reason: "Inert since 0.18.17: quality tier is compared before score, so no cross-tier delta is consulted. The value is stored and ignored; the field will be removed in a later minor.")
+	crossTierMinDelta: Int! @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
-	Score delta that bypasses normal forced-upgrade thresholds.
+	Deprecated and inert. There is no upgrade cooldown to bypass; this
+	always returns 0 and the value carries no meaning.
 	"""
-	forcedUpgradeDeltaBypass: Int!
+	forcedUpgradeDeltaBypass: Int! @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
 	Acquisition polling interval in seconds.
 	"""
@@ -29921,23 +29922,24 @@ input UpdateAcquisitionSettingsInput {
 	"""
 	enabled: Boolean!
 	"""
-	Upgrade cooldown in hours.
+	Deprecated and inert: accepted and ignored; nothing is read or stored.
+	Removed in the next minor.
 	"""
-	upgradeCooldownHours: Int!
+	upgradeCooldownHours: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
 	Minimum score improvement for a same-tier upgrade.
 	"""
 	sameTierMinDelta: Int!
 	"""
-	Deprecated and inert: accepted and stored for compatibility, ignored by
-	acquisition (quality tier is compared before score, so no cross-tier
-	delta is ever consulted). Will be removed in a later minor.
+	Deprecated and inert: accepted and ignored; nothing is read or stored.
+	Removed in the next minor.
 	"""
-	crossTierMinDelta: Int!
+	crossTierMinDelta: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
-	Score delta that bypasses the forced-upgrade guard.
+	Deprecated and inert: accepted and ignored; nothing is read or stored.
+	Removed in the next minor.
 	"""
-	forcedUpgradeDeltaBypass: Int!
+	forcedUpgradeDeltaBypass: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
 	Scheduler poll interval in seconds.
 	"""

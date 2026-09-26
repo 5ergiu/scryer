@@ -5333,13 +5333,8 @@ async fn covered_background_walk_reads_no_persona_or_acquisition_thresholds() {
             .any(|key| key == INDEXER_ROUTING_SETTINGS_KEY),
         "the stage reached the convergence gate: {walk_reads:?}"
     );
-    // The acquisition thresholds are the only reader of the last three keys.
-    for key in [
-        SCORING_PERSONA_KEY,
-        "acquisition.upgrade_cooldown_hours",
-        "acquisition.same_tier_min_delta",
-        "acquisition.forced_upgrade_delta_bypass",
-    ] {
+    // The acquisition thresholds are the only reader of the last key.
+    for key in [SCORING_PERSONA_KEY, "acquisition.same_tier_min_delta"] {
         assert!(
             !walk_reads.iter().any(|read| read == key),
             "a covered stage never resolves the persona or the acquisition thresholds ({key}): {walk_reads:?}"

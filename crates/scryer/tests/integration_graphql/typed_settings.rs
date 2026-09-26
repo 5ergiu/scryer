@@ -754,13 +754,68 @@ async fn graphql_typed_acquisition_settings_round_trip() {
         mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
           updateAcquisitionSettings(input: $input) {
             enabled
+            sameTierMinDelta
+            pollIntervalSeconds
+            longTailBackfillMaxScopesPerCycle
+            longTailReconvergeDays
+          }
+        }
+        "#,
+        json!({
+          "input": {
+            "enabled": true,
+            "sameTierMinDelta": 140,
+            "pollIntervalSeconds": 45,
+            "longTailBackfillMaxScopesPerCycle": 750,
+            "longTailReconvergeDays": 30
+          }
+        }),
+    )
+    .await;
+    assert_no_errors(&update);
+
+    let read = gql(
+        &ctx,
+        r#"
+        query AcquisitionSettings {
+          acquisitionSettings {
+            enabled
+            sameTierMinDelta
+            pollIntervalSeconds
+            longTailBackfillMaxScopesPerCycle
+            longTailReconvergeDays
+          }
+        }
+        "#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&read);
+
+    let settings = &read["data"]["acquisitionSettings"];
+    assert_eq!(settings["enabled"], true);
+    assert_eq!(settings["sameTierMinDelta"], 140);
+    assert_eq!(settings["pollIntervalSeconds"], 45);
+    assert_eq!(settings["longTailBackfillMaxScopesPerCycle"], 750);
+    assert_eq!(settings["longTailReconvergeDays"], 30);
+}
+
+/// Clients built before the dead upgrade knobs were retired still send them.
+/// The fields stay in the schema as deprecated no-ops: accepted, never stored,
+/// and always reported as 0.
+#[tokio::test]
+async fn graphql_retired_acquisition_fields_are_accepted_and_ignored() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let update = gql(
+        &ctx,
+        r#"
+        mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
+          updateAcquisitionSettings(input: $input) {
             upgradeCooldownHours
             sameTierMinDelta
             crossTierMinDelta
             forcedUpgradeDeltaBypass
-            pollIntervalSeconds
-            longTailBackfillMaxScopesPerCycle
-            longTailReconvergeDays
           }
         }
         "#,
@@ -780,36 +835,11 @@ async fn graphql_typed_acquisition_settings_round_trip() {
     .await;
     assert_no_errors(&update);
 
-    let read = gql(
-        &ctx,
-        r#"
-        query AcquisitionSettings {
-          acquisitionSettings {
-            enabled
-            upgradeCooldownHours
-            sameTierMinDelta
-            crossTierMinDelta
-            forcedUpgradeDeltaBypass
-            pollIntervalSeconds
-            longTailBackfillMaxScopesPerCycle
-            longTailReconvergeDays
-          }
-        }
-        "#,
-        json!({}),
-    )
-    .await;
-    assert_no_errors(&read);
-
-    let settings = &read["data"]["acquisitionSettings"];
-    assert_eq!(settings["enabled"], true);
-    assert_eq!(settings["upgradeCooldownHours"], 18);
+    let settings = &update["data"]["updateAcquisitionSettings"];
     assert_eq!(settings["sameTierMinDelta"], 140);
-    assert_eq!(settings["crossTierMinDelta"], 35);
-    assert_eq!(settings["forcedUpgradeDeltaBypass"], 420);
-    assert_eq!(settings["pollIntervalSeconds"], 45);
-    assert_eq!(settings["longTailBackfillMaxScopesPerCycle"], 750);
-    assert_eq!(settings["longTailReconvergeDays"], 30);
+    assert_eq!(settings["upgradeCooldownHours"], 0);
+    assert_eq!(settings["crossTierMinDelta"], 0);
+    assert_eq!(settings["forcedUpgradeDeltaBypass"], 0);
 }
 
 #[tokio::test]
