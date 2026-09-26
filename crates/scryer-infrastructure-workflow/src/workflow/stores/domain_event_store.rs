@@ -693,6 +693,7 @@ mod title_history_filter_tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         untitled.title_id = None;
@@ -925,6 +926,7 @@ mod title_history_filter_tests {
                         source_provider: None,
                         download_id: Some("download-1".to_string()),
                         episode_ids: Vec::new(),
+                        release_facts: None,
                     }),
                 ),
             ])

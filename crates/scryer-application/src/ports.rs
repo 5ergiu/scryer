@@ -5146,7 +5146,35 @@ pub trait QualityProfileRepository: Send + Sync {
 
 #[async_trait]
 pub trait ReleaseAttemptRepository: Send + Sync {
+    /// Record one download attempt.
+    ///
+    /// The source hint is usually the indexer download URL, which carries the
+    /// operator's indexer key. Callers pass the live URL they fetched from;
+    /// the attempt row is history, never a fetch source, so the credential is
+    /// dropped here before the row is written.
     async fn record_release_attempt(
+        &self,
+        title_id: Option<String>,
+        source_hint: Option<String>,
+        source_title: Option<String>,
+        outcome: ReleaseDownloadAttemptOutcome,
+        error_message: Option<String>,
+        source_password: Option<String>,
+    ) -> AppResult<()> {
+        self.insert_release_attempt(
+            title_id,
+            crate::url_redaction::redact_optional_url_credentials(source_hint),
+            source_title,
+            outcome,
+            error_message,
+            source_password,
+        )
+        .await
+    }
+
+    /// Persist an attempt exactly as given. Call
+    /// [`Self::record_release_attempt`] instead, which redacts the source hint.
+    async fn insert_release_attempt(
         &self,
         title_id: Option<String>,
         source_hint: Option<String>,

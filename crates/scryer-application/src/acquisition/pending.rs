@@ -1581,6 +1581,16 @@ impl AppUseCase {
                         grabbed_at: Some(now.to_rfc3339()),
                     })
                     .await?;
+                let release_facts = self
+                    .grabbed_release_facts(
+                        &pr.release_title,
+                        None,
+                        pr.release_size_bytes,
+                        source_kind,
+                        grab_indexer.clone(),
+                        grab.client_id.as_deref(),
+                    )
+                    .await;
                 let _ = self
                     .append_domain_event(new_title_domain_event(
                         None,
@@ -1592,6 +1602,7 @@ impl AppUseCase {
                             source_provider: None,
                             download_id: Some(download_job_id),
                             episode_ids: wanted.episode_id.iter().cloned().collect(),
+                            release_facts: Some(release_facts),
                         }),
                     ))
                     .await;

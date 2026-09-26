@@ -2,6 +2,7 @@ use crate::integration::workflow::{extract_url_origin, source_provider_label};
 use crate::library_scan_progress::{
     reduce_library_scan_projection_event, replay_library_scan_projection,
 };
+use crate::url_redaction::REDACTED_SECRET as REDACTED_HISTORY_SECRET;
 use crate::{
     ActivityChannel, ActivityEvent, ActivityKind, ActivitySeverity, DownloadQueueItem, JobKey,
     JobRun, JobRunStatus, JobTriggerSource, LibraryScanSession, LibraryScanStatus,
@@ -345,16 +346,6 @@ pub(crate) fn title_history_records_from_domain_event(
         .collect()
 }
 
-const REDACTED_HISTORY_SECRET: &str = "[redacted]";
-
-fn history_api_key_query_param_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r#"(?i)(?P<prefix>\b(?:api_?key)=)(?P<value>[^&#\s"'<>),\]}]+)"#)
-            .expect("history api key regex should compile")
-    })
-}
-
 fn history_url_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
@@ -373,9 +364,7 @@ fn looks_like_history_secret_key(key: &str) -> bool {
 }
 
 fn redact_history_api_keys(raw: &str) -> String {
-    history_api_key_query_param_regex()
-        .replace_all(raw, format!("${{prefix}}{REDACTED_HISTORY_SECRET}"))
-        .into_owned()
+    crate::url_redaction::redact_url_credentials(raw)
 }
 
 fn redact_history_urls(raw: &str) -> String {
@@ -1467,6 +1456,7 @@ mod tests {
                     source_provider: None,
                     download_id: Some("download-1".to_string()),
                     episode_ids: vec!["episode-1".to_string()],
+                    release_facts: None,
                 }),
                 r#"{"type":"release_grabbed","data":{"title":{"title_name":"Fixture","facet":"series","external_ids":{"imdb_id":null,"tmdb_id":null,"tvdb_id":null,"anidb_id":null},"poster_url":null,"year":2024},"source_title":"Grab.Release","source_hint":"rss","source_provider":null,"download_id":"download-1","episode_ids":["episode-1"]}}"#,
                 ActivityKind::AcquisitionCandidateAccepted,
@@ -1625,6 +1615,7 @@ mod tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
 
@@ -1650,6 +1641,7 @@ mod tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         event.title_id = None;
@@ -1684,6 +1676,7 @@ mod tests {
                 source_provider: Some("Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         event.actor_kind = scryer_domain::DomainEventActorKind::User;

@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use scryer_application::url_redaction::redact_optional_url_credentials;
 use scryer_application::{
     AcquisitionScopeState, AcquisitionScopeStateRepository, AcquisitionScopeStatesQuery,
     AcquisitionScopeStatus, AppResult, BlocklistRepository, DownloadSourceKind,
@@ -414,6 +415,14 @@ struct ReleaseDecisionIdentityArgs {
     release_size_bytes: i64,
 }
 
+/// The release URL as the decision ledger stores it. Indexer download links
+/// carry the operator's indexer key; the ledger is read-only history that is
+/// shown in the UI and never fetched from, so the key is dropped on write and
+/// the dedupe identity compares the same redacted form.
+fn stored_release_decision_url(decision: &ReleaseDecision) -> Option<String> {
+    redact_optional_url_credentials(decision.release_url.clone())
+}
+
 /// Stands in for "no size recorded" in the identity comparison. Negative, so
 /// it cannot collide with a real byte count.
 const RELEASE_DECISION_UNKNOWN_SIZE: i64 = -1;
@@ -423,7 +432,7 @@ impl ReleaseDecisionIdentityArgs {
         Self {
             wanted_item_id: decision.wanted_item_id.clone(),
             decision_code: decision.decision_code.clone(),
-            release_url: decision.release_url.clone().unwrap_or_default(),
+            release_url: stored_release_decision_url(decision).unwrap_or_default(),
             release_title: decision.release_title.clone(),
             release_size_bytes: decision
                 .release_size_bytes
@@ -1087,7 +1096,7 @@ impl AcquisitionScopeStateRepository for WantedStore {
             SqlArg::Text(decision.wanted_item_id.clone()),
             SqlArg::Text(decision.title_id.clone()),
             SqlArg::Text(decision.release_title.clone()),
-            SqlArg::OptText(decision.release_url.clone()),
+            SqlArg::OptText(stored_release_decision_url(decision)),
             SqlArg::OptI64(decision.release_size_bytes),
             SqlArg::Text(decision.decision_code.clone()),
             SqlArg::I32(decision.candidate_score),

@@ -596,7 +596,9 @@ impl AppUseCase {
                         client_id = ?grab.client_id,
                         client_type = %grab.client_type,
                         download_client_item_id = %grab.job_id,
-                        source_hint = ?source_hint_for_attempt,
+                        source_hint = ?source_hint_for_attempt
+                            .as_deref()
+                            .map(crate::url_redaction::RedactedUrl),
                         "queued download submission without a release title; import will parse the client-reported release name"
                     );
                 }
@@ -689,6 +691,18 @@ impl AppUseCase {
         };
 
         let grabbed_episode_ids = episode_ids_for_queue_scope(self, &scope).await;
+        // A grab without a release title still has a size, protocol, indexer
+        // and client worth reporting; the empty title just parses to nothing.
+        let release_facts = self
+            .grabbed_release_facts(
+                source_title_for_attempt.as_deref().unwrap_or_default(),
+                None,
+                size_bytes,
+                source_kind,
+                source_provider_name.clone(),
+                grab.client_id.as_deref(),
+            )
+            .await;
 
         self.append_domain_event(new_title_domain_event(
             actor,
@@ -700,6 +714,7 @@ impl AppUseCase {
                 source_provider: source_provider_name.clone(),
                 download_id: Some(grab.job_id.clone()),
                 episode_ids: grabbed_episode_ids,
+                release_facts: Some(release_facts),
             }),
         ))
         .await?;

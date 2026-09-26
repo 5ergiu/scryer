@@ -170,6 +170,7 @@ fn grabbed_payload(title_name: &str) -> DomainEventPayload {
         source_provider: Some("Fixture Indexer".to_string()),
         download_id: Some("dashboard-download-1".to_string()),
         episode_ids: vec![],
+        release_facts: None,
     })
 }
 

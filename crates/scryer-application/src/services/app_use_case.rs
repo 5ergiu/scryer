@@ -537,6 +537,74 @@ impl AppUseCase {
         }
     }
 
+    /// The release facts a grab event carries to history and notifications.
+    ///
+    /// `parsed` is the parse the grab was scored on when the caller has one;
+    /// otherwise the release title is parsed here. `indexer` should be the name
+    /// resolved through [`Self::grab_indexer_name`]. A download-client lookup
+    /// failure only leaves the client name out: describing a grab must never
+    /// fail it.
+    pub(crate) async fn grabbed_release_facts(
+        &self,
+        release_title: &str,
+        parsed: Option<&ParsedReleaseMetadata>,
+        size_bytes: Option<i64>,
+        source_kind: Option<DownloadSourceKind>,
+        indexer: Option<String>,
+        download_client_id: Option<&str>,
+    ) -> scryer_domain::GrabbedReleaseFacts {
+        let parsed_here;
+        let parsed = match parsed {
+            Some(parsed) => parsed,
+            None => {
+                parsed_here = parse_release_metadata(release_title);
+                &parsed_here
+            }
+        };
+        let protocol = source_kind.map(|kind| {
+            if crate::delay_profile::is_usenet_source(Some(kind)) {
+                "usenet".to_string()
+            } else {
+                "torrent".to_string()
+            }
+        });
+        let download_client_name = match download_client_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(client_id) => match self
+                .services
+                .integrations
+                .download_client_configs
+                .get_by_id(client_id)
+                .await
+            {
+                Ok(Some(config)) => Some(config.name).filter(|name| !name.trim().is_empty()),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(
+                        client_id,
+                        error = %error,
+                        "download client lookup failed while describing a grab"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        scryer_domain::GrabbedReleaseFacts {
+            quality: parsed.quality.clone(),
+            release_group: parsed.release_group.clone(),
+            audio_languages: parsed.languages_audio.clone(),
+            dual_audio: Some(parsed.is_dual_audio),
+            size_bytes,
+            protocol,
+            indexer: indexer.filter(|name| !name.trim().is_empty()),
+            download_client_name,
+        }
+    }
+
     /// Count one release grabbed through `indexer_id` toward that indexer's
     /// trailing-24h grab total.
     ///
