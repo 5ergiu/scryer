@@ -24,7 +24,7 @@ async fn set_experimental_features(harness: &MediaRequestTestHarness, enabled: b
             SETTINGS_SCOPE_SYSTEM,
             crate::settings::keys::EXPERIMENTAL_FEATURES_ENABLED_KEY,
             None,
-            enabled.to_string().into(),
+            enabled.to_string(),
             "test",
             None,
         )
