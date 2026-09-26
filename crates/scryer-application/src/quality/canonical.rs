@@ -741,6 +741,11 @@ fn run_term_pipeline(
 /// listing metadata read only from the frozen snapshot, so the result is
 /// reproducible from a media row: the snapshot survives on the row, and release
 /// age is measured at the snapshot's anchor rather than the clock.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "rule evaluation needs the parse, profile, size, file doc, listing facts, \
+              the decision being built and the shared batch, all already in hand"
+)]
 fn append_rule_scores(
     parsed: &ParsedReleaseMetadata,
     profile: &QualityProfile,

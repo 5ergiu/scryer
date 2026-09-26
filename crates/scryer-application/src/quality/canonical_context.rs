@@ -188,11 +188,6 @@ pub(crate) struct ParkedReleaseFacts {
 /// parked row is aged at the lane's `now`, a queued submission or a ledger
 /// claim at its grab.
 /// `None` scores with every listing fact unknown.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a parked release is scored from its title, size, listing snapshot and the \
-              caller's catalog rows and context, all already in the caller's hand"
-)]
 pub(crate) fn score_parked_release_title(
     title: &Title,
     release_title: &str,
