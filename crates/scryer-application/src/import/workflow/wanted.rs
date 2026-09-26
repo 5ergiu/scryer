@@ -74,6 +74,7 @@ async fn execute_resolved_episode_import(
     runtime_sample_mode: crate::post_download_gate::RuntimeSampleValidationMode,
     origin: crate::import_decide::ImportOrigin,
     announced_size_bytes: Option<i64>,
+    release_listing_json: Option<&str>,
     additional_import: bool,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
 ) -> AppResult<EpisodeImportOutcome> {
@@ -233,6 +234,7 @@ async fn execute_resolved_episode_import(
             original_file_path: Some(path_to_stored_string(source_video)),
             grabbed_release_title: Some(effective_parsed.raw_title.clone()),
             edition: effective_parsed.edition.clone(),
+            release_listing_json: release_listing_json.map(str::to_string),
             ..Default::default()
         };
         let media_file_id = file_result
@@ -370,6 +372,7 @@ async fn execute_resolved_episode_import(
         is_filler,
         runtime_sample_validation,
         disc_selection,
+        release_listing_json,
     )
     .await
     {
@@ -725,6 +728,7 @@ async fn execute_resolved_episode_import(
         original_file_path: Some(path_to_stored_string(source_video)),
         acquisition_score: Some(acq_score),
         scoring_log: post_download_score.scoring_log.clone(),
+        release_listing_json: prepared.release_listing_json.clone(),
         ..Default::default()
     };
     let media_file_id = file_result

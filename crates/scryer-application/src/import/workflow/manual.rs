@@ -2813,6 +2813,7 @@ async fn execute_manual_series_movie_import(
                 grabbed_release_title: release_evidence.release_title(Some(source)),
                 grabbed_at: Some(started_at.to_rfc3339()),
                 edition: parsed.edition.clone(),
+                release_listing_json: release_evidence.release_listing_json().map(str::to_string),
                 ..Default::default()
             },
         )
@@ -3389,6 +3390,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             crate::post_download_gate::RuntimeSampleValidationMode::BypassRuntimeSampleCheck,
             crate::import_decide::ImportOrigin::OperatorQueued,
             release_evidence.announced_size_bytes(),
+            release_evidence.release_listing_json(),
             false,
             mapping.disc_selection.as_ref(),
         )

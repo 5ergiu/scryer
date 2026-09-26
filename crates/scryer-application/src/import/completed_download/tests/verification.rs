@@ -518,6 +518,7 @@ async fn verify_import_excludes_only_currently_unmonitored_ignored_episodes_from
         source_title: Some("Show.S01.Complete.1080p.WEB-DL".to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope: crate::SubmissionScope::EpisodeSet {
             episode_ids: vec!["ep-1".to_string(), "ep-2".to_string()],
@@ -547,6 +548,7 @@ async fn verify_import_keeps_monitored_ignored_episode_in_wanted_coverage() {
         source_title: Some("Show.S01.Complete.1080p.WEB-DL".to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope: crate::SubmissionScope::EpisodeSet {
             episode_ids: vec!["ep-1".to_string(), "ep-2".to_string()],

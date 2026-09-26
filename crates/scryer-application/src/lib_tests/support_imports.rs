@@ -326,7 +326,7 @@ fn mock_media_file(id: String, input: &InsertMediaFileInput) -> TitleMediaFile {
         edition: input.edition.clone(),
         original_file_path: input.original_file_path.clone(),
         release_hash: input.release_hash.clone(),
-        release_listing_json: None,
+        release_listing_json: input.release_listing_json.clone(),
     }
 }
 
@@ -380,6 +380,9 @@ impl MediaFileRepository for MockMediaFileRepo {
                 if !existing.series_movie_link_ids.contains(link_id) {
                     existing.series_movie_link_ids.push(link_id.clone());
                 }
+            }
+            if input.release_listing_json.is_some() {
+                existing.release_listing_json = input.release_listing_json.clone();
             }
             return Ok(crate::ClaimedMediaFile {
                 media_file_id: existing.id.clone(),

@@ -1306,6 +1306,7 @@ async fn import_additional_movie_download(
         grabbed_release_title: source_title.clone(),
         grabbed_at: Some(started_at.to_rfc3339()),
         edition: parsed.edition.clone(),
+        release_listing_json: release_evidence.release_listing_json().map(str::to_string),
         ..Default::default()
     };
     let imported_media_file_id = file_result
@@ -1500,6 +1501,7 @@ async fn import_movie_download(
         false,
         runtime_sample_validation,
         largest.disc_selection.as_ref(),
+        release_evidence.release_listing_json(),
     )
     .await
     {
@@ -1977,6 +1979,7 @@ async fn import_movie_download(
         grabbed_at: Some(started_at.to_rfc3339()),
         acquisition_score: Some(acq_score),
         scoring_log: post_download_score.scoring_log.clone(),
+        release_listing_json: prepared.release_listing_json.clone(),
         ..Default::default()
     };
     let imported_media_file_id = match file_result
@@ -2377,6 +2380,7 @@ async fn import_series_movie_download(
         existing_score,
         false,
         runtime_sample_validation,
+        release_evidence.release_listing_json(),
     )
     .await
     {
@@ -2822,6 +2826,7 @@ async fn import_series_movie_download(
                 grabbed_at: Some(started_at.to_rfc3339()),
                 acquisition_score: Some(acq_score),
                 scoring_log: post_download_score.scoring_log.clone(),
+                release_listing_json: prepared.release_listing_json.clone(),
                 ..Default::default()
             },
         )
