@@ -9703,6 +9703,9 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
         .expect("set title folder path");
     std::fs::create_dir_all(&title_folder).expect("create title folder");
     let primary_path = title_folder.join("Additional Movie Retry (2026) - 2160p.mkv");
+    let unrelated_path = title_folder.join("unrelated.txt");
+    std::fs::write(&unrelated_path, b"preserve unrelated content")
+        .expect("write unrelated fixture");
     std::fs::File::create(&primary_path)
         .expect("create existing primary")
         .set_len(80 * 1024 * 1024)
@@ -9820,6 +9823,22 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     assert_eq!(
         library_videos, 2,
         "title folder must hold the primary and exactly one additional copy"
+    );
+    assert_eq!(
+        std::fs::metadata(&primary_path).unwrap().len(),
+        80 * 1024 * 1024
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file.id == primary_file_id)
+            .unwrap()
+            .role,
+        MediaFileRole::Primary
+    );
+    assert_eq!(
+        std::fs::read(&unrelated_path).unwrap(),
+        b"preserve unrelated content"
     );
 
     // A later download that lands at the same source path with the same size

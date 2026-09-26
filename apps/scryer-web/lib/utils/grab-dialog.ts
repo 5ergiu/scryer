@@ -83,3 +83,9 @@ export function episodeSubjectInput(
 export function episodeSubjectIncomplete(season: string, episode: string): boolean {
   return season.trim().length === 0 && episode.trim().length > 0;
 }
+
+export type GrabAction = "UNLINKED" | "STANDARD" | "ADDITIONAL_FILE";
+
+export function grabActionAllowed(action: GrabAction, frozen: GrabAction | null): boolean {
+  return frozen === null || frozen === action;
+}

@@ -338,12 +338,18 @@ impl AppUseCase {
         announced_size_bytes: Option<i64>,
         conflict_policy: SubmissionConflictPolicy,
         replacement: bool,
+        purpose: DownloadSubmissionPurpose,
         mut routing: crate::IndexerGrabSelection,
     ) -> AppResult<QueueDownloadOutcome> {
         // A grab assigned to a title is gated like every other grab for that
         // title: `ManageTitles` on its library, checked below. Only the
         // title-less grab bypasses the libraries and needs system settings.
         routing.validate()?;
+        if purpose.is_additional_file() && replacement {
+            return Err(AppError::Validation(
+                "additional-file queueing cannot replace existing media".into(),
+            ));
+        }
         let (queued_release, scope) = self
             .verify_release_candidate_token_for_signed_scope(actor, title_id, candidate_token)
             .await?;
@@ -393,7 +399,7 @@ impl AppUseCase {
         let purpose = if replacement {
             DownloadSubmissionPurpose::ManualReplacement
         } else {
-            DownloadSubmissionPurpose::Standard
+            purpose
         };
         let outcome = self
             .queue_manual_release_for_title_with_routing(

@@ -123,7 +123,7 @@ impl DownloadMutations {
             size_bytes,
             scope: _,
             replace_in_progress,
-            purpose: _,
+            purpose,
         } = input;
         let title_id = title_id.to_string();
         let outcome = app
@@ -134,6 +134,14 @@ impl DownloadMutations {
                 size_bytes.map(i64::from),
                 SubmissionConflictPolicy::from_replace_flag(replace_in_progress.unwrap_or(false)),
                 replacement,
+                match purpose.unwrap_or(QueueDownloadPurposeValue::Standard) {
+                    QueueDownloadPurposeValue::Standard => {
+                        scryer_application::DownloadSubmissionPurpose::Standard
+                    }
+                    QueueDownloadPurposeValue::AdditionalFile => {
+                        scryer_application::DownloadSubmissionPurpose::AdditionalFile
+                    }
+                },
                 scryer_application::IndexerGrabSelection {
                     client_id: routing.client_id.to_string(),
                     category: routing.category,
