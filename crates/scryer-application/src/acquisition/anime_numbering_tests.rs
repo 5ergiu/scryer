@@ -82,6 +82,7 @@ fn episode(id: &str, season: u32, number: u32, absolute: Option<u32>, aired: &st
         is_filler: false,
         is_recap: false,
         absolute_number: absolute.map(|value| value.to_string()),
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
         image_url: None,
@@ -128,6 +129,7 @@ fn bridge() -> AnimeNumberingBridge {
                 tvdb_episode_end: Some(tvdb_start + length - 1),
             }],
             absolute_start: Some(tvdb_start),
+            contiguous_absolute_start: None,
             episode_count: Some(*length),
         });
         tvdb_start += length;
@@ -248,10 +250,12 @@ fn translated_parser_metadata_resolves_coverage_and_vetoes_against_official_coor
     assert!(!parsed_release_contradicts_requested_episode(
         &release,
         &episodes[55],
+        scryer_domain::AbsoluteScale::Raw,
     ));
     assert!(parsed_release_contradicts_requested_episode(
         &release,
         &episodes[54],
+        scryer_domain::AbsoluteScale::Raw,
     ));
 }
 
@@ -457,6 +461,101 @@ fn an_absolute_release_falls_back_to_the_bridge_absolute_start() {
     let candidate = resolution.resolved().expect("community candidate");
     assert_eq!(candidate.kind, NumberingCandidateKind::Community);
     assert_eq!(candidate.episode_numbers, vec![56]);
+}
+
+/// Official order where TVDB files a special into the absolute order at raw
+/// 13, so story episode 13 carries raw absolute 14 and contiguous 13. The
+/// special keeps its raw absolute and has no contiguous number.
+fn episodes_with_an_interleaved_special() -> Vec<Episode> {
+    let mut episodes: Vec<Episode> = official_episodes(true)
+        .into_iter()
+        .map(|mut episode| {
+            let number: u32 = episode
+                .episode_number
+                .as_deref()
+                .and_then(|value| value.parse().ok())
+                .expect("episode number");
+            let raw = if number >= 13 { number + 1 } else { number };
+            episode.absolute_number = Some(raw.to_string());
+            episode.contiguous_absolute_number = Some(i32::try_from(number).expect("small"));
+            episode
+        })
+        .collect();
+    episodes.push(episode("sp-1", 0, 1, Some(13), "2025-09-28"));
+    episodes
+}
+
+/// A bare `- 13` names story episode 13 on the contiguous scale, never the
+/// special TVDB placed at raw absolute 13 nor story episode 12's neighbour.
+#[test]
+fn an_absolute_release_resolves_on_the_contiguous_scale_when_the_catalog_carries_it() {
+    let series = title(SERIES_NAME);
+    let episodes = episodes_with_an_interleaved_special();
+    assert_eq!(
+        scryer_domain::AbsoluteScale::for_catalog(&episodes),
+        scryer_domain::AbsoluteScale::Contiguous
+    );
+
+    let resolution = resolve(
+        &bridge(),
+        &series,
+        &episodes,
+        &absolute_only_parse(13),
+        &[],
+        None,
+    );
+    let candidate = resolution.resolved().expect("absolute candidate");
+    assert_eq!(candidate.kind, NumberingCandidateKind::Absolute);
+    assert_eq!(candidate.episode_ids, vec!["ep-13".to_string()]);
+
+    let mut release = crate::parse_release_metadata("[Group] Lantern Verge - 13 [1080p].mkv");
+    assert_eq!(
+        release
+            .episode
+            .as_ref()
+            .and_then(|episode| episode.absolute_episode),
+        Some(13)
+    );
+    let untranslated = release.clone();
+
+    // Without a bridge the literal coverage lane reads the same scale.
+    assert_eq!(
+        resolve_release_coverage(&untranslated, &episodes, &[], Some(&episodes[12])),
+        ReleaseCoverage::SingleEpisode("ep-13".to_string())
+    );
+
+    let resolution =
+        translate_release_numbering(Some(&bridge()), &series, &episodes, &mut release, None);
+    assert_eq!(
+        resolution
+            .resolved()
+            .expect("absolute candidate")
+            .episode_ids,
+        vec!["ep-13".to_string()]
+    );
+    assert_eq!(
+        resolve_release_coverage(&release, &episodes, &[], Some(&episodes[12])),
+        ReleaseCoverage::SingleEpisode("ep-13".to_string())
+    );
+
+    let scale = scryer_domain::AbsoluteScale::Contiguous;
+    assert!(!parsed_release_contradicts_requested_episode(
+        &release,
+        &episodes[12],
+        scale
+    ));
+    assert!(parsed_release_contradicts_requested_episode(
+        &release,
+        &episodes[11],
+        scale
+    ));
+    // Read on the raw scale the same release would have been vetoed for the
+    // story episode it names.
+    assert!(parsed_release_contradicts_requested_episode(
+        &untranslated,
+        &episodes[12],
+        scryer_domain::AbsoluteScale::Raw
+    ));
 }
 
 // ── title anchoring ───────────────────────────────────────────────────────
@@ -1656,6 +1755,7 @@ mod alternate_order {
                     tvdb_episode_end: Some(28),
                 }],
                 absolute_start: None,
+                contiguous_absolute_start: None,
                 episode_count: None,
             }],
         }

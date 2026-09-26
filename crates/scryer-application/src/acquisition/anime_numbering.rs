@@ -24,7 +24,7 @@
 //! other title keeps exactly today's behaviour.
 
 use chrono::NaiveDate;
-use scryer_domain::{AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
+use scryer_domain::{AbsoluteScale, AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
 
 use crate::ParsedEpisodeMetadata;
 use crate::release_parser::ParsedEpisodeReleaseType;
@@ -667,19 +667,28 @@ fn community_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
     absolute_start_candidates(input)
 }
 
-/// An absolute-only release on a catalog with no absolute numbers of its own:
-/// the community seasons carry `absolute_start`, so the absolute number picks
-/// the season and the offset inside it.
+/// An absolute-only release the catalog cannot place by its own absolute
+/// numbers: the community seasons carry a start on the title's absolute scale,
+/// so the absolute number picks the season and the offset inside it.
+///
+/// The start is read on the same scale the catalog is matched on — the
+/// contiguous start for a contiguous catalog, the raw TVDB start otherwise —
+/// because a raw start offset by a community count lands one episode late for
+/// every special TVDB interleaved before it.
 ///
 /// Every season that could hold the number is offered. Overlapping seasons
-/// normally agree — `absolute_start` plus an offset is the same TVDB episode
+/// normally agree — the start plus an offset is the same TVDB episode
 /// whichever season you count from — and collapse into one answer; where they
 /// genuinely disagree the caller sees the disagreement.
 fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
-    if !input.parsed.episode_numbers.is_empty() || catalog_has_absolute_numbers(input.episodes) {
+    if !input.parsed.episode_numbers.is_empty() {
         return Vec::new();
     }
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let absolutes = parsed_absolute_numbers(input.parsed);
+    if !absolute_start_applies(input.episodes, scale, &absolutes) {
+        return Vec::new();
+    }
     let Some(first) = absolutes
         .first()
         .and_then(|first| i32::try_from(*first).ok())
@@ -691,8 +700,8 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
         .seasons
         .iter()
         .filter_map(|community_season| {
-            let absolute_start = community_season
-                .absolute_start
+            let absolute_start = scale
+                .season_absolute_start(community_season)
                 .filter(|start| *start <= first)?;
             let community_numbers = absolutes
                 .iter()
@@ -708,9 +717,10 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
                 &community_numbers,
                 bridge_candidate_kind(input.bridge),
                 &format!(
-                    "{} {} by absolute start {absolute_start}",
+                    "{} {} by {} absolute start {absolute_start}",
                     bridge_numbering_noun(input.bridge),
-                    community_season.index
+                    community_season.index,
+                    scale.as_str()
                 ),
             )
         })
@@ -1110,13 +1120,14 @@ fn absolute_candidate(input: &NumberingInput<'_>) -> Option<NumberingCandidate> 
     // A range is an all-or-nothing claim. Retaining only the endpoints found
     // in the catalog used to turn `55..56` into a valid one-episode mapping
     // when 56 was absent, which then made a partial cour look complete.
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let matches = absolutes
         .iter()
         .map(|absolute| {
             let matches = input
                 .episodes
                 .iter()
-                .filter(|episode| parse_u32(episode.absolute_number.as_deref()) == Some(*absolute))
+                .filter(|episode| scale.episode_absolute(episode) == Some(*absolute))
                 .collect::<Vec<_>>();
             match matches.as_slice() {
                 [episode] => Some(*episode),
@@ -1396,10 +1407,26 @@ fn single_season_projection(matches: &[&Episode]) -> Option<(u32, Vec<u32>, Vec<
     ))
 }
 
-fn catalog_has_absolute_numbers(episodes: &[Episode]) -> bool {
-    episodes
-        .iter()
-        .any(|episode| parse_u32(episode.absolute_number.as_deref()).is_some_and(|value| value > 0))
+/// Whether the bridge's season starts may place an absolute-only release.
+///
+/// On the raw scale only a catalog with no absolute numbers at all defers to
+/// the bridge, exactly as before the contiguous scale existed. SMG numbers the
+/// contiguous scale episode by episode and leaves a trailing episode it cannot
+/// number yet empty, so a contiguous catalog defers for the numbers it does not
+/// carry; the ones it carries are answered by the catalog itself.
+fn absolute_start_applies(episodes: &[Episode], scale: AbsoluteScale, absolutes: &[u32]) -> bool {
+    match scale {
+        AbsoluteScale::Raw => !episodes.iter().any(|episode| {
+            scale
+                .episode_absolute(episode)
+                .is_some_and(|value| value > 0)
+        }),
+        AbsoluteScale::Contiguous => !absolutes.iter().all(|absolute| {
+            episodes
+                .iter()
+                .any(|episode| scale.episode_absolute(episode) == Some(*absolute))
+        }),
+    }
 }
 
 fn parsed_absolute_numbers(parsed: &ParsedEpisodeMetadata) -> Vec<u32> {
@@ -1590,6 +1617,7 @@ fn apply_resolved_catalog_coordinates(
         };
     }
 
+    let scale = AbsoluteScale::for_catalog(episodes);
     let absolute_numbers = candidate
         .episode_ids
         .iter()
@@ -1598,7 +1626,7 @@ fn apply_resolved_catalog_coordinates(
             let episode = episodes.iter().find(|episode| episode.id == *episode_id)?;
             (parse_u32(episode.season_number.as_deref()) == Some(candidate.season)
                 && parse_u32(episode.episode_number.as_deref()) == Some(*expected_number))
-            .then(|| parse_u32(episode.absolute_number.as_deref()))?
+            .then(|| scale.episode_absolute(episode))?
             .filter(|absolute| *absolute > 0)
         })
         .collect::<Option<Vec<_>>>()

@@ -940,6 +940,9 @@ pub struct EpisodeUpdate {
     pub tvdb_id: Option<String>,
     pub image_url: Option<String>,
     pub clear_image_url: bool,
+    /// `Some(value)` rewrites the stored contiguous absolute number, including
+    /// clearing it with `Some(None)`; `None` leaves it alone.
+    pub contiguous_absolute_number: Option<Option<i32>>,
 }
 
 impl EpisodeUpdate {
@@ -959,6 +962,7 @@ impl EpisodeUpdate {
             || self.tvdb_id.is_some()
             || self.image_url.is_some()
             || self.clear_image_url
+            || self.contiguous_absolute_number.is_some()
     }
 
     pub fn has_non_monitor_changes(&self) -> bool {
@@ -976,6 +980,7 @@ impl EpisodeUpdate {
             || self.tvdb_id.is_some()
             || self.image_url.is_some()
             || self.clear_image_url
+            || self.contiguous_absolute_number.is_some()
     }
 }
 

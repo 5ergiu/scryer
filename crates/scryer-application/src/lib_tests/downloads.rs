@@ -1974,6 +1974,7 @@ async fn queued_manual_import_rejects_observed_targets_before_consuming_or_queue
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
         image_url: None,
@@ -8502,6 +8503,7 @@ async fn automatic_single_file_import_uses_its_filename_title_evidence_for_anime
                     tvdb_episode_end: Some(official_start + length - 1),
                 }],
                 absolute_start: Some(official_start),
+                contiguous_absolute_start: None,
                 episode_count: Some(length),
             },
         )
@@ -15642,6 +15644,7 @@ async fn automatic_import_maps_a_double_episode_through_an_alternate_order_bridg
                 tvdb_episode_end: Some(29),
             }],
             absolute_start: None,
+            contiguous_absolute_start: None,
             episode_count: None,
         }],
     };

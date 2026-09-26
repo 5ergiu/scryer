@@ -225,6 +225,7 @@ fn graphql_fix_title_match_series_rebuilds_and_relinks_library() {
                     is_filler: false,
                     is_recap: false,
                     absolute_number: None,
+                    contiguous_absolute_number: None,
                     overview: Some("Legacy episode".to_string()),
                     tvdb_id: Some("9999001".to_string()),
                     image_url: None,

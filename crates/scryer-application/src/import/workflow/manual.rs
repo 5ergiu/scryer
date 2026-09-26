@@ -4166,6 +4166,7 @@ mod manual_preview_suggestion_tests {
             is_filler: false,
             is_recap: false,
             absolute_number: absolute_number.map(str::to_string),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,

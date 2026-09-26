@@ -157,6 +157,7 @@ fragment SeriesFields on TvdbSeries {
     is_recap
     overview
     absolute_number
+    contiguous_absolute_number
     image_url
   }
   anime_mappings {
@@ -201,6 +202,7 @@ fragment SeriesFields on TvdbSeries {
         tvdb_episode_end
       }
       absolute_start
+      contiguous_absolute_start
       episode_count
     }
   }

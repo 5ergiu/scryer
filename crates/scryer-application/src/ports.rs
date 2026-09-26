@@ -3172,11 +3172,19 @@ pub trait ShowRepository: Send + Sync {
         season_number: &str,
         episode_number: &str,
     ) -> AppResult<Option<Episode>>;
+    /// The episode carrying `absolute_number` on the title's own absolute
+    /// scale (see [`scryer_domain::AbsoluteScale`]).
     async fn find_episode_by_title_and_absolute_number(
         &self,
         title_id: &str,
         absolute_number: &str,
     ) -> AppResult<Option<Episode>>;
+    /// The absolute scale the title's catalog is matched on, answered without
+    /// loading the catalog: [`scryer_domain::AbsoluteScale::for_catalog`]'s rule.
+    async fn absolute_scale_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<scryer_domain::AbsoluteScale>;
     async fn list_primary_collection_summaries(
         &self,
         title_ids: &[String],

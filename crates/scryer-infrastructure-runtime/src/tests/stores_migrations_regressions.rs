@@ -344,6 +344,7 @@ async fn scoped_anibridge_external_ids_round_trip_for_collections_and_episodes()
         is_filler: false,
         is_recap: false,
         absolute_number: Some("47".to_string()),
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: Some("1234567".to_string()),
         image_url: None,

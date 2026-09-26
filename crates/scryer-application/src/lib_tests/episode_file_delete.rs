@@ -1627,6 +1627,7 @@ async fn maintenance_scope_newly_discovered_future_episodes_inherit_unmonitored_
         is_recap: false,
         overview: String::new(),
         absolute_number: "3".into(),
+        contiguous_absolute_number: None,
         season_number: 1,
         image_url: String::new(),
     }];

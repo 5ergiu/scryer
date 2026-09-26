@@ -6,8 +6,8 @@ use scryer_application::{
     TitleExternalIdLookup,
 };
 use scryer_domain::{
-    AnimeCommunitySeason, AnimeNumberingBridge, CalendarEpisode, Collection, CollectionType,
-    Episode, EpisodeType, Id, MovieEntity, SeriesMovieLink,
+    AbsoluteScale, AnimeCommunitySeason, AnimeNumberingBridge, CalendarEpisode, Collection,
+    CollectionType, Episode, EpisodeType, Id, MovieEntity, SeriesMovieLink,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -46,7 +46,7 @@ const SERIES_MOVIE_LINK_COLUMNS: &str = "sml.id AS link_id, sml.series_title_id,
 
 const EPISODE_COLUMNS: &str = "id, title_id, collection_id, episode_type, episode_number, season_number, \
     episode_label, title, air_date, duration_seconds, has_multi_audio, has_subtitle, is_filler, is_recap, \
-    absolute_number, overview, tvdb_id, image_url, monitored, created_at";
+    absolute_number, contiguous_absolute_number, overview, tvdb_id, image_url, monitored, created_at";
 
 const COLLECTION_INSERT_SQL: &str = "INSERT INTO collections (
     id, title_id, collection_type, collection_index, label, ordered_path, narrative_order,
@@ -70,10 +70,10 @@ WHERE id = {}";
 const EPISODE_INSERT_SQL: &str = "INSERT INTO episodes (
     id, title_id, collection_id, episode_type, episode_number, season_number,
     episode_label, title, air_date, duration_seconds, has_multi_audio,
-    has_subtitle, is_filler, is_recap, absolute_number, overview, tvdb_id,
-    image_url, monitored, created_at
+    has_subtitle, is_filler, is_recap, absolute_number, contiguous_absolute_number, overview,
+    tvdb_id, image_url, monitored, created_at
 ) VALUES (
-    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 )";
 
 const EPISODE_UPDATE_SQL: &str = "UPDATE episodes SET
@@ -91,6 +91,7 @@ const EPISODE_UPDATE_SQL: &str = "UPDATE episodes SET
     is_filler = {},
     is_recap = {},
     absolute_number = {},
+    contiguous_absolute_number = {},
     overview = {},
     tvdb_id = {},
     image_url = {},
@@ -600,6 +601,10 @@ impl ShowRepository for ShowStore {
             absolute_number,
         )
         .await
+    }
+
+    async fn absolute_scale_for_title(&self, title_id: &str) -> AppResult<AbsoluteScale> {
+        absolute_scale_for_title_query(self.read_target(), title_id).await
     }
 
     async fn list_primary_collection_summaries(
@@ -1418,7 +1423,7 @@ async fn find_episode_by_title_and_numbers_query(
     let sql = "SELECT e.id, e.title_id, e.collection_id, e.episode_type, e.episode_number, \
                e.season_number, e.episode_label, e.title, e.air_date, e.duration_seconds, \
                e.has_multi_audio, e.has_subtitle, e.is_filler, e.is_recap, e.absolute_number, \
-               e.overview, e.tvdb_id, e.image_url, e.monitored, e.created_at \
+               e.contiguous_absolute_number, e.overview, e.tvdb_id, e.image_url, e.monitored, e.created_at \
           FROM episodes e \
           INNER JOIN collections c ON c.id = e.collection_id \
          WHERE e.title_id = {} \
@@ -1438,23 +1443,61 @@ async fn find_episode_by_title_and_numbers_query(
     row.as_ref().map(row_to_episode).transpose()
 }
 
+/// The same rule as [`AbsoluteScale::for_catalog`], answered without loading
+/// the catalog.
+async fn absolute_scale_for_title_query(
+    target: SqlTarget<'_>,
+    title_id: &str,
+) -> AppResult<AbsoluteScale> {
+    let row = SqlRuntime::fetch_optional(
+        SqlExec::Target(target),
+        "SELECT id FROM episodes WHERE title_id = {} AND contiguous_absolute_number > 0 LIMIT 1",
+        &[SqlArg::Text(title_id.to_string())],
+    )
+    .await?;
+    Ok(if row.is_some() {
+        AbsoluteScale::Contiguous
+    } else {
+        AbsoluteScale::Raw
+    })
+}
+
+/// The episode carrying `absolute_number` on the title's own absolute scale.
 async fn find_episode_by_title_and_absolute_number_query(
     target: SqlTarget<'_>,
     title_id: &str,
     absolute_number: &str,
 ) -> AppResult<Option<Episode>> {
-    let sql = format!(
-        "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND absolute_number = {{}} LIMIT 1"
-    );
-    let row = SqlRuntime::fetch_optional(
-        SqlExec::Target(target),
-        &sql,
-        &[
-            SqlArg::Text(title_id.to_string()),
-            SqlArg::Text(absolute_number.to_string()),
-        ],
-    )
-    .await?;
+    let row = match absolute_scale_for_title_query(target, title_id).await? {
+        AbsoluteScale::Raw => {
+            let sql = format!(
+                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND absolute_number = {{}} LIMIT 1"
+            );
+            SqlRuntime::fetch_optional(
+                SqlExec::Target(target),
+                &sql,
+                &[
+                    SqlArg::Text(title_id.to_string()),
+                    SqlArg::Text(absolute_number.to_string()),
+                ],
+            )
+            .await?
+        }
+        AbsoluteScale::Contiguous => {
+            let Ok(number) = absolute_number.trim().parse::<i64>() else {
+                return Ok(None);
+            };
+            let sql = format!(
+                "SELECT {EPISODE_COLUMNS} FROM episodes WHERE title_id = {{}} AND contiguous_absolute_number = {{}} LIMIT 1"
+            );
+            SqlRuntime::fetch_optional(
+                SqlExec::Target(target),
+                &sql,
+                &[SqlArg::Text(title_id.to_string()), SqlArg::I64(number)],
+            )
+            .await?
+        }
+    };
     row.as_ref().map(row_to_episode).transpose()
 }
 
@@ -1704,6 +1747,7 @@ async fn insert_episode_tx(tx: &mut SqlTx<'_>, episode: &Episode) -> AppResult<(
         SqlArg::Bool(episode.is_filler),
         SqlArg::Bool(episode.is_recap),
         SqlArg::OptText(episode.absolute_number.clone()),
+        SqlArg::OptI64(episode.contiguous_absolute_number.map(i64::from)),
         SqlArg::OptText(episode.overview.clone()),
         SqlArg::OptText(episode.tvdb_id.clone()),
         SqlArg::OptText(episode.image_url.clone()),
@@ -1732,6 +1776,7 @@ async fn persist_episode_tx(tx: &mut SqlTx<'_>, episode: &Episode) -> AppResult<
         SqlArg::Bool(episode.is_filler),
         SqlArg::Bool(episode.is_recap),
         SqlArg::OptText(episode.absolute_number.clone()),
+        SqlArg::OptI64(episode.contiguous_absolute_number.map(i64::from)),
         SqlArg::OptText(episode.overview.clone()),
         SqlArg::OptText(episode.tvdb_id.clone()),
         SqlArg::OptText(episode.image_url.clone()),
@@ -1878,6 +1923,7 @@ fn episode_update_is_empty(update: &EpisodeUpdate) -> bool {
         && update.tvdb_id.is_none()
         && update.image_url.is_none()
         && !update.clear_image_url
+        && update.contiguous_absolute_number.is_none()
 }
 
 fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
@@ -1924,6 +1970,9 @@ fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
         episode.image_url = None;
     } else if let Some(value) = update.image_url {
         episode.image_url = Some(value);
+    }
+    if let Some(value) = update.contiguous_absolute_number {
+        episode.contiguous_absolute_number = value;
     }
 }
 
@@ -2124,6 +2173,9 @@ fn row_to_episode(row: &SqlRow) -> AppResult<Episode> {
         is_filler: row.opt_bool("is_filler")?.unwrap_or(false),
         is_recap: row.opt_bool("is_recap")?.unwrap_or(false),
         absolute_number: row.opt_text("absolute_number")?,
+        contiguous_absolute_number: row
+            .opt_i64("contiguous_absolute_number")?
+            .and_then(|number| i32::try_from(number).ok()),
         overview: row.opt_text("overview")?,
         tvdb_id: row.opt_text("tvdb_id")?,
         image_url: row.opt_text("image_url")?,
@@ -2409,6 +2461,7 @@ mod tests {
                     tvdb_episode_end: Some(28),
                 }],
                 absolute_start: None,
+                contiguous_absolute_start: None,
                 episode_count: None,
             }],
         }
@@ -2605,7 +2658,8 @@ mod collection_ordered_path_tests {
                 episode_type TEXT NOT NULL, episode_number TEXT, season_number TEXT,
                 episode_label TEXT, title TEXT, air_date TEXT, duration_seconds INTEGER,
                 has_multi_audio INTEGER NOT NULL, has_subtitle INTEGER NOT NULL,
-                is_filler INTEGER, is_recap INTEGER, absolute_number TEXT, overview TEXT,
+                is_filler INTEGER, is_recap INTEGER, absolute_number TEXT,
+                contiguous_absolute_number INTEGER, overview TEXT,
                 tvdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL, created_at TEXT NOT NULL
             )",
         )
@@ -2662,6 +2716,85 @@ mod collection_ordered_path_tests {
                 .expect("empty listing")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn absolute_lookup_matches_on_the_titles_own_scale() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open SQLite pool");
+        sqlx::query(
+            "CREATE TABLE episodes (
+                id TEXT PRIMARY KEY, title_id TEXT NOT NULL, collection_id TEXT,
+                episode_type TEXT NOT NULL, episode_number TEXT, season_number TEXT,
+                episode_label TEXT, title TEXT, air_date TEXT, duration_seconds INTEGER,
+                has_multi_audio INTEGER NOT NULL, has_subtitle INTEGER NOT NULL,
+                is_filler INTEGER, is_recap INTEGER, absolute_number TEXT,
+                contiguous_absolute_number INTEGER, overview TEXT,
+                tvdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL, created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create episodes table");
+        // `title-c` carries the contiguous scale: a special holds raw 13, so
+        // story episode 13 is raw 14 / contiguous 13. `title-r` is raw only.
+        for (id, title_id, season, episode, raw, contiguous) in [
+            ("c-sp1", "title-c", "0", "1", "13", None),
+            ("c-12", "title-c", "1", "12", "12", Some(12_i64)),
+            ("c-13", "title-c", "1", "13", "14", Some(13)),
+            ("r-13", "title-r", "1", "13", "13", None),
+        ] {
+            sqlx::query(
+                "INSERT INTO episodes (
+                    id, title_id, episode_type, episode_number, season_number,
+                    absolute_number, contiguous_absolute_number,
+                    has_multi_audio, has_subtitle, monitored, created_at
+                ) VALUES (?, ?, 'standard', ?, ?, ?, ?, 0, 0, 1, '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(title_id)
+            .bind(episode)
+            .bind(season)
+            .bind(raw)
+            .bind(contiguous)
+            .execute(&pool)
+            .await
+            .expect("insert episode");
+        }
+        let target = || SqlTarget::Sqlite(&pool);
+
+        assert_eq!(
+            super::absolute_scale_for_title_query(target(), "title-c")
+                .await
+                .expect("scale"),
+            scryer_domain::AbsoluteScale::Contiguous
+        );
+        assert_eq!(
+            super::absolute_scale_for_title_query(target(), "title-r")
+                .await
+                .expect("scale"),
+            scryer_domain::AbsoluteScale::Raw
+        );
+        let found = |title_id: &'static str, absolute: &'static str| async move {
+            super::find_episode_by_title_and_absolute_number_query(target(), title_id, absolute)
+                .await
+                .expect("absolute lookup")
+                .map(|episode| episode.id)
+        };
+        assert_eq!(found("title-c", "13").await.as_deref(), Some("c-13"));
+        assert_eq!(found("title-c", "14").await, None);
+        assert_eq!(found("title-r", "13").await.as_deref(), Some("r-13"));
+
+        let episode =
+            super::find_episode_by_title_and_absolute_number_query(target(), "title-c", "13")
+                .await
+                .expect("absolute lookup")
+                .expect("story episode");
+        assert_eq!(episode.absolute_number.as_deref(), Some("14"));
+        assert_eq!(episode.contiguous_absolute_number, Some(13));
     }
 
     #[tokio::test]

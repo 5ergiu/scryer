@@ -810,12 +810,35 @@ impl ShowRepository for MockShowRepo {
         absolute_number: &str,
     ) -> AppResult<Option<Episode>> {
         let episodes = self.episodes.lock().await;
-        Ok(episodes
+        let title_episodes = episodes
             .iter()
-            .find(|ep| {
-                ep.title_id == title_id && ep.absolute_number.as_deref() == Some(absolute_number)
+            .filter(|episode| episode.title_id == title_id)
+            .collect::<Vec<_>>();
+        let scale = scryer_domain::AbsoluteScale::for_catalog(title_episodes.iter().copied());
+        let wanted = absolute_number.trim().parse::<u32>().ok();
+        Ok(title_episodes
+            .into_iter()
+            .find(|episode| match scale {
+                scryer_domain::AbsoluteScale::Raw => {
+                    episode.absolute_number.as_deref() == Some(absolute_number)
+                }
+                scryer_domain::AbsoluteScale::Contiguous => {
+                    wanted.is_some() && scale.episode_absolute(episode) == wanted
+                }
             })
             .cloned())
+    }
+
+    async fn absolute_scale_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<scryer_domain::AbsoluteScale> {
+        let episodes = self.episodes.lock().await;
+        Ok(scryer_domain::AbsoluteScale::for_catalog(
+            episodes
+                .iter()
+                .filter(|episode| episode.title_id == title_id),
+        ))
     }
 
     async fn list_primary_collection_summaries(

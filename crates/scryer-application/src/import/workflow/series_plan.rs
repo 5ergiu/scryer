@@ -403,9 +403,10 @@ fn reconcile_pack_member_from_absolute_numbering(
         }
     };
 
+    let scale = scryer_domain::AbsoluteScale::for_catalog(catalog);
     let mut absolute_matches = catalog
         .iter()
-        .filter(|episode| catalog_episode_absolute_number(episode) == Some(absolute_number));
+        .filter(|episode| scale.episode_absolute(episode) == Some(absolute_number));
     let Some(episode) = absolute_matches.next() else {
         return ScopedPackMemberReconciliation::Unresolved;
     };
@@ -815,14 +816,6 @@ fn catalog_episode_number(episode: &scryer_domain::Episode) -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
-fn catalog_episode_absolute_number(episode: &scryer_domain::Episode) -> Option<u32> {
-    episode
-        .absolute_number
-        .as_deref()
-        .map(str::trim)
-        .and_then(|value| value.parse::<u32>().ok())
-}
-
 fn catalog_episodes_for_season_numbers(
     catalog: &[scryer_domain::Episode],
     season: u32,
@@ -844,10 +837,12 @@ fn catalog_episodes_for_absolute_numbers(
     catalog: &[scryer_domain::Episode],
     numbers: &[u32],
 ) -> Option<Vec<scryer_domain::Episode>> {
+    // Matched on the title's one absolute scale; see `AbsoluteScale`.
+    let scale = scryer_domain::AbsoluteScale::for_catalog(catalog);
     resolve_unique_catalog_numbers(numbers, |number| {
         catalog
             .iter()
-            .filter(|episode| catalog_episode_absolute_number(episode) == Some(number))
+            .filter(|episode| scale.episode_absolute(episode) == Some(number))
             .cloned()
             .collect()
     })
@@ -1288,6 +1283,7 @@ mod series_plan_tests {
             is_filler: false,
             is_recap: false,
             absolute_number: Some(absolute.to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,
@@ -1464,6 +1460,7 @@ mod series_plan_tests {
                     tvdb_episode_end: Some(tvdb_start + length - 1),
                 }],
                 absolute_start: Some(tvdb_start),
+                contiguous_absolute_start: None,
                 episode_count: Some(*length),
             });
             tvdb_start += length;
@@ -1528,6 +1525,7 @@ mod series_plan_tests {
                     tvdb_episode_end: Some(59),
                 }],
                 absolute_start: None,
+                contiguous_absolute_start: None,
                 episode_count: None,
             }],
         }

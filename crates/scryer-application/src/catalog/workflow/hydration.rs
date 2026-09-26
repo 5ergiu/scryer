@@ -2103,6 +2103,7 @@ mod numbering_bridge_from_orders_tests {
             season_number: Some(1),
             episode_number: Some(episode_number),
             absolute_number: None,
+            contiguous_absolute_number: None,
             name: name.to_string(),
         }
     }

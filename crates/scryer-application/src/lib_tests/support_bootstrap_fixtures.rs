@@ -2283,6 +2283,7 @@ pub(super) async fn seed_anime_season_wanted_for_acquisition(
                 is_filler: false,
                 is_recap: false,
                 absolute_number: None,
+                contiguous_absolute_number: None,
                 overview: None,
                 tvdb_id: None,
                 image_url: None,

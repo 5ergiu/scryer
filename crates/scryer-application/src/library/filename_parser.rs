@@ -214,7 +214,10 @@ pub(crate) fn parse_library_filename(
             .iter()
             .find(|episode| episode.id == episode_id)
     {
-        let episode_identity = parsed_episode_metadata_from_episode(episode);
+        let episode_identity = parsed_episode_metadata_from_episode(
+            episode,
+            scryer_domain::AbsoluteScale::for_catalog(input.episodes),
+        );
         parsed_release =
             synthesize_release_metadata(&raw_name, input, Some(episode_identity.clone()));
         return LibraryFilenameParse {
@@ -286,10 +289,12 @@ pub(crate) fn parse_library_filename(
         && !raw_name_has_explicit_episode_marker(&raw_name)
         && let Some(series_movie) = resolve_series_movie_from_name(input, &raw_name, fallback.year)
     {
-        let episode_identity = series_movie
-            .linked_episode
-            .as_ref()
-            .map(parsed_episode_metadata_from_episode);
+        let episode_identity = series_movie.linked_episode.as_ref().map(|episode| {
+            parsed_episode_metadata_from_episode(
+                episode,
+                scryer_domain::AbsoluteScale::for_catalog(input.episodes),
+            )
+        });
         fallback.episode = episode_identity.clone();
         return LibraryFilenameParse {
             query_evidence: query_build.evidence,
@@ -348,10 +353,12 @@ pub(crate) fn parse_library_filename(
     }
 
     if let Some(series_movie) = resolve_series_movie_from_name(input, &raw_name, fallback.year) {
-        let episode_identity = series_movie
-            .linked_episode
-            .as_ref()
-            .map(parsed_episode_metadata_from_episode);
+        let episode_identity = series_movie.linked_episode.as_ref().map(|episode| {
+            parsed_episode_metadata_from_episode(
+                episode,
+                scryer_domain::AbsoluteScale::for_catalog(input.episodes),
+            )
+        });
         if fallback.episode.is_none() {
             fallback.episode = episode_identity.clone();
         }
@@ -706,6 +713,8 @@ fn build_episode_lookup(collections: &[Collection], episodes: &[Episode]) -> Epi
         .map(|collection| (collection.id.clone(), collection.collection_index.clone()))
         .collect::<HashMap<_, _>>();
 
+    // One absolute scale for the whole title; see `AbsoluteScale`.
+    let scale = scryer_domain::AbsoluteScale::for_catalog(episodes);
     let mut lookup = EpisodeLookup::default();
     for episode in episodes {
         if let Some(air_date) = episode.air_date.as_ref() {
@@ -735,10 +744,10 @@ fn build_episode_lookup(collections: &[Collection], episodes: &[Episode]) -> Epi
             }
         }
 
-        if let Some(absolute_number) = episode.absolute_number.as_ref() {
+        if let Some(absolute_number) = scale.episode_absolute(episode) {
             lookup
                 .by_absolute_number
-                .entry(absolute_number.clone())
+                .entry(absolute_number.to_string())
                 .or_insert_with(|| episode.clone());
         }
 
@@ -1162,7 +1171,13 @@ fn synthesize_release_metadata(
     parsed
 }
 
-fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpisodeMetadata {
+/// The parse a stored episode stands for. Its absolute number is read on the
+/// title's absolute `scale`, the one every later absolute lookup matches on.
+fn parsed_episode_metadata_from_episode(
+    episode: &Episode,
+    scale: scryer_domain::AbsoluteScale,
+) -> crate::ParsedEpisodeMetadata {
+    let absolute = scale.episode_absolute(episode);
     crate::ParsedEpisodeMetadata {
         season: episode
             .season_number
@@ -1174,16 +1189,8 @@ fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpiso
             .and_then(|value| value.parse::<u32>().ok())
             .into_iter()
             .collect(),
-        absolute_episode: episode
-            .absolute_number
-            .as_deref()
-            .and_then(|value| value.parse::<u32>().ok()),
-        absolute_episode_numbers: episode
-            .absolute_number
-            .as_deref()
-            .and_then(|value| value.parse::<u32>().ok())
-            .into_iter()
-            .collect(),
+        absolute_episode: absolute,
+        absolute_episode_numbers: absolute.into_iter().collect(),
         air_date: episode
             .air_date
             .as_deref()
@@ -1447,6 +1454,7 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,
@@ -1586,6 +1594,7 @@ mod tests {
                     tvdb_episode_end: Some(tvdb_start + length - 1),
                 }],
                 absolute_start: Some(tvdb_start),
+                contiguous_absolute_start: None,
                 episode_count: Some(*length),
             });
             tvdb_start += length;
@@ -1711,6 +1720,115 @@ mod tests {
                 .map(|episode| episode.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["ep-56"]
+        );
+    }
+
+    /// Re:ZERO-shaped bridge: TVDB keeps every cour in season 1, and the third
+    /// community season starts at story episode 51 on the contiguous scale.
+    fn re_zero_bridge() -> scryer_domain::AnimeNumberingBridge {
+        let season = |index: i32, start: i32, length: i32, raw_start: i32| {
+            scryer_domain::AnimeCommunitySeason {
+                index,
+                anidb_id: None,
+                anilist_id: None,
+                mal_id: None,
+                titles: vec![format!("Re:ZERO Season {index}")],
+                ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                    community_episode_start: 1,
+                    community_episode_end: Some(length),
+                    tvdb_season: 1,
+                    tvdb_episode_start: start,
+                    tvdb_episode_end: Some(start + length - 1),
+                }],
+                absolute_start: Some(raw_start),
+                contiguous_absolute_start: Some(start),
+                episode_count: Some(length),
+            }
+        };
+        scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
+            generated_on: "2026-09-25".to_string(),
+            corroborating_order: None,
+            seasons: vec![
+                season(1, 1, 25, 1),
+                season(2, 26, 25, 27),
+                season(3, 51, 16, 53),
+            ],
+        }
+    }
+
+    /// Official S01E01-E66 where two specials sit in TVDB's absolute order (at
+    /// raw 13 and raw 40), so from story episode 38 on the raw absolute runs
+    /// two ahead of the contiguous one. `contiguous_through` marks the last
+    /// episode SMG has placed on the contiguous scale.
+    fn re_zero_episodes(contiguous_through: u32) -> Vec<Episode> {
+        let mut episodes: Vec<Episode> = (1..=66_u32)
+            .map(|number| {
+                let raw = match number {
+                    1..=12 => number,
+                    13..=38 => number + 1,
+                    _ => number + 2,
+                };
+                let mut episode = episode(&format!("ep-{number}"), "1", &number.to_string());
+                episode.absolute_number = Some(raw.to_string());
+                episode.contiguous_absolute_number = (number <= contiguous_through)
+                    .then(|| i32::try_from(number).expect("small episode number"));
+                episode
+            })
+            .collect();
+        for (number, raw) in [(1_u32, 13_u32), (2, 40)] {
+            let mut special = episode(&format!("sp-{number}"), "0", &number.to_string());
+            special.absolute_number = Some(raw.to_string());
+            episodes.push(special);
+        }
+        episodes
+    }
+
+    fn scan_re_zero_file(episodes: &[Episode], file_name: &str) -> Vec<String> {
+        let title = title("Re:ZERO", MediaFacet::Anime);
+        let bridge = re_zero_bridge();
+        let path = format!("/library/Re ZERO/Season 01/{file_name}");
+        let input = LibraryFilenameParseInput {
+            path: Path::new(&path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(&title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes,
+            existing_record: None,
+            anime_numbering_bridge: Some(&bridge),
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
+        };
+        parse_library_filename(&input)
+            .target_episodes()
+            .iter()
+            .map(|episode| episode.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn title_scan_files_an_absolute_numbered_file_on_the_contiguous_scale() {
+        // Raw absolute 51 is story episode 49; the contiguous 51 is S01E51.
+        let episodes = re_zero_episodes(66);
+
+        assert_eq!(
+            scan_re_zero_file(&episodes, "[Group] Re:ZERO - 51.mkv"),
+            vec!["ep-51".to_string()]
+        );
+    }
+
+    #[test]
+    fn title_scan_files_an_unplaced_absolute_through_the_contiguous_bridge_start() {
+        // SMG has not placed the newest cour on the contiguous scale yet, so
+        // the bridge's contiguous start carries `- 51` onto S01E51.
+        let episodes = re_zero_episodes(50);
+
+        assert_eq!(
+            scan_re_zero_file(&episodes, "[Group] Re:ZERO - 51.mkv"),
+            vec!["ep-51".to_string()]
         );
     }
 

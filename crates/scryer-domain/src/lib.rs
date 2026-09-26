@@ -1191,7 +1191,13 @@ pub struct AnimeCommunitySeason {
     pub titles: Vec<String>,
     pub ranges: Vec<AnimeCommunitySeasonRange>,
     /// TVDB `absolute_number` of community episode 1; `None` when unknown.
+    /// This is the raw scale; see [`AbsoluteScale`].
     pub absolute_start: Option<i32>,
+    /// Contiguous absolute number of community episode 1: the same episode on
+    /// the scale that skips specials interleaved into TVDB's absolute order.
+    /// `None` when unknown, and on every row stored before SMG served it.
+    #[serde(default)]
+    pub contiguous_absolute_start: Option<i32>,
     /// Closed episode count; `None` when the source range is open-ended.
     pub episode_count: Option<i32>,
 }
@@ -1277,6 +1283,10 @@ pub struct EpisodeOrderEntry {
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
     pub absolute_number: Option<i32>,
+    /// SMG's contiguous renumbering; set only on entries of the `absolute`
+    /// order. See [`AbsoluteScale`].
+    #[serde(default)]
+    pub contiguous_absolute_number: Option<i32>,
     pub name: String,
 }
 
@@ -1394,6 +1404,7 @@ pub fn numbering_bridge_from_episode_orders(
             titles: Vec::new(),
             ranges,
             absolute_start: None,
+            contiguous_absolute_start: None,
             episode_count,
         });
     }
@@ -1662,12 +1673,82 @@ pub struct Episode {
     pub has_subtitle: bool,
     pub is_filler: bool,
     pub is_recap: bool,
+    /// TVDB's raw absolute number. See [`AbsoluteScale`] before matching on it.
     pub absolute_number: Option<String>,
+    /// SMG's contiguous absolute number: TVDB's absolute order renumbered
+    /// 1..n over story episodes only, so a special interleaved into the
+    /// absolute order does not shift every later episode. `None` for series
+    /// without an absolute order and where SMG could not number safely.
+    pub contiguous_absolute_number: Option<i32>,
     pub overview: Option<String>,
     pub tvdb_id: Option<String>,
     pub image_url: Option<String>,
     pub monitored: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// Which absolute numbering a title's releases are matched on.
+///
+/// TVDB's absolute order interleaves specials and shorts with story episodes,
+/// so its raw numbers drift from the count release groups (and AniDB) use: a
+/// special at raw 13 makes story episode 13 raw 14. SMG serves a contiguous
+/// renumbering beside the raw one. A title is matched on exactly one of the two
+/// — the contiguous scale whenever its catalog carries any contiguous number,
+/// the raw scale otherwise — and a catalog number, a bridge season start and a
+/// parsed release number are only ever compared on that one scale. Falling back
+/// per episode would be wrong: an interleaved special has a raw number but no
+/// contiguous one, and its raw number is a story episode's contiguous number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AbsoluteScale {
+    /// TVDB's `absolute_number`, as stored.
+    #[default]
+    Raw,
+    /// SMG's `contiguous_absolute_number`.
+    Contiguous,
+}
+
+impl AbsoluteScale {
+    /// The scale a title's catalog is matched on.
+    pub fn for_catalog<'a>(episodes: impl IntoIterator<Item = &'a Episode>) -> Self {
+        if episodes.into_iter().any(|episode| {
+            episode
+                .contiguous_absolute_number
+                .is_some_and(|number| number > 0)
+        }) {
+            Self::Contiguous
+        } else {
+            Self::Raw
+        }
+    }
+
+    /// An episode's absolute number on this scale, or `None` when it has none
+    /// there. Never falls back to the other scale.
+    pub fn episode_absolute(self, episode: &Episode) -> Option<u32> {
+        match self {
+            Self::Raw => episode
+                .absolute_number
+                .as_deref()
+                .and_then(|value| value.trim().parse::<u32>().ok()),
+            Self::Contiguous => episode
+                .contiguous_absolute_number
+                .and_then(|number| u32::try_from(number).ok()),
+        }
+    }
+
+    /// A community season's first absolute number on this scale.
+    pub fn season_absolute_start(self, season: &AnimeCommunitySeason) -> Option<i32> {
+        match self {
+            Self::Raw => season.absolute_start,
+            Self::Contiguous => season.contiguous_absolute_start,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Contiguous => "contiguous",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

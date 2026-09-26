@@ -2327,6 +2327,7 @@ async fn media_file_aggregates_ignore_additional_files_but_listing_includes_them
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
         image_url: None,

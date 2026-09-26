@@ -1343,6 +1343,7 @@ impl AppUseCase {
             tvdb_id: None,
             image_url: None,
             clear_image_url: false,
+            contiguous_absolute_number: None,
         };
         if !update.has_changes() {
             return Err(AppError::Validation(

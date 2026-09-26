@@ -733,6 +733,8 @@ pub struct EpisodeMetadata {
     pub is_recap: bool,
     pub overview: String,
     pub absolute_number: String,
+    /// SMG's contiguous absolute number; see [`scryer_domain::AbsoluteScale`].
+    pub contiguous_absolute_number: Option<i32>,
     pub season_number: i32,
     pub image_url: String,
 }

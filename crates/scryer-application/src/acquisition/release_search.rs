@@ -2642,10 +2642,17 @@ impl AppUseCase {
             .await
             .or(title_anidb_id);
 
+        // Every absolute number this search carries is on the title's one
+        // absolute scale; see `AbsoluteScale`.
+        let absolute_scale = self
+            .services
+            .catalog
+            .shows
+            .absolute_scale_for_title(&title.id)
+            .await?;
         let absolute_episode = episode_record
             .as_ref()
-            .and_then(|episode| episode.absolute_number.as_deref())
-            .and_then(|value| value.trim().parse::<u32>().ok());
+            .and_then(|episode| absolute_scale.episode_absolute(episode));
 
         let category = self.release_search_category_for_facet(&title.facet);
 
@@ -2682,6 +2689,7 @@ impl AppUseCase {
             season_num as i32,
             episode_num as i32,
             anime_numbering_bridge.as_ref(),
+            absolute_scale,
         ));
         let numbering_context = community_numbering_context(
             title,
@@ -2972,21 +2980,30 @@ impl AppUseCase {
             .get_anime_numbering_bridge(&search_title.id)
             .await
             .unwrap_or_default();
+        // Every absolute number this subject carries is on the title's one
+        // absolute scale; see `AbsoluteScale`. A failed read keeps the raw
+        // scale, the same degraded answer a failed bridge read gives.
+        let absolute_scale = self
+            .services
+            .catalog
+            .shows
+            .absolute_scale_for_title(&search_title.id)
+            .await
+            .unwrap_or_default();
         let query_result = build_search_queries(
             search_title,
             item,
             episode,
             &self.facet_registry,
             anime_numbering_bridge.as_ref(),
+            absolute_scale,
         );
         let owner_facet = if item.media_type == "series_movie" {
             owner_title.facet.clone()
         } else {
             owner_facet_for_wanted_item(owner_title, item)
         };
-        let absolute_episode = episode
-            .and_then(|episode| episode.absolute_number.as_deref())
-            .and_then(|value| value.parse::<u32>().ok());
+        let absolute_episode = episode.and_then(|episode| absolute_scale.episode_absolute(episode));
         // Release groups name a posting after the cour, and the cour's name is
         // in the bridge rather than the catalog's aliases. The evidence has to
         // carry it or the walk proves nothing against its own results.
@@ -3234,6 +3251,7 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,
@@ -4386,6 +4404,7 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,
@@ -4435,6 +4454,7 @@ mod tests {
             Some(&episode),
             &crate::FacetRegistry::new(),
             None,
+            scryer_domain::AbsoluteScale::Raw,
         );
 
         assert_eq!(result.season, Some(0));
@@ -4464,6 +4484,7 @@ mod tests {
             Some(&episode),
             &crate::FacetRegistry::new(),
             None,
+            scryer_domain::AbsoluteScale::Raw,
         );
 
         assert_eq!(result.season, Some(2));
@@ -4681,6 +4702,7 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,

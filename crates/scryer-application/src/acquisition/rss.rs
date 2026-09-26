@@ -1686,6 +1686,7 @@ impl AppUseCase {
             .iter()
             .map(|episode| (episode.id.clone(), episode.clone()))
             .collect::<HashMap<_, _>>();
+        let absolute_scale = scryer_domain::AbsoluteScale::for_catalog(&catalog_episodes);
         let monitored_collection_ids = catalog_collections
             .iter()
             .filter(|collection| collection.monitored)
@@ -1794,10 +1795,7 @@ impl AppUseCase {
                 None,
                 Some(category.as_str()),
             );
-            let absolute_episode = episode_record
-                .absolute_number
-                .as_deref()
-                .and_then(|value| value.trim().parse::<u32>().ok());
+            let absolute_episode = absolute_scale.episode_absolute(&episode_record);
 
             // Score these releases
             let owned_releases: Vec<IndexerSearchResult> = episode_releases.to_vec();

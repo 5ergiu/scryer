@@ -675,7 +675,17 @@ impl AppUseCase {
                 let new_image_url = normalize_episode_image_url(&ep.image_url);
                 let tvdb_id_changed = new_tvdb_id.as_deref() != existing.tvdb_id.as_deref();
                 let image_url_changed = new_image_url.as_deref() != existing.image_url.as_deref();
-                if title_changed || overview_changed || tvdb_id_changed || image_url_changed {
+                // SMG recomputes the contiguous scale as TVDB's absolute order
+                // changes, so every hydration refreshes it, clearing included.
+                let new_contiguous_absolute_number = ep.contiguous_absolute_number;
+                let contiguous_changed =
+                    new_contiguous_absolute_number != existing.contiguous_absolute_number;
+                if title_changed
+                    || overview_changed
+                    || tvdb_id_changed
+                    || image_url_changed
+                    || contiguous_changed
+                {
                     let _ = self
                         .services
                         .catalog
@@ -697,6 +707,8 @@ impl AppUseCase {
                                     None
                                 },
                                 clear_image_url: image_url_changed && new_image_url.is_none(),
+                                contiguous_absolute_number: contiguous_changed
+                                    .then_some(new_contiguous_absolute_number),
                                 ..Default::default()
                             },
                         )
@@ -729,6 +741,7 @@ impl AppUseCase {
                 } else {
                     Some(ep.absolute_number.clone())
                 },
+                contiguous_absolute_number: ep.contiguous_absolute_number,
                 overview: if ep.overview.trim().is_empty() {
                     None
                 } else {
@@ -1365,6 +1378,7 @@ impl AppUseCase {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,

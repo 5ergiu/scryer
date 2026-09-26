@@ -822,6 +822,7 @@ fn feature_length_episode(id: &str, duration_seconds: i64) -> scryer_domain::Epi
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
         image_url: None,

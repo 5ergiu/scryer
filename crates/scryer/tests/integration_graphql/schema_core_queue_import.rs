@@ -1482,6 +1482,7 @@ async fn graphql_traverses_core_graph_relationships() {
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: Some("Episode overview".to_string()),
         tvdb_id: None,
         image_url: None,
