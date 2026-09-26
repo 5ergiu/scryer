@@ -1266,6 +1266,7 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Orphan,
+                release_listing_json: None,
             });
         }
         Ok(())

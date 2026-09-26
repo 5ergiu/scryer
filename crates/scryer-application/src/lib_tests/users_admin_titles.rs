@@ -775,6 +775,7 @@ async fn delete_title_queues_targeted_cancel_for_active_submission_only() {
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Title,
+        release_listing_json: None,
     };
     let terminal_submission = DownloadSubmission {
         download_id: scryer_domain::download_identity::DownloadId::new(),
@@ -793,6 +794,7 @@ async fn delete_title_queues_targeted_cancel_for_active_submission_only() {
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Title,
+        release_listing_json: None,
     };
     download_submissions
         .record_submission(active_submission.clone())
@@ -997,6 +999,7 @@ fn deleted_title_submission(
         info_hash: None,
         release_size_bytes: None,
         request_signature: None,
+        release_listing_json: None,
         scope: SubmissionScope::Title,
     }
 }

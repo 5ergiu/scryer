@@ -2396,6 +2396,18 @@ export const validateRuleSetMutation = `mutation ValidateRuleSet($input: Validat
 export const testRuleSetMutation = `mutation TestRuleSet($input: TestRuleSetInput!) {
   testRuleSet(input: $input) {
     score
+    releaseName
+    mediaFileId
+    listing {
+      publishedAt
+      ageDays
+      thumbsUp
+      thumbsDown
+      isPasswordProtected
+      indexerLanguages
+      extra
+      capturedAt
+    }
     allowed
     blocked
     minimumScoreMet

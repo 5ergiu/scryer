@@ -62,6 +62,7 @@ impl IndexerClient for MockIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -355,6 +356,7 @@ impl IndexerClient for TrackingIndexerClient {
                         candidate_token: None,
                         queue_scope: None,
                         coverage_scope: None,
+                        release_listing_json: None,
                     }
                 })
                 .collect(),
@@ -385,6 +387,8 @@ pub(super) struct FixedReleaseIndexerClient {
     /// under test reads the map, not the protocol.
     pub(super) seeders: Option<i64>,
     pub(super) published_at: String,
+    /// Listing facts a grab freezes into its snapshot; off by default.
+    pub(super) with_listing_facts: bool,
 }
 
 impl FixedReleaseIndexerClient {
@@ -397,6 +401,63 @@ impl FixedReleaseIndexerClient {
             empty_response: false,
             seeders: None,
             published_at: "1970-01-01T00:00:00Z".to_string(),
+            with_listing_facts: false,
+        }
+    }
+
+    /// Report votes and an indexer-specific attribute on the release, so a
+    /// captured listing snapshot is distinguishable from an empty one.
+    pub(super) fn with_listing_facts(mut self) -> Self {
+        self.with_listing_facts = true;
+        self
+    }
+
+    /// The single result every search returns.
+    pub(super) fn release(&self) -> IndexerSearchResult {
+        let mut extra = std::collections::HashMap::new();
+        if let Some(seeders) = self.seeders {
+            extra.insert("seeders".to_string(), serde_json::json!(seeders));
+        }
+        let (thumbs_up, thumbs_down) = if self.with_listing_facts {
+            extra.insert(
+                "synthetic_listing_attribute".to_string(),
+                serde_json::json!("synthetic-value"),
+            );
+            (Some(7), Some(1))
+        } else {
+            (None, None)
+        };
+        IndexerSearchResult {
+            // A real search names the indexer that served the result; the
+            // blocklist attributes a failure to it.
+            indexer_id: Some("indexer-a".to_string()),
+            source: "nzbgeek".into(),
+            title: self.release_title.clone(),
+            link: Some("https://example.invalid/info".to_string()),
+            download_url: Some("https://example.invalid/download.nzb".to_string()),
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            size_bytes: None,
+            published_at: Some(self.published_at.clone()),
+            thumbs_up,
+            thumbs_down,
+            indexer_languages: self.indexer_languages.clone(),
+            indexer_subtitles: None,
+            indexer_grabs: None,
+            password_hint: None,
+            parsed_release_metadata: Some(crate::parse_release_metadata(&self.release_title)),
+            quality_profile_decision: None,
+            extra,
+            response_attributes: Default::default(),
+            guid: Some("guid-fixed-release".to_string()),
+            info_url: Some("https://example.invalid/info".to_string()),
+            provenance: None,
+            auto_eligible: None,
+            auto_decision_code: None,
+            auto_decision_summary: None,
+            candidate_token: None,
+            queue_scope: None,
+            coverage_scope: None,
+            release_listing_json: None,
         }
     }
 
@@ -482,45 +543,11 @@ impl IndexerClient for FixedReleaseIndexerClient {
                 grab_max: None,
             });
         }
-        let mut extra = std::collections::HashMap::new();
-        if let Some(seeders) = self.seeders {
-            extra.insert("seeders".to_string(), serde_json::json!(seeders));
-        }
         Ok(IndexerSearchResponse {
             completion: crate::IndexerSearchCompletion::Complete,
 
             indexer_outcomes,
-            results: vec![IndexerSearchResult {
-                // A real search names the indexer that served the result; the
-                // blocklist attributes a failure to it.
-                indexer_id: Some("indexer-a".to_string()),
-                source: "nzbgeek".into(),
-                title: self.release_title.clone(),
-                link: Some("https://example.invalid/info".to_string()),
-                download_url: Some("https://example.invalid/download.nzb".to_string()),
-                source_kind: Some(DownloadSourceKind::NzbUrl),
-                size_bytes: None,
-                published_at: Some(self.published_at.clone()),
-                thumbs_up: None,
-                thumbs_down: None,
-                indexer_languages: self.indexer_languages.clone(),
-                indexer_subtitles: None,
-                indexer_grabs: None,
-                password_hint: None,
-                parsed_release_metadata: Some(crate::parse_release_metadata(&self.release_title)),
-                quality_profile_decision: None,
-                extra,
-                response_attributes: Default::default(),
-                guid: Some("guid-fixed-release".to_string()),
-                info_url: Some("https://example.invalid/info".to_string()),
-                provenance: None,
-                auto_eligible: None,
-                auto_decision_code: None,
-                auto_decision_summary: None,
-                candidate_token: None,
-                queue_scope: None,
-                coverage_scope: None,
-            }],
+            results: vec![self.release()],
             api_current: None,
             api_max: None,
             grab_current: None,
@@ -609,6 +636,7 @@ impl IndexerClient for SharedUrlMovieIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -718,6 +746,7 @@ impl IndexerClient for RecordingCategoriesIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -854,6 +883,7 @@ impl IndexerClient for MultiReleaseIndexerClient {
                     candidate_token: None,
                     queue_scope: None,
                     coverage_scope: None,
+                    release_listing_json: None,
                 })
                 .collect(),
             api_current: None,

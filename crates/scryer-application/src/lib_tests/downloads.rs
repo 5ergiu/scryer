@@ -393,6 +393,137 @@ async fn queued_grab_claims_merge_same_release_episode_coverage() {
     );
 }
 
+/// A grab the ledger still claims scores with the listing facts its grab
+/// froze. Scoring it without them while the same release is offered with them
+/// would let a listing rule make a same-release re-grab read as an upgrade.
+#[tokio::test]
+async fn a_ledger_claim_scores_with_the_listing_its_grab_froze() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, _user) =
+        bootstrap_with_cleanup_tracking(download_client, download_submissions, pending_releases);
+    let scope_states = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let app = base_app.with_test_overrides(|services| {
+        services.with_acquisition_scope_states(scope_states.clone())
+    });
+    *app.services.customization.user_rules.write().unwrap() =
+        scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "freeleech".into(),
+            name: "Freeleech".into(),
+            applied_facets: vec![],
+            origin: scryer_rules::PolicyOrigin::User,
+            rego_source: scryer_rules::rewrite_package_declaration(
+                "score_entry[\"freeleech\"] := 500 if { input.release.extra.freeleech == true }",
+                "freeleech",
+            ),
+        }])
+        .expect("freeleech rule compiles");
+    let title = make_due_hydration_title("title-claim-listing", MediaFacet::Movie, 1);
+    let context = app
+        .resolve_canonical_scoring_context(&title, &crate::builtin_default_quality_profile())
+        .await;
+    let membership = app
+        .scope_membership_for(&title, &SubmissionScope::Title)
+        .await;
+    let release = "Claimed.Movie.2024.1080p.WEB-DL-GRP";
+    let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+        published_at: None,
+        thumbs_up: None,
+        thumbs_down: None,
+        is_password_protected: None,
+        indexer_languages: Vec::new(),
+        extra: [("freeleech".to_string(), serde_json::Value::Bool(true))]
+            .into_iter()
+            .collect(),
+        captured_at: chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    };
+    let grabbed_release = |listing: Option<String>| {
+        serde_json::json!({
+            "title": release,
+            "score": 0,
+            "grabbed_at": "2026-09-07T00:00:00Z",
+            "release_listing_json": listing,
+        })
+        .to_string()
+    };
+    let claim_score = |grabbed_release: String| {
+        let app = &app;
+        let scope_states = &scope_states;
+        let title = &title;
+        let membership = &membership;
+        let context = &context;
+        async move {
+            scope_states
+                .upsert_acquisition_scope_state(&AcquisitionScopeState {
+                    id: "scope-claim".to_string(),
+                    title_id: title.id.clone(),
+                    title_name: Some(title.name.clone()),
+                    title_slug: None,
+                    title_facet: None,
+                    library_id: None,
+                    library_name: None,
+                    library_slug: None,
+                    episode_id: None,
+                    collection_id: None,
+                    series_movie_link_id: None,
+                    season_number: None,
+                    episode_number: None,
+                    media_type: "movie".to_string(),
+                    last_search_at: None,
+                    status: AcquisitionScopeStatus::Grabbed,
+                    grabbed_release: Some(grabbed_release),
+                    landed_bar: None,
+                    latest_release_decision: None,
+                    mismatch_recovery_eligible: false,
+                    created_at: "2026-09-07T00:00:00Z".to_string(),
+                    updated_at: "2026-09-07T00:00:00Z".to_string(),
+                })
+                .await
+                .expect("seed grabbed scope");
+            let claims = app
+                .grabbed_release_claims_for_scope(title, &membership.view(), context, &[], &[])
+                .await;
+            assert_eq!(claims.len(), 1, "{claims:?}");
+            assert!(claims[0].tier_index.is_some(), "the claim is re-derived");
+            claims[0].score
+        }
+    };
+
+    // The same release offered again, a year on, with the same listing facts.
+    let candidate = crate::quality::canonical_context::score_parked_release_title(
+        &title,
+        release,
+        None,
+        Some(crate::canonical_scoring::ListingFacts::candidate(
+            snapshot.clone(),
+            snapshot.captured_at + chrono::Duration::days(365),
+        )),
+        &[],
+        &[],
+        &context,
+    );
+
+    let claimed = claim_score(grabbed_release(Some(snapshot.to_json_string()))).await;
+    assert!(
+        candidate.score <= claimed,
+        "the same release must not out-score its own claim: candidate {}, claim {claimed}",
+        candidate.score
+    );
+    assert_eq!(candidate.score, claimed);
+
+    // A record written before grabs kept their listing scores as it always
+    // did: every listing fact unknown, so the rule does not fire.
+    let legacy = claim_score(grabbed_release(None)).await;
+    assert_eq!(
+        legacy + 500,
+        claimed,
+        "the freeleech rule fires on the claim"
+    );
+}
+
 #[tokio::test]
 async fn failed_client_poll_does_not_end_bindings_or_clean_manual_import_records() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -644,6 +775,7 @@ async fn list_download_queue_reads_cached_observed_items_without_client_calls() 
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record stub submission");
@@ -841,6 +973,7 @@ async fn list_download_queue_for_title_filters_the_shared_cache() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -1496,6 +1629,7 @@ async fn synthetic_download_import_rows_are_enriched_from_submissions_before_per
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record download submission");
@@ -1588,6 +1722,7 @@ async fn find_download_queue_scope_ignores_stale_submission_titles() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record stale submission");
@@ -1636,6 +1771,7 @@ async fn find_download_queue_scope_returns_orphan_without_title_lookup() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record orphan submission");
@@ -1702,6 +1838,7 @@ async fn manual_import_source_allows_orphan_submission_but_rejects_managed_reass
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record observed submission");
@@ -1723,6 +1860,7 @@ async fn manual_import_source_allows_orphan_submission_but_rejects_managed_reass
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record managed submission");
@@ -1874,6 +2012,7 @@ async fn manual_import_source_uses_retained_tracked_source_when_live_history_is_
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record orphan submission");
@@ -2124,6 +2263,7 @@ async fn queued_manual_import_reports_prior_automatic_import_after_source_cleanu
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2290,6 +2430,7 @@ async fn tracked_title_assignment_fixture() -> TrackedTitleAssignmentFixture {
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Title,
+        release_listing_json: None,
     };
 
     TrackedTitleAssignmentFixture {
@@ -2353,6 +2494,8 @@ async fn assign_tracked_download_title_serializes_submission_and_runtime_assignm
     assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
 }
 
+const GRAB_TIME_LISTING: &str = r#"{"v":1,"thumbs_up":4,"captured_at":"2026-08-01T00:00:00Z"}"#;
+
 #[tokio::test]
 async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_honors_scope() {
     // A reassignment must not destroy the indexer release name the grab
@@ -2363,6 +2506,7 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
     let mut grabbed = fixture.submission.clone();
     grabbed.title_id = "some-other-title".to_string();
     grabbed.source_title = Some("Grabbed.Release.2026.1080p.WEB-DL-GRP".to_string());
+    grabbed.release_listing_json = Some(GRAB_TIME_LISTING.to_string());
     fixture
         .submissions
         .record_submission(grabbed)
@@ -2399,6 +2543,11 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
         row.source_title.as_deref(),
         Some("Grabbed.Release.2026.1080p.WEB-DL-GRP"),
         "the grab-time release name survives the reassignment"
+    );
+    assert_eq!(
+        row.release_listing_json.as_deref(),
+        Some(GRAB_TIME_LISTING),
+        "the grab-time listing snapshot survives the reassignment"
     );
     assert_eq!(
         row.scope,
@@ -2962,6 +3111,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             submission_identity,
             None,
@@ -3160,6 +3310,7 @@ async fn external_failed_snapshot_dispatches_failure_worker_without_completed_ro
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed download submission");
@@ -4844,6 +4995,7 @@ async fn import_completed_download_ignores_stale_item_id_import_when_request_ide
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:fresh".to_string()),
@@ -5845,6 +5997,7 @@ async fn unknown_program_video_codec_is_held_for_review_across_production_paths(
         false,
         crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
         None,
+        None,
     )
     .await;
     let crate::post_download_gate::ImportedFileGateDecision::Rejected(rejection) = decision else {
@@ -5896,6 +6049,7 @@ async fn catalog_scan_and_final_import_join_the_same_native_probe() {
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         ),
         async {
@@ -5953,6 +6107,7 @@ async fn shared_native_probe_rejects_source_changes_in_both_production_paths() {
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         ),
         async {
@@ -6126,6 +6281,7 @@ async fn canonical_catalog_and_import_paths_preserve_the_same_analysis_contract(
             None,
             false,
             crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+            None,
             None,
         )
         .await;
@@ -7242,6 +7398,7 @@ async fn scryer_manual_import_defaults_to_grabbed_scope_but_accepts_same_title_o
         source_title: Some("Fail.Closed.Pack.S01E03.1080p.WEB-DL.DDP5.1.H.264-GRP".to_string()),
         observed_release_name: None,
         release_size_bytes: None,
+        release_listing_json: None,
         purpose: DownloadSubmissionPurpose::Standard,
         scope: SubmissionScope::Episode {
             episode_id: grabbed_episode.id,
@@ -7324,6 +7481,7 @@ async fn record_pack_identity_submission(
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         })
         .await
         .expect("record series submission");
@@ -9341,6 +9499,7 @@ async fn an_imported_file_remembers_the_announced_size_it_was_scored_on() {
                 scope: SubmissionScope::Episode {
                     episode_id: episode.id.clone(),
                 },
+                release_listing_json: None,
             })
             .await
             .expect("record series submission");
@@ -9381,6 +9540,96 @@ async fn an_imported_file_remembers_the_announced_size_it_was_scored_on() {
             media_files[0].announced_size_bytes,
             if remembered { announced } else { None },
             "announced={announced:?}"
+        );
+    }
+}
+
+/// The listing snapshot a grab froze, as a submission carries it. Opaque to the
+/// import: it must land on the media row byte for byte.
+const GRAB_LISTING_SNAPSHOT: &str =
+    r#"{"captured_at":"2026-01-02T03:04:05Z","votes":{"up":4,"down":1},"grabs":17}"#;
+
+/// An episode imported from a Scryer grab keeps that grab's listing snapshot on
+/// its media row; the same file adopted from the client (no submission) has no
+/// grab behind it and records none.
+#[tokio::test]
+async fn an_imported_episode_keeps_the_grab_listing_snapshot() {
+    for grabbed in [true, false] {
+        let (
+            FailClosedPackFixture {
+                app,
+                user,
+                title,
+                episode,
+                library_dir,
+                ..
+            },
+            download_submissions,
+        ) = fail_closed_pack_fixture_with_submissions().await;
+        let _keep_library = &library_dir;
+        let item_id = "listing-snapshot-single-file";
+        if grabbed {
+            download_submissions
+                .record_submission(DownloadSubmission {
+                    download_id: scryer_domain::download_identity::DownloadId::new(),
+                    title_id: title.id.clone(),
+                    purpose: crate::DownloadSubmissionPurpose::Standard,
+                    facet: "series".to_string(),
+                    download_client_id: Some("primary".to_string()),
+                    download_client_type: "nzbget".to_string(),
+                    download_client_item_id: item_id.to_string(),
+                    source_hint: None,
+                    source_provider_id: None,
+                    source_provider_name: None,
+                    source_kind: Some(DownloadSourceKind::NzbUrl),
+                    source_title: Some(PACK_IDENTITY_EPISODE_RELEASE.to_string()),
+                    info_hash: None,
+                    release_size_bytes: None,
+                    request_signature: None,
+                    scope: SubmissionScope::Episode {
+                        episode_id: episode.id.clone(),
+                    },
+                    release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
+                })
+                .await
+                .expect("record series submission");
+        }
+
+        let source_dir = tempfile::tempdir().expect("source tempdir");
+        let _source_file = write_pack_video(
+            source_dir.path(),
+            &format!("{PACK_IDENTITY_EPISODE_RELEASE}.mkv"),
+        );
+        let completed = series_pack_completed_download(
+            item_id,
+            &title.id,
+            PACK_IDENTITY_EPISODE_RELEASE,
+            source_dir.path(),
+        );
+
+        let result = {
+            let _probe = probe_agrees_with_the_name(1280, 720);
+            crate::import::import::import_completed_download(&app, &user, &completed)
+                .await
+                .expect("completed import should run")
+        };
+        assert_eq!(
+            result.decision,
+            scryer_domain::ImportDecision::Imported,
+            "grabbed={grabbed}: {result:?}"
+        );
+        let media_files = app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .expect("list media files");
+        assert_eq!(media_files.len(), 1, "{media_files:?}");
+        assert_eq!(
+            media_files[0].release_listing_json.as_deref(),
+            grabbed.then_some(GRAB_LISTING_SNAPSHOT),
+            "grabbed={grabbed}"
         );
     }
 }
@@ -9592,6 +9841,7 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
         })
         .await
         .expect("record additional series movie submission");
@@ -9653,6 +9903,11 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
         Some(linked_episode.id.as_str())
     );
     assert_eq!(additional_file.series_movie_link_ids, vec![link.id]);
+    assert_eq!(
+        additional_file.release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT)
+    );
+    assert_eq!(primary_file.release_listing_json, None);
 }
 
 /// A completed additional-file movie download that is imported again (copy
@@ -9745,6 +10000,7 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record additional movie submission");
@@ -9936,6 +10192,7 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
             scope: SubmissionScope::Episode {
                 episode_id: episode.id.clone(),
             },
+            release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
         })
         .await
         .expect("record additional episode submission");
@@ -10006,6 +10263,10 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
         Some(episode.id.as_str())
     );
     assert_eq!(additional_files[0].file_path, first_dest);
+    assert_eq!(
+        additional_files[0].release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT)
+    );
     let suffixed = std::fs::read_dir(Path::new(&first_dest).parent().expect("dest folder"))
         .expect("read destination folder")
         .filter_map(Result::ok)
@@ -10284,6 +10545,7 @@ async fn completed_import_uses_durable_scope_over_stale_origin_parameters() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed durable submission");
@@ -11074,6 +11336,7 @@ async fn legacy_queue_delete_ends_binding_that_predates_the_command() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record matching submission");
@@ -11568,6 +11831,7 @@ async fn ignore_tracked_download_uses_durable_fallback_idempotently() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:evicted-job-1".to_string()),
@@ -11671,6 +11935,7 @@ async fn ignoring_a_download_retires_memoized_observations_only_when_the_state_m
                 release_size_bytes: None,
                 request_signature: None,
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             },
             crate::DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:generation-job-1".to_string()),
@@ -11758,6 +12023,7 @@ async fn finalize_ignore_preserves_an_imported_outcome() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             identity.clone(),
             None,
@@ -11983,6 +12249,14 @@ struct DispositionFixture {
 }
 
 impl DispositionFixture {
+    /// Give the fixture's grab a frozen listing snapshot, as the grab lanes
+    /// persist it on the submission.
+    async fn attach_listing_snapshot(&self, snapshot: &str) {
+        let mut submissions = self.download_submissions.store.lock().await;
+        assert_eq!(submissions.len(), 1, "{submissions:?}");
+        submissions[0].release_listing_json = Some(snapshot.to_string());
+    }
+
     async fn scope_status(&self) -> AcquisitionScopeStatus {
         self.app
             .services
@@ -12196,6 +12470,7 @@ async fn disposition_fixture(name: &str, release_title: &str) -> DispositionFixt
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -12838,6 +13113,321 @@ async fn manual_movie_upgrade_marks_every_import_completed_as_upgrade() {
     }
 }
 
+/// A movie imported from a Scryer grab keeps that grab's listing snapshot on
+/// its media row, whether it lands fresh or replaces an incumbent.
+#[tokio::test]
+async fn a_grabbed_movie_import_keeps_the_submission_listing_snapshot() {
+    for with_incumbent in [false, true] {
+        let release_title = "Listing Snapshot Movie.2026.1080p.WEB-DL-GRP";
+        let fixture = disposition_fixture("Listing Snapshot Movie", release_title).await;
+        fixture.attach_listing_snapshot(GRAB_LISTING_SNAPSHOT).await;
+        let incumbent_id = if with_incumbent {
+            Some(
+                seed_primary_movie_file(&fixture, "listing.snapshot.incumbent.720p.mp4", "720p")
+                    .await,
+            )
+        } else {
+            None
+        };
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+
+        let result = crate::import_workflow::import_completed_download(
+            &fixture.app,
+            &fixture.user,
+            &fixture.completed,
+        )
+        .await
+        .expect("the import runs to a decision");
+        assert_eq!(
+            result.decision,
+            scryer_domain::ImportDecision::Imported,
+            "with_incumbent={with_incumbent}: {result:?}"
+        );
+
+        let primaries = primary_movie_files(&fixture).await;
+        assert_eq!(primaries.len(), 1, "{primaries:?}");
+        assert_ne!(Some(&primaries[0].id), incumbent_id.as_ref());
+        assert_eq!(
+            primaries[0].release_listing_json.as_deref(),
+            Some(GRAB_LISTING_SNAPSHOT),
+            "with_incumbent={with_incumbent}"
+        );
+    }
+}
+
+/// A manual import of a download Scryer grabbed still knows the grab, so the
+/// row it creates carries the submission's listing snapshot.
+#[tokio::test]
+async fn a_manual_import_of_a_grabbed_download_keeps_its_listing_snapshot() {
+    let release_title = "Manual Listing Snapshot Movie.2026.1080p.WEB-DL-GRP";
+    let fixture = disposition_fixture("Manual Listing Snapshot Movie", release_title).await;
+    fixture.attach_listing_snapshot(GRAB_LISTING_SNAPSHOT).await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let source_file = write_pack_video(source_dir.path(), &format!("{release_title}.mkv"));
+    let import_id = fixture
+        .app
+        .services
+        .workflow
+        .imports
+        .queue_import_request(
+            ClientJobLocator::for_import_artifact(
+                Some(&fixture.completed.client_id),
+                &fixture.completed.client_type,
+                &fixture.completed.download_client_item_id,
+            ),
+            ImportType::ManualImport.as_str().to_string(),
+            "{}".to_string(),
+        )
+        .await
+        .expect("queue manual import record");
+
+    let results = {
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        crate::import_workflow::execute_manual_import(
+            &fixture.app,
+            &fixture.user,
+            &import_id,
+            &fixture.title.id,
+            Some(&fixture.completed),
+            vec![ManualImportFileMapping {
+                disc_selection: None,
+                file_path: source_file.to_string_lossy().into_owned(),
+                episode_id: None,
+                episode_ids: Vec::new(),
+                series_movie_link_id: None,
+            }],
+            Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+        )
+        .await
+        .expect("execute manual movie import")
+    };
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].success, "{results:?}");
+
+    let primaries = primary_movie_files(&fixture).await;
+    assert_eq!(primaries.len(), 1, "{primaries:?}");
+    assert_eq!(
+        primaries[0].release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT)
+    );
+}
+
+/// A manual episode import of a download Scryer grabbed keeps the grab's
+/// listing snapshot on the row it creates.
+#[tokio::test]
+async fn a_manual_episode_import_of_a_grabbed_download_keeps_its_listing_snapshot() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode,
+            library_dir,
+            ..
+        },
+        download_submissions,
+    ) = fail_closed_pack_fixture_with_submissions().await;
+    let _keep_library = &library_dir;
+    let item_id = "manual-listing-snapshot-episode";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: title.id.clone(),
+            purpose: crate::DownloadSubmissionPurpose::Standard,
+            facet: "series".to_string(),
+            download_client_id: Some("primary".to_string()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some(PACK_IDENTITY_EPISODE_RELEASE.to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            scope: SubmissionScope::Episode {
+                episode_id: episode.id.clone(),
+            },
+            release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
+        })
+        .await
+        .expect("record series submission");
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let source_file = write_pack_video(
+        source_dir.path(),
+        &format!("{PACK_IDENTITY_EPISODE_RELEASE}.mkv"),
+    );
+    let completed = series_pack_completed_download(
+        item_id,
+        &title.id,
+        PACK_IDENTITY_EPISODE_RELEASE,
+        source_dir.path(),
+    );
+
+    let results = {
+        let _probe = probe_agrees_with_the_name(1280, 720);
+        crate::import_workflow::execute_manual_import(
+            &app,
+            &user,
+            "manual-listing-snapshot-episode",
+            &title.id,
+            Some(&completed),
+            vec![ManualImportFileMapping {
+                disc_selection: None,
+                file_path: source_file.to_string_lossy().into_owned(),
+                episode_id: Some(episode.id.clone()),
+                episode_ids: Vec::new(),
+                series_movie_link_id: None,
+            }],
+            Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root")),
+        )
+        .await
+        .expect("execute manual episode import")
+    };
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].success, "{results:?}");
+
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(
+        files[0].release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT)
+    );
+}
+
+/// A standard series-movie link grab with no incumbent lands a fresh primary
+/// row, and that row keeps the grab's listing snapshot.
+#[tokio::test]
+async fn a_grabbed_series_movie_link_import_keeps_the_listing_snapshot() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (base_app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let media_files = Arc::new(MockMediaFileRepo::default());
+    let import_repo = Arc::new(TrackingImportRepo::default());
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_imports(import_repo.clone())
+            .with_file_importer(Arc::new(CopyingFileImporter))
+            .with_media_files(media_files.clone())
+    });
+
+    let config =
+        create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
+    let library_dir = tempfile::tempdir().expect("library tempdir");
+    let title_folder = library_dir.path().join("Listing Snapshot Link");
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Listing Snapshot Link".to_string(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                runtime_minutes: Some(40),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create anime title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, &title_folder.to_string_lossy())
+        .await
+        .expect("set title folder path");
+    let link = app
+        .services
+        .catalog
+        .shows
+        .upsert_series_movie_link(test_series_movie_link(
+            &title.id,
+            "Listing Snapshot Link: The Movie",
+            Some(2026),
+            None,
+            Some("listing-snapshot-link"),
+        ))
+        .await
+        .expect("create series movie link");
+
+    let release_title = "Listing.Snapshot.Link.The.Movie.2026.1080p.BluRay.x264-Group";
+    let item_id = "listing-snapshot-link-1";
+    download_submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: title.id.clone(),
+            purpose: crate::DownloadSubmissionPurpose::Standard,
+            facet: "anime".to_string(),
+            download_client_id: Some(config.id.clone()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: item_id.to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            source_title: Some(release_title.to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            request_signature: None,
+            scope: SubmissionScope::SeriesMovie {
+                series_movie_link_id: link.id.clone(),
+            },
+            release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
+        })
+        .await
+        .expect("record series movie submission");
+
+    let download_dir = tempfile::tempdir().expect("download tempdir");
+    std::fs::File::create(download_dir.path().join(format!("{release_title}.mkv")))
+        .expect("create source video")
+        .set_len(300 * 1024 * 1024)
+        .expect("size source video");
+    let mut completed = completed_download_fixture_item(
+        item_id,
+        &title.id,
+        release_title,
+        download_dir.path().to_string_lossy().as_ref(),
+    );
+    completed.client_id = config.id.clone();
+    completed.parameters.clear();
+    *download_client.completed_downloads.lock().await = vec![completed.clone()];
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import_workflow::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("the link import runs to a decision");
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{result:?}"
+    );
+
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].role.is_primary(), "{files:?}");
+    assert_eq!(files[0].series_movie_link_ids, vec![link.id]);
+    assert_eq!(
+        files[0].release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT)
+    );
+}
+
 /// **A1 through the link path, end to end.** The clone of
 /// `completed_import_imports_additional_series_movie_file_from_submission_scope`
 /// the review asked for: a `Standard` submission (so it takes
@@ -13017,6 +13607,7 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: Some(GRAB_LISTING_SNAPSHOT.to_string()),
         })
         .await
         .expect("record series movie submission");
@@ -13063,6 +13654,11 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
         .find(|file| file.role.is_primary())
         .expect("the upgrade landed a primary file");
     assert_eq!(imported.series_movie_link_ids, vec![link.id]);
+    assert_eq!(
+        imported.release_listing_json.as_deref(),
+        Some(GRAB_LISTING_SNAPSHOT),
+        "the upgrade's replacement row carries the grab's listing snapshot"
+    );
     assert!(
         blocklist_repo.entries.lock().await.is_empty(),
         "an honest upgrade burns nothing"
@@ -13176,6 +13772,17 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
     assert!(
         results.iter().all(|result| result.success),
         "the operator's own file must import: {results:?}"
+    );
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert!(
+        !files.is_empty() && files.iter().all(|file| file.release_listing_json.is_none()),
+        "a manual import with no grab behind it records no listing snapshot: {files:?}"
     );
     assert!(
         blocklist_repo.entries.lock().await.is_empty(),
@@ -13385,6 +13992,7 @@ score_entry["operator_refuses_this_file"] := -10000 if {
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record series movie submission");
@@ -15737,6 +16345,7 @@ async fn a_job_absent_from_an_authoritative_listing_is_dropped_not_failed() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");
@@ -15815,6 +16424,7 @@ async fn an_already_imported_job_keeps_its_outcome_when_it_leaves_the_client() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");

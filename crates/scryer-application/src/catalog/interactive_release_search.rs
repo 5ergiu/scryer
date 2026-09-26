@@ -17,6 +17,7 @@ use super::release_search::{
 use crate::acquisition::submission::{GrabTrigger, record_direct_grab_outcome};
 use crate::acquisition_release_search::ResolvedReleaseSearchSubject;
 use crate::domain_events::{new_global_domain_event, title_context_snapshot};
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use scryer_logging::{ActorContext, LogContext, ResourceContext, WorkflowContext, context_span};
 use std::sync::Arc;
@@ -748,6 +749,7 @@ impl AppUseCase {
                                 child_token,
                                 Some(HashSet::from([indexer_id.clone()])),
                                 None,
+                                app.runtime.environment.now(),
                             )
                             .await
                         {
@@ -1039,6 +1041,8 @@ impl AppUseCase {
         let rules = self.user_rules_engine_snapshot();
         let judge = judge.cloned();
         let indexer_id = indexer_id.to_string();
+        // Not grabbed: listing age is measured at this search's own instant.
+        let now = self.runtime.environment.now();
         let results = tokio::task::spawn_blocking(move || {
             // Reuse one evaluator for this response and keep synchronous rule
             // evaluation off the async worker handling requests/cancellation.
@@ -1081,17 +1085,26 @@ impl AppUseCase {
                     {
                         // No title or incumbent context exists yet. Still collect
                         // every applicable contribution before judging eligibility.
+                        let listing =
+                            crate::quality::release_listing::ReleaseListingSnapshot::for_scoring(
+                                &result, now,
+                            );
+                        let listing_json = listing.to_json_string();
                         result.quality_profile_decision = Some(
                             crate::canonical_scoring::score_release_in_batch(
                                 &crate::canonical_scoring::ReleaseEvidence::announced(
                                     parsed.clone(),
                                     result.size_bytes,
-                                ),
+                                )
+                                .with_listing(Some(
+                                    crate::canonical_scoring::ListingFacts::candidate(listing, now),
+                                )),
                                 context,
                                 evaluator,
                             )
                             .announced_decision,
                         );
+                        result.release_listing_json = Some(listing_json);
                     }
                     result.parsed_release_metadata = Some(parsed);
                     result
@@ -1414,8 +1427,8 @@ impl AppUseCase {
                     MediaFacet::Movie
                 }
             });
-        let stand_in_title =
-            unlinked_grab_title(&result.title, facet.clone(), self.runtime.environment.now());
+        let now = self.runtime.environment.now();
+        let stand_in_title = unlinked_grab_title(&result.title, facet.clone(), now);
         let download_id = scryer_domain::download_identity::DownloadId::new();
         let info_hash_hint = result
             .extra
@@ -1509,6 +1522,9 @@ impl AppUseCase {
             request_signature: None,
             purpose: DownloadSubmissionPurpose::OperatorQueued,
             scope: SubmissionScope::Orphan,
+            release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                &result, now,
+            ),
         };
         let wire_id = download_id.to_wire();
         let identity = crate::download_identity::accepted_download_submission_identity(

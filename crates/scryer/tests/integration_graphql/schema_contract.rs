@@ -990,9 +990,15 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     ] {
         assert!(public_type_names.contains(&name), "missing type {name}");
     }
-    assert_eq!(public_types.len(), 913);
-    assert_eq!(kind_count("OBJECT"), 495);
-    assert_eq!(kind_count("INPUT_OBJECT"), 231);
+    // The rule tester's listing facts add one input and one payload, and the
+    // media file's frozen listing adds one payload:
+    // public types 913->916, OBJECT 495->497, INPUT_OBJECT 231->232.
+    assert!(public_type_names.contains(&"RuleSetTestListingInput"));
+    assert!(public_type_names.contains(&"RuleSetTestListingPayload"));
+    assert!(public_type_names.contains(&"ReleaseListingPayload"));
+    assert_eq!(public_types.len(), 916);
+    assert_eq!(kind_count("OBJECT"), 497);
+    assert_eq!(kind_count("INPUT_OBJECT"), 232);
     assert_eq!(kind_count("ENUM"), 175);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);

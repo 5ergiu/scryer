@@ -604,6 +604,7 @@ async fn source_password_writes_are_encrypted_at_rest_sqlite() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     PendingReleaseRepository::insert_pending_release(&pending_store, &pending_release)
         .await

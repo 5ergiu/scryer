@@ -1766,7 +1766,7 @@ const PENDING_RELEASE_COLUMNS: &str =
     added_at, last_observed_at, delay_until, status, grabbed_at, source_password, published_at, info_hash,
     minimum_seed_ratio, minimum_seed_time_minutes, season_pack_seed_ratio,
     season_pack_seed_time_minutes, seeders, release_identity, coverage_identity, role,
-    last_decision_code, release_age_unknown";
+    last_decision_code, release_age_unknown, release_listing_json";
 
 /// Same columns as [`PENDING_RELEASE_COLUMNS`] but qualified with the `pr` alias
 /// so the paged read can JOIN `titles` for library scoping without ambiguous
@@ -1777,7 +1777,7 @@ const PENDING_RELEASE_COLUMNS_PR: &str =
     pr.added_at, pr.last_observed_at, pr.delay_until, pr.status, pr.grabbed_at, pr.source_password, pr.published_at, pr.info_hash,
     pr.minimum_seed_ratio, pr.minimum_seed_time_minutes, pr.season_pack_seed_ratio,
     pr.season_pack_seed_time_minutes, pr.seeders, pr.release_identity, pr.coverage_identity,
-    pr.role, pr.last_decision_code, pr.release_age_unknown";
+    pr.role, pr.last_decision_code, pr.release_age_unknown, pr.release_listing_json";
 
 fn pending_release_row_to_item(
     row: &SqlRow,
@@ -1830,6 +1830,8 @@ fn pending_release_row_to_item(
         })?,
         last_decision_code: row.opt_text("last_decision_code")?,
         release_age_unknown: row.bool("release_age_unknown")?,
+        // Rows parked before the column existed read back as `None`.
+        release_listing_json: row.opt_text("release_listing_json")?,
     })
 }
 
@@ -1886,6 +1888,7 @@ fn pending_release_insert_args(
         SqlArg::Text(observation.role.as_str().to_string()),
         SqlArg::OptText(observation.latest_decision_code.clone()),
         SqlArg::Bool(observation.release_age_unknown),
+        SqlArg::OptText(release.release_listing_json.clone()),
     ])
 }
 
@@ -1976,6 +1979,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                             release_size_bytes = {},
                             release_score = {},
                             scoring_log_json = {},
+                            release_listing_json = COALESCE({}, release_listing_json),
                             source_password = COALESCE({}, source_password),
                             indexer_source = {},
                             indexer_id = {},
@@ -2006,6 +2010,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                             &self.datastore,
                             release.scoring_log_json.as_deref(),
                         )?,
+                        SqlArg::OptText(release.release_listing_json.clone()),
                         SqlArg::OptText(encrypt_pending_release_source_password(
                             encryption_key.as_ref(),
                             release.source_password.as_ref(),
@@ -2049,9 +2054,9 @@ impl PendingReleaseRepository for PendingReleaseStore {
               added_at, last_observed_at, delay_until, status, grabbed_at, source_password, published_at, info_hash,
               minimum_seed_ratio, minimum_seed_time_minutes, season_pack_seed_ratio,
               season_pack_seed_time_minutes, seeders, release_identity, coverage_identity, role,
-              last_decision_code, release_age_unknown)
+              last_decision_code, release_age_unknown, release_listing_json)
              VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-                     {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+                     {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
              ON CONFLICT(release_identity)
              WHERE status IN ('waiting', 'standby', 'processing', 'needs_review')
              DO UPDATE SET
@@ -2060,6 +2065,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                 release_size_bytes = excluded.release_size_bytes,
                 release_score = excluded.release_score,
                 scoring_log_json = excluded.scoring_log_json,
+                release_listing_json = COALESCE(excluded.release_listing_json, pending_releases.release_listing_json),
                 indexer_source = excluded.indexer_source,
                 indexer_id = excluded.indexer_id,
                 release_guid = excluded.release_guid,

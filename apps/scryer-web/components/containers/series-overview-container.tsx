@@ -72,6 +72,7 @@ import type { TitleOptionUpdates } from "@/lib/types/title-options";
 import type {
   CanonicalMediaTag,
   LibraryRecord,
+  MediaFileReleaseListing,
   TitleCreditRecord,
 } from "@/lib/types/titles";
 import { useDeletePreview } from "@/lib/hooks/use-delete-preview";
@@ -324,6 +325,7 @@ export type EpisodeMediaFile = {
   edition: string | null;
   originalFilePath: string | null;
   releaseHash: string | null;
+  releaseListing?: MediaFileReleaseListing | null;
 };
 
 type SeriesOverviewSnapshotTitle = TitleDetail & {

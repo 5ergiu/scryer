@@ -260,6 +260,7 @@ fn orphan_test_submission(item_id: &str, source_title: &str) -> DownloadSubmissi
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Orphan,
+        release_listing_json: None,
     }
 }
 
@@ -287,6 +288,7 @@ fn managed_episode_set_test_submission(item_id: &str) -> DownloadSubmission {
         scope: SubmissionScope::EpisodeSet {
             episode_ids: vec!["episode-1".to_string(), "episode-2".to_string()],
         },
+        release_listing_json: None,
     }
 }
 

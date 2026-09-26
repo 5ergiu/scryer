@@ -1041,6 +1041,7 @@ pub struct AppRuntimeAcquisitionState {
     pub(crate) title_walk_locks: AcquisitionTitleWalkLocks,
     pub(crate) release_candidate_passwords:
         Arc<std::sync::Mutex<HashMap<String, ReleaseCandidatePasswordTicket>>>,
+    pub(crate) release_candidate_listings: Arc<std::sync::Mutex<ReleaseCandidateListingTickets>>,
     pub rss_seen_guids: Arc<tokio::sync::RwLock<HashSet<String>>>,
     pub rss_unknown_age_last_warned_at:
         Arc<tokio::sync::RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
@@ -1482,6 +1483,100 @@ pub(crate) struct ReleaseCandidatePasswordTicket {
     pub source_title: String,
     pub password: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// The listing a signed search candidate was offered with, kept server-side
+/// so the token stays small. Bound to the same claims as the token.
+pub(crate) struct ReleaseCandidateListingTicket {
+    pub actor_id: String,
+    pub title_id: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub source_hint: String,
+    pub source_title: String,
+    pub listing: crate::quality::release_listing::ReleaseListingSnapshot,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// One ticket per offered search result, so the store is capped and evicts
+/// the oldest ticket first. A lost ticket only costs the grab its snapshot.
+#[derive(Default)]
+pub(crate) struct ReleaseCandidateListingTickets {
+    entries: HashMap<String, ReleaseCandidateListingTicket>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl ReleaseCandidateListingTickets {
+    pub(crate) const MAX_ENTRIES: usize = 4096;
+
+    pub(crate) fn insert(
+        &mut self,
+        reference: String,
+        ticket: ReleaseCandidateListingTicket,
+        now: DateTime<Utc>,
+        max_entries: usize,
+    ) {
+        // Expired tickets can never be read again, so they go on every insert
+        // rather than lingering until the store fills.
+        let before = self.entries.len();
+        self.entries.retain(|_, ticket| ticket.expires_at > now);
+        if self.entries.len() != before {
+            self.order
+                .retain(|reference| self.entries.contains_key(reference));
+        }
+        // Second line of defence: a store full of live tickets drops the
+        // oldest.
+        let mut evicted = 0usize;
+        while self.entries.len() >= max_entries.max(1) {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&oldest).is_some() {
+                evicted += 1;
+            }
+        }
+        if evicted > 0 {
+            tracing::debug!(
+                evicted,
+                max_entries,
+                "release candidate listing tickets at capacity; evicted unexpired tickets, whose grabs will record no listing"
+            );
+        }
+        if self.entries.insert(reference.clone(), ticket).is_none() {
+            self.order.push_back(reference);
+        }
+    }
+
+    pub(crate) fn get(
+        &self,
+        reference: &str,
+        now: DateTime<Utc>,
+    ) -> Option<&ReleaseCandidateListingTicket> {
+        self.entries
+            .get(reference)
+            .filter(|ticket| ticket.expires_at > now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, reference: &str) -> bool {
+        self.entries.contains_key(reference)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn order_len(&self) -> usize {
+        self.order.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
 }
 
 const MAX_CONCURRENT_ARCHIVE_EXTRACTIONS: usize = 1;
@@ -2455,6 +2550,9 @@ impl AppRuntimeState {
                 download_failure_guards: DownloadFailureGuardTable::default(),
                 title_walk_locks: AcquisitionTitleWalkLocks::default(),
                 release_candidate_passwords: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                release_candidate_listings: Arc::new(std::sync::Mutex::new(
+                    ReleaseCandidateListingTickets::default(),
+                )),
                 rss_seen_guids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
                 rss_unknown_age_last_warned_at: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 tracked_download_handle: None,

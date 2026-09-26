@@ -1791,6 +1791,7 @@ async fn queue_existing_title_download_adopts_same_title_client_identity() {
             request_signature: None,
             purpose: crate::DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record client-created seed binding");
@@ -1903,6 +1904,7 @@ async fn queue_existing_title_download_adopts_a_foreign_observation_stub_identit
         request_signature: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope: SubmissionScope::Orphan,
+        release_listing_json: None,
     };
     assert!(stub.is_observation_stub());
     download_submissions
@@ -2001,6 +2003,7 @@ async fn queue_existing_title_download_rejects_cross_title_client_identity() {
             request_signature: None,
             purpose: crate::DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record canonical owner submission");
@@ -2146,6 +2149,7 @@ async fn queue_existing_title_download_blocks_a_durable_unbound_submission() {
             release_size_bytes: None,
             request_signature: Some("first-signature".to_string()),
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record ambiguous submission");
@@ -2229,6 +2233,7 @@ async fn queue_existing_title_download_conflicts_for_state(state: DownloadQueueS
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2344,6 +2349,7 @@ async fn queue_existing_title_download_additional_file_ignores_standard_blocker(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record standard submission");
@@ -2459,6 +2465,7 @@ async fn queue_existing_title_download_additional_file_supports_series_movie_sco
             release_size_bytes: None,
             request_signature: None,
             scope: scope.clone(),
+            release_listing_json: None,
         })
         .await
         .expect("record standard submission");
@@ -2853,6 +2860,7 @@ async fn queue_existing_title_download_replace_early_deletes_old_submission() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2940,6 +2948,7 @@ async fn queue_existing_title_download_replace_early_deletes_all_blockers() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             })
             .await
             .expect("record submission");
@@ -3092,6 +3101,7 @@ async fn commit_successful_grab_marks_covered_wanted_set_and_supersedes_pending_
                 },
                 last_decision_code: None,
                 release_age_unknown: false,
+                release_listing_json: None,
             })
             .await
             .expect("seed pending release");
@@ -3196,6 +3206,7 @@ async fn trigger_title_wanted_search_conflicts_before_seeding_movie_wanted_item(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -3311,6 +3322,7 @@ async fn trigger_title_wanted_search_skips_conflicted_first_seed_episode_items()
             scope: SubmissionScope::Episode {
                 episode_id: episode.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -5473,6 +5485,7 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     pending_releases
         .insert_pending_release(&saved("SECOND", 200))
@@ -5500,6 +5513,7 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record first grab");
@@ -5807,6 +5821,7 @@ async fn every_scoped_search_records_coverage_including_interactive() {
             "interactive_search",
             SearchMode::Interactive,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await;
     let mut indexers: Vec<String> = coverage
@@ -5857,6 +5872,7 @@ async fn empty_response_from_fired_indexer_counts_as_coverage() {
             "background_acquisition",
             SearchMode::Auto,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await
         .expect("empty search succeeds");
@@ -6290,6 +6306,7 @@ async fn a_submission_the_client_no_longer_lists_does_not_block_a_new_grab() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");
@@ -6379,6 +6396,7 @@ async fn a_submission_on_a_blocked_client_fails_closed_until_the_client_returns(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");
@@ -6458,6 +6476,7 @@ async fn a_failed_queue_row_is_replaced_without_asking_for_snapshot_authority() 
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");
@@ -6487,4 +6506,344 @@ async fn a_failed_queue_row_is_replaced_without_asking_for_snapshot_authority() 
         download_client.submitted_release_titles.lock().await.len(),
         1
     );
+}
+
+struct ListingTokenFixture {
+    app: AppUseCase,
+    operator: User,
+    title: scryer_domain::Title,
+    submissions: Arc<TrackingDownloadSubmissionRepo>,
+}
+
+async fn listing_token_fixture() -> ListingTokenFixture {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let (app, admin) = bootstrap_with_cleanup_tracking(
+        download_client,
+        submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    );
+    app.create_download_client_config(
+        &admin,
+        NewDownloadClientConfig {
+            name: "NZBGet".to_string(),
+            client_type: "nzbget".to_string(),
+            config_json: "{}".to_string(),
+            client_priority: 1,
+            is_enabled: true,
+            proxy_config_id: None,
+        },
+    )
+    .await
+    .expect("create download client config");
+    let title = app
+        .add_title(
+            &admin,
+            NewTitle {
+                name: "Listing Ticket".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    let (_created, operator) = create_authenticated_user(
+        &app,
+        &admin,
+        "listing_ticket_user",
+        "password123",
+        vec![
+            TestPermissionPreset::CatalogView,
+            TestPermissionPreset::TitleManagement,
+        ],
+    )
+    .await;
+    ListingTokenFixture {
+        app,
+        operator,
+        title,
+        submissions,
+    }
+}
+
+fn fixed_instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .expect("fixed instant")
+        .with_timezone(&chrono::Utc)
+}
+
+/// Offers one listing-rich result through the search's token step at
+/// `offered_at`, returning the result as offered (token attached).
+async fn offer_listing_with_token(
+    fixture: &ListingTokenFixture,
+    offered_at: chrono::DateTime<chrono::Utc>,
+) -> IndexerSearchResult {
+    fixture
+        .app
+        .runtime
+        .environment
+        .set_fixed_now_for_tests(Some(offered_at));
+    let subject = fixture
+        .app
+        .resolve_release_search_subject_for_title(&fixture.title)
+        .await
+        .expect("resolve search subject");
+    let mut results = vec![
+        FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP")
+            .with_listing_facts()
+            .release(),
+    ];
+    fixture
+        .app
+        .attach_candidate_tokens(
+            &fixture.operator,
+            &fixture.title,
+            &subject,
+            &mut results,
+            false,
+        )
+        .await;
+    let offered = results.remove(0);
+    assert!(offered.candidate_token.is_some(), "{offered:?}");
+    offered
+}
+
+async fn persisted_listing(fixture: &ListingTokenFixture) -> Option<String> {
+    let submissions = fixture.submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    submissions[0].release_listing_json.clone()
+}
+
+#[tokio::test]
+async fn a_token_grab_persists_the_offered_listing_anchored_at_the_grab() {
+    let offered_at = fixed_instant("2026-05-01T10:00:00Z");
+    let grabbed_at = fixed_instant("2026-05-01T10:07:30Z");
+
+    for replacement in [false, true] {
+        let fixture = listing_token_fixture().await;
+        let offered = offer_listing_with_token(&fixture, offered_at).await;
+        let token = offered.candidate_token.clone().expect("token");
+        fixture
+            .app
+            .runtime
+            .environment
+            .set_fixed_now_for_tests(Some(grabbed_at));
+
+        let outcome = if replacement {
+            fixture
+                .app
+                .queue_replacement_release_from_candidate_token(
+                    &fixture.operator,
+                    &fixture.title.id,
+                    &token,
+                    SubmissionConflictPolicy::Abort,
+                    None,
+                )
+                .await
+        } else {
+            fixture
+                .app
+                .queue_existing_title_download_from_candidate_token(
+                    &fixture.operator,
+                    &fixture.title.id,
+                    &token,
+                    SubmissionScope::Title,
+                    SubmissionConflictPolicy::Abort,
+                )
+                .await
+        }
+        .expect("token grab");
+        assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+
+        let expected =
+            crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                &offered, grabbed_at,
+            );
+        assert_eq!(expected.thumbs_up, Some(7));
+        assert_eq!(
+            persisted_listing(&fixture).await,
+            Some(expected.to_json_string()),
+            "the offered facts persist, anchored at the grab (replacement: {replacement})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_grab_whose_listing_ticket_is_gone_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    // What a restart or eviction leaves behind: a valid token, no ticket.
+    fixture
+        .app
+        .runtime
+        .acquisition
+        .release_candidate_listings
+        .lock()
+        .expect("listing tickets")
+        .clear();
+
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            offered.candidate_token.as_deref().expect("token"),
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a lost ticket never fails the grab");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(persisted_listing(&fixture).await, None);
+}
+
+#[tokio::test]
+async fn a_token_minted_without_a_listing_ticket_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    fixture
+        .app
+        .runtime
+        .environment
+        .set_fixed_now_for_tests(Some(fixed_instant("2026-05-01T10:00:00Z")));
+    let token = fixture
+        .app
+        .issue_release_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &SubmissionScope::Title,
+            &QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/no-ticket.nzb".into()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Listing.Ticket.2026.720p.WEB-DL-GRP".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("issue token");
+
+    fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &token,
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("token grab");
+    assert_eq!(persisted_listing(&fixture).await, None);
+}
+
+#[test]
+fn listing_tickets_drop_expired_then_oldest_at_the_cap() {
+    use crate::services::{ReleaseCandidateListingTicket, ReleaseCandidateListingTickets};
+    let now = fixed_instant("2026-05-01T10:00:00Z");
+    let ticket = |expires_at| ReleaseCandidateListingTicket {
+        actor_id: "actor".into(),
+        title_id: "title".into(),
+        scope_kind: "title".into(),
+        scope_id: None,
+        source_hint: "https://example.invalid/ticket.nzb".into(),
+        source_title: "Listing.Ticket.2026.1080p.WEB-DL-GRP".into(),
+        listing:
+            crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                &FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP").release(),
+                now,
+            ),
+        expires_at,
+    };
+    let live = now + chrono::Duration::minutes(30);
+    let mut tickets = ReleaseCandidateListingTickets::default();
+
+    tickets.insert("first".into(), ticket(live), now, 2);
+    tickets.insert("second".into(), ticket(live), now, 2);
+    tickets.insert("third".into(), ticket(live), now, 2);
+    assert_eq!(tickets.len(), 2);
+    assert!(!tickets.contains("first"), "the oldest ticket is evicted");
+    assert!(tickets.contains("second") && tickets.contains("third"));
+
+    let mut tickets = ReleaseCandidateListingTickets::default();
+    tickets.insert(
+        "expired".into(),
+        ticket(now - chrono::Duration::seconds(1)),
+        now,
+        2,
+    );
+    tickets.insert("older-live".into(), ticket(live), now, 2);
+    tickets.insert("newer-live".into(), ticket(live), now, 2);
+    assert!(!tickets.contains("expired"), "expired tickets go first");
+    assert!(tickets.contains("older-live") && tickets.contains("newer-live"));
+    assert!(tickets.get("older-live", now).is_some());
+    assert!(
+        tickets.get("older-live", live).is_none(),
+        "a ticket is unreadable once it expires"
+    );
+
+    // Far below the cap, an expired ticket is still purged by the next insert.
+    let mut tickets = ReleaseCandidateListingTickets::default();
+    let soon = now + chrono::Duration::minutes(1);
+    tickets.insert("short-lived".into(), ticket(soon), now, 4096);
+    tickets.insert("long-lived".into(), ticket(live), now, 4096);
+    assert_eq!(tickets.len(), 2, "nothing has expired yet");
+    let later = soon + chrono::Duration::seconds(1);
+    tickets.insert(
+        "fresh".into(),
+        ticket(later + chrono::Duration::minutes(30)),
+        later,
+        4096,
+    );
+    assert!(
+        !tickets.contains("short-lived"),
+        "an expired ticket is gone after the next insert"
+    );
+    assert!(tickets.contains("long-lived") && tickets.contains("fresh"));
+    assert_eq!(tickets.len(), 2);
+    assert_eq!(
+        tickets.order_len(),
+        2,
+        "its eviction-order slot went with it"
+    );
+}
+
+#[tokio::test]
+async fn a_token_whose_listing_ticket_fails_its_binding_persists_no_listing() {
+    let fixture = listing_token_fixture().await;
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    let offered_token = offered.candidate_token.as_deref().expect("token");
+    // A validly signed token that presents the offered ticket's reference
+    // for a different source: the ticket exists but is bound elsewhere.
+    let mut claims = jsonwebtoken::dangerous::insecure_decode::<
+        crate::types::ReleaseCandidateTokenClaims,
+    >(offered_token)
+    .expect("decode offered token")
+    .claims;
+    assert!(claims.listing_ref.is_some(), "the offer holds a ticket");
+    claims.source_hint = "https://example.invalid/another-source.nzb".to_string();
+    let signing_key = fixture
+        .app
+        .release_candidate_signing_key_for_actor(&fixture.operator)
+        .await
+        .expect("signing key");
+    let rebound_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(&signing_key),
+    )
+    .expect("sign rebound token");
+
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            &rebound_token,
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a mismatched ticket never fails the grab");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(persisted_listing(&fixture).await, None);
 }

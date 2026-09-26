@@ -892,6 +892,7 @@ impl AppUseCase {
         season: Option<u32>,
         episode: Option<u32>,
         absolute_episode: Option<u32>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         let mut prepared = None;
         self.score_release_results_with_prepared(
@@ -906,6 +907,7 @@ impl AppUseCase {
             absolute_episode,
             &mut prepared,
             false,
+            now,
         )
         .await
     }
@@ -934,6 +936,9 @@ impl AppUseCase {
         absolute_episode: Option<u32>,
         prepared: &mut Option<PreparedReleaseScoringInputs>,
         preserve_duplicate_sources: bool,
+        // The lane's clock: listing age is read against it, and the snapshot a
+        // grab or park persists is captured at it.
+        now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         let mut timer = crate::rules::metrics::StageTimer::new(
             "scan_batch",
@@ -1012,7 +1017,7 @@ impl AppUseCase {
                 anime_numbering_bridge,
                 primary_episode_ids: None,
                 indexer_priority_by_name,
-                now: chrono::Utc::now(),
+                now,
                 rule_evaluation_batch,
             });
         }
@@ -1186,9 +1191,16 @@ impl AppUseCase {
             // One canonical score, from the same function and the same resolved
             // context the import path uses. Everything that used to be added
             // here and nowhere else — the freshness bonus, the single-episode
-            // pack penalty, the listing-metadata rule inputs — is gone from the
-            // number; what survives of it orders the results, in
-            // `acquisition::scoring`, and never crosses a comparison.
+            // pack penalty — is gone from the number; what survives of it
+            // orders the results, in `acquisition::scoring`, and never crosses
+            // a comparison. The listing facts rules read come from the frozen
+            // snapshot, captured here at the search's `now` and carried on the
+            // result, so the grab persists exactly what was scored.
+            let listing = crate::quality::release_listing::ReleaseListingSnapshot::for_scoring(
+                &result,
+                prepared.now,
+            );
+            let scored_listing_json = listing.to_json_string();
             let scoring_context = prepared
                 .canonical_context
                 .view(candidate_size_basis, false)
@@ -1197,7 +1209,10 @@ impl AppUseCase {
                 &crate::canonical_scoring::ReleaseEvidence::announced(
                     scored_release_metadata.clone(),
                     result.size_bytes,
-                ),
+                )
+                .with_listing(Some(
+                    crate::canonical_scoring::ListingFacts::candidate(listing, prepared.now),
+                )),
                 &scoring_context,
                 &mut prepared.rule_evaluation_batch,
             );
@@ -1277,6 +1292,7 @@ impl AppUseCase {
                     | crate::acquisition_coverage::ReleaseCoverage::Unknown => None,
                     resolved => Some(resolved.submission_scope()),
                 },
+                release_listing_json: Some(scored_listing_json),
                 ..result
             };
             if numbering_ambiguous {
@@ -1358,6 +1374,7 @@ impl AppUseCase {
             cancel_token,
             restrict_to_indexer_ids,
             background_value,
+            scoring_now,
         } = request;
         if cancel_token.is_cancelled() {
             return Err(AppError::canceled("indexer search canceled"));
@@ -1590,6 +1607,7 @@ impl AppUseCase {
                                     absolute_episode,
                                     &mut scoring_inputs,
                                     mode == SearchMode::Auto,
+                                    scoring_now,
                                 )
                                 .await?;
                             continue;
@@ -1676,6 +1694,7 @@ impl AppUseCase {
         caller_label: &str,
         mode: SearchMode,
         cancel_token: CancellationToken,
+        scoring_now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         self.search_and_evaluate_subject_restricted(
             title,
@@ -1685,6 +1704,7 @@ impl AppUseCase {
             cancel_token,
             None,
             None,
+            scoring_now,
         )
         .await
     }
@@ -1705,6 +1725,7 @@ impl AppUseCase {
         cancel_token: CancellationToken,
         restrict_to_indexer_ids: Option<std::collections::HashSet<String>>,
         background_value: Option<f64>,
+        scoring_now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         Ok(self
             .search_and_evaluate_subject_restricted_with_outcome(
@@ -1715,6 +1736,7 @@ impl AppUseCase {
                 cancel_token,
                 restrict_to_indexer_ids,
                 background_value,
+                scoring_now,
             )
             .await?
             .results)
@@ -1733,6 +1755,7 @@ impl AppUseCase {
         cancel_token: CancellationToken,
         restrict_to_indexer_ids: Option<std::collections::HashSet<String>>,
         background_value: Option<f64>,
+        scoring_now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<ScoredSearchOutcome> {
         let mut outcome = self
             .search_and_score_subject_restricted_with_fired_indexers(
@@ -1743,6 +1766,7 @@ impl AppUseCase {
                 cancel_token,
                 restrict_to_indexer_ids,
                 background_value,
+                scoring_now,
             )
             .await?;
         outcome.results = self
@@ -1792,6 +1816,7 @@ impl AppUseCase {
         cancel_token: CancellationToken,
         restrict_to_indexer_ids: Option<std::collections::HashSet<String>>,
         background_value: Option<f64>,
+        scoring_now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<ScoredSearchOutcome> {
         self.search_and_score_subject_restricted_with_fired_indexers(
             title,
@@ -1801,6 +1826,7 @@ impl AppUseCase {
             cancel_token,
             restrict_to_indexer_ids,
             background_value,
+            scoring_now,
         )
         .await
     }
@@ -1821,6 +1847,7 @@ impl AppUseCase {
         cancel_token: CancellationToken,
         restrict_to_indexer_ids: Option<std::collections::HashSet<String>>,
         background_value: Option<f64>,
+        scoring_now: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<ScoredSearchOutcome> {
         let tagged_aliases = release_search_tagged_aliases(title);
         self.search_and_score_releases(ReleaseSearchRequest {
@@ -1862,6 +1889,7 @@ impl AppUseCase {
             cancel_token,
             restrict_to_indexer_ids,
             background_value,
+            scoring_now,
         })
         .await
     }
@@ -1964,6 +1992,8 @@ impl AppUseCase {
             subject.absolute_episode,
         );
 
+        let now = self.runtime.environment.now();
+
         for result in results.iter_mut() {
             let scope = if preserve_subject_scope {
                 subject.submission_scope.clone()
@@ -2007,6 +2037,11 @@ impl AppUseCase {
                     &title.id,
                     &scope,
                     &selection,
+                    Some(
+                        crate::quality::release_listing::ReleaseListingSnapshot::capture_from_search_result(
+                            result, now,
+                        ),
+                    ),
                     &signing_key,
                 ) {
                     Ok(token) => Some(token),
@@ -2066,6 +2101,7 @@ impl AppUseCase {
                 &actor.id,
                 SearchMode::Interactive,
                 cancel_token,
+                self.runtime.environment.now(),
             )
             .await?;
         self.attach_candidate_tokens(actor, &title, &subject, &mut results, false)
@@ -2127,6 +2163,7 @@ impl AppUseCase {
                 &actor.id,
                 SearchMode::Interactive,
                 cancel_token,
+                self.runtime.environment.now(),
             )
             .await?;
         self.attach_candidate_tokens(actor, &search_title, &subject, &mut results, true)
@@ -2178,6 +2215,7 @@ impl AppUseCase {
                 &actor.id,
                 SearchMode::Interactive,
                 cancel_token,
+                self.runtime.environment.now(),
             )
             .await?;
         self.attach_candidate_tokens(actor, &title, &subject, &mut results, false)
@@ -2317,6 +2355,10 @@ pub(crate) struct ReleaseSearchRequest<'a> {
     /// the quota-pressure gate can drain cold work first. Only the Auto
     /// background path carries it; interactive/RSS leave it `None` (neutral).
     pub(crate) background_value: Option<f64>,
+    /// The lane's clock for this search. Candidates are scored against it and
+    /// the listing snapshot they carry is captured at it, so a grab or park
+    /// stamped with the same instant persists exactly what was scored.
+    pub(crate) scoring_now: chrono::DateTime<chrono::Utc>,
 }
 
 /// The configured scope that supplied an effective quality profile.

@@ -38,6 +38,9 @@ pub(crate) struct PreparedImportCandidate {
     pub accepted: Box<ImportedFileAcceptance>,
     pub rescore_changes: Vec<String>,
     pub source_snapshot: scryer_domain::ImportSourceSnapshot,
+    /// The listing snapshot of the Scryer grab this file came from; `None`
+    /// for scans and adopted downloads.
+    pub release_listing_json: Option<String>,
 }
 
 pub(crate) struct PostDownloadAcquisitionDecision {
@@ -747,6 +750,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     // Before anything touches the file, and on the calling thread (the override
     // is thread-local, and the real probe hands off to `spawn_blocking`).
@@ -1021,6 +1025,9 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         };
         let resolved_profile =
             resolved_import_profile(quality_profile, &required_audio_languages, &persona);
+        // The grab's frozen listing facts, aged at the grab instant.
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
         for scoped_analysis in &scoring_analyses {
             let scoped_file_doc = crate::user_rule_input::file_doc_from_analysis(scoped_analysis);
             let (rescored_for_rules, _) =
@@ -1043,15 +1050,10 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
                 &rescored_for_rules,
                 &resolved_profile,
                 &decision,
-                crate::user_rule_input::ReleaseRuntimeInfo {
-                    size_bytes: quality_size_bytes,
-                    published_at: None,
-                    thumbs_up: None,
-                    thumbs_down: None,
-                    is_password_protected: None,
-                    extra: None,
-                    indexer_languages: None,
-                },
+                crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                    quality_size_bytes,
+                    listing.as_ref(),
+                ),
                 crate::user_rule_input::RuleContextInfo {
                     title_id: Some(&title.id),
                     library_name: library_name.as_deref(),
@@ -1128,6 +1130,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     _is_filler: bool,
     _runtime_sample_validation: RuntimeSampleValidation,
     _disc_selection: Option<&scryer_media_types::DiscSelection>,
+    _release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     if scryer_domain::is_disc_image(path) {
         return ImportedFileGateDecision::Rejected(disc_review_rejection(
@@ -1243,6 +1246,7 @@ pub(crate) async fn prepare_import_candidate(
     existing_score: Option<i32>,
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     prepare_import_candidate_with_disc_selection(
         app,
@@ -1256,6 +1260,7 @@ pub(crate) async fn prepare_import_candidate(
         is_filler,
         runtime_sample_validation,
         None,
+        release_listing_json,
     )
     .await
 }
@@ -1276,6 +1281,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     if disc_selection.is_some() && !scryer_domain::is_disc_image(path) {
         return Err(disc_review_rejection(
@@ -1302,6 +1308,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
         is_filler,
         runtime_sample_validation,
         disc_selection,
+        release_listing_json,
     )
     .await
     {
@@ -1347,6 +1354,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
                 accepted,
                 rescore_changes,
                 source_snapshot: source_snapshot_after,
+                release_listing_json: release_listing_json.map(str::to_string),
             })
         }
     }
@@ -1815,6 +1823,7 @@ pub(crate) fn compute_post_download_acquisition_decision(
     size_bytes: i64,
     prior_rescore_changes: &[String],
     is_filler: bool,
+    listing: Option<crate::canonical_scoring::ListingFacts>,
 ) -> PostDownloadAcquisitionDecision {
     let (rescored, changes) = rescore_from_mediainfo(parsed, acceptance);
     let mut rescore_changes = prior_rescore_changes.to_vec();
@@ -1844,8 +1853,11 @@ pub(crate) fn compute_post_download_acquisition_decision(
         None,
     );
 
+    // The grab's frozen listing snapshot, anchored at the grab: the same
+    // listing facts the grab scored, and the same ones the row will carry.
     let mut evidence =
-        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes));
+        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes))
+            .with_listing(listing);
     if let Some(analysis) = acceptance.analysis.as_ref() {
         evidence = evidence.with_analysis(crate::canonical_scoring::AnalyzedFacts {
             analysis: analysis.clone(),
@@ -2444,7 +2456,7 @@ mod tests {
             &decision,
             crate::user_rule_input::ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -2472,6 +2484,106 @@ mod tests {
 
         assert_eq!(input.profile.required_audio_languages, vec!["jpn"]);
         assert_eq!(input.release.languages_audio, vec!["jpn"]);
+    }
+
+    /// The gate's blocking-rule pass for one file, from the persisted listing
+    /// JSON the gate is handed: grabbed listing facts, `from_listing`, rule
+    /// input, user-rule evaluation, and the post-download score finalization.
+    #[cfg(feature = "runtime-media-analysis")]
+    fn post_download_listing_rule_pass(
+        engine: &scryer_rules::UserRulesEngine,
+        release_listing_json: Option<&str>,
+    ) -> Vec<String> {
+        let profile = crate::QualityProfile::default();
+        let parsed = crate::parse_release_metadata("Listing.Gate.2024.1080p.WEB-DL.H.264-GRP");
+        let analysis = build_synthetic_media_file_analysis(&parsed, Some("mkv".to_string()));
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
+        let mut decision = build_import_profile_decision(
+            &profile,
+            &parsed,
+            "movie",
+            crate::quality_profile::CoverageSizeBasis::default(),
+            Some(4_000_000_000),
+            false,
+        );
+        let input = crate::user_rule_input::build_rule_input(
+            &parsed,
+            &profile,
+            &decision,
+            crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                Some(4_000_000_000),
+                listing.as_ref(),
+            ),
+            crate::user_rule_input::RuleContextInfo {
+                title_id: Some("title-listing-gate"),
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: false,
+                existing_score: None,
+                search_mode: "post_download",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: Some(1),
+                is_filler: false,
+            },
+            Some(crate::user_rule_input::file_doc_from_analysis(&analysis)),
+        );
+        let result = engine
+            .evaluator()
+            .evaluate(&input, "movie")
+            .expect("rule evaluation succeeds");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        finalize_post_download_rule_scores(&profile, &mut decision, result.entries)
+    }
+
+    #[cfg(feature = "runtime-media-analysis")]
+    #[test]
+    fn a_listing_based_blocking_rule_blocks_the_import_only_with_a_snapshot() {
+        use chrono::TimeZone;
+
+        let engine = scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "listing_password".to_string(),
+            name: "Listing password".to_string(),
+            rego_source: r#"
+                package scryer.rules.user.listing_password
+                import rego.v1
+
+                score_entry["listing_password"] := scryer.block_score() if {
+                    input.release.is_password_protected == true
+                }
+            "#
+            .to_string(),
+            origin: scryer_rules::PolicyOrigin::User,
+            applied_facets: vec![],
+        }])
+        .expect("rule builds");
+        let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+            published_at: Some("2024-01-02T03:04:05Z".to_string()),
+            thumbs_up: None,
+            thumbs_down: None,
+            is_password_protected: Some(true),
+            indexer_languages: Vec::new(),
+            extra: Default::default(),
+            captured_at: chrono::Utc.with_ymd_and_hms(2024, 2, 1, 12, 0, 0).unwrap(),
+        }
+        .to_json_string();
+
+        let blocked = post_download_listing_rule_pass(&engine, Some(&snapshot));
+        assert!(
+            blocked.iter().any(|code| code == "listing_password"),
+            "a protected listing blocks the import: {blocked:?}"
+        );
+
+        let unblocked = post_download_listing_rule_pass(&engine, None);
+        assert!(
+            unblocked.is_empty(),
+            "without a snapshot the listing is unknown and the rule does not fire: {unblocked:?}"
+        );
     }
 
     /// The tier comparison behind a `quality_contradicted:` blocklist. It reads
@@ -2555,7 +2667,7 @@ mod tests {
             &decision,
             crate::user_rule_input::ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,

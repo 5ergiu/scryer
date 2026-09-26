@@ -1728,7 +1728,7 @@ const nl: LocaleDictionary = {
   "settings.refReleaseAudioChannels":
     "Audiokanaalconfiguratie (bijv. 5.1, 7.1, 2.0)",
   "settings.refReleaseLangsAudio":
-    "ISO 639-3 audiotaalcodes (bijv. eng, jpn)",
+    "ISO 639-3 audiotaalcodes (bijv. eng, jpn). Bevat de talen die de indexer-listing meldde, vastgelegd toen de release werd gegrabd; bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard, dragen alleen bij wat de naam en het bestand tonen",
   "settings.refReleaseLangsSub": "ISO 639-3 ondertitelingstaalcodes",
   "settings.refReleaseIsDualAudio": "True wanneer meerdere audiotracks gedetecteerd zijn",
   "settings.refReleaseIsAtmos": "True wanneer Dolby Atmos-audio aanwezig is",
@@ -1743,7 +1743,7 @@ const nl: LocaleDictionary = {
   "settings.refReleaseIsHardcodedSubs":
     "True wanneer hardcoded ondertitels gedetecteerd zijn in de releasenaam",
   "settings.refReleaseIsPasswordProtected":
-    "True wanneer de indexer een genormaliseerde archief- of pack-wachtwoordhint voor de release leverde",
+    "True wanneer de indexer-listing de release als met wachtwoord beveiligd markeerde. Een indexer-listinggegeven dat is vastgelegd toen de release werd gegrabd; null wanneer de indexer het niet meldde, en null voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
   "settings.refReleaseIsHdr10Plus":
     "True wanneer HDR10+ gedetecteerd is uit de release-metadata",
   "settings.refReleaseIsHlg":
@@ -1777,11 +1777,14 @@ const nl: LocaleDictionary = {
   "settings.refReleaseParseConf": "Betrouwbaarheidsscore voor de parse (0.0 tot 1.0)",
   "settings.refReleaseSizeBytes":
     "Bestandsgrootte in bytes (gebruik scryer.size_gib() om te converteren)",
-  "settings.refReleaseAgeDays": "Dagen sinds de release gepubliceerd is",
-  "settings.refReleaseThumbsUp": "Indexer thumbs-up / aantal stemmen",
-  "settings.refReleaseThumbsDown": "Indexer thumbs-down / negatieve stemmen",
+  "settings.refReleaseAgeDays":
+    "Hele dagen van de publicatietijd bij de indexer tot het moment dat de release werd gegrabd. Een indexer-listinggegeven dat bij de grab is vastgelegd: de leeftijd bij de grab, die daarna niet meer verandert. Een nog niet gegrabde release wordt nu gemeten. Null wanneer de publicatietijd onbekend is, en null voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
+  "settings.refReleaseThumbsUp":
+    "Indexer thumbs-up-stemmen. Een indexer-listinggegeven dat is vastgelegd toen de release werd gegrabd; null wanneer de indexer geen stemmen meldde, en null voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
+  "settings.refReleaseThumbsDown":
+    "Indexer thumbs-down-stemmen. Een indexer-listinggegeven dat is vastgelegd toen de release werd gegrabd; null wanneer de indexer geen stemmen meldde, en null voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard",
   "settings.refReleaseExtra":
-    "Plugin-geleverd metadataobject, leesbaar als input.release.extra.<key>",
+    "Indexerspecifieke listingattributen (platte waarden en lijsten van waarden), leesbaar als input.release.extra.<key>. Indexer-listinggegevens die zijn vastgelegd toen de release werd gegrabd; een leeg object voor bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard, dus elke opzoeking van input.release.extra.<key> is undefined (niet null) en een vergelijking zoals == null komt niet overeen",
 
   "settings.refSectionProfile": "— Actieve kwaliteitsprofielconfiguratie",
   "settings.refProfileId": "Unieke profielidentifier",
@@ -3508,6 +3511,15 @@ const nl: LocaleDictionary = {
   "mediaInfo.grabbedAt": "Grabbed at",
   "mediaInfo.acquisitionScore": "Acquisition score",
   "mediaInfo.scoringLog": "Scoring log",
+  "mediaInfo.sectionReleaseListing": "Release listing",
+  "mediaInfo.listingPublishedAt": "Published",
+  "mediaInfo.listingAgeAtGrab": "Age at grab",
+  "mediaInfo.listingAgeDays": "{{count}} days",
+  "mediaInfo.listingThumbsUp": "Votes up",
+  "mediaInfo.listingThumbsDown": "Votes down",
+  "mediaInfo.listingPasswordProtected": "Password protected",
+  "mediaInfo.listingIndexerLanguages": "Indexer languages",
+  "mediaInfo.listingCapturedAt": "Captured at",
   "mediaInfo.colIndex": "#",
   "mediaInfo.colLanguage": "Language",
   "mediaInfo.colCodec": "Codec",

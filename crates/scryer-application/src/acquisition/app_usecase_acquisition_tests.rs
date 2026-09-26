@@ -136,6 +136,7 @@ fn test_search_result_with_decision(
         auto_eligible: Some(decision_code == "eligible"),
         auto_decision_code: Some(decision_code.to_string()),
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn series_movie_blocking_is_series_movie_link_scoped() {
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Title,
+        release_listing_json: None,
     };
     assert!(submission_blocks_wanted_item(
         &title_submission,
@@ -451,6 +453,7 @@ fn episode_set_submission_blocks_each_covered_episode() {
         scope: SubmissionScope::EpisodeSet {
             episode_ids: vec!["episode-1".to_string(), "episode-2".to_string()],
         },
+        release_listing_json: None,
     };
 
     assert!(submission_blocks_wanted_item(&submission, &wanted, None));

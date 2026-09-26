@@ -20,6 +20,7 @@ use crate::acquisition_search_queries::{
 };
 use crate::delay_profile::DelayProfile;
 use crate::domain_events::{new_title_domain_event, title_context_snapshot};
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use crate::settings::keys::default_indexer_routing_categories_for_scope;
 use crate::types::{PendingReleaseObservation, PendingReleaseRole};
 use chrono::{DateTime, Utc};
@@ -201,6 +202,68 @@ fn rss_coverage_identity(scope: &SubmissionScope) -> String {
     }
 }
 
+/// Whether a candidate is a pending row replayed through RSS rather than a
+/// fresh indexer listing.
+fn rss_candidate_is_reconstructed_pending(candidate: &IndexerSearchResult) -> bool {
+    candidate
+        .extra
+        .get("_rss_reconstructed_pending")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The pending row a replayed candidate was rebuilt from, found by the id the
+/// rebuild stamped, so its snapshot survives even when the replay no longer
+/// matches the row's scope. Fresh listings keep the matched row.
+fn rss_replayed_pending<'a>(
+    candidate: &IndexerSearchResult,
+    matched_pending: Option<&'a PendingRelease>,
+    title_pending: &'a [PendingRelease],
+) -> Option<&'a PendingRelease> {
+    candidate
+        .extra
+        .get("_rss_reconstructed_pending_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| title_pending.iter().find(|pending| pending.id == id))
+        .or(matched_pending)
+}
+
+/// The listing snapshot a parked RSS row carries. A fresh listing is a new
+/// sighting and parks the snapshot it was scored with; a replayed pending row
+/// is not, so it keeps the row's own frozen snapshot (`None` leaves the stored
+/// value untouched).
+fn rss_park_listing_json(
+    candidate: &IndexerSearchResult,
+    matched_pending: Option<&PendingRelease>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    if rss_candidate_is_reconstructed_pending(candidate) {
+        matched_pending.and_then(|pending| pending.release_listing_json.clone())
+    } else {
+        ReleaseListingSnapshot::json_for_candidate(candidate, now)
+    }
+}
+
+/// The listing snapshot an RSS grab submits: the one the candidate was scored
+/// with. A replayed pending row was scored with the row's frozen facts stamped
+/// at the scoring instant, which is exactly what a delay-expiry promotion of
+/// that row persists. A replay no scoring pass has seen falls back to that
+/// promotion snapshot.
+fn rss_grab_listing_json(
+    candidate: &IndexerSearchResult,
+    matched_pending: Option<&PendingRelease>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    if rss_candidate_is_reconstructed_pending(candidate) {
+        candidate.release_listing_json.clone().or_else(|| {
+            matched_pending
+                .and_then(|pending| ReleaseListingSnapshot::json_for_pending_release(pending, now))
+        })
+    } else {
+        ReleaseListingSnapshot::json_for_candidate(candidate, now)
+    }
+}
+
 /// Rebuild just enough durable indexer evidence for a pending row to pass
 /// through the current parse, scoring, and policy path. Stored scoring and
 /// parsed metadata are intentionally not reused after a profile change.
@@ -209,6 +272,10 @@ fn pending_release_as_rss_result(pending: &PendingRelease) -> IndexerSearchResul
     extra.insert(
         "_rss_reconstructed_pending".to_string(),
         serde_json::Value::Bool(true),
+    );
+    extra.insert(
+        "_rss_reconstructed_pending_id".to_string(),
+        serde_json::json!(pending.id),
     );
     if let Some(info_hash) = pending.info_hash.as_deref() {
         extra.insert("info_hash".to_string(), serde_json::json!(info_hash));
@@ -275,6 +342,7 @@ fn pending_release_as_rss_result(pending: &PendingRelease) -> IndexerSearchResul
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
@@ -1247,7 +1315,11 @@ impl AppUseCase {
         let pending_count = active_pending.len();
         for pending in active_pending {
             let title_id = pending.title_id.clone();
-            let result = pending_release_as_rss_result(&pending);
+            let mut result = pending_release_as_rss_result(&pending);
+            // A replay is scored with the row's frozen listing facts, never
+            // with the synthetic listing rebuilt from the row.
+            result.release_listing_json =
+                ReleaseListingSnapshot::json_for_pending_release(&pending, now);
             if matched_identities
                 .entry(title_id.clone())
                 .or_default()
@@ -1605,6 +1677,7 @@ impl AppUseCase {
                 None,
                 None,
                 None,
+                *now,
             )
             .await
         {
@@ -1819,6 +1892,7 @@ impl AppUseCase {
                         .as_deref()
                         .and_then(|value| value.parse::<u32>().ok()),
                     absolute_episode,
+                    *now,
                 )
                 .await
             {
@@ -2001,6 +2075,7 @@ impl AppUseCase {
                 season,
                 None,
                 None,
+                *now,
             )
             .await
         {
@@ -2175,6 +2250,7 @@ impl AppUseCase {
                     subject.season,
                     subject.episode,
                     subject.absolute_episode,
+                    *now,
                 )
                 .await
             {
@@ -2229,6 +2305,7 @@ impl AppUseCase {
         season: Option<u32>,
         episode: Option<u32>,
         absolute_episode: Option<u32>,
+        now: DateTime<Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         let quality_profile_lookup = crate::app_usecase_discovery::QualityProfileLookup {
             title_tags,
@@ -2253,6 +2330,7 @@ impl AppUseCase {
             season,
             episode,
             absolute_episode,
+            now,
         )
         .await
     }
@@ -2645,11 +2723,7 @@ impl AppUseCase {
                 // Pending reconstruction is not a fresh indexer observation.
                 // A real RSS observation, including another invalid timestamp,
                 // advances the health diagnostic's last-observed timestamp.
-                let observed_now = !candidate
-                    .extra
-                    .get("_rss_reconstructed_pending")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
+                let observed_now = !rss_candidate_is_reconstructed_pending(candidate);
                 let last_observed_at = if observed_now {
                     now.to_rfc3339()
                 } else {
@@ -2720,6 +2794,11 @@ impl AppUseCase {
                         decision_code,
                         ReleaseAutoDecisionCode::ReleaseAgeUnknown
                     ),
+                    release_listing_json: rss_park_listing_json(
+                        candidate,
+                        rss_replayed_pending(candidate, existing_pending, &title_pending),
+                        *now,
+                    ),
                 };
                 let observation = PendingReleaseObservation {
                     eligible_at,
@@ -2766,6 +2845,28 @@ impl AppUseCase {
             return;
         };
         let best = &scored[best_index];
+        let best_scope = best
+            .coverage_scope
+            .as_ref()
+            .unwrap_or(&subject.submission_scope);
+        let best_pending = pending_scopes
+            .iter()
+            .find(|(pending, scope)| {
+                rss_pending_is_active(pending.status)
+                    && rss_pending_matches_candidate(
+                        pending,
+                        scope,
+                        best,
+                        best_scope,
+                        &catalog_episodes,
+                    )
+            })
+            .map(|(pending, _)| *pending);
+        let release_listing_json = rss_grab_listing_json(
+            best,
+            rss_replayed_pending(best, best_pending, &title_pending),
+            *now,
+        );
 
         let candidate_score = best
             .quality_profile_decision
@@ -2904,6 +3005,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: Some(best.source.clone()),
                 release_size_bytes: best.size_bytes,
+                release_listing_json: release_listing_json.clone(),
             })
             .await;
 
@@ -2980,6 +3082,7 @@ impl AppUseCase {
                     "score": candidate_score,
                     "grabbed_at": now.to_rfc3339(),
                     "source": if best.extra.contains_key("external_announcement") { "external_release" } else { "rss_sync" },
+                    "release_listing_json": release_listing_json,
                 })
                 .to_string();
 
@@ -3433,6 +3536,7 @@ mod tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         };
         let parse_context = crate::release_parser::build_release_parse_context_for_title(
             &title,
@@ -3440,6 +3544,7 @@ mod tests {
             Some("movie"),
         );
         let profile = app.resolve_quality_profile_for_title(&title).await.unwrap();
+        let rss_now = Utc::now();
         for rescued in [false, true] {
             let mut policies = vec![scryer_rules::UserPolicy {
                 id: "pack".into(),
@@ -3474,6 +3579,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    rss_now,
                 )
                 .await
                 .unwrap();
@@ -3488,6 +3594,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    rss_now,
                 )
                 .await
                 .unwrap();
@@ -3497,6 +3604,7 @@ mod tests {
             let parked = crate::quality::canonical_context::score_parked_release_title(
                 &title,
                 raw,
+                None,
                 None,
                 &[],
                 &[],
@@ -4860,6 +4968,7 @@ mod tests {
             role: PendingReleaseRole::Primary,
             last_decision_code: Some("release_age_unknown".to_string()),
             release_age_unknown: true,
+            release_listing_json: None,
         };
         let mut hydrated = pending_release_as_rss_result(&pending);
         hydrated.published_at = Some("not-a-timestamp".to_string());
@@ -4900,5 +5009,141 @@ mod tests {
             &SubmissionScope::Title,
             &[],
         ));
+    }
+
+    fn listing_pending(release_listing_json: Option<&str>) -> PendingRelease {
+        PendingRelease {
+            id: "pending-listing".to_string(),
+            wanted_item_id: "wanted-1".to_string(),
+            title_id: "title-1".to_string(),
+            release_title: "Synthetic.Release.1080p.WEB-DL-GRP".to_string(),
+            release_url: Some("https://example.invalid/synthetic.nzb".to_string()),
+            source_kind: Some(DownloadSourceKind::NzbUrl),
+            release_size_bytes: None,
+            release_score: 0,
+            scoring_log_json: None,
+            indexer_source: Some("Synthetic Indexer".to_string()),
+            indexer_id: Some("indexer-1".to_string()),
+            release_guid: Some("synthetic-guid".to_string()),
+            added_at: "2026-08-01T00:00:00Z".to_string(),
+            last_observed_at: "2026-08-01T00:00:00Z".to_string(),
+            delay_until: "2026-08-02T00:00:00Z".to_string(),
+            status: PendingReleaseStatus::Waiting,
+            grabbed_at: None,
+            source_password: None,
+            published_at: Some("2026-07-31T00:00:00Z".to_string()),
+            info_hash: None,
+            seed_minimums: crate::ReleaseSeedMinimums::default(),
+            seeders: None,
+            release_identity: "guid:indexer-1:synthetic-guid".to_string(),
+            coverage_identity: "title".to_string(),
+            role: PendingReleaseRole::Primary,
+            last_decision_code: None,
+            release_age_unknown: false,
+            release_listing_json: release_listing_json.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn rss_listing_snapshot_is_captured_only_from_a_fresh_listing() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let frozen = r#"{"v":1,"thumbs_up":2,"captured_at":"2026-08-01T00:00:00Z"}"#;
+
+        // A fresh listing is a new sighting: captured now, whatever row it matches.
+        let with_snapshot = listing_pending(Some(frozen));
+        let mut fresh = pending_release_as_rss_result(&with_snapshot);
+        fresh.extra.remove("_rss_reconstructed_pending");
+        fresh.extra.remove("_rss_reconstructed_pending_id");
+        fresh.thumbs_up = Some(9);
+        let fresh_capture = ReleaseListingSnapshot::capture_json_from_search_result(&fresh, now);
+        assert_eq!(
+            rss_park_listing_json(&fresh, Some(&with_snapshot), now),
+            fresh_capture
+        );
+        assert_eq!(
+            rss_grab_listing_json(&fresh, Some(&with_snapshot), now),
+            fresh_capture
+        );
+
+        // A replayed row re-parks with the snapshot frozen when it was parked,
+        // and grabs with the same facts stamped at the grab, as a promotion does.
+        let frozen_at_grab = ReleaseListingSnapshot::json_for_pending_release(&with_snapshot, now);
+        assert_eq!(
+            ReleaseListingSnapshot::from_json_str(frozen_at_grab.as_deref().unwrap()),
+            Some(ReleaseListingSnapshot {
+                captured_at: now,
+                ..ReleaseListingSnapshot::from_json_str(frozen).unwrap()
+            })
+        );
+        let replayed = pending_release_as_rss_result(&with_snapshot);
+        assert_eq!(
+            rss_park_listing_json(&replayed, Some(&with_snapshot), now).as_deref(),
+            Some(frozen)
+        );
+        assert_eq!(
+            rss_grab_listing_json(&replayed, Some(&with_snapshot), now),
+            frozen_at_grab
+        );
+
+        // Once scored, a candidate grabs and parks with exactly the snapshot
+        // its scoring pass attached.
+        let scored_at = now - chrono::Duration::minutes(5);
+        let mut scored_fresh = fresh.clone();
+        scored_fresh.release_listing_json =
+            Some(ReleaseListingSnapshot::for_scoring(&scored_fresh, scored_at).to_json_string());
+        assert_eq!(
+            rss_grab_listing_json(&scored_fresh, Some(&with_snapshot), now),
+            scored_fresh.release_listing_json
+        );
+        assert_eq!(
+            rss_park_listing_json(&scored_fresh, Some(&with_snapshot), now),
+            scored_fresh.release_listing_json
+        );
+        let mut scored_replay = replayed.clone();
+        scored_replay.release_listing_json = frozen_at_grab.clone();
+        scored_replay.release_listing_json =
+            Some(ReleaseListingSnapshot::for_scoring(&scored_replay, scored_at).to_json_string());
+        assert_eq!(
+            rss_grab_listing_json(&scored_replay, Some(&with_snapshot), now),
+            scored_replay.release_listing_json
+        );
+
+        // A replayed row saved before snapshots existed: re-parking leaves the
+        // column alone, and a grab falls back to a capture from the row.
+        let mut legacy = listing_pending(None);
+        legacy.id = "pending-legacy".to_string();
+        let replayed_legacy = pending_release_as_rss_result(&legacy);
+        assert_eq!(
+            rss_park_listing_json(&replayed_legacy, Some(&legacy), now),
+            None
+        );
+        assert_eq!(
+            rss_grab_listing_json(&replayed_legacy, Some(&legacy), now),
+            Some(
+                ReleaseListingSnapshot::capture_from_pending_release(&legacy, now).to_json_string()
+            )
+        );
+
+        // Never a capture of the replay's own synthetic listing.
+        assert_eq!(rss_park_listing_json(&replayed, None, now), None);
+        assert_eq!(rss_grab_listing_json(&replayed, None, now), None);
+
+        // A replay that no longer matches its row by scope still finds it by
+        // the id the rebuild stamped.
+        let title_pending = vec![legacy.clone(), with_snapshot.clone()];
+        let found = rss_replayed_pending(&replayed, None, &title_pending);
+        assert_eq!(
+            found.map(|pending| pending.id.as_str()),
+            Some("pending-listing")
+        );
+        assert_eq!(rss_grab_listing_json(&replayed, found, now), frozen_at_grab);
+        assert!(rss_replayed_pending(&replayed, None, &[]).is_none());
+        assert_eq!(
+            rss_replayed_pending(&fresh, Some(&legacy), &title_pending).map(|p| p.id.as_str()),
+            Some("pending-legacy"),
+            "a fresh listing keeps the row it matched"
+        );
     }
 }

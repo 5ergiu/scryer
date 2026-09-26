@@ -29,7 +29,6 @@ export type WantedItem = {
   mediaType: WantedMediaType;
   lastSearchAt: string | null;
   status: WantedStatus;
-  grabbedRelease: string | null;
   sourceProvider: string | null;
   currentScore: number | null;
   latestReleaseDecision?: {

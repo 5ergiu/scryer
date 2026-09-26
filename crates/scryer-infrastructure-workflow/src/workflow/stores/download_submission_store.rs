@@ -2052,6 +2052,7 @@ mod seed_goal_tests {
                  source_title TEXT,
                  info_hash TEXT,
                  release_size_bytes INTEGER,
+                 release_listing_json TEXT,
                  submitted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                  collection_id TEXT,
                  tracked_state TEXT,
@@ -2194,6 +2195,7 @@ mod seed_goal_tests {
             request_signature: Some(format!("signature-{item_id}")),
             scope: SubmissionScope::Title,
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 
@@ -2457,6 +2459,7 @@ mod seed_goal_tests {
             release_size_bytes: Some(123),
             request_signature: Some("ambiguous-signature".to_string()),
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 
@@ -2815,6 +2818,7 @@ mod seed_goal_tests {
             request_signature: None,
             scope: SubmissionScope::Orphan,
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 

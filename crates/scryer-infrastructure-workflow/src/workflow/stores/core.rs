@@ -38,7 +38,7 @@ const APPEND_DOMAIN_EVENT_INSERT_SQL: &str = "INSERT INTO domain_events (
             stream_kind, stream_id, event_type, payload_json, import_status,
             media_file_delete_reason, download_id
          ) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
-pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
+pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, release_listing_json, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
 pub const IMPORT_COLUMNS: &str = "id, source_client_id, source_system, source_ref, import_type, status, payload_json, result_json, download_id, import_transfer_phase, import_transfer_bytes, import_transfer_total_bytes, import_transfer_started_at, import_transfer_updated_at, started_at, finished_at, created_at, updated_at";
 pub const DOWNLOAD_QUEUE_COMMAND_COLUMNS: &str = "id, action, canonical_download_id, client_id, client_type, download_client_item_id, is_history, status, error_text, requested_by_user_id, started_at, finished_at, created_at, updated_at";
 
@@ -343,9 +343,9 @@ pub async fn record_ambiguous_download_submission_tx(
          (id, title_id, facet, download_client_id, download_client_type,
           download_client_item_id, source_hint, source_provider_id,
           source_provider_name, source_kind, source_title, info_hash,
-          release_size_bytes, request_signature, purpose, episode_id,
-          collection_id, series_movie_link_id, download_id)
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+          release_size_bytes, release_listing_json, request_signature, purpose,
+          episode_id, collection_id, series_movie_link_id, download_id)
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
          ON CONFLICT(id) DO NOTHING",
         &[
             SqlArg::Text(canonical_id.clone()),
@@ -365,6 +365,7 @@ pub async fn record_ambiguous_download_submission_tx(
             SqlArg::OptText(submission.source_title.clone()),
             SqlArg::OptText(submission.info_hash.clone()),
             SqlArg::OptI64(submission.release_size_bytes),
+            SqlArg::OptText(submission.release_listing_json.clone()),
             SqlArg::OptText(submission.request_signature.clone()),
             SqlArg::Text(submission.purpose.as_str().to_string()),
             SqlArg::OptText(None),
@@ -445,6 +446,7 @@ async fn record_download_submission_tx_inner(
              source_title = excluded.source_title,
              info_hash = excluded.info_hash,
              release_size_bytes = excluded.release_size_bytes,
+             release_listing_json = excluded.release_listing_json,
              request_signature = excluded.request_signature,
              purpose = excluded.purpose,
              episode_id = excluded.episode_id,
@@ -453,8 +455,8 @@ async fn record_download_submission_tx_inner(
     };
     let sql = [
         "INSERT INTO download_submissions
-         (id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id)
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+         (id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, release_listing_json, request_signature, purpose, episode_id, collection_id, series_movie_link_id)
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         conflict_clause,
     ]
     .join(" ");
@@ -479,6 +481,7 @@ async fn record_download_submission_tx_inner(
             SqlArg::OptText(submission.source_title.clone()),
             SqlArg::OptText(submission.info_hash.clone()),
             SqlArg::OptI64(submission.release_size_bytes),
+            SqlArg::OptText(submission.release_listing_json.clone()),
             SqlArg::OptText(submission.request_signature.clone()),
             SqlArg::Text(submission.purpose.as_str().to_string()),
             SqlArg::OptText(episode_id.map(str::to_string)),
@@ -1523,6 +1526,7 @@ pub fn download_submission_from_row(row: &SqlRow) -> AppResult<DownloadSubmissio
         source_title: row.opt_text("source_title")?,
         info_hash: row.opt_text("info_hash")?,
         release_size_bytes: row.opt_i64("release_size_bytes")?,
+        release_listing_json: row.opt_text("release_listing_json")?,
         request_signature: row.opt_text("request_signature")?,
         purpose: row
             .opt_text("purpose")?

@@ -254,6 +254,7 @@ async fn check_with_lookup_matches_qbit_torrent_hash_download_id() {
                         .to_string(),
                 ),
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             },
             accepted_identity,
             None,

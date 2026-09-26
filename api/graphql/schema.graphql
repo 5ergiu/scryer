@@ -24397,6 +24397,44 @@ type ReleaseDecisionsPagePayload {
 }
 
 """
+Indexer listing facts about a grabbed release, as captured at grab time.
+"""
+type ReleaseListingPayload {
+	"""
+	Publish time the indexer reported, in UTC, or null when unknown.
+	"""
+	publishedAt: DateTime
+	"""
+	Whole days from publish to capture, or null when the publish time is unknown.
+	"""
+	ageDaysAtGrab: Int
+	"""
+	Positive votes the indexer reported, or null when unreported.
+	"""
+	thumbsUp: Int
+	"""
+	Negative votes the indexer reported, or null when unreported.
+	"""
+	thumbsDown: Int
+	"""
+	Whether the release was reported password protected, or null when unknown.
+	"""
+	isPasswordProtected: Boolean
+	"""
+	Languages the indexer reported for the release.
+	"""
+	indexerLanguages: [String!]!
+	"""
+	Indexer-specific scalar attributes, as a JSON object.
+	"""
+	extra: JSON!
+	"""
+	Time when the listing facts were captured, in UTC.
+	"""
+	capturedAt: DateTime!
+}
+
+"""
 Which episode numbering a title's releases are read in.
 """
 enum ReleaseNumberingValue {
@@ -25490,6 +25528,80 @@ type RuleSetTestErrorPayload {
 	Rule-set identity associated with the error, or null when global.
 	"""
 	ruleSetId: String
+}
+
+"""
+Indexer listing facts a tested release name is scored with. The tester
+treats the release as a fresh, never-grabbed search result.
+"""
+input RuleSetTestListingInput {
+	"""
+	Publish time as an RFC 2822 (newznab `pubDate`) or RFC 3339
+	timestamp, kept as written; `input.release.age_days` is measured from
+	it to now.
+	"""
+	publishedAt: String
+	"""
+	Indexer up-votes; never negative.
+	"""
+	thumbsUp: Int
+	"""
+	Indexer down-votes; never negative.
+	"""
+	thumbsDown: Int
+	"""
+	Whether the indexer reports the release as password protected.
+	"""
+	isPasswordProtected: Boolean
+	"""
+	Audio languages the indexer reports.
+	"""
+	indexerLanguages: [String!]
+	"""
+	Indexer-specific attributes as a flat JSON object. Nested values are
+	dropped and the map is size-bounded, as for a live listing.
+	"""
+	extra: JSON
+}
+
+"""
+Indexer listing facts a scoring preview read, as rules saw them.
+"""
+type RuleSetTestListingPayload {
+	"""
+	Publish time the listing reported, or null when unknown.
+	"""
+	publishedAt: String
+	"""
+	`input.release.age_days`: whole days from publish to `capturedAt`, or
+	null when the publish time is unknown.
+	"""
+	ageDays: Int
+	"""
+	Indexer up-votes, or null when unknown.
+	"""
+	thumbsUp: Int
+	"""
+	Indexer down-votes, or null when unknown.
+	"""
+	thumbsDown: Int
+	"""
+	Indexer password-protection flag, or null when unknown.
+	"""
+	isPasswordProtected: Boolean
+	"""
+	Audio languages the indexer reported.
+	"""
+	indexerLanguages: [String!]!
+	"""
+	Bounded indexer-specific attributes rules read as `input.release.extra`.
+	"""
+	extra: JSON!
+	"""
+	When the facts were captured: the grab for a stored file, now for a
+	tested release name. Release age is measured at this instant.
+	"""
+	capturedAt: DateTime!
 }
 
 """
@@ -27529,19 +27641,46 @@ input TestRuleSetInput {
 	"""
 	episodeId: ID
 	"""
-	Release name to parse and score.
+	Release name to parse and score. Exactly one of this and
+	`mediaFileId` is required.
 	"""
-	releaseName: String!
+	releaseName: String
 	"""
-	Release size in bytes, or null when unknown.
+	Release size in bytes, or null when unknown. Only with `releaseName`.
 	"""
 	sizeBytes: Long
+	"""
+	Indexer listing facts for `releaseName`, as a live search result would
+	report them. Omitted facts are unknown (null to rules). Only with
+	`releaseName`.
+	"""
+	listing: RuleSetTestListingInput
+	"""
+	Stored media file of the selected title to score from its own row and
+	the listing facts frozen when it was grabbed, instead of a release name.
+	"""
+	mediaFileId: ID
 }
 
 """
 Explicit, read-only scoring preview for the current rule-editor draft.
 """
 type TestRuleSetPayload {
+	"""
+	Release name that was scored: the supplied one, or a stored file's
+	grabbed release title (its file name when it has none).
+	"""
+	releaseName: String!
+	"""
+	Stored media file that was scored, or null for a release name.
+	"""
+	mediaFileId: ID
+	"""
+	Listing facts the rules read. Null for a stored file that has no
+	listing snapshot (scanned in, adopted, or imported before snapshots
+	were kept): every listing fact was unknown.
+	"""
+	listing: RuleSetTestListingPayload
 	"""
 	Aggregate score after normal policy aggregation.
 	"""
@@ -28587,6 +28726,11 @@ type TitleMediaFilePayload {
 	Release identity hash, or null when unavailable.
 	"""
 	releaseHash: String
+	"""
+	Indexer listing facts frozen when the release was grabbed, or null when
+	the file was not grabbed by Scryer or the stored snapshot is unreadable.
+	"""
+	releaseListing: ReleaseListingPayload
 	"""
 	Parent title for this media file, or null if it is no longer available to the caller.
 	"""

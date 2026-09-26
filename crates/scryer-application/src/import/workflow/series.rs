@@ -1762,6 +1762,7 @@ async fn import_single_episode_file(
         runtime_sample_mode,
         origin,
         release_evidence.announced_size_bytes(),
+        release_evidence.release_listing_json(),
         additional_import,
         None,
     )

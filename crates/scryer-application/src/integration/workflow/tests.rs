@@ -832,6 +832,7 @@ mod tests {
             request_signature: None,
             purpose: DownloadSubmissionPurpose::Standard,
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         }
     }
 

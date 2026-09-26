@@ -139,6 +139,7 @@ fn nzb_release(title: &str, guid: &str) -> IndexerSearchResult {
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
@@ -1139,6 +1140,12 @@ async fn an_unlinked_grab_records_an_orphan_scoped_submission_and_history() {
     let done = await_completion(&app, &user, &start.id).await;
     let release = done.results.first().expect("one result").clone();
     let download_url = release.download_url.clone().expect("release download url");
+    let grabbed_at = chrono::DateTime::parse_from_rfc3339("2026-03-04T05:06:07Z")
+        .expect("fixed grab time")
+        .with_timezone(&chrono::Utc);
+    app.runtime
+        .environment
+        .set_fixed_now_for_tests(Some(grabbed_at));
 
     *submissions.record_submission_error.lock().await = Some("temporary catalog outage".into());
     let error = app
@@ -1195,6 +1202,13 @@ async fn an_unlinked_grab_records_an_orphan_scoped_submission_and_history() {
     );
     assert_eq!(row.source_provider_id.as_deref(), Some("idx-a"));
     assert_eq!(row.release_size_bytes, release.size_bytes);
+    assert_eq!(
+        row.release_listing_json,
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &release, grabbed_at,
+        ),
+        "the grab persists the listing it was offered"
+    );
     assert_eq!(row.download_client_item_id, outcome.download_id);
     assert_eq!(
         row.facet, "movie",

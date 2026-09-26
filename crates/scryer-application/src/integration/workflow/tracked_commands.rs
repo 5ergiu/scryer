@@ -858,6 +858,9 @@ impl AppUseCase {
             info_hash: None,
             request_signature: None,
             scope,
+            // Filled from the existing row by the assignment command, like
+            // the release name.
+            release_listing_json: None,
         };
         let actor_snapshot = crate::domain_events::DomainEventActor::from(actor)
             .into_download_submission_actor_snapshot();
@@ -1916,13 +1919,15 @@ pub(crate) async fn assign_tracked_download_title_command(
     // An assignment is an operator's explicit identity for the download and is
     // recorded like a grab (the store reads any titled row back as a Scryer
     // submission anyway). It names the requested scope, and it must not throw
-    // away the grab-time indexer release name — that is still the best
-    // release evidence for parsing and scoring, whatever title it lands in.
+    // away the grab-time indexer release name or listing snapshot — those are
+    // still the best release evidence for parsing and scoring, whatever title
+    // it lands in.
     let source_identity = ClientJobLocator::from_submission(&submission);
-    if submission
+    let missing_source_title = submission
         .source_title
         .as_deref()
-        .is_none_or(|value| value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty());
+    if (missing_source_title || submission.release_listing_json.is_none())
         && let Some(existing) = app
             .services
             .workflow
@@ -1930,9 +1935,14 @@ pub(crate) async fn assign_tracked_download_title_command(
             .find_by_client_item_id(&source_identity)
             .await?
     {
-        submission.source_title = existing
-            .source_title
-            .filter(|value| !value.trim().is_empty());
+        if missing_source_title {
+            submission.source_title = existing
+                .source_title
+                .filter(|value| !value.trim().is_empty());
+        }
+        if submission.release_listing_json.is_none() {
+            submission.release_listing_json = existing.release_listing_json;
+        }
     }
     app.services
         .workflow
@@ -3921,6 +3931,7 @@ mod ignored_submission_scope_release_tests {
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         }
     }
 

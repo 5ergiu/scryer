@@ -20,11 +20,19 @@
 //! Sonarr draws the same line: `DownloadDecisionComparer` chains quality →
 //! custom-format score → protocol → episode coverage/number → indexer priority
 //! → swarm/age → size as *comparator steps*, while `UpgradableSpecification`
-//! compares only quality and custom-format score. Nothing about the listing
-//! ever reaches the upgrade decision.
+//! compares only quality and custom-format score. Nothing in a rank ever
+//! reaches the upgrade decision.
 //!
 //! Ranks are therefore built per search, keyed by release, and dropped when the
 //! search ends. Nothing here is ever persisted.
+//!
+//! The listing facts user rules read — publish time, votes, password
+//! protection, indexer languages and `extra` scalars — are a different matter.
+//! They are frozen into a listing snapshot when the release is evaluated for
+//! grab, persisted with the submission and copied to the media row, so they
+//! survive where the bar is re-derived and count as release properties in the
+//! score (see [`crate::canonical_scoring`]). Freshness, indexer priority and
+//! peers stay here, unpersisted.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;

@@ -4412,6 +4412,7 @@ async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
                 role: scryer_application::PendingReleaseRole::Fallback,
                 last_decision_code: None,
                 release_age_unknown: false,
+                release_listing_json: None,
             })
             .await
             .expect("seed standby release");
@@ -4521,6 +4522,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     })
     .await
     .expect("seed pending release");
@@ -4543,6 +4545,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
             request_signature: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
             scope: scryer_application::SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");
@@ -5228,4 +5231,110 @@ async fn graphql_series_movie_tags_patch_the_link_and_count_apart_from_titles() 
         cleared["data"]["updateSeriesMovieTags"][0]["tags"],
         json!([])
     );
+}
+
+#[tokio::test]
+async fn graphql_media_file_release_listing_reads_the_frozen_snapshot() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Listing Facts Movie",
+        MediaFacet::Movie,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+
+    let seeds = [
+        (
+            "/media/Listing.Facts.Movie.Snapshot.mkv",
+            Some(
+                r#"{"v":1,"published_at":"2026-03-01T00:00:00Z","thumbs_up":12,"thumbs_down":1,"is_password_protected":false,"indexer_languages":["en","de"],"extra":{"grabs":40,"tags":["internal"]},"captured_at":"2026-03-11T06:00:00Z"}"#,
+            ),
+        ),
+        ("/media/Listing.Facts.Movie.NoSnapshot.mkv", None),
+        (
+            "/media/Listing.Facts.Movie.Garbage.mkv",
+            Some("{not a snapshot"),
+        ),
+    ];
+    for (path, listing) in seeds {
+        ctx.media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: path.to_string(),
+                size_bytes: 2_048,
+                release_listing_json: listing.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .expect("seed media file");
+    }
+
+    let body = gql(
+        &ctx,
+        r#"query($id: ID!) {
+            title(id: $id) {
+                mediaFiles {
+                    filePath
+                    releaseListing {
+                        publishedAt
+                        ageDaysAtGrab
+                        thumbsUp
+                        thumbsDown
+                        isPasswordProtected
+                        indexerLanguages
+                        extra
+                        capturedAt
+                    }
+                }
+            }
+        }"#,
+        json!({ "id": title.id }),
+    )
+    .await;
+    assert_no_errors(&body);
+
+    let files = body["data"]["title"]["mediaFiles"]
+        .as_array()
+        .expect("media files");
+    let listing_of = |suffix: &str| {
+        files
+            .iter()
+            .find(|file| {
+                file["filePath"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(suffix))
+            })
+            .unwrap_or_else(|| panic!("media file {suffix} is listed"))["releaseListing"]
+            .clone()
+    };
+
+    let listing = listing_of(".Snapshot.mkv");
+    let instant = |field: &str| {
+        chrono::DateTime::parse_from_rfc3339(listing[field].as_str().expect("timestamp"))
+            .expect("rfc3339 timestamp")
+            .with_timezone(&Utc)
+    };
+    assert_eq!(
+        instant("publishedAt"),
+        chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z").unwrap()
+    );
+    assert_eq!(
+        instant("capturedAt"),
+        chrono::DateTime::parse_from_rfc3339("2026-03-11T06:00:00Z").unwrap()
+    );
+    assert_eq!(listing["ageDaysAtGrab"], 10);
+    assert_eq!(listing["thumbsUp"], 12);
+    assert_eq!(listing["thumbsDown"], 1);
+    assert_eq!(listing["isPasswordProtected"], false);
+    assert_eq!(listing["indexerLanguages"], json!(["en", "de"]));
+    assert_eq!(
+        listing["extra"],
+        json!({ "grabs": 40, "tags": ["internal"] })
+    );
+
+    assert_eq!(listing_of(".NoSnapshot.mkv"), Value::Null);
+    assert_eq!(listing_of(".Garbage.mkv"), Value::Null);
 }

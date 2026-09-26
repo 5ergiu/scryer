@@ -38,6 +38,8 @@ mod metadata_search;
 mod misc_smoke;
 #[path = "integration_graphql/quality_routing_settings.rs"]
 mod quality_routing_settings;
+#[path = "integration_graphql/rule_tester.rs"]
+mod rule_tester;
 #[path = "integration_graphql/schema_contract.rs"]
 mod schema_contract;
 #[path = "integration_graphql/schema_core_queue_import.rs"]

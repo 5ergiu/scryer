@@ -361,6 +361,7 @@ async fn record_host_job_ownership(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .unwrap();
@@ -5321,6 +5322,7 @@ async fn delete_title_settles_the_pending_cleanup_of_its_seeding_download() {
         info_hash: None,
         release_size_bytes: None,
         request_signature: None,
+        release_listing_json: None,
         scope: SubmissionScope::Title,
     };
     let locator = ClientJobLocator::from_submission(&submission);

@@ -19,6 +19,7 @@ use crate::contracts::{
 use crate::domain_events::{
     DomainEventActor, deleted_media_update, new_title_domain_event, title_context_snapshot,
 };
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use crate::settings::settings::root_folder_entries_from_library_roots;
 use scryer_domain::{
     DomainEventPayload, JobRunCompletedEventData, JobRunFailedEventData, JobRunStartedEventData,

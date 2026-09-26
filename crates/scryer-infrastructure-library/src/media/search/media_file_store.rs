@@ -54,14 +54,14 @@ const INSERT_MEDIA_FILE_SQL: &str =
       video_codec_parsed, audio_codec_parsed, audio_channels_parsed,
       acquisition_score, scoring_log,
       indexer_source, grabbed_release_title, grabbed_at,
-      edition, original_file_path, release_hash)
+      edition, original_file_path, release_hash, release_listing_json)
      VALUES ({}, {}, {}, {}, {}, {}, {}, 'imported', {},
              {}, {},
              {}, {}, {}, {},
              {}, {}, {},
              {}, {},
              {}, {}, {},
-             {}, {}, {})
+             {}, {}, {}, {})
      ON CONFLICT(file_path) DO UPDATE SET
         title_id = excluded.title_id,
         size_bytes = excluded.size_bytes,
@@ -85,7 +85,8 @@ const INSERT_MEDIA_FILE_SQL: &str =
         grabbed_at = excluded.grabbed_at,
         edition = excluded.edition,
         original_file_path = excluded.original_file_path,
-        release_hash = excluded.release_hash";
+        release_hash = excluded.release_hash,
+        release_listing_json = excluded.release_listing_json";
 
 fn media_file_insert_args(
     datastore: &StoreDatastore,
@@ -118,6 +119,7 @@ fn media_file_insert_args(
         SqlArg::OptText(input.edition.clone()),
         SqlArg::OptText(input.original_file_path.clone()),
         SqlArg::OptText(input.release_hash.clone()),
+        SqlArg::OptText(input.release_listing_json.clone()),
     ])
 }
 
@@ -320,6 +322,22 @@ impl MediaFileRepository for MediaFileStore {
                             tx,
                             &existing.media_file_id,
                             &associations,
+                        )
+                        .await?;
+                        // A reuse that carries a grab's listing snapshot
+                        // overwrites the one an earlier import left; a reuse
+                        // without a grab behind it (an adopted or manual
+                        // re-import of the same file) keeps the existing
+                        // snapshot, which still matches the row's grab facts.
+                        SqlRuntime::execute(
+                            SqlExec::Tx(tx),
+                            "UPDATE media_files
+                                SET release_listing_json = COALESCE({}, release_listing_json)
+                              WHERE id = {}",
+                            &[
+                                SqlArg::OptText(input.release_listing_json.clone()),
+                                SqlArg::Text(existing.media_file_id.clone()),
+                            ],
                         )
                         .await?;
                         return Ok(ClaimedMediaFile {
@@ -2160,7 +2178,7 @@ fn media_file_select_columns(dialect: SqlDialect, episode_expr: &str, role_expr:
             mf.video_codec_parsed, mf.audio_codec_parsed, mf.audio_channels_parsed,
             mf.acquisition_score, mf.scoring_log,
             mf.indexer_source, mf.grabbed_release_title, mf.grabbed_at,
-            mf.edition, mf.original_file_path, mf.release_hash",
+            mf.edition, mf.original_file_path, mf.release_hash, mf.release_listing_json",
     )
 }
 
@@ -2402,6 +2420,7 @@ fn row_to_title_media_file(row: &SqlRow) -> AppResult<TitleMediaFile> {
         edition: row.opt_text("edition")?,
         original_file_path: row.opt_text("original_file_path")?,
         release_hash: row.opt_text("release_hash")?,
+        release_listing_json: row.opt_text("release_listing_json")?,
     })
 }
 
@@ -4094,6 +4113,89 @@ mod tests {
                 .expect("media lookup should succeed")
                 .is_none()
         );
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[tokio::test]
+    async fn reused_import_destination_takes_the_new_listing_snapshot() {
+        let db = std::env::temp_dir().join(format!(
+            "scryer_media_file_reuse_listing_snapshot_{}.db",
+            chrono::Utc::now().timestamp_micros()
+        ));
+        let services = SqliteServices::new(db.to_string_lossy())
+            .await
+            .expect("db should initialize");
+        let titles = title_store(&services);
+        let media_files = media_file_store(&services);
+        let title = make_test_series_title("title-reuse-listing-snapshot");
+        titles
+            .create(title.clone())
+            .await
+            .expect("title should insert");
+        let first = InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: "/library/Synthetic Show/Synthetic Show.mkv".to_string(),
+            original_file_path: Some("/downloads/Synthetic.Show.mkv".to_string()),
+            size_bytes: 1_000,
+            release_listing_json: Some(r#"{"votes":{"up":1}}"#.to_string()),
+            ..Default::default()
+        };
+        let created = media_files
+            .claim_import_destination(&first, &MediaFileAssociations::default())
+            .await
+            .expect("destination should be claimed");
+        assert_eq!(created.disposition, MediaFileCatalogDisposition::Created);
+
+        let stored = |id: String| {
+            let pool = services.pool().clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT release_listing_json FROM media_files WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("listing snapshot should load")
+            }
+        };
+        assert_eq!(
+            stored(created.media_file_id.clone()).await.as_deref(),
+            Some(r#"{"votes":{"up":1}}"#)
+        );
+
+        let reused = media_files
+            .claim_import_destination(
+                &InsertMediaFileInput {
+                    release_listing_json: Some(r#"{"votes":{"up":7}}"#.to_string()),
+                    ..first.clone()
+                },
+                &MediaFileAssociations::default(),
+            )
+            .await
+            .expect("same import target should reuse the row");
+        assert_eq!(reused.disposition, MediaFileCatalogDisposition::Reused);
+        assert_eq!(reused.media_file_id, created.media_file_id);
+        assert_eq!(
+            stored(created.media_file_id.clone()).await.as_deref(),
+            Some(r#"{"votes":{"up":7}}"#)
+        );
+
+        media_files
+            .claim_import_destination(
+                &InsertMediaFileInput {
+                    release_listing_json: None,
+                    ..first
+                },
+                &MediaFileAssociations::default(),
+            )
+            .await
+            .expect("same import target should reuse the row");
+        assert_eq!(
+            stored(created.media_file_id).await.as_deref(),
+            Some(r#"{"votes":{"up":7}}"#),
+            "a reuse without a grab keeps the existing snapshot"
+        );
+
         let _ = std::fs::remove_file(db);
     }
 

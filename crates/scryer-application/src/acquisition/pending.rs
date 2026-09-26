@@ -11,6 +11,7 @@ use crate::acquisition::submission::{
     record_grab_submission_outcome,
 };
 use crate::delay_profile::DelayProfile;
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use crate::types::{
     PendingRelease, PendingReleaseObservation, PendingReleaseRole, PendingReleaseStatus,
 };
@@ -158,6 +159,8 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            // Test-only helper built from loose fields: no listing in hand.
+            release_listing_json: None,
         };
 
         match self
@@ -213,6 +216,7 @@ impl AppUseCase {
         &self,
         wanted: &AcquisitionScopeState,
         releases: &mut [PendingRelease],
+        now: chrono::DateTime<Utc>,
     ) {
         if releases.len() < 2 {
             return;
@@ -256,6 +260,7 @@ impl AppUseCase {
                 &title,
                 &release.release_title,
                 release.release_size_bytes,
+                Some(crate::canonical_scoring::ListingFacts::parked(release, now)),
                 &catalog_episodes,
                 &catalog_collections,
                 &context,
@@ -293,6 +298,7 @@ impl AppUseCase {
         candidate: &IndexerSearchResult,
         release_score: i32,
         scoring_log_json: Option<String>,
+        now: DateTime<Utc>,
     ) {
         let existing = self
             .services
@@ -311,7 +317,6 @@ impl AppUseCase {
             return;
         }
 
-        let now = Utc::now();
         let canonical_source = candidate.canonical_download_source();
         let pending = PendingRelease {
             id: Id::new().0,
@@ -352,6 +357,7 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, now),
         };
 
         match self
@@ -446,7 +452,7 @@ impl AppUseCase {
             //
             // Ordered by the search rank's own key, which is the same ladder
             // admission compares on, then size fit breaks equal preferences.
-            self.order_expired_releases_by_rank(&wanted, &mut releases)
+            self.order_expired_releases_by_rank(&wanted, &mut releases, now)
                 .await;
 
             // Try to grab the best release
@@ -1190,6 +1196,8 @@ impl AppUseCase {
             &title,
             &pr.release_title,
             pr.release_size_bytes,
+            // Not yet grabbed: aged at this pass's `now`.
+            Some(crate::canonical_scoring::ListingFacts::parked(pr, *now)),
             &catalog_episodes,
             &catalog_collections,
             &scoring_context,
@@ -1464,6 +1472,7 @@ impl AppUseCase {
         .episode
         .is_some_and(|episode| episode.full_season);
 
+        let release_listing_json = ReleaseListingSnapshot::json_for_pending_release(pr, *now);
         let canonical_result = self
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
                 request: DownloadClientAddRequest {
@@ -1504,6 +1513,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: pr.indexer_source.clone(),
                 release_size_bytes: pr.release_size_bytes,
+                release_listing_json: release_listing_json.clone(),
             })
             .await;
 
@@ -1558,6 +1568,7 @@ impl AppUseCase {
                     "grabbed_at": now.to_rfc3339(),
                     "source": "pending_release",
                     "source_provider": pr.indexer_source.clone(),
+                    "release_listing_json": release_listing_json,
                 })
                 .to_string();
                 let download_job_id = grab.job_id.clone();

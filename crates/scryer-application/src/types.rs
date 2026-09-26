@@ -929,6 +929,10 @@ pub struct TitleMediaFile {
     pub edition: Option<String>,
     pub original_file_path: Option<String>,
     pub release_hash: Option<String>,
+    /// The frozen indexer listing snapshot the grab read, as opaque JSON.
+    /// `None` for rows written before the column existed, scanned files, and
+    /// adopted downloads.
+    pub release_listing_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1722,6 +1726,10 @@ pub struct PendingRelease {
     pub role: PendingReleaseRole,
     pub last_decision_code: Option<String>,
     pub release_age_unknown: bool,
+    /// The indexer listing snapshot captured when the release was parked, as
+    /// opaque JSON, so the delayed grab submits the same listing facts the
+    /// park-time decision read. `None` for rows parked before the column.
+    pub release_listing_json: Option<String>,
 }
 
 impl PendingReleaseObservation {
@@ -2160,6 +2168,11 @@ pub struct IndexerSearchResult {
     pub auto_eligible: Option<bool>,
     pub auto_decision_code: Option<String>,
     pub auto_decision_summary: Option<String>,
+    /// The frozen listing snapshot this result was scored with, as persisted
+    /// JSON. Set by the scoring pass so a grab or park persists exactly the
+    /// snapshot that was scored; a replayed pending row arrives with its own.
+    /// `None` on a result no scoring pass has seen.
+    pub release_listing_json: Option<String>,
 }
 
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
@@ -2299,6 +2312,7 @@ mod canonical_download_source_tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
     }
 
@@ -3401,6 +3415,9 @@ pub(crate) struct ReleaseCandidateTokenClaims {
     pub source_title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_ref: Option<String>,
+    /// Absent on tokens minted before listing tickets existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing_ref: Option<String>,
     /// Absent on tokens minted before torrent info-hash handoff existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info_hash_hint: Option<String>,

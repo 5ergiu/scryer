@@ -170,6 +170,7 @@ fn submission_for_scope(title_id: &str, scope: &SubmissionScope) -> DownloadSubm
         request_signature: None,
         purpose: DownloadSubmissionPurpose::Standard,
         scope: scope.clone(),
+        release_listing_json: None,
     }
 }
 async fn episode_ids_for_queue_scope(app: &AppUseCase, scope: &SubmissionScope) -> Vec<String> {
@@ -344,9 +345,11 @@ impl AppUseCase {
         // title: `ManageTitles` on its library, checked below. Only the
         // title-less grab bypasses the libraries and needs system settings.
         routing.validate()?;
-        let (queued_release, scope) = self
-            .verify_release_candidate_token_for_signed_scope(actor, title_id, candidate_token)
+        let verified = self
+            .verify_release_candidate_token_with_listing(actor, title_id, candidate_token)
             .await?;
+        let release_listing_json = self.listing_json_at_grab(verified.listing);
+        let (queued_release, scope) = (verified.selection, verified.scope);
         if announced_size_bytes.is_some_and(|size| queued_release.size_bytes != Some(size)) {
             return Err(AppError::Validation(
                 "release size does not match the signed candidate".into(),
@@ -404,6 +407,7 @@ impl AppUseCase {
                 conflict_policy,
                 purpose,
                 Some(routing),
+                release_listing_json,
             )
             .await?;
         Ok(match outcome {
@@ -415,6 +419,10 @@ impl AppUseCase {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the manual queue inputs plus the grab-time listing snapshot"
+    )]
     async fn queue_manual_release_for_title(
         &self,
         actor: &User,
@@ -423,6 +431,7 @@ impl AppUseCase {
         scope: SubmissionScope,
         conflict_policy: SubmissionConflictPolicy,
         purpose: DownloadSubmissionPurpose,
+        release_listing_json: Option<String>,
     ) -> AppResult<QueueDownloadOutcome> {
         self.queue_manual_release_for_title_with_routing(
             actor,
@@ -432,6 +441,7 @@ impl AppUseCase {
             conflict_policy,
             purpose,
             None,
+            release_listing_json,
         )
         .await
     }
@@ -449,6 +459,7 @@ impl AppUseCase {
         conflict_policy: SubmissionConflictPolicy,
         purpose: DownloadSubmissionPurpose,
         routing: Option<crate::IndexerGrabSelection>,
+        release_listing_json: Option<String>,
     ) -> AppResult<QueueDownloadOutcome> {
         validate_manual_queue_purpose(purpose, title, &scope)?;
         let QueuedReleaseSelection {
@@ -549,6 +560,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: source_provider_name.clone(),
                 release_size_bytes: size_bytes,
+                release_listing_json,
             })
             .await;
 
@@ -780,6 +792,8 @@ impl AppUseCase {
                 SubmissionScope::Title,
                 SubmissionConflictPolicy::Abort,
                 DownloadSubmissionPurpose::OperatorQueued,
+                // The caller hands over a resolved source, not an indexer listing.
+                None,
             )
             .await?;
         let QueueDownloadOutcome::Queued(queued) = queued else {
@@ -839,6 +853,44 @@ impl AppUseCase {
         conflict_policy: SubmissionConflictPolicy,
         purpose: DownloadSubmissionPurpose,
     ) -> AppResult<QueueDownloadOutcome> {
+        self.queue_existing_title_download_with_listing(
+            actor,
+            title_id,
+            queued_release,
+            scope,
+            conflict_policy,
+            purpose,
+            // The caller hands over a resolved source, not an indexer listing.
+            None,
+        )
+        .await
+    }
+
+    /// The listing a token's ticket held, anchored at the grab instant: the
+    /// facts are the offered ones, the capture time is when it was grabbed.
+    fn listing_json_at_grab(&self, listing: Option<ReleaseListingSnapshot>) -> Option<String> {
+        listing.map(|mut listing| {
+            listing.captured_at = self.runtime.environment.now();
+            listing.to_json_string()
+        })
+    }
+
+    /// Queue a release for an existing title, persisting the listing snapshot
+    /// captured by a caller that holds the indexer result.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the manual queue inputs plus the grab-time listing snapshot"
+    )]
+    async fn queue_existing_title_download_with_listing(
+        &self,
+        actor: &User,
+        title_id: &str,
+        queued_release: QueuedReleaseSelection,
+        scope: SubmissionScope,
+        conflict_policy: SubmissionConflictPolicy,
+        purpose: DownloadSubmissionPurpose,
+        release_listing_json: Option<String>,
+    ) -> AppResult<QueueDownloadOutcome> {
         let title = self
             .services
             .catalog
@@ -859,6 +911,7 @@ impl AppUseCase {
             scope,
             conflict_policy,
             purpose,
+            release_listing_json,
         )
         .await
     }
@@ -876,6 +929,27 @@ impl AppUseCase {
         queued_release: QueuedReleaseSelection,
         scope: SubmissionScope,
         conflict_policy: SubmissionConflictPolicy,
+    ) -> AppResult<QueueDownloadOutcome> {
+        self.queue_replacement_release_with_listing(
+            actor,
+            title_id,
+            queued_release,
+            scope,
+            conflict_policy,
+            // The caller hands over a resolved source, not an indexer listing.
+            None,
+        )
+        .await
+    }
+
+    async fn queue_replacement_release_with_listing(
+        &self,
+        actor: &User,
+        title_id: &str,
+        queued_release: QueuedReleaseSelection,
+        scope: SubmissionScope,
+        conflict_policy: SubmissionConflictPolicy,
+        release_listing_json: Option<String>,
     ) -> AppResult<QueueDownloadOutcome> {
         let title = self
             .services
@@ -899,6 +973,7 @@ impl AppUseCase {
             scope,
             conflict_policy,
             DownloadSubmissionPurpose::ManualReplacement,
+            release_listing_json,
         )
         .await
     }
@@ -913,9 +988,11 @@ impl AppUseCase {
         conflict_policy: SubmissionConflictPolicy,
         announced_size_bytes: Option<i64>,
     ) -> AppResult<QueueDownloadOutcome> {
-        let (queued_release, signed_scope) = self
-            .verify_release_candidate_token_for_signed_scope(actor, title_id, candidate_token)
+        let verified = self
+            .verify_release_candidate_token_with_listing(actor, title_id, candidate_token)
             .await?;
+        let release_listing_json = self.listing_json_at_grab(verified.listing);
+        let (queued_release, signed_scope) = (verified.selection, verified.scope);
         if let Some(announced_size_bytes) = announced_size_bytes
             && queued_release.size_bytes != Some(announced_size_bytes)
         {
@@ -924,12 +1001,13 @@ impl AppUseCase {
             ));
         }
         let outcome = self
-            .queue_replacement_release(
+            .queue_replacement_release_with_listing(
                 actor,
                 title_id,
                 queued_release.clone(),
                 signed_scope,
                 conflict_policy,
+                release_listing_json,
             )
             .await?;
         Ok(match outcome {
@@ -1051,9 +1129,11 @@ impl AppUseCase {
         purpose: DownloadSubmissionPurpose,
         announced_size_bytes: Option<i64>,
     ) -> AppResult<QueueDownloadOutcome> {
-        let (queued_release, signed_scope) = self
-            .verify_release_candidate_token_for_signed_scope(actor, title_id, candidate_token)
+        let verified = self
+            .verify_release_candidate_token_with_listing(actor, title_id, candidate_token)
             .await?;
+        let release_listing_json = self.listing_json_at_grab(verified.listing);
+        let (queued_release, signed_scope) = (verified.selection, verified.scope);
         if let Some(announced_size_bytes) = announced_size_bytes
             && queued_release.size_bytes != Some(announced_size_bytes)
         {
@@ -1062,13 +1142,14 @@ impl AppUseCase {
             ));
         }
         let outcome = self
-            .queue_existing_title_download_with_purpose(
+            .queue_existing_title_download_with_listing(
                 actor,
                 title_id,
                 queued_release.clone(),
                 signed_scope,
                 conflict_policy,
                 purpose,
+                release_listing_json,
             )
             .await?;
         let _ = scope;
@@ -1187,6 +1268,9 @@ impl AppUseCase {
             | SubmissionScope::Collection { .. } => None,
         };
 
+        // One instant for the whole pass: candidates are scored against it and
+        // whatever this call grabs or parks persists the listing captured at it.
+        let now = self.runtime.environment.now();
         let results = self
             .search_and_evaluate_subject(
                 &search_title,
@@ -1194,6 +1278,7 @@ impl AppUseCase {
                 &actor.id,
                 SearchMode::Auto,
                 tokio_util::sync::CancellationToken::new(),
+                now,
             )
             .await?;
         if let Some(candidate) = results
@@ -1206,7 +1291,14 @@ impl AppUseCase {
                 .as_ref()
                 .map(|decision| decision.preference_score)
                 .unwrap_or_default();
-            self.park_pending_release_for_review(wanted, &title, candidate, candidate_score, None)
+            self.park_pending_release_for_review(
+                wanted,
+                &title,
+                candidate,
+                candidate_score,
+                None,
+                now,
+            )
                 .await;
         }
         let Some(best_index) = results
@@ -1260,7 +1352,8 @@ impl AppUseCase {
         };
 
         let canonical_source = best.canonical_download_source();
-        self.queue_existing_title_download(
+        let release_listing_json = ReleaseListingSnapshot::json_for_candidate(&best, now);
+        self.queue_existing_title_download_with_listing(
             actor,
             title_id,
             QueuedReleaseSelection {
@@ -1282,6 +1375,8 @@ impl AppUseCase {
             },
             queue_scope,
             conflict_policy,
+            DownloadSubmissionPurpose::Standard,
+            release_listing_json,
         )
         .await
     }
@@ -1390,6 +1485,7 @@ mod auto_eligibility_reason_tests {
             auto_eligible: Some(false),
             auto_decision_code: Some(code.to_string()),
             auto_decision_summary: Some(summary.to_string()),
+            release_listing_json: None,
         }
     }
 

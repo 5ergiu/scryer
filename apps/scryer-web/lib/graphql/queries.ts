@@ -441,7 +441,17 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       grabbedAt
       edition
       originalFilePath
-      releaseHash`;
+      releaseHash
+      releaseListing {
+        publishedAt
+        ageDaysAtGrab
+        thumbsUp
+        thumbsDown
+        isPasswordProtected
+        indexerLanguages
+        extra
+        capturedAt
+      }`;
 
 const WANTED_ITEM_FIELDS = `
       id
@@ -455,7 +465,6 @@ const WANTED_ITEM_FIELDS = `
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       sourceProvider
       currentScore
       convergenceState
@@ -3433,7 +3442,6 @@ export const wantedItemsQuery = `query WantedItems($wantedKind: WantedKindValue!
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       currentScore
       standbyCount
       latestReleaseDecision {

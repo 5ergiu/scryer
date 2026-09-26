@@ -1273,6 +1273,8 @@ impl TrackedDownloadService {
                     info_hash: None,
                     request_signature: None,
                     scope: SubmissionScope::Orphan,
+                    // Adopted from the client, so there is no indexer listing.
+                    release_listing_json: None,
                 })
                 .await
         {
@@ -4404,6 +4406,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: Some("canonical-observed-request".to_string()),
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let app = build_app(
             Arc::new(TestDownloadSubmissionRepo {
@@ -4447,6 +4450,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: Some("canonical-failure-request".to_string()),
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let download_submissions = Arc::new(TestDownloadSubmissionRepo {
             canonical_submission: Some(canonical_submission),
@@ -4485,6 +4489,7 @@ mod tests {
                 release_size_bytes: None,
                 request_signature: Some("legacy-failure-request".to_string()),
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             }),
             ..Default::default()
         });
@@ -4519,6 +4524,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: Some("canonical-failure-request".to_string()),
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let legacy_submission = crate::DownloadSubmission {
             download_id: DownloadId::new(),
@@ -4537,6 +4543,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: Some("legacy-failure-request".to_string()),
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let download_submissions = TestDownloadSubmissionRepo {
             submission: Some(legacy_submission.clone()),
@@ -4578,6 +4585,7 @@ mod tests {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             }),
             canonical_submission: None,
             submission_identity: Some(crate::DownloadSubmissionIdentity {
@@ -4677,6 +4685,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: None,
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let deleted_download_id = DownloadId::new();
         let regrab_download_id = DownloadId::new();
@@ -4963,6 +4972,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: None,
             scope: crate::SubmissionScope::Orphan,
+            release_listing_json: None,
         };
         let managed = crate::DownloadSubmission {
             download_id: scryer_domain::download_identity::DownloadId::new(),
@@ -4981,6 +4991,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: None,
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         };
         let download_submissions = Arc::new(TestDownloadSubmissionRepo {
             submission: Some(orphan),
@@ -5081,6 +5092,7 @@ mod tests {
             release_size_bytes: None,
             request_signature: None,
             scope: crate::SubmissionScope::Title,
+            release_listing_json: None,
         });
         *mutable_submission_identity.lock().await = Some(crate::DownloadSubmissionIdentity {
             download_id: Some(download_id.to_string()),
@@ -5186,6 +5198,7 @@ mod tests {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             }),
             canonical_submission: None,
             submission_identity: Some(crate::DownloadSubmissionIdentity {
@@ -7521,6 +7534,7 @@ mod tests {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             }),
             ..Default::default()
         });

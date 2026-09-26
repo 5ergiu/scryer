@@ -1600,6 +1600,7 @@ mod series_plan_tests {
             source_title: Some("Lantern Verge S03 Complete 1080p WEB-DL-FIXTUREGRP".to_string()),
             observed_release_name: None,
             release_size_bytes: None,
+            release_listing_json: None,
             purpose: crate::DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::EpisodeSet {
                 episode_ids: (28..=35).map(|number| format!("ep-{number}")).collect(),

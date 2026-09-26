@@ -52,7 +52,7 @@ pub(super) fn pack_entries(
         decision,
         ReleaseRuntimeInfo {
             size_bytes: size,
-            published_at: None,
+            age_days: None,
             thumbs_up: None,
             thumbs_down: None,
             is_password_protected: None,

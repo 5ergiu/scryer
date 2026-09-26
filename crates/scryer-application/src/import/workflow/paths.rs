@@ -78,6 +78,11 @@ pub(crate) enum ReleaseEvidence {
         /// size term on it when the landed file is within the overhead band.
         #[serde(default)]
         release_size_bytes: Option<i64>,
+        /// The frozen indexer listing snapshot the grab read
+        /// (`download_submissions.release_listing_json`), copied unchanged
+        /// onto the media row the import creates.
+        #[serde(default)]
+        release_listing_json: Option<String>,
         purpose: crate::DownloadSubmissionPurpose,
         scope: SubmissionScope,
     },
@@ -141,6 +146,7 @@ impl ReleaseEvidence {
             source_title,
             observed_release_name,
             release_size_bytes: submission.release_size_bytes,
+            release_listing_json: submission.release_listing_json.clone(),
             purpose: submission.purpose,
             scope: submission.scope.clone(),
         }
@@ -180,6 +186,18 @@ impl ReleaseEvidence {
             Self::ScryerSubmission {
                 release_size_bytes, ..
             } => *release_size_bytes,
+            Self::DownloaderObservation { .. } => None,
+        }
+    }
+
+    /// The listing snapshot a Scryer grab froze; `None` for adopted
+    /// downloads and grabs recorded without one.
+    pub(crate) fn release_listing_json(&self) -> Option<&str> {
+        match self {
+            Self::ScryerSubmission {
+                release_listing_json,
+                ..
+            } => release_listing_json.as_deref(),
             Self::DownloaderObservation { .. } => None,
         }
     }

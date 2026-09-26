@@ -1622,6 +1622,10 @@ async fn series_title_scan_imports_episode_file_as_primary() {
         media_file_role_for_path(&files, episode_path.as_path()),
         MediaFileRole::Primary
     );
+    assert_eq!(
+        files[0].release_listing_json, None,
+        "a scanned file has no grab behind it"
+    );
 }
 
 #[tokio::test]

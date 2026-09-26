@@ -1593,6 +1593,7 @@ async fn graphql_traverses_core_graph_relationships() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: Some("pending_delay".to_string()),
         release_age_unknown: false,
+        release_listing_json: None,
     };
     scryer_infrastructure_library::media::libraries::state_store::PendingReleaseStore::new(
         ctx.db.datastore(),
@@ -3444,6 +3445,7 @@ async fn drive_unlinked_completed_grab(with_identity: bool, staged: u8) -> Optio
         request_signature: None,
         purpose: DownloadSubmissionPurpose::OperatorQueued,
         scope: SubmissionScope::Orphan,
+        release_listing_json: None,
     };
     if with_identity {
         submissions

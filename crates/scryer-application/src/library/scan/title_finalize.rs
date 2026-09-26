@@ -100,6 +100,8 @@ async fn persist_or_reuse_scanned_media_file(
         video_codec_parsed: None,
         audio_codec_parsed: None,
         audio_channels_parsed: None,
+        // A scanned file has no grab behind it, so no listing snapshot.
+        release_listing_json: None,
         ..Default::default()
     };
 

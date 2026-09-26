@@ -671,6 +671,33 @@ mod tests {
     }
 
     #[test]
+    fn release_listing_snapshot_migration_is_registered_for_both_engines() {
+        let bundle = compile_source_bundle(&source_db_root()).expect("compile migration catalog");
+        let migration = bundle
+            .catalog
+            .find_migration(261)
+            .expect("release listing snapshot migration registered");
+        for (expected_engine, expected_file) in [
+            (
+                EngineScope::Sqlite,
+                "migrations/0261_release_listing_snapshot.sql",
+            ),
+            (
+                EngineScope::Postgres,
+                "postgres/migrations/0261_release_listing_snapshot.sql",
+            ),
+        ] {
+            assert!(
+                migration.steps.iter().any(|step| matches!(step,
+                    CompiledMigrationStep::Sql { engine, file, scope: StepScope::All, .. }
+                    if *engine == expected_engine && file == expected_file
+                )),
+                "both fresh installs and upgrades must add the listing snapshot columns"
+            );
+        }
+    }
+
+    #[test]
     fn source_bundle_registers_latest_migration_and_engine_baselines() {
         let bundle =
             compile_source_bundle(&source_db_root()).expect("compile source migration bundle");

@@ -61,6 +61,7 @@ mod romaji_release_matching;
 mod root_change;
 mod root_move;
 mod routing_settings;
+mod rule_tester_listing;
 mod search_cutoff;
 mod security_auth;
 mod seeding_gate;
