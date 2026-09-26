@@ -206,6 +206,16 @@ pub struct DownloadSubmission {
     /// `None` on rows written before the column existed; a size-less queued
     /// release is then compared size-less, which is the honest reading.
     pub release_size_bytes: Option<i64>,
+    /// The indexer listing facts the grab decision read, frozen as an opaque
+    /// JSON snapshot.
+    ///
+    /// Import-time scoring and the re-derived incumbent bar must score the
+    /// release on the same published date, votes, password flag, languages and
+    /// plugin extras the grab saw. None of that is recoverable from the release
+    /// title, and the indexer may report different values later, so it is
+    /// frozen here. `None` on rows written before the column existed and on
+    /// adopted downloads, which had no listing.
+    pub release_listing_json: Option<String>,
     pub request_signature: Option<String>,
     pub purpose: DownloadSubmissionPurpose,
     pub scope: SubmissionScope,
@@ -231,6 +241,7 @@ impl DownloadSubmission {
             && self.source_title.is_none()
             && self.info_hash.is_none()
             && self.release_size_bytes.is_none()
+            && self.release_listing_json.is_none()
             && self.request_signature.is_none()
     }
 }
@@ -1158,6 +1169,9 @@ pub struct InsertMediaFileInput {
     pub edition: Option<String>,
     pub original_file_path: Option<String>,
     pub release_hash: Option<String>,
+    /// The frozen indexer listing snapshot the grab read, carried from the
+    /// submission so later scoring reads the same values. `None` otherwise.
+    pub release_listing_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1485,6 +1499,38 @@ mod tests {
         ClientJobLocator, IndexerRoutingEntry, IndexerRoutingPlan, IndexerSearchEligibility,
         indexer_search_eligibility,
     };
+
+    fn orphan_stub_submission() -> super::DownloadSubmission {
+        super::DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: String::new(),
+            facet: String::new(),
+            download_client_id: Some("client-a".to_string()),
+            download_client_type: "nzbget".to_string(),
+            download_client_item_id: "job-a".to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: None,
+            source_title: None,
+            info_hash: None,
+            release_size_bytes: None,
+            release_listing_json: None,
+            request_signature: None,
+            purpose: super::DownloadSubmissionPurpose::Standard,
+            scope: super::SubmissionScope::Orphan,
+        }
+    }
+
+    #[test]
+    fn a_submission_carrying_only_a_listing_snapshot_is_not_an_observation_stub() {
+        assert!(orphan_stub_submission().is_observation_stub());
+        let with_listing = super::DownloadSubmission {
+            release_listing_json: Some(r#"{"votes":{"up":1}}"#.to_string()),
+            ..orphan_stub_submission()
+        };
+        assert!(!with_listing.is_observation_stub());
+    }
 
     fn routing_entry(enabled: bool) -> IndexerRoutingEntry {
         IndexerRoutingEntry {

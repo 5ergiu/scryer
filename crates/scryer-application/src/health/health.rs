@@ -610,6 +610,7 @@ mod tests {
             role: PendingReleaseRole::Primary,
             last_decision_code: Some("release_age_unknown".to_string()),
             release_age_unknown: true,
+            release_listing_json: None,
         }
     }
 

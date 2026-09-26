@@ -1022,6 +1022,7 @@ fn test_media_file(path: &str) -> TitleMediaFile {
         edition: Some("IMAX Enhanced".to_string()),
         original_file_path: None,
         release_hash: None,
+        release_listing_json: None,
     }
 }
 

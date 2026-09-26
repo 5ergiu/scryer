@@ -1509,6 +1509,7 @@ impl AppUseCase {
             request_signature: None,
             purpose: DownloadSubmissionPurpose::OperatorQueued,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         };
         let wire_id = download_id.to_wire();
         let identity = crate::download_identity::accepted_download_submission_identity(

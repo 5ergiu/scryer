@@ -1791,6 +1791,7 @@ async fn queue_existing_title_download_adopts_same_title_client_identity() {
             request_signature: None,
             purpose: crate::DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record client-created seed binding");
@@ -1903,6 +1904,7 @@ async fn queue_existing_title_download_adopts_a_foreign_observation_stub_identit
         request_signature: None,
         purpose: crate::DownloadSubmissionPurpose::Standard,
         scope: SubmissionScope::Orphan,
+        release_listing_json: None,
     };
     assert!(stub.is_observation_stub());
     download_submissions
@@ -2001,6 +2003,7 @@ async fn queue_existing_title_download_rejects_cross_title_client_identity() {
             request_signature: None,
             purpose: crate::DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record canonical owner submission");
@@ -2146,6 +2149,7 @@ async fn queue_existing_title_download_blocks_a_durable_unbound_submission() {
             release_size_bytes: None,
             request_signature: Some("first-signature".to_string()),
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record ambiguous submission");
@@ -2229,6 +2233,7 @@ async fn queue_existing_title_download_conflicts_for_state(state: DownloadQueueS
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2344,6 +2349,7 @@ async fn queue_existing_title_download_additional_file_ignores_standard_blocker(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record standard submission");
@@ -2459,6 +2465,7 @@ async fn queue_existing_title_download_additional_file_supports_series_movie_sco
             release_size_bytes: None,
             request_signature: None,
             scope: scope.clone(),
+            release_listing_json: None,
         })
         .await
         .expect("record standard submission");
@@ -2853,6 +2860,7 @@ async fn queue_existing_title_download_replace_early_deletes_old_submission() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2940,6 +2948,7 @@ async fn queue_existing_title_download_replace_early_deletes_all_blockers() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             })
             .await
             .expect("record submission");
@@ -3092,6 +3101,7 @@ async fn commit_successful_grab_marks_covered_wanted_set_and_supersedes_pending_
                 },
                 last_decision_code: None,
                 release_age_unknown: false,
+                release_listing_json: None,
             })
             .await
             .expect("seed pending release");
@@ -3196,6 +3206,7 @@ async fn trigger_title_wanted_search_conflicts_before_seeding_movie_wanted_item(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -3311,6 +3322,7 @@ async fn trigger_title_wanted_search_skips_conflicted_first_seed_episode_items()
             scope: SubmissionScope::Episode {
                 episode_id: episode.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -5473,6 +5485,7 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     pending_releases
         .insert_pending_release(&saved("SECOND", 200))
@@ -5500,6 +5513,7 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record first grab");
@@ -6290,6 +6304,7 @@ async fn a_submission_the_client_no_longer_lists_does_not_block_a_new_grab() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");
@@ -6379,6 +6394,7 @@ async fn a_submission_on_a_blocked_client_fails_closed_until_the_client_returns(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");
@@ -6458,6 +6474,7 @@ async fn a_failed_queue_row_is_replaced_without_asking_for_snapshot_authority() 
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record prior submission");

@@ -158,6 +158,7 @@ async fn seed_pending_release(
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     let store =
         scryer_infrastructure_library::media::libraries::state_store::PendingReleaseStore::new(
@@ -353,6 +354,7 @@ async fn pending_release_roundtrips_indexer_provenance() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     let observation = scryer_application::PendingReleaseObservation {
         eligible_at: release.delay_until.clone(),
@@ -850,6 +852,7 @@ async fn download_submission_roundtrips_episode_scope() {
             scope: SubmissionScope::Episode {
                 episode_id: "episode-1".to_string(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record submission");

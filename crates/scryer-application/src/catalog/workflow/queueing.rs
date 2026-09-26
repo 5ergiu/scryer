@@ -170,6 +170,7 @@ fn submission_for_scope(title_id: &str, scope: &SubmissionScope) -> DownloadSubm
         request_signature: None,
         purpose: DownloadSubmissionPurpose::Standard,
         scope: scope.clone(),
+        release_listing_json: None,
     }
 }
 async fn episode_ids_for_queue_scope(app: &AppUseCase, scope: &SubmissionScope) -> Vec<String> {
@@ -549,6 +550,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: source_provider_name.clone(),
                 release_size_bytes: size_bytes,
+                release_listing_json: None,
             })
             .await;
 

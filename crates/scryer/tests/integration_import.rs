@@ -173,6 +173,7 @@ async fn record_movie_grab_submission(
             request_signature: None,
             purpose: DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record grab submission");

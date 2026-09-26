@@ -858,6 +858,7 @@ impl AppUseCase {
             info_hash: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         };
         let actor_snapshot = crate::domain_events::DomainEventActor::from(actor)
             .into_download_submission_actor_snapshot();
@@ -3912,6 +3913,7 @@ mod ignored_submission_scope_release_tests {
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         }
     }
 
