@@ -1,4 +1,5 @@
 use crate::ports::{NOTIFICATION_REQUEST_SCHEMA_VERSION, NotificationMediaRequestPayload};
+use crate::url_redaction::redact_optional_url_credentials;
 use crate::{
     AppUseCase, NotificationActorPayload, NotificationAppPayload, NotificationDownloadPayload,
     NotificationEpisodePayload, NotificationExternalIdsPayload, NotificationFilePayload,
@@ -661,13 +662,23 @@ fn build_release_grabbed_notification(data: &ReleaseGrabbedEventData) -> BuiltNo
         &data.episode_ids,
         &[],
     );
+    let facts = data.release_facts.clone().unwrap_or_default();
     payload.release = Some(NotificationReleasePayload {
         source_title: data.source_title.clone(),
-        source_hint: data.source_hint.clone(),
+        // Grab events keep the live indexer URL; a webhook must not carry the
+        // indexer key to a third party.
+        source_hint: redact_optional_url_credentials(data.source_hint.clone()),
+        quality: facts.quality,
+        release_group: facts.release_group,
+        protocol: facts.protocol,
+        indexer: facts.indexer.or_else(|| data.source_provider.clone()),
+        languages: facts.audio_languages,
         ..Default::default()
     });
     payload.download = Some(NotificationDownloadPayload {
         download_id: data.download_id.clone(),
+        client_name: facts.download_client_name,
+        size_bytes: facts.size_bytes,
         ..Default::default()
     });
     BuiltNotification { payload }
@@ -691,7 +702,7 @@ fn build_download_failed_notification(data: &DownloadFailedEventData) -> BuiltNo
     );
     payload.release = Some(NotificationReleasePayload {
         source_title: data.source_title.clone(),
-        source_hint: data.source_hint.clone(),
+        source_hint: redact_optional_url_credentials(data.source_hint.clone()),
         quality: data.quality.clone(),
         ..Default::default()
     });
@@ -2045,6 +2056,7 @@ mod tests {
                     source_provider: Some("rss".to_string()),
                     download_id: Some("grab-1".to_string()),
                     episode_ids: vec!["episode-1".to_string()],
+                    release_facts: None,
                 }),
             },
             DomainEvent {
@@ -3119,6 +3131,126 @@ mod tests {
                 expected_created_title_id
             );
         }
+    }
+
+    #[test]
+    fn grab_notification_redacts_a_stored_indexer_key_and_carries_release_facts() {
+        let mut event = sample_event("evt-release-grabbed");
+        let DomainEventPayload::ReleaseGrabbed(data) = &mut event.payload else {
+            panic!("sample should be a release grabbed event");
+        };
+        // An event persisted before redaction existed still holds the key.
+        data.source_hint = Some(
+            "https://indexer.invalid/api?t=get&id=harbor-lights&apikey=stored-indexer-key"
+                .to_string(),
+        );
+        data.release_facts = Some(scryer_domain::GrabbedReleaseFacts {
+            quality: Some("1080p".to_string()),
+            release_group: Some("NOGRP".to_string()),
+            audio_languages: vec!["eng".to_string(), "jpn".to_string()],
+            dual_audio: Some(true),
+            size_bytes: Some(2_147_483_648),
+            protocol: Some("usenet".to_string()),
+            indexer: Some("Synthetic Indexer".to_string()),
+            download_client_name: Some("Synthetic Client".to_string()),
+        });
+
+        let payload = build_notification(&event)
+            .expect("grab should build a notification")
+            .payload;
+        let release = payload.release.expect("release payload");
+        assert_eq!(
+            release.source_hint.as_deref(),
+            Some("https://indexer.invalid/api?t=get&id=harbor-lights&apikey=[redacted]")
+        );
+        assert_eq!(release.quality.as_deref(), Some("1080p"));
+        assert_eq!(release.release_group.as_deref(), Some("NOGRP"));
+        assert_eq!(
+            release.languages,
+            vec!["eng".to_string(), "jpn".to_string()]
+        );
+        assert_eq!(release.protocol.as_deref(), Some("usenet"));
+        assert_eq!(release.indexer.as_deref(), Some("Synthetic Indexer"));
+        let download = payload.download.expect("download payload");
+        assert_eq!(download.client_name.as_deref(), Some("Synthetic Client"));
+        assert_eq!(download.size_bytes, Some(2_147_483_648));
+        assert_eq!(download.download_id.as_deref(), Some("grab-1"));
+    }
+
+    #[test]
+    fn grab_notification_without_release_facts_leaves_them_absent() {
+        let mut event = sample_event("evt-release-grabbed");
+        let DomainEventPayload::ReleaseGrabbed(data) = &mut event.payload else {
+            panic!("sample should be a release grabbed event");
+        };
+        data.source_provider = None;
+        data.release_facts = None;
+
+        let payload = build_notification(&event)
+            .expect("grab should build a notification")
+            .payload;
+        let release = payload.release.expect("release payload");
+        assert_eq!(
+            release.source_title.as_deref(),
+            Some("Example.Show.S01E01.1080p")
+        );
+        assert_eq!(release.source_hint.as_deref(), Some("rss"));
+        assert_eq!(release.quality, None);
+        assert_eq!(release.release_group, None);
+        assert_eq!(release.protocol, None);
+        assert_eq!(release.indexer, None);
+        assert!(release.languages.is_empty());
+        let download = payload.download.expect("download payload");
+        assert_eq!(download.client_name, None);
+        assert_eq!(download.size_bytes, None);
+    }
+
+    #[test]
+    fn download_failed_notification_redacts_the_indexer_key() {
+        let mut event = sample_event("evt-download-failed");
+        let DomainEventPayload::DownloadFailed(data) = &mut event.payload else {
+            panic!("sample should be a download failed event");
+        };
+        data.source_hint =
+            Some("https://tracker.invalid/dl/9.torrent?passkey=stored-passkey".to_string());
+
+        let payload = build_notification(&event)
+            .expect("download failed should build a notification")
+            .payload;
+        assert_eq!(
+            payload
+                .release
+                .expect("release payload")
+                .source_hint
+                .as_deref(),
+            Some("https://tracker.invalid/dl/9.torrent?passkey=[redacted]")
+        );
+    }
+
+    #[test]
+    fn grab_event_without_release_facts_serialises_without_them_and_legacy_rows_decode() {
+        let event = sample_event("evt-release-grabbed");
+        let DomainEventPayload::ReleaseGrabbed(mut data) = event.payload else {
+            panic!("sample should be a release grabbed event");
+        };
+        data.release_facts = None;
+
+        let json = serde_json::to_value(&data).expect("grab event serialises");
+        assert!(json.get("release_facts").is_none());
+        let decoded: ReleaseGrabbedEventData =
+            serde_json::from_value(json).expect("a row without release facts decodes");
+        assert_eq!(decoded.release_facts, None);
+
+        data.release_facts = Some(scryer_domain::GrabbedReleaseFacts {
+            quality: Some("720p".to_string()),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&data).expect("grab event serialises");
+        assert_eq!(
+            json["release_facts"],
+            serde_json::json!({ "quality": "720p" }),
+            "unknown facts are left out rather than written as null"
+        );
     }
 }
 

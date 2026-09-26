@@ -2095,6 +2095,16 @@ async fn commit_season_pack_proposal(
                     );
                     grab_meta.insert("indexer".to_string(), serde_json::json!(best_pack.source));
                     grab_meta.insert("score".to_string(), serde_json::json!(pack_score));
+                    let release_facts = app
+                        .grabbed_release_facts(
+                            &best_pack.title,
+                            best_pack.parsed_release_metadata.as_ref(),
+                            best_pack.size_bytes,
+                            best_pack.source_kind,
+                            grab_indexer.clone(),
+                            grab.client_id.as_deref(),
+                        )
+                        .await;
                     let _ = app
                         .append_domain_event(new_title_domain_event(
                             None,
@@ -2106,6 +2116,7 @@ async fn commit_season_pack_proposal(
                                 source_provider: Some(best_pack.source.clone()),
                                 download_id: Some(download_job_id),
                                 episode_ids: grabbed_episode_ids.clone(),
+                                release_facts: Some(release_facts),
                             }),
                         ))
                         .await;
@@ -3017,12 +3028,7 @@ async fn prune_stale_standby_coverage(
         .release_search_title_for_wanted_item(title, item, episode, Some(&context.reads))
         .await;
     let pending_subject = match app
-        .resolve_pending_release_search_subject_for_wanted_item(
-            title,
-            &search_title,
-            item,
-            episode,
-        )
+        .resolve_pending_release_search_subject_for_wanted_item(title, &search_title, item, episode)
         .await
     {
         Ok(pending_subject) => pending_subject,
@@ -3546,11 +3552,10 @@ async fn process_single_target(
 
                 // Calculate total season runtime for accurate size scoring.
                 // A 10-episode × 24-min season should expect ~10× a single episode's size.
-                let pack_runtime =
-                    crate::acquisition::release_search::season_pack_runtime_minutes(
-                        title,
-                        season_episodes.len(),
-                    );
+                let pack_runtime = crate::acquisition::release_search::season_pack_runtime_minutes(
+                    title,
+                    season_episodes.len(),
+                );
 
                 let pack_subject = app
                     .resolve_release_search_subject_for_season_pack(
@@ -4875,6 +4880,16 @@ async fn commit_scope_grab(
                 )
                 .await;
 
+                let release_facts = app
+                    .grabbed_release_facts(
+                        &candidate.title,
+                        candidate.parsed_release_metadata.as_ref(),
+                        candidate.size_bytes,
+                        canonical_source_kind,
+                        grab_indexer.clone(),
+                        grab.client_id.as_deref(),
+                    )
+                    .await;
                 let _ = app
                     .append_domain_event(new_title_domain_event(
                         None,
@@ -4886,6 +4901,7 @@ async fn commit_scope_grab(
                             source_provider: Some(candidate.source.clone()),
                             download_id: Some(download_job_id),
                             episode_ids: item.episode_id.iter().cloned().collect(),
+                            release_facts: Some(release_facts),
                         }),
                     ))
                     .await;

@@ -568,7 +568,11 @@ pub fn from_release_decision(
         wanted_item_id: decision.wanted_item_id.into(),
         title_id: decision.title_id.into(),
         release_title: decision.release_title,
-        release_url: decision.release_url,
+        // Rows written before the ledger started redacting on write still
+        // hold the indexer key.
+        release_url: scryer_application::url_redaction::redact_optional_url_credentials(
+            decision.release_url,
+        ),
         release_size_bytes: decision.release_size_bytes.map(Long::from),
         decision_code: decision.decision_code,
         candidate_score: decision.candidate_score,

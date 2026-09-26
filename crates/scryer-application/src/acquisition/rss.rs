@@ -3097,6 +3097,16 @@ impl AppUseCase {
                     })
                     .await;
 
+                let release_facts = self
+                    .grabbed_release_facts(
+                        &best.title,
+                        best.parsed_release_metadata.as_ref(),
+                        best.size_bytes,
+                        canonical_source_kind,
+                        grab_indexer.clone(),
+                        canonical_submission.grab.client_id.as_deref(),
+                    )
+                    .await;
                 let _ = self
                     .append_domain_event(new_title_domain_event(
                         report.external_actor.as_ref().map_or_else(
@@ -3111,6 +3121,7 @@ impl AppUseCase {
                             source_provider: Some(best.source.clone()),
                             download_id: None,
                             episode_ids: grabbed_episode_ids,
+                            release_facts: Some(release_facts),
                         }),
                     ))
                     .await;

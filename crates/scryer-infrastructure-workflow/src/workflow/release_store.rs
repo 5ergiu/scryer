@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use scryer_application::url_redaction::redact_url_credentials;
 use scryer_application::{
     AppResult, ReleaseAttemptRepository, ReleaseDownloadAttemptOutcome,
     ReleaseDownloadFailureRecord, ReleaseDownloadFailureSignature,
@@ -146,7 +147,7 @@ impl ReleaseStore {
 
 #[async_trait]
 impl ReleaseAttemptRepository for ReleaseStore {
-    async fn record_release_attempt(
+    async fn insert_release_attempt(
         &self,
         title_id: Option<String>,
         source_hint: Option<String>,
@@ -223,7 +224,8 @@ impl ReleaseAttemptRepository for ReleaseStore {
         source_title: Option<&str>,
     ) -> AppResult<Option<String>> {
         let title_id = title_id.map(str::to_string);
-        let source_hint = source_hint.map(str::to_string);
+        // Stored hints are redacted, so the lookup key must be too.
+        let source_hint = source_hint.map(redact_url_credentials);
         let source_title = source_title.map(str::to_string);
         let encryption_key = self.encryption_key()?;
         let row = SqlRuntime::fetch_optional(
@@ -292,4 +294,79 @@ fn decode_release_download_failure(row: SqlRow) -> AppResult<ReleaseDownloadFail
         error_message: row.opt_text("error_message")?,
         attempted_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn store() -> (ReleaseStore, sqlx::SqlitePool) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should open");
+        sqlx::query(
+            "CREATE TABLE release_download_attempts (
+                 id TEXT PRIMARY KEY,
+                 title_id TEXT,
+                 source_hint TEXT,
+                 source_title TEXT,
+                 outcome TEXT NOT NULL,
+                 error_message TEXT,
+                 source_password TEXT,
+                 attempted_at TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("release attempt fixture table should be created");
+        let store = ReleaseStore::new(
+            StoreDatastore::Sqlite {
+                pool: pool.clone(),
+                writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            },
+            Arc::new(RwLock::new(Some(EncryptionKey::from_bytes([7; 32])))),
+        );
+        (store, pool)
+    }
+
+    #[tokio::test]
+    async fn recorded_attempt_persists_the_source_hint_without_the_indexer_key() {
+        let (store, pool) = store().await;
+        let live_url = "https://indexer.invalid/api?t=get&id=paper-lantern&apikey=live-indexer-key";
+
+        store
+            .record_release_attempt(
+                Some("title-1".to_string()),
+                Some(live_url.to_string()),
+                Some("Paper.Lantern.2031.1080p.WEB-DL-NOGRP".to_string()),
+                ReleaseDownloadAttemptOutcome::Failed,
+                None,
+                Some("nzb-password".to_string()),
+            )
+            .await
+            .expect("attempt should record");
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT source_hint FROM release_download_attempts")
+                .fetch_one(&pool)
+                .await
+                .expect("stored attempt should be readable");
+        assert_eq!(
+            stored.as_deref(),
+            Some("https://indexer.invalid/api?t=get&id=paper-lantern&apikey=[redacted]")
+        );
+
+        // The source-password lookup keys on the hint; a caller holding the
+        // live URL still finds the row it wrote.
+        let password = store
+            .get_latest_source_password(Some("title-1"), Some(live_url), None)
+            .await
+            .expect("password lookup should succeed");
+        assert_eq!(password.as_deref(), Some("nzb-password"));
+    }
 }

@@ -23,7 +23,7 @@ pub(super) struct MockBlocklistRepo {
 
 #[async_trait]
 impl ReleaseAttemptRepository for MockReleaseAttemptRepo {
-    async fn record_release_attempt(
+    async fn insert_release_attempt(
         &self,
         title_id: Option<String>,
         source_hint: Option<String>,
@@ -1961,6 +1961,8 @@ pub(super) struct StubDownloadClient {
     pub(super) submitted_download_ids:
         Arc<Mutex<Vec<Option<scryer_domain::download_identity::DownloadId>>>>,
     pub(super) submitted_source_passwords: Arc<Mutex<Vec<Option<String>>>>,
+    /// The source hint each submission fetched from, credentials included.
+    pub(super) submitted_source_hints: Arc<Mutex<Vec<Option<String>>>>,
     pub(super) submitted_info_hash_hints: Arc<Mutex<Vec<Option<String>>>>,
     /// Tracker-declared minimums as they reached the client, so a caller-level
     /// test can prove the clamp inputs survived the path under test.
@@ -2152,6 +2154,10 @@ impl DownloadClient for StubDownloadClient {
             .lock()
             .await
             .push(request.source_password.clone());
+        self.submitted_source_hints
+            .lock()
+            .await
+            .push(request.source_hint.clone());
         self.submitted_info_hash_hints
             .lock()
             .await

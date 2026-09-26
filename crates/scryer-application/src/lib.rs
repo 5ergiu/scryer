@@ -117,6 +117,7 @@ pub mod subtitles;
 pub mod testing;
 mod types;
 pub mod upstream_scheduler;
+pub mod url_redaction;
 
 pub(crate) use acquisition::acquisition as acquisition_workflow;
 pub(crate) use acquisition::admission;

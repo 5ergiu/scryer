@@ -1094,6 +1094,7 @@ mod tests {
                 source_provider: None,
                 download_id: None,
                 episode_ids: Vec::new(),
+                release_facts: None,
             },
         ))]);
 
@@ -1182,6 +1183,7 @@ mod tests {
                 source_provider: None,
                 download_id: None,
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
             DomainEventPayload::DownloadFailed(download_failed(Some("sabnzbd"))),
             DomainEventPayload::ReleaseBlocklisted(ReleaseBlocklistedEventData {

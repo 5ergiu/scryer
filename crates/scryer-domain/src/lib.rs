@@ -4138,6 +4138,33 @@ pub struct ReleaseGrabbedEventData {
     pub download_id: Option<String>,
     #[serde(default)]
     pub episode_ids: Vec<String>,
+    /// What was known about the release when it was grabbed. Absent on events
+    /// recorded before these facts were captured, and on grabs whose origin
+    /// carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_facts: Option<GrabbedReleaseFacts>,
+}
+
+/// Release facts captured at grab time, for history and notifications.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabbedReleaseFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    /// `usenet` or `torrent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_client_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

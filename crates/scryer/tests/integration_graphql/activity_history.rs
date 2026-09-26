@@ -105,6 +105,7 @@ async fn graphql_title_history_page_lists_an_untitled_grab() {
                         source_provider: Some("Configured Indexer".to_string()),
                         download_id: Some(format!("download-{release}")),
                         episode_ids: Vec::new(),
+                        release_facts: None,
                     },
                 ),
             })

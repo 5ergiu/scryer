@@ -6331,6 +6331,64 @@ async fn legacy_pending_release_placeholder_password_is_normalized_on_grab() {
 }
 
 #[tokio::test]
+async fn pending_grab_fetches_with_the_indexer_key_but_records_the_attempt_without_it() {
+    let release_title = "Keyed.Lantern.Movie.2031.1080p.WEB-DL-NOGRP";
+    let live_url = "https://indexer.invalid/api?t=get&id=keyed-lantern&apikey=live-indexer-key";
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            download_client.clone(),
+            download_submissions,
+            pending_releases.clone(),
+            wanted_items.clone(),
+            Arc::new(MockIndexerClient),
+        );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Keyed Lantern Movie", 2031)
+            .await;
+    let mut pending = pending_movie_release(
+        &wanted_id,
+        &title,
+        release_title,
+        PendingReleaseStatus::Waiting,
+    );
+    pending.release_url = Some(live_url.to_string());
+    let pending_id = pending.id.clone();
+    pending_releases
+        .insert_pending_release(&pending)
+        .await
+        .expect("seed pending release");
+
+    let grabbed = app
+        .force_grab_pending_release(&user, &pending_id)
+        .await
+        .expect("force grab pending release");
+
+    assert!(grabbed);
+    assert_eq!(
+        download_client
+            .submitted_source_hints
+            .lock()
+            .await
+            .as_slice(),
+        &[Some(live_url.to_string())],
+        "the download client must receive the credentialed URL it fetches from"
+    );
+    let attempts = release_attempts.attempts.lock().await;
+    assert!(!attempts.is_empty(), "the grab records its attempts");
+    for attempt in attempts.iter() {
+        assert_eq!(
+            attempt.source_hint.as_deref(),
+            Some("https://indexer.invalid/api?t=get&id=keyed-lantern&apikey=[redacted]"),
+            "an attempt row must never hold the indexer key"
+        );
+    }
+}
+
+#[tokio::test]
 async fn legacy_pending_release_real_password_is_preserved_on_grab() {
     let release_title = "Legacy.Real.Password.Movie.2024.1080p-GRP";
     let download_client = Arc::new(StubDownloadClient::default());

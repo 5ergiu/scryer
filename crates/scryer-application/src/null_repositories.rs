@@ -4661,7 +4661,7 @@ pub mod test_nulls {
 
     #[async_trait]
     impl ReleaseAttemptRepository for NullReleaseAttemptRepository {
-        async fn record_release_attempt(
+        async fn insert_release_attempt(
             &self,
             _: Option<String>,
             _: Option<String>,

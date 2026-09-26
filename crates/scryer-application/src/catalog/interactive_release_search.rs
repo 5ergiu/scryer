@@ -1391,6 +1391,9 @@ impl AppUseCase {
                 MediaFacet::parse(&submission.facet).unwrap_or(MediaFacet::Movie),
                 self.runtime.environment.now(),
             );
+            let release_facts = self
+                .unlinked_grab_release_facts(&result, source_kind, &client.name)
+                .await;
             self.append_domain_event(new_global_domain_event(
                 actor,
                 DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
@@ -1400,6 +1403,7 @@ impl AppUseCase {
                     source_provider: submission.source_provider_name.clone(),
                     download_id: Some(submission.download_client_item_id.clone()),
                     episode_ids: Vec::new(),
+                    release_facts: Some(release_facts),
                 }),
             ))
             .await?;
@@ -1586,6 +1590,9 @@ impl AppUseCase {
             );
         }
 
+        let release_facts = self
+            .unlinked_grab_release_facts(&result, source_kind, &client.name)
+            .await;
         self.append_domain_event(new_global_domain_event(
             actor,
             DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
@@ -1597,6 +1604,7 @@ impl AppUseCase {
                 source_provider: Some(result.source.clone()),
                 download_id: Some(grab.job_id.clone()),
                 episode_ids: Vec::new(),
+                release_facts: Some(release_facts),
             }),
         ))
         .await?;
@@ -1739,6 +1747,17 @@ impl AppUseCase {
                     "selected release files exceed the 64 MiB download bundle limit".to_string(),
                 ));
             }
+            // Nothing was submitted, so there is no download client to name.
+            let release_facts = self
+                .grabbed_release_facts(
+                    &result.title,
+                    result.parsed_release_metadata.as_ref(),
+                    result.size_bytes,
+                    Some(source_kind),
+                    grab_indexer,
+                    None,
+                )
+                .await;
             artifacts.push(FetchedSearchArtifact {
                 file_name: artifact_file_name(&result.title, extension),
                 content_type: content_type.unwrap_or_else(|| default_content_type.to_string()),
@@ -1747,6 +1766,7 @@ impl AppUseCase {
                 source_title: result.title,
                 source_hint,
                 source_provider: result.source,
+                release_facts,
             });
         }
 
@@ -1787,6 +1807,7 @@ impl AppUseCase {
                         // Nothing was submitted, so there is no client item id.
                         download_id: None,
                         episode_ids: Vec::new(),
+                        release_facts: Some(artifact.release_facts),
                     }),
                 )
             })
@@ -1794,6 +1815,32 @@ impl AppUseCase {
         self.append_domain_events(events).await?;
 
         Ok(bundle)
+    }
+
+    /// Grab facts for an unlinked grab, whose download client was already
+    /// loaded to validate the request, so its name needs no second lookup.
+    async fn unlinked_grab_release_facts(
+        &self,
+        result: &IndexerSearchResult,
+        source_kind: DownloadSourceKind,
+        client_name: &str,
+    ) -> scryer_domain::GrabbedReleaseFacts {
+        let indexer = self
+            .grab_indexer_name(result.indexer_id.as_deref(), Some(result.source.as_str()))
+            .await;
+        let mut facts = self
+            .grabbed_release_facts(
+                &result.title,
+                result.parsed_release_metadata.as_ref(),
+                result.size_bytes,
+                Some(source_kind),
+                indexer,
+                None,
+            )
+            .await;
+        facts.download_client_name =
+            Some(client_name.to_string()).filter(|name| !name.trim().is_empty());
+        facts
     }
 
     /// Locate one release of the actor's own live search by the download URL
@@ -1904,6 +1951,7 @@ struct FetchedSearchArtifact {
     source_title: String,
     source_hint: String,
     source_provider: String,
+    release_facts: scryer_domain::GrabbedReleaseFacts,
 }
 
 /// Restate which release an artifact fetch failed on: the operator picked
