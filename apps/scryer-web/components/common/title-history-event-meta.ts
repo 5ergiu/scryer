@@ -199,6 +199,7 @@ const DOMAIN_EVENT_TYPES_BY_HISTORY_EVENT: Record<string, readonly string[]> = {
   file_recycled: ["MEDIA_FILE_DELETED"],
   file_deleted: ["MEDIA_FILE_DELETED"],
   file_renamed: ["MEDIA_FILE_RENAMED"],
+  file_restored: ["MEDIA_FILE_RESTORED"],
   title_moved: ["TITLE_MOVED"],
   rematched: ["TITLE_REMATCHED"],
   seeding_started: ["SEEDING_STARTED"],
