@@ -610,15 +610,63 @@ fn apply_match_hint(
             }
         },
         SubtitleMatchHintKind::SeasonEpisode => {
-            if query.season.is_some() {
-                matches.insert("season".to_string());
-            }
-            if query.episode.is_some() {
-                matches.insert("episode".to_string());
+            match hint.value.as_deref().and_then(parse_season_episode_hint) {
+                None => {
+                    if query.season.is_some() {
+                        matches.insert("season".to_string());
+                    }
+                    if query.episode.is_some() {
+                        matches.insert("episode".to_string());
+                    }
+                }
+                Some((claimed_season, claimed_episode)) => {
+                    let community = query.community_entry.as_ref();
+                    let episode_accepted = [
+                        query.episode,
+                        community.map(|entry| entry.episode),
+                        query.absolute_episode,
+                    ]
+                    .contains(&Some(claimed_episode));
+                    if !episode_accepted {
+                        return;
+                    }
+                    matches.insert("episode".to_string());
+                    let season_accepted = claimed_season.is_none_or(|season| {
+                        query.season == Some(season)
+                            || community.is_some_and(|entry| entry.season == season)
+                    });
+                    if query.season.is_some() && season_accepted {
+                        matches.insert("season".to_string());
+                    }
+                }
             }
         }
         SubtitleMatchHintKind::Release | SubtitleMatchHintKind::Language => {}
     }
+}
+
+/// Parses a season/episode hint value into an optional season claim and an
+/// episode claim. Accepts a bare episode number ("12"), "S02E12" in any case
+/// with optional zero padding, and "2x12". Returns `None` when the value
+/// carries no recognizable episode claim.
+fn parse_season_episode_hint(value: &str) -> Option<(Option<i32>, i32)> {
+    let value = value.trim();
+    if let Ok(episode) = value.parse::<i32>() {
+        return Some((None, episode));
+    }
+    let lower = value.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix('s')
+        && let Some((season, episode)) = rest.split_once('e')
+        && let (Ok(season), Ok(episode)) = (season.parse::<i32>(), episode.parse::<i32>())
+    {
+        return Some((Some(season), episode));
+    }
+    if let Some((season, episode)) = lower.split_once('x')
+        && let (Ok(season), Ok(episode)) = (season.parse::<i32>(), episode.parse::<i32>())
+    {
+        return Some((Some(season), episode));
+    }
+    None
 }
 
 fn external_id_matches(query: &SubtitleQuery, hint_value: &str) -> bool {
@@ -962,6 +1010,133 @@ mod tests {
 
         assert_eq!(stronger.score, MOVIE_WEIGHTS.weights().max_score());
         assert!(stronger.score > weaker.score);
+    }
+
+    fn episode_query() -> SubtitleQuery {
+        SubtitleQuery {
+            media_kind: SubtitleMediaKind::Episode,
+            facet: Some("anime".into()),
+            imdb_id: None,
+            series_imdb_id: None,
+            title: "Synthetic Harbor Tales".into(),
+            year: None,
+            season: Some(1),
+            episode: Some(12),
+            absolute_episode: None,
+            community_entry: None,
+            release_group: None,
+            source: None,
+            video_codec: None,
+            audio_codec: None,
+            resolution: None,
+            hearing_impaired: None,
+            ..movie_query()
+        }
+    }
+
+    fn season_episode_hint(value: Option<&str>) -> SubtitleMatchHint {
+        SubtitleMatchHint {
+            kind: SubtitleMatchHintKind::SeasonEpisode,
+            value: value.map(str::to_string),
+        }
+    }
+
+    fn hint_matches(query: &SubtitleQuery, value: Option<&str>) -> HashSet<String> {
+        let mut matches = HashSet::new();
+        apply_match_hint(query, &mut matches, &season_episode_hint(value));
+        matches
+    }
+
+    fn episode_candidate(id: &str, value: Option<&str>) -> SubtitlePluginCandidate {
+        SubtitlePluginCandidate {
+            provider_file_id: id.into(),
+            language: "eng".into(),
+            release_info: None,
+            hearing_impaired: false,
+            forced: false,
+            ai_translated: false,
+            machine_translated: false,
+            uploader: None,
+            download_count: None,
+            match_hints: vec![season_episode_hint(value)],
+        }
+    }
+
+    fn season_and_episode() -> HashSet<String> {
+        ["season".to_string(), "episode".to_string()].into()
+    }
+
+    #[test]
+    fn season_episode_hint_without_value_is_trusted() {
+        assert_eq!(hint_matches(&episode_query(), None), season_and_episode());
+    }
+
+    #[test]
+    fn season_episode_hint_accepts_matching_bare_episode() {
+        assert_eq!(
+            hint_matches(&episode_query(), Some("12")),
+            season_and_episode()
+        );
+    }
+
+    #[test]
+    fn season_episode_hint_rejects_mismatching_bare_episode() {
+        let query = episode_query();
+        assert!(hint_matches(&query, Some("3")).is_empty());
+
+        let matching =
+            map_candidate_to_match("fixture", &query, episode_candidate("1", Some("12")));
+        let mismatching =
+            map_candidate_to_match("fixture", &query, episode_candidate("2", Some("3")));
+        assert!(matching.score > mismatching.score);
+    }
+
+    #[test]
+    fn season_episode_hint_checks_season_and_episode_values() {
+        let query = episode_query();
+        assert_eq!(hint_matches(&query, Some("S01E12")), season_and_episode());
+        assert_eq!(hint_matches(&query, Some("s1e12")), season_and_episode());
+        assert_eq!(hint_matches(&query, Some("1x12")), season_and_episode());
+        assert!(hint_matches(&query, Some("S01E05")).is_empty());
+        assert_eq!(
+            hint_matches(&query, Some("S02E12")),
+            ["episode".to_string()].into()
+        );
+    }
+
+    #[test]
+    fn season_episode_hint_accepts_community_entry_numbering() {
+        let query = SubtitleQuery {
+            season: Some(1),
+            episode: Some(17),
+            community_entry: Some(SubtitleCommunityEntry {
+                season: 2,
+                episode: 5,
+                ..Default::default()
+            }),
+            ..episode_query()
+        };
+        assert_eq!(hint_matches(&query, Some("5")), season_and_episode());
+        assert_eq!(hint_matches(&query, Some("S02E05")), season_and_episode());
+        assert!(hint_matches(&query, Some("6")).is_empty());
+    }
+
+    #[test]
+    fn season_episode_hint_accepts_absolute_episode() {
+        let query = SubtitleQuery {
+            episode: Some(4),
+            absolute_episode: Some(28),
+            ..episode_query()
+        };
+        assert_eq!(hint_matches(&query, Some("28")), season_and_episode());
+    }
+
+    #[test]
+    fn season_episode_hint_with_unparseable_value_is_trusted() {
+        let query = episode_query();
+        assert_eq!(hint_matches(&query, Some("finale")), season_and_episode());
+        assert_eq!(hint_matches(&query, Some("")), season_and_episode());
+        assert_eq!(hint_matches(&query, Some("SxxE")), season_and_episode());
     }
 }
 
