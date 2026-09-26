@@ -4630,6 +4630,7 @@ const en: LocaleDictionary = {
   "requests.fallbackHeld": "A rule could not decide, because something it reads was unknown.",
   "requests.fallbackError": "A rule failed to run, so the request went to a person.",
   "requests.fallbackNoRuleMatched": "No rule matched this request.",
+  "requests.fallbackLibraryPermission": "Approved by the requester's Auto-Approve Requests permission.",
 
   "requests.approvedLease": "Keep for",
   "requests.approvedLeaseKeepForever": "Forever, as asked",

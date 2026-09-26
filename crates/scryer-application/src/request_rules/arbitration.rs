@@ -35,6 +35,11 @@ pub const FALLBACK_HELD: &str = "held";
 pub const FALLBACK_ERROR: &str = "error";
 /// Nothing voted, and the requester holds no Auto-Approve permission.
 pub const FALLBACK_NO_RULE_MATCHED: &str = "no_rule_matched";
+/// No rule decided, and the requester's Auto-Approve permission approved. A
+/// verdict no rule reached is a fallback like any other, and naming it is what
+/// lets the trace, the pre-flight and the requests view say the permission
+/// approved rather than showing an approval with nothing behind it.
+pub const FALLBACK_LIBRARY_PERMISSION: &str = LIBRARY_PERMISSION_DECIDER;
 
 /// One rule's vote, already narrowed to the rules whose library scope covers
 /// this request (see [`super::engine`]). Carries the rule's identity and mode so
@@ -69,7 +74,9 @@ pub struct Arbitration {
     /// *policy's* answer, recorded whether or not it is allowed to act.
     pub policy_outcome: RequestDecisionOutcome,
     /// Why the verdict is a fallback rather than a rule's own decision.
-    /// `None` exactly when a rule voted `deny` or `approve` and won.
+    /// `None` exactly when a rule voted `deny` or `approve` and won; an
+    /// approval by the Auto-Approve permission is
+    /// [`FALLBACK_LIBRARY_PERMISSION`].
     pub fallback_reason: Option<&'static str>,
     /// The rule sets that produced `policy_outcome`, or
     /// [`LIBRARY_PERMISSION_DECIDER`] when the Auto-Approve permission did.
@@ -154,7 +161,7 @@ pub const fn legacy_outcome(permission_grants_auto_approve: bool) -> RequestDeci
 /// | any `deny` | `Deny` | the denying rules | — |
 /// | else any `manual`, any held rule, any error | `ManualReview` | those rules | `rule_manual` \| `held` \| `error` |
 /// | else any `approve` | `AutoApprove` | the approving rules | — |
-/// | else Auto-Approve permission | `AutoApprove` | `library_permission` | — |
+/// | else Auto-Approve permission | `AutoApprove` | `library_permission` | `library_permission` |
 /// | else | `ManualReview` | — | `no_rule_matched` |
 pub fn arbitrate(
     votes: &[ScopedVote],
@@ -227,7 +234,7 @@ pub fn arbitrate(
     if permission_grants_auto_approve {
         return Arbitration {
             policy_outcome: RequestDecisionOutcome::AutoApprove,
-            fallback_reason: None,
+            fallback_reason: Some(FALLBACK_LIBRARY_PERMISSION),
             deciding_rule_set_ids: vec![LIBRARY_PERMISSION_DECIDER.to_string()],
             tags,
             reasons: Vec::new(),
