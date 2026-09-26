@@ -1304,6 +1304,7 @@ fn should_invalidate_wanted_projection(payload: &scryer_domain::DomainEventPaylo
         | DomainEventPayload::MediaFileAnalyzed(_)
         | DomainEventPayload::MediaFileRenamed(_)
         | DomainEventPayload::MediaFileDeleted(_)
+        | DomainEventPayload::MediaFileRestored(_)
         | DomainEventPayload::MediaFileUpgraded(_)
         | DomainEventPayload::LibraryScanTitleDiscovered(_)
         | DomainEventPayload::LibraryScanDeltaRecorded(_)

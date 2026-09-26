@@ -1645,6 +1645,7 @@
         "title_deleted",
         "file_deleted",
         "file_deleted_for_upgrade",
+        "file_restored",
         "post_processing_completed",
         "subtitle_downloaded",
         "subtitle_search_failed",

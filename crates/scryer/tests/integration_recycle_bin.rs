@@ -7,7 +7,9 @@ use std::path::Path;
 
 use chrono::Utc;
 use common::TestContext;
-use scryer_application::recycle_bin::{RecycleBinConfig, RecycleManifest, recycle_file};
+use scryer_application::recycle_bin::{
+    RecycleBinConfig, RecycleManifest, RecycledMediaRowSnapshot, recycle_file,
+};
 use scryer_application::{
     AppError, InsertMediaFileInput, JobKey, JobRunStatus, LibraryRootDraft, MediaFileRepository,
     MediaFileRole, RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY, RECYCLE_BIN_RETENTION_DAYS_KEY,
@@ -15,8 +17,9 @@ use scryer_application::{
     UpdateRecycleBinSettings,
 };
 use scryer_domain::{
-    AppPermission, AppPermissionMask, Collection, CollectionType, Id, Library, LibraryGrant,
-    LibraryPermission, LibraryPermissionMask, MediaFacet, Title, User, UserAuthorization,
+    AppPermission, AppPermissionMask, Collection, CollectionType, DomainEventFilter,
+    DomainEventPayload, DomainEventType, Id, Library, LibraryGrant, LibraryPermission,
+    LibraryPermissionMask, MediaFacet, Title, User, UserAuthorization,
 };
 use scryer_infrastructure_sql::types::SettingDefinitionSeed;
 use serde_json::{Value, json};
@@ -292,6 +295,7 @@ async fn seed_recycled_file_in_bin(
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await
@@ -1238,6 +1242,7 @@ async fn restoring_conflict_scans_title_and_tracks_restored_file_as_additional()
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await
@@ -1313,6 +1318,183 @@ async fn restoring_conflict_scans_title_and_tracks_restored_file_as_additional()
 }
 
 #[tokio::test]
+async fn restoring_recreates_row_with_snapshotted_score_and_emits_one_restore_event() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let title_dir = root.path().join("Glassmoor Harbor (2031)");
+    let other_dir = root.path().join("Quillfen Parade (2029)");
+    std::fs::create_dir(&title_dir).expect("create title folder");
+    std::fs::create_dir(&other_dir).expect("create unrelated title folder");
+    let library = seed_library(&ctx, "Restore Score", root.path()).await;
+    seed_title_with_folder_path(
+        &ctx,
+        "title-restore-score",
+        &library,
+        Some(title_dir.to_string_lossy().to_string()),
+    )
+    .await;
+    seed_title_with_folder_path(
+        &ctx,
+        "title-restore-unrelated",
+        &library,
+        Some(other_dir.to_string_lossy().to_string()),
+    )
+    .await;
+
+    let unrelated_path = other_dir.join("Quillfen.Parade.2029.1080p.WEB-DL.mkv");
+    let unrelated_path_string = unrelated_path.to_string_lossy().to_string();
+    std::fs::write(&unrelated_path, b"unrelated live file").expect("write unrelated file");
+    ctx.media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: "title-restore-unrelated".to_string(),
+            file_path: unrelated_path_string.clone(),
+            size_bytes: 19,
+            role: MediaFileRole::Primary,
+            quality_label: Some("1080p".to_string()),
+            acquisition_score: Some(11),
+            scoring_log: Some("unrelated scoring log".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("insert unrelated media file");
+    let unrelated_before = ctx
+        .media_files
+        .get_media_file_by_path(&unrelated_path_string)
+        .await
+        .expect("load unrelated row")
+        .expect("unrelated row exists");
+
+    let original_path = title_dir.join("Glassmoor.Harbor.2031.720p.WEB-DL-NOPE.mkv");
+    let original_path_string = original_path.to_string_lossy().to_string();
+    std::fs::write(&original_path, b"recycled original").expect("write original source file");
+    let recycle_result = recycle_file(
+        &RecycleBinConfig {
+            enabled: true,
+            base_path: root.path().join(".scryer-recycle"),
+            retention_days: 7,
+            cleanup_enabled: true,
+            validation_error: None,
+            source_roots: vec![root.path().to_path_buf()],
+        },
+        &original_path,
+        RecycleManifest {
+            schema: None,
+            entry_id: None,
+            source_operation_id: None,
+            recycled_at: Utc::now().to_rfc3339(),
+            original_path: original_path_string.clone(),
+            original_file_id: Some("gone-media-file-row".to_string()),
+            size_bytes: 17,
+            title_id: Some("title-restore-score".to_string()),
+            media_root: None,
+            reason: "upgrade_replaced".to_string(),
+            status: None,
+            replacement_file_id: None,
+            replacement_path: None,
+            media_row: Some(RecycledMediaRowSnapshot {
+                acquisition_score: Some(4321),
+                scoring_log: Some("invented scoring log".to_string()),
+                release_group: Some("NOPE".to_string()),
+                ..Default::default()
+            }),
+        },
+    )
+    .await
+    .expect("recycle original file")
+    .expect("file should be recycled");
+
+    let manager = persisted_manage_titles_actor(
+        &ctx,
+        "restore-score-manager",
+        std::slice::from_ref(&library.id),
+    )
+    .await;
+    let accepted = ctx
+        .app
+        .start_restore_recycled_item_job(&manager, &recycle_result.entry_id)
+        .await
+        .expect("start recycle restore job");
+    let terminal = wait_for_terminal_job(
+        &ctx,
+        &manager,
+        JobKey::RecycleBinRestore,
+        &accepted.job_run.id,
+    )
+    .await;
+    assert_eq!(terminal.status, JobRunStatus::Completed);
+
+    assert_eq!(
+        std::fs::read(&original_path).expect("restored file exists"),
+        b"recycled original"
+    );
+    let restored = ctx
+        .media_files
+        .get_media_file_by_path(&original_path_string)
+        .await
+        .expect("load restored row")
+        .expect("restore should recreate the media row");
+    assert_eq!(restored.acquisition_score, Some(4321));
+    assert_eq!(
+        restored.scoring_log.as_deref(),
+        Some("invented scoring log")
+    );
+    assert_eq!(restored.release_group.as_deref(), Some("NOPE"));
+
+    let events = ctx
+        .app
+        .list_domain_events(
+            &User::new_admin("restore-score-auditor"),
+            &DomainEventFilter {
+                event_types: Some(vec![DomainEventType::MediaFileRestored]),
+                after_sequence: Some(0),
+                limit: 10,
+                ..DomainEventFilter::default()
+            },
+        )
+        .await
+        .expect("list restore events");
+    assert_eq!(events.len(), 1, "exactly one restore event: {events:?}");
+    let DomainEventPayload::MediaFileRestored(data) = &events[0].payload else {
+        panic!("unexpected payload: {:?}", events[0].payload);
+    };
+    assert_eq!(events[0].title_id.as_deref(), Some("title-restore-score"));
+    assert_eq!(data.file_id.as_deref(), Some(restored.id.as_str()));
+    assert_eq!(
+        data.original_path.as_deref(),
+        Some(original_path_string.as_str())
+    );
+    assert_eq!(
+        data.recycle_entry_id.as_deref(),
+        Some(recycle_result.entry_id.as_str())
+    );
+    assert_eq!(
+        data.media_updates
+            .iter()
+            .map(|update| update.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![original_path_string.as_str()]
+    );
+
+    assert_eq!(
+        std::fs::read(&unrelated_path).expect("unrelated file still exists"),
+        b"unrelated live file"
+    );
+    let unrelated_after = ctx
+        .media_files
+        .get_media_file_by_path(&unrelated_path_string)
+        .await
+        .expect("load unrelated row after restore")
+        .expect("unrelated row still exists");
+    assert_eq!(unrelated_after.id, unrelated_before.id);
+    assert_eq!(unrelated_after.acquisition_score, Some(11));
+    assert_eq!(
+        unrelated_after.scoring_log.as_deref(),
+        Some("unrelated scoring log")
+    );
+}
+
+#[tokio::test]
 async fn failed_restore_job_keeps_recycle_entry_available() {
     let ctx = TestContext::new().await;
     seed_recycle_bin_setting_definition(&ctx).await;
@@ -1348,6 +1530,7 @@ async fn failed_restore_job_keeps_recycle_entry_available() {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await
@@ -1424,6 +1607,7 @@ async fn restoring_out_of_root_manifest_is_refused_and_entry_remains() {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await
@@ -1490,6 +1674,7 @@ async fn restoring_root_equal_manifest_is_refused_and_entry_remains() {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await
@@ -1588,6 +1773,7 @@ async fn disabled_recycle_bin_paths_are_inert_and_direct_delete_new_files() {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         },
     )
     .await

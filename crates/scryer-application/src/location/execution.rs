@@ -1447,6 +1447,7 @@ impl SourceRecycler for RecycleBinSourceRecycler {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         };
 
         match crate::recycle_bin::recycle_file(config, source, manifest).await {

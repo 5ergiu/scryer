@@ -4660,6 +4660,10 @@ enum DomainEventTypeValue {
 	"""
 	MEDIA_FILE_DELETED
 	"""
+	A media file was restored from the recycle bin.
+	"""
+	MEDIA_FILE_RESTORED
+	"""
 	A media file was upgraded.
 	"""
 	MEDIA_FILE_UPGRADED
@@ -28231,6 +28235,10 @@ enum TitleHistoryEventTypeValue {
 	File was deleted.
 	"""
 	FILE_DELETED
+	"""
+	File was restored from the recycle bin.
+	"""
+	FILE_RESTORED
 	"""
 	File was renamed.
 	"""

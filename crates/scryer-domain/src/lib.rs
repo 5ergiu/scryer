@@ -3483,6 +3483,8 @@ pub enum TitleHistoryEventType {
     FileUpgraded,
     FileRecycled,
     FileDeleted,
+    /// A recycled media file was put back into the library from the recycle bin.
+    FileRestored,
     FileRenamed,
     TitleMoved,
     DownloadIgnored,
@@ -3510,6 +3512,7 @@ impl TitleHistoryEventType {
             Self::FileUpgraded => "file_upgraded",
             Self::FileRecycled => "file_recycled",
             Self::FileDeleted => "file_deleted",
+            Self::FileRestored => "file_restored",
             Self::FileRenamed => "file_renamed",
             Self::TitleMoved => "title_moved",
             Self::DownloadIgnored => "download_ignored",
@@ -3533,6 +3536,7 @@ impl TitleHistoryEventType {
             "file_upgraded" => Some(Self::FileUpgraded),
             "file_recycled" => Some(Self::FileRecycled),
             "file_deleted" => Some(Self::FileDeleted),
+            "file_restored" => Some(Self::FileRestored),
             "file_renamed" => Some(Self::FileRenamed),
             "title_moved" => Some(Self::TitleMoved),
             "download_ignored" => Some(Self::DownloadIgnored),
@@ -3556,6 +3560,7 @@ impl TitleHistoryEventType {
         Self::FileUpgraded,
         Self::FileRecycled,
         Self::FileDeleted,
+        Self::FileRestored,
         Self::FileRenamed,
         Self::TitleMoved,
         Self::DownloadIgnored,
@@ -3794,6 +3799,7 @@ pub enum DomainEventType {
     MediaFileAnalyzed,
     MediaFileRenamed,
     MediaFileDeleted,
+    MediaFileRestored,
     MediaFileUpgraded,
     AcquisitionSearchCompleted,
     AcquisitionCandidateRejected,
@@ -3853,6 +3859,7 @@ impl DomainEventType {
             Self::MediaFileAnalyzed => "media_file_analyzed",
             Self::MediaFileRenamed => "media_file_renamed",
             Self::MediaFileDeleted => "media_file_deleted",
+            Self::MediaFileRestored => "media_file_restored",
             Self::MediaFileUpgraded => "media_file_upgraded",
             Self::AcquisitionSearchCompleted => "acquisition_search_completed",
             Self::AcquisitionCandidateRejected => "acquisition_candidate_rejected",
@@ -3912,6 +3919,7 @@ impl DomainEventType {
             "media_file_analyzed" => Some(Self::MediaFileAnalyzed),
             "media_file_renamed" => Some(Self::MediaFileRenamed),
             "media_file_deleted" => Some(Self::MediaFileDeleted),
+            "media_file_restored" => Some(Self::MediaFileRestored),
             "media_file_upgraded" => Some(Self::MediaFileUpgraded),
             "acquisition_search_completed" => Some(Self::AcquisitionSearchCompleted),
             "acquisition_candidate_rejected" => Some(Self::AcquisitionCandidateRejected),
@@ -4303,6 +4311,26 @@ pub struct MediaFileDeletedEventData {
     pub episode_ids: Vec<String>,
 }
 
+/// A media file came back out of the recycle bin. `media_updates` carries the
+/// path the file was restored to, which differs from the recycled original when
+/// the restore had to divert to a sibling to avoid overwriting a live file.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaFileRestoredEventData {
+    pub title: TitleContextSnapshot,
+    pub media_updates: Vec<MediaPathUpdate>,
+    /// The media row the restored file is tracked by, once the restore scan
+    /// recreated it.
+    #[serde(default)]
+    pub file_id: Option<String>,
+    /// Path the file had when it was recycled.
+    #[serde(default)]
+    pub original_path: Option<String>,
+    #[serde(default)]
+    pub recycle_entry_id: Option<String>,
+    #[serde(default)]
+    pub episode_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MediaFileUpgradedEventData {
     pub title: TitleContextSnapshot,
@@ -4660,6 +4688,7 @@ pub enum DomainEventPayload {
     MediaFileAnalyzed(MediaFileAnalyzedEventData),
     MediaFileRenamed(MediaFileRenamedEventData),
     MediaFileDeleted(MediaFileDeletedEventData),
+    MediaFileRestored(MediaFileRestoredEventData),
     MediaFileUpgraded(MediaFileUpgradedEventData),
     AcquisitionSearchCompleted(AcquisitionSearchCompletedEventData),
     AcquisitionCandidateRejected(AcquisitionCandidateRejectedEventData),
@@ -4721,6 +4750,7 @@ impl DomainEventPayload {
             Self::MediaFileAnalyzed(_) => DomainEventType::MediaFileAnalyzed,
             Self::MediaFileRenamed(_) => DomainEventType::MediaFileRenamed,
             Self::MediaFileDeleted(_) => DomainEventType::MediaFileDeleted,
+            Self::MediaFileRestored(_) => DomainEventType::MediaFileRestored,
             Self::MediaFileUpgraded(_) => DomainEventType::MediaFileUpgraded,
             Self::AcquisitionSearchCompleted(_) => DomainEventType::AcquisitionSearchCompleted,
             Self::AcquisitionCandidateRejected(_) => DomainEventType::AcquisitionCandidateRejected,
@@ -7304,6 +7334,7 @@ pub enum NotificationEventType {
     TitleDeleted,
     FileDeleted,
     FileDeletedForUpgrade,
+    FileRestored,
     PostProcessingCompleted,
     SubtitleDownloaded,
     SubtitleSearchFailed,
@@ -7338,6 +7369,7 @@ impl NotificationEventType {
             Self::TitleDeleted => "title_deleted",
             Self::FileDeleted => "file_deleted",
             Self::FileDeletedForUpgrade => "file_deleted_for_upgrade",
+            Self::FileRestored => "file_restored",
             Self::PostProcessingCompleted => "post_processing_completed",
             Self::SubtitleDownloaded => "subtitle_downloaded",
             Self::SubtitleSearchFailed => "subtitle_search_failed",
@@ -7372,6 +7404,7 @@ impl NotificationEventType {
             Self::TitleDeleted,
             Self::FileDeleted,
             Self::FileDeletedForUpgrade,
+            Self::FileRestored,
             Self::PostProcessingCompleted,
             Self::SubtitleDownloaded,
             Self::SubtitleSearchFailed,
@@ -7406,6 +7439,7 @@ impl NotificationEventType {
             "title_deleted" => Some(Self::TitleDeleted),
             "file_deleted" => Some(Self::FileDeleted),
             "file_deleted_for_upgrade" => Some(Self::FileDeletedForUpgrade),
+            "file_restored" => Some(Self::FileRestored),
             "post_processing_completed" => Some(Self::PostProcessingCompleted),
             "subtitle_downloaded" => Some(Self::SubtitleDownloaded),
             "subtitle_search_failed" => Some(Self::SubtitleSearchFailed),
@@ -7431,6 +7465,7 @@ impl NotificationEventType {
             "import_completed" => Some(Self::ImportComplete),
             "media_file_renamed" => Some(Self::Rename),
             "media_file_deleted" => Some(Self::FileDeleted),
+            "media_file_restored" => Some(Self::FileRestored),
             _ => None,
         }
     }

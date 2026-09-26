@@ -684,6 +684,8 @@ pub enum DomainEventTypeValue {
     MediaFileRenamed,
     /// A media file was deleted.
     MediaFileDeleted,
+    /// A media file was restored from the recycle bin.
+    MediaFileRestored,
     /// A media file was upgraded.
     MediaFileUpgraded,
     /// An acquisition search completed.
@@ -772,6 +774,7 @@ impl DomainEventTypeValue {
             DomainEventType::MediaFileAnalyzed => Self::MediaFileAnalyzed,
             DomainEventType::MediaFileRenamed => Self::MediaFileRenamed,
             DomainEventType::MediaFileDeleted => Self::MediaFileDeleted,
+            DomainEventType::MediaFileRestored => Self::MediaFileRestored,
             DomainEventType::MediaFileUpgraded => Self::MediaFileUpgraded,
             DomainEventType::AcquisitionSearchCompleted => Self::AcquisitionSearchCompleted,
             DomainEventType::AcquisitionCandidateRejected => Self::AcquisitionCandidateRejected,
@@ -831,6 +834,7 @@ impl DomainEventTypeValue {
             Self::MediaFileAnalyzed => DomainEventType::MediaFileAnalyzed,
             Self::MediaFileRenamed => DomainEventType::MediaFileRenamed,
             Self::MediaFileDeleted => DomainEventType::MediaFileDeleted,
+            Self::MediaFileRestored => DomainEventType::MediaFileRestored,
             Self::MediaFileUpgraded => DomainEventType::MediaFileUpgraded,
             Self::AcquisitionSearchCompleted => DomainEventType::AcquisitionSearchCompleted,
             Self::AcquisitionCandidateRejected => DomainEventType::AcquisitionCandidateRejected,

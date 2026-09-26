@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain_events::{
-    DomainEventActor, deleted_media_update, new_title_domain_event, title_context_snapshot,
+    DomainEventActor, created_media_update, deleted_media_update, new_title_domain_event,
+    title_context_snapshot,
 };
 use crate::events::retention::{
     ACQUISITION_TELEMETRY_RETENTION_DAYS, OPERATIONAL_DOMAIN_EVENT_RETENTION_DAYS,
@@ -1513,57 +1514,224 @@ impl AppUseCase {
             );
         }
         if let Some(title_id) = context.manifest.title_id.as_deref() {
-            let restored_library_file = crate::LibraryFile {
-                path: restored_to.to_string_lossy().to_string(),
-                display_name: original_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                nfo_path: None,
-                size_bytes: tokio::fs::metadata(&restored_to)
-                    .await
-                    .ok()
-                    .and_then(|metadata| i64::try_from(metadata.len()).ok()),
-                source_signature_scheme: None,
-                source_signature_value: None,
-            };
-            match self.services.catalog.titles.get_by_id(title_id).await {
-                Ok(Some(title)) => {
-                    if let Err(error) = self
-                        .scan_title_library_with_discovered_files(
-                            actor,
-                            title,
-                            vec![restored_library_file],
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            title_id,
-                            restored_to = %restored_to.display(),
-                            "failed to scan title after restoring recycled file"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        title_id,
-                        restored_to = %restored_to.display(),
-                        "skipping restored file scan because the title no longer exists"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        title_id,
-                        restored_to = %restored_to.display(),
-                        "failed to load title before restored file scan"
-                    );
-                }
-            }
+            self.track_restored_recycled_file(
+                actor,
+                title_id,
+                &context.manifest,
+                &context.entry_dir,
+                &original_path,
+                &restored_to,
+            )
+            .await;
         }
         Ok(true)
+    }
+
+    /// Rescans a restored file's title so the file is tracked again, puts back
+    /// the acquisition-time columns the rescan cannot recompute, and records
+    /// the restore. Failures here are logged, not returned: the file is already
+    /// back on disk and the recycle entry is gone, so failing the restore would
+    /// only misreport what happened.
+    async fn track_restored_recycled_file(
+        &self,
+        actor: &scryer_domain::User,
+        title_id: &str,
+        manifest: &crate::recycle_bin::RecycleManifest,
+        entry_dir: &Path,
+        original_path: &Path,
+        restored_to: &Path,
+    ) {
+        let restored_path = restored_to.to_string_lossy().to_string();
+        let restored_library_file = crate::LibraryFile {
+            path: restored_path.clone(),
+            display_name: original_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            nfo_path: None,
+            size_bytes: tokio::fs::metadata(restored_to)
+                .await
+                .ok()
+                .and_then(|metadata| i64::try_from(metadata.len()).ok()),
+            source_signature_scheme: None,
+            source_signature_value: None,
+        };
+        let title = match self.services.catalog.titles.get_by_id(title_id).await {
+            Ok(Some(title)) => title,
+            Ok(None) => {
+                tracing::warn!(
+                    title_id,
+                    restored_to = %restored_to.display(),
+                    "skipping restored file scan because the title no longer exists"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id,
+                    restored_to = %restored_to.display(),
+                    "failed to load title before restored file scan"
+                );
+                return;
+            }
+        };
+        if let Err(error) = self
+            .scan_title_library_with_discovered_files(
+                actor,
+                title.clone(),
+                vec![restored_library_file],
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                title_id,
+                restored_to = %restored_to.display(),
+                "failed to scan title after restoring recycled file"
+            );
+        }
+
+        let restored_row = match self
+            .services
+            .library
+            .media_files
+            .get_media_file_by_path(&restored_path)
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    restored_to = %restored_to.display(),
+                    "failed to load the media row of a restored file"
+                );
+                None
+            }
+        };
+        if let Some(row) = restored_row.as_ref() {
+            self.restore_recycled_media_row_snapshot(manifest, row)
+                .await;
+        }
+        let episode_ids = match restored_row.as_ref() {
+            Some(row) => self.restored_file_episode_ids(&title.id, &row.id).await,
+            None => Vec::new(),
+        };
+
+        let recycle_entry_id = manifest.entry_id.clone().or_else(|| {
+            entry_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        });
+        let event = new_title_domain_event(
+            DomainEventActor::from(actor),
+            &title,
+            scryer_domain::DomainEventPayload::MediaFileRestored(
+                scryer_domain::MediaFileRestoredEventData {
+                    title: title_context_snapshot(&title),
+                    media_updates: vec![created_media_update(restored_path)],
+                    file_id: restored_row.map(|row| row.id),
+                    original_path: Some(manifest.original_path.clone()),
+                    recycle_entry_id,
+                    episode_ids,
+                },
+            ),
+        );
+        if let Err(error) = self.append_domain_event(event).await {
+            tracing::warn!(
+                title_id,
+                error = %error,
+                restored_to = %restored_to.display(),
+                "recycled file restored but the restore event could not be recorded"
+            );
+        }
+    }
+
+    /// Copies the recycled row's acquisition-time columns onto the row the
+    /// rescan recreated. The manifest snapshot is authoritative; entries
+    /// without one fall back to the original row when it still exists (a
+    /// location operation recycles a redundant source copy while its row
+    /// follows the file to the destination).
+    async fn restore_recycled_media_row_snapshot(
+        &self,
+        manifest: &crate::recycle_bin::RecycleManifest,
+        restored_row: &crate::TitleMediaFile,
+    ) {
+        let snapshot = match manifest.media_row.clone() {
+            Some(snapshot) => Some(snapshot),
+            None => match manifest.original_file_id.as_deref() {
+                Some(original_file_id) if original_file_id != restored_row.id => match self
+                    .services
+                    .library
+                    .media_files
+                    .get_media_file_by_id(original_file_id)
+                    .await
+                {
+                    Ok(original) => original
+                        .as_ref()
+                        .map(crate::recycle_bin::RecycledMediaRowSnapshot::from_media_file),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            original_file_id,
+                            "failed to load the original media row of a restored file"
+                        );
+                        None
+                    }
+                },
+                _ => None,
+            },
+        };
+        let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.is_empty()) else {
+            return;
+        };
+        if let Err(error) = self
+            .services
+            .library
+            .media_files
+            .restore_media_file_acquisition_metadata(&restored_row.id, &snapshot)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                file_id = %restored_row.id,
+                "failed to restore acquisition metadata onto a restored media row"
+            );
+        }
+    }
+
+    async fn restored_file_episode_ids(&self, title_id: &str, file_id: &str) -> Vec<String> {
+        match self
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(title_id)
+            .await
+        {
+            Ok(files) => {
+                let mut episode_ids = Vec::new();
+                for episode_id in files
+                    .into_iter()
+                    .filter(|file| file.id == file_id)
+                    .filter_map(|file| file.episode_id)
+                {
+                    if !episode_ids.contains(&episode_id) {
+                        episode_ids.push(episode_id);
+                    }
+                }
+                episode_ids
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id,
+                    file_id,
+                    "failed to load episode links of a restored file"
+                );
+                Vec::new()
+            }
+        }
     }
 
     async fn restore_recycled_item_replacing_existing(
@@ -1621,6 +1789,9 @@ impl AppUseCase {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: incumbent
+                .as_ref()
+                .map(crate::recycle_bin::RecycledMediaRowSnapshot::from_media_file),
         };
         let displaced = crate::recycle_bin::recycle_file_pending(
             &context.recycle_config,

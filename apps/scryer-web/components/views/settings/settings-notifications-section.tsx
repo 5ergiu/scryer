@@ -126,6 +126,7 @@ const NOTIFICATION_EVENT_LABEL_KEYS: Record<string, string> = {
   title_moved: "settings.notificationEvent.titleMoved",
   file_deleted: "settings.notificationEvent.fileDeleted",
   file_deleted_for_upgrade: "settings.notificationEvent.fileDeletedForUpgrade",
+  file_restored: "settings.notificationEvent.fileRestored",
   post_processing_completed: "settings.notificationEvent.postProcessingCompleted",
   subtitle_downloaded: "settings.notificationEvent.subtitleDownloaded",
   subtitle_search_failed: "settings.notificationEvent.subtitleSearchFailed",

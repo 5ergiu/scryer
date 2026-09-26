@@ -1931,6 +1931,46 @@ impl MediaFileRepository for MediaFileStore {
         .await?;
         Ok(affected > 0)
     }
+
+    async fn restore_media_file_acquisition_metadata(
+        &self,
+        file_id: &str,
+        snapshot: &scryer_application::recycle_bin::RecycledMediaRowSnapshot,
+    ) -> AppResult<bool> {
+        // COALESCE keeps whatever the rescan already established; the snapshot
+        // only fills columns the recreated row left empty.
+        let affected = execute_write(
+            &self.datastore,
+            "restore_media_file_acquisition_metadata",
+            "UPDATE media_files SET
+                acquisition_score = COALESCE(acquisition_score, {}),
+                scoring_log = COALESCE(scoring_log, {}),
+                announced_size_bytes = COALESCE(announced_size_bytes, {}),
+                scene_name = COALESCE(scene_name, {}),
+                release_group = COALESCE(release_group, {}),
+                indexer_source = COALESCE(indexer_source, {}),
+                grabbed_release_title = COALESCE(grabbed_release_title, {}),
+                grabbed_at = COALESCE(grabbed_at, {}),
+                edition = COALESCE(edition, {}),
+                release_hash = COALESCE(release_hash, {})
+             WHERE id = {}",
+            vec![
+                SqlArg::OptI32(snapshot.acquisition_score),
+                SqlArg::OptText(snapshot.scoring_log.clone()),
+                SqlArg::OptI64(snapshot.announced_size_bytes),
+                SqlArg::OptText(snapshot.scene_name.clone()),
+                SqlArg::OptText(snapshot.release_group.clone()),
+                SqlArg::OptText(snapshot.indexer_source.clone()),
+                SqlArg::OptText(snapshot.grabbed_release_title.clone()),
+                opt_timestamp_arg_for_datastore(&self.datastore, snapshot.grabbed_at.as_deref())?,
+                SqlArg::OptText(snapshot.edition.clone()),
+                SqlArg::OptText(snapshot.release_hash.clone()),
+                SqlArg::Text(file_id.to_string()),
+            ],
+        )
+        .await?;
+        Ok(affected > 0)
+    }
 }
 
 /// Paths per batched lookup. Windows spends two binds per path, so the chunk
@@ -4095,6 +4135,86 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_file(db);
+    }
+
+    #[tokio::test]
+    async fn restoring_acquisition_metadata_fills_only_empty_columns_of_one_row() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let services = SqliteServices::new(dir.path().join("restore.db").to_string_lossy())
+            .await
+            .expect("db should initialize");
+        let titles = title_store(&services);
+        let media_files = media_file_store(&services);
+        let title = make_test_series_title("title-restore-metadata");
+        titles
+            .create(title.clone())
+            .await
+            .expect("title should insert");
+        let restored_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: "/library/Brindlewick/Season 01/Brindlewick - S01E02.mkv".to_string(),
+                size_bytes: 1_000,
+                release_group: Some("SCANNED".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("restored row should insert");
+        let sibling_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: "/library/Brindlewick/Season 01/Brindlewick - S01E03.mkv".to_string(),
+                size_bytes: 1_000,
+                ..Default::default()
+            })
+            .await
+            .expect("sibling row should insert");
+
+        let snapshot = scryer_application::recycle_bin::RecycledMediaRowSnapshot {
+            acquisition_score: Some(777),
+            scoring_log: Some("invented scoring log".to_string()),
+            release_group: Some("SNAPSHOT".to_string()),
+            grabbed_at: Some("2031-02-03T04:05:06Z".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            media_files
+                .restore_media_file_acquisition_metadata(&restored_id, &snapshot)
+                .await
+                .expect("restore metadata")
+        );
+        assert!(
+            !media_files
+                .restore_media_file_acquisition_metadata("no-such-media-file", &snapshot)
+                .await
+                .expect("restore metadata on a missing row")
+        );
+
+        let restored = media_files
+            .get_media_file_by_id(&restored_id)
+            .await
+            .expect("load restored row")
+            .expect("restored row exists");
+        assert_eq!(restored.acquisition_score, Some(777));
+        assert_eq!(
+            restored.scoring_log.as_deref(),
+            Some("invented scoring log")
+        );
+        assert_eq!(
+            restored.release_group.as_deref(),
+            Some("SCANNED"),
+            "a value the rescan established wins over the snapshot"
+        );
+        assert!(restored.grabbed_at.is_some());
+
+        let sibling = media_files
+            .get_media_file_by_id(&sibling_id)
+            .await
+            .expect("load sibling row")
+            .expect("sibling row exists");
+        assert_eq!(sibling.acquisition_score, None);
+        assert_eq!(sibling.scoring_log, None);
+        assert_eq!(sibling.release_group, None);
     }
 
     #[tokio::test]
