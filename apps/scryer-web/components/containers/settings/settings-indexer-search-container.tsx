@@ -22,6 +22,7 @@ import {
   type InteractiveSearchKind,
 } from "@/lib/graphql/release-search";
 import type { IndexerRecord, Release } from "@/lib/types";
+import { earliestSearchExpiry, indexerSearchExpiresAt } from "@/lib/utils/indexer-search-expiry";
 import {
   downloadIndexerSearchArtifacts,
   type IndexerSearchArtifactTarget,
@@ -116,6 +117,41 @@ export function SettingsIndexerSearchContainer() {
   >(() => new Map());
 
   const searchAbortRef = React.useRef<AbortController | null>(null);
+  const deadlinesRef = React.useRef(new Map<string, number>());
+  const [expiresAt, setExpiresAt] = React.useState<number | null>(null);
+
+  const expireResults = React.useCallback(() => {
+    const deadline = earliestSearchExpiry(deadlinesRef.current);
+    if (deadline === null || Date.now() < deadline) return false;
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
+    deadlinesRef.current.clear();
+    setExpiresAt(null);
+    setReleases([]);
+    setIndexers([]);
+    setSearchIdByRowKey(new Map());
+    setSelectedRowKeys([]);
+    setExpandedRowKey(null);
+    setGrabTargets(null);
+    setSelectedFacets([]);
+    setSizeRangeGiB(null);
+    setSearching(false);
+    setHasSearched(false);
+    return true;
+  }, []);
+
+  React.useEffect(() => {
+    if (expiresAt === null) return;
+    const timer = window.setTimeout(expireResults, Math.max(0, expiresAt - Date.now()));
+    // Background tabs can suspend timers. Recheck before users resume work.
+    window.addEventListener("focus", expireResults);
+    document.addEventListener("visibilitychange", expireResults);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", expireResults);
+      document.removeEventListener("visibilitychange", expireResults);
+    };
+  }, [expireResults, expiresAt]);
 
   React.useEffect(() => {
     setSavedSearches(readSavedIndexerSearches());
@@ -171,6 +207,7 @@ export function SettingsIndexerSearchContainer() {
         return;
       }
       const isRetry = retryIndexerIds != null;
+      if (isRetry && expireResults()) return;
       const baseReleases = isRetry ? releases : [];
       const baseIndexers = isRetry ? indexers : [];
 
@@ -179,6 +216,9 @@ export function SettingsIndexerSearchContainer() {
       searchAbortRef.current = controller;
 
       if (!isRetry) {
+        deadlinesRef.current.clear();
+        setExpiresAt(null);
+        setGrabTargets(null);
         setReleases([]);
         setIndexers([]);
         setSelectedRowKeys([]);
@@ -209,6 +249,11 @@ export function SettingsIndexerSearchContainer() {
           {
             signal: controller.signal,
             onUpdate: (snapshot) => {
+              if (controller.signal.aborted || searchAbortRef.current !== controller) return;
+              if (expireResults()) return;
+              deadlinesRef.current.set(snapshot.searchId, indexerSearchExpiresAt(snapshot));
+              if (expireResults()) return;
+              setExpiresAt(earliestSearchExpiry(deadlinesRef.current));
               setNowMs(Date.now());
               setSearchIdByRowKey((current) => {
                 const next = new Map(current);
@@ -245,6 +290,7 @@ export function SettingsIndexerSearchContainer() {
       advanced.limit,
       categories,
       client,
+      expireResults,
       indexers,
       kind,
       query,
@@ -335,8 +381,9 @@ export function SettingsIndexerSearchContainer() {
   }, []);
 
   const handleGrab = React.useCallback((grabbed: Release[]) => {
+    if (expireResults()) return;
     setGrabTargets(grabbed.length > 0 ? grabbed : null);
-  }, []);
+  }, [expireResults]);
 
   // Rows stay in the table after a grab: the same release may legitimately be
   // grabbed again for a second title.
@@ -348,6 +395,7 @@ export function SettingsIndexerSearchContainer() {
   // success needs no toast — the browser's own download is the confirmation.
   const handleDownload = React.useCallback(
     (targets: Release[]) => {
+      if (expireResults()) return;
       const downloadable = downloadableReleases(targets);
       if (downloadable.length === 0) {
         return;
@@ -382,7 +430,7 @@ export function SettingsIndexerSearchContainer() {
         }
       })();
     },
-    [searchIdByRowKey, setGlobalStatus, t],
+    [expireResults, searchIdByRowKey, setGlobalStatus, t],
   );
 
   const facetGroups = React.useMemo(
