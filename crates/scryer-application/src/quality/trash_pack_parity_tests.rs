@@ -95,7 +95,7 @@ fn trash_pack_matches_native_numeric_golden() {
             &empty_decision,
             ReleaseRuntimeInfo {
                 size_bytes: case.size_bytes,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,

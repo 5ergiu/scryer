@@ -62,6 +62,7 @@ impl IndexerClient for MockIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -355,6 +356,7 @@ impl IndexerClient for TrackingIndexerClient {
                         candidate_token: None,
                         queue_scope: None,
                         coverage_scope: None,
+                        release_listing_json: None,
                     }
                 })
                 .collect(),
@@ -455,6 +457,7 @@ impl FixedReleaseIndexerClient {
             candidate_token: None,
             queue_scope: None,
             coverage_scope: None,
+            release_listing_json: None,
         }
     }
 
@@ -633,6 +636,7 @@ impl IndexerClient for SharedUrlMovieIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -742,6 +746,7 @@ impl IndexerClient for RecordingCategoriesIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -878,6 +883,7 @@ impl IndexerClient for MultiReleaseIndexerClient {
                     candidate_token: None,
                     queue_scope: None,
                     coverage_scope: None,
+                    release_listing_json: None,
                 })
                 .collect(),
             api_current: None,

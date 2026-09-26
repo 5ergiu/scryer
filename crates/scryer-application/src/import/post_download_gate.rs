@@ -633,6 +633,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     // Before anything touches the file, and on the calling thread (the override
     // is thread-local, and the real probe hands off to `spawn_blocking`).
@@ -907,6 +908,9 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         };
         let resolved_profile =
             resolved_import_profile(quality_profile, &required_audio_languages, &persona);
+        // The grab's frozen listing facts, aged at the grab instant.
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
         for scoped_analysis in &scoring_analyses {
             let scoped_file_doc = crate::user_rule_input::file_doc_from_analysis(scoped_analysis);
             let (rescored_for_rules, _) =
@@ -929,15 +933,10 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
                 &rescored_for_rules,
                 &resolved_profile,
                 &decision,
-                crate::user_rule_input::ReleaseRuntimeInfo {
-                    size_bytes: quality_size_bytes,
-                    published_at: None,
-                    thumbs_up: None,
-                    thumbs_down: None,
-                    is_password_protected: None,
-                    extra: None,
-                    indexer_languages: None,
-                },
+                crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                    quality_size_bytes,
+                    listing.as_ref(),
+                ),
                 crate::user_rule_input::RuleContextInfo {
                     title_id: Some(&title.id),
                     library_name: library_name.as_deref(),
@@ -1022,6 +1021,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     _is_filler: bool,
     _runtime_sample_validation: RuntimeSampleValidation,
     _disc_selection: Option<&scryer_media_types::DiscSelection>,
+    _release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     if scryer_domain::is_disc_image(path) {
         return ImportedFileGateDecision::Rejected(disc_review_rejection(
@@ -1199,6 +1199,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
         is_filler,
         runtime_sample_validation,
         disc_selection,
+        release_listing_json,
     )
     .await
     {
@@ -1713,6 +1714,7 @@ pub(crate) fn compute_post_download_acquisition_decision(
     size_bytes: i64,
     prior_rescore_changes: &[String],
     is_filler: bool,
+    listing: Option<crate::canonical_scoring::ListingFacts>,
 ) -> PostDownloadAcquisitionDecision {
     let (rescored, changes) = rescore_from_mediainfo(parsed, acceptance);
     let mut rescore_changes = prior_rescore_changes.to_vec();
@@ -1742,8 +1744,11 @@ pub(crate) fn compute_post_download_acquisition_decision(
         None,
     );
 
+    // The grab's frozen listing snapshot, anchored at the grab: the same
+    // listing facts the grab scored, and the same ones the row will carry.
     let mut evidence =
-        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes));
+        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes))
+            .with_listing(listing);
     if let Some(analysis) = acceptance.analysis.as_ref() {
         evidence = evidence.with_analysis(crate::canonical_scoring::AnalyzedFacts {
             analysis: analysis.clone(),
@@ -2342,7 +2347,7 @@ mod tests {
             &decision,
             crate::user_rule_input::ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,

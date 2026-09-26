@@ -1450,6 +1450,7 @@ async fn try_series_pack_for_title(
         title,
         search_title,
         target,
+        *now,
         availability,
         indexer_hosts,
         dl_snapshot,
@@ -1498,6 +1499,7 @@ async fn plan_series_pack_for_title(
     title: &Title,
     search_title: &Title,
     target: &crate::acquisition::targets::AcquisitionTarget,
+    now: DateTime<Utc>,
     availability: &crate::acquisition::convergence::SchedulerAvailability,
     indexer_hosts: &HashMap<String, String>,
     dl_snapshot: &DownloadClientSnapshot,
@@ -1627,6 +1629,7 @@ async fn plan_series_pack_for_title(
             session.options.search_cancellation(),
             Some(searchable.into_iter().collect()),
             intent.background_value(target),
+            now,
         )
         .await?;
 
@@ -1914,6 +1917,7 @@ async fn commit_season_pack_proposal(
             app.ensure_acquisition_scope_unpaused(&title.id, &submission_scope)
                 .await?;
 
+            let release_listing_json = ReleaseListingSnapshot::json_for_candidate(best_pack, *now);
             let canonical_result = app
                 .submit_canonical_download(CanonicalDownloadSubmissionIntent {
                     request: DownloadClientAddRequest {
@@ -1949,9 +1953,7 @@ async fn commit_season_pack_proposal(
                     request_signature: request_signature.clone(),
                     source_provider_name: Some(best_pack.source.clone()),
                     release_size_bytes: best_pack.size_bytes,
-                    release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
-                        best_pack, *now,
-                    ),
+                    release_listing_json: release_listing_json.clone(),
                 })
                 .await;
 
@@ -2045,6 +2047,7 @@ async fn commit_season_pack_proposal(
                         "grabbed_at": now.to_rfc3339(),
                         "season_pack": true,
                         "source_provider": best_pack.source.clone(),
+                        "release_listing_json": release_listing_json,
                     })
                     .to_string();
                     app.services
@@ -3535,6 +3538,7 @@ async fn process_single_target(
                             // The pack shares the target's recency lane (§D3);
                             // an interactive walk takes the operator lane.
                             intent.background_value(target),
+                            *now,
                         )
                         .await
                     {
@@ -3718,6 +3722,7 @@ async fn process_single_target(
             session.options.search_cancellation(),
             Some(uncovered),
             intent.background_value(target),
+            *now,
         )
         .await
     {
@@ -3920,6 +3925,7 @@ async fn process_single_target(
             candidate,
             candidate_score,
             serialize_decision_explanation(candidate),
+            *now,
         )
         .await;
     }
@@ -4040,6 +4046,7 @@ async fn process_single_target(
                     candidate,
                     candidate_score,
                     serialize_decision_explanation(candidate),
+                    *now,
                 )
                 .await;
                 // Keep walking the ranked list: a lower-scored candidate that
@@ -4139,7 +4146,7 @@ async fn process_single_target(
                         decision_code,
                         ReleaseAutoDecisionCode::ReleaseAgeUnknown
                     ),
-                    release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                    release_listing_json: ReleaseListingSnapshot::json_for_candidate(
                         candidate, *now,
                     ),
                 };
@@ -4654,6 +4661,7 @@ async fn commit_scope_grab(
         app.ensure_acquisition_scope_unpaused(&title.id, &submission_scope)
             .await?;
 
+        let release_listing_json = ReleaseListingSnapshot::json_for_candidate(candidate, *now);
         let canonical_result = app
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
                 request: DownloadClientAddRequest {
@@ -4690,9 +4698,7 @@ async fn commit_scope_grab(
                 request_signature: request_signature.clone(),
                 source_provider_name: Some(candidate.source.clone()),
                 release_size_bytes: candidate.size_bytes,
-                release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
-                    candidate, *now,
-                ),
+                release_listing_json: release_listing_json.clone(),
             })
             .await;
 
@@ -4756,6 +4762,7 @@ async fn commit_scope_grab(
                     "score": candidate_score,
                     "grabbed_at": now.to_rfc3339(),
                     "source_provider": candidate.source.clone(),
+                    "release_listing_json": release_listing_json,
                 })
                 .to_string();
                 let download_job_id = grab.job_id.clone();
@@ -6405,6 +6412,7 @@ mod task_runner_tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
     }
 

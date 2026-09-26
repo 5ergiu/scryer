@@ -1268,6 +1268,9 @@ impl AppUseCase {
             | SubmissionScope::Collection { .. } => None,
         };
 
+        // One instant for the whole pass: candidates are scored against it and
+        // whatever this call grabs or parks persists the listing captured at it.
+        let now = self.runtime.environment.now();
         let results = self
             .search_and_evaluate_subject(
                 &search_title,
@@ -1275,6 +1278,7 @@ impl AppUseCase {
                 &actor.id,
                 SearchMode::Auto,
                 tokio_util::sync::CancellationToken::new(),
+                now,
             )
             .await?;
         if let Some(candidate) = results
@@ -1287,7 +1291,14 @@ impl AppUseCase {
                 .as_ref()
                 .map(|decision| decision.preference_score)
                 .unwrap_or_default();
-            self.park_pending_release_for_review(wanted, &title, candidate, candidate_score, None)
+            self.park_pending_release_for_review(
+                wanted,
+                &title,
+                candidate,
+                candidate_score,
+                None,
+                now,
+            )
                 .await;
         }
         let Some(best_index) = results
@@ -1341,10 +1352,7 @@ impl AppUseCase {
         };
 
         let canonical_source = best.canonical_download_source();
-        let release_listing_json = ReleaseListingSnapshot::capture_json_from_search_result(
-            &best,
-            self.runtime.environment.now(),
-        );
+        let release_listing_json = ReleaseListingSnapshot::json_for_candidate(&best, now);
         self.queue_existing_title_download_with_listing(
             actor,
             title_id,
@@ -1477,6 +1485,7 @@ mod auto_eligibility_reason_tests {
             auto_eligible: Some(false),
             auto_decision_code: Some(code.to_string()),
             auto_decision_summary: Some(summary.to_string()),
+            release_listing_json: None,
         }
     }
 

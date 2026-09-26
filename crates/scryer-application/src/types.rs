@@ -2155,6 +2155,11 @@ pub struct IndexerSearchResult {
     pub auto_eligible: Option<bool>,
     pub auto_decision_code: Option<String>,
     pub auto_decision_summary: Option<String>,
+    /// The frozen listing snapshot this result was scored with, as persisted
+    /// JSON. Set by the scoring pass so a grab or park persists exactly the
+    /// snapshot that was scored; a replayed pending row arrives with its own.
+    /// `None` on a result no scoring pass has seen.
+    pub release_listing_json: Option<String>,
 }
 
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
@@ -2294,6 +2299,7 @@ mod canonical_download_source_tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
     }
 

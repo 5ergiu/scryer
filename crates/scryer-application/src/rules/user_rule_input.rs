@@ -1,15 +1,40 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::{ParsedReleaseMetadata, QualityProfile, QualityProfileDecision};
 
 pub(crate) struct ReleaseRuntimeInfo<'a> {
     pub size_bytes: Option<i64>,
-    pub published_at: Option<&'a str>,
+    /// Whole days from publish to the lane's anchor. The caller computes it
+    /// from the frozen listing snapshot; rule input never reads the clock.
+    pub age_days: Option<i64>,
     pub thumbs_up: Option<i32>,
     pub thumbs_down: Option<i32>,
     pub is_password_protected: Option<bool>,
-    pub extra: Option<&'a HashMap<String, serde_json::Value>>,
+    pub extra: Option<&'a BTreeMap<String, serde_json::Value>>,
     pub indexer_languages: Option<&'a [String]>,
+}
+
+impl<'a> ReleaseRuntimeInfo<'a> {
+    /// Listing inputs read only from a frozen listing snapshot, with release
+    /// age measured at the snapshot's anchor. Without a snapshot every listing
+    /// fact is unknown.
+    pub(crate) fn from_listing(
+        size_bytes: Option<i64>,
+        listing: Option<&'a crate::canonical_scoring::ListingFacts>,
+    ) -> Self {
+        let snapshot = listing.map(|facts| &facts.snapshot);
+        Self {
+            size_bytes,
+            age_days: listing.and_then(|facts| facts.snapshot.age_days(facts.anchor)),
+            thumbs_up: snapshot.and_then(|snapshot| snapshot.thumbs_up),
+            thumbs_down: snapshot.and_then(|snapshot| snapshot.thumbs_down),
+            is_password_protected: snapshot.and_then(|snapshot| snapshot.is_password_protected),
+            extra: snapshot.map(|snapshot| &snapshot.extra),
+            indexer_languages: snapshot
+                .map(|snapshot| snapshot.indexer_languages.as_slice())
+                .filter(|languages| !languages.is_empty()),
+        }
+    }
 }
 
 pub(crate) struct RuleContextInfo<'a> {
@@ -144,13 +169,18 @@ pub(crate) fn build_rule_input(
             year: parsed.year.and_then(|year| u32::try_from(year).ok()),
             parse_confidence: parsed.parse_confidence,
             size_bytes: release_runtime.size_bytes,
-            age_days: release_runtime
-                .published_at
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| (chrono::Utc::now() - value.with_timezone(&chrono::Utc)).num_days()),
+            age_days: release_runtime.age_days,
             thumbs_up: release_runtime.thumbs_up,
             thumbs_down: release_runtime.thumbs_down,
-            extra: release_runtime.extra.cloned().unwrap_or_default(),
+            extra: release_runtime
+                .extra
+                .map(|extra| {
+                    extra
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
         profile: ProfileDoc {
             id: profile.id.clone(),
@@ -493,7 +523,7 @@ mod tests {
                 &test_decision(),
                 ReleaseRuntimeInfo {
                     size_bytes: None,
-                    published_at: None,
+                    age_days: None,
                     thumbs_up: None,
                     thumbs_down: None,
                     is_password_protected: None,
@@ -600,7 +630,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: Some(1234),
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -655,7 +685,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -702,7 +732,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -745,7 +775,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -787,7 +817,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -831,7 +861,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -881,7 +911,7 @@ mod tests {
             &test_decision(),
             ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,

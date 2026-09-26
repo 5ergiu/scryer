@@ -31,7 +31,7 @@ use std::sync::{Mutex, PoisonError};
 /// Memo entries are keyed on it, so a build whose scoring changed never reuses
 /// a bar the previous scoring produced. (Entries do not outlive the process
 /// today, so this matters once anything persists them; keep it honest now.)
-pub(crate) const SCORER_VERSION: u32 = 1;
+pub(crate) const SCORER_VERSION: u32 = 2;
 
 /// Hard bound on entries. A full pass drops every entry it did not touch, so
 /// the memo normally holds one entry per live occupied scope; this is the
@@ -313,6 +313,31 @@ mod tests {
         let _current = memo.begin_pass();
         memo.finish_pass(stale);
         assert_eq!(memo.len(), 1);
+    }
+
+    /// A row's listing snapshot feeds its bar, so two rows that differ only in
+    /// the snapshot must not share a memoized bar.
+    #[test]
+    fn rows_differing_only_in_their_listing_have_different_keys() {
+        let row = |listing: Option<&str>| crate::TitleMediaFile {
+            id: "file-1".into(),
+            title_id: "title-1".into(),
+            file_path: "/media/Movie (2024)/Movie.mkv".into(),
+            size_bytes: 8,
+            scene_name: Some("Movie.2024.1080p.WEB-DL-GRP".into()),
+            release_listing_json: listing.map(str::to_string),
+            ..Default::default()
+        };
+        let digest = |file: &crate::TitleMediaFile| {
+            let mut hasher = blake3::Hasher::new();
+            hash_debug(&mut hasher, file);
+            finish_key(&hasher)
+        };
+        let fresh = r#"{"v":1,"thumbs_up":3,"captured_at":"2026-01-01T00:00:00Z"}"#;
+        let voted = r#"{"v":1,"thumbs_up":9,"captured_at":"2026-01-01T00:00:00Z"}"#;
+        assert_eq!(digest(&row(Some(fresh))), digest(&row(Some(fresh))));
+        assert_ne!(digest(&row(Some(fresh))), digest(&row(Some(voted))));
+        assert_ne!(digest(&row(None)), digest(&row(Some(fresh))));
     }
 
     #[test]

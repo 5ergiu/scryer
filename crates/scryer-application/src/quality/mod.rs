@@ -19,10 +19,8 @@ pub(crate) mod pack_test_support;
 pub(crate) mod profile;
 pub mod release_dedup;
 pub(crate) mod release_group_db;
-pub(crate) mod release_parser;
-// Grab lanes capture and persist snapshots; no scoring lane reads them yet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod release_listing;
+pub(crate) mod release_parser;
 pub(crate) mod scoring_weights;
 
 /// The hand-authored TRaSH ranking corpus. It spans the parser, the profile

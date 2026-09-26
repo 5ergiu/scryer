@@ -5821,6 +5821,7 @@ async fn every_scoped_search_records_coverage_including_interactive() {
             "interactive_search",
             SearchMode::Interactive,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await;
     let mut indexers: Vec<String> = coverage
@@ -5871,6 +5872,7 @@ async fn empty_response_from_fired_indexer_counts_as_coverage() {
             "background_acquisition",
             SearchMode::Auto,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await
         .expect("empty search succeeds");

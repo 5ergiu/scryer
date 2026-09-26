@@ -131,6 +131,20 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
 
 const STANDBY_LISTING_SNAPSHOT: &str = r#"{"v":1,"thumbs_up":4,"extra":{"synthetic_listing_attribute":"standby"},"captured_at":"2026-01-01T00:00:00Z"}"#;
 
+/// The standby row's frozen facts, stamped at the instant the row was grabbed.
+fn standby_listing_stamped_at(grabbed_at: &str) -> String {
+    use crate::quality::release_listing::ReleaseListingSnapshot;
+    let frozen = ReleaseListingSnapshot::from_json_str(STANDBY_LISTING_SNAPSHOT)
+        .expect("standby snapshot parses");
+    ReleaseListingSnapshot {
+        captured_at: chrono::DateTime::parse_from_rfc3339(grabbed_at)
+            .expect("grabbed_at is RFC 3339")
+            .with_timezone(&Utc),
+        ..frozen
+    }
+    .to_json_string()
+}
+
 #[tokio::test]
 async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -326,12 +340,28 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             && submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
             && submission.request_signature.as_deref() == Some(expected_signature.as_str())
     }));
-    assert!(
-        submissions.iter().any(|submission| {
+    let standby_row = pending_releases
+        .store
+        .lock()
+        .await
+        .iter()
+        .find(|release| release.release_title == "Standby.Release.1080p.WEB-DL")
+        .cloned()
+        .expect("standby row");
+    let standby_grabbed_at = standby_row
+        .grabbed_at
+        .as_deref()
+        .expect("the standby row records its grab");
+    let standby_submission = submissions
+        .iter()
+        .find(|submission| {
             submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
-                && submission.release_listing_json.as_deref() == Some(STANDBY_LISTING_SNAPSHOT)
-        }),
-        "the standby grab carries the snapshot frozen when the row was saved"
+        })
+        .expect("standby submission");
+    assert_eq!(
+        standby_submission.release_listing_json,
+        Some(standby_listing_stamped_at(standby_grabbed_at)),
+        "the standby grab carries the facts frozen when the row was saved, stamped at the grab"
     );
     let identities = download_submissions.identities.lock().await;
     assert!(
@@ -3548,6 +3578,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
                     candidate_token: None,
                     queue_scope: None,
                     coverage_scope: None,
+                    release_listing_json: None,
                 }],
                 api_current: None,
                 api_max: None,
@@ -5425,15 +5456,6 @@ async fn automatic_search_grab_persists_the_listing_it_was_offered() {
 
     let submissions = download_submissions.store.lock().await.clone();
     assert_eq!(submissions.len(), 1, "{submissions:?}");
-    let listing = submissions[0].release_listing_json.as_deref();
-    let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
-        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
-            &offered,
-            captured_at,
-        )
-    );
     let wanted = wanted_items
         .get_acquisition_scope_state_by_id(&wanted_id)
         .await
@@ -5446,10 +5468,19 @@ async fn automatic_search_grab_persists_the_listing_it_was_offered() {
             .expect("grabbed release recorded"),
     )
     .expect("grabbed release parses");
+    let grabbed_at = chrono::DateTime::parse_from_rfc3339(
+        grabbed["grabbed_at"].as_str().expect("grabbed_at recorded"),
+    )
+    .expect("grabbed_at is RFC 3339")
+    .with_timezone(&chrono::Utc);
+    // The lane scores and grabs at one instant, so the snapshot it persists is
+    // the offered listing captured exactly when the grab was recorded.
     assert_eq!(
-        grabbed["grabbed_at"].as_str().map(str::to_string),
-        Some(captured_at.to_rfc3339()),
-        "the snapshot is captured at the lane's grab time"
+        submissions[0].release_listing_json,
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered, grabbed_at,
+        ),
+        "the grab persists the snapshot it scored, captured at the lane's grab time"
     );
 }
 
@@ -5517,7 +5548,7 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, added_at,
         ),
-        "the hold freezes the listing it parked, captured at park time"
+        "the hold freezes the listing it scored and parked, captured at park time"
     );
     let delay_until = crate::quality_profile::parse_published_at(&row.delay_until)
         .expect("valid escalation deadline");
@@ -6969,6 +7000,7 @@ impl IndexerClient for PendingStatusAssertingIndexerClient {
                 candidate_token: None,
                 queue_scope: None,
                 coverage_scope: None,
+                release_listing_json: None,
             }],
             api_current: None,
             api_max: None,
@@ -7201,6 +7233,7 @@ async fn expired_pending_releases_break_equal_scores_by_size_fit_before_id() {
             &title,
             &release.release_title,
             release.release_size_bytes,
+            None,
             &[],
             &[],
             &context,
@@ -7654,10 +7687,19 @@ async fn expired_pending_release_grabs_with_its_frozen_listing_snapshot() {
 
     let submissions = download_submissions.store.lock().await.clone();
     assert_eq!(submissions.len(), 1, "{submissions:?}");
+    let promoted = pending_releases
+        .get_pending_release(&pending.id)
+        .await
+        .expect("load pending release")
+        .expect("pending release exists");
+    let promoted_at = promoted
+        .grabbed_at
+        .as_deref()
+        .expect("promotion records its grab instant");
     assert_eq!(
-        submissions[0].release_listing_json.as_deref(),
-        Some(STANDBY_LISTING_SNAPSHOT),
-        "promotion submits the snapshot frozen at park time, not a re-capture"
+        submissions[0].release_listing_json,
+        Some(standby_listing_stamped_at(promoted_at)),
+        "promotion keeps every fact frozen at park time and stamps it at the promotion instant"
     );
 }
 
@@ -8096,7 +8138,7 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, added_at,
         ),
-        "the RSS hold freezes the listing it parked, captured at park time"
+        "the RSS hold freezes the listing it scored and parked, captured at park time"
     );
 }
 
@@ -11285,6 +11327,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                         candidate_token: None,
                         queue_scope: None,
                         coverage_scope: None,
+                        release_listing_json: None,
                     }
                 })
                 .collect(),
@@ -13176,6 +13219,7 @@ async fn automatic_search_refuses_pack_coverage_of_a_paused_sibling_without_hidi
             &test_admin_user().id,
             SearchMode::Auto,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await
         .unwrap();
@@ -13241,6 +13285,7 @@ async fn automatic_search_refuses_pack_coverage_of_a_paused_sibling_without_hidi
             &test_admin_user().id,
             SearchMode::Auto,
             tokio_util::sync::CancellationToken::new(),
+            app.runtime.environment.now(),
         )
         .await
         .unwrap();

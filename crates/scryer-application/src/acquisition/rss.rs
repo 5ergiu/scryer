@@ -229,8 +229,9 @@ fn rss_replayed_pending<'a>(
 }
 
 /// The listing snapshot a parked RSS row carries. A fresh listing is a new
-/// sighting and is captured now; a replayed pending row is not, so it keeps
-/// the row's own frozen snapshot (`None` leaves the stored value untouched).
+/// sighting and parks the snapshot it was scored with; a replayed pending row
+/// is not, so it keeps the row's own frozen snapshot (`None` leaves the stored
+/// value untouched).
 fn rss_park_listing_json(
     candidate: &IndexerSearchResult,
     matched_pending: Option<&PendingRelease>,
@@ -239,22 +240,27 @@ fn rss_park_listing_json(
     if rss_candidate_is_reconstructed_pending(candidate) {
         matched_pending.and_then(|pending| pending.release_listing_json.clone())
     } else {
-        ReleaseListingSnapshot::capture_json_from_search_result(candidate, now)
+        ReleaseListingSnapshot::json_for_candidate(candidate, now)
     }
 }
 
-/// The listing snapshot an RSS grab submits. A replayed pending row grabs
-/// with the row's snapshot, as a delay-expiry promotion of that row would.
+/// The listing snapshot an RSS grab submits: the one the candidate was scored
+/// with. A replayed pending row was scored with the row's frozen facts stamped
+/// at the scoring instant, which is exactly what a delay-expiry promotion of
+/// that row persists. A replay no scoring pass has seen falls back to that
+/// promotion snapshot.
 fn rss_grab_listing_json(
     candidate: &IndexerSearchResult,
     matched_pending: Option<&PendingRelease>,
     now: DateTime<Utc>,
 ) -> Option<String> {
     if rss_candidate_is_reconstructed_pending(candidate) {
-        matched_pending
-            .and_then(|pending| ReleaseListingSnapshot::json_for_pending_release(pending, now))
+        candidate.release_listing_json.clone().or_else(|| {
+            matched_pending
+                .and_then(|pending| ReleaseListingSnapshot::json_for_pending_release(pending, now))
+        })
     } else {
-        ReleaseListingSnapshot::capture_json_from_search_result(candidate, now)
+        ReleaseListingSnapshot::json_for_candidate(candidate, now)
     }
 }
 
@@ -336,6 +342,7 @@ fn pending_release_as_rss_result(pending: &PendingRelease) -> IndexerSearchResul
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
@@ -1308,7 +1315,11 @@ impl AppUseCase {
         let pending_count = active_pending.len();
         for pending in active_pending {
             let title_id = pending.title_id.clone();
-            let result = pending_release_as_rss_result(&pending);
+            let mut result = pending_release_as_rss_result(&pending);
+            // A replay is scored with the row's frozen listing facts, never
+            // with the synthetic listing rebuilt from the row.
+            result.release_listing_json =
+                ReleaseListingSnapshot::json_for_pending_release(&pending, now);
             if matched_identities
                 .entry(title_id.clone())
                 .or_default()
@@ -1666,6 +1677,7 @@ impl AppUseCase {
                 None,
                 None,
                 None,
+                *now,
             )
             .await
         {
@@ -1882,6 +1894,7 @@ impl AppUseCase {
                         .as_deref()
                         .and_then(|value| value.parse::<u32>().ok()),
                     absolute_episode,
+                    *now,
                 )
                 .await
             {
@@ -2064,6 +2077,7 @@ impl AppUseCase {
                 season,
                 None,
                 None,
+                *now,
             )
             .await
         {
@@ -2238,6 +2252,7 @@ impl AppUseCase {
                     subject.season,
                     subject.episode,
                     subject.absolute_episode,
+                    *now,
                 )
                 .await
             {
@@ -2292,6 +2307,7 @@ impl AppUseCase {
         season: Option<u32>,
         episode: Option<u32>,
         absolute_episode: Option<u32>,
+        now: DateTime<Utc>,
     ) -> AppResult<Vec<IndexerSearchResult>> {
         let quality_profile_lookup = crate::app_usecase_discovery::QualityProfileLookup {
             title_tags,
@@ -2316,6 +2332,7 @@ impl AppUseCase {
             season,
             episode,
             absolute_episode,
+            now,
         )
         .await
     }
@@ -2990,7 +3007,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: Some(best.source.clone()),
                 release_size_bytes: best.size_bytes,
-                release_listing_json,
+                release_listing_json: release_listing_json.clone(),
             })
             .await;
 
@@ -3067,6 +3084,7 @@ impl AppUseCase {
                     "score": candidate_score,
                     "grabbed_at": now.to_rfc3339(),
                     "source": if best.extra.contains_key("external_announcement") { "external_release" } else { "rss_sync" },
+                    "release_listing_json": release_listing_json,
                 })
                 .to_string();
 
@@ -3520,6 +3538,7 @@ mod tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         };
         let parse_context = crate::release_parser::build_release_parse_context_for_title(
             &title,
@@ -3527,6 +3546,7 @@ mod tests {
             Some("movie"),
         );
         let profile = app.resolve_quality_profile_for_title(&title).await.unwrap();
+        let rss_now = Utc::now();
         for rescued in [false, true] {
             let mut policies = vec![scryer_rules::UserPolicy {
                 id: "pack".into(),
@@ -3561,6 +3581,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    rss_now,
                 )
                 .await
                 .unwrap();
@@ -3575,6 +3596,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    rss_now,
                 )
                 .await
                 .unwrap();
@@ -3584,6 +3606,7 @@ mod tests {
             let parked = crate::quality::canonical_context::score_parked_release_title(
                 &title,
                 raw,
+                None,
                 None,
                 &[],
                 &[],
@@ -5046,15 +5069,47 @@ mod tests {
             fresh_capture
         );
 
-        // A replayed row keeps the snapshot frozen when it was parked.
+        // A replayed row re-parks with the snapshot frozen when it was parked,
+        // and grabs with the same facts stamped at the grab, as a promotion does.
+        let frozen_at_grab = ReleaseListingSnapshot::json_for_pending_release(&with_snapshot, now);
+        assert_eq!(
+            ReleaseListingSnapshot::from_json_str(frozen_at_grab.as_deref().unwrap()),
+            Some(ReleaseListingSnapshot {
+                captured_at: now,
+                ..ReleaseListingSnapshot::from_json_str(frozen).unwrap()
+            })
+        );
         let replayed = pending_release_as_rss_result(&with_snapshot);
         assert_eq!(
             rss_park_listing_json(&replayed, Some(&with_snapshot), now).as_deref(),
             Some(frozen)
         );
         assert_eq!(
-            rss_grab_listing_json(&replayed, Some(&with_snapshot), now).as_deref(),
-            Some(frozen)
+            rss_grab_listing_json(&replayed, Some(&with_snapshot), now),
+            frozen_at_grab
+        );
+
+        // Once scored, a candidate grabs and parks with exactly the snapshot
+        // its scoring pass attached.
+        let scored_at = now - chrono::Duration::minutes(5);
+        let mut scored_fresh = fresh.clone();
+        scored_fresh.release_listing_json =
+            Some(ReleaseListingSnapshot::for_scoring(&scored_fresh, scored_at).to_json_string());
+        assert_eq!(
+            rss_grab_listing_json(&scored_fresh, Some(&with_snapshot), now),
+            scored_fresh.release_listing_json
+        );
+        assert_eq!(
+            rss_park_listing_json(&scored_fresh, Some(&with_snapshot), now),
+            scored_fresh.release_listing_json
+        );
+        let mut scored_replay = replayed.clone();
+        scored_replay.release_listing_json = frozen_at_grab.clone();
+        scored_replay.release_listing_json =
+            Some(ReleaseListingSnapshot::for_scoring(&scored_replay, scored_at).to_json_string());
+        assert_eq!(
+            rss_grab_listing_json(&scored_replay, Some(&with_snapshot), now),
+            scored_replay.release_listing_json
         );
 
         // A replayed row saved before snapshots existed: re-parking leaves the
@@ -5085,10 +5140,7 @@ mod tests {
             found.map(|pending| pending.id.as_str()),
             Some("pending-listing")
         );
-        assert_eq!(
-            rss_grab_listing_json(&replayed, found, now).as_deref(),
-            Some(frozen)
-        );
+        assert_eq!(rss_grab_listing_json(&replayed, found, now), frozen_at_grab);
         assert!(rss_replayed_pending(&replayed, None, &[]).is_none());
         assert_eq!(
             rss_replayed_pending(&fresh, Some(&legacy), &title_pending).map(|p| p.id.as_str()),

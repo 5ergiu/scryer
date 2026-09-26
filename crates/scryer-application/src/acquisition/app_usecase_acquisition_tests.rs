@@ -135,6 +135,7 @@ fn test_search_result_with_decision(
         auto_eligible: Some(decision_code == "eligible"),
         auto_decision_code: Some(decision_code.to_string()),
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
