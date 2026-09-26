@@ -637,6 +637,7 @@ async fn list_download_queue_reads_cached_observed_items_without_client_calls() 
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record stub submission");
@@ -834,6 +835,7 @@ async fn list_download_queue_for_title_filters_the_shared_cache() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -1489,6 +1491,7 @@ async fn synthetic_download_import_rows_are_enriched_from_submissions_before_per
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record download submission");
@@ -1581,6 +1584,7 @@ async fn find_download_queue_scope_ignores_stale_submission_titles() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record stale submission");
@@ -1629,6 +1633,7 @@ async fn find_download_queue_scope_returns_orphan_without_title_lookup() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record orphan submission");
@@ -1695,6 +1700,7 @@ async fn manual_import_source_allows_orphan_submission_but_rejects_managed_reass
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record observed submission");
@@ -1716,6 +1722,7 @@ async fn manual_import_source_allows_orphan_submission_but_rejects_managed_reass
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record managed submission");
@@ -1867,6 +1874,7 @@ async fn manual_import_source_uses_retained_tracked_source_when_live_history_is_
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("record orphan submission");
@@ -2116,6 +2124,7 @@ async fn queued_manual_import_reports_prior_automatic_import_after_source_cleanu
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -2282,6 +2291,7 @@ async fn tracked_title_assignment_fixture() -> TrackedTitleAssignmentFixture {
         release_size_bytes: None,
         request_signature: None,
         scope: SubmissionScope::Title,
+        release_listing_json: None,
     };
 
     TrackedTitleAssignmentFixture {
@@ -2345,6 +2355,8 @@ async fn assign_tracked_download_title_serializes_submission_and_runtime_assignm
     assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
 }
 
+const GRAB_TIME_LISTING: &str = r#"{"v":1,"thumbs_up":4,"captured_at":"2026-08-01T00:00:00Z"}"#;
+
 #[tokio::test]
 async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_honors_scope() {
     // A reassignment must not destroy the indexer release name the grab
@@ -2355,6 +2367,7 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
     let mut grabbed = fixture.submission.clone();
     grabbed.title_id = "some-other-title".to_string();
     grabbed.source_title = Some("Grabbed.Release.2026.1080p.WEB-DL-GRP".to_string());
+    grabbed.release_listing_json = Some(GRAB_TIME_LISTING.to_string());
     fixture
         .submissions
         .record_submission(grabbed)
@@ -2391,6 +2404,11 @@ async fn assign_tracked_download_title_preserves_the_grab_time_release_name_and_
         row.source_title.as_deref(),
         Some("Grabbed.Release.2026.1080p.WEB-DL-GRP"),
         "the grab-time release name survives the reassignment"
+    );
+    assert_eq!(
+        row.release_listing_json.as_deref(),
+        Some(GRAB_TIME_LISTING),
+        "the grab-time listing snapshot survives the reassignment"
     );
     assert_eq!(
         row.scope,
@@ -2954,6 +2972,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             submission_identity,
             None,
@@ -3152,6 +3171,7 @@ async fn external_failed_snapshot_dispatches_failure_worker_without_completed_ro
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed download submission");
@@ -4836,6 +4856,7 @@ async fn import_completed_download_ignores_stale_item_id_import_when_request_ide
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:fresh".to_string()),
@@ -7259,6 +7280,7 @@ async fn record_pack_identity_submission(
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         })
         .await
         .expect("record series submission");
@@ -9275,6 +9297,7 @@ async fn an_imported_file_remembers_the_announced_size_it_was_scored_on() {
                 scope: SubmissionScope::Episode {
                     episode_id: episode.id.clone(),
                 },
+                release_listing_json: None,
             })
             .await
             .expect("record series submission");
@@ -9526,6 +9549,7 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record additional series movie submission");
@@ -9679,6 +9703,7 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record additional movie submission");
@@ -9870,6 +9895,7 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
             scope: SubmissionScope::Episode {
                 episode_id: episode.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record additional episode submission");
@@ -10218,6 +10244,7 @@ async fn completed_import_uses_durable_scope_over_stale_origin_parameters() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed durable submission");
@@ -11008,6 +11035,7 @@ async fn legacy_queue_delete_ends_binding_that_predates_the_command() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record matching submission");
@@ -11502,6 +11530,7 @@ async fn ignore_tracked_download_uses_durable_fallback_idempotently() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:evicted-job-1".to_string()),
@@ -11605,6 +11634,7 @@ async fn ignoring_a_download_retires_memoized_observations_only_when_the_state_m
                 release_size_bytes: None,
                 request_signature: None,
                 scope: crate::SubmissionScope::Title,
+                release_listing_json: None,
             },
             crate::DownloadSubmissionIdentity {
                 download_id: Some("scryer-download:generation-job-1".to_string()),
@@ -11692,6 +11722,7 @@ async fn finalize_ignore_preserves_an_imported_outcome() {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             },
             identity.clone(),
             None,
@@ -12130,6 +12161,7 @@ async fn disposition_fixture(name: &str, release_title: &str) -> DispositionFixt
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record submission");
@@ -12951,6 +12983,7 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record series movie submission");
@@ -13319,6 +13352,7 @@ score_entry["operator_refuses_this_file"] := -10000 if {
             scope: SubmissionScope::SeriesMovie {
                 series_movie_link_id: link.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record series movie submission");
@@ -15670,6 +15704,7 @@ async fn a_job_absent_from_an_authoritative_listing_is_dropped_not_failed() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");
@@ -15748,6 +15783,7 @@ async fn an_already_imported_job_keeps_its_outcome_when_it_leaves_the_client() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");

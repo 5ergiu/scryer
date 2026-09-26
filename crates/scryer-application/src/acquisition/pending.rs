@@ -11,6 +11,7 @@ use crate::acquisition::submission::{
     record_grab_submission_outcome,
 };
 use crate::delay_profile::DelayProfile;
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use crate::types::{
     PendingRelease, PendingReleaseObservation, PendingReleaseRole, PendingReleaseStatus,
 };
@@ -149,6 +150,8 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            // Test-only helper built from loose fields: no listing in hand.
+            release_listing_json: None,
         };
 
         match self
@@ -343,6 +346,9 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                candidate, now,
+            ),
         };
 
         match self
@@ -1481,6 +1487,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: pr.indexer_source.clone(),
                 release_size_bytes: pr.release_size_bytes,
+                release_listing_json: ReleaseListingSnapshot::json_for_pending_release(pr, *now),
             })
             .await;
 

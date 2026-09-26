@@ -129,6 +129,8 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
     );
 }
 
+const STANDBY_LISTING_SNAPSHOT: &str = r#"{"v":1,"thumbs_up":4,"extra":{"synthetic_listing_attribute":"standby"},"captured_at":"2026-01-01T00:00:00Z"}"#;
+
 #[tokio::test]
 async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -235,6 +237,7 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: Some(STANDBY_LISTING_SNAPSHOT.to_string()),
         })
         .await
         .expect("seed standby");
@@ -257,6 +260,7 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -322,6 +326,13 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             && submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
             && submission.request_signature.as_deref() == Some(expected_signature.as_str())
     }));
+    assert!(
+        submissions.iter().any(|submission| {
+            submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
+                && submission.release_listing_json.as_deref() == Some(STANDBY_LISTING_SNAPSHOT)
+        }),
+        "the standby grab carries the snapshot frozen when the row was saved"
+    );
     let identities = download_submissions.identities.lock().await;
     assert!(
         identities
@@ -432,6 +443,7 @@ async fn a_gone_standby_link_expires_and_grabs_the_next_row_in_the_same_walk() {
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     let gone = standby("GONE", 200);
     let usable = standby("USABLE", 100);
@@ -870,6 +882,7 @@ async fn acquisition_failure_fallback_skips_failed_submission_for_another_episod
                 scope: SubmissionScope::Episode {
                     episode_id: episode_id.to_string(),
                 },
+                release_listing_json: None,
             })
             .await
             .expect("record episode submission");
@@ -1030,6 +1043,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed standby");
@@ -1052,6 +1066,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1281,6 +1296,7 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1445,6 +1461,7 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1656,6 +1673,7 @@ async fn operator_client_failure_is_recorded_without_reopening_scope() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1764,6 +1782,7 @@ async fn process_download_failure_dedupes_same_release_title_across_client_item_
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             })
             .await
             .expect("record failed submission");
@@ -1881,6 +1900,7 @@ async fn tracked_download_failure_prefers_tracked_source_title_for_blocklist_ide
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -2241,6 +2261,7 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed season pack submission");
@@ -2531,6 +2552,7 @@ async fn episode_set_pack_failure_reopens_only_its_covered_wanted_items() {
                     .map(|(_, episode_id)| episode_id.clone())
                     .collect(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed episode-set submission");
@@ -2662,6 +2684,7 @@ async fn acquisition_cycle_looks_up_submissions_once_per_title_for_grabbed_items
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record shared submission");
@@ -2846,6 +2869,7 @@ async fn acquisition_cycle_records_failed_collection_submission_once() {
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed collection submission");
@@ -3114,6 +3138,7 @@ async fn acquisition_cycle_episode_submission_blocks_only_matching_episode() {
             scope: SubmissionScope::Episode {
                 episode_id: episode_one.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record active episode submission");
@@ -3348,6 +3373,7 @@ async fn acquisition_cycle_collection_submission_blocks_same_season_only() {
             scope: SubmissionScope::Collection {
                 collection_id: season_one.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record active season pack submission");
@@ -3900,6 +3926,7 @@ fn series_pack_anchor_standby(
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     }
 }
 
@@ -4081,6 +4108,7 @@ async fn in_flight_series_episodes_count_as_owned_for_the_pack_ratio_gate() {
         scope: SubmissionScope::EpisodeSet {
             episode_ids: season_one_episode_ids,
         },
+        release_listing_json: None,
     };
     let active_identity = ClientJobLocator::from_submission(&active_submission);
     app.services
@@ -5234,6 +5262,7 @@ async fn acquisition_cycle_skips_recently_failed_season_pack_from_submission_rel
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed season pack submission");
@@ -5373,6 +5402,58 @@ async fn acquisition_cycle_submit_unavailable_records_pending_without_failed_sig
 }
 
 #[tokio::test]
+async fn automatic_search_grab_persists_the_listing_it_was_offered() {
+    let release_title = "Listing.Movie.2024.1080p.WEB-DL-GRP";
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer = FixedReleaseIndexerClient::new(release_title)
+        .with_published_at("2024-01-02T03:04:05Z")
+        .with_listing_facts();
+    let offered = indexer.release();
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client.clone(),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        Arc::new(indexer),
+    );
+    let (_, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Listing Movie", 2024).await;
+
+    app.run_background_acquisition_cycle_once().await;
+
+    let submissions = download_submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    let listing = submissions[0].release_listing_json.as_deref();
+    let captured_at = crate::quality::release_listing::captured_at_of(listing);
+    assert_eq!(
+        listing.map(str::to_string),
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered,
+            captured_at,
+        )
+    );
+    let wanted = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted_id)
+        .await
+        .expect("load wanted")
+        .expect("wanted exists");
+    let grabbed: serde_json::Value = serde_json::from_str(
+        wanted
+            .grabbed_release
+            .as_deref()
+            .expect("grabbed release recorded"),
+    )
+    .expect("grabbed release parses");
+    assert_eq!(
+        grabbed["grabbed_at"].as_str().map(str::to_string),
+        Some(captured_at.to_rfc3339()),
+        "the snapshot is captured at the lane's grab time"
+    );
+}
+
+#[tokio::test]
 async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     let release_title = "Unknown.Age.Movie.2024.1080p.WEB-DL-GRP";
     let download_client = Arc::new(StubDownloadClient::default());
@@ -5381,6 +5462,7 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     let indexer_client = Arc::new(
         FixedReleaseIndexerClient::new(release_title).with_published_at("not-a-timestamp"),
     );
+    let offered = indexer_client.release();
     let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
         download_client.clone(),
         Arc::new(TrackingDownloadSubmissionRepo::default()),
@@ -5430,6 +5512,13 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     );
     let added_at =
         crate::quality_profile::parse_published_at(&row.added_at).expect("valid first-seen time");
+    assert_eq!(
+        row.release_listing_json,
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered, added_at,
+        ),
+        "the hold freezes the listing it parked, captured at park time"
+    );
     let delay_until = crate::quality_profile::parse_published_at(&row.delay_until)
         .expect("valid escalation deadline");
     assert_eq!(delay_until, added_at + chrono::Duration::minutes(120));
@@ -6545,6 +6634,7 @@ async fn pending_release_submit_unavailable_records_pending_without_failed_signa
             role: crate::types::PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed pending release");
@@ -7531,6 +7621,47 @@ async fn automatic_promotion_rejects_a_pending_release_below_the_current_minimum
 }
 
 #[tokio::test]
+async fn expired_pending_release_grabs_with_its_frozen_listing_snapshot() {
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking(
+        Arc::new(StubDownloadClient::default()),
+        download_submissions.clone(),
+        pending_releases.clone(),
+        wanted_items.clone(),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Frozen Listing", 2024).await;
+    let mut pending = pending_movie_release(
+        &wanted_id,
+        &title,
+        "Frozen.Listing.2024.1080p.WEB-DL-GRP",
+        PendingReleaseStatus::Waiting,
+    );
+    pending.release_listing_json = Some(STANDBY_LISTING_SNAPSHOT.to_string());
+    pending_releases
+        .insert_pending_release(&pending)
+        .await
+        .expect("seed pending release");
+
+    assert_eq!(
+        app.process_expired_pending_releases()
+            .await
+            .expect("process expired pending releases"),
+        1
+    );
+
+    let submissions = download_submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0].release_listing_json.as_deref(),
+        Some(STANDBY_LISTING_SNAPSHOT),
+        "promotion submits the snapshot frozen at park time, not a re-capture"
+    );
+}
+
+#[tokio::test]
 async fn automatic_promotion_grabs_a_pending_release_at_the_current_minimum_seeders() {
     let (_app, _user, pending_releases, download_submissions, pending_id, grabbed) =
         promote_pending_torrent_with_seeders("Swarm.Exact.2024.1080p.WEB-DL-GRP", Some(5), "5")
@@ -7546,7 +7677,27 @@ async fn automatic_promotion_grabs_a_pending_release_at_the_current_minimum_seed
             .status,
         PendingReleaseStatus::Grabbed
     );
-    assert!(!download_submissions.store.lock().await.is_empty());
+    let row = pending_releases
+        .get_pending_release(&pending_id)
+        .await
+        .expect("load pending release")
+        .expect("pending release exists");
+    let submissions = download_submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    // A row saved before snapshots were stored grabs with a best-effort
+    // capture from the row itself.
+    let listing = submissions[0].release_listing_json.as_deref();
+    let captured_at = crate::quality::release_listing::captured_at_of(listing);
+    assert_eq!(
+        listing.map(str::to_string),
+        Some(
+            crate::quality::release_listing::ReleaseListingSnapshot::capture_from_pending_release(
+                &row,
+                captured_at,
+            )
+            .to_json_string()
+        )
+    );
 }
 
 #[tokio::test]
@@ -7728,6 +7879,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     // Tried first (the test repo lists standby rows in insertion order).
     let dead = standby("Standby.Dead.Swarm.1080p.WEB-DL", 200, Some(1));
@@ -7777,6 +7929,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
             info_hash: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -7891,6 +8044,7 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
     let indexer_client = Arc::new(
         FixedReleaseIndexerClient::new(release_title).with_published_at("not-a-timestamp"),
     );
+    let offered = indexer_client.release();
     let (app, user, _release_attempts) =
         bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
             Arc::new(StubDownloadClient::default()),
@@ -7934,6 +8088,15 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
     assert_eq!(
         row.last_decision_code.as_deref(),
         Some("release_age_unknown")
+    );
+    let added_at =
+        crate::quality_profile::parse_published_at(&row.added_at).expect("valid first-seen time");
+    assert_eq!(
+        row.release_listing_json,
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered, added_at,
+        ),
+        "the RSS hold freezes the listing it parked, captured at park time"
     );
 }
 
@@ -8612,6 +8775,7 @@ async fn acquisition_cycle_title_submission_still_blocks_movie_search() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record active movie submission");
@@ -9238,6 +9402,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed standby");
@@ -9260,6 +9425,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -9379,6 +9545,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed stale standby");
@@ -9676,6 +9843,7 @@ async fn acquisition_cycle_drops_saved_results_of_a_completed_scope() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed stale standby");
@@ -10228,7 +10396,9 @@ async fn rss_grabs_missing_movie_with_no_wanted_row_and_creates_state_row() {
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
-    let indexer_client = Arc::new(FixedReleaseIndexerClient::new(release_title));
+    let indexer_client =
+        Arc::new(FixedReleaseIndexerClient::new(release_title).with_listing_facts());
+    let offered = indexer_client.release();
     let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
         download_client.clone(),
         download_submissions.clone(),
@@ -10289,6 +10459,64 @@ async fn rss_grabs_missing_movie_with_no_wanted_row_and_creates_state_row() {
             .any(|submission| submission.title_id == title.id
                 && submission.scope == SubmissionScope::Title),
         "movie grab records a title-scope submission"
+    );
+    let submissions = download_submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    let listing = submissions[0].release_listing_json.as_deref();
+    let captured_at = crate::quality::release_listing::captured_at_of(listing);
+    assert_eq!(
+        listing.map(str::to_string),
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered,
+            captured_at,
+        ),
+        "the RSS grab persists the listing it was offered"
+    );
+}
+
+#[tokio::test]
+async fn manual_best_release_grab_persists_the_listing_it_was_offered() {
+    let release_title = "Lantern.Meridian.2024.1080p.WEB-DL-GRP";
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client =
+        Arc::new(FixedReleaseIndexerClient::new(release_title).with_listing_facts());
+    let offered = indexer_client.release();
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+        wanted_items.clone(),
+        indexer_client,
+    );
+    let (title, _wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Lantern Meridian", 2024)
+            .await;
+
+    let outcome = app
+        .queue_best_release(
+            &user,
+            &title.id,
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("queue best release");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+
+    let submissions = download_submissions.store.lock().await.clone();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    let listing = submissions[0].release_listing_json.as_deref();
+    let captured_at = crate::quality::release_listing::captured_at_of(listing);
+    assert_eq!(
+        listing.map(str::to_string),
+        crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
+            &offered,
+            captured_at,
+        ),
+        "the manual grab persists the listing it was offered"
     );
 }
 
@@ -11301,6 +11529,18 @@ async fn queue_best_release_parks_ambiguous_candidate_while_queuing_eligible_rel
         assert_eq!(parked[0].status, PendingReleaseStatus::NeedsReview);
         assert_eq!(parked[0].wanted_item_id, wanted_id);
         assert_eq!(parked[0].release_title, ambiguous);
+        let parked_listing = parked[0].release_listing_json.as_deref();
+        assert!(
+            parked_listing.is_some(),
+            "the review park keeps its listing"
+        );
+        assert_eq!(
+            crate::quality::release_listing::captured_at_of(parked_listing),
+            chrono::DateTime::parse_from_rfc3339(&parked[0].added_at)
+                .expect("added_at")
+                .with_timezone(&chrono::Utc),
+            "the listing is captured when the row is parked"
+        );
         assert_eq!(
             download_client
                 .submitted_release_titles
@@ -11671,6 +11911,7 @@ async fn assert_pending_release_submit_decision(
             role: crate::types::PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed pending release");

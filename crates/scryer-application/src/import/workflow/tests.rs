@@ -293,6 +293,7 @@ mod tests {
                 request_signature: None,
                 purpose: DownloadSubmissionPurpose::Standard,
                 scope,
+                release_listing_json: None,
             },
             identity: None,
         }))

@@ -1949,6 +1949,9 @@ async fn commit_season_pack_proposal(
                     request_signature: request_signature.clone(),
                     source_provider_name: Some(best_pack.source.clone()),
                     release_size_bytes: best_pack.size_bytes,
+                    release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                        best_pack, *now,
+                    ),
                 })
                 .await;
 
@@ -4136,6 +4139,9 @@ async fn process_single_target(
                         decision_code,
                         ReleaseAutoDecisionCode::ReleaseAgeUnknown
                     ),
+                    release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                        candidate, *now,
+                    ),
                 };
                 let observation = PendingReleaseObservation::derived(&pending, next_pending_role);
                 match app
@@ -4684,6 +4690,9 @@ async fn commit_scope_grab(
                 request_signature: request_signature.clone(),
                 source_provider_name: Some(candidate.source.clone()),
                 release_size_bytes: candidate.size_bytes,
+                release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                    candidate, *now,
+                ),
             })
             .await;
 
@@ -5677,6 +5686,7 @@ mod task_runner_tests {
             scope: SubmissionScope::Episode {
                 episode_id: episode_id.to_string(),
             },
+            release_listing_json: None,
         }
     }
 

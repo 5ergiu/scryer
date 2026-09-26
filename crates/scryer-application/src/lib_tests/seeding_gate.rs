@@ -361,6 +361,7 @@ async fn record_host_job_ownership(
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .unwrap();

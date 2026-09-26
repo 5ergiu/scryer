@@ -326,6 +326,7 @@ fn mock_media_file(id: String, input: &InsertMediaFileInput) -> TitleMediaFile {
         edition: input.edition.clone(),
         original_file_path: input.original_file_path.clone(),
         release_hash: input.release_hash.clone(),
+        release_listing_json: None,
     }
 }
 
