@@ -18,6 +18,7 @@ fn bridge(tag: &str) -> AnimeNumberingBridge {
             titles: vec![format!("Synthetic Cour {tag}")],
             ranges: Vec::new(),
             absolute_start: Some(1),
+            contiguous_absolute_start: None,
             episode_count: Some(12),
         }],
         ..Default::default()

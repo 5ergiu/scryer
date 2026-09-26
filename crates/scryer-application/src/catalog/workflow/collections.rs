@@ -377,13 +377,22 @@ impl AppUseCase {
                 legacy_specials_id,
             );
         }
+        let existing_episodes = self
+            .services
+            .catalog
+            .shows
+            .list_episodes_for_title(&title.id)
+            .await
+            .unwrap_or_default();
+        // Rows carrying a contiguous number, kept aside so the ones the
+        // incoming metadata no longer names can be cleared after the sync.
+        let existing_contiguous_episode_ids: Vec<String> = existing_episodes
+            .iter()
+            .filter(|episode| episode.contiguous_absolute_number.is_some())
+            .map(|episode| episode.id.clone())
+            .collect();
         let mut existing_episode_lookup: std::collections::HashMap<(String, String), Episode> =
-            self.services
-                .catalog
-                .shows
-                .list_episodes_for_title(&title.id)
-                .await
-                .unwrap_or_default()
+            existing_episodes
                 .into_iter()
                 .filter_map(|episode| {
                     let season_number = episode.season_number.clone()?;
@@ -391,6 +400,7 @@ impl AppUseCase {
                     Some(((season_number, episode_number), episode))
                 })
                 .collect();
+        let mut refreshed_episode_ids: HashSet<String> = HashSet::new();
 
         // Build a map from season number -> collection_id for episode assignment.
         // Only create one collection per season number, preferring "official" episode_type.
@@ -654,6 +664,7 @@ impl AppUseCase {
                 .get(&(season_number_key.clone(), episode_number_key.clone()))
                 .cloned()
             {
+                refreshed_episode_ids.insert(existing.id.clone());
                 let new_title = if ep.name.is_empty() {
                     None
                 } else {
@@ -675,8 +686,17 @@ impl AppUseCase {
                 let new_image_url = normalize_episode_image_url(&ep.image_url);
                 let tvdb_id_changed = new_tvdb_id.as_deref() != existing.tvdb_id.as_deref();
                 let image_url_changed = new_image_url.as_deref() != existing.image_url.as_deref();
-                if title_changed || overview_changed || tvdb_id_changed || image_url_changed {
-                    let _ = self
+                // SMG recomputes the contiguous scale as TVDB's absolute order
+                // changes, so every hydration refreshes it, clearing included.
+                let new_contiguous_absolute_number = ep.contiguous_absolute_number;
+                let contiguous_changed =
+                    new_contiguous_absolute_number != existing.contiguous_absolute_number;
+                if (title_changed
+                    || overview_changed
+                    || tvdb_id_changed
+                    || image_url_changed
+                    || contiguous_changed)
+                    && let Err(err) = self
                         .services
                         .catalog
                         .shows
@@ -697,10 +717,19 @@ impl AppUseCase {
                                     None
                                 },
                                 clear_image_url: image_url_changed && new_image_url.is_none(),
+                                contiguous_absolute_number: contiguous_changed
+                                    .then_some(new_contiguous_absolute_number),
                                 ..Default::default()
                             },
                         )
-                        .await;
+                        .await
+                {
+                    warn!(
+                        title_id = %title.id,
+                        episode_id = %existing.id,
+                        error = %err,
+                        "failed to refresh episode metadata"
+                    );
                 }
                 continue;
             }
@@ -729,6 +758,7 @@ impl AppUseCase {
                 } else {
                     Some(ep.absolute_number.clone())
                 },
+                contiguous_absolute_number: ep.contiguous_absolute_number,
                 overview: if ep.overview.trim().is_empty() {
                     None
                 } else {
@@ -755,6 +785,39 @@ impl AppUseCase {
                         episode_number = ep.episode_number,
                         error = %err,
                         "failed to create episode"
+                    );
+                }
+            }
+        }
+
+        // A row the incoming metadata no longer names (TVDB renumbered its
+        // key away) keeps whatever contiguous number it last had, which a
+        // renumbered episode may now carry too. Clear only that column; the
+        // raw absolute keeps its existing behaviour. An empty response names
+        // nothing and must not wipe the scale.
+        if !episodes.is_empty() {
+            for episode_id in existing_contiguous_episode_ids
+                .iter()
+                .filter(|episode_id| !refreshed_episode_ids.contains(*episode_id))
+            {
+                if let Err(err) = self
+                    .services
+                    .catalog
+                    .shows
+                    .update_episode(
+                        episode_id,
+                        EpisodeUpdate {
+                            contiguous_absolute_number: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    warn!(
+                        title_id = %title.id,
+                        episode_id = %episode_id,
+                        error = %err,
+                        "failed to clear the contiguous absolute number of an episode the metadata no longer names"
                     );
                 }
             }
@@ -1365,6 +1428,7 @@ impl AppUseCase {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,

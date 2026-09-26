@@ -2413,6 +2413,7 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
                 is_recap: ep.is_recap,
                 overview: ep.overview,
                 absolute_number: ep.absolute_number,
+                contiguous_absolute_number: ep.contiguous_absolute_number,
                 season_number: ep.season_number,
                 image_url: ep.image_url,
             })
@@ -3394,6 +3395,117 @@ mod tests {
         assert_eq!(alternate.entries[0].episode_number, Some(25));
         assert_eq!(alternate.entries[0].absolute_number, None);
         assert_eq!(alternate.entries[1].name, "Salt Marsh Relay");
+    }
+
+    #[test]
+    fn series_mapper_carries_the_contiguous_absolute_scale() {
+        let episode =
+            |tvdb_id: i64, season: i32, number: i32, raw: &str, contiguous: Option<i32>| {
+                json!({
+                    "tvdb_id": tvdb_id, "episode_number": number, "season_number": season,
+                    "name": "", "aired": "", "runtime_minutes": 24, "is_filler": false,
+                    "is_recap": false, "overview": "", "absolute_number": raw,
+                    "contiguous_absolute_number": contiguous, "image_url": ""
+                })
+            };
+        let payload = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "episodes": [
+                    episode(8012, 1, 12, "12", Some(12)),
+                    episode(8900, 0, 1, "13", None),
+                    episode(8013, 1, 13, "14", Some(13))
+                ],
+                "episode_orders": [{
+                    "season_type": "absolute",
+                    "entries": [
+                        { "tvdb_id": 8013, "season_number": 1, "episode_number": 14, "absolute_number": 14, "contiguous_absolute_number": 13, "name": "" }
+                    ]
+                }],
+                "anime_numbering_bridge": {
+                    "generated_on": "2026-09-25",
+                    "corroborating_order": null,
+                    "seasons": [{
+                        "index": 2, "anidb_id": 4242, "anilist_id": null, "mal_id": null,
+                        "titles": ["Fixture Serial 2nd Season"],
+                        "ranges": [{
+                            "community_episode_start": 1, "community_episode_end": 12,
+                            "tvdb_season": 1, "tvdb_episode_start": 13, "tvdb_episode_end": 24
+                        }],
+                        "absolute_start": 14,
+                        "contiguous_absolute_start": 13,
+                        "episode_count": 12
+                    }]
+                }
+            }),
+        );
+        let item: SeriesItem = serde_json::from_value(payload).expect("series item should decode");
+
+        let series = series_metadata_from_item(item);
+
+        let contiguous = series
+            .episodes
+            .iter()
+            .map(|episode| {
+                (
+                    episode.absolute_number.as_str(),
+                    episode.contiguous_absolute_number,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contiguous,
+            vec![("12", Some(12)), ("13", None), ("14", Some(13))]
+        );
+        assert_eq!(
+            series.episode_orders[0].entries[0].contiguous_absolute_number,
+            Some(13)
+        );
+        let bridge = series
+            .anime_numbering_bridge
+            .expect("bridge should survive the mapper");
+        assert_eq!(bridge.seasons[0].absolute_start, Some(14));
+        assert_eq!(bridge.seasons[0].contiguous_absolute_start, Some(13));
+    }
+
+    #[test]
+    fn series_mapper_defaults_the_contiguous_scale_when_smg_omits_it() {
+        let payload = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "episodes": [{
+                    "tvdb_id": 8012, "episode_number": 12, "season_number": 1,
+                    "name": "", "aired": "", "runtime_minutes": 24, "is_filler": false,
+                    "is_recap": false, "overview": "", "absolute_number": "12", "image_url": ""
+                }],
+                "anime_numbering_bridge": {
+                    "generated_on": "2026-09-25",
+                    "seasons": [{
+                        "index": 1,
+                        "ranges": [{ "community_episode_start": 1, "tvdb_season": 1, "tvdb_episode_start": 1 }],
+                        "absolute_start": 1
+                    }]
+                }
+            }),
+        );
+        let item: SeriesItem = serde_json::from_value(payload).expect("series item should decode");
+
+        let series = series_metadata_from_item(item);
+
+        assert_eq!(series.episodes[0].contiguous_absolute_number, None);
+        let bridge = series.anime_numbering_bridge.expect("bridge");
+        assert_eq!(bridge.seasons[0].contiguous_absolute_start, None);
+    }
+
+    #[test]
+    fn series_queries_select_the_contiguous_absolute_scale() {
+        for query in [
+            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::METADATA_BULK_QUERY,
+        ] {
+            assert!(query.contains("contiguous_absolute_number"));
+            assert!(query.contains("contiguous_absolute_start"));
+        }
     }
 
     #[test]
@@ -6257,6 +6369,8 @@ struct EpisodeOrderEntryItem {
     #[serde(default)]
     absolute_number: Option<i32>,
     #[serde(default)]
+    contiguous_absolute_number: Option<i32>,
+    #[serde(default)]
     name: String,
 }
 
@@ -6280,6 +6394,7 @@ fn episode_orders_from_gateway(items: Vec<EpisodeOrderSetItem>) -> Vec<EpisodeOr
                         season_number: entry.season_number,
                         episode_number: entry.episode_number,
                         absolute_number: entry.absolute_number,
+                        contiguous_absolute_number: entry.contiguous_absolute_number,
                         name: entry.name,
                     })
                     .collect(),
@@ -6313,6 +6428,8 @@ struct AnimeCommunitySeasonItem {
     ranges: Vec<AnimeCommunitySeasonRangeItem>,
     #[serde(default)]
     absolute_start: Option<i32>,
+    #[serde(default)]
+    contiguous_absolute_start: Option<i32>,
     #[serde(default)]
     episode_count: Option<i32>,
 }
@@ -6362,6 +6479,7 @@ fn anime_numbering_bridge_from_gateway(
                     })
                     .collect(),
                 absolute_start: season.absolute_start,
+                contiguous_absolute_start: season.contiguous_absolute_start,
                 episode_count: season.episode_count,
             })
             .collect(),
@@ -6389,6 +6507,8 @@ struct SeriesEpisodeItem {
     is_recap: bool,
     overview: String,
     absolute_number: String,
+    #[serde(default)]
+    contiguous_absolute_number: Option<i32>,
     #[serde(default)]
     image_url: String,
 }

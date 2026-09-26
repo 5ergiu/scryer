@@ -206,14 +206,12 @@ fn resolve_requested_episode(
         return Some(found);
     }
 
+    // Matched on the title's one absolute scale; see `AbsoluteScale`.
+    let scale = scryer_domain::AbsoluteScale::for_catalog(episodes);
     absolute_episode.and_then(|wanted_absolute| {
-        episodes.iter().find(|candidate| {
-            candidate
-                .absolute_number
-                .as_deref()
-                .and_then(|value| value.parse::<u32>().ok())
-                == Some(wanted_absolute)
-        })
+        episodes
+            .iter()
+            .find(|candidate| scale.episode_absolute(candidate) == Some(wanted_absolute))
     })
 }
 

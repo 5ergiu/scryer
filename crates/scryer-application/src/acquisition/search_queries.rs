@@ -2,7 +2,7 @@ use crate::{
     AcquisitionScopeState, AnimeSearchNumberingContext, FacetRegistry,
     IndexerSearchNumberingContext,
 };
-use scryer_domain::{AnimeNumberingBridge, Episode, EpisodeType, ExternalId, Title};
+use scryer_domain::{AbsoluteScale, AnimeNumberingBridge, Episode, EpisodeType, ExternalId, Title};
 
 pub(crate) struct SearchQueryResult {
     pub(crate) queries: Vec<String>,
@@ -23,12 +23,16 @@ pub(crate) struct SearchQueryResult {
 /// when the catalog stores one. It only ever *adds* queries, after the ones
 /// this function already produced, so a title without a bridge searches
 /// exactly as it does today.
+///
+/// `absolute_scale` is the title's absolute scale; every absolute number a
+/// query carries is read on it.
 pub(crate) fn build_search_queries(
     title: &Title,
     item: &AcquisitionScopeState,
     episode: Option<&Episode>,
     facet_registry: &FacetRegistry,
     anime_numbering_bridge: Option<&AnimeNumberingBridge>,
+    absolute_scale: AbsoluteScale,
 ) -> SearchQueryResult {
     let imdb_id = imdb_id_from_title(title);
     let tmdb_id = tmdb_id_from_external_ids(&title.external_ids);
@@ -100,10 +104,9 @@ pub(crate) fn build_search_queries(
                 }
 
                 if title.facet == scryer_domain::MediaFacet::Anime
-                    && let Some(absolute) = episode
-                        .absolute_number
-                        .as_deref()
-                        .and_then(|value| value.parse::<usize>().ok())
+                    && let Some(absolute) = absolute_scale
+                        .episode_absolute(episode)
+                        .map(|value| value as usize)
                         .filter(|&value| value > 0 && value != episode_num)
                 {
                     queries.insert(0, format!("{} {:0>3}", title.name, absolute));
@@ -124,6 +127,7 @@ pub(crate) fn build_search_queries(
                     season_num as i32,
                     episode_num as i32,
                     anime_numbering_bridge,
+                    absolute_scale,
                 ));
                 numbering_context = community_numbering_context(
                     title,
@@ -227,6 +231,7 @@ pub(crate) fn community_numbering_queries(
     season_num: i32,
     episode_num: i32,
     bridge: Option<&AnimeNumberingBridge>,
+    absolute_scale: AbsoluteScale,
 ) -> Vec<String> {
     let Some(coordinates) = community_numbering_scope(title, season_num, episode_num, bridge)
     else {
@@ -255,15 +260,15 @@ pub(crate) fn community_numbering_queries(
         queries.push(format!("{season_title} - {:0>2}", coordinates.episode));
     }
     // The absolute number the catalog carries, or the one the bridge's season
-    // start implies when the catalog has none.
+    // start implies when the catalog has none — both on the title's scale.
     if let Some(absolute) = episode
-        .and_then(|episode| episode.absolute_number.as_deref())
-        .and_then(|value| value.trim().parse::<i32>().ok())
+        .and_then(|episode| absolute_scale.episode_absolute(episode))
+        .and_then(|value| i32::try_from(value).ok())
         .filter(|&value| value > 0)
         .or_else(|| {
             bridge
                 .and_then(|bridge| bridge.season(coordinates.season))
-                .and_then(|season| season.absolute_start)
+                .and_then(|season| absolute_scale.season_absolute_start(season))
                 .map(|start| start + coordinates.episode - 1)
                 .filter(|&value| value > 0)
         })
@@ -529,6 +534,7 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: absolute.map(|value| value.to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
             image_url: None,
@@ -556,6 +562,7 @@ mod tests {
                     tvdb_episode_end: Some(tvdb_start + length - 1),
                 }],
                 absolute_start: Some(tvdb_start),
+                contiguous_absolute_start: None,
                 episode_count: Some(*length),
             });
             tvdb_start += length;
@@ -598,7 +605,15 @@ mod tests {
     fn queries_for(episode: &Episode, bridge: Option<&AnimeNumberingBridge>) -> Vec<String> {
         let title = anime_title();
         let item = wanted_episode_item(episode);
-        build_search_queries(&title, &item, Some(episode), &FacetRegistry::new(), bridge).queries
+        build_search_queries(
+            &title,
+            &item,
+            Some(episode),
+            &FacetRegistry::new(),
+            bridge,
+            AbsoluteScale::for_catalog([episode]),
+        )
+        .queries
     }
 
     #[test]
@@ -629,7 +644,14 @@ mod tests {
     /// `absolute_start`, which is what the catalog row would have said.
     #[test]
     fn community_queries_are_built_without_a_catalog_episode() {
-        let queries = community_numbering_queries(&anime_title(), None, 1, 56, Some(&bridge()));
+        let queries = community_numbering_queries(
+            &anime_title(),
+            None,
+            1,
+            56,
+            Some(&bridge()),
+            AbsoluteScale::Raw,
+        );
 
         assert_eq!(
             queries,
@@ -781,7 +803,15 @@ mod tests {
         unpinned.facet = scryer_domain::MediaFacet::Series;
 
         assert!(
-            community_numbering_queries(&unpinned, None, 1, 56, Some(&tvdb_bridge)).is_empty(),
+            community_numbering_queries(
+                &unpinned,
+                None,
+                1,
+                56,
+                Some(&tvdb_bridge),
+                AbsoluteScale::Raw
+            )
+            .is_empty(),
             "an unpinned series must not ask for alternate-numbered forms"
         );
         assert!(
@@ -795,8 +825,22 @@ mod tests {
             scryer_domain::RELEASE_NUMBERING_TAG_PREFIX
         )];
         assert_eq!(
-            community_numbering_queries(&pinned, None, 1, 56, Some(&tvdb_bridge)),
-            community_numbering_queries(&anime_title(), None, 1, 56, Some(&bridge())),
+            community_numbering_queries(
+                &pinned,
+                None,
+                1,
+                56,
+                Some(&tvdb_bridge),
+                AbsoluteScale::Raw
+            ),
+            community_numbering_queries(
+                &anime_title(),
+                None,
+                1,
+                56,
+                Some(&bridge()),
+                AbsoluteScale::Raw
+            ),
             "a pinned title asks for exactly the forms an anime bridge would"
         );
         assert_eq!(
@@ -809,7 +853,15 @@ mod tests {
     #[test]
     fn an_anime_community_bridge_still_widens_without_a_pin() {
         assert!(
-            !community_numbering_queries(&anime_title(), None, 1, 56, Some(&bridge())).is_empty()
+            !community_numbering_queries(
+                &anime_title(),
+                None,
+                1,
+                56,
+                Some(&bridge()),
+                AbsoluteScale::Raw
+            )
+            .is_empty()
         );
     }
 }

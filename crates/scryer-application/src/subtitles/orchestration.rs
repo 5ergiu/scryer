@@ -2686,6 +2686,7 @@ mod tests {
                 tvdb_episode_end: Some(tvdb_end),
             }],
             absolute_start: None,
+            contiguous_absolute_start: None,
             episode_count: Some(tvdb_end - tvdb_start + 1),
         };
         AnimeNumberingBridge {

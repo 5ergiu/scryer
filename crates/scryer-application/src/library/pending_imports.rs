@@ -224,10 +224,12 @@ fn pending_import_suggested_episode_ids(
     if suggested.is_empty()
         && let Some(absolute_episode) = episode.absolute_episode
     {
-        let absolute_episode = absolute_episode.to_string();
-        if let Some(matched) = available_episodes.iter().find(|candidate| {
-            candidate.absolute_number.as_deref() == Some(absolute_episode.as_str())
-        }) {
+        // Matched on the title's one absolute scale; see `AbsoluteScale`.
+        let scale = scryer_domain::AbsoluteScale::for_catalog(available_episodes);
+        if let Some(matched) = available_episodes
+            .iter()
+            .find(|candidate| scale.episode_absolute(candidate) == Some(absolute_episode))
+        {
             suggested.push(matched.id.clone());
         }
     }

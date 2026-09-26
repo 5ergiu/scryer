@@ -1044,6 +1044,7 @@ impl AppUseCase {
             && crate::acquisition_coverage::parsed_release_contradicts_requested_episode(
                 &pending_parsed,
                 requested,
+                scryer_domain::AbsoluteScale::for_catalog(catalog_episodes.iter()),
             )
         {
             info!(

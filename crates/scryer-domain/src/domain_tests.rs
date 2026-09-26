@@ -1074,6 +1074,7 @@ fn order_entry(tvdb_id: i64, season: i32, episode: i32, name: &str) -> EpisodeOr
         season_number: Some(season),
         episode_number: Some(episode),
         absolute_number: None,
+        contiguous_absolute_number: None,
         name: name.to_string(),
     }
 }
@@ -1246,4 +1247,103 @@ fn release_numbering_admits_only_the_bridge_its_setting_names() {
     assert!(ReleaseNumbering::Dvd.admits_bridge_source(TvdbDvd));
     assert!(!ReleaseNumbering::Dvd.admits_bridge_source(TvdbAlternate));
     assert!(!ReleaseNumbering::Dvd.admits_bridge_source(AnimeCommunity));
+}
+
+fn scale_episode(id: &str, raw: Option<&str>, contiguous: Option<i32>) -> Episode {
+    Episode {
+        id: id.to_string(),
+        title_id: "title-1".to_string(),
+        collection_id: None,
+        episode_type: EpisodeType::Standard,
+        episode_number: None,
+        season_number: None,
+        episode_label: None,
+        title: None,
+        air_date: None,
+        duration_seconds: None,
+        has_multi_audio: false,
+        has_subtitle: false,
+        is_filler: false,
+        is_recap: false,
+        absolute_number: raw.map(str::to_string),
+        contiguous_absolute_number: contiguous,
+        overview: None,
+        tvdb_id: None,
+        image_url: None,
+        monitored: true,
+        created_at: Utc::now(),
+    }
+}
+
+#[test]
+fn absolute_scale_is_contiguous_when_the_catalog_carries_any_contiguous_number() {
+    // Story episode 12, the special interleaved at raw 13, story episode 13
+    // (raw 14), and a trailing episode SMG could not number yet.
+    let catalog = vec![
+        scale_episode("s01e12", Some("12"), Some(12)),
+        scale_episode("s00e01", Some("13"), None),
+        scale_episode("s01e13", Some("14"), Some(13)),
+        scale_episode("s01e14", None, None),
+    ];
+    let scale = AbsoluteScale::for_catalog(&catalog);
+    assert_eq!(scale, AbsoluteScale::Contiguous);
+    assert_eq!(scale.episode_absolute(&catalog[2]), Some(13));
+    // Never mixed: the special's raw 13 is not read on the contiguous scale.
+    assert_eq!(scale.episode_absolute(&catalog[1]), None);
+    assert_eq!(scale.episode_absolute(&catalog[3]), None);
+}
+
+#[test]
+fn absolute_scale_is_raw_when_the_catalog_carries_no_contiguous_number() {
+    let catalog = vec![
+        scale_episode("s01e12", Some("12"), None),
+        scale_episode("s00e01", Some("13"), None),
+        scale_episode("s01e13", Some("14"), None),
+    ];
+    let scale = AbsoluteScale::for_catalog(&catalog);
+    assert_eq!(scale, AbsoluteScale::Raw);
+    assert_eq!(scale.episode_absolute(&catalog[1]), Some(13));
+    assert_eq!(scale.episode_absolute(&catalog[2]), Some(14));
+    assert_eq!(AbsoluteScale::for_catalog(&[]), AbsoluteScale::Raw);
+}
+
+#[test]
+fn absolute_scale_reads_the_bridge_start_of_its_own_scale_only() {
+    let season = AnimeCommunitySeason {
+        index: 2,
+        absolute_start: Some(27),
+        contiguous_absolute_start: Some(25),
+        ..AnimeCommunitySeason::default()
+    };
+    assert_eq!(AbsoluteScale::Raw.season_absolute_start(&season), Some(27));
+    assert_eq!(
+        AbsoluteScale::Contiguous.season_absolute_start(&season),
+        Some(25)
+    );
+    let raw_only = AnimeCommunitySeason {
+        index: 2,
+        absolute_start: Some(27),
+        ..AnimeCommunitySeason::default()
+    };
+    assert_eq!(
+        AbsoluteScale::Contiguous.season_absolute_start(&raw_only),
+        None
+    );
+}
+
+#[test]
+fn community_season_rows_stored_before_the_contiguous_start_still_deserialize() {
+    let season: AnimeCommunitySeason = serde_json::from_value(serde_json::json!({
+        "index": 1,
+        "anidb_id": null,
+        "anilist_id": null,
+        "mal_id": null,
+        "titles": [],
+        "ranges": [],
+        "absolute_start": 1,
+        "episode_count": 12
+    }))
+    .expect("legacy community season row");
+    assert_eq!(season.absolute_start, Some(1));
+    assert_eq!(season.contiguous_absolute_start, None);
 }

@@ -4488,6 +4488,12 @@ pub mod test_nulls {
         ) -> AppResult<Option<Episode>> {
             Ok(None)
         }
+        async fn absolute_scale_for_title(
+            &self,
+            _: &str,
+        ) -> AppResult<scryer_domain::AbsoluteScale> {
+            Ok(scryer_domain::AbsoluteScale::Raw)
+        }
         async fn list_primary_collection_summaries(
             &self,
             _: &[String],

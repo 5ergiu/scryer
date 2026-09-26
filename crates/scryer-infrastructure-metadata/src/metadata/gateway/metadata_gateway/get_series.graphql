@@ -101,6 +101,7 @@ query GetSeries($id: String!, $includeEpisodes: Boolean!, $includeEpisodeOrders:
         is_recap
         overview
         absolute_number
+        contiguous_absolute_number
         image_url
       }
       anime_mappings {
@@ -145,6 +146,7 @@ query GetSeries($id: String!, $includeEpisodes: Boolean!, $includeEpisodeOrders:
             tvdb_episode_end
           }
           absolute_start
+          contiguous_absolute_start
           episode_count
         }
       }
@@ -159,6 +161,7 @@ query GetSeries($id: String!, $includeEpisodes: Boolean!, $includeEpisodeOrders:
           season_number
           episode_number
           absolute_number
+          contiguous_absolute_number
           name
           aired
         }

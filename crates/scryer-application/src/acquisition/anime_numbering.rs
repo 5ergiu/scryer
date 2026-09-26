@@ -24,7 +24,7 @@
 //! other title keeps exactly today's behaviour.
 
 use chrono::NaiveDate;
-use scryer_domain::{AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
+use scryer_domain::{AbsoluteScale, AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
 
 use crate::ParsedEpisodeMetadata;
 use crate::release_parser::ParsedEpisodeReleaseType;
@@ -667,19 +667,28 @@ fn community_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
     absolute_start_candidates(input)
 }
 
-/// An absolute-only release on a catalog with no absolute numbers of its own:
-/// the community seasons carry `absolute_start`, so the absolute number picks
-/// the season and the offset inside it.
+/// An absolute-only release the catalog cannot place by its own absolute
+/// numbers: the community seasons carry a start on the title's absolute scale,
+/// so the absolute number picks the season and the offset inside it.
+///
+/// The start is read on the same scale the catalog is matched on — the
+/// contiguous start for a contiguous catalog, the raw TVDB start otherwise —
+/// because a raw start offset by a community count lands one episode late for
+/// every special TVDB interleaved before it.
 ///
 /// Every season that could hold the number is offered. Overlapping seasons
-/// normally agree — `absolute_start` plus an offset is the same TVDB episode
+/// normally agree — the start plus an offset is the same TVDB episode
 /// whichever season you count from — and collapse into one answer; where they
 /// genuinely disagree the caller sees the disagreement.
 fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
-    if !input.parsed.episode_numbers.is_empty() || catalog_has_absolute_numbers(input.episodes) {
+    if !input.parsed.episode_numbers.is_empty() {
         return Vec::new();
     }
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let absolutes = parsed_absolute_numbers(input.parsed);
+    if !absolute_start_applies(input.episodes, scale, &absolutes) {
+        return Vec::new();
+    }
     let Some(first) = absolutes
         .first()
         .and_then(|first| i32::try_from(*first).ok())
@@ -691,8 +700,8 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
         .seasons
         .iter()
         .filter_map(|community_season| {
-            let absolute_start = community_season
-                .absolute_start
+            let absolute_start = scale
+                .season_absolute_start(community_season)
                 .filter(|start| *start <= first)?;
             let community_numbers = absolutes
                 .iter()
@@ -708,9 +717,10 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
                 &community_numbers,
                 bridge_candidate_kind(input.bridge),
                 &format!(
-                    "{} {} by absolute start {absolute_start}",
+                    "{} {} by {} absolute start {absolute_start}",
                     bridge_numbering_noun(input.bridge),
-                    community_season.index
+                    community_season.index,
+                    scale.as_str()
                 ),
             )
         })
@@ -1110,13 +1120,14 @@ fn absolute_candidate(input: &NumberingInput<'_>) -> Option<NumberingCandidate> 
     // A range is an all-or-nothing claim. Retaining only the endpoints found
     // in the catalog used to turn `55..56` into a valid one-episode mapping
     // when 56 was absent, which then made a partial cour look complete.
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let matches = absolutes
         .iter()
         .map(|absolute| {
             let matches = input
                 .episodes
                 .iter()
-                .filter(|episode| parse_u32(episode.absolute_number.as_deref()) == Some(*absolute))
+                .filter(|episode| scale.episode_absolute(episode) == Some(*absolute))
                 .collect::<Vec<_>>();
             match matches.as_slice() {
                 [episode] => Some(*episode),
@@ -1396,10 +1407,32 @@ fn single_season_projection(matches: &[&Episode]) -> Option<(u32, Vec<u32>, Vec<
     ))
 }
 
-fn catalog_has_absolute_numbers(episodes: &[Episode]) -> bool {
-    episodes
-        .iter()
-        .any(|episode| parse_u32(episode.absolute_number.as_deref()).is_some_and(|value| value > 0))
+/// Whether the bridge's season starts may place an absolute-only release.
+///
+/// On the raw scale only a catalog with no absolute numbers at all defers to
+/// the bridge, exactly as before the contiguous scale existed. SMG numbers the
+/// contiguous scale episode by episode and leaves a trailing episode it cannot
+/// number yet empty, so a contiguous catalog defers for the numbers it does not
+/// carry; the ones it carries are answered by the catalog itself.
+///
+/// Deferring helps only inside a community season whose anchor episode SMG
+/// *has* numbered and whose range is still open: SMG reads a season's
+/// contiguous start off its anchor's own contiguous number, so a season whose
+/// anchor is itself unplaced carries no contiguous start and the release stays
+/// unplaced rather than being filed by a raw number.
+fn absolute_start_applies(episodes: &[Episode], scale: AbsoluteScale, absolutes: &[u32]) -> bool {
+    match scale {
+        AbsoluteScale::Raw => !episodes.iter().any(|episode| {
+            scale
+                .episode_absolute(episode)
+                .is_some_and(|value| value > 0)
+        }),
+        AbsoluteScale::Contiguous => !absolutes.iter().all(|absolute| {
+            episodes
+                .iter()
+                .any(|episode| scale.episode_absolute(episode) == Some(*absolute))
+        }),
+    }
 }
 
 fn parsed_absolute_numbers(parsed: &ParsedEpisodeMetadata) -> Vec<u32> {
@@ -1566,6 +1599,14 @@ pub(crate) fn translate_parsed_episode_numbering(
 /// downstream admission check reads. Absolute coordinates are trustworthy only
 /// when every resolved catalog episode supplies one positive, distinct value;
 /// the parser's raw evidence remains untouched.
+///
+/// The stamped absolute is the catalog episode's *raw* `absolute_number`, never
+/// its contiguous one: matching reads the title's `AbsoluteScale`, but every
+/// renderer (import, rename, manual-import labels) writes the raw number, so
+/// the parse path of an import must hand them the same value the catalog path
+/// and a later rename would. Downstream matching is unaffected because a
+/// resolved parse always carries the catalog season and episode numbers, which
+/// coverage and the numbering veto read before any absolute.
 fn apply_resolved_catalog_coordinates(
     parsed: &mut ParsedEpisodeMetadata,
     candidate: &NumberingCandidate,
