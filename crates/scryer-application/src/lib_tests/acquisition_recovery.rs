@@ -235,6 +235,7 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed standby");
@@ -257,6 +258,7 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -432,6 +434,7 @@ async fn a_gone_standby_link_expires_and_grabs_the_next_row_in_the_same_walk() {
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     let gone = standby("GONE", 200);
     let usable = standby("USABLE", 100);
@@ -870,6 +873,7 @@ async fn acquisition_failure_fallback_skips_failed_submission_for_another_episod
                 scope: SubmissionScope::Episode {
                     episode_id: episode_id.to_string(),
                 },
+                release_listing_json: None,
             })
             .await
             .expect("record episode submission");
@@ -1030,6 +1034,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed standby");
@@ -1052,6 +1057,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1281,6 +1287,7 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1445,6 +1452,7 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1656,6 +1664,7 @@ async fn operator_client_failure_is_recorded_without_reopening_scope() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -1764,6 +1773,7 @@ async fn process_download_failure_dedupes_same_release_title_across_client_item_
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Title,
+                release_listing_json: None,
             })
             .await
             .expect("record failed submission");
@@ -1881,6 +1891,7 @@ async fn tracked_download_failure_prefers_tracked_source_title_for_blocklist_ide
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -2241,6 +2252,7 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed season pack submission");
@@ -2531,6 +2543,7 @@ async fn episode_set_pack_failure_reopens_only_its_covered_wanted_items() {
                     .map(|(_, episode_id)| episode_id.clone())
                     .collect(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed episode-set submission");
@@ -2662,6 +2675,7 @@ async fn acquisition_cycle_looks_up_submissions_once_per_title_for_grabbed_items
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record shared submission");
@@ -2846,6 +2860,7 @@ async fn acquisition_cycle_records_failed_collection_submission_once() {
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed collection submission");
@@ -3114,6 +3129,7 @@ async fn acquisition_cycle_episode_submission_blocks_only_matching_episode() {
             scope: SubmissionScope::Episode {
                 episode_id: episode_one.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record active episode submission");
@@ -3348,6 +3364,7 @@ async fn acquisition_cycle_collection_submission_blocks_same_season_only() {
             scope: SubmissionScope::Collection {
                 collection_id: season_one.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record active season pack submission");
@@ -3900,6 +3917,7 @@ fn series_pack_anchor_standby(
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     }
 }
 
@@ -4081,6 +4099,7 @@ async fn in_flight_series_episodes_count_as_owned_for_the_pack_ratio_gate() {
         scope: SubmissionScope::EpisodeSet {
             episode_ids: season_one_episode_ids,
         },
+        release_listing_json: None,
     };
     let active_identity = ClientJobLocator::from_submission(&active_submission);
     app.services
@@ -5234,6 +5253,7 @@ async fn acquisition_cycle_skips_recently_failed_season_pack_from_submission_rel
             scope: SubmissionScope::Collection {
                 collection_id: season.id.clone(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record failed season pack submission");
@@ -6545,6 +6565,7 @@ async fn pending_release_submit_unavailable_records_pending_without_failed_signa
             role: crate::types::PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed pending release");
@@ -7728,6 +7749,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
         role: crate::types::PendingReleaseRole::Fallback,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     // Tried first (the test repo lists standby rows in insertion order).
     let dead = standby("Standby.Dead.Swarm.1080p.WEB-DL", 200, Some(1));
@@ -7777,6 +7799,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
             info_hash: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -8612,6 +8635,7 @@ async fn acquisition_cycle_title_submission_still_blocks_movie_search() {
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record active movie submission");
@@ -9238,6 +9262,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed standby");
@@ -9260,6 +9285,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
             release_size_bytes: None,
             request_signature: None,
             scope: SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("record failed submission");
@@ -9379,6 +9405,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed stale standby");
@@ -9676,6 +9703,7 @@ async fn acquisition_cycle_drops_saved_results_of_a_completed_scope() {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed stale standby");
@@ -11671,6 +11699,7 @@ async fn assert_pending_release_submit_decision(
             role: crate::types::PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         })
         .await
         .expect("seed pending release");

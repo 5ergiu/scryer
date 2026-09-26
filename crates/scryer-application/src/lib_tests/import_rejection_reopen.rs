@@ -145,6 +145,7 @@ async fn rejected_import_keeps_coverage_and_reopens_for_the_saved_results_walk()
             scope: SubmissionScope::Collection {
                 collection_id: collection_id.to_string(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record attributed submission");

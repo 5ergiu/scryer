@@ -2722,6 +2722,7 @@ impl AppUseCase {
                         decision_code,
                         ReleaseAutoDecisionCode::ReleaseAgeUnknown
                     ),
+                    release_listing_json: None,
                 };
                 let observation = PendingReleaseObservation {
                     eligible_at,
@@ -2906,6 +2907,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: Some(best.source.clone()),
                 release_size_bytes: best.size_bytes,
+                release_listing_json: None,
             })
             .await;
 
@@ -4862,6 +4864,7 @@ mod tests {
             role: PendingReleaseRole::Primary,
             last_decision_code: Some("release_age_unknown".to_string()),
             release_age_unknown: true,
+            release_listing_json: None,
         };
         let mut hydrated = pending_release_as_rss_result(&pending);
         hydrated.published_at = Some("not-a-timestamp".to_string());

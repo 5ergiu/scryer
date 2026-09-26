@@ -719,6 +719,7 @@ impl AppUseCase {
             info_hash: None,
             request_signature: None,
             scope: scope.clone(),
+            release_listing_json: None,
         };
 
         let mut covered = items

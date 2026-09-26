@@ -2060,6 +2060,7 @@ where
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         };
 
         if app
@@ -2193,6 +2194,7 @@ mod client_snapshot_tests {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         }
     }
 
@@ -2400,6 +2402,7 @@ mod client_snapshot_tests {
             scope: SubmissionScope::Episode {
                 episode_id: "ep-1".to_string(),
             },
+            release_listing_json: None,
         }
     }
 

@@ -4408,6 +4408,7 @@ async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
                 role: scryer_application::PendingReleaseRole::Fallback,
                 last_decision_code: None,
                 release_age_unknown: false,
+                release_listing_json: None,
             })
             .await
             .expect("seed standby release");
@@ -4517,6 +4518,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     })
     .await
     .expect("seed pending release");
@@ -4539,6 +4541,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
             request_signature: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
             scope: scryer_application::SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");

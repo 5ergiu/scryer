@@ -1960,6 +1960,7 @@ fn scoped_media_file(
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         },
         title_role: crate::MediaFileRole::Primary,
         episode_ids: episode_ids

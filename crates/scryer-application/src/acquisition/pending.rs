@@ -149,6 +149,7 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         };
 
         match self
@@ -343,6 +344,7 @@ impl AppUseCase {
             role: PendingReleaseRole::Primary,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         };
 
         match self
@@ -1481,6 +1483,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: pr.indexer_source.clone(),
                 release_size_bytes: pr.release_size_bytes,
+                release_listing_json: pr.release_listing_json.clone(),
             })
             .await;
 

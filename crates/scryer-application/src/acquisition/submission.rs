@@ -15,6 +15,8 @@ pub(crate) struct CanonicalDownloadSubmissionIntent {
     pub request_signature: Option<String>,
     pub source_provider_name: Option<String>,
     pub release_size_bytes: Option<i64>,
+    /// Frozen indexer listing snapshot (opaque JSON) persisted on the submission.
+    pub release_listing_json: Option<String>,
 }
 
 pub(crate) enum CanonicalDownloadSubmissionOutcome {
@@ -62,6 +64,7 @@ fn submission_for_grab(
         source_title: request.source_title.clone(),
         info_hash: request.info_hash_hint.clone(),
         release_size_bytes: intent.release_size_bytes,
+        release_listing_json: intent.release_listing_json.clone(),
         request_signature: intent.request_signature.clone(),
         purpose: request.purpose,
         scope: intent.scope.clone(),
@@ -644,6 +647,7 @@ impl AppUseCase {
                             source_title: request.source_title.clone(),
                             info_hash: request.info_hash_hint.clone(),
                             release_size_bytes: intent.release_size_bytes,
+                            release_listing_json: intent.release_listing_json.clone(),
                             request_signature: intent.request_signature.clone(),
                             purpose: request.purpose,
                             scope: intent.scope.clone(),
@@ -697,6 +701,7 @@ impl AppUseCase {
                 source_title: request.source_title.clone(),
                 info_hash: request.info_hash_hint.clone(),
                 release_size_bytes: intent.release_size_bytes,
+                release_listing_json: intent.release_listing_json.clone(),
                 request_signature: intent.request_signature.clone(),
                 purpose: request.purpose,
                 scope: intent.scope.clone(),

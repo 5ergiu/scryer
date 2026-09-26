@@ -54,14 +54,14 @@ const INSERT_MEDIA_FILE_SQL: &str =
       video_codec_parsed, audio_codec_parsed, audio_channels_parsed,
       acquisition_score, scoring_log,
       indexer_source, grabbed_release_title, grabbed_at,
-      edition, original_file_path, release_hash)
+      edition, original_file_path, release_hash, release_listing_json)
      VALUES ({}, {}, {}, {}, {}, {}, {}, 'imported', {},
              {}, {},
              {}, {}, {}, {},
              {}, {}, {},
              {}, {},
              {}, {}, {},
-             {}, {}, {})
+             {}, {}, {}, {})
      ON CONFLICT(file_path) DO UPDATE SET
         title_id = excluded.title_id,
         size_bytes = excluded.size_bytes,
@@ -85,7 +85,8 @@ const INSERT_MEDIA_FILE_SQL: &str =
         grabbed_at = excluded.grabbed_at,
         edition = excluded.edition,
         original_file_path = excluded.original_file_path,
-        release_hash = excluded.release_hash";
+        release_hash = excluded.release_hash,
+        release_listing_json = excluded.release_listing_json";
 
 fn media_file_insert_args(
     datastore: &StoreDatastore,
@@ -118,6 +119,7 @@ fn media_file_insert_args(
         SqlArg::OptText(input.edition.clone()),
         SqlArg::OptText(input.original_file_path.clone()),
         SqlArg::OptText(input.release_hash.clone()),
+        SqlArg::OptText(input.release_listing_json.clone()),
     ])
 }
 
@@ -2160,7 +2162,7 @@ fn media_file_select_columns(dialect: SqlDialect, episode_expr: &str, role_expr:
             mf.video_codec_parsed, mf.audio_codec_parsed, mf.audio_channels_parsed,
             mf.acquisition_score, mf.scoring_log,
             mf.indexer_source, mf.grabbed_release_title, mf.grabbed_at,
-            mf.edition, mf.original_file_path, mf.release_hash",
+            mf.edition, mf.original_file_path, mf.release_hash, mf.release_listing_json",
     )
 }
 
@@ -2402,6 +2404,7 @@ fn row_to_title_media_file(row: &SqlRow) -> AppResult<TitleMediaFile> {
         edition: row.opt_text("edition")?,
         original_file_path: row.opt_text("original_file_path")?,
         release_hash: row.opt_text("release_hash")?,
+        release_listing_json: row.opt_text("release_listing_json")?,
     })
 }
 
