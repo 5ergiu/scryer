@@ -79,9 +79,18 @@ export function MediaInfoDialog({
 }) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
+  const listing = file.releaseListing;
   const labels = {
     added: file.createdAt ? formatUiDate(file.createdAt, dateTimeFormat, { fallback: file.createdAt }) : null,
     grabbedAt: file.grabbedAt ? formatUiDate(file.grabbedAt, dateTimeFormat, { fallback: file.grabbedAt }) : null,
+    listingPublishedAt: listing?.publishedAt
+      ? formatUiDate(listing.publishedAt, dateTimeFormat, { fallback: listing.publishedAt })
+      : null,
+    listingCapturedAt: listing
+      ? formatUiDate(listing.capturedAt, dateTimeFormat, { fallback: listing.capturedAt })
+      : null,
+    listingAgeAtGrab:
+      listing?.ageDaysAtGrab == null ? null : t("mediaInfo.listingAgeDays", { count: listing.ageDaysAtGrab }),
     yes: t("label.yes"),
     no: t("label.no"),
   };
@@ -203,6 +212,8 @@ export function MediaInfoDialog({
           ) : null}
         </FieldTable>
 
+        <FieldTable section={fieldSection("media-info-release-listing")} t={t} />
+
         <FieldTable section={fieldSection("media-info-analysis")} t={t} />
 
         {chapters.length > 0 ? (
@@ -294,7 +305,7 @@ function FieldTable({
       <TableBody>
         {section.rows.map((entry, index) => (
           <TableRow key={`${entry.labelKey}-${index}`} data-ui="media-info-row">
-            <TableCell className="w-56 align-top font-medium text-muted-foreground">{t(entry.labelKey)}</TableCell>
+            <TableCell className="w-56 align-top font-medium text-muted-foreground">{entry.label ?? t(entry.labelKey)}</TableCell>
             <TableCell className="break-all">{entry.value}</TableCell>
           </TableRow>
         ))}

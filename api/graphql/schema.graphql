@@ -22883,6 +22883,44 @@ type ReleaseDecisionsPagePayload {
 }
 
 """
+Indexer listing facts about a grabbed release, as captured at grab time.
+"""
+type ReleaseListingPayload {
+	"""
+	Publish time the indexer reported, in UTC, or null when unknown.
+	"""
+	publishedAt: DateTime
+	"""
+	Whole days from publish to capture, or null when the publish time is unknown.
+	"""
+	ageDaysAtGrab: Int
+	"""
+	Positive votes the indexer reported, or null when unreported.
+	"""
+	thumbsUp: Int
+	"""
+	Negative votes the indexer reported, or null when unreported.
+	"""
+	thumbsDown: Int
+	"""
+	Whether the release was reported password protected, or null when unknown.
+	"""
+	isPasswordProtected: Boolean
+	"""
+	Languages the indexer reported for the release.
+	"""
+	indexerLanguages: [String!]!
+	"""
+	Indexer-specific scalar attributes, as a JSON object.
+	"""
+	extra: JSON!
+	"""
+	Time when the listing facts were captured, in UTC.
+	"""
+	capturedAt: DateTime!
+}
+
+"""
 Which episode numbering a title's releases are read in.
 """
 enum ReleaseNumberingValue {
@@ -26990,6 +27028,11 @@ type TitleMediaFilePayload {
 	Release identity hash, or null when unavailable.
 	"""
 	releaseHash: String
+	"""
+	Indexer listing facts frozen when the release was grabbed, or null when
+	the file was not grabbed by Scryer or the stored snapshot is unreadable.
+	"""
+	releaseListing: ReleaseListingPayload
 	"""
 	Parent title for this media file, or null if it is no longer available to the caller.
 	"""

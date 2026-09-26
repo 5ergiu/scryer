@@ -228,6 +228,43 @@ impl ReleaseListingSnapshot {
     }
 }
 
+/// The read-only display form of a persisted listing snapshot, for surfaces
+/// that show what a grab saw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReleaseListingView {
+    /// Publish time the indexer reported, or `None` when it was unknown.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Whole days from publish to capture, clamped at zero; `None` when the
+    /// publish time was unknown.
+    pub age_days_at_grab: Option<i64>,
+    pub thumbs_up: Option<i32>,
+    pub thumbs_down: Option<i32>,
+    pub is_password_protected: Option<bool>,
+    pub indexer_languages: Vec<String>,
+    /// Bounded indexer-specific scalars, keyed in ascending order.
+    pub extra: BTreeMap<String, Value>,
+    pub captured_at: DateTime<Utc>,
+}
+
+/// Read a persisted listing snapshot for display. Anything
+/// [`ReleaseListingSnapshot::from_json_str`] cannot read yields `None`.
+pub fn release_listing_view(raw: &str) -> Option<ReleaseListingView> {
+    let snapshot = ReleaseListingSnapshot::from_json_str(raw)?;
+    Some(ReleaseListingView {
+        published_at: snapshot
+            .published_at
+            .as_deref()
+            .and_then(crate::quality_profile::parse_published_at),
+        age_days_at_grab: snapshot.age_days(snapshot.captured_at),
+        thumbs_up: snapshot.thumbs_up,
+        thumbs_down: snapshot.thumbs_down,
+        is_password_protected: snapshot.is_password_protected,
+        indexer_languages: snapshot.indexer_languages,
+        extra: snapshot.extra,
+        captured_at: snapshot.captured_at,
+    })
+}
+
 /// When a persisted snapshot was captured, for tests that compare it with a
 /// fresh capture at the lane's own timestamp.
 #[cfg(test)]
@@ -979,5 +1016,38 @@ mod tests {
             snapshot.age_days(Utc.with_ymd_and_hms(2024, 1, 2, 12, 0, 0).unwrap()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn release_listing_view_maps_every_field_and_ages_to_the_capture() {
+        let snapshot = ReleaseListingSnapshot {
+            published_at: Some("2024-03-01T12:00:00Z".to_string()),
+            thumbs_up: Some(7),
+            thumbs_down: Some(2),
+            is_password_protected: Some(true),
+            indexer_languages: vec!["en".to_string(), "fr".to_string()],
+            extra: BTreeMap::from([
+                ("grabs".to_string(), json!(40)),
+                ("tags".to_string(), json!(["internal"])),
+            ]),
+            captured_at: at(2024, 3, 15),
+        };
+
+        let view = release_listing_view(&snapshot.to_json_string()).expect("view reads");
+
+        assert_eq!(view.published_at, Some(at(2024, 3, 1)));
+        assert_eq!(view.age_days_at_grab, Some(14));
+        assert_eq!(view.thumbs_up, Some(7));
+        assert_eq!(view.thumbs_down, Some(2));
+        assert_eq!(view.is_password_protected, Some(true));
+        assert_eq!(view.indexer_languages, vec!["en", "fr"]);
+        assert_eq!(view.extra, snapshot.extra);
+        assert_eq!(view.captured_at, at(2024, 3, 15));
+    }
+
+    #[test]
+    fn release_listing_view_is_none_for_garbage() {
+        assert_eq!(release_listing_view("{not a snapshot"), None);
+        assert_eq!(release_listing_view("[]"), None);
     }
 }
