@@ -1028,6 +1028,36 @@ impl AppUseCase {
             .collect())
     }
 
+    /// The most recent run of every listed job. A window of recent runs across
+    /// all jobs is filled by the frequent ones, so a job's last run is read
+    /// per job instead.
+    pub async fn list_latest_job_runs(&self, actor: &User) -> AppResult<Vec<JobRun>> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let active_runs = self.runtime.jobs.job_run_tracker.list_active().await;
+        let active_runs_by_id = active_runs
+            .into_iter()
+            .map(|run| (run.id.clone(), run))
+            .collect::<HashMap<_, _>>();
+
+        let mut runs = Vec::with_capacity(crate::jobs::ALL_JOB_KEYS.len());
+        for job_key in crate::jobs::ALL_JOB_KEYS {
+            let records = self
+                .services
+                .events
+                .job_runs
+                .list_job_runs(Some(job_key), 1)
+                .await?;
+            runs.extend(records.into_iter().map(|record| {
+                active_runs_by_id
+                    .get(&record.id)
+                    .cloned()
+                    .unwrap_or_else(|| JobRun::from_record(&record, None))
+            }));
+        }
+        Ok(runs)
+    }
+
     pub async fn discovery_sync_status(&self, actor: &User) -> AppResult<DiscoverySyncStatus> {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;

@@ -32,7 +32,8 @@ const JOBS_MUTED_TEXT_CLASS = "text-[var(--scry-muted3)]";
 type SystemJobsViewState = {
   jobs: JobDefinition[];
   activeRuns: JobRun[];
-  recentRuns: JobRun[];
+  /** The latest run of each job, loaded per job rather than from a recent-runs window. */
+  lastRunsByJob: Partial<Record<JobKey, JobRun>>;
   selectedJobKey: JobKey | null;
   selectedJobRunId: string | null;
   selectedJobHistory: JobRun[];
@@ -334,7 +335,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
   const {
     jobs,
     activeRuns,
-    recentRuns,
+    lastRunsByJob,
     selectedJobKey,
     selectedJobRunId,
     selectedJobHistory,
@@ -364,16 +365,6 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
     () => Object.fromEntries(activeRuns.map((run) => [run.jobKey, run])),
     [activeRuns],
   );
-
-  const lastRunsByJob = useMemo(() => {
-    const map = new Map<JobKey, JobRun>();
-    for (const run of recentRuns) {
-      if (!map.has(run.jobKey)) {
-        map.set(run.jobKey, run);
-      }
-    }
-    return map;
-  }, [recentRuns]);
 
   const defaultSortDirectionFor = useCallback((key: SortKey): SortDirection => {
     switch (key) {
@@ -441,7 +432,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
               defaultLibraryIdForFacet(libraryFacet),
             )
           : null;
-      const recentRun = lastRunsByJob.get(job.key) ?? null;
+      const recentRun = lastRunsByJob[job.key] ?? null;
       const activeRun = isStaleActiveRun(rawActiveRun, recentRun) ? null : (rawActiveRun ?? null);
       const lastRun = activeRun ?? recentRun;
       const status =
@@ -749,7 +740,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
                 <div className="flex gap-2">
                   {(() => {
                     const activeRun = activeRunsByJob[selectedJob.key] ?? null;
-                    const recentRun = lastRunsByJob.get(selectedJob.key) ?? null;
+                    const recentRun = lastRunsByJob[selectedJob.key] ?? null;
                     const libraryFacet = libraryFacetForJob(selectedJob.key);
                     const activeLibraryScan =
                       selectedJob.usesLibraryScanProgress && libraryFacet
