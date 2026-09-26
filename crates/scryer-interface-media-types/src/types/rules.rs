@@ -1,5 +1,5 @@
 use super::{Long, MediaFacetValue};
-use async_graphql::{ID, InputObject, SimpleObject};
+use async_graphql::{ID, InputObject, Json, SimpleObject};
 use chrono::{DateTime, Utc};
 
 // ── Rule Sets ──────────────────────────────────────────────────────────────
@@ -91,10 +91,39 @@ pub struct TestRuleSetInput {
     pub title_id: ID,
     /// Episode belonging to the selected title, or null for a whole-title preview.
     pub episode_id: Option<ID>,
-    /// Release name to parse and score.
-    pub release_name: String,
-    /// Release size in bytes, or null when unknown.
+    /// Release name to parse and score. Exactly one of this and
+    /// `mediaFileId` is required.
+    pub release_name: Option<String>,
+    /// Release size in bytes, or null when unknown. Only with `releaseName`.
     pub size_bytes: Option<Long>,
+    /// Indexer listing facts for `releaseName`, as a live search result would
+    /// report them. Omitted facts are unknown (null to rules). Only with
+    /// `releaseName`.
+    pub listing: Option<RuleSetTestListingInput>,
+    /// Stored media file of the selected title to score from its own row and
+    /// the listing facts frozen when it was grabbed, instead of a release name.
+    pub media_file_id: Option<ID>,
+}
+
+#[derive(InputObject, Default)]
+/// Indexer listing facts a tested release name is scored with. The tester
+/// treats the release as a fresh, never-grabbed search result.
+pub struct RuleSetTestListingInput {
+    /// Publish time as an RFC 2822 (newznab `pubDate`) or RFC 3339
+    /// timestamp, kept as written; `input.release.age_days` is measured from
+    /// it to now.
+    pub published_at: Option<String>,
+    /// Indexer up-votes; never negative.
+    pub thumbs_up: Option<i32>,
+    /// Indexer down-votes; never negative.
+    pub thumbs_down: Option<i32>,
+    /// Whether the indexer reports the release as password protected.
+    pub is_password_protected: Option<bool>,
+    /// Audio languages the indexer reports.
+    pub indexer_languages: Option<Vec<String>>,
+    /// Indexer-specific attributes as a flat JSON object. Nested values are
+    /// dropped and the map is size-bounded, as for a live listing.
+    pub extra: Option<Json<serde_json::Value>>,
 }
 
 #[cfg(test)]
@@ -231,8 +260,40 @@ pub struct RuleSetTestErrorPayload {
 }
 
 #[derive(SimpleObject, Clone)]
+/// Indexer listing facts a scoring preview read, as rules saw them.
+pub struct RuleSetTestListingPayload {
+    /// Publish time the listing reported, or null when unknown.
+    pub published_at: Option<String>,
+    /// `input.release.age_days`: whole days from publish to `capturedAt`, or
+    /// null when the publish time is unknown.
+    pub age_days: Option<i32>,
+    /// Indexer up-votes, or null when unknown.
+    pub thumbs_up: Option<i32>,
+    /// Indexer down-votes, or null when unknown.
+    pub thumbs_down: Option<i32>,
+    /// Indexer password-protection flag, or null when unknown.
+    pub is_password_protected: Option<bool>,
+    /// Audio languages the indexer reported.
+    pub indexer_languages: Vec<String>,
+    /// Bounded indexer-specific attributes rules read as `input.release.extra`.
+    pub extra: Json<serde_json::Value>,
+    /// When the facts were captured: the grab for a stored file, now for a
+    /// tested release name. Release age is measured at this instant.
+    pub captured_at: DateTime<Utc>,
+}
+
+#[derive(SimpleObject, Clone)]
 /// Explicit, read-only scoring preview for the current rule-editor draft.
 pub struct TestRuleSetPayload {
+    /// Release name that was scored: the supplied one, or a stored file's
+    /// grabbed release title (its file name when it has none).
+    pub release_name: String,
+    /// Stored media file that was scored, or null for a release name.
+    pub media_file_id: Option<ID>,
+    /// Listing facts the rules read. Null for a stored file that has no
+    /// listing snapshot (scanned in, adopted, or imported before snapshots
+    /// were kept): every listing fact was unknown.
+    pub listing: Option<RuleSetTestListingPayload>,
     /// Aggregate score after normal policy aggregation.
     pub score: i32,
     /// Whether mandatory requirements and both final score gates pass.
