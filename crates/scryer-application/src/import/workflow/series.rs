@@ -2084,9 +2084,11 @@ pub(crate) fn use_season_folders(title: &scryer_domain::Title) -> bool {
 }
 
 /// Compute the destination path for an episode import using the canonical
-/// token set: base tokens from parsed release metadata, overridden by the
+/// token set: the same media tokens library rename renders, overridden by the
 /// explicit episode values supplied by the caller.
 ///
+/// `analysis` is the import's probe of the file, when it has run; without it
+/// the media tokens come from the parsed release name alone.
 /// `ep_num_str` may be empty to leave `{episode}` blank (anime absolute-only
 /// files where no per-season episode number is known).
 /// `quality_override` replaces the filename-parsed quality token when the
@@ -2117,6 +2119,7 @@ pub(crate) fn episode_import_dest_path(
     title: &scryer_domain::Title,
     use_season_folders: bool,
     parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
     ext: &str,
     source_path: &Path,
     title_folder_path: &Path,
@@ -2130,22 +2133,18 @@ pub(crate) fn episode_import_dest_path(
     episode_title: Option<&str>,
     quality_override: Option<&str>,
 ) -> PathBuf {
-    let mut tokens = build_rename_tokens(title, parsed, ext);
-    tokens.insert("season".to_string(), season_num.to_string());
-    tokens.insert("season_order".to_string(), season_num.to_string());
-    tokens.insert("episode".to_string(), ep_num_str.to_string());
-    tokens.insert(
-        "absolute_episode".to_string(),
-        absolute_number.unwrap_or("").to_string(),
-    );
-    tokens.insert(
-        "episode_title".to_string(),
-        episode_title.unwrap_or("").to_string(),
-    );
-    if let Some(q) = quality_override {
-        tokens.insert("quality".to_string(), q.to_string());
-    }
     let rendered = if rename_enabled {
+        let tokens = episode_import_rename_tokens(
+            title,
+            parsed,
+            analysis,
+            ext,
+            season_num,
+            ep_num_str,
+            absolute_number,
+            episode_title,
+            quality_override,
+        );
         render_rename_template(rename_template, &tokens)
     } else {
         preserved_import_filename(source_path)
@@ -2160,84 +2159,62 @@ pub(crate) fn episode_import_dest_path(
     )
     .join(rendered)
 }
-/// Build the common rename token map from parsed release metadata.
+
+/// The rename tokens of an episode file being imported.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "episode rename tokens combine media evidence with the resolved episode numbering"
+)]
+pub(crate) fn episode_import_rename_tokens(
+    title: &scryer_domain::Title,
+    parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
+    ext: &str,
+    season_num: u32,
+    ep_num_str: &str,
+    absolute_number: Option<&str>,
+    episode_title: Option<&str>,
+    quality_override: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut tokens = build_rename_tokens(title, parsed, analysis, ext);
+    let season = season_num.to_string();
+    let absolute_episode = crate::library::rename::normalize_absolute_episode_token(
+        absolute_number.map(str::to_string),
+    )
+    .unwrap_or_default();
+    crate::library::rename::insert_series_rename_tokens(
+        &mut tokens,
+        crate::library::rename::SeriesRenameNumbering {
+            season: &season,
+            season_order: &season,
+            episode: ep_num_str,
+            absolute_episode: &absolute_episode,
+            episode_title: episode_title.unwrap_or(""),
+        },
+    );
+    if let Some(q) = quality_override {
+        tokens.insert("quality".to_string(), q.to_string());
+    }
+    tokens
+}
+
+/// The title and media rename tokens of a file being imported, rendered by the
+/// same builder library rename uses so both passes name a file alike.
 pub(crate) fn build_rename_tokens(
     title: &scryer_domain::Title,
     parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
     ext: &str,
 ) -> BTreeMap<String, String> {
-    let mut tokens = BTreeMap::new();
-    let fallback_title_year = title.year;
-    let resolved_year = parsed.year.or(fallback_title_year);
-    tokens.insert("title".to_string(), title.name.clone());
-    tokens.insert(
-        "year".to_string(),
-        resolved_year.map(|y| y.to_string()).unwrap_or_default(),
+    let (mut tokens, edition) = crate::library::rename::title_rename_tokens(
+        title,
+        analysis.map(crate::library::rename::RenameMediaEvidence::from_analysis),
+        parsed,
+        ext,
     );
-    tokens.insert(
-        "quality".to_string(),
-        parsed
-            .quality
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string()),
-    );
-    tokens.insert(
-        "source".to_string(),
-        parsed
-            .source
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "video_codec".to_string(),
-        parsed
-            .video_codec
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "audio".to_string(),
-        parsed
-            .audio
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "release_group".to_string(),
-        parsed.release_group.clone().unwrap_or_default(),
-    );
-    tokens.insert(
-        "season".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.season)
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "episode".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.episode_numbers.first().copied())
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "absolute_episode".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.absolute_episode)
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert("episode_title".to_string(), String::new());
-    tokens.insert("ext".to_string(), ext.to_string());
+    if title.facet == MediaFacet::Movie {
+        tokens.insert("edition".to_string(), edition);
+    }
     tokens
 }
 /// Resolve a parsed episode block against the catalog, translating community

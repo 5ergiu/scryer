@@ -5125,6 +5125,7 @@ async fn import_series_duplicate_destination_requires_catalog_for_already_import
         &stored_title,
         true,
         &parsed,
+        None,
         "mkv",
         &source_path,
         &title_folder,
