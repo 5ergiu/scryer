@@ -667,18 +667,9 @@ const ru: LocaleDictionary = {
     "settings.acquisitionEnabledHelp":
         "Запускает фоновый цикл получения контента: поиск для достижения актуального состояния и сопоставление через RSS.",
     "settings.acquisitionThresholds": "Пороги обновления",
-    "settings.acquisitionUpgradeCooldownHours": "Задержка между обновлениями (часы)",
-    "settings.acquisitionUpgradeCooldownHoursHelp":
-        "Минимальный промежуток времени между загрузками обновлённых версий одного и того же элемента.",
     "settings.acquisitionSameTierMinDelta": "Минимальная разница оценки в одном уровне качества",
     "settings.acquisitionSameTierMinDeltaHelp":
         "Релиз того же уровня качества должен превзойти оценку текущего файла как минимум на указанное значение.",
-    "settings.acquisitionCrossTierMinDelta": "Минимальная разница между уровнями качества",
-    "settings.acquisitionCrossTierMinDeltaHelp":
-        "Релиз более высокого уровня качества должен превзойти оценку текущего файла как минимум на указанное значение.",
-    "settings.acquisitionForcedUpgradeDeltaBypass": "Принудительное обновление при большой разнице оценок",
-    "settings.acquisitionForcedUpgradeDeltaBypassHelp":
-        "Если улучшение оценки достигает этого значения, обновление выполняется немедленно, игнорируя период ожидания.",
     "settings.acquisitionConvergence": "Сходимость и распределение нагрузки",
     "settings.acquisitionPollIntervalSeconds": "Интервал опроса (секунды)",
     "settings.acquisitionPollIntervalSecondsHelp":

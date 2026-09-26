@@ -84,19 +84,26 @@ pub struct PluginAutoUpdateSettingsPayload {
 pub struct AcquisitionSettingsPayload {
     /// Whether automatic acquisition is enabled.
     pub enabled: bool,
-    /// Upgrade cooldown in hours.
+    /// Deprecated and inert. There is no upgrade cooldown; this always
+    /// returns 0 and the value carries no meaning.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
     pub upgrade_cooldown_hours: i32,
     /// Minimum score delta for same-tier upgrades.
     pub same_tier_min_delta: i32,
     /// Deprecated and inert. Quality tier is compared before score, so no
-    /// score delta ever sees a cross-tier comparison; the stored value is
-    /// returned unchanged and ignored by acquisition. Scheduled for removal in
-    /// a later minor.
+    /// cross-tier delta is consulted; this always returns 0 and the value
+    /// carries no meaning.
     #[graphql(
-        deprecation = "Inert since 0.18.17: quality tier is compared before score, so no cross-tier delta is consulted. The value is stored and ignored; the field will be removed in a later minor."
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
     )]
     pub cross_tier_min_delta: i32,
-    /// Score delta that bypasses normal forced-upgrade thresholds.
+    /// Deprecated and inert. There is no upgrade cooldown to bypass; this
+    /// always returns 0 and the value carries no meaning.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
     pub forced_upgrade_delta_bypass: i32,
     /// Acquisition polling interval in seconds.
     pub poll_interval_seconds: i32,
@@ -1092,16 +1099,26 @@ pub struct UpdatePluginAutoUpdateSettingsInput {
 pub struct UpdateAcquisitionSettingsInput {
     /// Whether acquisition scheduling is enabled.
     pub enabled: bool,
-    /// Upgrade cooldown in hours.
-    pub upgrade_cooldown_hours: i32,
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub upgrade_cooldown_hours: Option<i32>,
     /// Minimum score improvement for a same-tier upgrade.
     pub same_tier_min_delta: i32,
-    /// Deprecated and inert: accepted and stored for compatibility, ignored by
-    /// acquisition (quality tier is compared before score, so no cross-tier
-    /// delta is ever consulted). Will be removed in a later minor.
-    pub cross_tier_min_delta: i32,
-    /// Score delta that bypasses the forced-upgrade guard.
-    pub forced_upgrade_delta_bypass: i32,
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub cross_tier_min_delta: Option<i32>,
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub forced_upgrade_delta_bypass: Option<i32>,
     /// Scheduler poll interval in seconds.
     pub poll_interval_seconds: i32,
     /// Maximum long-tail scopes processed per cycle.

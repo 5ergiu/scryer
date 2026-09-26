@@ -851,10 +851,7 @@ export const testSubtitleProviderConnectionMutation = `mutation TestSubtitleProv
 export const updateAcquisitionSettingsMutation = `mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
   updateAcquisitionSettings(input: $input) {
     enabled
-    upgradeCooldownHours
     sameTierMinDelta
-    crossTierMinDelta
-    forcedUpgradeDeltaBypass
     pollIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays

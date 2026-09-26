@@ -937,33 +937,9 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
             scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.upgrade_cooldown_hours",
-            data_type: "number",
-            default_value_json: "24",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
-            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "acquisition.same_tier_min_delta",
             data_type: "number",
             default_value_json: "120",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.cross_tier_min_delta",
-            data_type: "number",
-            default_value_json: "30",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.forced_upgrade_delta_bypass",
-            data_type: "number",
-            default_value_json: "400",
             is_sensitive: false,
         },
         ServiceSettingSeed {
