@@ -102,8 +102,8 @@ pub mod request_rules;
 mod rules;
 pub use rules::preview::{
     RuleSetTestContext, RuleSetTestDraft, RuleSetTestDraftContribution, RuleSetTestEntry,
-    RuleSetTestError, RuleSetTestParsed, RuleSetTestRequest, RuleSetTestResult,
-    RuleSetTestRuleSetResult,
+    RuleSetTestError, RuleSetTestListingFacts, RuleSetTestListingInput, RuleSetTestParsed,
+    RuleSetTestRequest, RuleSetTestResult, RuleSetTestRuleSetResult,
 };
 pub use rules::tracked_packs::{RulePackPreviewChange, TrackedRulePackPreview};
 mod scheduler;

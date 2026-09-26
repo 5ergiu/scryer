@@ -1158,6 +1158,37 @@ pub(crate) fn score_media_file(
     score_release(&evidence_from_media_file(file), ctx)
 }
 
+/// [`score_media_file`] for the rule editor's tester: the same evidence and
+/// pipeline, with rule diagnostics collected for display.
+pub(crate) fn score_media_file_preview(
+    file: &crate::TitleMediaFile,
+    ctx: &ScoringContext<'_>,
+) -> ScoredReleasePreview {
+    score_release_preview(&evidence_from_media_file(file), ctx)
+}
+
+/// [`score_media_file_for_episodes`] for the rule editor's tester: the same
+/// per-episode disc scope, with rule diagnostics collected for display.
+pub(crate) fn score_media_file_for_episodes_preview(
+    file: &crate::TitleMediaFile,
+    episode_ids: &[String],
+    ctx: &ScoringContext<'_>,
+) -> ScoredReleasePreview {
+    let mut rules = RuleEvaluationBatch::from_context(ctx);
+    rules.collect_diagnostics = true;
+    let scored = score_disc_scope_with_rules(
+        &evidence_from_media_file(file),
+        ctx,
+        &mut rules,
+        Some(episode_ids),
+    );
+    ScoredReleasePreview {
+        scored,
+        rule_errors: rules.errors,
+        engine_error: rules.engine_error,
+    }
+}
+
 pub(crate) fn score_media_file_for_episodes(
     file: &crate::TitleMediaFile,
     episode_ids: &[String],

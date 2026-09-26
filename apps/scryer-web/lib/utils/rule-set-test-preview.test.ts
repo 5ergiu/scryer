@@ -4,9 +4,12 @@ import {
   canTestRuleSet,
   buildRuleSetTestInput,
   RuleSetTestRequestController,
+  EMPTY_RULE_SET_TEST_LISTING,
+  listingInputFromDraft,
   ruleSetTestFingerprint,
   sizeBytesFromGib,
   shouldApplyRuleSetTestResponse,
+  storedFileOptions,
 } from "./rule-set-test-preview.ts";
 import { testRuleSetMutation } from "../graphql/mutations.ts";
 
@@ -128,4 +131,188 @@ test("preview operation asks for structured evaluation errors", () => {
   assert.match(testRuleSetMutation, /errors \{\s+code\s+message\s+ruleSetId\s+\}/);
   assert.match(testRuleSetMutation, /entries \{\s+code\s+delta\s+blocked\s+kind\s+\}/);
   assert.match(testRuleSetMutation, /releaseGroup[\s\S]*videoCodec[\s\S]*audioLanguages/);
+});
+
+test("a stored file needs only a title and a file, never an episode", () => {
+  const stored = {
+    titleId: "title",
+    episodeId: null,
+    releaseName: "",
+    sizeGib: "",
+    mode: "storedFile" as const,
+    mediaFileId: null,
+  };
+  assert.equal(canTestRuleSet(stored, true), false);
+  assert.equal(canTestRuleSet({ ...stored, mediaFileId: "file" }, true), true);
+  assert.equal(
+    canTestRuleSet({ ...stored, titleId: null, mediaFileId: "file" }, false),
+    false,
+  );
+});
+
+test("stored-file requests send the file, never a release name, size, or listing", () => {
+  const input = buildRuleSetTestInput({
+    draft,
+    editRuleSetId: null,
+    copySourceRuleSetId: null,
+    testRuleSetId: "installed-rule",
+    titleId: "title",
+    releaseName: "ignored",
+    sizeBytes: 42,
+    listing: { thumbsUp: 3 },
+    mediaFileId: "file",
+  });
+  assert.deepEqual(input, {
+    testRuleSetId: "installed-rule",
+    titleId: "title",
+    episodeId: undefined,
+    mediaFileId: "file",
+  });
+});
+
+test("release requests carry the typed listing facts", () => {
+  const input = buildRuleSetTestInput({
+    draft: null,
+    editRuleSetId: null,
+    copySourceRuleSetId: null,
+    testRuleSetId: "installed-rule",
+    titleId: "title",
+    releaseName: "release",
+    listing: { thumbsUp: 3, extra: { freeleech: true } },
+  });
+  assert.deepEqual(input.listing, { thumbsUp: 3, extra: { freeleech: true } });
+  assert.equal(input.mediaFileId, undefined);
+});
+
+test("empty listing facts stay unknown", () => {
+  assert.deepEqual(listingInputFromDraft(EMPTY_RULE_SET_TEST_LISTING), {
+    value: undefined,
+  });
+  assert.deepEqual(
+    listingInputFromDraft({
+      ...EMPTY_RULE_SET_TEST_LISTING,
+      indexerLanguages: " , ",
+      isPasswordProtected: "",
+    }),
+    { value: undefined },
+  );
+});
+
+test("listing facts parse into mutation input", () => {
+  assert.deepEqual(
+    listingInputFromDraft({
+      publishedAt: "2024-01-31",
+      thumbsUp: "12",
+      thumbsDown: " 0 ",
+      isPasswordProtected: "false",
+      indexerLanguages: "en, de ,",
+      extra: '{"freeleech": true, "grabs": 5}',
+    }),
+    {
+      value: {
+        publishedAt: "2024-01-31T00:00:00Z",
+        thumbsUp: 12,
+        thumbsDown: 0,
+        isPasswordProtected: false,
+        indexerLanguages: ["en", "de"],
+        extra: { freeleech: true, grabs: 5 },
+      },
+    },
+  );
+  assert.deepEqual(
+    listingInputFromDraft({
+      ...EMPTY_RULE_SET_TEST_LISTING,
+      publishedAt: "2024-01-31 12:30:00+02:00",
+    }),
+    { value: { publishedAt: "2024-01-31 12:30:00+02:00" } },
+    "an RFC 3339 time is kept as written",
+  );
+  assert.deepEqual(
+    listingInputFromDraft({
+      ...EMPTY_RULE_SET_TEST_LISTING,
+      publishedAt: " Wed, 01 Jan 2025 12:00:00 +0000 ",
+    }),
+    { value: { publishedAt: "Wed, 01 Jan 2025 12:00:00 +0000" } },
+    "a newznab pubDate is accepted",
+  );
+});
+
+test("malformed listing facts report their i18n error", () => {
+  const bad = (field: keyof typeof EMPTY_RULE_SET_TEST_LISTING, value: string) =>
+    listingInputFromDraft({ ...EMPTY_RULE_SET_TEST_LISTING, [field]: value });
+  for (const value of [
+    "yesterday",
+    "2024-01-31T12:00:00",
+    "2024-01-31T12:30Z",
+    "2024-13-45T00:00:00Z",
+    "Wed, 45 Foo 2025 12:00:00 +0000",
+  ]) {
+    assert.deepEqual(bad("publishedAt", value), {
+      error: "settings.ruleTestListingPublishedAtInvalid",
+    });
+  }
+  assert.deepEqual(bad("thumbsUp", "1.5"), {
+    error: "settings.ruleTestListingVotesInvalid",
+  });
+  assert.deepEqual(bad("thumbsUp", "-1"), {
+    error: "settings.ruleTestListingVotesInvalid",
+  });
+  assert.deepEqual(bad("thumbsDown", "many"), {
+    error: "settings.ruleTestListingVotesInvalid",
+  });
+  for (const value of ["[1, 2]", "null", "7", "{not json"]) {
+    assert.deepEqual(bad("extra", value), {
+      error: "settings.ruleTestListingExtraInvalid",
+    });
+  }
+});
+
+test("listing changes make a previous result stale", () => {
+  const selection = {
+    titleId: "title",
+    episodeId: null,
+    releaseName: "release",
+    sizeGib: "",
+    listing: EMPTY_RULE_SET_TEST_LISTING,
+  };
+  assert.notEqual(
+    ruleSetTestFingerprint(draft, selection, null, null, null),
+    ruleSetTestFingerprint(
+      draft,
+      { ...selection, listing: { ...EMPTY_RULE_SET_TEST_LISTING, thumbsUp: "1" } },
+      null,
+      null,
+      null,
+    ),
+  );
+});
+
+test("preview operation echoes the scored release and its listing facts", () => {
+  assert.match(testRuleSetMutation, /releaseName\s+mediaFileId/);
+  assert.match(
+    testRuleSetMutation,
+    /listing \{\s+publishedAt\s+ageDays\s+thumbsUp\s+thumbsDown\s+isPasswordProtected\s+indexerLanguages\s+extra\s+capturedAt\s+\}/,
+  );
+});
+
+test("stored-file options list each file once and follow the selected episode", () => {
+  const rows = [
+    { id: "disc", episodeId: "ep-1", filePath: "/library/Serial/disc.iso", grabbedReleaseTitle: null },
+    { id: "disc", episodeId: "ep-2", filePath: "/library/Serial/disc.iso", grabbedReleaseTitle: null },
+    { id: "single", episodeId: "ep-2", filePath: "C:\\library\\Serial\\e2.mkv", grabbedReleaseTitle: "Synthetic.Serial.S01E02" },
+    { id: "unbound", episodeId: null, filePath: "/library/Serial/extra.mkv" },
+  ];
+  assert.deepEqual(storedFileOptions(rows, null), [
+    { id: "disc", label: "disc.iso", episodeIds: ["ep-1", "ep-2"] },
+    { id: "single", label: "Synthetic.Serial.S01E02", episodeIds: ["ep-2"] },
+    { id: "unbound", label: "extra.mkv", episodeIds: [] },
+  ]);
+  assert.deepEqual(
+    storedFileOptions(rows, "ep-1").map((option) => option.id),
+    ["disc"],
+  );
+  assert.deepEqual(
+    storedFileOptions(rows, "ep-2").map((option) => option.id),
+    ["disc", "single"],
+  );
 });

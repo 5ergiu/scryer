@@ -1986,7 +1986,7 @@ const en: LocaleDictionary = {
   "settings.refReleaseAudioChannels":
     "Audio channel configuration (e.g. 5.1, 7.1, 2.0)",
   "settings.refReleaseLangsAudio":
-    "ISO 639-3 audio language codes (e.g. eng, jpn)",
+    "ISO 639-3 audio language codes (e.g. eng, jpn). Includes the languages the indexer listing reported, frozen when the release was grabbed; files that were scanned in, adopted, or imported before listing snapshots were kept contribute only what the name and file show",
   "settings.refReleaseLangsSub": "ISO 639-3 subtitle language codes",
   "settings.refReleaseIsDualAudio": "True when multiple audio tracks detected",
   "settings.refReleaseIsAtmos": "True when Dolby Atmos audio is present",
@@ -2009,7 +2009,7 @@ const en: LocaleDictionary = {
   "settings.refReleaseIsHardcodedSubs":
     "True when hardcoded subtitles are detected in the release name",
   "settings.refReleaseIsPasswordProtected":
-    "True when the indexer supplied a normalized archive or pack password hint for the release",
+    "True when the indexer listing flagged the release as password protected. An indexer listing fact frozen when the release was grabbed; null when the indexer did not say, and null for files that were scanned in, adopted, or imported before listing snapshots were kept",
   "settings.refReleaseIsHdr10Plus":
     "True when HDR10+ is detected from the release metadata",
   "settings.refReleaseIsHlg":
@@ -2043,11 +2043,50 @@ const en: LocaleDictionary = {
   "settings.refReleaseParseConf": "Confidence score for the parse (0.0 to 1.0)",
   "settings.refReleaseSizeBytes":
     "File size in bytes (use scryer.size_gib() to convert)",
-  "settings.refReleaseAgeDays": "Days since the release was published",
-  "settings.refReleaseThumbsUp": "Indexer thumbs-up / votes count",
-  "settings.refReleaseThumbsDown": "Indexer thumbs-down / negative votes count",
+  "settings.refReleaseAgeDays":
+    "Whole days from the indexer's publish time to when the release was grabbed. An indexer listing fact frozen at the grab: the age at grab, which does not move afterwards. A release not yet grabbed is aged now. Null when the publish time is unknown, and null for files that were scanned in, adopted, or imported before listing snapshots were kept",
+  "settings.refReleaseThumbsUp":
+    "Indexer thumbs-up votes. An indexer listing fact frozen when the release was grabbed; null when the indexer did not report votes, and null for files that were scanned in, adopted, or imported before listing snapshots were kept",
+  "settings.refReleaseThumbsDown":
+    "Indexer thumbs-down votes. An indexer listing fact frozen when the release was grabbed; null when the indexer did not report votes, and null for files that were scanned in, adopted, or imported before listing snapshots were kept",
   "settings.refReleaseExtra":
-    "Plugin-supplied metadata object, readable as input.release.extra.<key>",
+    "Indexer-specific listing attributes (flat values and lists of values), readable as input.release.extra.<key>. Indexer listing facts frozen when the release was grabbed; empty (every key null) for files that were scanned in, adopted, or imported before listing snapshots were kept",
+
+  "settings.ruleTestModeLabel": "What to test",
+  "settings.ruleTestModeRelease": "Release name",
+  "settings.ruleTestModeStoredFile": "Test a stored file",
+  "settings.ruleTestStoredFile": "Stored file",
+  "settings.ruleTestStoredFileHelp":
+    "Scored with the file's own size and the indexer listing facts frozen when it was grabbed.",
+  "settings.ruleTestStoredFileSelectTitle": "Select a library title first",
+  "settings.ruleTestStoredFileLoading": "Loading files…",
+  "settings.ruleTestStoredFilePlaceholder": "Select a file",
+  "settings.ruleTestStoredFileNone": "No files for this title or episode",
+  "settings.ruleTestStoredFileFilter": "Filter files",
+  "settings.ruleTestStoredFileLoadFailed": "Unable to load this title's files.",
+  "settings.ruleTestListingFacts": "Listing facts",
+  "settings.ruleTestListingFactsHelp":
+    "Optional indexer listing facts. Anything left empty is unknown (null) to the rules. The release is aged from its publish time to now.",
+  "settings.ruleTestListingPublishedAt": "Published at",
+  "settings.ruleTestListingPublishedAtPlaceholder": "2024-01-31, 2024-01-31T12:00:00Z, or Wed, 31 Jan 2024 12:00:00 +0000",
+  "settings.ruleTestListingThumbsUp": "Thumbs up",
+  "settings.ruleTestListingThumbsDown": "Thumbs down",
+  "settings.ruleTestListingPasswordProtected": "Password protected",
+  "settings.ruleTestListingUnknown": "Unknown",
+  "settings.ruleTestListingYes": "Yes",
+  "settings.ruleTestListingNo": "No",
+  "settings.ruleTestListingIndexerLanguages": "Indexer languages (comma-separated)",
+  "settings.ruleTestListingExtra": "Extra attributes (JSON object)",
+  "settings.ruleTestListingPublishedAtInvalid":
+    "Published at must be a date (2024-01-31), an RFC 3339 time with seconds and a zone (2024-01-31T12:00:00Z), or an RFC 2822 date (Wed, 31 Jan 2024 12:00:00 +0000).",
+  "settings.ruleTestListingVotesInvalid": "Votes must be whole numbers of zero or more.",
+  "settings.ruleTestListingExtraInvalid": "Extra attributes must be a JSON object.",
+  "settings.ruleTestResultRelease": "Scored release",
+  "settings.ruleTestResultListingUnknown":
+    "Listing facts unknown: this file was scanned in, adopted, or imported before listing snapshots were kept, so every listing fact is null to the rules.",
+  "settings.ruleTestResultAgeDays": "Age (days)",
+  "settings.ruleTestResultAgeAtGrab": "{{days}} at grab",
+  "settings.ruleTestResultCapturedAt": "Captured",
 
   "settings.refSectionProfile": "— Active quality profile config",
   "settings.refProfileId": "Profile unique identifier",
