@@ -2116,6 +2116,7 @@ async fn queued_manual_import_rejects_observed_targets_before_consuming_or_queue
         contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),

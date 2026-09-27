@@ -85,6 +85,7 @@ fn episode(id: &str, season: u32, number: u32, absolute: Option<u32>, aired: &st
         contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: chrono::Utc::now(),

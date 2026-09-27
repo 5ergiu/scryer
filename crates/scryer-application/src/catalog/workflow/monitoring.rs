@@ -1341,6 +1341,7 @@ impl AppUseCase {
             collection_id,
             overview,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             clear_image_url: false,
             contiguous_absolute_number: None,

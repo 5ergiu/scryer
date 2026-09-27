@@ -1733,6 +1733,9 @@ pub struct Episode {
     pub contiguous_absolute_number: Option<i32>,
     pub overview: Option<String>,
     pub tvdb_id: Option<String>,
+    /// TMDB's episode id. Set for a TMDB-primary series' episodes, which have
+    /// no TVDB id; `None` for TVDB-backed series and rows written before 0263.
+    pub tmdb_id: Option<String>,
     pub image_url: Option<String>,
     pub monitored: bool,
     pub created_at: DateTime<Utc>,

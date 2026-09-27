@@ -561,6 +561,7 @@ mod title_image_cache_refresh_tests {
             contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("456".to_string()),
+            tmdb_id: None,
             image_url: Some("https://old.example/still.jpg".to_string()),
             monitored: true,
             created_at: chrono::Utc::now(),

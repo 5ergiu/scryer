@@ -754,6 +754,9 @@ impl ShowRepository for MockShowRepo {
         if let Some(value) = update.tvdb_id {
             item.tvdb_id = Some(value);
         }
+        if let Some(value) = update.tmdb_id {
+            item.tmdb_id = Some(value);
+        }
         if update.clear_image_url {
             item.image_url = None;
         } else if let Some(value) = update.image_url {

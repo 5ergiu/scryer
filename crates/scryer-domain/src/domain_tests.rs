@@ -1269,6 +1269,7 @@ fn scale_episode(id: &str, raw: Option<&str>, contiguous: Option<i32>) -> Episod
         contiguous_absolute_number: contiguous,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),

@@ -352,6 +352,7 @@ async fn scoped_anibridge_external_ids_round_trip_for_collections_and_episodes()
         contiguous_absolute_number: None,
         overview: None,
         tvdb_id: Some("1234567".to_string()),
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),
@@ -1364,6 +1365,112 @@ async fn media_file_release_listing_snapshot_survives_analysis_and_signature_upd
         .expect("lookup should succeed")
         .expect("pre-column media file should exist");
     assert_eq!(earlier.release_listing_json, None);
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// Migration 0263 gave `episodes` a `tmdb_id` column: the provider identity of
+/// a TMDB-primary series' episodes, which have no TVDB id. Proves it round
+/// trips through insert, lookup and a targeted update, that an update naming
+/// only other fields leaves it alone, and that a row written without it (the
+/// shape of every pre-0263 row) reads back as `None`.
+#[tokio::test]
+async fn episode_tmdb_id_round_trips_and_legacy_rows_read_back_as_none() {
+    let (services, db) = temp_services("scryer_episode_tmdb_id").await;
+    let catalog = title_store(&services);
+    let shows = show_store(&services);
+
+    let mut title = make_test_title("title-tmdb-series", None);
+    title.facet = MediaFacet::Series;
+    title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+    title.external_ids = vec![ExternalId::with_kind("tmdb", "series", "1399")];
+    TitleRepository::create(&catalog, title.clone())
+        .await
+        .expect("title should insert");
+
+    let episode = Episode {
+        id: "episode-tmdb-s01e01".to_string(),
+        title_id: title.id.clone(),
+        collection_id: None,
+        episode_type: scryer_domain::EpisodeType::Standard,
+        episode_number: Some("1".to_string()),
+        season_number: Some("1".to_string()),
+        episode_label: Some("S01E01".to_string()),
+        title: Some("Pilot".to_string()),
+        air_date: Some("2026-01-01".to_string()),
+        duration_seconds: Some(3_600),
+        has_multi_audio: false,
+        has_subtitle: false,
+        is_filler: false,
+        is_recap: false,
+        absolute_number: None,
+        contiguous_absolute_number: None,
+        overview: None,
+        tvdb_id: None,
+        tmdb_id: Some("63056".to_string()),
+        image_url: None,
+        monitored: true,
+        created_at: Utc::now(),
+    };
+    ShowRepository::create_episode(&shows, episode.clone())
+        .await
+        .expect("episode should insert");
+
+    let loaded = ShowRepository::get_episode_by_id(&shows, &episode.id)
+        .await
+        .expect("episode should load")
+        .expect("episode should exist");
+    assert_eq!(loaded.tvdb_id, None);
+    assert_eq!(loaded.tmdb_id.as_deref(), Some("63056"));
+
+    let renamed = ShowRepository::update_episode(
+        &shows,
+        &episode.id,
+        EpisodeUpdate {
+            title: Some("Winter Is Coming".to_string()),
+            ..EpisodeUpdate::default()
+        },
+    )
+    .await
+    .expect("an update naming other fields should succeed");
+    assert_eq!(renamed.tmdb_id.as_deref(), Some("63056"));
+
+    let refreshed = ShowRepository::update_episode(
+        &shows,
+        &episode.id,
+        EpisodeUpdate {
+            tmdb_id: Some("63057".to_string()),
+            ..EpisodeUpdate::default()
+        },
+    )
+    .await
+    .expect("a tmdb id update should succeed");
+    assert_eq!(refreshed.tmdb_id.as_deref(), Some("63057"));
+    let listed = ShowRepository::list_episodes_for_title(&shows, &title.id)
+        .await
+        .expect("episodes should list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tmdb_id.as_deref(), Some("63057"));
+
+    // Written the way every row inserted before 0263 was: no tmdb_id column.
+    sqlx::query(
+        "INSERT INTO episodes
+         (id, title_id, episode_type, episode_number, season_number, tvdb_id,
+          has_multi_audio, has_subtitle, monitored, created_at)
+         VALUES (?, ?, 'standard', '2', '1', '1234568', 0, 0, 1, ?)",
+    )
+    .bind("episode-legacy-s01e02")
+    .bind(&title.id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("legacy episode should insert");
+    let legacy = ShowRepository::get_episode_by_id(&shows, "episode-legacy-s01e02")
+        .await
+        .expect("legacy episode should load")
+        .expect("legacy episode should exist");
+    assert_eq!(legacy.tvdb_id.as_deref(), Some("1234568"));
+    assert_eq!(legacy.tmdb_id, None);
 
     let _ = std::fs::remove_file(db);
 }

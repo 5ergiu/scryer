@@ -46,7 +46,7 @@ const SERIES_MOVIE_LINK_COLUMNS: &str = "sml.id AS link_id, sml.series_title_id,
 
 const EPISODE_COLUMNS: &str = "id, title_id, collection_id, episode_type, episode_number, season_number, \
     episode_label, title, air_date, duration_seconds, has_multi_audio, has_subtitle, is_filler, is_recap, \
-    absolute_number, contiguous_absolute_number, overview, tvdb_id, image_url, monitored, created_at";
+    absolute_number, contiguous_absolute_number, overview, tvdb_id, tmdb_id, image_url, monitored, created_at";
 
 const COLLECTION_INSERT_SQL: &str = "INSERT INTO collections (
     id, title_id, collection_type, collection_index, label, ordered_path, narrative_order,
@@ -71,9 +71,9 @@ const EPISODE_INSERT_SQL: &str = "INSERT INTO episodes (
     id, title_id, collection_id, episode_type, episode_number, season_number,
     episode_label, title, air_date, duration_seconds, has_multi_audio,
     has_subtitle, is_filler, is_recap, absolute_number, contiguous_absolute_number, overview,
-    tvdb_id, image_url, monitored, created_at
+    tvdb_id, tmdb_id, image_url, monitored, created_at
 ) VALUES (
-    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 )";
 
 const EPISODE_UPDATE_SQL: &str = "UPDATE episodes SET
@@ -94,6 +94,7 @@ const EPISODE_UPDATE_SQL: &str = "UPDATE episodes SET
     contiguous_absolute_number = {},
     overview = {},
     tvdb_id = {},
+    tmdb_id = {},
     image_url = {},
     monitored = {}
 WHERE id = {}";
@@ -1423,7 +1424,7 @@ async fn find_episode_by_title_and_numbers_query(
     let sql = "SELECT e.id, e.title_id, e.collection_id, e.episode_type, e.episode_number, \
                e.season_number, e.episode_label, e.title, e.air_date, e.duration_seconds, \
                e.has_multi_audio, e.has_subtitle, e.is_filler, e.is_recap, e.absolute_number, \
-               e.contiguous_absolute_number, e.overview, e.tvdb_id, e.image_url, e.monitored, e.created_at \
+               e.contiguous_absolute_number, e.overview, e.tvdb_id, e.tmdb_id, e.image_url, e.monitored, e.created_at \
           FROM episodes e \
           INNER JOIN collections c ON c.id = e.collection_id \
          WHERE e.title_id = {} \
@@ -1755,6 +1756,7 @@ async fn insert_episode_tx(tx: &mut SqlTx<'_>, episode: &Episode) -> AppResult<(
         SqlArg::OptI64(episode.contiguous_absolute_number.map(i64::from)),
         SqlArg::OptText(episode.overview.clone()),
         SqlArg::OptText(episode.tvdb_id.clone()),
+        SqlArg::OptText(episode.tmdb_id.clone()),
         SqlArg::OptText(episode.image_url.clone()),
         SqlArg::Bool(episode.monitored),
         SqlArg::Timestamp(episode.created_at),
@@ -1784,6 +1786,7 @@ async fn persist_episode_tx(tx: &mut SqlTx<'_>, episode: &Episode) -> AppResult<
         SqlArg::OptI64(episode.contiguous_absolute_number.map(i64::from)),
         SqlArg::OptText(episode.overview.clone()),
         SqlArg::OptText(episode.tvdb_id.clone()),
+        SqlArg::OptText(episode.tmdb_id.clone()),
         SqlArg::OptText(episode.image_url.clone()),
         SqlArg::Bool(episode.monitored),
     ];
@@ -1926,6 +1929,7 @@ fn episode_update_is_empty(update: &EpisodeUpdate) -> bool {
         && update.collection_id.is_none()
         && update.overview.is_none()
         && update.tvdb_id.is_none()
+        && update.tmdb_id.is_none()
         && update.image_url.is_none()
         && !update.clear_image_url
         && update.contiguous_absolute_number.is_none()
@@ -1970,6 +1974,9 @@ fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
     }
     if let Some(value) = update.tvdb_id {
         episode.tvdb_id = Some(value);
+    }
+    if let Some(value) = update.tmdb_id {
+        episode.tmdb_id = Some(value);
     }
     if update.clear_image_url {
         episode.image_url = None;
@@ -2183,6 +2190,7 @@ fn row_to_episode(row: &SqlRow) -> AppResult<Episode> {
             .and_then(|number| i32::try_from(number).ok()),
         overview: row.opt_text("overview")?,
         tvdb_id: row.opt_text("tvdb_id")?,
+        tmdb_id: row.opt_text("tmdb_id")?,
         image_url: row.opt_text("image_url")?,
         monitored: row.bool("monitored")?,
         created_at: row.timestamp("created_at")?,
@@ -2693,7 +2701,8 @@ mod collection_ordered_path_tests {
                 has_multi_audio INTEGER NOT NULL, has_subtitle INTEGER NOT NULL,
                 is_filler INTEGER, is_recap INTEGER, absolute_number TEXT,
                 contiguous_absolute_number INTEGER, overview TEXT,
-                tvdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL, created_at TEXT NOT NULL
+                tvdb_id TEXT, tmdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL,
+                created_at TEXT NOT NULL
             )",
         )
         .execute(&pool)
@@ -2766,7 +2775,8 @@ mod collection_ordered_path_tests {
                 has_multi_audio INTEGER NOT NULL, has_subtitle INTEGER NOT NULL,
                 is_filler INTEGER, is_recap INTEGER, absolute_number TEXT,
                 contiguous_absolute_number INTEGER, overview TEXT,
-                tvdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL, created_at TEXT NOT NULL
+                tvdb_id TEXT, tmdb_id TEXT, image_url TEXT, monitored INTEGER NOT NULL,
+                created_at TEXT NOT NULL
             )",
         )
         .execute(&pool)

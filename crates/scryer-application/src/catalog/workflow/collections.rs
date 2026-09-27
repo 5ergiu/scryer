@@ -683,8 +683,13 @@ impl AppUseCase {
                 } else {
                     None
                 };
+                // A TMDB-primary series' episodes carry TMDB ids instead. Like
+                // the TVDB id, a present id is refreshed and an absent one
+                // leaves the stored value alone.
+                let new_tmdb_id = ep.tmdb_id.filter(|id| *id > 0).map(|id| id.to_string());
                 let new_image_url = normalize_episode_image_url(&ep.image_url);
                 let tvdb_id_changed = new_tvdb_id.as_deref() != existing.tvdb_id.as_deref();
+                let tmdb_id_changed = new_tmdb_id.is_some() && new_tmdb_id != existing.tmdb_id;
                 let image_url_changed = new_image_url.as_deref() != existing.image_url.as_deref();
                 // SMG recomputes the contiguous scale as TVDB's absolute order
                 // changes, so every hydration refreshes it, clearing included.
@@ -694,6 +699,7 @@ impl AppUseCase {
                 if (title_changed
                     || overview_changed
                     || tvdb_id_changed
+                    || tmdb_id_changed
                     || image_url_changed
                     || contiguous_changed)
                     && let Err(err) = self
@@ -711,6 +717,7 @@ impl AppUseCase {
                                 title: if title_changed { new_title } else { None },
                                 overview: if overview_changed { new_overview } else { None },
                                 tvdb_id: if tvdb_id_changed { new_tvdb_id } else { None },
+                                tmdb_id: if tmdb_id_changed { new_tmdb_id } else { None },
                                 image_url: if image_url_changed {
                                     new_image_url.clone()
                                 } else {
@@ -769,6 +776,7 @@ impl AppUseCase {
                 } else {
                     None
                 },
+                tmdb_id: ep.tmdb_id.filter(|id| *id > 0).map(|id| id.to_string()),
                 image_url: normalize_episode_image_url(&ep.image_url),
                 monitored: episode_monitored,
                 created_at: Utc::now(),
@@ -1431,6 +1439,7 @@ impl AppUseCase {
             contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),

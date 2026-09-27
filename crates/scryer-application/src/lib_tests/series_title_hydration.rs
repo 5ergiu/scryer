@@ -254,12 +254,12 @@ fn external_id_values(title: &Title, source: &str) -> Vec<String> {
         .collect()
 }
 
-/// `(season, episode, tvdb_id)` for every stored episode, sorted.
+/// `(season, episode, tvdb_id, tmdb_id)` for every stored episode, sorted.
 async fn stored_episodes(
     app: &AppUseCase,
     user: &User,
     title_id: &str,
-) -> Vec<(String, String, Option<String>)> {
+) -> Vec<(String, String, Option<String>, Option<String>)> {
     let mut episodes = Vec::new();
     for collection in app
         .list_collections(user, title_id)
@@ -275,6 +275,7 @@ async fn stored_episodes(
                 episode.season_number.unwrap_or_default(),
                 episode.episode_number.unwrap_or_default(),
                 episode.tvdb_id,
+                episode.tmdb_id,
             ));
         }
     }
@@ -322,8 +323,18 @@ async fn a_tmdb_primary_series_hydrates_by_its_smg_title_id() {
     assert_eq!(
         stored_episodes(&app, &user, &hydrated.id).await,
         vec![
-            ("1".to_string(), "1".to_string(), None),
-            ("1".to_string(), "2".to_string(), None),
+            (
+                "1".to_string(),
+                "1".to_string(),
+                None,
+                Some((tmdb_id * 100 + 1).to_string())
+            ),
+            (
+                "1".to_string(),
+                "2".to_string(),
+                None,
+                Some((tmdb_id * 100 + 2).to_string())
+            ),
         ]
     );
     let title_calls = gateway.title_calls.lock().await;
@@ -391,12 +402,14 @@ async fn a_tvdb_series_hydrates_identically_through_either_surface() {
             (
                 "1".to_string(),
                 "1".to_string(),
-                Some((tvdb_id * 100 + 1).to_string())
+                Some((tvdb_id * 100 + 1).to_string()),
+                None
             ),
             (
                 "1".to_string(),
                 "2".to_string(),
-                Some((tvdb_id * 100 + 2).to_string())
+                Some((tvdb_id * 100 + 2).to_string()),
+                None
             ),
         ]
     );

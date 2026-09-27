@@ -499,6 +499,7 @@ async fn movie_title_file_only_deletion_retains_title_and_metadata_records() {
             contiguous_absolute_number: None,
             overview: Some("must survive file-only maintenance".to_string()),
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),

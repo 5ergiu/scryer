@@ -228,6 +228,7 @@ fn graphql_fix_title_match_series_rebuilds_and_relinks_library() {
                     contiguous_absolute_number: None,
                     overview: Some("Legacy episode".to_string()),
                     tvdb_id: Some("9999001".to_string()),
+                    tmdb_id: None,
                     image_url: None,
                     monitored: true,
                     created_at: chrono::Utc::now(),

@@ -1168,6 +1168,7 @@ fn test_series_episode() -> Episode {
         contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),

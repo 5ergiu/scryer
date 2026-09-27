@@ -2332,6 +2332,7 @@ async fn media_file_aggregates_ignore_additional_files_but_listing_includes_them
         contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),

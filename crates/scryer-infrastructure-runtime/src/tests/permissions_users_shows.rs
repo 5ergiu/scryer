@@ -563,6 +563,7 @@ async fn sqlite_show_queries_roundtrip() {
         contiguous_absolute_number: None,
         overview: Some("The pilot episode.".into()),
         tvdb_id: None,
+        tmdb_id: None,
         image_url: Some("https://cdn.example.test/episode-created.jpg".into()),
         monitored: true,
         created_at: Utc::now(),

@@ -949,6 +949,7 @@ pub struct EpisodeUpdate {
     pub collection_id: Option<String>,
     pub overview: Option<String>,
     pub tvdb_id: Option<String>,
+    pub tmdb_id: Option<String>,
     pub image_url: Option<String>,
     pub clear_image_url: bool,
     /// `Some(value)` rewrites the stored contiguous absolute number, including
@@ -971,6 +972,7 @@ impl EpisodeUpdate {
             || self.collection_id.is_some()
             || self.overview.is_some()
             || self.tvdb_id.is_some()
+            || self.tmdb_id.is_some()
             || self.image_url.is_some()
             || self.clear_image_url
             || self.contiguous_absolute_number.is_some()
@@ -989,6 +991,7 @@ impl EpisodeUpdate {
             || self.collection_id.is_some()
             || self.overview.is_some()
             || self.tvdb_id.is_some()
+            || self.tmdb_id.is_some()
             || self.image_url.is_some()
             || self.clear_image_url
             || self.contiguous_absolute_number.is_some()
