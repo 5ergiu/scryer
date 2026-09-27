@@ -136,6 +136,66 @@ impl MovieTitleRef {
     }
 }
 
+/// A series named by the ids SMG's title surface accepts: its own title id,
+/// and the provider ids it can resolve when the title id is not known yet.
+///
+/// Mirrors [`MovieTitleRef`]. A TMDB-primary series has no TVDB id, so SMG's
+/// title id (`smg` external id) is the only handle hydration can rely on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeriesTitleRef {
+    pub smg_id: Option<i64>,
+    pub tvdb_id: Option<i64>,
+    pub tmdb_id: Option<i64>,
+    pub imdb_id: Option<String>,
+}
+
+impl SeriesTitleRef {
+    pub fn from_title(title: &Title) -> Option<Self> {
+        if title.facet == MediaFacet::Movie {
+            return None;
+        }
+
+        // The SMG and TVDB ids are read exactly as hydration always read them
+        // (first id of that source), so a TVDB-backed series keeps addressing
+        // the same entity. TMDB and IMDb ids are only trusted when they are
+        // not kinded as something other than a series: an anime title also
+        // carries its mapped movies' ids.
+        let external_id = |source: &str| {
+            let series_only = matches!(source, "tmdb" | "imdb");
+            title
+                .external_ids
+                .iter()
+                .find(|external_id| {
+                    external_id.source.trim().eq_ignore_ascii_case(source)
+                        && (!series_only
+                            || external_id.kind.as_deref().is_none_or(|kind| {
+                                let kind = kind.trim();
+                                kind.is_empty() || kind.eq_ignore_ascii_case("series")
+                            }))
+                })
+                .map(|external_id| external_id.value.trim())
+                .filter(|value| !value.is_empty())
+        };
+        let reference = Self {
+            smg_id: external_id("smg").and_then(|value| value.parse().ok()),
+            tvdb_id: external_id("tvdb").and_then(|value| value.parse().ok()),
+            tmdb_id: external_id("tmdb").and_then(|value| value.parse().ok()),
+            imdb_id: external_id("imdb").map(str::to_string).or_else(|| {
+                title
+                    .imdb_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+            }),
+        };
+
+        (reference.smg_id.is_some()
+            || reference.tvdb_id.is_some()
+            || reference.tmdb_id.is_some()
+            || reference.imdb_id.is_some())
+        .then_some(reference)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MultiMetadataSearchResult {
     pub movies: Vec<RichMetadataSearchItem>,
@@ -634,10 +694,26 @@ pub struct MovieTitleBulkResult {
     pub missing_ref_indexes: Vec<usize>,
 }
 
+/// SMG's answer to a `titles` request for series, keyed like
+/// [`MovieTitleBulkResult`].
+#[derive(Debug, Clone, Default)]
+pub struct SeriesTitleBulkResult {
+    pub by_ref_index: HashMap<usize, SeriesMetadata>,
+    pub redirects: Vec<(i64, i64)>,
+    pub missing_ref_indexes: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SeriesMetadata {
     pub target_key: Option<String>,
+    /// SMG's title id. Set only when the series came from the title surface.
+    pub smg_id: Option<i64>,
+    /// `tvdb` or `tmdb`; empty when the legacy TVDB documents supplied it.
+    pub primary_source: String,
+    /// The series' TVDB id, or `0` for a TMDB-primary series.
     pub tvdb_id: i64,
+    /// The series' TMDB id, when SMG knows one.
+    pub tmdb_id: Option<i64>,
     pub name: String,
     pub sort_name: String,
     pub slug: String,
@@ -733,7 +809,10 @@ pub struct AnimeMovie {
 
 #[derive(Debug, Clone)]
 pub struct SeasonMetadata {
+    /// The season's TVDB id, or `0` when it has none (a TMDB-primary series).
     pub tvdb_id: i64,
+    /// The season's TMDB id; set for a TMDB-primary series' seasons.
+    pub tmdb_id: Option<i64>,
     pub number: i32,
     pub label: String,
     pub episode_type: String,
@@ -741,7 +820,10 @@ pub struct SeasonMetadata {
 
 #[derive(Debug, Clone)]
 pub struct EpisodeMetadata {
+    /// The episode's TVDB id, or `0` when it has none (a TMDB-primary series).
     pub tvdb_id: i64,
+    /// The episode's TMDB id; set for a TMDB-primary series' episodes.
+    pub tmdb_id: Option<i64>,
     pub episode_number: i32,
     pub name: String,
     pub aired: String,
@@ -819,6 +901,26 @@ pub trait MetadataGateway: Send + Sync {
         language: &str,
     ) -> AppResult<MovieTitleBulkResult> {
         let _ = (refs, language);
+        Err(AppError::Repository(
+            "metadata gateway does not support title-id queries".into(),
+        ))
+    }
+
+    /// Fetch series by SMG title id through the `titles` operation. Refs
+    /// without an SMG id are resolved from their provider ids first. The
+    /// result's `by_ref_index` is keyed by the index into `refs`.
+    ///
+    /// Gateways without the title surface answer with an error that
+    /// `title_queries_not_supported` recognises; callers fall back to
+    /// [`MetadataGateway::get_series`] by TVDB id.
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        language: &str,
+        include_episodes: bool,
+        include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        let _ = (refs, language, include_episodes, include_episode_orders);
         Err(AppError::Repository(
             "metadata gateway does not support title-id queries".into(),
         ))

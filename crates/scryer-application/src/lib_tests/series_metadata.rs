@@ -88,12 +88,14 @@ async fn series_hydration_persists_and_clears_episode_image_url() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 880_001,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let mut episodes = vec![EpisodeMetadata {
         tvdb_id: 880_101,
+        tmdb_id: None,
         episode_number: 1,
         name: "A Still Frame".into(),
         aired: "2026-01-01".into(),
@@ -168,12 +170,14 @@ async fn series_hydration_clears_the_contiguous_number_of_episodes_it_no_longer_
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 880_002,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let episode = |number: i32, contiguous: Option<i32>| EpisodeMetadata {
         tvdb_id: 880_200 + i64::from(number),
+        tmdb_id: None,
         episode_number: number,
         name: format!("Episode {number}"),
         aired: "2026-01-01".into(),
@@ -330,12 +334,14 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -344,6 +350,7 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 1001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Cruelty".into(),
             aired: "2019-04-06".into(),
@@ -358,6 +365,7 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
         },
         EpisodeMetadata {
             tvdb_id: 1002,
+            tmdb_id: None,
             episode_number: 26,
             name: "New Mission".into(),
             aired: "2019-09-28".into(),
@@ -372,6 +380,7 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
         },
         EpisodeMetadata {
             tvdb_id: 2001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Iron Rail".into(),
             aired: "2020-10-10".into(),
@@ -504,12 +513,14 @@ async fn series_season_zero_creates_canonical_specials_collection() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 80,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 81,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -518,6 +529,7 @@ async fn series_season_zero_creates_canonical_specials_collection() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 8001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Special Episode".into(),
             aired: "2003-11-01".into(),
@@ -532,6 +544,7 @@ async fn series_season_zero_creates_canonical_specials_collection() {
         },
         EpisodeMetadata {
             tvdb_id: 8101,
+            tmdb_id: None,
             episode_number: 1,
             name: "Pilot".into(),
             aired: "2003-11-02".into(),
@@ -587,6 +600,7 @@ async fn new_regular_season_without_episodes_is_monitored_when_title_is_monitore
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 92,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -634,6 +648,7 @@ async fn new_regular_season_without_episodes_is_not_monitored_when_monitor_type_
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 93,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -701,6 +716,7 @@ async fn rehydrating_existing_regular_season_preserves_manual_unmonitored_state(
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 94,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -763,12 +779,14 @@ async fn series_rollout_reuses_legacy_season_zero_specials_collection() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 90,
+        tmdb_id: None,
         number: 0,
         label: "Specials".into(),
         episode_type: "special".into(),
     }];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 9001,
+        tmdb_id: None,
         episode_number: 1,
         name: "Pilot Special".into(),
         aired: "2004-01-01".into(),
@@ -830,12 +848,14 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 20,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 21,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -844,6 +864,7 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 3001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Kids in the Chorus".into(),
             aired: "2019-07-12".into(),
@@ -858,6 +879,7 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
         },
         EpisodeMetadata {
             tvdb_id: 3002,
+            tmdb_id: None,
             episode_number: 1,
             name: "OVA".into(),
             aired: "2020-02-01".into(),
@@ -936,6 +958,7 @@ async fn anime_hydration_persists_scoped_anibridge_ids_for_episode_and_full_seas
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 4_311_622,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -943,6 +966,7 @@ async fn anime_hydration_persists_scoped_anibridge_ids_for_episode_and_full_seas
     let episodes = (1..=24)
         .map(|episode_number| EpisodeMetadata {
             tvdb_id: 431_162_200 + i64::from(episode_number),
+            tmdb_id: None,
             episode_number,
             name: format!("Episode {episode_number}"),
             aired: "2025-01-10".into(),
@@ -1071,18 +1095,21 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 50,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 51,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
         },
         SeasonMetadata {
             tvdb_id: 52,
+            tmdb_id: None,
             number: 2,
             label: "Season 2".into(),
             episode_type: "official".into(),
@@ -1091,6 +1118,7 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 5001,
+            tmdb_id: None,
             episode_number: 1,
             name: "To You, in 2000 Winters".into(),
             aired: "2013-04-07".into(),
@@ -1105,6 +1133,7 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
         },
         EpisodeMetadata {
             tvdb_id: 6001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Iron Colossus".into(),
             aired: "2017-04-01".into(),
@@ -1308,12 +1337,14 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -1322,6 +1353,7 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 1001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Episode 1".into(),
             aired: "2018-04-03".into(),
@@ -1336,6 +1368,7 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
         },
         EpisodeMetadata {
             tvdb_id: 2001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Twin Sentinels".into(),
             aired: "2018-08-03".into(),
@@ -1465,12 +1498,14 @@ async fn anime_specials_refresh_updates_localized_series_movie_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -1478,6 +1513,7 @@ async fn anime_specials_refresh_updates_localized_series_movie_metadata() {
     ];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 1001,
+        tmdb_id: None,
         episode_number: 1,
         name: "Episode 1".into(),
         aired: "2013-04-07".into(),
@@ -1959,12 +1995,14 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 101,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
         },
         SeasonMetadata {
             tvdb_id: 102,
+            tmdb_id: None,
             number: 2,
             label: "Season 2".into(),
             episode_type: "official".into(),
@@ -1973,6 +2011,7 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 10101,
+            tmdb_id: None,
             episode_number: 1,
             name: "S1E1".into(),
             // Already aired: proves advanced ignores air-date policy entirely.
@@ -1988,6 +2027,7 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
         },
         EpisodeMetadata {
             tvdb_id: 10201,
+            tmdb_id: None,
             episode_number: 1,
             name: "S2E1".into(),
             aired: "2002-01-01".into(),
@@ -2055,12 +2095,14 @@ async fn advanced_monitoring_monitors_only_the_selected_series_movies() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 201,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 20101,
+        tmdb_id: None,
         episode_number: 1,
         name: "S1E1".into(),
         aired: "2013-04-07".into(),

@@ -1178,3 +1178,9 @@ pub(crate) fn movie_title_ref(title: &scryer_domain::Title) -> Option<crate::Mov
     reference.smg_id = extract_smg_id(title);
     Some(reference)
 }
+
+/// The ids SMG's title surface can hydrate a series (or anime) title by.
+/// `None` for movies and for a series with no usable id at all.
+pub(crate) fn series_title_ref(title: &scryer_domain::Title) -> Option<crate::SeriesTitleRef> {
+    crate::SeriesTitleRef::from_title(title)
+}

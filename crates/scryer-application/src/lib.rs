@@ -505,8 +505,9 @@ pub use library_scan::{
     LibraryDirectoryScanResult, LibraryFile, LibraryFileBatch, LibraryFileBatchReceiver,
     LibraryScanSummary, LibraryScanner, MetadataGateway, MetadataSearchItem, MetadataSearchQuery,
     MovieMetadata, MovieTitleBulkResult, MovieTitleRef, MultiMetadataSearchResult,
-    RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls, SeriesMetadata, TitleArtworkUrls,
-    TitleExternalRef, TitleRecommendationsInput, TitleResolution,
+    RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls, SeriesMetadata,
+    SeriesTitleBulkResult, SeriesTitleRef, TitleArtworkUrls, TitleExternalRef,
+    TitleRecommendationsInput, TitleResolution,
 };
 pub use library_scan_progress::{
     LibraryScanMode, LibraryScanPhaseProgress, LibraryScanSession, LibraryScanStatus,

@@ -19,9 +19,9 @@ use scryer_application::{
     EpisodeMetadata, MdblistSummary, MetadataGateway, MetadataSearchItem, MetadataSearchQuery,
     MovieMetadata, MovieTitleBulkResult, MovieTitleRef, MultiMetadataSearchResult,
     RateLimitCooldownAction, RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls,
-    SeriesMetadata, SettingsRepository, SmgScryerUpdateNotice, TitleArtworkUrls, TitleAward,
-    TitleCredit, TitleExternalRating, TitleExternalRef, TitleRatingSummary,
-    TitleRecommendationsInput, TitleResolution,
+    SeriesMetadata, SeriesTitleBulkResult, SeriesTitleRef, SettingsRepository,
+    SmgScryerUpdateNotice, TitleArtworkUrls, TitleAward, TitleCredit, TitleExternalRating,
+    TitleExternalRef, TitleRatingSummary, TitleRecommendationsInput, TitleResolution,
 };
 use scryer_domain::{
     AnimeCommunitySeason, AnimeCommunitySeasonRange, AnimeNumberingBridge, CanonicalMediaTag,
@@ -1665,20 +1665,237 @@ impl MetadataGatewayClient {
         }
     }
 
+    /// The `titles` flow shared by movies and series.
+    ///
+    /// Refs without an SMG title id are resolved first (`resolveTitles`, by
+    /// provider id). A stored SMG id the gateway reports missing without a
+    /// redirect is re-resolved once from the ref's TVDB/TMDB ids, so a deleted
+    /// SMG row does not park the title forever. `take` pulls the kind's items
+    /// out of one `titles` answer, keyed by SMG title id.
+    async fn fetch_titles_by_ref<T: Clone>(
+        &self,
+        refs: &[TitleRefInput],
+        kind: TitleFetchKind,
+        language: &str,
+        take: impl Fn(TitlesResult) -> Vec<(i64, T)>,
+    ) -> AppResult<TitleRefFetch<T>> {
+        if Self::legacy_title_id_only() {
+            return Err(Self::title_id_queries_unsupported());
+        }
+
+        let mut title_ids_by_ref = refs
+            .iter()
+            .map(|reference| reference.id)
+            .collect::<Vec<_>>();
+        let mut missing_ref_indexes = HashSet::new();
+
+        let unresolved_refs = refs
+            .iter()
+            .enumerate()
+            .filter(|(_, reference)| reference.id.is_none())
+            .map(|(index, reference)| (index, reference.clone()))
+            .collect::<Vec<_>>();
+        if !unresolved_refs.is_empty() {
+            self.apply_title_ref_resolutions(
+                &unresolved_refs,
+                kind.resolve_kind(),
+                &mut title_ids_by_ref,
+                &mut missing_ref_indexes,
+            )
+            .await?;
+        }
+
+        for (index, title_id) in title_ids_by_ref.iter().enumerate() {
+            if title_id.is_none() {
+                missing_ref_indexes.insert(index);
+            }
+        }
+
+        let unique_title_ids = title_ids_by_ref
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut items_by_smg_id = HashMap::new();
+        let mut redirects = Vec::new();
+        let mut redirect_targets = HashMap::new();
+        let mut missing_smg_ids = HashSet::new();
+
+        self.fetch_title_chunks(
+            &unique_title_ids,
+            kind,
+            language,
+            &take,
+            &mut items_by_smg_id,
+            &mut redirects,
+            &mut redirect_targets,
+            &mut missing_smg_ids,
+        )
+        .await?;
+
+        // A stored SMG id can disappear without a redirect. Keep redirect
+        // handling above intact, but re-resolve a genuinely deleted id from
+        // its stable provider identity instead of repeatedly parking it.
+        let deleted_smg_refs = title_ids_by_ref
+            .iter()
+            .enumerate()
+            .filter_map(|(index, title_id)| {
+                let title_id = (*title_id)?;
+                let reference = refs.get(index)?;
+                (reference.id == Some(title_id)
+                    && !redirect_targets.contains_key(&title_id)
+                    && missing_smg_ids.contains(&title_id)
+                    && reference.has_stable_provider_id())
+                .then(|| {
+                    (
+                        index,
+                        TitleRefInput {
+                            id: None,
+                            external_ids: reference.external_ids.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !deleted_smg_refs.is_empty() {
+            self.apply_title_ref_resolutions(
+                &deleted_smg_refs,
+                kind.resolve_kind(),
+                &mut title_ids_by_ref,
+                &mut missing_ref_indexes,
+            )
+            .await?;
+
+            let refetched_title_ids = title_ids_by_ref
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|title_id| !unique_title_ids.contains(title_id))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.fetch_title_chunks(
+                &refetched_title_ids,
+                kind,
+                language,
+                &take,
+                &mut items_by_smg_id,
+                &mut redirects,
+                &mut redirect_targets,
+                &mut missing_smg_ids,
+            )
+            .await?;
+        }
+
+        let mut by_ref_index = HashMap::new();
+        for (index, title_id) in title_ids_by_ref.into_iter().enumerate() {
+            let Some(title_id) = title_id else {
+                continue;
+            };
+            let resolved_id = redirect_targets.get(&title_id).copied().unwrap_or(title_id);
+            if missing_smg_ids.contains(&title_id) || missing_smg_ids.contains(&resolved_id) {
+                missing_ref_indexes.insert(index);
+                continue;
+            }
+            if let Some(item) = items_by_smg_id.get(&resolved_id) {
+                by_ref_index.insert(index, item.clone());
+            } else {
+                missing_ref_indexes.insert(index);
+            }
+        }
+
+        let mut missing_ref_indexes = missing_ref_indexes.into_iter().collect::<Vec<_>>();
+        missing_ref_indexes.sort_unstable();
+        Ok(TitleRefFetch {
+            by_ref_index,
+            redirects,
+            missing_ref_indexes,
+        })
+    }
+
+    /// Resolve `(original_index, ref)` pairs and record each outcome against
+    /// the original ref index.
+    async fn apply_title_ref_resolutions(
+        &self,
+        pending: &[(usize, TitleRefInput)],
+        kind: &'static str,
+        title_ids_by_ref: &mut [Option<i64>],
+        missing_ref_indexes: &mut HashSet<usize>,
+    ) -> AppResult<()> {
+        let inputs = pending
+            .iter()
+            .map(|(_, reference)| reference.clone())
+            .collect::<Vec<_>>();
+        for resolution in self.resolve_title_ref_inputs(&inputs, kind, false).await? {
+            let Some((original_index, _)) = pending.get(resolution.ref_index) else {
+                continue;
+            };
+            if resolution.resolved {
+                title_ids_by_ref[*original_index] = resolution.smg_id;
+            } else {
+                missing_ref_indexes.insert(*original_index);
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_title_chunks<T>(
+        &self,
+        title_ids: &[i64],
+        kind: TitleFetchKind,
+        language: &str,
+        take: &impl Fn(TitlesResult) -> Vec<(i64, T)>,
+        items_by_smg_id: &mut HashMap<i64, T>,
+        redirects: &mut Vec<(i64, i64)>,
+        redirect_targets: &mut HashMap<i64, i64>,
+        missing_smg_ids: &mut HashSet<i64>,
+    ) -> AppResult<()> {
+        for ids in title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
+            let data: TitlesResponse = self
+                .execute_title_id_apq(
+                    OP_TITLES,
+                    graphql_docs::TITLES_QUERY,
+                    &self.titles_hash,
+                    kind.titles_variables(ids, language),
+                )
+                .await?;
+            for redirect in &data.titles.redirects {
+                redirect_targets.insert(redirect.from_id, redirect.to_id);
+                redirects.push((redirect.from_id, redirect.to_id));
+            }
+            missing_smg_ids.extend(data.titles.missing_ids.iter().copied());
+            items_by_smg_id.extend(take(data.titles));
+        }
+        Ok(())
+    }
+
     async fn resolve_movie_title_refs(
         &self,
         refs: &[MovieTitleRef],
         create_missing: bool,
     ) -> AppResult<Vec<TitleResolution>> {
+        let inputs = refs
+            .iter()
+            .map(title_ref_input_from_ref)
+            .collect::<Vec<_>>();
+        self.resolve_title_ref_inputs(&inputs, "movie", create_missing)
+            .await
+    }
+
+    async fn resolve_title_ref_inputs(
+        &self,
+        refs: &[TitleRefInput],
+        kind: &str,
+        create_missing: bool,
+    ) -> AppResult<Vec<TitleResolution>> {
         let mut resolutions = Vec::with_capacity(refs.len());
-        for (chunk_index, refs) in refs
+        for (chunk_index, inputs) in refs
             .chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH)
             .enumerate()
         {
-            let inputs = refs
-                .iter()
-                .map(title_ref_input_from_ref)
-                .collect::<Vec<_>>();
             let data: ResolveTitlesResponse = self
                 .execute_title_id_apq(
                     OP_RESOLVE_TITLES,
@@ -1686,7 +1903,7 @@ impl MetadataGatewayClient {
                     &self.resolve_titles_hash,
                     json!({
                         "refs": inputs,
-                        "kind": "movie",
+                        "kind": kind,
                         "createMissing": create_missing,
                     }),
                 )
@@ -2364,9 +2581,21 @@ fn movie_metadata_from_item(m: MovieItem) -> MovieMetadata {
 }
 
 fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
+    let primary_source = if s.primary_source.trim().is_empty() {
+        if s.tvdb_id.is_some() {
+            "tvdb".to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        s.primary_source.trim().to_ascii_lowercase()
+    };
     SeriesMetadata {
         target_key: None,
-        tvdb_id: s.tvdb_id,
+        smg_id: s.id,
+        primary_source,
+        tvdb_id: s.tvdb_id.unwrap_or_default(),
+        tmdb_id: s.tmdb_id,
         name: s.name,
         sort_name: s.sort_name,
         slug: s.slug,
@@ -2394,7 +2623,8 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
             .seasons
             .into_iter()
             .map(|season| SeasonMetadata {
-                tvdb_id: season.tvdb_id,
+                tvdb_id: season.tvdb_id.unwrap_or_default(),
+                tmdb_id: season.tmdb_id,
                 number: season.number,
                 label: season.label,
                 episode_type: season.episode_type,
@@ -2404,7 +2634,8 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
             .episodes
             .into_iter()
             .map(|ep| EpisodeMetadata {
-                tvdb_id: ep.tvdb_id,
+                tvdb_id: ep.tvdb_id.unwrap_or_default(),
+                tmdb_id: ep.tmdb_id,
                 episode_number: ep.episode_number,
                 name: ep.name,
                 aired: ep.aired,
@@ -2516,8 +2747,8 @@ mod tests {
         MetadataSearchQuery, MovieItem, MovieTitleRef, MtlsState, OP_DISCOVER_PUBLIC_FEED,
         OP_GET_MOVIE, OP_GET_SERIES, OP_METADATA_BULK, OP_SEARCH_TVDB, OP_SEARCH_TVDB_BATCH,
         OP_SEARCH_TVDB_MULTI, OP_SEARCH_TVDB_RICH, SearchTvdbBatchResult, SearchTvdbResponse,
-        SeriesItem, SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce, apq_cache_key,
-        apq_hash, build_bulk_artwork_url_query, build_search_tvdb_batch_query,
+        SeriesItem, SeriesTitleRef, SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce,
+        apq_cache_key, apq_hash, build_bulk_artwork_url_query, build_search_tvdb_batch_query,
         canonical_request_host, canonical_request_path_and_query, compatibility_poll_phase,
         enrollment_retry_delay, external_ids_from_gateway, is_version_incompatible_response,
         map_metadata_gateway_outbound_error, movie_metadata_from_item,
@@ -4836,6 +5067,219 @@ mod tests {
         assert_eq!(result.missing_ref_indexes, vec![1]);
     }
 
+    fn tmdb_primary_series_titles_payload() -> serde_json::Value {
+        let series = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "id": 303,
+                "kind": "series",
+                "primary_source": "tmdb",
+                "tvdb_id": null,
+                "tmdb_id": 3030,
+                "name": "TMDB Primary Series",
+                "seasons": [
+                    { "tvdb_id": null, "tmdb_id": 71, "number": 1, "label": "Season 1", "episode_type": "official" }
+                ],
+                "episodes": [{
+                    "tvdb_id": null,
+                    "tmdb_id": 9101,
+                    "episode_number": 1,
+                    "season_number": 1,
+                    "name": "Pilot",
+                    "aired": "2024-01-01",
+                    "runtime_minutes": 42,
+                    "is_filler": false,
+                    "is_recap": false,
+                    "overview": "",
+                    "absolute_number": "",
+                    "contiguous_absolute_number": null,
+                    "image_url": ""
+                }],
+                "episode_orders": [{
+                    "season_type": "official",
+                    "seasons": [{ "season_number": 1, "name": "Season 1" }],
+                    "entries": [{
+                        "tvdb_id": null,
+                        "tmdb_id": 9101,
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "absolute_number": null,
+                        "contiguous_absolute_number": null,
+                        "name": "Pilot",
+                        "aired": "2024-01-01"
+                    }]
+                }],
+                "anime_numbering_bridge": null
+            }),
+        );
+        json!({
+            "data": {
+                "titles": {
+                    "movies": [],
+                    "series": [series],
+                    "missing_ids": [404],
+                    "redirects": [{ "from_id": 300, "to_id": 303 }]
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn get_series_titles_maps_tmdb_primary_series_redirects_and_missing_ids() {
+        let _guard = title_id_capability_test_lock().lock().await;
+        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(tmdb_primary_series_titles_payload()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+
+        let result = client
+            .get_series_titles(
+                &[
+                    SeriesTitleRef {
+                        smg_id: Some(300),
+                        ..Default::default()
+                    },
+                    SeriesTitleRef {
+                        smg_id: Some(404),
+                        ..Default::default()
+                    },
+                ],
+                "eng",
+                true,
+                true,
+            )
+            .await
+            .expect("series title-id request should succeed");
+
+        let series = result.by_ref_index.get(&0).expect("redirected series");
+        assert_eq!(series.smg_id, Some(303));
+        assert_eq!(series.primary_source, "tmdb");
+        assert_eq!(series.tvdb_id, 0);
+        assert_eq!(series.tmdb_id, Some(3030));
+        assert_eq!(series.seasons[0].tvdb_id, 0);
+        assert_eq!(series.seasons[0].tmdb_id, Some(71));
+        assert_eq!(series.episodes[0].tvdb_id, 0);
+        assert_eq!(series.episodes[0].tmdb_id, Some(9101));
+        assert_eq!(series.episode_orders.len(), 1);
+        assert_eq!(series.episode_orders[0].entries[0].tvdb_id, 0);
+        assert_eq!(result.redirects, vec![(300, 303)]);
+        assert_eq!(result.missing_ref_indexes, vec![1]);
+
+        let requests = server.received_requests().await.expect("captured request");
+        let variables = requests[0]
+            .url
+            .query_pairs()
+            .find_map(|(name, value)| {
+                (name == "variables").then(|| {
+                    serde_json::from_str::<serde_json::Value>(&value).expect("variables JSON")
+                })
+            })
+            .expect("titles request carries variables");
+        assert_eq!(variables["includeEpisodes"], json!(true));
+        assert_eq!(variables["includeEpisodeOrders"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn get_series_titles_resolves_a_tvdb_series_without_an_smg_id_as_a_series() {
+        let _guard = title_id_capability_test_lock().lock().await;
+        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_RESOLVE_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "resolveTitles": [{
+                    "ref_index": 0,
+                    "resolved": true,
+                    "title_id": 505,
+                    "kind": "series",
+                    "primary_source": "tvdb",
+                    "redirected_from": null,
+                    "created": false,
+                    "external_ids": [],
+                    "reason": ""
+                }] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tvdb_series = merge_json(
+            minimal_series_item_fields(),
+            json!({ "id": 505, "kind": "series", "primary_source": "tvdb", "tmdb_id": 55 }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "titles": {
+                    "movies": [],
+                    "series": [tvdb_series],
+                    "missing_ids": [],
+                    "redirects": []
+                } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+
+        let result = client
+            .get_series_titles(
+                &[SeriesTitleRef {
+                    tvdb_id: Some(5151),
+                    ..Default::default()
+                }],
+                "eng",
+                true,
+                false,
+            )
+            .await
+            .expect("series resolution then fetch should succeed");
+
+        let series = result.by_ref_index.get(&0).expect("resolved series");
+        assert_eq!(series.tvdb_id, 5151);
+        assert_eq!(series.smg_id, Some(505));
+        assert_eq!(series.primary_source, "tvdb");
+        let requests = server.received_requests().await.expect("captured requests");
+        let resolve_variables = requests
+            .iter()
+            .find(|request| {
+                request.url.query_pairs().any(|(name, value)| {
+                    name == "operationName" && value == super::OP_RESOLVE_TITLES
+                })
+            })
+            .and_then(|request| {
+                request.url.query_pairs().find_map(|(name, value)| {
+                    (name == "variables").then(|| {
+                        serde_json::from_str::<serde_json::Value>(&value).expect("variables")
+                    })
+                })
+            })
+            .expect("resolve request variables");
+        assert_eq!(resolve_variables["kind"], json!("series"));
+        assert_eq!(
+            resolve_variables["refs"][0]["externalIds"][0],
+            json!({ "source": "tvdb", "kind": "series", "id": "5151" })
+        );
+    }
+
+    #[test]
+    fn titles_document_selects_series_with_provider_typed_ids() {
+        let query = graphql_docs::TITLES_QUERY;
+        assert!(query.contains("movies {"));
+        assert!(query.contains("series {"));
+        assert!(query.contains("includeEpisodeOrders: $includeEpisodeOrders"));
+        assert!(query.contains("seasons { tvdb_id tmdb_id number label episode_type }"));
+    }
+
     #[tokio::test]
     async fn title_id_validation_error_flips_the_legacy_probe() {
         let _guard = title_id_capability_test_lock().lock().await;
@@ -5694,7 +6138,12 @@ struct TitlesResponse {
 
 #[derive(Deserialize)]
 struct TitlesResult {
+    #[serde(default)]
     movies: Vec<MovieItem>,
+    /// Absent from gateways and fixtures that predate series on the title
+    /// surface, and from documents that do not select it.
+    #[serde(default)]
+    series: Vec<SeriesItem>,
     #[serde(default)]
     missing_ids: Vec<i64>,
     #[serde(default)]
@@ -5743,7 +6192,7 @@ impl From<TitleResolutionItem> for TitleResolution {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TitleRefInput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5751,7 +6200,17 @@ struct TitleRefInput {
     external_ids: Vec<MetadataExternalIdInput>,
 }
 
-#[derive(Serialize)]
+impl TitleRefInput {
+    /// Whether the ref names a provider id stable enough to re-resolve a
+    /// deleted SMG title from (IMDb alone is not).
+    fn has_stable_provider_id(&self) -> bool {
+        self.external_ids
+            .iter()
+            .any(|external_id| matches!(external_id.source.as_str(), "tvdb" | "tmdb"))
+    }
+}
+
+#[derive(Clone, Serialize)]
 struct MetadataExternalIdInput {
     source: String,
     kind: String,
@@ -5759,37 +6218,99 @@ struct MetadataExternalIdInput {
 }
 
 fn title_ref_input_from_ref(reference: &MovieTitleRef) -> TitleRefInput {
+    title_ref_input(
+        reference.smg_id,
+        "movie",
+        reference.tvdb_id,
+        reference.tmdb_id,
+        reference.imdb_id.as_deref(),
+    )
+}
+
+fn series_title_ref_input_from_ref(reference: &SeriesTitleRef) -> TitleRefInput {
+    title_ref_input(
+        reference.smg_id,
+        "series",
+        reference.tvdb_id,
+        reference.tmdb_id,
+        reference.imdb_id.as_deref(),
+    )
+}
+
+fn title_ref_input(
+    smg_id: Option<i64>,
+    kind: &str,
+    tvdb_id: Option<i64>,
+    tmdb_id: Option<i64>,
+    imdb_id: Option<&str>,
+) -> TitleRefInput {
     let mut external_ids = Vec::with_capacity(3);
-    if let Some(tvdb_id) = reference.tvdb_id {
+    if let Some(tvdb_id) = tvdb_id {
         external_ids.push(MetadataExternalIdInput {
             source: "tvdb".to_string(),
-            kind: "movie".to_string(),
+            kind: kind.to_string(),
             id: tvdb_id.to_string(),
         });
     }
-    if let Some(tmdb_id) = reference.tmdb_id {
+    if let Some(tmdb_id) = tmdb_id {
         external_ids.push(MetadataExternalIdInput {
             source: "tmdb".to_string(),
-            kind: "movie".to_string(),
+            kind: kind.to_string(),
             id: tmdb_id.to_string(),
         });
     }
-    if let Some(imdb_id) = reference
-        .imdb_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(imdb_id) = imdb_id.map(str::trim).filter(|value| !value.is_empty()) {
         external_ids.push(MetadataExternalIdInput {
             source: "imdb".to_string(),
-            kind: "movie".to_string(),
-            id: imdb_id.trim().to_string(),
+            kind: kind.to_string(),
+            id: imdb_id.to_string(),
         });
     }
 
     TitleRefInput {
-        id: reference.smg_id,
+        id: smg_id,
         external_ids,
     }
+}
+
+/// Which half of a `titles` answer a title-id fetch reads, and what it asks for.
+#[derive(Clone, Copy, Debug)]
+enum TitleFetchKind {
+    Movie,
+    Series {
+        include_episodes: bool,
+        include_episode_orders: bool,
+    },
+}
+
+impl TitleFetchKind {
+    fn resolve_kind(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Series { .. } => "series",
+        }
+    }
+
+    fn titles_variables(self, ids: &[i64], language: &str) -> serde_json::Value {
+        match self {
+            Self::Movie => json!({ "ids": ids, "language": language }),
+            Self::Series {
+                include_episodes,
+                include_episode_orders,
+            } => json!({
+                "ids": ids,
+                "language": language,
+                "includeEpisodes": include_episodes,
+                "includeEpisodeOrders": include_episode_orders,
+            }),
+        }
+    }
+}
+
+struct TitleRefFetch<T> {
+    by_ref_index: HashMap<usize, T>,
+    redirects: Vec<(i64, i64)>,
+    missing_ref_indexes: Vec<usize>,
 }
 
 #[derive(Deserialize)]
@@ -6323,7 +6844,17 @@ struct SeriesResult {
 
 #[derive(Deserialize)]
 struct SeriesItem {
-    tvdb_id: i64,
+    /// SMG's title id; only the `titles` operation selects it.
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    primary_source: String,
+    /// Always set by the legacy TVDB documents; null for a TMDB-primary series
+    /// served by `titles`.
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     name: String,
     sort_name: String,
     slug: String,
@@ -6388,8 +6919,9 @@ struct EpisodeOrderSetItem {
 
 #[derive(Deserialize)]
 struct EpisodeOrderEntryItem {
+    /// Null on a TMDB-primary series' single official order.
     #[serde(default)]
-    tvdb_id: i64,
+    tvdb_id: Option<i64>,
     #[serde(default)]
     season_number: Option<i32>,
     #[serde(default)]
@@ -6418,7 +6950,7 @@ fn episode_orders_from_gateway(items: Vec<EpisodeOrderSetItem>) -> Vec<EpisodeOr
                     .entries
                     .into_iter()
                     .map(|entry| EpisodeOrderEntry {
-                        tvdb_id: entry.tvdb_id,
+                        tvdb_id: entry.tvdb_id.unwrap_or_default(),
                         season_number: entry.season_number,
                         episode_number: entry.episode_number,
                         absolute_number: entry.absolute_number,
@@ -6517,7 +7049,10 @@ fn anime_numbering_bridge_from_gateway(
 
 #[derive(Deserialize)]
 struct SeriesSeasonItem {
-    tvdb_id: i64,
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     number: i32,
     label: String,
     episode_type: String,
@@ -6525,7 +7060,10 @@ struct SeriesSeasonItem {
 
 #[derive(Deserialize)]
 struct SeriesEpisodeItem {
-    tvdb_id: i64,
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     episode_number: i32,
     season_number: i32,
     name: String,
@@ -6947,185 +7485,67 @@ impl MetadataGateway for MetadataGatewayClient {
         if refs.is_empty() {
             return Ok(MovieTitleBulkResult::default());
         }
-        if Self::legacy_title_id_only() {
-            return Err(Self::title_id_queries_unsupported());
-        }
-
-        let mut title_ids_by_ref = refs
+        let inputs = refs
             .iter()
-            .map(|reference| reference.smg_id)
+            .map(title_ref_input_from_ref)
             .collect::<Vec<_>>();
-        let unresolved_refs = refs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, reference)| {
-                reference
-                    .smg_id
-                    .is_none()
-                    .then_some((index, reference.clone()))
+        let fetched = self
+            .fetch_titles_by_ref(&inputs, TitleFetchKind::Movie, language, |titles| {
+                titles
+                    .movies
+                    .into_iter()
+                    .filter_map(|movie| {
+                        let metadata = movie_metadata_from_item(movie);
+                        metadata.smg_id.map(|smg_id| (smg_id, metadata))
+                    })
+                    .collect()
             })
-            .collect::<Vec<_>>();
-        let mut missing_ref_indexes = HashSet::new();
-
-        if !unresolved_refs.is_empty() {
-            let resolution_refs = unresolved_refs
-                .iter()
-                .map(|(_, reference)| reference.clone())
-                .collect::<Vec<_>>();
-            for resolution in self
-                .resolve_movie_title_refs(&resolution_refs, false)
-                .await?
-            {
-                let Some((original_index, _)) = unresolved_refs.get(resolution.ref_index) else {
-                    continue;
-                };
-                if resolution.resolved {
-                    title_ids_by_ref[*original_index] = resolution.smg_id;
-                } else {
-                    missing_ref_indexes.insert(*original_index);
-                }
-            }
-        }
-
-        for (index, title_id) in title_ids_by_ref.iter().enumerate() {
-            if title_id.is_none() {
-                missing_ref_indexes.insert(index);
-            }
-        }
-
-        let unique_title_ids = title_ids_by_ref
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut movies_by_smg_id = HashMap::new();
-        let mut redirects = Vec::new();
-        let mut redirect_targets = HashMap::new();
-        let mut missing_smg_ids = HashSet::new();
-
-        for ids in unique_title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
-            let data: TitlesResponse = self
-                .execute_title_id_apq(
-                    OP_TITLES,
-                    graphql_docs::TITLES_QUERY,
-                    &self.titles_hash,
-                    json!({ "ids": ids, "language": language }),
-                )
-                .await?;
-            for redirect in data.titles.redirects {
-                redirect_targets.insert(redirect.from_id, redirect.to_id);
-                redirects.push((redirect.from_id, redirect.to_id));
-            }
-            missing_smg_ids.extend(data.titles.missing_ids);
-            for movie in data.titles.movies {
-                let metadata = movie_metadata_from_item(movie);
-                if let Some(smg_id) = metadata.smg_id {
-                    movies_by_smg_id.insert(smg_id, metadata);
-                }
-            }
-        }
-
-        // A stored SMG id can disappear without a redirect. Keep redirect
-        // handling above intact, but re-resolve a genuinely deleted id from
-        // its stable provider identity instead of repeatedly parking it.
-        let deleted_smg_refs = title_ids_by_ref
-            .iter()
-            .enumerate()
-            .filter_map(|(index, title_id)| {
-                let title_id = (*title_id)?;
-                let reference = refs.get(index)?;
-                (reference.smg_id == Some(title_id)
-                    && !redirect_targets.contains_key(&title_id)
-                    && missing_smg_ids.contains(&title_id)
-                    && (reference.tvdb_id.is_some() || reference.tmdb_id.is_some()))
-                .then(|| {
-                    (
-                        index,
-                        MovieTitleRef {
-                            smg_id: None,
-                            tvdb_id: reference.tvdb_id,
-                            tmdb_id: reference.tmdb_id,
-                            imdb_id: reference.imdb_id.clone(),
-                        },
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        if !deleted_smg_refs.is_empty() {
-            let resolution_refs = deleted_smg_refs
-                .iter()
-                .map(|(_, reference)| reference.clone())
-                .collect::<Vec<_>>();
-            for resolution in self
-                .resolve_movie_title_refs(&resolution_refs, false)
-                .await?
-            {
-                let Some((original_index, _)) = deleted_smg_refs.get(resolution.ref_index) else {
-                    continue;
-                };
-                if resolution.resolved {
-                    title_ids_by_ref[*original_index] = resolution.smg_id;
-                } else {
-                    missing_ref_indexes.insert(*original_index);
-                }
-            }
-
-            let refetched_title_ids = title_ids_by_ref
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|title_id| !unique_title_ids.contains(title_id))
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            for ids in refetched_title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
-                let data: TitlesResponse = self
-                    .execute_title_id_apq(
-                        OP_TITLES,
-                        graphql_docs::TITLES_QUERY,
-                        &self.titles_hash,
-                        json!({ "ids": ids, "language": language }),
-                    )
-                    .await?;
-                for redirect in data.titles.redirects {
-                    redirect_targets.insert(redirect.from_id, redirect.to_id);
-                    redirects.push((redirect.from_id, redirect.to_id));
-                }
-                missing_smg_ids.extend(data.titles.missing_ids);
-                for movie in data.titles.movies {
-                    let metadata = movie_metadata_from_item(movie);
-                    if let Some(smg_id) = metadata.smg_id {
-                        movies_by_smg_id.insert(smg_id, metadata);
-                    }
-                }
-            }
-        }
-
-        let mut by_ref_index = HashMap::new();
-        for (index, title_id) in title_ids_by_ref.into_iter().enumerate() {
-            let Some(title_id) = title_id else {
-                continue;
-            };
-            let resolved_id = redirect_targets.get(&title_id).copied().unwrap_or(title_id);
-            if missing_smg_ids.contains(&title_id) || missing_smg_ids.contains(&resolved_id) {
-                missing_ref_indexes.insert(index);
-                continue;
-            }
-            if let Some(movie) = movies_by_smg_id.get(&resolved_id) {
-                by_ref_index.insert(index, movie.clone());
-            } else {
-                missing_ref_indexes.insert(index);
-            }
-        }
-
-        let mut missing_ref_indexes = missing_ref_indexes.into_iter().collect::<Vec<_>>();
-        missing_ref_indexes.sort_unstable();
+            .await?;
         Ok(MovieTitleBulkResult {
-            by_ref_index,
-            redirects,
-            missing_ref_indexes,
+            by_ref_index: fetched.by_ref_index,
+            redirects: fetched.redirects,
+            missing_ref_indexes: fetched.missing_ref_indexes,
+        })
+    }
+
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        language: &str,
+        include_episodes: bool,
+        include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        if refs.is_empty() {
+            return Ok(SeriesTitleBulkResult::default());
+        }
+        let inputs = refs
+            .iter()
+            .map(series_title_ref_input_from_ref)
+            .collect::<Vec<_>>();
+        let fetched = self
+            .fetch_titles_by_ref(
+                &inputs,
+                TitleFetchKind::Series {
+                    include_episodes,
+                    include_episode_orders,
+                },
+                language,
+                |titles| {
+                    titles
+                        .series
+                        .into_iter()
+                        .filter_map(|series| {
+                            let metadata = series_metadata_from_item(series);
+                            metadata.smg_id.map(|smg_id| (smg_id, metadata))
+                        })
+                        .collect()
+                },
+            )
+            .await?;
+        Ok(SeriesTitleBulkResult {
+            by_ref_index: fetched.by_ref_index,
+            redirects: fetched.redirects,
+            missing_ref_indexes: fetched.missing_ref_indexes,
         })
     }
 

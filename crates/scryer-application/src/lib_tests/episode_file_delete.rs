@@ -1613,12 +1613,14 @@ async fn maintenance_scope_newly_discovered_future_episodes_inherit_unmonitored_
         .unwrap();
     let seasons = vec![SeasonMetadata {
         tvdb_id: 101,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 10103,
+        tmdb_id: None,
         episode_number: 3,
         name: "Future episode".into(),
         aired: "2099-01-01".into(),
