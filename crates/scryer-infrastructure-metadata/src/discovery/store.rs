@@ -208,16 +208,27 @@ impl DiscoveryRepository for DiscoveryStore {
     }
 
     async fn discovery_run_matches_presentation(&self, run_id: &str) -> AppResult<bool> {
-        let stale = SqlRuntime::fetch_optional(
+        // Compared in Rust with the same normalization as the commit guard, so
+        // a run whose stored language differs only in case or padding is
+        // judged identically by both.
+        let row = SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
-            "SELECT p.language FROM discovery_presentation_selection p
+            "SELECT p.language AS selected_language, p.revision AS selected_revision,
+                    r.language AS run_language, r.presentation_revision AS run_revision
+             FROM discovery_presentation_selection p
              JOIN discovery_sync_runs r ON r.id = {}
-             WHERE p.scope_key = 'default'
-               AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
+             WHERE p.scope_key = 'default'",
             &[SqlArg::Text(run_id.to_string())],
         )
         .await?;
-        Ok(stale.is_none())
+        let Some(row) = row else {
+            return Ok(true);
+        };
+        Ok(
+            normalize_discovery_language(&row.text("selected_language")?)
+                == normalize_discovery_language(&row.text("run_language")?)
+                && row.i64("selected_revision")? == row.i64("run_revision")?,
+        )
     }
 
     async fn refresh_discovery_presentation(
@@ -1569,7 +1580,7 @@ fn discovery_run_status_is_successful(status: &str) -> bool {
 }
 
 fn discovery_run_status_is_diagnostic(status: &str) -> bool {
-    status == "warning" || status == "failed" || status == "deferred"
+    status == "warning" || status == "failed" || status == "deferred" || status == "superseded"
 }
 
 fn split_columns(columns: &str) -> Vec<&str> {
@@ -7223,6 +7234,38 @@ mod tests {
                 .last_public_feed_generation_id,
             Some(current.id)
         );
+        // A run whose stored language differs from the selection only in case
+        // and padding is current for both the resume check and the commit
+        // guard.
+        let mut padded = discovery_prune_run("presentation-padded", "public_feed", "complete", now);
+        padded.language = "ENG ".to_string();
+        restarted.upsert_discovery_sync_run(&padded).await?;
+        assert!(
+            restarted
+                .discovery_run_matches_presentation(&padded.id)
+                .await?
+        );
+        let mut padded_state = restarted
+            .get_discovery_sync_state("default")
+            .await?
+            .unwrap();
+        padded_state.last_public_feed_generation_id = Some(padded.id.clone());
+        restarted
+            .commit_discovery_public_feed(&DiscoveryPublicFeedCommit {
+                state: padded_state,
+                run: padded.clone(),
+                sections: vec![],
+                items: vec![],
+            })
+            .await?;
+        assert_eq!(
+            restarted
+                .get_discovery_sync_state("default")
+                .await?
+                .unwrap()
+                .last_public_feed_generation_id,
+            Some(padded.id)
+        );
         // Replay the actual additive migration over populated pre-evidence
         // tables. This shared fixture executes for both datastore engines.
         SqlRuntime::run_in_transaction(&store.datastore, "evidence-upgrade-fixture", |tx| {
@@ -8982,6 +9025,8 @@ mod tests {
             ),
             discovery_prune_run("deferred-old", "context_incremental", "deferred", old_at),
             discovery_prune_run("failed-recent", "context_incremental", "failed", now),
+            discovery_prune_run("superseded-recent", "public_feed", "superseded", now),
+            discovery_prune_run("superseded-old", "public_feed", "superseded", old_at),
             discovery_prune_run("running-old", "context_snapshot", "running", old_at),
         ] {
             let mut run = run;
@@ -9018,7 +9063,7 @@ mod tests {
             )
             .await
             .expect("discovery history should prune");
-        assert_eq!(report.runs_deleted, 2);
+        assert_eq!(report.runs_deleted, 3);
 
         for id in [
             "snapshot-active",
@@ -9026,6 +9071,7 @@ mod tests {
             "public-active",
             "incremental-attached",
             "failed-recent",
+            "superseded-recent",
             "running-old",
         ] {
             assert!(
@@ -9037,7 +9083,7 @@ mod tests {
                 "{id} should be retained"
             );
         }
-        for id in ["snapshot-pruned", "deferred-old"] {
+        for id in ["snapshot-pruned", "deferred-old", "superseded-old"] {
             assert!(
                 store
                     .get_discovery_sync_run(id)

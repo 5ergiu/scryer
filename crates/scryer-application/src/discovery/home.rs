@@ -1047,17 +1047,22 @@ pub(super) fn label_affinity_sections(
     emitted_item_keys: &mut HashSet<String>,
 ) -> Vec<DiscoverySectionResult> {
     let mut sections = Vec::new();
-    if canonical_kind == "theme" {
+    // The rejection count only feeds a debug log; skip the per-item scan on
+    // every home render unless that log is actually emitted.
+    if canonical_kind == "theme" && tracing::enabled!(tracing::Level::DEBUG) {
+        let label_keys = labels
+            .iter()
+            .map(|label| normalize_discovery_affinity_key(label))
+            .collect::<Vec<_>>();
         let rejected = items
             .iter()
             .filter(|item| {
-                labels.iter().any(|label| {
-                    discovery_item_canonical_facet_labels(item, "theme")
-                        .iter()
-                        .any(|candidate| {
-                            normalize_discovery_affinity_key(candidate)
-                                == normalize_discovery_affinity_key(label)
-                        })
+                let candidate_keys = discovery_item_canonical_facet_labels(item, "theme")
+                    .iter()
+                    .map(|candidate| normalize_discovery_affinity_key(candidate))
+                    .collect::<HashSet<_>>();
+                labels.iter().zip(&label_keys).any(|(label, label_key)| {
+                    candidate_keys.contains(label_key)
                         && !discovery_item_matches_affinity_label(item, label, "theme", true)
                 })
             })

@@ -703,14 +703,11 @@ pub trait DiscoveryRepository: Send + Sync {
     /// Persist the selected presentation and invalidate both generations atomically.
     async fn refresh_discovery_presentation(
         &self,
-        _language: &str,
-        _now: DateTime<Utc>,
-    ) -> AppResult<()> {
-        Ok(())
-    }
-    async fn discovery_run_matches_presentation(&self, _run_id: &str) -> AppResult<bool> {
-        Ok(true)
-    }
+        language: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<()>;
+    /// Whether the run was built for the currently selected presentation.
+    async fn discovery_run_matches_presentation(&self, run_id: &str) -> AppResult<bool>;
 
     async fn try_acquire_discovery_sync_lease(
         &self,

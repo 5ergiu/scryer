@@ -5685,6 +5685,18 @@ impl DiscoveryRepository for RecordingDiscoveryRepository {
         Ok(())
     }
 
+    async fn refresh_discovery_presentation(
+        &self,
+        _language: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn discovery_run_matches_presentation(&self, _run_id: &str) -> AppResult<bool> {
+        Ok(true)
+    }
+
     async fn try_acquire_discovery_sync_lease(
         &self,
         scope_key: &str,

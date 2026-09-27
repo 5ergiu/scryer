@@ -2200,6 +2200,14 @@ impl AppUseCase {
                 .discovery
                 .upsert_discovery_sync_run(&run)
                 .await?;
+        } else {
+            // Every commit path persists its run as running before committing,
+            // so a missing row means that invariant broke and the skip would
+            // otherwise leave no run history.
+            warn!(
+                run_id,
+                "superseded discovery sync run has no persisted run row; nothing to mark superseded"
+            );
         }
         Ok(JobExecutionOutcome::new(
             Some(
