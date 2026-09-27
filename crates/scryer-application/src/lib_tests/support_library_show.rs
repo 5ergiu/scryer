@@ -281,6 +281,8 @@ pub(super) struct MockShowRepo {
     pub(super) fail_monitoring: Mutex<bool>,
     /// Stands in for a transient store failure on the anime numbering bridge.
     pub(super) fail_anime_bridge: Mutex<bool>,
+    /// Stands in for a transient store failure on a title's collections read.
+    pub(super) fail_title_collections: Mutex<bool>,
     pub(super) anime_numbering_bridges: Mutex<HashMap<String, scryer_domain::AnimeNumberingBridge>>,
     pub(super) collections: Arc<Mutex<Vec<Collection>>>,
     pub(super) episodes: Arc<Mutex<Vec<Episode>>>,
@@ -483,6 +485,11 @@ impl ShowRepository for MockShowRepo {
     async fn list_collections_for_title(&self, title_id: &str) -> AppResult<Vec<Collection>> {
         self.title_collection_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if *self.fail_title_collections.lock().await {
+            return Err(crate::AppError::Repository(
+                "title collections are unavailable".into(),
+            ));
+        }
         let collections = self.collections.lock().await;
         Ok(collections
             .iter()

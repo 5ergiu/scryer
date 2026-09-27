@@ -2170,6 +2170,7 @@ mod tests {
                     imported: 2,
                     skipped: 1,
                     unmatched: 0,
+                    relinked: 0,
                 }),
                 warning_message: None,
             }),

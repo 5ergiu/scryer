@@ -4559,6 +4559,8 @@ pub struct LibraryScanSummaryEventData {
     pub imported: i64,
     pub skipped: i64,
     pub unmatched: i64,
+    #[serde(default)]
+    pub relinked: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

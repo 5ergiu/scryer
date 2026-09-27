@@ -6997,6 +6997,23 @@ pub trait MediaFileRepository: Send + Sync {
 
     async fn link_file_to_episode(&self, file_id: &str, episode_id: &str) -> AppResult<()>;
 
+    /// Make `episode_ids` the complete episode link set of one file, in one
+    /// transaction. Links whose episode stays in the set keep their row, role
+    /// and filler flag; links outside it are removed; missing links are
+    /// inserted with the default role. Links of every other file, and the
+    /// file on disk, are never touched. A failure leaves the old links intact.
+    ///
+    /// The write is a compare-and-set against what the caller read: it only
+    /// happens while the file still has no import source path, no series
+    /// movie link, and exactly `expected_episode_ids` as its links. Otherwise
+    /// nothing changes and the result is [`EpisodeLinkReplacement::Skipped`].
+    async fn replace_file_episode_links(
+        &self,
+        file_id: &str,
+        expected_episode_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<EpisodeLinkReplacement>;
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,

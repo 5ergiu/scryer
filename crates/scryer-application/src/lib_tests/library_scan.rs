@@ -9650,6 +9650,7 @@ async fn unchanged_title_deltas_coalesce_into_few_events_without_moving_projecti
         imported: 0,
         skipped: TITLES,
         unmatched: 0,
+        relinked: 0,
     };
     coordinator.set_summary(summary.clone()).await;
     coordinator.publish_progress().await;
@@ -9700,4 +9701,619 @@ async fn recorded_library_scan_delta_events(app: &AppUseCase) -> usize {
         .await
         .expect("list delta events")
         .len()
+}
+
+/// How the fixture's tracked row describes the file on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelinkRow {
+    /// Analysed, with the file's current signature, so a rescan takes the
+    /// stored-record path and skips analysis.
+    Current,
+    /// Analysed, but with a signature the file no longer has, so a rescan
+    /// re-parses and re-analyses it.
+    StaleSignature,
+    /// No row at all: the file is not tracked yet.
+    Absent,
+}
+
+/// The catalog an [`EpisodeRelinkFixture`] title carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelinkCatalog {
+    /// A series with three season-one episodes.
+    SeriesOneSeason,
+    /// An anime with two seasons of three episodes each, absolute numbers 1-6
+    /// running across both, and no numbering bridge.
+    AnimeTwoSeasonsWithoutBridge,
+}
+
+/// A title with one file on disk; three season-one episodes unless the
+/// catalog says otherwise. When the fixture seeds a row for the file, that
+/// row is linked to the first episode only.
+struct EpisodeRelinkFixture {
+    app: AppUseCase,
+    user: User,
+    shows: Arc<MockShowRepo>,
+    media_files: Arc<MockMediaFileRepo>,
+    unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
+    title_id: String,
+    file_id: Option<String>,
+    episode_path: PathBuf,
+    library_root: PathBuf,
+    episode_ids: Vec<String>,
+    _tempdir: tempfile::TempDir,
+}
+
+async fn episode_relink_fixture(
+    file_name: &str,
+    original_file_path: Option<&str>,
+) -> EpisodeRelinkFixture {
+    episode_relink_fixture_with(file_name, original_file_path, RelinkRow::Current).await
+}
+
+async fn episode_relink_fixture_with(
+    file_name: &str,
+    original_file_path: Option<&str>,
+    row: RelinkRow,
+) -> EpisodeRelinkFixture {
+    episode_relink_fixture_in(
+        RelinkCatalog::SeriesOneSeason,
+        "Season 01",
+        file_name,
+        original_file_path,
+        row,
+    )
+    .await
+}
+
+async fn episode_relink_fixture_in(
+    catalog: RelinkCatalog,
+    season_folder: &str,
+    file_name: &str,
+    original_file_path: Option<&str>,
+    row: RelinkRow,
+) -> EpisodeRelinkFixture {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let title_dir = tempdir.path().join("Relink Harbor (2026)");
+    let season_dir = title_dir.join(season_folder);
+    std::fs::create_dir_all(&season_dir).expect("create season folder");
+    let episode_path = season_dir.join(file_name);
+    std::fs::write(&episode_path, vec![0_u8; 256]).expect("write episode file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "series.path",
+            tempdir.path().to_string_lossy().as_ref(),
+        )
+        .await;
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(build_test_library_files(&[episode_path.as_path()]))
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, _, shows, media_files) =
+        bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+            settings,
+            library_scanner,
+            unmatched_items.clone(),
+            Arc::new(EmptySearchMetadataGateway),
+        );
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile series root");
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Relink Harbor".into(),
+                facet: if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+                    MediaFacet::Anime
+                } else {
+                    MediaFacet::Series
+                },
+                monitored: true,
+                year: Some(2026),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create series title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, title_dir.to_string_lossy().as_ref())
+        .await
+        .expect("set series folder path");
+    let season_count = if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+        2
+    } else {
+        1
+    };
+    let mut episode_ids = Vec::new();
+    for season_number in 1..=season_count {
+        let season = app
+            .services
+            .catalog
+            .shows
+            .create_collection(Collection {
+                id: Id::new().0,
+                title_id: title.id.clone(),
+                collection_type: CollectionType::Season,
+                collection_index: season_number.to_string(),
+                label: Some(format!("Season {season_number}")),
+                ordered_path: None,
+                narrative_order: Some(season_number.to_string()),
+                first_episode_number: Some("1".to_string()),
+                last_episode_number: Some("3".to_string()),
+                monitored: true,
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("create season");
+        for number in 1..=3 {
+            let absolute_number = (season_number - 1) * 3 + number;
+            let episode = app
+                .services
+                .catalog
+                .shows
+                .create_episode(Episode {
+                    id: Id::new().0,
+                    title_id: title.id.clone(),
+                    collection_id: Some(season.id.clone()),
+                    episode_type: scryer_domain::EpisodeType::Standard,
+                    episode_number: Some(number.to_string()),
+                    season_number: Some(season_number.to_string()),
+                    episode_label: Some(format!("S0{season_number}E0{number}")),
+                    title: Some(format!("Tide {absolute_number}")),
+                    air_date: None,
+                    duration_seconds: Some(420),
+                    has_multi_audio: false,
+                    has_subtitle: false,
+                    is_filler: false,
+                    is_recap: false,
+                    absolute_number: (catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge)
+                        .then(|| absolute_number.to_string()),
+                    contiguous_absolute_number: None,
+                    overview: None,
+                    tvdb_id: None,
+                    image_url: None,
+                    monitored: true,
+                    created_at: Utc::now(),
+                })
+                .await
+                .expect("create episode");
+            episode_ids.push(episode.id);
+        }
+    }
+
+    // Seed the row the way an earlier scan left it: analysed, signed, and
+    // linked to the first episode.
+    let file_id = if row == RelinkRow::Absent {
+        None
+    } else {
+        let signature = crate::file_source_signature::file_source_signature_from_metadata(
+            &std::fs::metadata(&episode_path).expect("stat episode file"),
+        )
+        .expect("episode file signature");
+        let signature_value = if row == RelinkRow::StaleSignature {
+            "0:0".to_string()
+        } else {
+            signature.value
+        };
+        let file_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: episode_path.to_string_lossy().to_string(),
+                size_bytes: 256,
+                role: MediaFileRole::Primary,
+                source_signature_scheme: Some(signature.scheme),
+                source_signature_value: Some(signature_value),
+                original_file_path: original_file_path.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .expect("seed episode file");
+        media_files
+            .update_media_file_analysis(&file_id, test_valid_media_analysis())
+            .await
+            .expect("seed analysis");
+        media_files
+            .link_file_to_episode(&file_id, &episode_ids[0])
+            .await
+            .expect("seed episode link");
+        Some(file_id)
+    };
+
+    EpisodeRelinkFixture {
+        app,
+        user,
+        shows,
+        media_files,
+        unmatched_items,
+        title_id: title.id,
+        file_id,
+        episode_path,
+        library_root: tempdir.path().to_path_buf(),
+        episode_ids,
+        _tempdir: tempdir,
+    }
+}
+
+impl EpisodeRelinkFixture {
+    fn file_id(&self) -> &str {
+        self.file_id.as_deref().expect("tracked file")
+    }
+
+    fn episodes(&self, numbers: &[usize]) -> Vec<String> {
+        let mut ids = numbers
+            .iter()
+            .map(|number| self.episode_ids[number - 1].clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    async fn linked_episode_ids(&self) -> Vec<String> {
+        self.media_files.linked_episode_ids(self.file_id()).await
+    }
+
+    async fn tracked_row(&self) -> TitleMediaFile {
+        self.app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&self.title_id)
+            .await
+            .expect("list media files")
+            .into_iter()
+            .find(|file| file.file_path == self.episode_path.to_string_lossy())
+            .expect("tracked file")
+    }
+
+    /// The stored row still describes the file on disk exactly, so the scan's
+    /// filename parse short-circuits to the stored link and only the fresh
+    /// re-parse can see what the filename names.
+    async fn assert_rescan_takes_the_stored_record_path(&self) {
+        let row = self.tracked_row().await;
+        let signature = crate::file_source_signature::file_source_signature_from_metadata(
+            &std::fs::metadata(&self.episode_path).expect("stat episode file"),
+        )
+        .expect("episode file signature");
+        assert_eq!(row.scan_status, "scanned");
+        assert_eq!(row.size_bytes, 256);
+        assert_eq!(row.source_signature_scheme, Some(signature.scheme));
+        assert_eq!(row.source_signature_value, Some(signature.value));
+        assert!(row.episode_id.is_some());
+    }
+
+    async fn rescan(&self) -> LibraryScanSummary {
+        self.app
+            .scan_title_library(&self.user, &self.title_id)
+            .await
+            .expect("scan title")
+    }
+
+    async fn analyzed_event_episode_ids(&self) -> Vec<Vec<String>> {
+        self.app
+            .services
+            .events
+            .domain_events
+            .list(&DomainEventFilter {
+                event_types: Some(vec![DomainEventType::MediaFileAnalyzed]),
+                limit: 0,
+                ..DomainEventFilter::default()
+            })
+            .await
+            .expect("list analyzed events")
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                scryer_domain::DomainEventPayload::MediaFileAnalyzed(data) => {
+                    let mut ids = data.episode_ids;
+                    ids.sort();
+                    Some(ids)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_relinks_a_scanned_file_whose_stored_episode_contradicts_its_filename() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[2]));
+
+    // Once the link agrees with the filename a rescan writes nothing more.
+    let summary = fixture.rescan().await;
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(summary.matched, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[2]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_a_correctly_linked_file_untouched() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E01 - Tide 1.mkv", None).await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(summary.matched, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_an_imported_file_on_the_episode_it_was_imported_to() {
+    let fixture = episode_relink_fixture(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        Some("/downloads/complete/Relink.Harbor.S01E02.mkv"),
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_the_stored_link_when_the_filename_names_no_known_episode() {
+    for file_name in [
+        "Relink Harbor - S01E07 - Tide 7.mkv",
+        "Relink Harbor - Harbor Lights Bonus Reel.mkv",
+        "Relink Harbor - Season 01 Complete.mkv",
+    ] {
+        let fixture = episode_relink_fixture(file_name, None).await;
+
+        let summary = fixture.rescan().await;
+
+        assert_eq!(summary.relinked, 0, "{file_name}");
+        assert_eq!(
+            fixture.linked_episode_ids().await,
+            fixture.episodes(&[1]),
+            "{file_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_stored_links_when_the_catalog_context_fails_to_load() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    *fixture.shows.fail_anime_bridge.lock().await = true;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_stored_links_when_the_title_collections_fail_to_load() {
+    // Without collections the lookup still resolves `S01E02` by the
+    // episode's own season, so only the gate keeps the link in place.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    *fixture.shows.fail_title_collections.lock().await = true;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_fails_the_title_when_its_stored_files_cannot_be_read() {
+    // Without the stored rows every file would look new, and the scan would
+    // re-insert them over what it knew about them.
+    let fixture = episode_relink_fixture_with(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        Some("/downloads/Relink Harbor - S01E02 - Tide 2.mkv"),
+        RelinkRow::StaleSignature,
+    )
+    .await;
+    let rows_before = fixture.media_files.store.lock().await.clone();
+    fixture
+        .media_files
+        .fail_list_media_files_for_title("media file table is locked")
+        .await;
+
+    let result = fixture
+        .app
+        .scan_title_library(&fixture.user, &fixture.title_id)
+        .await;
+
+    assert!(result.is_err(), "the title scan fails instead of guessing");
+    let rows_after = fixture.media_files.store.lock().await.clone();
+    assert_eq!(rows_after.len(), rows_before.len(), "nothing was inserted");
+    assert_eq!(
+        rows_after
+            .iter()
+            .map(|row| (row.id.clone(), row.original_file_path.clone()))
+            .collect::<Vec<_>>(),
+        rows_before
+            .iter()
+            .map(|row| (row.id.clone(), row.original_file_path.clone()))
+            .collect::<Vec<_>>(),
+        "the import marker is untouched"
+    );
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn anime_title_rescan_without_a_bridge_keeps_links_a_later_season_filename_contradicts() {
+    // Without a bridge, `S02E02` may be community numbering for an episode
+    // the catalog files under season one, so it never moves a stored link.
+    let fixture = episode_relink_fixture_in(
+        RelinkCatalog::AnimeTwoSeasonsWithoutBridge,
+        "Season 02",
+        "Relink Harbor - S02E02 - Tide 5.mkv",
+        None,
+        RelinkRow::Current,
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn anime_title_rescan_without_a_bridge_still_relinks_an_absolute_named_file() {
+    let fixture = episode_relink_fixture_in(
+        RelinkCatalog::AnimeTwoSeasonsWithoutBridge,
+        "Season 02",
+        "Relink Harbor - 05.mkv",
+        None,
+        RelinkRow::Current,
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[5]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_the_stored_links_when_replacing_them_fails() {
+    // A stale signature makes the rescan parse and analyse the file afresh,
+    // so the additive path would link the filename's episode if a failed
+    // replacement fell through to it.
+    let fixture = episode_relink_fixture_with(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        None,
+        RelinkRow::StaleSignature,
+    )
+    .await;
+    fixture
+        .media_files
+        .fail_replace_file_episode_links("episode link table is locked")
+        .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+    for episode_ids in fixture.analyzed_event_episode_ids().await {
+        assert_eq!(episode_ids, fixture.episodes(&[1]));
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_trims_a_multi_episode_file_to_the_episodes_its_filename_names() {
+    let fixture =
+        episode_relink_fixture("Relink Harbor - S01E01E02 - Tide 1 and 2.mkv", None).await;
+    for number in [2, 3] {
+        fixture
+            .media_files
+            .link_additional_episode(fixture.file_id(), &fixture.episode_ids[number - 1])
+            .await;
+    }
+    assert_eq!(
+        fixture.linked_episode_ids().await,
+        fixture.episodes(&[1, 2, 3])
+    );
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 1);
+    assert_eq!(
+        fixture.linked_episode_ids().await,
+        fixture.episodes(&[1, 2])
+    );
+
+    let summary = fixture.rescan().await;
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(
+        fixture.linked_episode_ids().await,
+        fixture.episodes(&[1, 2])
+    );
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_disc_images_on_their_stored_links() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.iso", None).await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_series_movie_files_on_their_stored_links() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    fixture
+        .media_files
+        .link_file_to_series_movie(fixture.file_id(), "series-movie-link-relink")
+        .await
+        .expect("link series movie");
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn a_pending_import_bound_by_hand_keeps_its_episodes_through_a_rescan() {
+    let fixture = episode_relink_fixture_with(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        None,
+        RelinkRow::Absent,
+    )
+    .await;
+    let item_path = fixture.episode_path.to_string_lossy().to_string();
+    let mut pending = build_test_unmatched_item(
+        "relink-pending-bind",
+        MediaFacet::Series,
+        fixture.library_root.to_string_lossy().as_ref(),
+        &item_path,
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        "Relink Harbor",
+        Some(2026),
+    );
+    pending.title_id = Some(fixture.title_id.clone());
+    fixture
+        .unmatched_items
+        .upsert_library_scan_unmatched_item(&pending)
+        .await
+        .expect("seed pending import");
+
+    // The person picks the first episode although the filename names the
+    // second.
+    fixture
+        .app
+        .bind_title_bound_pending_import(
+            &fixture.user,
+            &pending.id,
+            None,
+            &[fixture.episode_ids[0].clone()],
+        )
+        .await
+        .expect("bind pending import");
+    let row = fixture.tracked_row().await;
+    assert_eq!(row.original_file_path.as_deref(), Some(item_path.as_str()));
+    let bound = fixture.media_files.linked_episode_ids(&row.id).await;
+    assert_eq!(bound, fixture.episodes(&[1]));
+    // The fixture has no media analyser, so record the analysis a real bind
+    // would have persisted. The rescan then reads the row as current and only
+    // the fresh filename parse disagrees with the chosen episode.
+    fixture
+        .media_files
+        .update_media_file_analysis(&row.id, test_valid_media_analysis())
+        .await
+        .expect("record bind analysis");
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.media_files.linked_episode_ids(&row.id).await, bound);
 }

@@ -532,6 +532,7 @@ mod tests {
             imported: 5,
             skipped: 2,
             unmatched: 3,
+            relinked: 0,
         }
     }
 

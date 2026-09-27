@@ -991,6 +991,17 @@ impl MediaFileRepository for NullMediaFileRepository {
         ))
     }
 
+    async fn replace_file_episode_links(
+        &self,
+        _file_id: &str,
+        _expected_episode_ids: &[String],
+        _episode_ids: &[String],
+    ) -> AppResult<crate::EpisodeLinkReplacement> {
+        Err(AppError::Repository(
+            "media file repository is not configured".to_string(),
+        ))
+    }
+
     async fn link_file_to_series_movie(
         &self,
         _file_id: &str,

@@ -36,6 +36,9 @@ pub struct LibraryScanSummary {
     pub imported: usize,
     pub skipped: usize,
     pub unmatched: usize,
+    /// Tracked files whose episode links a scan replaced because a confident
+    /// fresh parse of the filename contradicted the stored links.
+    pub relinked: usize,
 }
 
 impl LibraryScanSummary {
@@ -45,6 +48,7 @@ impl LibraryScanSummary {
         self.imported = self.imported.saturating_add(delta.imported);
         self.skipped = self.skipped.saturating_add(delta.skipped);
         self.unmatched = self.unmatched.saturating_add(delta.unmatched);
+        self.relinked = self.relinked.saturating_add(delta.relinked);
     }
 }
 

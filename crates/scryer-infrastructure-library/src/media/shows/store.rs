@@ -1647,20 +1647,22 @@ async fn get_anime_numbering_bridge_query(
         return Ok(None);
     };
     let seasons_json = row.text("seasons_json")?;
-    // A row whose payload no longer parses is treated as absent rather than as
-    // an error: the bridge is a cache, and refusing to search a title because a
-    // stored blob went stale would be worse than searching it in TVDB numbering.
-    let seasons = match serde_json::from_str::<Vec<AnimeCommunitySeason>>(&seasons_json) {
-        Ok(seasons) => seasons,
-        Err(error) => {
+    // A row whose payload no longer parses is an error, not an absent bridge.
+    // Readers that can live without one (search, RSS, imports) already fall
+    // back to TVDB numbering on an error, but a reader that trusts the
+    // numbering completely (a scan replacing stored episode links) must be able
+    // to tell "this title has no bridge" from "its bridge could not be read".
+    let seasons =
+        serde_json::from_str::<Vec<AnimeCommunitySeason>>(&seasons_json).map_err(|error| {
             tracing::warn!(
                 title_id,
                 error = %error,
-                "stored anime numbering bridge is unreadable; ignoring it"
+                "stored anime numbering bridge is unreadable"
             );
-            return Ok(None);
-        }
-    };
+            AppError::Repository(format!(
+                "stored anime numbering bridge for title {title_id} is unreadable: {error}"
+            ))
+        })?;
     if seasons.is_empty() {
         return Ok(None);
     }
@@ -2489,6 +2491,34 @@ mod tests {
             .expect("bridge present");
         assert_eq!(read, stored);
         assert!(read.source.is_tvdb_alternate_order());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_stored_bridge_is_an_error_rather_than_no_bridge() {
+        let pool = numbering_bridge_pool().await;
+        sqlx::query(
+            "INSERT INTO title_anime_numbering_bridges \
+             (title_id, generated_on, corroborating_order, seasons_json, updated_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("title-garbled")
+        .bind("2026-08-30")
+        .bind("dvd")
+        .bind("[{\"index\": \"not a number\"")
+        .bind("2026-08-30T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert garbled row");
+
+        super::get_anime_numbering_bridge_query(SqlTarget::Sqlite(&pool), "title-garbled")
+            .await
+            .expect_err("an unreadable bridge must not read as absent");
+        assert!(
+            super::get_anime_numbering_bridge_query(SqlTarget::Sqlite(&pool), "title-missing")
+                .await
+                .expect("a title without a row reads cleanly")
+                .is_none()
+        );
     }
 
     /// A row written before 0240 carries the column default, and has to read
