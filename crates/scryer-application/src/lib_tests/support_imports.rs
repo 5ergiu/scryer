@@ -229,6 +229,10 @@ pub(super) struct MockMediaFileRepo {
     pub(super) pending_analysis_ids: Arc<Mutex<Vec<String>>>,
     pub(super) analysis_attempts: Arc<Mutex<Vec<(String, MediaFileAnalysis)>>>,
     pub(super) delete_media_file_error: Arc<Mutex<Option<String>>>,
+    /// Stands in for a store failure while replacing a file's episode links.
+    pub(super) replace_file_episode_links_error: Arc<Mutex<Option<String>>>,
+    /// Stands in for a store failure while listing a title's media files.
+    pub(super) list_media_files_for_title_error: Arc<Mutex<Option<String>>>,
     /// Optional bridge for the background acquisition cursor: when set, the
     /// derived missing-target sweep reads the seeded acquisition-state rows so a
     /// mock-backed store still yields targets for `run_background_acquisition_cycle_once`.
@@ -252,6 +256,50 @@ pub(super) struct MockMediaFileRepo {
 impl MockMediaFileRepo {
     pub(super) async fn fail_delete_media_file(&self, message: &str) {
         *self.delete_media_file_error.lock().await = Some(message.to_string());
+    }
+
+    pub(super) async fn fail_replace_file_episode_links(&self, message: &str) {
+        *self.replace_file_episode_links_error.lock().await = Some(message.to_string());
+    }
+
+    pub(super) async fn fail_list_media_files_for_title(&self, message: &str) {
+        *self.list_media_files_for_title_error.lock().await = Some(message.to_string());
+    }
+
+    /// Add one more episode link to a tracked file. The store keeps one row
+    /// per link, the way the title listing returns them, so a file spanning
+    /// several episodes is several rows sharing one id.
+    pub(super) async fn link_additional_episode(&self, file_id: &str, episode_id: &str) {
+        let mut list = self.store.lock().await;
+        let template = list
+            .iter()
+            .find(|entry| entry.id == file_id)
+            .cloned()
+            .expect("tracked file");
+        if !list
+            .iter()
+            .any(|entry| entry.id == file_id && entry.episode_id.as_deref() == Some(episode_id))
+        {
+            list.push(TitleMediaFile {
+                episode_id: Some(episode_id.to_string()),
+                ..template
+            });
+        }
+    }
+
+    /// Every episode a tracked file is linked to, sorted.
+    pub(super) async fn linked_episode_ids(&self, file_id: &str) -> Vec<String> {
+        let mut ids = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| entry.id == file_id)
+            .filter_map(|entry| entry.episode_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Wire the seeded wanted-state store (and its catalog) as the missing-target
@@ -411,6 +459,62 @@ impl MediaFileRepository for MockMediaFileRepo {
         Ok(())
     }
 
+    async fn replace_file_episode_links(
+        &self,
+        file_id: &str,
+        expected_episode_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<crate::EpisodeLinkReplacement> {
+        if let Some(message) = self.replace_file_episode_links_error.lock().await.clone() {
+            return Err(AppError::Repository(message));
+        }
+        let sorted = |ids: &[String]| {
+            let mut ids = ids.to_vec();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        // One row per link, like the store's title listing.
+        let mut list = self.store.lock().await;
+        let rows = list
+            .iter()
+            .filter(|entry| entry.id == file_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(template) = rows.first().cloned() else {
+            return Ok(crate::EpisodeLinkReplacement::Skipped);
+        };
+        let current = sorted(
+            &rows
+                .iter()
+                .filter_map(|entry| entry.episode_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        if template.original_file_path.is_some()
+            || rows
+                .iter()
+                .any(|entry| !entry.series_movie_link_ids.is_empty())
+            || current != sorted(expected_episode_ids)
+        {
+            return Ok(crate::EpisodeLinkReplacement::Skipped);
+        }
+        let wanted = sorted(episode_ids);
+        list.retain(|entry| {
+            entry.id != file_id
+                || entry
+                    .episode_id
+                    .as_ref()
+                    .is_some_and(|episode_id| wanted.contains(episode_id))
+        });
+        for episode_id in wanted.iter().filter(|id| !current.contains(id)) {
+            list.push(TitleMediaFile {
+                episode_id: Some(episode_id.clone()),
+                ..template.clone()
+            });
+        }
+        Ok(crate::EpisodeLinkReplacement::Replaced)
+    }
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,
@@ -539,6 +643,9 @@ impl MediaFileRepository for MockMediaFileRepo {
     async fn list_media_files_for_title(&self, title_id: &str) -> AppResult<Vec<TitleMediaFile>> {
         self.title_file_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(message) = self.list_media_files_for_title_error.lock().await.clone() {
+            return Err(AppError::Repository(message));
+        }
         Ok(self
             .store
             .lock()

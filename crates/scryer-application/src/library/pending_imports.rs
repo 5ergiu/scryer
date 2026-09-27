@@ -1143,6 +1143,11 @@ impl AppUseCase {
                 series_movie_link_id: None,
                 snapshot,
                 record: PlannedTitleScanRecord::New,
+                // The episodes were picked by hand. Recording the source path
+                // marks the row as placed on purpose, the way every import
+                // does, so a later scan never replaces these links with the
+                // ones the filename names.
+                original_file_path: Some(item.item_path.clone()),
             },
             analysis_outcome,
             LibraryScanMode::Full,

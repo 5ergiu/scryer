@@ -1463,6 +1463,29 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
     unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
     metadata_gateway: Arc<dyn MetadataGateway>,
 ) -> (AppUseCase, User, Arc<MockTitleRepo>) {
+    let (app, user, titles, _, _) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+        settings,
+        library_scanner,
+        unmatched_items,
+        metadata_gateway,
+    );
+    (app, user, titles)
+}
+
+/// The same wiring, also handing back the show and media file fakes so a test
+/// can inject store failures or seed multi-episode files.
+pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+    settings: Arc<StoredSettingsRepo>,
+    library_scanner: Arc<MutableLibraryScanner>,
+    unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
+    metadata_gateway: Arc<dyn MetadataGateway>,
+) -> (
+    AppUseCase,
+    User,
+    Arc<MockTitleRepo>,
+    Arc<MockShowRepo>,
+    Arc<MockMediaFileRepo>,
+) {
     let titles = Arc::new(MockTitleRepo {
         pending_import_items: Some(unmatched_items.items.clone()),
         ..Default::default()
@@ -1482,7 +1505,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
 
     let services = AppServices::builder(
         titles.clone(),
-        shows,
+        shows.clone(),
         users.clone(),
         indexer_configs,
         indexer_client,
@@ -1496,7 +1519,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
     .with_domain_events(Arc::new(MockDomainEventRepo::default()))
     .with_metadata_gateway(metadata_gateway)
     .with_library_scanner(library_scanner)
-    .with_media_files(media_files)
+    .with_media_files(media_files.clone())
     .with_library_scan_unmatched_items(unmatched_items)
     .with_libraries(Arc::new(MockLibraryRepo::default()))
     .build_partial_for_tests();
@@ -1519,7 +1542,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
         Arc::new(registry),
     );
 
-    (app, test_admin_user(), titles)
+    (app, test_admin_user(), titles, shows, media_files)
 }
 
 pub(super) struct FixedBatchSearchMetadataGateway {

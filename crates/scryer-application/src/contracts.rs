@@ -1194,6 +1194,17 @@ pub struct ClaimedMediaFile {
     pub disposition: MediaFileCatalogDisposition,
 }
 
+/// What a request to replace one file's episode links did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpisodeLinkReplacement {
+    /// The file's links are now exactly the requested set.
+    Replaced,
+    /// The file no longer looked the way the caller read it: its links
+    /// differed from the expected set, it had gained an import source path, or
+    /// it had been linked to a series movie. Nothing was written.
+    Skipped,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TitleHistoryFilter {
     pub event_types: Option<Vec<TitleHistoryEventType>>,

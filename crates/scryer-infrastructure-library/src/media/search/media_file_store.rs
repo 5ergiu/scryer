@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use scryer_application::{
     AppError, AppResult, ClaimedMediaFile, CollectionEpisodeProgressSummary,
-    CollectionMediaSizeSummary, CutoffUnmetQualitySummary, EpisodeMediaAvailability,
-    EpisodeMediaAvailabilityState, EpisodeMediaSizeSummary, EpisodeScopedMediaFile,
-    InsertMediaFileInput, MediaFileAnalysis, MediaFileAssociations, MediaFileCatalogDisposition,
-    MediaFileHashCandidate, MediaFileRepository, MissingEpisodeCandidate, MissingScopeCandidates,
-    MissingSeriesMovieLinkCandidate, MissingTitleCandidate, TitleEpisodeProgressSummary,
-    TitleMediaFile, TitleMediaSizeSummary, TitleMovieMediaSummary, TitleQualitySummary,
-    derive_primary_quality_label,
+    CollectionMediaSizeSummary, CutoffUnmetQualitySummary, EpisodeLinkReplacement,
+    EpisodeMediaAvailability, EpisodeMediaAvailabilityState, EpisodeMediaSizeSummary,
+    EpisodeScopedMediaFile, InsertMediaFileInput, MediaFileAnalysis, MediaFileAssociations,
+    MediaFileCatalogDisposition, MediaFileHashCandidate, MediaFileRepository,
+    MissingEpisodeCandidate, MissingScopeCandidates, MissingSeriesMovieLinkCandidate,
+    MissingTitleCandidate, TitleEpisodeProgressSummary, TitleMediaFile, TitleMediaSizeSummary,
+    TitleMovieMediaSummary, TitleQualitySummary, derive_primary_quality_label,
 };
 use scryer_domain::Id;
 use serde::de::DeserializeOwned;
@@ -84,7 +84,7 @@ const INSERT_MEDIA_FILE_SQL: &str =
         grabbed_release_title = excluded.grabbed_release_title,
         grabbed_at = excluded.grabbed_at,
         edition = excluded.edition,
-        original_file_path = excluded.original_file_path,
+        original_file_path = COALESCE(excluded.original_file_path, media_files.original_file_path),
         release_hash = excluded.release_hash,
         release_listing_json = excluded.release_listing_json";
 
@@ -171,6 +171,92 @@ async fn reconcile_media_file_associations_tx(
         .await?;
     }
     Ok(())
+}
+
+/// Make `episode_ids` the complete episode link set of `file_id`, but only
+/// while the file still looks the way the caller read it: no import source
+/// path, no series movie link, and exactly `expected_episode_ids` (sorted and
+/// deduplicated) as its links. Surviving links are neither deleted nor
+/// re-inserted, so their role and filler flag stay as they are; only this
+/// file's rows are touched.
+async fn replace_file_episode_links_tx(
+    tx: &mut SqlTx<'_>,
+    dialect: SqlDialect,
+    file_id: &str,
+    expected_episode_ids: &[String],
+    episode_ids: &[String],
+) -> AppResult<EpisodeLinkReplacement> {
+    let file_query = format!(
+        "SELECT original_file_path FROM media_files WHERE id = {{}}{}",
+        if matches!(dialect, SqlDialect::Postgres) {
+            " FOR UPDATE"
+        } else {
+            ""
+        }
+    );
+    let Some(file_row) = SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        &file_query,
+        &[SqlArg::Text(file_id.to_string())],
+    )
+    .await?
+    else {
+        return Ok(EpisodeLinkReplacement::Skipped);
+    };
+    if file_row.opt_text("original_file_path")?.is_some() {
+        return Ok(EpisodeLinkReplacement::Skipped);
+    }
+    let series_movie_link = SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        "SELECT series_movie_link_id FROM file_series_movie_link_map WHERE file_id = {} LIMIT 1",
+        &[SqlArg::Text(file_id.to_string())],
+    )
+    .await?;
+    if series_movie_link.is_some() {
+        return Ok(EpisodeLinkReplacement::Skipped);
+    }
+    let mut current_episode_ids = SqlRuntime::fetch_all(
+        SqlExec::Tx(tx),
+        "SELECT episode_id FROM file_episode_map WHERE file_id = {} ORDER BY episode_id",
+        &[SqlArg::Text(file_id.to_string())],
+    )
+    .await?
+    .into_iter()
+    .map(|row| row.text("episode_id"))
+    .collect::<AppResult<Vec<_>>>()?;
+    // The expected ids arrive sorted by Rust's byte order; database collation
+    // must not decide whether the two sets compare equal.
+    current_episode_ids.sort();
+    current_episode_ids.dedup();
+    if current_episode_ids != expected_episode_ids {
+        return Ok(EpisodeLinkReplacement::Skipped);
+    }
+
+    let mut delete_args = vec![SqlArg::Text(file_id.to_string())];
+    let delete_sql = if episode_ids.is_empty() {
+        "DELETE FROM file_episode_map WHERE file_id = {}".to_string()
+    } else {
+        delete_args.extend(episode_ids.iter().cloned().map(SqlArg::Text));
+        format!(
+            "DELETE FROM file_episode_map WHERE file_id = {{}} AND episode_id NOT IN ({})",
+            placeholders(episode_ids.len())
+        )
+    };
+    SqlRuntime::execute(SqlExec::Tx(tx), &delete_sql, &delete_args).await?;
+    for episode_id in episode_ids {
+        SqlRuntime::execute(
+            SqlExec::Tx(tx),
+            "INSERT INTO file_episode_map (file_id, episode_id)
+             VALUES ({}, {})
+             ON CONFLICT(file_id, episode_id) DO NOTHING",
+            &[
+                SqlArg::Text(file_id.to_string()),
+                SqlArg::Text(episode_id.clone()),
+            ],
+        )
+        .await?;
+    }
+    Ok(EpisodeLinkReplacement::Replaced)
 }
 
 struct StoredMediaFileOwnership {
@@ -371,6 +457,40 @@ impl MediaFileRepository for MediaFileStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn replace_file_episode_links(
+        &self,
+        file_id: &str,
+        expected_episode_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<EpisodeLinkReplacement> {
+        let sorted = |ids: &[String]| {
+            let mut ids = ids.to_vec();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let expected_episode_ids = sorted(expected_episode_ids);
+        let episode_ids = sorted(episode_ids);
+        let dialect = dialect_for_datastore(&self.datastore);
+        let file_id = file_id.to_string();
+        SqlRuntime::run_in_transaction(&self.datastore, "replace_file_episode_links", move |tx| {
+            let file_id = file_id.clone();
+            let expected_episode_ids = expected_episode_ids.clone();
+            let episode_ids = episode_ids.clone();
+            Box::pin(async move {
+                replace_file_episode_links_tx(
+                    tx,
+                    dialect,
+                    &file_id,
+                    &expected_episode_ids,
+                    &episode_ids,
+                )
+                .await
+            })
+        })
+        .await
     }
 
     async fn link_file_to_series_movie(
@@ -4110,6 +4230,358 @@ mod tests {
         assert_eq!(recovered.disposition, MediaFileCatalogDisposition::Reused);
 
         let _ = std::fs::remove_file(db);
+    }
+
+    async fn episode_link_rows(
+        services: &SqliteServices,
+        file_id: &str,
+    ) -> Vec<(String, String, bool)> {
+        sqlx::query_as::<_, (String, String, bool)>(
+            "SELECT episode_id, role, COALESCE(is_filler, 0) != 0
+               FROM file_episode_map
+              WHERE file_id = ?
+              ORDER BY episode_id",
+        )
+        .bind(file_id)
+        .fetch_all(services.pool())
+        .await
+        .expect("episode links should load")
+    }
+
+    #[tokio::test]
+    async fn an_upsert_without_an_original_path_keeps_the_stored_import_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = SqliteServices::new(dir.path().join("marker.db").to_string_lossy())
+            .await
+            .expect("db should initialize");
+        let titles = title_store(&services);
+        let media_files = media_file_store(&services);
+        let title = make_test_series_title("title-marker");
+        titles
+            .create(title.clone())
+            .await
+            .expect("title should insert");
+        let file_path = "/library/Marker Show/Season 01/Marker Show - S01E01.mkv";
+        let imported_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: file_path.to_string(),
+                size_bytes: 1_000,
+                original_file_path: Some("/downloads/Marker Show - S01E01.mkv".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("imported file should insert");
+        let rescanned_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: file_path.to_string(),
+                size_bytes: 2_000,
+                original_file_path: None,
+                ..Default::default()
+            })
+            .await
+            .expect("rescanned file should upsert");
+        assert_eq!(rescanned_id, imported_id);
+
+        let (size_bytes, original_file_path) = sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT size_bytes, original_file_path FROM media_files WHERE id = ?",
+        )
+        .bind(&imported_id)
+        .fetch_one(services.pool())
+        .await
+        .expect("media file should load");
+        assert_eq!(size_bytes, 2_000, "the upsert still refreshes the row");
+        assert_eq!(
+            original_file_path.as_deref(),
+            Some("/downloads/Marker Show - S01E01.mkv"),
+            "an upsert that carries no original path keeps the stored one"
+        );
+
+        media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: file_path.to_string(),
+                size_bytes: 2_000,
+                original_file_path: Some("/downloads/Marker Show - S01E01 v2.mkv".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("reimported file should upsert");
+        let original_file_path = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT original_file_path FROM media_files WHERE id = ?",
+        )
+        .bind(&imported_id)
+        .fetch_one(services.pool())
+        .await
+        .expect("media file should load");
+        assert_eq!(
+            original_file_path.as_deref(),
+            Some("/downloads/Marker Show - S01E01 v2.mkv"),
+            "an upsert that carries an original path replaces the stored one"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_episode_links_touches_only_the_stale_rows_of_one_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = SqliteServices::new(dir.path().join("relink.db").to_string_lossy())
+            .await
+            .expect("db should initialize");
+        let titles = title_store(&services);
+        let shows = show_store(&services);
+        let media_files = media_file_store(&services);
+        let title = make_test_series_title("title-relink");
+        titles
+            .create(title.clone())
+            .await
+            .expect("title should insert");
+        let collection = Collection {
+            id: "collection-relink".to_string(),
+            title_id: title.id.clone(),
+            collection_type: CollectionType::Season,
+            collection_index: "1".to_string(),
+            label: Some("Season 1".to_string()),
+            ordered_path: None,
+            narrative_order: None,
+            first_episode_number: Some("1".to_string()),
+            last_episode_number: Some("3".to_string()),
+            monitored: true,
+            created_at: Utc::now(),
+        };
+        ShowRepository::create_collection(&shows, collection.clone())
+            .await
+            .expect("collection should insert");
+        for number in 1..=3 {
+            ShowRepository::create_episode(
+                &shows,
+                Episode {
+                    id: format!("episode-relink-{number}"),
+                    title_id: title.id.clone(),
+                    collection_id: Some(collection.id.clone()),
+                    episode_type: scryer_domain::EpisodeType::Standard,
+                    episode_number: Some(number.to_string()),
+                    season_number: Some("1".to_string()),
+                    episode_label: Some(format!("S01E0{number}")),
+                    title: Some(format!("Episode {number}")),
+                    air_date: None,
+                    duration_seconds: None,
+                    has_multi_audio: false,
+                    has_subtitle: false,
+                    is_filler: false,
+                    is_recap: false,
+                    absolute_number: None,
+                    contiguous_absolute_number: None,
+                    overview: None,
+                    tvdb_id: None,
+                    image_url: None,
+                    monitored: true,
+                    created_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("episode should insert");
+        }
+        let insert = |path: &str| InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: path.to_string(),
+            size_bytes: 1_000,
+            ..Default::default()
+        };
+        let relinked_id = media_files
+            .insert_media_file(&insert(
+                "/library/Relink Show/Season 01/Relink Show - S01E03.mkv",
+            ))
+            .await
+            .expect("relinked file should insert");
+        let other_id = media_files
+            .insert_media_file(&insert(
+                "/library/Relink Show/Season 01/Relink Show - S01E02.mkv",
+            ))
+            .await
+            .expect("other file should insert");
+        for (file_id, episode_id) in [
+            (&relinked_id, "episode-relink-1"),
+            (&relinked_id, "episode-relink-2"),
+            (&other_id, "episode-relink-2"),
+        ] {
+            media_files
+                .link_file_to_episode(file_id, episode_id)
+                .await
+                .expect("seed link should insert");
+        }
+        // The surviving link carries a role and filler flag of its own.
+        sqlx::query(
+            "UPDATE file_episode_map SET role = 'primary', is_filler = 1
+              WHERE file_id = ? AND episode_id = 'episode-relink-1'",
+        )
+        .bind(&relinked_id)
+        .execute(services.pool())
+        .await
+        .expect("seed role should update");
+        let other_rows_before = episode_link_rows(&services, &other_id).await;
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        let outcome = media_files
+            .replace_file_episode_links(
+                &relinked_id,
+                &ids(&["episode-relink-2", "episode-relink-1"]),
+                &ids(&["episode-relink-3", "episode-relink-1"]),
+            )
+            .await
+            .expect("replacement should commit");
+        assert_eq!(outcome, EpisodeLinkReplacement::Replaced);
+
+        let replaced_rows = vec![
+            ("episode-relink-1".to_string(), "primary".to_string(), true),
+            (
+                "episode-relink-3".to_string(),
+                "additional".to_string(),
+                false,
+            ),
+        ];
+        assert_eq!(
+            episode_link_rows(&services, &relinked_id).await,
+            replaced_rows
+        );
+        assert_eq!(
+            episode_link_rows(&services, &other_id).await,
+            other_rows_before
+        );
+
+        // A caller holding the links it read before that write is stale, so
+        // nothing changes.
+        let outcome = media_files
+            .replace_file_episode_links(
+                &relinked_id,
+                &ids(&["episode-relink-1", "episode-relink-2"]),
+                &ids(&["episode-relink-2"]),
+            )
+            .await
+            .expect("a stale expectation is not an error");
+        assert_eq!(outcome, EpisodeLinkReplacement::Skipped);
+        assert_eq!(
+            episode_link_rows(&services, &relinked_id).await,
+            replaced_rows
+        );
+
+        // A write that fails after the delete must leave every old row in place.
+        media_files
+            .replace_file_episode_links(
+                &relinked_id,
+                &ids(&["episode-relink-1", "episode-relink-3"]),
+                &ids(&["episode-relink-2", "episode-relink-missing"]),
+            )
+            .await
+            .expect_err("a link to a missing episode must fail");
+        assert_eq!(
+            episode_link_rows(&services, &relinked_id).await,
+            replaced_rows
+        );
+        assert_eq!(
+            episode_link_rows(&services, &other_id).await,
+            other_rows_before
+        );
+
+        // A file that arrived through an import, or that is linked to a series
+        // movie, keeps its links even when the caller's expectation holds.
+        let imported_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                original_file_path: Some("/downloads/Relink Show - S01E01.mkv".to_string()),
+                ..insert("/library/Relink Show/Season 01/Relink Show - S01E01.mkv")
+            })
+            .await
+            .expect("imported file should insert");
+        let series_movie_file_id = media_files
+            .insert_media_file(&insert("/library/Relink Show/Relink Show - The Movie.mkv"))
+            .await
+            .expect("series movie file should insert");
+        seed_series_movie_link(&shows, &title.id, "series-movie-link-relink").await;
+        media_files
+            .link_file_to_series_movie(&series_movie_file_id, "series-movie-link-relink")
+            .await
+            .expect("series movie link should insert");
+        for file_id in [&imported_id, &series_movie_file_id] {
+            media_files
+                .link_file_to_episode(file_id, "episode-relink-1")
+                .await
+                .expect("seed link should insert");
+            let rows_before = episode_link_rows(&services, file_id).await;
+            let outcome = media_files
+                .replace_file_episode_links(
+                    file_id,
+                    &ids(&["episode-relink-1"]),
+                    &ids(&["episode-relink-2"]),
+                )
+                .await
+                .expect("a guarded file is not an error");
+            assert_eq!(outcome, EpisodeLinkReplacement::Skipped);
+            assert_eq!(episode_link_rows(&services, file_id).await, rows_before);
+        }
+
+        // A file that is gone has nothing to replace.
+        let outcome = media_files
+            .replace_file_episode_links("media-file-missing", &[], &ids(&["episode-relink-2"]))
+            .await
+            .expect("a missing file is not an error");
+        assert_eq!(outcome, EpisodeLinkReplacement::Skipped);
+    }
+
+    async fn seed_series_movie_link(
+        shows: &impl ShowRepository,
+        series_title_id: &str,
+        link_id: &str,
+    ) {
+        let now = Utc::now();
+        let link = SeriesMovieLink {
+            id: link_id.to_string(),
+            series_title_id: series_title_id.to_string(),
+            movie: MovieEntity {
+                id: format!("{link_id}-movie"),
+                title: "Relink Show The Movie".to_string(),
+                sort_title: None,
+                slug: None,
+                year: Some(2026),
+                overview: None,
+                poster_url: None,
+                background_url: None,
+                language: None,
+                runtime_minutes: Some(90),
+                content_status: None,
+                studio: None,
+                digital_release_date: None,
+                imdb_id: None,
+                tvdb_id: None,
+                tmdb_id: None,
+                mal_id: None,
+                anidb_id: None,
+                ratings: None,
+                credits: None,
+                created_at: now,
+                updated_at: now,
+            },
+            placement: None,
+            narrative_order: None,
+            after_season: None,
+            before_season: None,
+            linked_episode_id: None,
+            association_confidence: None,
+            continuity_status: None,
+            movie_form: None,
+            confidence: None,
+            signal_summary: None,
+            source: None,
+            monitoring_override: None,
+            metadata_active: true,
+            monitored: true,
+            legacy_collection_id: None,
+            tags: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        ShowRepository::upsert_series_movie_link(shows, link)
+            .await
+            .expect("series movie link should insert");
     }
 
     #[tokio::test]
