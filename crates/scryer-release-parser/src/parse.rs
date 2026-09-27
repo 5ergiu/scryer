@@ -4345,25 +4345,18 @@ fn audio_channel_has_audio_context(tokens: &[Token], index: usize) -> bool {
 }
 
 /// Whether the token is one digit of a dotted channel layout (`2.0`, `5.1`,
-/// `7.1`) that sits against an audio codec in the same bracket or group. The
-/// lexer splits `2.0` into `2` and `0` joined by a dot; either half qualifies.
-/// A codec glued to the head digit (`AAC2.0` lexes as `AAC2`, `0`) counts too.
+/// `7.1`) with an audio codec nearby in the same bracket or group. The lexer
+/// splits `2.0` into `2` and `0` joined by a dot; either half qualifies. The
+/// codec may sit a few tokens away (`DTS-HD MA 5.1`, `TrueHD Atmos 7.1`,
+/// `AAC LC 2.0`), the same reach [`audio_channel_has_audio_context`] allows,
+/// and a codec glued to the head digit (`AAC2.0` lexes as `AAC2`, `0`) counts
+/// too.
 fn is_audio_channel_layout_digit(tokens: &[Token], index: usize) -> bool {
     let is_digit = |token: &Token| {
         token.normalized.len() == 1 && token.normalized.as_bytes()[0].is_ascii_digit()
     };
     let joined = |head: &Token, tail: &Token| {
         tail.separator_before == SeparatorKind::Dot && same_technical_scope(head, tail)
-    };
-    let codec_beside = |head: usize, tail: usize| {
-        head.checked_sub(1)
-            .and_then(|before| tokens.get(before))
-            .into_iter()
-            .chain(tokens.get(tail + 1))
-            .any(|candidate| {
-                same_technical_scope(candidate, &tokens[head])
-                    && token_has_audio_codec(candidate.normalized.as_str())
-            })
     };
     let Some(token) = tokens.get(index) else {
         return false;
@@ -4374,9 +4367,8 @@ fn is_audio_channel_layout_digit(tokens: &[Token], index: usize) -> bool {
     if let Some(next) = tokens.get(index + 1)
         && is_digit(next)
         && joined(token, next)
-        && codec_beside(index, index + 1)
     {
-        return true;
+        return audio_codec_near_in_scope(tokens, index, index + 1);
     }
     let Some(previous) = index.checked_sub(1).and_then(|before| tokens.get(before)) else {
         return false;
@@ -4385,7 +4377,7 @@ fn is_audio_channel_layout_digit(tokens: &[Token], index: usize) -> bool {
         return false;
     }
     if is_digit(previous) {
-        return codec_beside(index - 1, index);
+        return audio_codec_near_in_scope(tokens, index - 1, index);
     }
     previous
         .normalized
@@ -4393,6 +4385,21 @@ fn is_audio_channel_layout_digit(tokens: &[Token], index: usize) -> bool {
         .last()
         .is_some_and(u8::is_ascii_digit)
         && token_has_audio_codec(previous.normalized.as_str())
+}
+
+/// [`audio_channel_has_audio_context`] for a two-token layout, confined to the
+/// layout's own bracket or group so a codec in a neighbouring bracket cannot
+/// claim an episode number.
+fn audio_codec_near_in_scope(tokens: &[Token], head: usize, tail: usize) -> bool {
+    let start = head.saturating_sub(3);
+    let end = (tail + 3).min(tokens.len().saturating_sub(1));
+    (start..=end)
+        .filter(|position| *position != head && *position != tail)
+        .filter_map(|position| tokens.get(position))
+        .any(|candidate| {
+            same_technical_scope(candidate, &tokens[head])
+                && token_has_audio_codec(candidate.normalized.as_str())
+        })
 }
 
 fn token_has_audio_codec(token: &str) -> bool {
@@ -4413,6 +4420,9 @@ fn token_has_audio_codec(token: &str) -> bool {
             | "MP3"
             | "PCM"
             | "LPCM"
+            | "EC3"
+            | "ATMOS"
+            | "VORBIS"
     ) || detect_compound_metadata(token).audio_codec.is_some()
 }
 

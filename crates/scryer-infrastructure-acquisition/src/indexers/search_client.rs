@@ -6734,15 +6734,12 @@ fn exact_cour_mapping_covers_requested_episode(
     else {
         return false;
     };
-    let Ok(cour_index) = u32::try_from(cour.index) else {
-        return false;
-    };
-    if cour_index == 0
+    if cour.index <= 0
         || parsed_episode
             .season
             .into_iter()
             .chain(parsed_episode.season_numbers.iter().copied())
-            .any(|season| season != 1 && season != cour_index)
+            .any(|season| !cour.admits_season_token(season))
     {
         return false;
     }

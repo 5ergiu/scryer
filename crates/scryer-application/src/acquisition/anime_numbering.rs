@@ -46,7 +46,10 @@ pub(crate) enum NumberingCandidateKind {
     /// The parsed season read as a community season index.
     Community,
     /// The release names one community season's own title, which pins the
-    /// season regardless of what season token the release carries.
+    /// season over a season token that agrees with it (`S01`, the cour's own
+    /// index, or a TVDB season the cour lands in). A season token that names
+    /// some other season contradicts the title, and no anchored reading is
+    /// offered.
     TitleAnchored,
 }
 
@@ -198,7 +201,7 @@ pub(crate) fn resolve_numbering(input: &NumberingInput<'_>) -> NumberingResoluti
             .season
             .into_iter()
             .chain(input.parsed.season_numbers.iter().copied())
-            .any(|season| season != 1 && i32::try_from(season).ok() != Some(cour.index))
+            .any(|season| !cour.admits_season_token(season))
     {
         return NumberingResolution::UnresolvedPack;
     }
@@ -731,19 +734,17 @@ fn title_anchored_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
     let Some(community_season) = anchored_community_season(input) else {
         return Vec::new();
     };
-    // An explicit season token that is neither `1` nor the named cour's own
-    // index says something the name does not. `S02E01` under a name that
-    // happens to match cour 1 is season 2's first episode, not cour 1's; the
-    // name loses, exactly as it does for a pack or for search admission.
-    // `S01` stays compatible: groups that title a release per cour restart
-    // their season numbering with it.
-    let cour_index = u32::try_from(community_season.index).ok();
+    // An explicit season token the named cour does not answer to says
+    // something the name does not. `S02E01` under a name that happens to
+    // match a cour TVDB keeps in season 1 is season 2's first episode, not
+    // that cour's; the name loses, exactly as it does for a pack or for
+    // search admission.
     if input
         .parsed
         .season
         .into_iter()
         .chain(input.parsed.season_numbers.iter().copied())
-        .any(|season| season != 1 && Some(season) != cour_index)
+        .any(|season| !community_season.admits_season_token(season))
     {
         return Vec::new();
     }
@@ -822,8 +823,9 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
         .bridge
         .seasons
         .iter()
-        .filter(|season| !franchise.cour_answers_to_series(season))
-        .map(|season| {
+        .enumerate()
+        .filter(|(position, _)| !franchise.cour_answers_to_series(*position))
+        .map(|(_, season)| {
             let season_titles = season
                 .titles
                 .iter()
@@ -846,13 +848,16 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
 /// different provider in several others (`Lantern Verge: Mein Star`), and a
 /// release names whichever it likes. Compared spelling for spelling, the
 /// franchise's own name slips past every guard and anchors to the first cour.
-/// These comparisons therefore use
-/// [`scryer_domain::title_spelling::title_identity_loose_form`], and only
-/// these: nothing here is persisted or used as a lookup key.
+///
+/// Every name — canonical, cour title and parsed variant alike — is read the
+/// same way: the catalog's lookup form first, exactly as the parsed variants
+/// arrive (so `Lantern, The` is `the lantern` on both sides), then
+/// [`scryer_domain::title_spelling::title_identity_loose_form`]. Nothing here
+/// is persisted or used as a lookup key.
 struct FranchiseNames {
     /// The canonical name's loose words.
     canonical: Vec<String>,
-    /// Each cour's titles as loose words.
+    /// Each cour's titles as loose words, in bridge order.
     cours: Vec<Vec<Vec<String>>>,
 }
 
@@ -879,7 +884,7 @@ impl FranchiseNames {
     fn distinguishing_titles(&self, parsed_titles: &[String]) -> Vec<String> {
         parsed_titles
             .iter()
-            .filter(|parsed| !self.names_only_the_franchise(&loose_words(parsed)))
+            .filter(|parsed| !self.names_only_the_franchise(&loose_words(parsed).concat()))
             .cloned()
             .collect()
     }
@@ -891,17 +896,21 @@ impl FranchiseNames {
     /// language the bridge does not carry at all, where nothing else ties
     /// the bare franchise name back to the series.
     ///
+    /// Names are compared with their word breaks removed but only ever cut at
+    /// the longer name's word breaks, so `Lantern*Verge` (one word once the
+    /// lookup form has dropped the `*`) is still the stem of
+    /// `Lantern Verge 2nd Season`, while `Lantern Ve` is not.
+    ///
     /// Direction matters: `Lantern Verge 2` is not inside `Lantern Verge`, so
     /// a genuine cour name still distinguishes.
-    fn names_only_the_franchise(&self, words: &[String]) -> bool {
-        if words.is_empty() {
+    fn names_only_the_franchise(&self, compact: &str) -> bool {
+        if compact.is_empty() {
             return true;
         }
-        let compact = words.concat();
-        if (1..=self.canonical.len()).any(|end| self.canonical[..end].concat() == compact) {
+        if leading_run_equals(&self.canonical, compact, true) {
             return true;
         }
-        let extends = |title: &Vec<String>| title.len() > words.len() && title.starts_with(words);
+        let extends = |title: &Vec<String>| leading_run_equals(title, compact, false);
         let equals = |title: &Vec<String>| title.concat() == compact;
         self.cours.len() > 1
             && self.cours.iter().any(|titles| titles.iter().any(extends))
@@ -911,28 +920,54 @@ impl FranchiseNames {
                 .all(|titles| titles.iter().any(|title| extends(title) || equals(title)))
     }
 
-    /// Whether this cour is catalogued under the series' own name.
-    fn cour_answers_to_series(&self, season: &AnimeCommunitySeason) -> bool {
+    /// Whether the cour at this bridge position is catalogued under the
+    /// series' own name.
+    fn cour_answers_to_series(&self, position: usize) -> bool {
         let canonical = self.canonical.concat();
         !canonical.is_empty()
-            && season
-                .titles
-                .iter()
-                .any(|title| loose_words(title).concat() == canonical)
+            && self
+                .cours
+                .get(position)
+                .is_some_and(|titles| titles.iter().any(|title| title.concat() == canonical))
     }
 
-    /// Whether a cour title and a parsed name are the same name.
-    fn same_name(left: &str, right: &str) -> bool {
-        let left = loose_words(left).concat();
-        !left.is_empty() && left == loose_words(right).concat()
+    /// Whether the cour at this bridge position answers to any of these
+    /// parsed names.
+    fn cour_is_named_by(&self, position: usize, parsed: &[String]) -> bool {
+        self.cours.get(position).is_some_and(|titles| {
+            titles.iter().any(|title| {
+                let title = title.concat();
+                parsed.iter().any(|name| *name == title)
+            })
+        })
     }
 }
 
+/// Whether some leading run of `words` — the whole of it only when `inclusive`
+/// — joined without breaks is `compact`.
+fn leading_run_equals(words: &[String], compact: &str, inclusive: bool) -> bool {
+    let limit = if inclusive {
+        words.len()
+    } else {
+        words.len().saturating_sub(1)
+    };
+    let mut joined = String::new();
+    for word in &words[..limit] {
+        joined.push_str(word);
+        if joined.len() >= compact.len() {
+            return joined == compact;
+        }
+    }
+    false
+}
+
 fn loose_words(value: &str) -> Vec<String> {
-    scryer_domain::title_spelling::title_identity_loose_form(value)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect()
+    scryer_domain::title_spelling::title_identity_loose_form(
+        &scryer_domain::title_spelling::title_lookup_form(value),
+    )
+    .split_whitespace()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Return the only community cour whose own title the parsed release names
@@ -984,17 +1019,20 @@ fn exact_cour_title_matches<'a>(
 
     // Names are compared loosely, so two cours whose titles differ only by
     // punctuation both match and the name stays ambiguous.
+    let distinguishing = distinguishing
+        .iter()
+        .map(|parsed| loose_words(parsed).concat())
+        .filter(|parsed| !parsed.is_empty())
+        .collect::<Vec<_>>();
     bridge
         .seasons
         .iter()
-        .filter(|season| !franchise.cour_answers_to_series(season))
-        .filter(|season| {
-            season.titles.iter().any(|season_title| {
-                distinguishing
-                    .iter()
-                    .any(|parsed| FranchiseNames::same_name(season_title, parsed))
-            })
+        .enumerate()
+        .filter(|(position, _)| {
+            !franchise.cour_answers_to_series(*position)
+                && franchise.cour_is_named_by(*position, &distinguishing)
         })
+        .map(|(_, season)| season)
         .collect()
 }
 

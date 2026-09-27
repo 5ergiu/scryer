@@ -4251,7 +4251,16 @@ fn catalog_with_absolutes(facet: ContextFacetHint, title: &str) -> ReleaseParseC
 #[test]
 fn an_audio_channel_layout_is_never_an_absolute_episode_number() {
     for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
-        for audio in ["EAC3 2.0", "EAC3 5.1", "AAC 7.1"] {
+        for audio in [
+            "EAC3 2.0",
+            "EAC3 5.1",
+            "AAC 7.1",
+            "AAC2.0",
+            "DDP5.1",
+            "DTS-HD MA 5.1",
+            "TrueHD Atmos 7.1",
+            "AAC LC 2.0",
+        ] {
             let raw = format!(
                 "Lantern Verge (2024) - S02E06 - 018 - Ember Tide [WEBDL-1080p][{audio}][JA][x265 10bit]-Cindergroup"
             );
@@ -4281,4 +4290,22 @@ fn an_absolute_release_with_an_audio_bracket_keeps_its_number() {
 
     assert_eq!(candidate.family, ParseFamily::AnimeAbsolute);
     assert_eq!(episode.absolute_episode, Some(18), "{episode:?}");
+}
+
+/// Scene-style dotted names carry the layout between dots, several tokens
+/// after the codec it belongs to. Its digits are still the audio track.
+#[test]
+fn a_dotted_channel_layout_after_a_multi_part_codec_is_not_an_episode() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        for audio in ["DTS-HD.MA.5.1", "TrueHD.Atmos.7.1", "DDP5.1", "AAC2.0"] {
+            let raw = format!("Lantern.Verge.2024.S02E06.1080p.BluRay.{audio}.x264-Cindergroup");
+            let target = catalog_with_absolutes(facet, "Lantern Verge");
+            let analysis = analyze_release_for_target(&raw, &target);
+            let candidate = analysis.best_candidate().expect("candidate");
+            let episode = candidate.projected.episode.as_ref().expect("episode");
+
+            assert_eq!(episode.season, Some(2), "{facet:?} {raw}: {episode:?}");
+            assert_eq!(episode.episode_numbers, vec![6], "{facet:?} {raw}");
+        }
+    }
 }

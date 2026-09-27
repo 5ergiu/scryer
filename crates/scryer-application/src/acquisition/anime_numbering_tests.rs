@@ -2113,7 +2113,9 @@ fn a_canonical_name_the_bridge_does_not_carry_still_keeps_the_stated_season() {
 
 /// A season token that contradicts the named cour wins over the name for a
 /// single episode, the way it already does for packs: `S03E02` under cour 2's
-/// title is read by its season token, not as cour 2's second episode.
+/// title is read by its season token, not as cour 2's second episode. Every
+/// cour of this fixture lands in TVDB season 1, so `3` is neither `1`, cour
+/// 2's own index, nor a TVDB season it lands in.
 #[test]
 fn an_explicit_season_that_contradicts_the_named_cour_wins() {
     let resolution = resolve(
@@ -2247,4 +2249,168 @@ fn a_bare_franchise_name_with_an_absolute_number_reads_absolutely() {
     let candidate = resolution.resolved().expect("absolute candidate");
     assert_eq!(candidate.kind, NumberingCandidateKind::Absolute);
     assert_eq!(candidate.episode_ids, vec!["ep-2-1".to_string()]);
+}
+
+/// TVDB keeps the first two cours in season 1 and gives the third its own
+/// season 2; the catalog follows TVDB.
+fn split_cour_catalog_and_bridge() -> (Vec<Episode>, AnimeNumberingBridge) {
+    let mut episodes = Vec::new();
+    for (season, length) in [(1_u32, 24_u32), (2, 12)] {
+        for number in 1..=length {
+            episodes.push(episode(
+                &format!("ep-{season}-{number}"),
+                season,
+                number,
+                None,
+                "",
+            ));
+        }
+    }
+    let cour = |index: i32, title: &str, tvdb_season: i32, tvdb_start: i32| AnimeCommunitySeason {
+        index,
+        anidb_id: None,
+        anilist_id: None,
+        mal_id: None,
+        titles: vec![title.to_string()],
+        ranges: vec![AnimeCommunitySeasonRange {
+            community_episode_start: 1,
+            community_episode_end: Some(12),
+            tvdb_season,
+            tvdb_episode_start: tvdb_start,
+            tvdb_episode_end: Some(tvdb_start + 11),
+        }],
+        absolute_start: None,
+        contiguous_absolute_start: None,
+        episode_count: Some(12),
+    };
+    let bridge = AnimeNumberingBridge {
+        source: Default::default(),
+        generated_on: "2026-09-26".to_string(),
+        corroborating_order: None,
+        seasons: vec![
+            cour(1, "Lantern Verge", 1, 1),
+            cour(2, "Lantern Verge: Ember Circuit", 1, 13),
+            cour(3, "Lantern Verge: Glass Meridian", 2, 1),
+        ],
+    };
+    (episodes, bridge)
+}
+
+/// A cour TVDB records as its own season is released under that season
+/// number. `Glass Meridian S02E05` names cour 3, which TVDB keeps as season
+/// 2, so `S02` agrees with the name and the release stays on S02E05 rather
+/// than being read as community season 2 (official S01E17).
+#[test]
+fn a_season_token_matching_the_named_cours_tvdb_season_keeps_the_anchor() {
+    let (episodes, bridge) = split_cour_catalog_and_bridge();
+    let series = title(SERIES_NAME);
+    let parse = parsed(Some(2), &[5]);
+    let variants = vec![
+        SERIES_NAME.to_string(),
+        "Lantern Verge Glass Meridian".to_string(),
+    ];
+    let input = NumberingInput {
+        bridge: &bridge,
+        title: &series,
+        episodes: &episodes,
+        parsed: &parse,
+        parsed_title_variants: &variants,
+        reference_date: None,
+        forced_alternate_numbering: false,
+    };
+
+    let anchored = title_anchored_candidates(&input);
+    assert_eq!(anchored.len(), 1, "{anchored:?}");
+    assert_eq!(anchored[0].episode_ids, vec!["ep-2-5".to_string()]);
+    assert_eq!(resolve_numbering(&input), NumberingResolution::Unchanged);
+
+    // Cour 1 lands only in TVDB season 1, so `S02` still contradicts it.
+    let parse = parsed(Some(2), &[1]);
+    let named_first = three_cour_bridge([
+        &["Lantern Verge: Mein Star"],
+        &["Lantern Verge 2nd Season"],
+        &["Lantern Verge: Glass Meridian"],
+    ]);
+    let catalog = three_season_catalog();
+    let series = title("Фонарь на грани");
+    let input = NumberingInput {
+        bridge: &named_first,
+        title: &series,
+        episodes: &catalog,
+        parsed: &parse,
+        parsed_title_variants: &["Lantern Verge Mein Star".to_string()],
+        reference_date: None,
+        forced_alternate_numbering: false,
+    };
+    assert!(title_anchored_candidates(&input).is_empty());
+    assert_eq!(resolve_numbering(&input), NumberingResolution::Unchanged);
+}
+
+/// The catalog writes the series with a trailing article (`Lantern, The`),
+/// the first cour with a leading one, and the parsed variants arrive in the
+/// lookup form that moves the article to the front. Both sides are read the
+/// same way, so the franchise name anchors nothing and a genuine cour name
+/// still anchors uniquely.
+#[test]
+fn a_trailing_article_canonical_is_still_the_franchise() {
+    let bridge = three_cour_bridge([&["The Lantern"], &["Ember Circuit"], &["Glass Meridian"]]);
+    let canonical = "Lantern, The";
+    let projected = crate::app_usecase_rss::normalize_for_matching(canonical);
+
+    assert!(matches!(
+        exact_cour_title_match(canonical, &bridge, &[projected.clone()]),
+        ExactCourTitleMatch::None
+    ));
+    assert!(matches!(
+        exact_cour_title_match(
+            canonical,
+            &bridge,
+            &[projected.clone(), "Ember Circuit".to_string()]
+        ),
+        ExactCourTitleMatch::Unique(cour) if cour.index == 2
+    ));
+    assert_eq!(
+        resolve(
+            &bridge,
+            &title(canonical),
+            &three_season_catalog(),
+            &parsed(Some(2), &[1]),
+            &[projected, "The Lantern".to_string()],
+            None,
+        ),
+        NumberingResolution::Unchanged
+    );
+}
+
+/// The lookup form drops a `*` without a word break, so a release written
+/// `Lantern*Verge` arrives as the single word `lanternverge`. It is still the
+/// stem every cour title grows from, so it anchors nothing.
+#[test]
+fn a_franchise_stem_run_together_by_punctuation_is_still_the_stem() {
+    let bridge = three_cour_bridge([
+        &["Lantern Verge"],
+        &["Lantern Verge 2nd Season"],
+        &["Lantern Verge: Glass Meridian"],
+    ]);
+    let series = title("Фонарь на грани");
+
+    assert_eq!(
+        anchored_index(
+            &bridge,
+            &series,
+            &absolute_only_parse(13),
+            &["Lantern*Verge".to_string()]
+        ),
+        None
+    );
+    // A word cut inside a title word is not a stem.
+    assert_eq!(
+        anchored_index(
+            &bridge,
+            &series,
+            &absolute_only_parse(3),
+            &["Lantern Verge 2nd*Season".to_string()]
+        ),
+        Some(2)
+    );
 }
