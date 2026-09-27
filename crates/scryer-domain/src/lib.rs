@@ -1231,6 +1231,21 @@ pub struct AnimeCommunitySeasonRange {
 }
 
 impl AnimeCommunitySeason {
+    /// Whether a release that names this community season may also carry
+    /// `season` as its season token without contradicting that name.
+    ///
+    /// Three spellings agree with the name: `1` (groups that title a release
+    /// per cour restart their season numbering with it), the community
+    /// season's own index, and any TVDB season one of its ranges lands in (a
+    /// cour TVDB records as its own season is released under that number).
+    /// Anything else names a different season than the title does.
+    pub fn admits_season_token(&self, season: u32) -> bool {
+        season == 1
+            || i32::try_from(season).is_ok_and(|season| {
+                season == self.index || self.ranges.iter().any(|range| range.tvdb_season == season)
+            })
+    }
+
     /// The TVDB (season, episode) a community episode number lands on, or
     /// `None` when no range of this season covers it.
     pub fn tvdb_for_community_episode(&self, community_episode: i32) -> Option<(i32, i32)> {

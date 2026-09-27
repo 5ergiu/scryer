@@ -272,6 +272,41 @@ pub fn title_search_lenient_form(value: &str) -> String {
     collapse_initialisms(&stripped)
 }
 
+/// A deliberately loose spelling of a name, for asking whether two names
+/// denote the same thing rather than for looking anything up.
+///
+/// NFKD, combining marks dropped, lowercased, and every run of anything that
+/// is not a letter or digit collapsed to one space. So `Mein*Star`,
+/// `Mein Star` and `Mein：Star` are one form, `I`ll` and `I'll` are one form,
+/// and `Éclair` is `eclair`. Words stay apart, so a caller can still ask
+/// whether one name is a leading run of another's words.
+///
+/// Never persist this form or key an index on it: it conflates spellings
+/// that [`title_lookup_form`] keeps apart on purpose (`año` and `ano`). It
+/// exists for the comparisons where a missed equality is the dangerous
+/// outcome, such as refusing to read a franchise's own name as naming one of
+/// its seasons.
+pub fn title_identity_loose_form(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for ch in value
+        .nfkd()
+        .filter(|ch| !is_combining_mark(*ch))
+        .flat_map(char::to_lowercase)
+    {
+        if ch.is_alphanumeric() {
+            if pending_space && !result.is_empty() {
+                result.push(' ');
+            }
+            pending_space = false;
+            result.push(ch);
+        } else {
+            pending_space = true;
+        }
+    }
+    result
+}
+
 fn collapse_initialisms(raw: &str) -> String {
     let tokens = raw.split_whitespace().collect::<Vec<_>>();
     let is_initial = |token: &str| {
@@ -603,6 +638,34 @@ pub fn compare_title_spelling(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_identity_loose_form_collapses_punctuation_between_words() {
+        for (left, right) in [
+            ("[Lantern Verge] - [Mein*Star]", "Lantern Verge: Mein Star"),
+            ("Cinder Atlas：Second Tide", "Cinder Atlas - Second Tide"),
+            ("I`ll Hold the Lantern", "I'll Hold the Lantern"),
+            ("I’ll Hold the Lantern", "I'll Hold the Lantern"),
+            ("Éclair Verge", "eclair verge"),
+            ("ＬＡＮＴＥＲＮ　ＶＥＲＧＥ", "Lantern Verge"),
+        ] {
+            assert_eq!(
+                title_identity_loose_form(left),
+                title_identity_loose_form(right),
+                "{left} vs {right}"
+            );
+        }
+        assert_eq!(
+            title_identity_loose_form("[Lantern Verge] - [Mein*Star]"),
+            "lantern verge mein star"
+        );
+        assert_eq!(title_identity_loose_form("  --  "), "");
+        assert_ne!(
+            title_identity_loose_form("Lantern Verge 2"),
+            title_identity_loose_form("Lantern Verge")
+        );
+        assert_eq!(title_identity_loose_form("Фонарь"), "фонарь");
+    }
     use crate::title_normalization::JAPANESE_ROMANIZATION_TAG;
     use crate::title_normalization::japanese::{FoldedWith, JapaneseRomanization, Switches};
 

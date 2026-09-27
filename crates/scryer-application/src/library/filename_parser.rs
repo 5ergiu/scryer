@@ -2628,4 +2628,131 @@ mod tests {
             );
         }
     }
+
+    /// Three TVDB seasons of twelve, each carrying its absolute number.
+    fn seasonal_catalog_with_absolutes() -> Vec<Episode> {
+        let mut episodes = Vec::new();
+        for absolute in 1..=36_u32 {
+            let season = absolute.div_ceil(12);
+            let number = (absolute - 1) % 12 + 1;
+            let mut row = episode(
+                &format!("ep-{season}-{number}"),
+                &season.to_string(),
+                &number.to_string(),
+            );
+            row.absolute_number = Some(absolute.to_string());
+            episodes.push(row);
+        }
+        episodes
+    }
+
+    /// Community cours that coincide with the three TVDB seasons. The first
+    /// cour answers to the bare franchise name as well as its own subtitle,
+    /// which is how the anime metadata providers catalogue a first season.
+    fn seasonal_bridge(cour_titles: [&[&str]; 3]) -> scryer_domain::AnimeNumberingBridge {
+        let seasons = cour_titles
+            .iter()
+            .enumerate()
+            .map(|(offset, titles)| {
+                let index = i32::try_from(offset).expect("small index") + 1;
+                scryer_domain::AnimeCommunitySeason {
+                    index,
+                    anidb_id: None,
+                    anilist_id: None,
+                    mal_id: None,
+                    titles: titles.iter().map(|title| (*title).to_string()).collect(),
+                    ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                        community_episode_start: 1,
+                        community_episode_end: Some(12),
+                        tvdb_season: index,
+                        tvdb_episode_start: 1,
+                        tvdb_episode_end: Some(12),
+                    }],
+                    absolute_start: Some((index - 1) * 12 + 1),
+                    contiguous_absolute_start: None,
+                    episode_count: Some(12),
+                }
+            })
+            .collect();
+        scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
+            generated_on: "2026-09-26".to_string(),
+            corroborating_order: None,
+            seasons,
+        }
+    }
+
+    fn scan_one(
+        title: &Title,
+        episodes: &[Episode],
+        bridge: Option<&scryer_domain::AnimeNumberingBridge>,
+        path: &str,
+    ) -> Vec<String> {
+        let input = LibraryFilenameParseInput {
+            path: Path::new(path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes,
+            existing_record: None,
+            anime_numbering_bridge: bridge,
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::NeedReleaseMetadata,
+        };
+        parse_library_filename(&input)
+            .target_episodes()
+            .into_iter()
+            .map(|episode| episode.id)
+            .collect()
+    }
+
+    /// The catalog's name for the series differs from the first cour's title
+    /// only by punctuation (`Mein*Star` against `Mein Star`), and the files
+    /// name the bare franchise. That name is the series, not its first cour,
+    /// so each file keeps the season its own `SxxEyy` states.
+    #[test]
+    fn title_scan_keeps_the_stated_season_when_the_franchise_name_matches_the_first_cour() {
+        let title = title("[Lantern Verge] - [Mein*Star]", MediaFacet::Anime);
+        let episodes = seasonal_catalog_with_absolutes();
+        let bridge = seasonal_bridge([
+            &["Lantern Verge: Mein Star", "Lantern Verge"],
+            &["Lantern Verge 2nd Season"],
+            &["Lantern Verge 3rd Season"],
+        ]);
+
+        for (season, absolute) in [(1_u32, 1_u32), (2, 13), (3, 25)] {
+            let path = format!(
+                "/library/Lantern Verge (2023)/Season {season:02}/Lantern Verge (2023) - S{season:02}E01 - {absolute:03} - Ember Tide [WEBDL-1080p][JA][x265 10bit]-Cindergroup.mkv"
+            );
+            assert_eq!(
+                scan_one(&title, &episodes, Some(&bridge), &path),
+                vec![format!("ep-{season}-1")],
+                "{path}"
+            );
+        }
+    }
+
+    /// `[EAC3 2.0]` describes the audio track. With the catalog's absolute
+    /// numbers in the parse context its `2` used to read as absolute episode
+    /// 2 and outrank the file's own `S02E06 - 018`.
+    #[test]
+    fn title_scan_never_reads_an_audio_channel_layout_as_the_episode() {
+        let episodes = seasonal_catalog_with_absolutes();
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            let title = title("Cinder Atlas", facet.clone());
+            for audio in ["EAC3 2.0", "EAC3 5.1", "AAC 7.1"] {
+                let path = format!(
+                    "/library/Cinder Atlas (2024)/Season 02/Cinder Atlas (2024) - S02E06 - 018 - Ember Tide [WEBDL-1080p][{audio}][JA][x265 10bit]-Cindergroup.mkv"
+                );
+                assert_eq!(
+                    scan_one(&title, &episodes, None, &path),
+                    vec!["ep-2-6".to_string()],
+                    "{facet:?} {path}"
+                );
+            }
+        }
+    }
 }
