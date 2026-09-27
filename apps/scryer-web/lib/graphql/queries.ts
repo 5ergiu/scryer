@@ -1678,6 +1678,10 @@ export function buildTitlesQuery(
       unmonitored
       continuing
       ended
+      missing
+      partial
+      complete
+      needsAttention
     }`
     }`
     : "";

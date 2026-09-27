@@ -879,6 +879,12 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // carries a `DownloadImportActionsPayload`: OBJECT 460->461, public types
     // 852->853. It is an additive field on a type that already existed, so no
     // other count moves.
+    // The catalogue's file and attention filters add two fields to the existing
+    // `TitleCatalogFilterInput`, four counts to the existing
+    // `TitleCatalogFilterCountsPayload`, and the `TitleCatalogPresenceValue` enum
+    // the first of them needs: ENUM 162->163 and public types 864->865. Both
+    // other changes are additive fields on types that already existed, so no
+    // OBJECT or INPUT_OBJECT count moves.
     // Explicit grab destinations add indexerGrabClients and downloadClientCategories,
     // queueIndexerSearchAssignment, two objects, and IndexerGrabSelectionInput.
     // Dashboard summary and recent imports add two queries, three objects, and
@@ -996,10 +1002,14 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     assert!(public_type_names.contains(&"RuleSetTestListingInput"));
     assert!(public_type_names.contains(&"RuleSetTestListingPayload"));
     assert!(public_type_names.contains(&"ReleaseListingPayload"));
-    assert_eq!(public_types.len(), 916);
+    // The catalogue's file and attention filters add the
+    // `TitleCatalogPresenceValue` enum on top: ENUM 175->176, public types
+    // 916->917; their other changes are additive fields on existing types.
+    assert!(public_type_names.contains(&"TitleCatalogPresenceValue"));
+    assert_eq!(public_types.len(), 917);
     assert_eq!(kind_count("OBJECT"), 497);
     assert_eq!(kind_count("INPUT_OBJECT"), 232);
-    assert_eq!(kind_count("ENUM"), 175);
+    assert_eq!(kind_count("ENUM"), 176);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
