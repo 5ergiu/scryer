@@ -710,9 +710,11 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Public lists add ten reads: the provider catalog, followed lists, one
     // list, its titles, its sync history, three previews, exclusions and
     // member policies. Query 174->184. Server-wide list provider settings add
-    // one more read: 184->185.
+    // one more read: 184->185. Keeping the jobs view current adds
+    // `latestJobRuns`, the newest run per job in one read: 185->186.
+    assert!(query_field_names.contains(&"latestJobRuns"));
     assert_eq!(
-        query_field_count, 185,
+        query_field_count, 186,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
