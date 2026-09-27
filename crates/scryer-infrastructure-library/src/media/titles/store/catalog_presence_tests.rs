@@ -328,7 +328,7 @@ async fn presence_states_partition_the_catalogue_and_match_the_page() {
     ] {
         assert_eq!(
             names_for(&store, presence_filter(vec![state])).await,
-            expected(&expected_names),
+            expected(expected_names),
             "{state:?}"
         );
     }
