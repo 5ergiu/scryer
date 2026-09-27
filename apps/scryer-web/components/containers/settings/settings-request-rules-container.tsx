@@ -1,3 +1,4 @@
+import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
@@ -21,7 +22,6 @@ import type {
   RequestRuleSetDraft,
   RequestRuleSetRecord,
   RequestRuleUserOption,
-  RequestRuleValidationResult,
 } from "@/lib/types/request-rule-sets";
 import {
   REQUEST_DECISION_LIMIT,
@@ -54,7 +54,6 @@ import {
   setRequestRuleModeMutation,
   updateRequestRuleMatcherMutation,
   updateRequestRuleMetadataMutation,
-  validateRequestRuleMutation,
 } from "@/lib/graphql/mutations";
 
 const PREVIEW_TITLE_SEARCH_LIMIT = 8;
@@ -107,9 +106,8 @@ export function SettingsRequestRulesContainer() {
   );
   const [ruleSetDraftBaseline, setRuleSetDraftBaseline] =
     useState<RequestRuleSetDraft>(initialRequestRuleDraft);
-  const [validating, setValidating] = useState(false);
-  const [validationResult, setValidationResult] =
-    useState<RequestRuleValidationResult | null>(null);
+  const { validating, validationResult, setValidationResult, validateDraft } =
+    useRegoValidation("request", ruleSetDraft.regoSource, editingRuleSetId, isEditorOpen);
 
   const [previewSource, setPreviewSource] =
     useState<RequestRulePreviewSource>("stored");
@@ -146,7 +144,7 @@ export function SettingsRequestRulesContainer() {
     setRuleSetDraft(next);
     setRuleSetDraftBaseline(next);
     setValidationResult(null);
-  }, []);
+  }, [setValidationResult]);
 
   const openCreateEditor = useCallback(() => {
     const next = initialRequestRuleDraft();
@@ -155,7 +153,7 @@ export function SettingsRequestRulesContainer() {
     setRuleSetDraftBaseline(next);
     setValidationResult(null);
     setIsEditorOpen(true);
-  }, []);
+  }, [setValidationResult]);
 
   const fetchRuleSetDetail = useCallback(
     async (id: string): Promise<RequestRuleSetDetail | null> => {
@@ -190,7 +188,7 @@ export function SettingsRequestRulesContainer() {
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [fetchRuleSetDetail],
+    [setValidationResult, fetchRuleSetDetail],
   );
 
   const openCopyEditor = useCallback(
@@ -204,7 +202,7 @@ export function SettingsRequestRulesContainer() {
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [fetchRuleSetDetail],
+    [setValidationResult, fetchRuleSetDetail],
   );
 
   /// Load a starter template into the create-rule editor. A template prefills
@@ -230,7 +228,7 @@ export function SettingsRequestRulesContainer() {
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [t],
+    [setValidationResult, t],
   );
 
   const requestCreateEditor = useCallback(() => {
@@ -411,35 +409,6 @@ export function SettingsRequestRulesContainer() {
     void refreshDecisions();
   }, [refreshDecisions]);
 
-  const validateDraft =
-    useCallback(async (): Promise<RequestRuleValidationResult | null> => {
-      if (!ruleSetDraft.regoSource.trim()) return null;
-      setValidating(true);
-      setValidationResult(null);
-      try {
-        const { data, error } = await client
-          .mutation(validateRequestRuleMutation, {
-            input: { regoSource: ruleSetDraft.regoSource },
-          })
-          .toPromise();
-        if (error) throw error;
-        const result = data.validateRequestRule as RequestRuleValidationResult;
-        setValidationResult(result);
-        return result;
-      } catch (error) {
-        /// The API's refusals — the person-targeting one especially — are the
-        /// message the author needs, so they are surfaced verbatim rather than
-        /// replaced with a generic failure.
-        const result = {
-          valid: false,
-          errors: [error instanceof Error ? error.message : "Validation failed"],
-        };
-        setValidationResult(result);
-        return result;
-      } finally {
-        setValidating(false);
-      }
-    }, [client, ruleSetDraft.regoSource]);
 
   const applyRequesters = useCallback(
     (usernames: string[]) => {
@@ -449,7 +418,7 @@ export function SettingsRequestRulesContainer() {
       });
       setValidationResult(null);
     },
-    [],
+    [setValidationResult],
   );
 
   const confirmDeleteRuleSet = useCallback(async () => {

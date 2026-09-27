@@ -1,3 +1,4 @@
+import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { RuleSetTestPanel } from "@/components/containers/settings/rule-set-test-panel";
@@ -12,7 +13,7 @@ import type { ArrCustomFormatDraft } from "@/components/views/settings/arr-custo
 import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
-import type { RuleSetRecord, RuleSetDraft, RuleValidationResult } from "@/lib/types/rule-sets";
+import type { RuleSetRecord, RuleSetDraft } from "@/lib/types/rule-sets";
 import { copyRuleSetDraft, createRuleSetInput } from "@/lib/utils/rule-sets";
 import { conflictingFrenchPack } from "@/lib/utils/trash-packs";
 import { resolveRuleDetailRequest } from "@/lib/utils/rule-detail-request";
@@ -28,7 +29,6 @@ import {
   uninstallTrackedRulePackMutation,
   updateTrackedRulePackMutation,
   updateRuleSetMutation,
-  validateRuleSetMutation,
 } from "@/lib/graphql/mutations";
 
 const RULE_SET_INITIAL_DRAFT: RuleSetDraft = {
@@ -82,8 +82,8 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
   const [ruleSetDraftBaseline, setRuleSetDraftBaseline] = useState<RuleSetDraft>(() => ({
     ...RULE_SET_INITIAL_DRAFT,
   }));
-  const [validating, setValidating] = useState(false);
-  const [validationResult, setValidationResult] = useState<RuleValidationResult | null>(null);
+  const { validating, validationResult, setValidationResult, validateDraft } =
+    useRegoValidation("release", ruleSetDraft.regoSource, editingRuleSetId, isEditorOpen);
   const [translationDiagnostics, setTranslationDiagnostics] = useState<string[]>([]);
   const [focusImportedEditor, setFocusImportedEditor] = useState(false);
   const detailRequestRef = useRef(0);
@@ -98,7 +98,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
     setValidationResult(null);
     setTranslationDiagnostics([]);
     setFocusImportedEditor(false);
-  }, []);
+  }, [setValidationResult]);
 
   const isRuleDraftDirty =
     JSON.stringify(ruleSetDraft) !== JSON.stringify(ruleSetDraftBaseline);
@@ -119,7 +119,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
     setTranslationDiagnostics([]);
     setFocusImportedEditor(false);
     setIsEditorOpen(true);
-  }, []);
+  }, [setValidationResult]);
 
   const openEditRuleEditor = useCallback(
     (record: RuleSetRecord) => {
@@ -142,7 +142,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
       setIsEditorOpen(true);
       setGlobalStatus(t("status.editingRule", { name: record.name }));
     },
-    [setGlobalStatus, t],
+    [setValidationResult, setGlobalStatus, t],
   );
 
   const openCopyRuleEditor = useCallback(
@@ -158,7 +158,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
       setFocusImportedEditor(false);
       setIsEditorOpen(true);
     },
-    [],
+    [setValidationResult],
   );
 
   const openTrackedRuleCopyEditor = useCallback((record: RuleSetRecord) => {
@@ -172,7 +172,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
     setTranslationDiagnostics([]);
     setFocusImportedEditor(false);
     setIsEditorOpen(true);
-  }, []);
+  }, [setValidationResult]);
 
   const openTemplateRuleEditor = useCallback(
     (template: {
@@ -198,7 +198,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
       setFocusImportedEditor(false);
       setIsEditorOpen(true);
     },
-    [],
+    [setValidationResult],
   );
 
   const openImportedRuleEditor = useCallback((imported: ArrCustomFormatDraft) => {
@@ -218,7 +218,7 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
     setTranslationDiagnostics(imported.translationDiagnostics);
     setFocusImportedEditor(true);
     setIsEditorOpen(true);
-  }, [t]);
+  }, [setValidationResult, t]);
 
   const loadRuleSetDetail = useCallback(async (id: string, request: number): Promise<RuleSetRecord | null> => {
     try {
@@ -581,34 +581,6 @@ export function SettingsRulesContainer({ canManageCatalogSettings, canManageSyst
     pendingEditorAction,
   ]);
 
-  const validateDraft = useCallback(async (): Promise<RuleValidationResult | null> => {
-    if (!ruleSetDraft.regoSource.trim()) return null;
-    setValidating(true);
-    setValidationResult(null);
-    try {
-      const { data, error } = await client
-        .mutation(validateRuleSetMutation, {
-          input: {
-            regoSource: ruleSetDraft.regoSource,
-            ruleSetId: editingRuleSetId || undefined,
-          },
-        })
-        .toPromise();
-      if (error) throw error;
-      const result = data.validateRuleSet;
-      setValidationResult(result);
-      return result;
-    } catch (error) {
-      const result = {
-        valid: false,
-        errors: [error instanceof Error ? error.message : "Validation failed"],
-      };
-      setValidationResult(result);
-      return result;
-    } finally {
-      setValidating(false);
-    }
-  }, [client, editingRuleSetId, ruleSetDraft.regoSource]);
 
   const submitRuleSet = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

@@ -1,6 +1,27 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "settings.regoValidationUnavailable": "Validation unavailable. Check your connection and try Validate again.",
+  "settings.regoFileAvailability": "Available only when scoring an imported file with media information. During release searches input.file is null; guard it before reading fields.",
+  "settings.regoExtraAvailability": "Indexer-provided attributes. Keys vary by indexer and are not suggested.",
+  "settings.regoSnippetLabel": "Snippet",
+  "settings.regoHelper.blockScore": "Return the standard blocking penalty (-10000). Other scoring entries can still offset this penalty.",
+  "settings.regoHelper.sizeGib": "Convert a byte count to gibibytes (GiB).",
+  "settings.regoHelper.langMatches": "Compare a language code with another code or a supported language alias.",
+  "settings.regoHelper.normalizeSource": "Normalize a source label, such as webdl to WEB-DL.",
+  "settings.regoHelper.normalizeCodec": "Normalize a codec label, such as x265 to H.265.",
+  "settings.regoHelper.lower": "Convert a string to lowercase.",
+  "settings.regoHelper.upper": "Convert a string to uppercase.",
+  "settings.regoHelper.count": "Count items in an array, set or object, or characters in a string.",
+  "settings.regoHelper.objectGet": "Read an object key, returning the default when absent. Use a named input fact in request and maintenance rules.",
+  "settings.regoHelper.startsWith": "Return whether a string begins with a prefix.",
+  "settings.regoSnippet.scoreEntry": "Add a named scoring adjustment when a release condition matches.",
+  "settings.regoSnippet.tagScore": "Add a scoring adjustment for a title tag. Replace the tag and score placeholders.",
+  "settings.regoSnippet.nullableField": "Check for a release group before comparing its lowercase name.",
+  "settings.regoSnippet.denyRequest": "Deny a request when its adult-content fact is true.",
+  "settings.regoSnippet.manualRequest": "Require manual review when the recent approval count reaches a threshold.",
+  "settings.regoSnippet.matchTag": "Match a maintenance subject by tag. This matcher does not define an action.",
+
   "settings.trustedProxiesTitle": "Trusted proxies for rate limiting",
   "settings.trustedProxiesHelp": "Trust X-Forwarded-For only from these proxy addresses when identifying clients for rate limiting. This does not change login rules, local access, or rate-limit bypasses. Changes apply immediately.",
   "settings.trustedProxiesAddresses": "IPv4, IPv6, or CIDR addresses (one per line or comma-separated)",
