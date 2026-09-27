@@ -25,9 +25,12 @@ use scryer_domain::{
     DomainExternalIds, DownloadFailedEventData, ExternalId, ImportCompletedEventData,
     LibraryScanProgressedEventData, MediaFacet, MediaFileDeletedEventData, MediaFileDeletedReason,
     MediaFileRenamedEventData, MediaFileUpgradedEventData, MediaPathUpdate,
-    MediaRequestSubmittedEventData, MediaServerConnection, MediaServerPathMapping,
-    MediaServerProvider, MediaUpdateType, NewDomainEvent, NewTitle, NotificationChannelConfig,
-    NotificationEventType, ReleaseGrabbedEventData, TitleContextSnapshot,
+    MediaRequestResolvedEventData, MediaRequestSubmittedEventData, MediaServerConnection,
+    MediaServerPathMapping, MediaServerProvider, MediaUpdateType, NewDomainEvent, NewTitle,
+    NotificationChannelConfig, NotificationEventType, PostProcessingCompletedEventData,
+    PostProcessingResult, ReleaseGrabbedEventData, SubtitleDownloadedEventData,
+    SubtitleSearchFailedEventData, TitleAddedEventData, TitleContextSnapshot,
+    TitleDeletedEventData,
 };
 use scryer_infrastructure_library::media::servers::MediaServerConnectionStore;
 use scryer_infrastructure_notifications::notifications::store::NotificationStore;
@@ -745,6 +748,59 @@ async fn wait_for_wiremock_requests(
         .await
         .expect("request capture should succeed");
     panic!("timed out waiting for {expected} HTTP requests, captured {requests:?}");
+}
+
+/// Create a global webhook subscription for one event type and start the dispatcher. The caller
+/// appends the event that should be delivered.
+async fn dispatcher_with_global_subscription(
+    ctx: &TestContext,
+    provider: &Arc<FakeNotificationProvider>,
+    event_type: NotificationEventType,
+) -> (
+    scryer_application::AppUseCase,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let app = app_with_notification_provider(ctx, provider.clone());
+    let user = default_user(&app).await;
+    let channel = app
+        .create_notification_channel(&user, "Webhook".into(), "webhook".into(), "{}".into(), true)
+        .await
+        .expect("channel should be created");
+    app.create_notification_subscription(
+        &user,
+        channel.id,
+        event_type.as_str().to_string(),
+        "global".into(),
+        None,
+        true,
+    )
+    .await
+    .expect("subscription should be created");
+
+    let cancel = CancellationToken::new();
+    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
+    (app, cancel, dispatcher)
+}
+
+/// The single delivered payload, after asserting the identity every event family shares.
+fn delivered_payload(
+    provider: &FakeNotificationProvider,
+    event_type: NotificationEventType,
+    title: &str,
+    message: &str,
+) -> NotificationPayload {
+    let captured = provider.captured();
+    assert_eq!(captured.len(), 1, "one notification should be delivered");
+    assert_eq!(captured[0].event_type, event_type.as_str());
+    assert_eq!(captured[0].title, title);
+    assert_eq!(captured[0].message, message);
+
+    provider
+        .payloads()
+        .into_iter()
+        .next()
+        .expect("captured payload")
 }
 
 // ---------------------------------------------------------------------------
@@ -1908,25 +1964,9 @@ async fn notification_dispatcher_delivers_global_media_request_to_facet_scope() 
 async fn notification_dispatcher_delivers_release_grabbed() {
     let ctx = TestContext::new().await;
     let provider = Arc::new(FakeNotificationProvider::webhook());
-    let app = app_with_notification_provider(&ctx, provider.clone());
-    let user = default_user(&app).await;
-    let channel = app
-        .create_notification_channel(&user, "Webhook".into(), "webhook".into(), "{}".into(), true)
-        .await
-        .expect("channel should be created");
-    app.create_notification_subscription(
-        &user,
-        channel.id,
-        NotificationEventType::Grab.as_str().to_string(),
-        "global".into(),
-        None,
-        true,
-    )
-    .await
-    .expect("subscription should be created");
+    let (app, cancel, dispatcher) =
+        dispatcher_with_global_subscription(&ctx, &provider, NotificationEventType::Grab).await;
 
-    let cancel = CancellationToken::new();
-    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
     app.append_domain_event(new_event(
         "evt-release-grabbed",
         "title-1",
@@ -1943,15 +1983,13 @@ async fn notification_dispatcher_delivers_release_grabbed() {
     .await
     .expect("grab event should append");
 
-    let captured = wait_for_captured(&provider, 1).await;
-    assert_eq!(captured[0].event_type, NotificationEventType::Grab.as_str());
-    assert_eq!(captured[0].title, "Grabbed: Grabbed Show");
-    assert_eq!(
-        captured[0].message,
-        "Grabbed 'Grabbed.Show.S01E01.1080p.WEB-DL' for 'Grabbed Show'."
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::Grab,
+        "Grabbed: Grabbed Show",
+        "Grabbed 'Grabbed.Show.S01E01.1080p.WEB-DL' for 'Grabbed Show'.",
     );
-
-    let payload = &provider.payloads()[0];
     assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
     assert_eq!(
         payload.release,
@@ -1988,25 +2026,9 @@ async fn notification_dispatcher_delivers_release_grabbed() {
 async fn notification_dispatcher_delivers_download_failed() {
     let ctx = TestContext::new().await;
     let provider = Arc::new(FakeNotificationProvider::webhook());
-    let app = app_with_notification_provider(&ctx, provider.clone());
-    let user = default_user(&app).await;
-    let channel = app
-        .create_notification_channel(&user, "Webhook".into(), "webhook".into(), "{}".into(), true)
-        .await
-        .expect("channel should be created");
-    app.create_notification_subscription(
-        &user,
-        channel.id,
-        NotificationEventType::Download.as_str().to_string(),
-        "global".into(),
-        None,
-        true,
-    )
-    .await
-    .expect("subscription should be created");
+    let (app, cancel, dispatcher) =
+        dispatcher_with_global_subscription(&ctx, &provider, NotificationEventType::Download).await;
 
-    let cancel = CancellationToken::new();
-    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
     app.append_domain_event(NewDomainEvent {
         event_id: "evt-download-failed".to_string(),
         occurred_at: Utc::now(),
@@ -2040,15 +2062,13 @@ async fn notification_dispatcher_delivers_download_failed() {
     .await
     .expect("download failure event should append");
 
-    let captured = wait_for_captured(&provider, 1).await;
-    assert_eq!(
-        captured[0].event_type,
-        NotificationEventType::Download.as_str()
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::Download,
+        "Download failed: Failed Movie",
+        "archive corrupt",
     );
-    assert_eq!(captured[0].title, "Download failed: Failed Movie");
-    assert_eq!(captured[0].message, "archive corrupt");
-
-    let payload = &provider.payloads()[0];
     assert_eq!(payload.severity, Some(NotificationSeverityPayload::Error));
     assert_eq!(
         payload.release,
@@ -2076,6 +2096,423 @@ async fn notification_dispatcher_delivers_download_failed() {
 
     cancel.cancel();
     dispatcher.await.expect("dispatcher should stop");
+}
+
+/// A catalogue change carries no file, so the title context and the absence of a file section are
+/// the whole contract.
+#[tokio::test]
+async fn notification_dispatcher_delivers_title_added() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let (app, cancel, dispatcher) =
+        dispatcher_with_global_subscription(&ctx, &provider, NotificationEventType::TitleAdded)
+            .await;
+
+    app.append_domain_event(new_event(
+        "evt-title-added",
+        "title-1",
+        "movie",
+        DomainEventPayload::TitleAdded(TitleAddedEventData {
+            title: title_context(
+                "Added Movie",
+                "movie",
+                DomainExternalIds {
+                    imdb_id: Some("tt0111161".to_string()),
+                    tmdb_id: Some("278".to_string()),
+                    tvdb_id: None,
+                    anidb_id: None,
+                },
+            ),
+        }),
+    ))
+    .await
+    .expect("title added event should append");
+
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::TitleAdded,
+        "Added: Added Movie",
+        "Added 'Added Movie' to Scryer.",
+    );
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+
+    let title = payload.title.as_ref().expect("title context");
+    assert_eq!(title.name, "Added Movie");
+    assert_eq!(title.facet, "movie");
+    assert_eq!(title.external_ids.imdb_id.as_deref(), Some("tt0111161"));
+    assert_eq!(title.external_ids.tmdb_id.as_deref(), Some("278"));
+    assert_eq!(payload.file, None);
+    assert_eq!(payload.episode, None);
+    assert!(payload.media_files.is_empty());
+
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+#[tokio::test]
+async fn notification_dispatcher_delivers_title_deleted() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let (app, cancel, dispatcher) =
+        dispatcher_with_global_subscription(&ctx, &provider, NotificationEventType::TitleDeleted)
+            .await;
+
+    app.append_domain_event(new_event(
+        "evt-title-deleted",
+        "title-1",
+        "series",
+        DomainEventPayload::TitleDeleted(TitleDeletedEventData {
+            title: title_context("Removed Show", "series", DomainExternalIds::default()),
+        }),
+    ))
+    .await
+    .expect("title deleted event should append");
+
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::TitleDeleted,
+        "Deleted: Removed Show",
+        "Deleted 'Removed Show' from Scryer.",
+    );
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+
+    let title = payload.title.as_ref().expect("title context");
+    assert_eq!(title.name, "Removed Show");
+    assert_eq!(title.facet, "series");
+    assert_eq!(payload.file, None);
+
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+/// A post-processing script reports through its own section, and the outcome has to survive the trip
+/// unchanged. Severity is asserted only for the succeeded case: the dispatcher derives it from the
+/// event type today, so the other two outcomes are not a property of this path yet.
+#[tokio::test]
+async fn notification_dispatcher_delivers_every_post_processing_result() {
+    for (result, status, outcome) in [
+        // The status token and the sentence differ only for the timeout, which reads "timed out".
+        (PostProcessingResult::Succeeded, "succeeded", "succeeded"),
+        (PostProcessingResult::TimedOut, "timed_out", "timed out"),
+        (PostProcessingResult::Failed, "failed", "failed"),
+    ] {
+        let ctx = TestContext::new().await;
+        let provider = Arc::new(FakeNotificationProvider::webhook());
+        let (app, cancel, dispatcher) = dispatcher_with_global_subscription(
+            &ctx,
+            &provider,
+            NotificationEventType::PostProcessingCompleted,
+        )
+        .await;
+
+        app.append_domain_event(new_event(
+            "evt-post-processing",
+            "title-1",
+            "movie",
+            DomainEventPayload::PostProcessingCompleted(PostProcessingCompletedEventData {
+                title: title_context("Processed Movie", "movie", DomainExternalIds::default()),
+                script_name: "notify.sh".to_string(),
+                result,
+                exit_code: Some(1),
+            }),
+        ))
+        .await
+        .expect("post-processing event should append");
+
+        wait_for_captured(&provider, 1).await;
+        let payload = delivered_payload(
+            &provider,
+            NotificationEventType::PostProcessingCompleted,
+            "Post-processing: Processed Movie",
+            &format!("Post-processing 'notify.sh' {outcome} for 'Processed Movie'."),
+        );
+        assert_eq!(
+            payload
+                .import
+                .as_ref()
+                .and_then(|import| import.status.as_deref()),
+            Some(status)
+        );
+        if result == PostProcessingResult::Succeeded {
+            assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+        }
+
+        cancel.cancel();
+        dispatcher.await.expect("dispatcher should stop");
+    }
+}
+
+#[tokio::test]
+async fn notification_dispatcher_delivers_subtitle_downloaded() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let (app, cancel, dispatcher) = dispatcher_with_global_subscription(
+        &ctx,
+        &provider,
+        NotificationEventType::SubtitleDownloaded,
+    )
+    .await;
+
+    app.append_domain_event(new_event(
+        "evt-subtitle-downloaded",
+        "title-1",
+        "series",
+        DomainEventPayload::SubtitleDownloaded(SubtitleDownloadedEventData {
+            title: title_context("Subtitle Show", "series", DomainExternalIds::default()),
+            subtitle_path: Some("/library/Subtitle Show/S01E01.en.srt".to_string()),
+            language: Some("English".to_string()),
+            provider: Some("opensubtitles".to_string()),
+        }),
+    ))
+    .await
+    .expect("subtitle downloaded event should append");
+
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::SubtitleDownloaded,
+        "Subtitle downloaded: Subtitle Show",
+        "Downloaded English subtitle for 'Subtitle Show'.",
+    );
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+    assert_eq!(
+        payload.release,
+        Some(NotificationReleasePayload {
+            provider: Some("opensubtitles".to_string()),
+            language: Some("English".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        payload.file,
+        Some(NotificationFilePayload {
+            primary_path: Some("/library/Subtitle Show/S01E01.en.srt".to_string()),
+            media_updates: Vec::new(),
+        })
+    );
+    // A subtitle path is not a media file, so nothing is looked up on disk for it.
+    assert!(payload.media_files.is_empty());
+
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+#[tokio::test]
+async fn notification_dispatcher_delivers_subtitle_search_failed() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let (app, cancel, dispatcher) = dispatcher_with_global_subscription(
+        &ctx,
+        &provider,
+        NotificationEventType::SubtitleSearchFailed,
+    )
+    .await;
+
+    app.append_domain_event(new_event(
+        "evt-subtitle-search-failed",
+        "title-1",
+        "series",
+        DomainEventPayload::SubtitleSearchFailed(SubtitleSearchFailedEventData {
+            title: title_context("Subtitle Failure", "series", DomainExternalIds::default()),
+            language: Some("English".to_string()),
+            reason: Some("provider timeout".to_string()),
+        }),
+    ))
+    .await
+    .expect("subtitle search failure event should append");
+
+    wait_for_captured(&provider, 1).await;
+    let payload = delivered_payload(
+        &provider,
+        NotificationEventType::SubtitleSearchFailed,
+        "Subtitle search failed: Subtitle Failure",
+        "provider timeout",
+    );
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Error));
+    assert_eq!(
+        payload.release,
+        Some(NotificationReleasePayload {
+            language: Some("English".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(payload.file, None);
+
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+fn resolved_media_request(
+    request_id: &str,
+    facet: MediaFacet,
+    title_name: &str,
+    created_title_id: Option<&str>,
+    requested_monitor_type: Option<&str>,
+    approved_profile: Option<&str>,
+) -> MediaRequestResolvedEventData {
+    MediaRequestResolvedEventData {
+        request_id: request_id.to_string(),
+        library_id: format!("library-{}", facet.as_str()),
+        facet,
+        title_name: title_name.to_string(),
+        external_ids: vec![external_id("imdb", "tt0111161")],
+        created_title_id: created_title_id.map(str::to_string),
+        requested_quality_profile_id: Some("quality-requested".to_string()),
+        requested_quality_profile_name: Some("Requested HD".to_string()),
+        requested_monitor_type: requested_monitor_type.map(str::to_string),
+        approved_quality_profile_id: approved_profile.map(|profile| profile.to_string()),
+        approved_quality_profile_name: approved_profile
+            .map(|profile| format!("{profile} Approved")),
+        decided_by_rule_set_ids: Vec::new(),
+        decision_reason_codes: Vec::new(),
+        approved_lease_days: None,
+        policy_tags: Vec::new(),
+    }
+}
+
+/// The three decisions share a payload shape; `submitted` already has a facet-scope test above. The
+/// request section is asserted whole, because a notifier keys on the status and profile fields.
+#[tokio::test]
+async fn notification_dispatcher_delivers_media_request_decisions() {
+    let cases = [
+        (
+            NotificationEventType::MediaRequestApproved,
+            resolved_media_request(
+                "request-approved",
+                MediaFacet::Movie,
+                "Approved Movie",
+                Some("title-approved"),
+                None,
+                Some("quality-approved"),
+            ),
+            "approved",
+            "Approved",
+        ),
+        (
+            NotificationEventType::MediaRequestRejected,
+            resolved_media_request(
+                "request-rejected",
+                MediaFacet::Movie,
+                "Rejected Movie",
+                None,
+                None,
+                None,
+            ),
+            "rejected",
+            "Rejected",
+        ),
+        (
+            NotificationEventType::MediaRequestCanceled,
+            resolved_media_request(
+                "request-canceled",
+                MediaFacet::Anime,
+                "Canceled Anime",
+                None,
+                Some("futureEpisodes"),
+                None,
+            ),
+            "canceled",
+            "Canceled",
+        ),
+    ];
+
+    for (event_type, data, status, verb) in cases {
+        let ctx = TestContext::new().await;
+        let provider = Arc::new(FakeNotificationProvider::webhook());
+        let (app, cancel, dispatcher) =
+            dispatcher_with_global_subscription(&ctx, &provider, event_type).await;
+
+        app.append_domain_event(NewDomainEvent {
+            event_id: format!("evt-{}", event_type.as_str()),
+            occurred_at: Utc::now(),
+            actor_kind: DomainEventActorKind::User,
+            actor_user_id: Some("admin-1".to_string()),
+            actor_display_name: "admin-1".to_string(),
+            title_id: None,
+            facet: None,
+            correlation_id: None,
+            causation_id: None,
+            schema_version: 1,
+            stream: DomainEventStream::Global,
+            payload: match event_type {
+                NotificationEventType::MediaRequestApproved => {
+                    DomainEventPayload::MediaRequestApproved(data.clone())
+                }
+                NotificationEventType::MediaRequestRejected => {
+                    DomainEventPayload::MediaRequestRejected(data.clone())
+                }
+                other => {
+                    assert_eq!(other, NotificationEventType::MediaRequestCanceled);
+                    DomainEventPayload::MediaRequestCanceled(data.clone())
+                }
+            },
+        })
+        .await
+        .expect("media request decision should append");
+
+        wait_for_captured(&provider, 1).await;
+        let payload = delivered_payload(
+            &provider,
+            event_type,
+            &format!("Media request {status}: {}", data.title_name),
+            &format!("{verb} media request for '{}'.", data.title_name),
+        );
+        assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+        let request = payload
+            .media_request
+            .as_ref()
+            .expect("media request section");
+        assert_eq!(
+            request.request_id.as_deref(),
+            Some(data.request_id.as_str())
+        );
+        assert_eq!(
+            request.library_id.as_deref(),
+            Some(data.library_id.as_str())
+        );
+        assert_eq!(request.status.as_deref(), Some(status));
+        assert_eq!(request.facet.as_deref(), Some(data.facet.as_str()));
+        assert_eq!(
+            request.requested_quality_profile_id.as_deref(),
+            data.requested_quality_profile_id.as_deref()
+        );
+        assert_eq!(
+            request.requested_quality_profile_name.as_deref(),
+            data.requested_quality_profile_name.as_deref()
+        );
+        assert_eq!(
+            request.requested_monitor_type.as_deref(),
+            data.requested_monitor_type.as_deref()
+        );
+        assert_eq!(
+            request.approved_quality_profile_id.as_deref(),
+            data.approved_quality_profile_id.as_deref()
+        );
+        assert_eq!(
+            request.approved_quality_profile_name.as_deref(),
+            data.approved_quality_profile_name.as_deref()
+        );
+        assert_eq!(
+            request.created_title_id.as_deref(),
+            data.created_title_id.as_deref()
+        );
+        assert_eq!(
+            payload.title.as_ref().map(|title| title.name.as_str()),
+            Some(data.title_name.as_str())
+        );
+        assert_eq!(
+            payload
+                .title
+                .as_ref()
+                .and_then(|title| title.external_ids.imdb_id.as_deref()),
+            Some("tt0111161")
+        );
+
+        cancel.cancel();
+        dispatcher.await.expect("dispatcher should stop");
+    }
 }
 
 #[tokio::test]
