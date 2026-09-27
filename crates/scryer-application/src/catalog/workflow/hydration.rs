@@ -1608,7 +1608,7 @@ impl AppUseCase {
         )
         .await;
 
-        info!(
+        tracing::debug!(
             hydration_source = source.as_str(),
             facet = title.facet.as_str(),
             title_id = %title.id,
@@ -1693,7 +1693,7 @@ impl AppUseCase {
         };
 
         match outcome {
-            TitleRecommendationRefreshEnqueueOutcome::Queued => info!(
+            TitleRecommendationRefreshEnqueueOutcome::Queued => tracing::debug!(
                 hydration_source = source.as_str(),
                 facet = title.facet.as_str(),
                 title_id = %title.id,
@@ -1850,7 +1850,7 @@ impl AppUseCase {
                 .await
             {
                 Ok(()) => {
-                    info!(
+                    tracing::debug!(
                         hydration_source = source.as_str(),
                         facet = title.facet.as_str(),
                         title_id = %title.id,

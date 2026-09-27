@@ -393,7 +393,7 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
             .flatten(),
     };
     // One line per cycle, above the per-title summaries.
-    info!(
+    tracing::debug!(
         titles_walked = outcome.titles_walked,
         targets_derived = outcome.targets_derived,
         selected_scopes = selection.indices.len(),
@@ -2720,7 +2720,7 @@ where
     // One line per title walk. The debug! lines above narrate the steps; this
     // is the shape of the whole pass, which is what an operator reading a slow
     // cycle actually needs.
-    info!(
+    tracing::debug!(
         title_id = context.title.id.as_str(),
         title_name = context.title.name.as_str(),
         intent = intent.as_str(),
@@ -3180,7 +3180,7 @@ async fn process_single_target(
     });
 
     if has_blocking_download_submission {
-        info!(
+        tracing::debug!(
             title = title.name.as_str(),
             media_type = item.media_type.as_str(),
             episode_id = item.episode_id.as_deref(),
@@ -3300,7 +3300,7 @@ async fn process_single_target(
                 return Ok(());
             }
             StandbyRecoveryOutcome::Deferred { refused, .. } => {
-                info!(
+                tracing::debug!(
                     title = title.name.as_str(),
                     scope_key = target.scope_key.as_str(),
                     "saved search result kept pending until the download client recovers"
@@ -3319,7 +3319,7 @@ async fn process_single_target(
                 return Ok(());
             }
             StandbyRecoveryOutcome::Parked { .. } => {
-                info!(
+                tracing::debug!(
                     title = title.name.as_str(),
                     scope_key = target.scope_key.as_str(),
                     "best saved search result is held by its delay profile"
@@ -3532,7 +3532,7 @@ async fn process_single_target(
                 load_recent_failed_season_pack_seasons_for_title(app, &title.id, now).await;
 
             if recent_failed_seasons.contains(&season_num) {
-                info!(
+                tracing::debug!(
                     title = title.name.as_str(),
                     season = season_num,
                     cooldown_minutes = FAILED_GRAB_RESEARCH_COOLDOWN_MINUTES,
@@ -3740,7 +3740,7 @@ async fn process_single_target(
             return Ok(());
         }
         if cycle.season_pack_viable(&season_key) {
-            info!(
+            tracing::debug!(
                 title = title.name.as_str(),
                 season = season_num,
                 "season pack candidate found; skipping individual episode search for this cycle"
@@ -3757,7 +3757,7 @@ async fn process_single_target(
     let download_cat = app.derive_download_category(&title.facet).await;
 
     if pending_subject.for_convergence().queries.is_empty() {
-        info!(
+        tracing::debug!(
             title_id = title.id.as_str(),
             title_name = title.name.as_str(),
             media_type = item.media_type.as_str(),
@@ -4631,7 +4631,7 @@ async fn commit_scope_grab(
             match cycle.claim_submission(route, url) {
                 SubmissionClaim::Granted => {}
                 SubmissionClaim::AlreadySubmitted => {
-                    info!(
+                    tracing::debug!(
                         title = title.name.as_str(),
                         release = candidate.title.as_str(),
                         "skipping duplicate release already submitted this cycle"
@@ -4639,7 +4639,7 @@ async fn commit_scope_grab(
                     continue;
                 }
                 SubmissionClaim::AlreadyAttempted | SubmissionClaim::RouteUnavailable => {
-                    info!(
+                    tracing::debug!(
                         title = title.name.as_str(),
                         release = candidate.title.as_str(),
                         indexer_id = ?candidate.indexer_id,

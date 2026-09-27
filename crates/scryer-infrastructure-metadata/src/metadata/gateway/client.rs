@@ -6732,7 +6732,7 @@ impl MetadataGateway for MetadataGatewayClient {
                 results.insert(query_spec, items);
             }
 
-            tracing::info!(
+            tracing::debug!(
                 target: "import_scan_hint_debug",
                 request_count = chunk.len(),
                 exact_id_count,

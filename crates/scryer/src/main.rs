@@ -765,9 +765,19 @@ async fn run_application() {
         &data_dir,
         default_windows_log_file_path(),
     );
+    let log_file_policy = log_file_config.as_ref().map(|_| {
+        log_buffer::LogFilePolicy::from_env().unwrap_or_else(|error| {
+            eprintln!("invalid file logging configuration: {error}");
+            std::process::exit(1);
+        })
+    });
+    let mut _log_file_guard = None;
     let log_file_writer = match log_file_config.as_ref() {
-        Some(config) => match log_buffer::open_log_file(&config.path) {
-            Ok(writer) => Some(writer),
+        Some(config) => match log_buffer::open_log_file(&config.path, log_file_policy.unwrap()) {
+            Ok((writer, guard)) => {
+                _log_file_guard = Some(guard);
+                Some(writer)
+            }
             Err(error) if config.explicit => {
                 eprintln!(
                     "failed to open Scryer log file at {}: {error}",
@@ -853,7 +863,10 @@ async fn run_application() {
         );
     }
     if let Some(path) = file_logging_path.as_ref() {
-        tracing::info!(path = %path.display(), "file logging enabled");
+        let policy = log_file_policy.unwrap();
+        tracing::info!(path = %path.display(), max_bytes = policy.max_bytes,
+            max_archives = policy.max_files, rotation = "UTC daily or size", compression = "gzip",
+            "file logging enabled");
     }
 
     let migration_mode = parse_migration_mode(std::env::var("SCRYER_DB_MIGRATION_MODE").ok());

@@ -332,7 +332,7 @@ impl AppUseCase {
             None
         };
         let monitor_selection = monitor_selection.as_ref();
-        info!(
+        tracing::debug!(
             title_id = %title.id,
             monitor_type = %monitor_type,
             tags = ?title.tags,

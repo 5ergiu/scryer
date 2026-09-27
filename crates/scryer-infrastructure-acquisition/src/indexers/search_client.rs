@@ -4552,7 +4552,7 @@ impl IndexerClient for MultiIndexerSearchClient {
             if matches!(resolved_caps.id_dispatch_mode, IdDispatchMode::QueryOnly)
                 && let Some(reason) = resolved_caps.query_only_reason
             {
-                info!(
+                tracing::debug!(
                     indexer = config.name.as_str(),
                     transport = resolved_caps
                         .transport_kind

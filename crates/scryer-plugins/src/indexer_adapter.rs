@@ -20,7 +20,7 @@ use scryer_plugin_sdk::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::loader::{allowed_hosts_for_descriptor, parse_config_json_entries};
 use crate::plugin_http_host::{IndexerErrorCaptureContext, ProxyPolicy};
@@ -125,7 +125,7 @@ impl WasmIndexerClient {
         let runtime = ComponentRuntime::new(engine::shared_async_engine(), &wasm_bytes)
             .map_err(AppError::Repository)?;
 
-        info!(
+        tracing::debug!(
             indexer = indexer_name.as_str(),
             plugin = descriptor.name.as_str(),
             "WASI Preview 2 indexer component registered"

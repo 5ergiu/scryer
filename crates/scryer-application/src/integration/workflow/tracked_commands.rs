@@ -2935,7 +2935,7 @@ fn dispatch_prepared_tracked_download_background_work(
     preparation_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
     let id = tracked.id.as_str();
-    tracing::info!(
+    tracing::debug!(
         id = %id,
         work = kind.as_str(),
         active_workers = tracked_work_in_flight.len() + 1,
@@ -2994,7 +2994,7 @@ fn dispatch_tracked_download_background_work(
 
         let outcome = match worker {
             Ok(tracked) => {
-                tracing::info!(
+                tracing::debug!(
                     id = %tracked.id,
                     work = kind.as_str(),
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
