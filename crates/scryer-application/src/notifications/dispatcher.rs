@@ -1758,6 +1758,58 @@ mod tests {
         assert!(supported.contains(&NotificationEventType::MediaRequestCanceled));
     }
 
+    /// Event types that are wired through the enum, the plugin SDK, the plugin descriptor and the
+    /// settings labels, but that no domain event produces yet. Keeping them declared is deliberate:
+    /// a published plugin may already ask for them. Nothing can send one, so nothing subscribes.
+    const RESERVED_NOTIFICATION_EVENT_TYPES: &[NotificationEventType] = &[
+        // Reserved for the application self-update flow.
+        NotificationEventType::ApplicationUpdate,
+        // Reserved for work that needs an operator to intervene before it can proceed.
+        NotificationEventType::ManualInteractionRequired,
+    ];
+
+    /// Every event type must be exactly one of: produced by a domain event, deliberately reserved, or
+    /// the test button's own value. A new enum variant fails this until it is placed, and a reserved
+    /// variant that becomes producible fails it too - which is how health_issue and health_restored
+    /// should have been reclassified when the disk-space family landed.
+    #[test]
+    fn every_notification_event_type_is_classified() {
+        let dispatchable = supported_notification_event_types();
+
+        for event_type in NotificationEventType::all() {
+            let buckets = [
+                dispatchable.contains(event_type),
+                RESERVED_NOTIFICATION_EVENT_TYPES.contains(event_type),
+                *event_type == NotificationEventType::Test,
+            ];
+            let matched = buckets.iter().filter(|in_bucket| **in_bucket).count();
+            assert_eq!(
+                matched,
+                1,
+                "{} is classified {} times; it must be dispatchable, reserved, or test-only",
+                event_type.as_str(),
+                matched
+            );
+        }
+    }
+
+    /// Reserved values and the test value must stay unsubscribable, or the settings surface offers
+    /// events that can never fire.
+    #[test]
+    fn reserved_and_test_event_types_are_not_subscribable() {
+        let subscribable = supported_notification_event_types();
+        for event_type in RESERVED_NOTIFICATION_EVENT_TYPES
+            .iter()
+            .chain(std::iter::once(&NotificationEventType::Test))
+        {
+            assert!(
+                !subscribable.contains(event_type),
+                "{} must not be subscribable",
+                event_type.as_str()
+            );
+        }
+    }
+
     #[test]
     fn matches_scope_accepts_any_selected_facet_in_csv_scope_id() {
         assert!(matches_scope(
