@@ -2126,6 +2126,7 @@ fn snapshot_award() -> crate::TitleAward {
 
 fn adult_canonical_tag() -> scryer_domain::CanonicalMediaTag {
     scryer_domain::CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:genre:fixture".to_string(),
         category: "genre".to_string(),
         name: "Fixture".to_string(),

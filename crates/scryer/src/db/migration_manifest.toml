@@ -2664,6 +2664,23 @@ file = "postgres/migrations/0261_release_listing_snapshot.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 262
+description = "discovery affinity evidence"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0262_discovery_affinity_evidence.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0262_discovery_affinity_evidence.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

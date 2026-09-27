@@ -1553,6 +1553,14 @@ impl AppUseCase {
         trigger_source: JobTriggerSource,
     ) -> AppResult<()> {
         let now = self.runtime.environment.now();
+        // The metadata language change path owns the presentation revision
+        // bump; the sync run it triggers below re-checks it cheaply.
+        let language = self.metadata_language().await;
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&language, now)
+            .await?;
         let mut state = self
             .services
             .library
@@ -1561,6 +1569,9 @@ impl AppUseCase {
             .await?
             .unwrap_or_default();
         state.next_public_feed_eligible_at = Some(now);
+        state.next_context_snapshot_eligible_at = Some(now);
+        state.dirty_since = Some(now);
+        state.dirty_reason_mask |= 1;
         state.updated_at = now;
         self.services
             .library
@@ -2139,9 +2150,15 @@ impl AppUseCase {
             ));
         }
 
-        let result = self
+        let result = match self
             .run_discovery_sync_job_with_lease(trigger_source, &lease_owner_id)
-            .await;
+            .await
+        {
+            Err(AppError::DiscoveryPresentationSuperseded { run_id }) => {
+                self.skip_superseded_discovery_run(&run_id).await
+            }
+            other => other,
+        };
         let released_at = self.runtime.environment.now();
         let release_result = self
             .services
@@ -2156,6 +2173,48 @@ impl AppUseCase {
             );
         }
         result
+    }
+
+    /// A language change landed while this run was building a generation for
+    /// the previous presentation. Its commit rolled back and the change already
+    /// marked discovery dirty, so the next run rebuilds it: this is a clean
+    /// skip, not a failure, and it must not enter the retry ladder.
+    async fn skip_superseded_discovery_run(&self, run_id: &str) -> AppResult<JobExecutionOutcome> {
+        info!(
+            run_id,
+            "discovery sync run superseded by a metadata language change; skipping its commit"
+        );
+        if let Some(mut run) = self
+            .services
+            .library
+            .discovery
+            .get_discovery_sync_run(run_id)
+            .await?
+        {
+            let now = self.runtime.environment.now();
+            run.status = "superseded".to_string();
+            run.completed_at = Some(now);
+            run.updated_at = now;
+            self.services
+                .library
+                .discovery
+                .upsert_discovery_sync_run(&run)
+                .await?;
+        } else {
+            // Every commit path persists its run as running before committing,
+            // so a missing row means that invariant broke and the skip would
+            // otherwise leave no run history.
+            warn!(
+                run_id,
+                "superseded discovery sync run has no persisted run row; nothing to mark superseded"
+            );
+        }
+        Ok(JobExecutionOutcome::new(
+            Some(
+                "Discovery sync skipped: the metadata language changed during the run".to_string(),
+            ),
+            Some(json!({ "superseded_run_id": run_id }).to_string()),
+        ))
     }
 
     async fn run_discovery_sync_job_with_lease(
@@ -2175,6 +2234,11 @@ impl AppUseCase {
             language: self.metadata_language().await,
             ..DiscoveryContextDefaults::default()
         };
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&defaults.language, now)
+            .await?;
         let existing_state = self
             .services
             .library
@@ -3034,6 +3098,12 @@ impl AppUseCase {
     ) -> AppResult<DiscoveryContextSnapshotRunSummary> {
         let mut resumed_run = None;
         if let Some(run_id) = state.inflight_context_snapshot_run_id.clone() {
+            let presentation_current = self
+                .services
+                .library
+                .discovery
+                .discovery_run_matches_presentation(&run_id)
+                .await?;
             match self
                 .services
                 .library
@@ -3041,7 +3111,13 @@ impl AppUseCase {
                 .get_discovery_sync_run(&run_id)
                 .await?
             {
-                Some(run) if run.smg_request_id.is_some() => {
+                Some(run)
+                    if presentation_current
+                        && run.smg_request_id.is_some()
+                        && crate::normalize_metadata_language_code(&run.language).as_deref()
+                            == Some(defaults.language.as_str())
+                        && run.region == defaults.region =>
+                {
                     resumed_run = Some(run);
                 }
                 _ => {

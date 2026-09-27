@@ -164,22 +164,22 @@ pub use import::completed_download as completed_download_handler;
 pub use ports::{
     CatalogDiscoveryCandidatesRecord, CatalogDiscoveryGroup, CatalogDiscoveryGroupKind,
     CatalogDiscoveryQuery, CatalogDiscoveryResult, CatalogDiscoverySectionCandidatesRecord,
-    CatalogDiscoverySurface, DISCOVERY_DEFAULT_SCOPE_KEY, DiscoveryCanonicalTagFilterOption,
-    DiscoveryContextIncrementalCommit, DiscoveryContextSnapshotCommit, DiscoveryExternalIdRecord,
-    DiscoveryFacetRecord, DiscoveryHomeCandidate, DiscoveryHomeFilterOptions, DiscoveryHomeFilters,
-    DiscoveryHomeQuery, DiscoveryHomeResult, DiscoveryHomeSectionCandidatesRecord,
-    DiscoveryItemDetailQuery, DiscoveryItemLibraryProvenanceRecord, DiscoveryItemRecord,
-    DiscoveryItemsPageRecord, DiscoveryItemsQuery, DiscoveryItemsResult,
-    DiscoveryItemsStorageQuery, DiscoveryPendingContextChangeRecord, DiscoveryPruneReport,
-    DiscoveryPublicFeedCommit, DiscoveryRankComponentRecord, DiscoveryRepository,
-    DiscoverySectionItemsRecord, DiscoverySectionRecord, DiscoverySectionResult,
-    DiscoverySourceTagRecord, DiscoverySubmittedSubjectRecord, DiscoverySyncRunRecord,
-    DiscoverySyncStateRecord, DiscoverySyncStatus, EpisodeImageUrlUpdate,
-    MediaRequestQualityProfileReferenceCounts, MediaRequestResolution,
-    MediaRequestResolutionResult, MediaRequestSubmissionResult, MediaRequestUpdateResult,
-    SeriesMovieExternalIdLookupMatch, SubtitleSyncClient, SubtitleSyncJob, TitleArtworkUrlUpdate,
-    TitleDeletePreviewInfo, TitleExternalIdLookup, TitleExternalIdLookupMatch,
-    UserUiSettingsRepository,
+    CatalogDiscoverySurface, DISCOVERY_DEFAULT_SCOPE_KEY, DiscoveryAffinitySignalRecord,
+    DiscoveryCanonicalTagFilterOption, DiscoveryContextIncrementalCommit,
+    DiscoveryContextSnapshotCommit, DiscoveryExternalIdRecord, DiscoveryFacetRecord,
+    DiscoveryHomeCandidate, DiscoveryHomeFilterOptions, DiscoveryHomeFilters, DiscoveryHomeQuery,
+    DiscoveryHomeResult, DiscoveryHomeSectionCandidatesRecord, DiscoveryItemDetailQuery,
+    DiscoveryItemLibraryProvenanceRecord, DiscoveryItemRecord, DiscoveryItemsPageRecord,
+    DiscoveryItemsQuery, DiscoveryItemsResult, DiscoveryItemsStorageQuery,
+    DiscoveryPendingContextChangeRecord, DiscoveryPruneReport, DiscoveryPublicFeedCommit,
+    DiscoveryRankComponentRecord, DiscoveryRepository, DiscoverySectionItemsRecord,
+    DiscoverySectionRecord, DiscoverySectionResult, DiscoverySourceTagRecord,
+    DiscoverySubmittedSubjectRecord, DiscoverySyncRunRecord, DiscoverySyncStateRecord,
+    DiscoverySyncStatus, EpisodeImageUrlUpdate, MediaRequestQualityProfileReferenceCounts,
+    MediaRequestResolution, MediaRequestResolutionResult, MediaRequestSubmissionResult,
+    MediaRequestUpdateResult, SeriesMovieExternalIdLookupMatch, SubtitleSyncClient,
+    SubtitleSyncJob, TitleArtworkUrlUpdate, TitleDeletePreviewInfo, TitleExternalIdLookup,
+    TitleExternalIdLookupMatch, UserUiSettingsRepository,
 };
 pub(crate) mod normalize;
 pub use acquisition::submission::describe_acquisition_metrics;
@@ -941,6 +941,12 @@ pub enum AppError {
 
     #[error("import source changed while being inspected {path}: {message}")]
     ImportSourceChanged { path: String, message: String },
+
+    /// A discovery generation was built for a presentation (metadata language
+    /// and revision) that changed before it could be committed. The commit is
+    /// rolled back; the language change already scheduled a fresh run.
+    #[error("discovery run {run_id} was superseded by a presentation change")]
+    DiscoveryPresentationSuperseded { run_id: String },
 
     #[error("repository: {0}")]
     Repository(String),

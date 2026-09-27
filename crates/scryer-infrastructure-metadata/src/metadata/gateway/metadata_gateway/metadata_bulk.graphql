@@ -44,6 +44,16 @@ fragment MovieFields on TvdbMovie {
   tmdb_id
   anidb_id
   canonical_tags {
+    affinity_signals {
+      affinity_key
+      category
+      tier
+      signal_class
+      confidence
+      sources
+      source_tag_keys
+      rail_eligible
+    }
     key
     category
     name
@@ -99,6 +109,16 @@ fragment SeriesFields on TvdbSeries {
   original_language
   country
   canonical_tags {
+    affinity_signals {
+      affinity_key
+      category
+      tier
+      signal_class
+      confidence
+      sources
+      source_tag_keys
+      rail_eligible
+    }
     key
     category
     name

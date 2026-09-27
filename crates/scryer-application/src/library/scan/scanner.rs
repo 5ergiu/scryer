@@ -451,6 +451,8 @@ pub struct DiscoveryTitle {
     #[serde(default)]
     pub canonical_tags: Vec<serde_json::Value>,
     #[serde(default)]
+    pub affinity_signals: Vec<crate::ports::DiscoveryAffinitySignalRecord>,
+    #[serde(default)]
     pub is_adult: bool,
     #[serde(default)]
     pub content_ratings: Vec<DiscoveryContentRating>,

@@ -1012,6 +1012,11 @@ pub(super) fn canonical_affinity_labels_for_profile(
     let mut canonical_labels_by_key = HashMap::new();
     for item in items {
         for label in discovery_item_canonical_facet_labels(item, canonical_kind) {
+            if canonical_kind == "theme"
+                && !discovery_item_matches_affinity_label(item, &label, canonical_kind, true)
+            {
+                continue;
+            }
             let key = normalize_discovery_affinity_key(&label);
             if !key.is_empty() {
                 canonical_labels_by_key.entry(key).or_insert(label);
@@ -1042,6 +1047,32 @@ pub(super) fn label_affinity_sections(
     emitted_item_keys: &mut HashSet<String>,
 ) -> Vec<DiscoverySectionResult> {
     let mut sections = Vec::new();
+    // The rejection count only feeds a debug log; skip the per-item scan on
+    // every home render unless that log is actually emitted.
+    if canonical_kind == "theme" && tracing::enabled!(tracing::Level::DEBUG) {
+        let label_keys = labels
+            .iter()
+            .map(|label| normalize_discovery_affinity_key(label))
+            .collect::<Vec<_>>();
+        let rejected = items
+            .iter()
+            .filter(|item| {
+                let candidate_keys = discovery_item_canonical_facet_labels(item, "theme")
+                    .iter()
+                    .map(|candidate| normalize_discovery_affinity_key(candidate))
+                    .collect::<HashSet<_>>();
+                labels.iter().zip(&label_keys).any(|(label, label_key)| {
+                    candidate_keys.contains(label_key)
+                        && !discovery_item_matches_affinity_label(item, label, "theme", true)
+                })
+            })
+            .count();
+        tracing::debug!(
+            reason = "insufficient_theme_evidence",
+            rejected,
+            "discovery candidate admission"
+        );
+    }
     for label in canonical_affinity_labels_for_profile(items, labels, canonical_kind)
         .into_iter()
         .take(label_budget)
