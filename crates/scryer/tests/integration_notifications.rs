@@ -13,21 +13,21 @@ use scryer_application::DomainEventRepository as _;
 use scryer_application::testing::AppUseCaseTestExt;
 use scryer_application::{
     AppError, AppResult, MediaServerConnectionRepository, NotificationAppPayload,
-    NotificationClient, NotificationExternalIdsPayload, NotificationFilePayload,
-    NotificationMediaFilePayload, NotificationMediaUpdatePayload,
+    NotificationClient, NotificationDownloadPayload, NotificationExternalIdsPayload,
+    NotificationFilePayload, NotificationMediaFilePayload, NotificationMediaUpdatePayload,
     NotificationMediaUpdateTypePayload, NotificationPayload, NotificationPluginProvider,
-    NotificationScopeIdUpdate, NotificationSubscriptionTargetCreate, NotificationTitlePayload,
-    start_notification_dispatcher,
+    NotificationReleasePayload, NotificationScopeIdUpdate, NotificationSeverityPayload,
+    NotificationSubscriptionTargetCreate, NotificationTitlePayload, start_notification_dispatcher,
 };
 use scryer_domain::{
     AppPermissionMask, ConfigFieldDef, ConfigFieldOption, ConfigFieldType, ConfigFieldValueSource,
     DomainEventActorKind, DomainEventPayload, DomainEventStream, DomainEventType,
-    DomainExternalIds, ExternalId, ImportCompletedEventData, LibraryScanProgressedEventData,
-    MediaFacet, MediaFileDeletedEventData, MediaFileDeletedReason, MediaFileRenamedEventData,
-    MediaFileUpgradedEventData, MediaPathUpdate, MediaRequestSubmittedEventData,
-    MediaServerConnection, MediaServerPathMapping, MediaServerProvider, MediaUpdateType,
-    NewDomainEvent, NewTitle, NotificationChannelConfig, NotificationEventType,
-    TitleContextSnapshot,
+    DomainExternalIds, DownloadFailedEventData, ExternalId, ImportCompletedEventData,
+    LibraryScanProgressedEventData, MediaFacet, MediaFileDeletedEventData, MediaFileDeletedReason,
+    MediaFileRenamedEventData, MediaFileUpgradedEventData, MediaPathUpdate,
+    MediaRequestSubmittedEventData, MediaServerConnection, MediaServerPathMapping,
+    MediaServerProvider, MediaUpdateType, NewDomainEvent, NewTitle, NotificationChannelConfig,
+    NotificationEventType, ReleaseGrabbedEventData, TitleContextSnapshot,
 };
 use scryer_infrastructure_library::media::servers::MediaServerConnectionStore;
 use scryer_infrastructure_notifications::notifications::store::NotificationStore;
@@ -177,6 +177,7 @@ struct CapturedNotification {
 #[derive(Clone)]
 struct FakeNotificationClient {
     captured: Arc<Mutex<Vec<CapturedNotification>>>,
+    payloads: Arc<Mutex<Vec<NotificationPayload>>>,
 }
 
 #[async_trait]
@@ -188,6 +189,7 @@ impl NotificationClient for FakeNotificationClient {
             message: payload.summary_message.clone(),
             metadata: captured_metadata(payload),
         });
+        self.payloads.lock().unwrap().push(payload.clone());
         Ok(())
     }
 }
@@ -199,6 +201,7 @@ struct FakeNotificationProvider {
     config_fields: Vec<ConfigFieldDef>,
     supports_test: bool,
     captured: Arc<Mutex<Vec<CapturedNotification>>>,
+    payloads: Arc<Mutex<Vec<NotificationPayload>>>,
 }
 
 impl FakeNotificationProvider {
@@ -209,6 +212,7 @@ impl FakeNotificationProvider {
             config_fields: Vec::new(),
             supports_test: true,
             captured: Arc::new(Mutex::new(Vec::new())),
+            payloads: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -270,11 +274,18 @@ impl FakeNotificationProvider {
             ],
             supports_test: true,
             captured: Arc::new(Mutex::new(Vec::new())),
+            payloads: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn captured(&self) -> Vec<CapturedNotification> {
         self.captured.lock().unwrap().clone()
+    }
+
+    /// The whole payload each send carried, so a test can assert a complete typed section rather
+    /// than a flattened subset of it.
+    fn payloads(&self) -> Vec<NotificationPayload> {
+        self.payloads.lock().unwrap().clone()
     }
 }
 
@@ -299,6 +310,7 @@ impl NotificationPluginProvider for FakeNotificationProvider {
 
         Some(Arc::new(FakeNotificationClient {
             captured: Arc::clone(&self.captured),
+            payloads: Arc::clone(&self.payloads),
         }))
     }
 
@@ -1886,6 +1898,182 @@ async fn notification_dispatcher_delivers_global_media_request_to_facet_scope() 
         captured[0].event_type,
         NotificationEventType::MediaRequestSubmitted.as_str()
     );
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+/// The media-file family is the one already covered. These are the acquisition events, which had no
+/// end-to-end test at all: nothing asserted what a plugin receives for a grab or a failed download.
+#[tokio::test]
+async fn notification_dispatcher_delivers_release_grabbed() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let app = app_with_notification_provider(&ctx, provider.clone());
+    let user = default_user(&app).await;
+    let channel = app
+        .create_notification_channel(&user, "Webhook".into(), "webhook".into(), "{}".into(), true)
+        .await
+        .expect("channel should be created");
+    app.create_notification_subscription(
+        &user,
+        channel.id,
+        NotificationEventType::Grab.as_str().to_string(),
+        "global".into(),
+        None,
+        true,
+    )
+    .await
+    .expect("subscription should be created");
+
+    let cancel = CancellationToken::new();
+    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
+    app.append_domain_event(new_event(
+        "evt-release-grabbed",
+        "title-1",
+        "series",
+        DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
+            title: title_context("Grabbed Show", "series", DomainExternalIds::default()),
+            source_title: Some("Grabbed.Show.S01E01.1080p.WEB-DL".to_string()),
+            source_hint: Some("rss".to_string()),
+            source_provider: Some("rss".to_string()),
+            download_id: Some("download-1".to_string()),
+            episode_ids: vec!["episode-1".to_string()],
+        }),
+    ))
+    .await
+    .expect("grab event should append");
+
+    let captured = wait_for_captured(&provider, 1).await;
+    assert_eq!(captured[0].event_type, NotificationEventType::Grab.as_str());
+    assert_eq!(captured[0].title, "Grabbed: Grabbed Show");
+    assert_eq!(
+        captured[0].message,
+        "Grabbed 'Grabbed.Show.S01E01.1080p.WEB-DL' for 'Grabbed Show'."
+    );
+
+    let payload = &provider.payloads()[0];
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
+    assert_eq!(
+        payload.release,
+        Some(NotificationReleasePayload {
+            source_title: Some("Grabbed.Show.S01E01.1080p.WEB-DL".to_string()),
+            source_hint: Some("rss".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        payload.download,
+        Some(NotificationDownloadPayload {
+            download_id: Some("download-1".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        payload.title.as_ref().map(|title| title.name.as_str()),
+        Some("Grabbed Show")
+    );
+    assert_eq!(
+        payload
+            .episode
+            .as_ref()
+            .map(|episode| episode.episode_ids.clone()),
+        Some(vec!["episode-1".to_string()])
+    );
+
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher should stop");
+}
+
+#[tokio::test]
+async fn notification_dispatcher_delivers_download_failed() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::webhook());
+    let app = app_with_notification_provider(&ctx, provider.clone());
+    let user = default_user(&app).await;
+    let channel = app
+        .create_notification_channel(&user, "Webhook".into(), "webhook".into(), "{}".into(), true)
+        .await
+        .expect("channel should be created");
+    app.create_notification_subscription(
+        &user,
+        channel.id,
+        NotificationEventType::Download.as_str().to_string(),
+        "global".into(),
+        None,
+        true,
+    )
+    .await
+    .expect("subscription should be created");
+
+    let cancel = CancellationToken::new();
+    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
+    app.append_domain_event(NewDomainEvent {
+        event_id: "evt-download-failed".to_string(),
+        occurred_at: Utc::now(),
+        actor_kind: DomainEventActorKind::System,
+        actor_user_id: None,
+        actor_display_name: "System".to_string(),
+        title_id: None,
+        facet: None,
+        correlation_id: None,
+        causation_id: None,
+        schema_version: 1,
+        stream: DomainEventStream::Global,
+        payload: DomainEventPayload::DownloadFailed(DownloadFailedEventData {
+            title: Some(title_context(
+                "Failed Movie",
+                "movie",
+                DomainExternalIds::default(),
+            )),
+            source_title: Some("Failed.Movie.2024.1080p.WEB-DL".to_string()),
+            source_hint: Some("manual".to_string()),
+            download_id: Some("download-2".to_string()),
+            client_id: Some("client-1".to_string()),
+            client_name: Some("SABnzbd".to_string()),
+            client_type: Some("sabnzbd".to_string()),
+            quality: Some("1080p".to_string()),
+            reason: Some("archive corrupt".to_string()),
+            episode_ids: Vec::new(),
+            collection_id: None,
+        }),
+    })
+    .await
+    .expect("download failure event should append");
+
+    let captured = wait_for_captured(&provider, 1).await;
+    assert_eq!(
+        captured[0].event_type,
+        NotificationEventType::Download.as_str()
+    );
+    assert_eq!(captured[0].title, "Download failed: Failed Movie");
+    assert_eq!(captured[0].message, "archive corrupt");
+
+    let payload = &provider.payloads()[0];
+    assert_eq!(payload.severity, Some(NotificationSeverityPayload::Error));
+    assert_eq!(
+        payload.release,
+        Some(NotificationReleasePayload {
+            source_title: Some("Failed.Movie.2024.1080p.WEB-DL".to_string()),
+            source_hint: Some("manual".to_string()),
+            quality: Some("1080p".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        payload.download,
+        Some(NotificationDownloadPayload {
+            download_id: Some("download-2".to_string()),
+            client_id: Some("client-1".to_string()),
+            client_name: Some("SABnzbd".to_string()),
+            client_type: Some("sabnzbd".to_string()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        payload.title.as_ref().map(|title| title.name.as_str()),
+        Some("Failed Movie")
+    );
+
     cancel.cancel();
     dispatcher.await.expect("dispatcher should stop");
 }
