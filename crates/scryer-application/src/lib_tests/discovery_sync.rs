@@ -150,6 +150,7 @@ fn rail_floor_padding_items(
                     tier: "strong".to_string(),
                     confidence: 0.95,
                     sources: vec!["mal".to_string()],
+                    rail_eligible: true,
                     ..Default::default()
                 })
                 .collect();
@@ -171,6 +172,7 @@ fn canonical_theme_tags(labels: &[&str]) -> Vec<CanonicalMediaTag> {
                 tier: "strong".to_string(),
                 confidence: 1.0,
                 sources: vec!["anilist".to_string()],
+                rail_eligible: true,
                 ..Default::default()
             }],
             key: format!(
@@ -620,6 +622,7 @@ async fn discovery_home_and_items_use_local_rows_and_library_view_rbac() {
         tier: "strong".to_string(),
         confidence: 0.95,
         sources: vec!["mal".to_string()],
+        rail_eligible: true,
         ..Default::default()
     }];
 

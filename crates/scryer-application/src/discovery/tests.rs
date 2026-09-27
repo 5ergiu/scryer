@@ -1069,6 +1069,7 @@ fn affinity_test_item(id: &str, content_type: &str, facet_terms: &[&str]) -> Dis
             tier: "strong".to_string(),
             confidence: 0.95,
             sources: vec!["anilist".to_string()],
+            rail_eligible: true,
             ..Default::default()
         })
         .collect();
@@ -2628,7 +2629,7 @@ fn test_discovery_section(
 }
 
 #[test]
-fn discovery_theme_requires_typed_strong_or_independent_evidence() {
+fn discovery_theme_admission_follows_smg_rail_eligibility() {
     let mut item = affinity_test_item("theme-evidence", "series", &["canonical:theme:friendship"]);
     assert!(discovery_item_matches_affinity_label(
         &item,
@@ -2636,28 +2637,31 @@ fn discovery_theme_requires_typed_strong_or_independent_evidence() {
         "theme",
         false
     ));
+    // SMG's verdict is final: a rejected signal stays rejected however strong
+    // its tier, confidence, or source count look to Scryer.
+    item.affinity_signals[0].rail_eligible = false;
+    item.affinity_signals[0].tier = "key".to_string();
+    item.affinity_signals[0].confidence = 1.0;
+    item.affinity_signals[0].sources = vec!["anilist".to_string(), "mal".to_string()];
+    assert!(!discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    // An admitted signal is accepted without any local threshold.
+    item.affinity_signals[0].rail_eligible = true;
     item.affinity_signals[0].tier = "support".to_string();
-    assert!(!discovery_item_matches_affinity_label(
-        &item,
-        "Friendship",
-        "theme",
-        false
-    ));
-    item.affinity_signals[0].sources = vec!["tmdb".to_string(), "TMDB".to_string()];
-    assert!(!discovery_item_matches_affinity_label(
-        &item,
-        "Friendship",
-        "theme",
-        false
-    ));
-    item.affinity_signals[0].sources.push("anilist".to_string());
+    item.affinity_signals[0].confidence = 0.1;
+    item.affinity_signals[0].sources.clear();
     assert!(discovery_item_matches_affinity_label(
         &item,
         "Friendship",
         "theme",
         false
     ));
-    item.affinity_signals[0].confidence = 0.89;
+    // Eligibility for a different theme does not transfer.
+    item.affinity_signals[0].affinity_key = "affinity:theme:revenge".to_string();
     assert!(!discovery_item_matches_affinity_label(
         &item,
         "Friendship",
@@ -2689,9 +2693,10 @@ fn discovery_owned_themes_require_the_same_evidence_as_candidates() {
         affinity_signals: vec![crate::DiscoveryAffinitySignalRecord {
             affinity_key: "affinity:theme:friendship".into(),
             category: "theme".into(),
-            tier: "support".into(),
-            confidence: 0.95,
-            sources: vec!["tmdb".into()],
+            tier: "key".into(),
+            confidence: 1.0,
+            sources: vec!["tmdb".into(), "anilist".into()],
+            rail_eligible: false,
             ..Default::default()
         }],
         ..Default::default()
@@ -2700,15 +2705,8 @@ fn discovery_owned_themes_require_the_same_evidence_as_candidates() {
         discovery_library_affinity_profile_from_titles(&vec![title.clone(); 10], true)
     };
     assert!(profile(&title).theme_labels.is_empty());
-    title.canonical_tags[0].affinity_signals[0].tier = "strong".into();
+    title.canonical_tags[0].affinity_signals[0].rail_eligible = true;
     assert_eq!(profile(&title).theme_labels, vec!["Friendship"]);
-    title.canonical_tags[0].affinity_signals[0].tier = "support".into();
-    title.canonical_tags[0].affinity_signals[0]
-        .sources
-        .push("anilist".into());
-    assert_eq!(profile(&title).theme_labels, vec!["Friendship"]);
-    title.canonical_tags[0].affinity_signals[0].confidence = 0.89;
-    assert!(profile(&title).theme_labels.is_empty());
     title.canonical_tags[0].affinity_signals.clear();
     assert!(profile(&title).theme_labels.is_empty());
 }

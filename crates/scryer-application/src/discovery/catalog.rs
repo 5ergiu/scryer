@@ -1177,6 +1177,9 @@ pub(super) fn collect_json_text_values(value: &JsonValue, values: &mut Vec<Strin
     }
 }
 
+/// SMG decides whether a signal is strong enough to back a rail
+/// (`rail_eligible`); Scryer only checks that it is a theme signal for this
+/// label, so SMG can retune admission without a Scryer release.
 pub(super) fn theme_affinity_signal_qualifies(
     signal: &scryer_domain::CanonicalMediaAffinitySignal,
     label_key: &str,
@@ -1187,18 +1190,7 @@ pub(super) fn theme_affinity_signal_qualifies(
         .unwrap_or("");
     signal.category == "theme"
         && affinity_value_matches_label(key, label_key)
-        && signal.confidence.is_finite()
-        && signal.confidence >= 0.9
-        && signal.signal_class != "advisory"
-        && (matches!(signal.tier.as_str(), "key" | "strong")
-            || signal
-                .sources
-                .iter()
-                .map(|source| source.trim().to_ascii_lowercase())
-                .filter(|source| !source.is_empty())
-                .collect::<HashSet<_>>()
-                .len()
-                >= 2)
+        && signal.rail_eligible
 }
 
 pub(super) fn qualified_owned_theme_labels(tags: &[CanonicalMediaTag]) -> Vec<String> {

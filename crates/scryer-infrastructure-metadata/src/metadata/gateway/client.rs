@@ -4284,6 +4284,31 @@ mod tests {
     }
 
     #[test]
+    fn affinity_signal_selections_request_smg_rail_eligibility() {
+        let queries = [
+            graphql_docs::DISCOVER_PUBLIC_FEED_QUERY,
+            graphql_docs::DISCOVERY_CONTEXT_SNAPSHOT_PAGE_QUERY,
+            graphql_docs::DISCOVERY_CONTEXT_CHANGES_QUERY,
+            graphql_docs::COLLECTION_COMPLETIONS_QUERY,
+            graphql_docs::TITLE_RECOMMENDATIONS_QUERY,
+            graphql_docs::GET_MOVIE_QUERY,
+            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::METADATA_BULK_QUERY,
+            graphql_docs::TITLES_QUERY,
+        ];
+
+        for query in queries {
+            let selections = query.matches("affinity_signals {").count();
+            assert!(selections > 0);
+            assert_eq!(
+                query.matches("rail_eligible").count(),
+                selections,
+                "every affinity_signals selection must request rail_eligible"
+            );
+        }
+    }
+
+    #[test]
     fn discovery_title_applies_rating_provenance_as_external_ratings() {
         let mut item = scryer_application::DiscoveryTitle {
             rating_provenance: vec![scryer_application::DiscoveryRatingProvenance {

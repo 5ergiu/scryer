@@ -59,7 +59,16 @@ fragment DiscoveryDashboardTitleFields on DiscoveryDashboardTitle {
     is_adult
     is_spoiler
   }
-  affinity_signals { affinity_key category tier signal_class confidence sources source_tag_keys }
+  affinity_signals {
+    affinity_key
+    category
+    tier
+    signal_class
+    confidence
+    sources
+    source_tag_keys
+    rail_eligible
+  }
   canonical_tags {
     key
     category

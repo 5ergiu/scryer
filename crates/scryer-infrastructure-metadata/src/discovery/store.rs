@@ -7003,6 +7003,7 @@ mod tests {
             tier: "strong".to_string(),
             confidence: 0.95,
             sources: vec!["anilist".to_string()],
+            rail_eligible: true,
             ..Default::default()
         }];
         store

@@ -955,6 +955,10 @@ pub struct CanonicalMediaAffinitySignal {
     pub sources: Vec<String>,
     #[serde(default)]
     pub source_tag_keys: Vec<String>,
+    /// SMG's admission decision for this signal as rail evidence. SMG owns the
+    /// thresholds, so Scryer never re-derives it from tier or confidence.
+    #[serde(default)]
+    pub rail_eligible: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
