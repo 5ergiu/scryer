@@ -29,7 +29,7 @@ pub(super) async fn title_requires_scan_hydration(
     let hydratable = match title.facet {
         MediaFacet::Movie => crate::catalog_workflow::movie_title_ref(title).is_some(),
         MediaFacet::Series | MediaFacet::Anime => {
-            crate::catalog_workflow::extract_tvdb_id(title).is_some()
+            crate::catalog_workflow::series_title_ref(title).is_some()
         }
     };
     if !hydratable {

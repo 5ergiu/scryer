@@ -262,7 +262,7 @@ impl AppUseCase {
                     }
                 }
                 Err(error)
-                    if crate::catalog_workflow::movie_title_queries_not_supported(&error) =>
+                    if crate::catalog_workflow::title_queries_not_supported(&error) =>
                 {
                     let legacy_movie_ids = movie_targets
                         .iter()

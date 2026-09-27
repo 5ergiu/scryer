@@ -168,12 +168,26 @@ pub(crate) fn is_non_retryable_hydration_failure(reason: &str) -> bool {
 /// predates the surface answers any of them with `Cannot query field "<name>"`,
 /// which is the same capability signal as the mapped gateway error -- and is
 /// what a caller sees when the raw validation error reaches this layer.
-const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 5] = [
+const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 6] = [
     "\"titles\"",
     "\"resolvetitles\"",
     "\"searchtitles\"",
     "\"searchtitlesbatch\"",
     "\"title_id\"",
+    // A gateway whose title surface predates series answers the `series`
+    // selection with `Cannot query field "series" on type "TitleBulkResult"`.
+    "\"titlebulkresult\"",
+];
+
+/// The client-capability declaration the title operations carry, lowercased the
+/// way a GraphQL validation error quotes it. A gateway that predates it answers
+/// `Unknown argument "clientCapabilities" on field "Query.titles"` (or rejects
+/// the `ClientCapability` type or `TMDB_PRIMARY_SERIES` value); that is the same
+/// "title surface unavailable" signal as an unknown title field.
+const TITLE_CAPABILITY_UNKNOWN_MARKERS: [&str; 3] = [
+    "unknown argument \"clientcapabilities\"",
+    "unknown type \"clientcapability\"",
+    "\"tmdb_primary_series\"",
 ];
 
 /// Derive a numbering bridge from the episode orders TVDB publishes.
@@ -213,7 +227,11 @@ fn numbering_bridge_from_orders(
     })
 }
 
-pub(crate) fn movie_title_queries_not_supported(error: &AppError) -> bool {
+/// Whether a gateway error means the SMG title-id surface (`titles`,
+/// `resolveTitles`, `searchTitles*`, including their `clientCapabilities`
+/// argument and the `series` half of `titles`) is unavailable, so the caller
+/// should use the legacy TVDB-keyed documents instead.
+pub(crate) fn title_queries_not_supported(error: &AppError) -> bool {
     let AppError::Repository(message) = error else {
         return false;
     };
@@ -222,6 +240,13 @@ pub(crate) fn movie_title_queries_not_supported(error: &AppError) -> bool {
         && (message.contains("does not support")
             || message.contains("not supported")
             || message.contains("unsupported"))
+    {
+        return true;
+    }
+
+    if TITLE_CAPABILITY_UNKNOWN_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
     {
         return true;
     }
@@ -282,7 +307,7 @@ mod title_id_capability_tests {
 
     #[test]
     fn the_mapped_gateway_error_is_a_capability_error() {
-        assert!(movie_title_queries_not_supported(&AppError::Repository(
+        assert!(title_queries_not_supported(&AppError::Repository(
             "metadata gateway does not support title-id queries".into()
         )));
     }
@@ -302,21 +327,48 @@ mod title_id_capability_tests {
             let error =
                 AppError::Repository(format!("Cannot query field \"{field}\" on type \"Query\"."));
             assert!(
-                movie_title_queries_not_supported(&error),
+                title_queries_not_supported(&error),
                 "unknown field {field} should be read as a capability error"
             );
         }
     }
 
+    /// A pre-0.0.311 gateway rejects the capability declaration itself rather
+    /// than a field; that must read as "title surface unavailable" too.
+    #[test]
+    fn an_unknown_client_capabilities_argument_is_a_capability_error() {
+        for message in [
+            "Unknown argument \"clientCapabilities\" on field \"Query.titles\".",
+            "Unknown argument \"clientCapabilities\" on field \"Query.searchTitlesMulti\".",
+            "Unknown type \"ClientCapability\".",
+            "Value \"TMDB_PRIMARY_SERIES\" does not exist in \"ClientCapability\" enum.",
+        ] {
+            assert!(
+                title_queries_not_supported(&AppError::Repository(message.into())),
+                "{message} should be read as a capability error"
+            );
+        }
+    }
+
+    #[test]
+    fn a_title_surface_without_series_is_a_capability_error() {
+        assert!(title_queries_not_supported(&AppError::Repository(
+            "Cannot query field \"series\" on type \"TitleBulkResult\".".into()
+        )));
+    }
+
     #[test]
     fn unrelated_gateway_failures_are_not_capability_errors() {
-        assert!(!movie_title_queries_not_supported(&AppError::Repository(
+        assert!(!title_queries_not_supported(&AppError::Repository(
             "metadata gateway request failed (503): upstream unavailable".into()
         )));
-        assert!(!movie_title_queries_not_supported(&AppError::Repository(
+        assert!(!title_queries_not_supported(&AppError::Repository(
             "Cannot query field \"seedMinimums\" on type \"Query\".".into()
         )));
-        assert!(!movie_title_queries_not_supported(&AppError::Validation(
+        assert!(!title_queries_not_supported(&AppError::Repository(
+            "Unknown argument \"includeCredits\" on field \"Query.series\".".into()
+        )));
+        assert!(!title_queries_not_supported(&AppError::Validation(
             "metadata gateway does not support title-id queries".into()
         )));
     }
@@ -770,18 +822,49 @@ impl AppUseCase {
 
     /// Persist a series hydration result and read the row back, serialized
     /// against every other hydration of the same title.
+    ///
+    /// `redirects` are the SMG title redirects the fetch followed; when one
+    /// moved the title's stored SMG id, the new id is persisted with its
+    /// predecessor, exactly as a movie hydration does.
     async fn persist_series_hydration(
         &self,
         target: HydrationTarget,
         result: super::HydrationResult,
+        redirects: &[(i64, i64)],
     ) -> AppResult<Title> {
         let (_guard, title) = match self.claim_title_hydration(&target.title).await {
             TitleHydrationClaim::Claimed { _guard, title } => (_guard, title),
             TitleHydrationClaim::AlreadyHydrated(title) => return Ok(title),
         };
+        let series_smg_id = result
+            .raw_series
+            .as_ref()
+            .and_then(|series| series.smg_id);
+        let redirected_from = redirected_smg_id(&title, series_smg_id, redirects);
         let hydrated = self
             .apply_hydration_result(title, result, target.source)
             .await?;
+        if let (Some(series_smg_id), Some(redirected_from)) = (series_smg_id, redirected_from) {
+            match self
+                .services
+                .catalog
+                .titles
+                .persist_smg_id(&hydrated.id, series_smg_id, Some(redirected_from))
+                .await
+            {
+                // An SMG id is an external id the matcher indexes.
+                Ok(()) => self.invalidate_monitored_title_matcher().await,
+                Err(error) => {
+                    warn!(
+                        title_id = %hydrated.id,
+                        smg_id = series_smg_id,
+                        redirected_from,
+                        error = %error,
+                        "failed to persist redirected series SMG title id"
+                    );
+                }
+            }
+        }
         self.complete_title_hydration(
             &hydrated,
             HydrationCompletionOptions {
@@ -820,12 +903,7 @@ impl AppUseCase {
             )
             .await?;
         let movie_smg_id = movie.smg_id;
-        let redirected_from = extract_smg_id(&target.title).filter(|stored_smg_id| {
-            movie_smg_id.is_some_and(|movie_smg_id| movie_smg_id != *stored_smg_id)
-                && redirects
-                    .iter()
-                    .any(|(from, to)| *from == *stored_smg_id && Some(*to) == movie_smg_id)
-        });
+        let redirected_from = redirected_smg_id(&target.title, movie_smg_id, redirects);
         let result = super::movie_to_hydration_result(movie, language);
         let hydrated = self
             .apply_hydration_result(target.title.clone(), result, target.source)
@@ -868,6 +946,56 @@ impl AppUseCase {
             .map(|title| title.unwrap_or(hydrated))
     }
 }
+/// The stored SMG id a hydration's redirect moved away from, if any: the
+/// title's current SMG id, when the gateway redirected exactly it to the id
+/// the fetched payload now carries.
+fn redirected_smg_id(
+    title: &Title,
+    fetched_smg_id: Option<i64>,
+    redirects: &[(i64, i64)],
+) -> Option<i64> {
+    extract_smg_id(title).filter(|stored_smg_id| {
+        fetched_smg_id.is_some_and(|fetched_smg_id| fetched_smg_id != *stored_smg_id)
+            && redirects
+                .iter()
+                .any(|(from, to)| *from == *stored_smg_id && Some(*to) == fetched_smg_id)
+    })
+}
+
+/// The ids a series (or anime) hydration target is fetched by.
+///
+/// A requested TVDB id (a rematch onto a new series) wins: the stored SMG,
+/// TMDB and IMDb ids may belong to the old identity, so they are only kept when
+/// they already describe the requested TVDB series.
+pub(crate) fn series_hydration_ref(target: &HydrationTarget) -> Option<SeriesTitleRef> {
+    let stored = series_title_ref(&target.title);
+    match target.requested_tvdb_id {
+        Some(requested) => match stored {
+            Some(reference) if reference.tvdb_id == Some(requested) => Some(reference),
+            _ => Some(SeriesTitleRef {
+                tvdb_id: Some(requested),
+                ..Default::default()
+            }),
+        },
+        None => stored,
+    }
+}
+
+const SERIES_METADATA_MISSING_TITLE: &str = "series metadata response missing title";
+
+/// The failure reported for a series SMG's title surface does not have and no
+/// TVDB id can reach through the legacy documents.
+fn series_missing_from_gateway(reference: &SeriesTitleRef) -> AppError {
+    match reference.smg_id {
+        Some(smg_id) => AppError::NotFound(format!(
+            "{SERIES_METADATA_MISSING_TITLE}: SMG has no series for title id {smg_id}"
+        )),
+        None => AppError::NotFound(format!(
+            "{SERIES_METADATA_MISSING_TITLE}: SMG could not resolve the series from its external ids"
+        )),
+    }
+}
+
 impl AppUseCase {
     pub(crate) async fn hydrate_titles_bulk_cancellable(
         &self,
@@ -928,10 +1056,7 @@ impl AppUseCase {
                             movie_targets.push((target, movie_ref));
                         }
                         MediaFacet::Series | MediaFacet::Anime => {
-                            let Some(tvdb_id) = target
-                                .requested_tvdb_id
-                                .or_else(|| extract_tvdb_id(&target.title))
-                            else {
+                            let Some(series_ref) = series_hydration_ref(&target) else {
                                 self.emit_hydration_failed(
                                     &target.title,
                                     "no tvdb external id found",
@@ -943,7 +1068,7 @@ impl AppUseCase {
                                 );
                                 continue;
                             };
-                            series_targets.push((target, tvdb_id));
+                            series_targets.push((target, series_ref));
                         }
                     }
                 }
@@ -1009,7 +1134,7 @@ impl AppUseCase {
                                 }
                             }
                         }
-                        Err(error) if movie_title_queries_not_supported(&error) => {
+                        Err(error) if title_queries_not_supported(&error) => {
                             let fallback_targets = movie_targets
                                 .iter()
                                 .filter(|(_, movie_ref)| movie_ref.tvdb_id.is_some())
@@ -1102,104 +1227,82 @@ impl AppUseCase {
                 }
 
                 if !series_targets.is_empty() {
-                    let series_ids = series_targets
-                        .iter()
-                        .map(|(_, tvdb_id)| *tvdb_id)
-                        .collect::<Vec<_>>();
-                    let series_result = await_cancellable(
-                        cancel_token,
-                        self.services.library.metadata_gateway.get_metadata_bulk(
-                            &[],
-                            &series_ids,
-                            &language,
-                        ),
-                    )
-                    .await;
-                    let Some(series_result) = series_result else {
+                    let Some(series_by_target) = self
+                        .fetch_series_for_bulk_hydration(&series_targets, &language, cancel_token)
+                        .await
+                    else {
                         break 'languages;
                     };
-                    match series_result {
-                        Ok(series_result) => {
-                            let series_items = series_result.series.values().collect::<Vec<_>>();
-                            let movie_metadata = await_cancellable(
-                                cancel_token,
-                                crate::catalog::facets::handler::hydrate_referenced_movie_metadata(
-                                    self.services.library.metadata_gateway.as_ref(),
-                                    &series_items,
-                                    &language,
-                                ),
-                            )
-                            .await;
-                            let Some(movie_metadata) = movie_metadata else {
-                                break 'languages;
-                            };
-                            let movie_metadata = movie_metadata
-                                .inspect_err(|error| {
-                                    warn!(error = %error, "linked movie metadata hydration failed");
-                                })
-                                .unwrap_or_default();
-                            for (target, tvdb_id) in series_targets {
-                                if crate::library::library::library_scan_cancel_requested(
-                                    cancel_token,
-                                ) {
-                                    break 'languages;
-                                }
-                                let title_id = target.title.id.clone();
-                                let title_facet = target.title.facet.clone();
-                                let title_source = target.source;
-                                if let Some(series) = series_result.series.get(&tvdb_id) {
-                                    let mut result = super::series_to_hydration_result(
-                                        series.clone(),
-                                        &language,
-                                    );
-                                    result.movie_metadata = movie_metadata.clone();
-                                    let refreshed =
-                                        match self.persist_series_hydration(target, result).await {
-                                            Ok(refreshed) => refreshed,
-                                            Err(error) => {
-                                                outcome
-                                                    .failed_titles
-                                                    .insert(title_id, error.to_string());
-                                                continue;
-                                            }
-                                        };
-                                    if refreshed.metadata_fetched_at.is_some() {
-                                        outcome
-                                            .hydrated_titles
-                                            .insert(refreshed.id.clone(), refreshed);
-                                    } else {
-                                        outcome.failed_titles.insert(
-                                            title_id,
-                                            "metadata could not be persisted".to_string(),
-                                        );
-                                    }
-                                } else {
+                    let series_items = series_by_target
+                        .iter()
+                        .filter_map(|fetched| fetched.as_ref().ok().map(|(series, _)| series))
+                        .collect::<Vec<_>>();
+                    let movie_metadata = if series_items.is_empty() {
+                        Some(Ok(HashMap::new()))
+                    } else {
+                        await_cancellable(
+                            cancel_token,
+                            crate::catalog::facets::handler::hydrate_referenced_movie_metadata(
+                                self.services.library.metadata_gateway.as_ref(),
+                                &series_items,
+                                &language,
+                            ),
+                        )
+                        .await
+                    };
+                    let Some(movie_metadata) = movie_metadata else {
+                        break 'languages;
+                    };
+                    let movie_metadata = movie_metadata
+                        .inspect_err(|error| {
+                            warn!(error = %error, "linked movie metadata hydration failed");
+                        })
+                        .unwrap_or_default();
+                    for ((target, _), fetched) in series_targets.into_iter().zip(series_by_target)
+                    {
+                        if crate::library::library::library_scan_cancel_requested(cancel_token) {
+                            break 'languages;
+                        }
+                        let title_id = target.title.id.clone();
+                        let title_facet = target.title.facet.clone();
+                        let title_source = target.source;
+                        let (series, redirects) = match fetched {
+                            Ok(fetched) => fetched,
+                            Err(reason) => {
+                                if reason == "bulk metadata response missing title" {
                                     warn!(
                                         hydration_source = title_source.as_str(),
                                         facet = title_facet.as_str(),
                                         title_id = %title_id,
                                         "title hydration failed: bulk metadata response missing series title"
                                     );
-                                    self.emit_hydration_failed(
-                                        &target.title,
-                                        "bulk metadata response missing title",
-                                    )
-                                    .await;
-                                    outcome.failed_titles.insert(
-                                        title_id,
-                                        "bulk metadata response missing title".to_string(),
-                                    );
                                 }
-                            }
-                        }
-                        Err(error) => {
-                            let reason = error.to_string();
-                            for (target, _) in series_targets {
                                 self.emit_hydration_failed(&target.title, &reason).await;
-                                outcome
-                                    .failed_titles
-                                    .insert(target.title.id.clone(), reason.clone());
+                                outcome.failed_titles.insert(title_id, reason);
+                                continue;
                             }
+                        };
+                        let mut result = super::series_to_hydration_result(series, &language);
+                        result.movie_metadata = movie_metadata.clone();
+                        let refreshed = match self
+                            .persist_series_hydration(target, result, &redirects)
+                            .await
+                        {
+                            Ok(refreshed) => refreshed,
+                            Err(error) => {
+                                outcome.failed_titles.insert(title_id, error.to_string());
+                                continue;
+                            }
+                        };
+                        if refreshed.metadata_fetched_at.is_some() {
+                            outcome
+                                .hydrated_titles
+                                .insert(refreshed.id.clone(), refreshed);
+                        } else {
+                            outcome.failed_titles.insert(
+                                title_id,
+                                "metadata could not be persisted".to_string(),
+                            );
                         }
                     }
                 }
@@ -1260,7 +1363,7 @@ impl AppUseCase {
                         })?,
                         result.redirects,
                     ),
-                    Err(error) if movie_title_queries_not_supported(&error) => {
+                    Err(error) if title_queries_not_supported(&error) => {
                         let tvdb_id = movie_ref.tvdb_id.ok_or_else(|| {
                             AppError::Repository("no tvdb external id found".to_string())
                         })?;
@@ -1287,18 +1390,15 @@ impl AppUseCase {
                 }
             }
             MediaFacet::Series | MediaFacet::Anime => {
-                let tvdb_id = target
-                    .requested_tvdb_id
-                    .or_else(|| extract_tvdb_id(&target.title))
+                let series_ref = series_hydration_ref(&target)
                     .ok_or_else(|| AppError::Repository("no tvdb external id found".to_string()))?;
-                let series = self
-                    .services
-                    .library
-                    .metadata_gateway
-                    .get_series(tvdb_id, language)
+                let (series, redirects) = self
+                    .fetch_series_for_single_hydration(&series_ref, language)
                     .await?;
                 let result = super::series_to_hydration_result(series, language);
-                let refreshed = self.persist_series_hydration(target, result).await?;
+                let refreshed = self
+                    .persist_series_hydration(target, result, &redirects)
+                    .await?;
                 if refreshed.metadata_fetched_at.is_some() {
                     Ok(refreshed)
                 } else {
@@ -1308,6 +1408,140 @@ impl AppUseCase {
                 }
             }
         }
+    }
+
+    /// Fetch one series for hydration: SMG's title surface first (by SMG title
+    /// id, resolving provider ids when the title has none yet), with episodes
+    /// and episode orders.
+    ///
+    /// The legacy `series(id:)` document by TVDB id is used when the gateway
+    /// has no title surface, and for a TVDB-backed series the title surface
+    /// does not have: that document reads the series through from TVDB, so a
+    /// TVDB-backed series stays exactly as reachable as it was. Only a series
+    /// with no TVDB id fails, and only when both paths are closed to it.
+    async fn fetch_series_for_single_hydration(
+        &self,
+        series_ref: &SeriesTitleRef,
+        language: &str,
+    ) -> AppResult<(SeriesMetadata, Vec<(i64, i64)>)> {
+        let gateway = &self.services.library.metadata_gateway;
+        let legacy = |tvdb_id: i64| async move {
+            gateway
+                .get_series(tvdb_id, language)
+                .await
+                .map(|series| (series, Vec::new()))
+        };
+        match gateway
+            .get_series_titles(std::slice::from_ref(series_ref), language, true, true)
+            .await
+        {
+            Ok(mut result) => match result.by_ref_index.remove(&0) {
+                Some(series) => Ok((series, result.redirects)),
+                None => match series_ref.tvdb_id {
+                    Some(tvdb_id) => legacy(tvdb_id).await,
+                    None => Err(series_missing_from_gateway(series_ref)),
+                },
+            },
+            Err(error) if title_queries_not_supported(&error) => {
+                let tvdb_id = series_ref.tvdb_id.ok_or_else(|| {
+                    AppError::Repository("no tvdb external id found".to_string())
+                })?;
+                legacy(tvdb_id).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Fetch a bulk chunk's series, one entry per target in order: the series
+    /// and the SMG redirects its fetch followed, or the failure reason.
+    ///
+    /// Same routing as [`Self::fetch_series_for_single_hydration`], except that
+    /// episode orders are not requested: bulk hydration never carried them
+    /// (`metadataBulk` cannot), and the numbering-bridge bookkeeping relies on
+    /// that. Legacy fallbacks are batched into one `metadataBulk` request.
+    /// `None` means the scan was cancelled.
+    async fn fetch_series_for_bulk_hydration(
+        &self,
+        series_targets: &[(HydrationTarget, SeriesTitleRef)],
+        language: &str,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Option<Vec<Result<(SeriesMetadata, Vec<(i64, i64)>), String>>> {
+        const MISSING: &str = "bulk metadata response missing title";
+        let gateway = &self.services.library.metadata_gateway;
+        let refs = series_targets
+            .iter()
+            .map(|(_, series_ref)| series_ref.clone())
+            .collect::<Vec<_>>();
+        let mut fetched = vec![None; refs.len()];
+        let mut legacy_indexes = Vec::new();
+
+        match await_cancellable(
+            cancel_token,
+            gateway.get_series_titles(&refs, language, true, false),
+        )
+        .await?
+        {
+            Ok(mut result) => {
+                for (index, series_ref) in refs.iter().enumerate() {
+                    match result.by_ref_index.remove(&index) {
+                        Some(series) => {
+                            fetched[index] = Some(Ok((series, result.redirects.clone())));
+                        }
+                        None if series_ref.tvdb_id.is_some() => legacy_indexes.push(index),
+                        None => fetched[index] = Some(Err(MISSING.to_string())),
+                    }
+                }
+            }
+            Err(error) if title_queries_not_supported(&error) => {
+                for (index, series_ref) in refs.iter().enumerate() {
+                    if series_ref.tvdb_id.is_some() {
+                        legacy_indexes.push(index);
+                    } else {
+                        fetched[index] = Some(Err("no tvdb external id found".to_string()));
+                    }
+                }
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                return Some(refs.iter().map(|_| Err(reason.clone())).collect());
+            }
+        }
+
+        if !legacy_indexes.is_empty() {
+            let tvdb_ids = legacy_indexes
+                .iter()
+                .filter_map(|index| refs[*index].tvdb_id)
+                .collect::<Vec<_>>();
+            match await_cancellable(
+                cancel_token,
+                gateway.get_metadata_bulk(&[], &tvdb_ids, language),
+            )
+            .await?
+            {
+                Ok(legacy) => {
+                    for index in legacy_indexes {
+                        let tvdb_id = refs[index].tvdb_id.expect("legacy refs carry a tvdb id");
+                        fetched[index] = Some(match legacy.series.get(&tvdb_id) {
+                            Some(series) => Ok((series.clone(), Vec::new())),
+                            None => Err(MISSING.to_string()),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    for index in legacy_indexes {
+                        fetched[index] = Some(Err(reason.clone()));
+                    }
+                }
+            }
+        }
+
+        Some(
+            fetched
+                .into_iter()
+                .map(|entry| entry.unwrap_or_else(|| Err(MISSING.to_string())))
+                .collect(),
+        )
     }
 
     pub(crate) async fn hydrate_titles_bulk(
@@ -1472,7 +1706,7 @@ impl AppUseCase {
             }
         }
         if preference == scryer_domain::ReleaseNumbering::Official
-            || extract_tvdb_id(title).is_none()
+            || series_title_ref(title).is_none()
         {
             return;
         }

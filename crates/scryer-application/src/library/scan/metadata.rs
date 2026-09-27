@@ -611,7 +611,7 @@ pub(crate) async fn execute_batch_metadata_searches(
         {
             Ok(Some(results)) => results,
             Ok(None) => return Ok(HashMap::new()),
-            Err(error) if crate::catalog_workflow::movie_title_queries_not_supported(&error) => {
+            Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
                 let Some(results) = await_cancellable_app_result(
                     cancel_token,
                     metadata_gateway.search_tvdb_batch(&queries, metadata_language),

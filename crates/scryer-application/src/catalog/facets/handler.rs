@@ -284,14 +284,50 @@ pub(crate) async fn hydrate_referenced_movie_metadata(
         .movies)
 }
 
+/// The identity a series fetched through SMG's title surface adds to the title.
+///
+/// SMG's title id is always kept: it is how the next hydration (and a
+/// redirect) addresses the series. A TMDB-primary series has no TVDB id, so
+/// its TMDB id is the only provider id it can be matched and searched by. A
+/// TVDB-backed series gains nothing else, so its persisted identity stays
+/// what the legacy TVDB documents produced.
+fn series_title_extra_external_ids(
+    series: &SeriesMetadata,
+    existing: &[ExternalId],
+) -> Vec<ExternalId> {
+    let mut external_ids = Vec::new();
+    if let Some(smg_id) = series.smg_id.filter(|id| *id > 0) {
+        external_ids.push(ExternalId::with_kind("smg", "title", smg_id.to_string()));
+    }
+    if series.tvdb_id <= 0
+        && let Some(tmdb_id) = series.tmdb_id.filter(|id| *id > 0)
+    {
+        let value = tmdb_id.to_string();
+        let already_present = existing.iter().any(|external_id| {
+            external_id.source.eq_ignore_ascii_case("tmdb") && external_id.value == value
+        });
+        if !already_present {
+            external_ids.push(ExternalId::with_kind("tmdb", "series", value));
+        }
+    }
+    external_ids
+}
+
 /// Build a [`HydrationResult`] from an already-fetched [`SeriesMetadata`].
 pub fn series_to_hydration_result(series: SeriesMetadata, language: &str) -> HydrationResult {
-    let extra_external_ids = primary_anime_mapping_extra_external_ids(&series.anime_mappings);
+    let mut extra_external_ids = primary_anime_mapping_extra_external_ids(&series.anime_mappings);
+    extra_external_ids.extend(series_title_extra_external_ids(
+        &series,
+        &extra_external_ids,
+    ));
     // Carry the series-level facts `TitleMetadataUpdate` has no home for. Only the cheap fields
     // are copied; see `HydrationResult::raw_series`.
     let raw_series = SeriesMetadata {
         target_key: series.target_key.clone(),
+        smg_id: series.smg_id,
+        primary_source: series.primary_source.clone(),
         tvdb_id: series.tvdb_id,
+        tmdb_id: series.tmdb_id,
         name: series.name.clone(),
         sort_name: series.sort_name.clone(),
         slug: series.slug.clone(),

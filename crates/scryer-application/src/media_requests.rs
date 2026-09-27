@@ -1965,9 +1965,7 @@ impl AppUseCase {
                         .ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".to_string())
                         }),
-                    Err(error)
-                        if crate::catalog_workflow::movie_title_queries_not_supported(&error) =>
-                    {
+                    Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
                         let Some(tvdb_id) = movie_ref.tvdb_id else {
                             return MediaRequestMetadataEnrichment::unavailable(
                                 external_ids,

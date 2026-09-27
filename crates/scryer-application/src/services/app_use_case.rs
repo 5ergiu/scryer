@@ -816,9 +816,7 @@ impl AppUseCase {
                 .await
             {
                 Ok(results) => Ok(results),
-                Err(error)
-                    if crate::catalog_workflow::movie_title_queries_not_supported(&error) =>
-                {
+                Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
                     gateway
                         .search_tvdb_rich(query, type_hint, limit, language, year)
                         .await
@@ -940,7 +938,7 @@ impl AppUseCase {
                     AppError::NotFound("movie metadata response missing title".into())
                 })
             }
-            Err(error) if crate::catalog_workflow::movie_title_queries_not_supported(&error) => {
+            Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
                 let tvdb_id = movie_ref.tvdb_id.ok_or_else(|| {
                     AppError::Repository("legacy metadata gateway requires a tvdb id".into())
                 })?;

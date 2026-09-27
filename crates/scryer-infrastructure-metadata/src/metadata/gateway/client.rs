@@ -296,12 +296,23 @@ static LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS: AtomicU64 = AtomicU64::new(0)
 /// validation error names an unknown field. A gateway that predates the surface
 /// answers any of them with `Cannot query field "<name>" on type "..."`, which
 /// is the capability signal the probe watches for.
-const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 5] = [
+const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 6] = [
     "\"titles\"",
     "\"resolveTitles\"",
     "\"searchTitles\"",
     "\"searchTitlesBatch\"",
     "\"title_id\"",
+    // `titles { series { ... } }` against a title surface without series.
+    "\"TitleBulkResult\"",
+];
+
+/// Validation errors from a gateway that predates the `clientCapabilities`
+/// argument every title operation declares. Like an unknown title field, they
+/// mean the title surface cannot serve this client.
+const TITLE_ID_UNKNOWN_CAPABILITY_MARKERS: [&str; 3] = [
+    "Unknown argument \"clientCapabilities\"",
+    "Unknown type \"ClientCapability\"",
+    "\"TMDB_PRIMARY_SERIES\"",
 ];
 
 #[derive(Deserialize)]
@@ -1482,12 +1493,16 @@ impl MetadataGatewayClient {
 
     fn observe_capability_error(error: &AppError, any_unknown_query_field: bool) -> bool {
         let message = error.to_string();
-        if !message.contains("Cannot query field") {
+        let unknown_capability = TITLE_ID_UNKNOWN_CAPABILITY_MARKERS
+            .iter()
+            .any(|marker| message.contains(marker));
+        if !unknown_capability && !message.contains("Cannot query field") {
             return false;
         }
-        let unknown_title_field = TITLE_ID_UNKNOWN_FIELD_MARKERS
-            .iter()
-            .any(|marker| message.contains(marker))
+        let unknown_title_field = unknown_capability
+            || TITLE_ID_UNKNOWN_FIELD_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
             || (any_unknown_query_field && message.contains("on type \"Query\""));
         if !unknown_title_field {
             return false;

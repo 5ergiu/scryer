@@ -961,7 +961,7 @@ impl AppUseCase {
             AddTitleHydrationState::Complete
         } else if matches!(created.title.facet, MediaFacet::Movie)
             .then(|| movie_title_ref(&created.title).is_some())
-            .unwrap_or_else(|| extract_tvdb_id(&created.title).is_some())
+            .unwrap_or_else(|| series_title_ref(&created.title).is_some())
         {
             if created.reused_existing {
                 self.services

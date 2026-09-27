@@ -1,6 +1,6 @@
 use super::*;
 use crate::catalog_workflow::{
-    HYDRATION_BULK_BATCH_SIZE, HydrationSource, HydrationTarget, extract_tvdb_id, movie_title_ref,
+    HYDRATION_BULK_BATCH_SIZE, HydrationSource, HydrationTarget, movie_title_ref, series_title_ref,
 };
 use crate::polling_worker::PollingWorker;
 use std::time::Duration;
@@ -134,7 +134,7 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
             _ = token.cancelled() => return MovieSmgIdentityBackfillTick::Cancelled,
             result = app.services.library.metadata_gateway.resolve_movie_titles(&references, false) => match result {
                 Ok(resolutions) => resolutions,
-                Err(error) if crate::catalog_workflow::movie_title_queries_not_supported(&error) => {
+                Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
                     return MovieSmgIdentityBackfillTick::NotSupported;
                 }
                 Err(error) => return MovieSmgIdentityBackfillTick::Failed(error),
@@ -384,7 +384,7 @@ pub async fn start_background_title_hydration_loop(
             let hydratable = match due_title.title.facet {
                 MediaFacet::Movie => requested_movie_ref.is_some(),
                 MediaFacet::Series | MediaFacet::Anime => {
-                    extract_tvdb_id(&due_title.title).is_some()
+                    series_title_ref(&due_title.title).is_some()
                 }
             };
             if !hydratable {

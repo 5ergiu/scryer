@@ -850,7 +850,7 @@ impl AppUseCase {
                         Ok(result) => result.by_ref_index.get(&0).cloned().ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".into())
                         })?,
-                        Err(error) if movie_title_queries_not_supported(&error) => {
+                        Err(error) if title_queries_not_supported(&error) => {
                             let tvdb_id = requested_ref.tvdb_id.ok_or_else(|| {
                                 AppError::Repository(
                                     "legacy metadata gateway requires a tvdb id".into(),
