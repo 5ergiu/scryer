@@ -941,6 +941,12 @@ pub enum AppError {
     #[error("import source changed while being inspected {path}: {message}")]
     ImportSourceChanged { path: String, message: String },
 
+    /// A discovery generation was built for a presentation (metadata language
+    /// and revision) that changed before it could be committed. The commit is
+    /// rolled back; the language change already scheduled a fresh run.
+    #[error("discovery run {run_id} was superseded by a presentation change")]
+    DiscoveryPresentationSuperseded { run_id: String },
+
     #[error("repository: {0}")]
     Repository(String),
 }

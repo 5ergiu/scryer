@@ -1553,6 +1553,14 @@ impl AppUseCase {
         trigger_source: JobTriggerSource,
     ) -> AppResult<()> {
         let now = self.runtime.environment.now();
+        // The metadata language change path owns the presentation revision
+        // bump; the sync run it triggers below re-checks it cheaply.
+        let language = self.metadata_language().await;
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&language, now)
+            .await?;
         let mut state = self
             .services
             .library
@@ -2142,9 +2150,15 @@ impl AppUseCase {
             ));
         }
 
-        let result = self
+        let result = match self
             .run_discovery_sync_job_with_lease(trigger_source, &lease_owner_id)
-            .await;
+            .await
+        {
+            Err(AppError::DiscoveryPresentationSuperseded { run_id }) => {
+                self.skip_superseded_discovery_run(&run_id).await
+            }
+            other => other,
+        };
         let released_at = self.runtime.environment.now();
         let release_result = self
             .services
@@ -2159,6 +2173,40 @@ impl AppUseCase {
             );
         }
         result
+    }
+
+    /// A language change landed while this run was building a generation for
+    /// the previous presentation. Its commit rolled back and the change already
+    /// marked discovery dirty, so the next run rebuilds it: this is a clean
+    /// skip, not a failure, and it must not enter the retry ladder.
+    async fn skip_superseded_discovery_run(&self, run_id: &str) -> AppResult<JobExecutionOutcome> {
+        info!(
+            run_id,
+            "discovery sync run superseded by a metadata language change; skipping its commit"
+        );
+        if let Some(mut run) = self
+            .services
+            .library
+            .discovery
+            .get_discovery_sync_run(run_id)
+            .await?
+        {
+            let now = self.runtime.environment.now();
+            run.status = "superseded".to_string();
+            run.completed_at = Some(now);
+            run.updated_at = now;
+            self.services
+                .library
+                .discovery
+                .upsert_discovery_sync_run(&run)
+                .await?;
+        }
+        Ok(JobExecutionOutcome::new(
+            Some(
+                "Discovery sync skipped: the metadata language changed during the run".to_string(),
+            ),
+            Some(json!({ "superseded_run_id": run_id }).to_string()),
+        ))
     }
 
     async fn run_discovery_sync_job_with_lease(

@@ -3034,6 +3034,11 @@ pub(crate) fn map_app_error(error: AppError) -> Response {
         AppError::PluginInstallInProgress(message) | AppError::LocationOperationBusy(message) => {
             (StatusCode::CONFLICT, Json(ErrorResponse::new(message))).into_response()
         }
+        error @ AppError::DiscoveryPresentationSuperseded { .. } => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(error.to_string())),
+        )
+            .into_response(),
         AppError::NotFound(message) => {
             (StatusCode::NOT_FOUND, Json(ErrorResponse::new(message))).into_response()
         }

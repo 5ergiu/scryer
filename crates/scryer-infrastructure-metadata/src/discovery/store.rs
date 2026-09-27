@@ -208,10 +208,15 @@ impl DiscoveryRepository for DiscoveryStore {
     }
 
     async fn discovery_run_matches_presentation(&self, run_id: &str) -> AppResult<bool> {
-        let stale = SqlRuntime::fetch_optional(self.datastore.read_exec(),
-            "SELECT p.language FROM discovery_presentation_selection p JOIN discovery_sync_runs r ON r.id = {}
-             WHERE p.scope_key = 'default' AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
-            &[SqlArg::Text(run_id.to_string())]).await?;
+        let stale = SqlRuntime::fetch_optional(
+            self.datastore.read_exec(),
+            "SELECT p.language FROM discovery_presentation_selection p
+             JOIN discovery_sync_runs r ON r.id = {}
+             WHERE p.scope_key = 'default'
+               AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
+            &[SqlArg::Text(run_id.to_string())],
+        )
+        .await?;
         Ok(stale.is_none())
     }
 
@@ -221,35 +226,67 @@ impl DiscoveryRepository for DiscoveryStore {
         now: DateTime<Utc>,
     ) -> AppResult<()> {
         let language = normalize_discovery_language(language);
-        SqlRuntime::run_in_transaction(&self.datastore, "refresh_discovery_presentation", move |tx| {
-            let language = language.clone();
-            Box::pin(async move {
-                if discovery_selected_language_tx(tx).await? != language {
-                    return Err(AppError::Repository("discovery_presentation_superseded".to_string()));
-                }
-                let changed = SqlRuntime::execute(SqlExec::Tx(tx),
-                    "INSERT INTO discovery_presentation_selection (scope_key, language, revision) VALUES ('default', {}, 1)
-                     ON CONFLICT(scope_key) DO UPDATE SET language = excluded.language,
-                     revision = discovery_presentation_selection.revision + 1
-                     WHERE discovery_presentation_selection.language <> excluded.language", &[SqlArg::Text(language)]).await?;
-                // Reconciliation is also called by every polling job. Invalidate
-                // once per persisted selection, preserving retry deadlines on
-                // subsequent calls even if a generation is absent or pending.
-                if changed == 0 {
-                    return Ok(());
-                }
-                SqlRuntime::execute(SqlExec::Tx(tx),
-                    "UPDATE discovery_sync_state SET next_context_snapshot_eligible_at = {}, next_public_feed_eligible_at = {},
-                     dirty_since = COALESCE(dirty_since, {}), dirty_reason_mask = dirty_reason_mask | 1
-                     WHERE scope_key = 'default' AND (
-                       NOT EXISTS (SELECT 1 FROM discovery_sync_runs r JOIN discovery_presentation_selection p ON p.scope_key = 'default'
-                         WHERE r.id = discovery_sync_state.last_success_generation_id AND r.presentation_revision = p.revision AND r.language = p.language)
-                       OR NOT EXISTS (SELECT 1 FROM discovery_sync_runs r JOIN discovery_presentation_selection p ON p.scope_key = 'default'
-                         WHERE r.id = discovery_sync_state.last_public_feed_generation_id AND r.presentation_revision = p.revision AND r.language = p.language))",
-                    &[SqlArg::Timestamp(now), SqlArg::Timestamp(now), SqlArg::Timestamp(now)]).await?;
-                Ok(())
-            })
-        }).await
+        // The caller passes the cached metadata language. When the persisted
+        // selection already matches, this is a single read and nothing is
+        // written, so calling it at the start of every sync run is free.
+        let persisted = SqlRuntime::fetch_optional(
+            self.datastore.read_exec(),
+            "SELECT language FROM discovery_presentation_selection WHERE scope_key = 'default'",
+            &[],
+        )
+        .await?
+        .map(|row| row.text("language"))
+        .transpose()?;
+        if persisted.as_deref() == Some(language.as_str()) {
+            return Ok(());
+        }
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "refresh_discovery_presentation",
+            move |tx| {
+                let language = language.clone();
+                Box::pin(async move {
+                    let changed = SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "INSERT INTO discovery_presentation_selection (scope_key, language, revision)
+                         VALUES ('default', {}, 1)
+                         ON CONFLICT(scope_key) DO UPDATE SET language = excluded.language,
+                         revision = discovery_presentation_selection.revision + 1
+                         WHERE discovery_presentation_selection.language <> excluded.language",
+                        &[SqlArg::Text(language)],
+                    )
+                    .await?;
+                    // A concurrent refresh already persisted this selection and
+                    // invalidated the generations it superseded.
+                    if changed == 0 {
+                        return Ok(());
+                    }
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE discovery_sync_state SET next_context_snapshot_eligible_at = {},
+                         next_public_feed_eligible_at = {},
+                         dirty_since = COALESCE(dirty_since, {}), dirty_reason_mask = dirty_reason_mask | 1
+                         WHERE scope_key = 'default' AND (
+                           NOT EXISTS (SELECT 1 FROM discovery_sync_runs r
+                             JOIN discovery_presentation_selection p ON p.scope_key = 'default'
+                             WHERE r.id = discovery_sync_state.last_success_generation_id
+                               AND r.presentation_revision = p.revision AND r.language = p.language)
+                           OR NOT EXISTS (SELECT 1 FROM discovery_sync_runs r
+                             JOIN discovery_presentation_selection p ON p.scope_key = 'default'
+                             WHERE r.id = discovery_sync_state.last_public_feed_generation_id
+                               AND r.presentation_revision = p.revision AND r.language = p.language))",
+                        &[
+                            SqlArg::Timestamp(now),
+                            SqlArg::Timestamp(now),
+                            SqlArg::Timestamp(now),
+                        ],
+                    )
+                    .await?;
+                    Ok(())
+                })
+            },
+        )
+        .await
     }
 
     async fn try_acquire_discovery_sync_lease(
@@ -414,8 +451,8 @@ impl DiscoveryRepository for DiscoveryStore {
                 let commit = std::sync::Arc::clone(&commit);
                 Box::pin(async move {
                     upsert_sync_run_tx(tx, &datastore, &commit.run).await?;
-                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     upsert_sync_state_tx(tx, &commit.state).await?;
+                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     delete_for_run_tx(tx, "discovery_submitted_subjects", &commit.run.id).await?;
                     delete_item_children_for_run_tx(tx, &commit.run.id).await?;
                     delete_for_run_tx(tx, "discovery_items", &commit.run.id).await?;
@@ -470,8 +507,8 @@ impl DiscoveryRepository for DiscoveryStore {
                 let commit = std::sync::Arc::clone(&commit);
                 Box::pin(async move {
                     upsert_sync_run_tx(tx, &datastore, &commit.run).await?;
-                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     upsert_sync_state_tx(tx, &commit.state).await?;
+                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     delete_item_children_for_run_tx(tx, &commit.run.id).await?;
                     delete_for_run_tx(tx, "discovery_items", &commit.run.id).await?;
                     tombstone_discovery_items_tx(
@@ -521,7 +558,6 @@ impl DiscoveryRepository for DiscoveryStore {
                             error,
                         );
                     })?;
-                guard_discovery_presentation_tx(tx, &commit.run).await?;
                 upsert_sync_state_tx(tx, &commit.state)
                     .await
                     .inspect_err(|error| {
@@ -531,6 +567,7 @@ impl DiscoveryRepository for DiscoveryStore {
                             error,
                         );
                     })?;
+                guard_discovery_presentation_tx(tx, &commit.run).await?;
                 delete_for_run_tx(tx, "discovery_section_items", &commit.run.id)
                     .await
                     .inspect_err(|error| {
@@ -4147,44 +4184,43 @@ fn upsert_discovery_sync_run_sql() -> String {
         ON CONFLICT(id) DO UPDATE SET {updates}", placeholders(columns.len()))
 }
 
-async fn discovery_selected_language_tx(tx: &mut SqlTx<'_>) -> AppResult<String> {
-    // Serialize with updates of the existing global metadata preference. This
-    // prevents a delayed refresh request from restoring an older selection.
-    SqlRuntime::execute(SqlExec::Tx(tx),
-        "UPDATE settings_values SET value_json = value_json WHERE scope = 'system' AND scope_id IS NULL
-         AND setting_definition_id IN (SELECT id FROM settings_definitions WHERE key_name = 'metadata_language' AND scope = 'system')", &[]).await?;
-    let row = SqlRuntime::fetch_optional(SqlExec::Tx(tx),
-        "SELECT CAST(v.value_json AS TEXT) AS value_json FROM settings_values v JOIN settings_definitions d ON d.id = v.setting_definition_id
-         WHERE d.key_name = 'metadata_language' AND v.scope = 'system' AND v.scope_id IS NULL ORDER BY v.updated_at DESC LIMIT 1", &[]).await?;
-    let language = row
-        .map(|row| row.text("value_json"))
-        .transpose()?
-        .and_then(|raw| serde_json::from_str::<String>(&raw).ok())
-        .unwrap_or_else(|| "eng".to_string());
-    Ok(normalize_discovery_language(&language))
-}
-
+/// Refuse to publish a generation built for a superseded presentation.
+///
+/// Read-only: it runs after the commit has written its run and sync-state
+/// rows, so the commit transaction already holds those row locks. A language
+/// change bumps `discovery_presentation_selection` and then updates the same
+/// `discovery_sync_state` row. On SQLite the two write transactions are
+/// serialized outright. On PostgreSQL a bump that committed before this read
+/// is visible to it (READ COMMITTED takes a fresh snapshot per statement), and
+/// a bump still in flight blocks on the sync-state row until this commit ends
+/// and then invalidates the generation just published.
 async fn guard_discovery_presentation_tx(
     tx: &mut SqlTx<'_>,
     run: &DiscoverySyncRunRecord,
 ) -> AppResult<()> {
-    if discovery_selected_language_tx(tx).await? != normalize_discovery_language(&run.language) {
-        return Err(AppError::Repository(
-            "discovery_presentation_superseded".to_string(),
-        ));
+    let row = SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        "SELECT p.language AS selected_language, p.revision AS selected_revision,
+                r.presentation_revision AS run_revision
+         FROM discovery_presentation_selection p
+         JOIN discovery_sync_runs r ON r.id = {}
+         WHERE p.scope_key = 'default'",
+        &[SqlArg::Text(run.id.clone())],
+    )
+    .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let selected_language = normalize_discovery_language(&row.text("selected_language")?);
+    let current = selected_language == normalize_discovery_language(&run.language)
+        && row.i64("selected_revision")? == row.i64("run_revision")?;
+    if current {
+        Ok(())
+    } else {
+        Err(AppError::DiscoveryPresentationSuperseded {
+            run_id: run.id.clone(),
+        })
     }
-    // A no-op write serializes selection changes with publication on both engines.
-    SqlRuntime::execute(SqlExec::Tx(tx), "UPDATE discovery_presentation_selection SET revision = revision WHERE scope_key = 'default'", &[]).await?;
-    let stale = SqlRuntime::fetch_optional(SqlExec::Tx(tx),
-        "SELECT p.language FROM discovery_presentation_selection p JOIN discovery_sync_runs r ON r.id = {}
-         WHERE p.scope_key = 'default' AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
-        &[SqlArg::Text(run.id.clone())]).await?;
-    if stale.is_some() {
-        return Err(AppError::Repository(
-            "discovery_presentation_superseded".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 async fn upsert_sync_run_tx(
@@ -7070,17 +7106,29 @@ mod tests {
         let unchanged = store.get_discovery_sync_state("default").await?.unwrap();
         assert_eq!(unchanged.next_public_feed_eligible_at, Some(retry));
         assert_eq!(unchanged.next_context_snapshot_eligible_at, Some(retry));
-        // Persist the real global setting, then refresh. A delayed English
-        // request must not override the new French selection.
-        SqlRuntime::execute_write(&store.datastore,"fixture-language-definition",
-            "INSERT INTO settings_definitions(id,category,scope,key_name,data_type,default_value_json,created_at,updated_at)
-             VALUES('presentation-fixture','system','system','metadata_language','string','null',{}, {})
-             ON CONFLICT(category,scope,key_name) DO NOTHING",vec![SqlArg::Timestamp(now),SqlArg::Timestamp(now)]).await?;
-        SqlRuntime::execute_write(&store.datastore,"fixture-language-value",
-            "INSERT INTO settings_values(id,setting_definition_id,scope,value_json,source,created_at,updated_at)
-             SELECT 'presentation-fixture',id,'system','\"fra\"','test',{},{} FROM settings_definitions WHERE key_name='metadata_language' AND scope='system'",
-            vec![SqlArg::Timestamp(now),SqlArg::Timestamp(now)]).await?;
+        async fn selection_revision(store: &DiscoveryStore) -> AppResult<i64> {
+            SqlRuntime::fetch_optional(
+                store.datastore.read_exec(),
+                "SELECT revision FROM discovery_presentation_selection WHERE scope_key = 'default'",
+                &[],
+            )
+            .await?
+            .expect("presentation selection row")
+            .i64("revision")
+        }
+        fn assert_superseded(result: AppResult<()>, run_id: &str) {
+            match result {
+                Err(AppError::DiscoveryPresentationSuperseded { run_id: superseded }) => {
+                    assert_eq!(superseded, run_id);
+                }
+                other => panic!("expected a superseded commit, got {other:?}"),
+            }
+        }
+        // An unchanged selection is read-only: no revision bump and no
+        // invalidation of the scheduled retries.
+        assert_eq!(selection_revision(store).await?, 1);
         store.refresh_discovery_presentation("fra", now).await?;
+        assert_eq!(selection_revision(store).await?, 2);
         let mut pending = store.get_discovery_sync_state("default").await?.unwrap();
         assert_eq!(pending.next_public_feed_eligible_at, Some(now));
         assert_eq!(pending.next_context_snapshot_eligible_at, Some(now));
@@ -7088,17 +7136,12 @@ mod tests {
         pending.next_context_snapshot_eligible_at = Some(retry);
         store.upsert_discovery_sync_state(&pending).await?;
         store
-            .refresh_discovery_presentation("fra", now + chrono::Duration::minutes(5))
+            .refresh_discovery_presentation("FRA ", now + chrono::Duration::minutes(5))
             .await?;
+        assert_eq!(selection_revision(store).await?, 2);
         let pending = store.get_discovery_sync_state("default").await?.unwrap();
         assert_eq!(pending.next_public_feed_eligible_at, Some(retry));
         assert_eq!(pending.next_context_snapshot_eligible_at, Some(retry));
-        assert!(
-            store
-                .refresh_discovery_presentation("eng", now)
-                .await
-                .is_err()
-        );
         assert!(!store.discovery_run_matches_presentation(&old.id).await?);
         let state = store.get_discovery_sync_state("default").await?.unwrap();
         assert_eq!(
@@ -7117,7 +7160,7 @@ mod tests {
             sections: vec![],
             items: vec![],
         };
-        assert!(store.commit_discovery_public_feed(&stale).await.is_err());
+        assert_superseded(store.commit_discovery_public_feed(&stale).await, &old.id);
         let mut current =
             discovery_prune_run("presentation-current", "public_feed", "complete", now);
         current.language = "fra".to_string();
@@ -7132,7 +7175,7 @@ mod tests {
                 items: vec![],
             })
             .await?;
-        assert!(store.commit_discovery_public_feed(&stale).await.is_err());
+        assert_superseded(store.commit_discovery_public_feed(&stale).await, &old.id);
         assert_eq!(
             store
                 .get_discovery_sync_state("default")
@@ -7141,25 +7184,36 @@ mod tests {
                 .last_public_feed_generation_id,
             Some(current.id.clone())
         );
-        // Returning to the old language does not resurrect an earlier revision.
-        SqlRuntime::execute_write(
-            &store.datastore,
-            "fixture-language-cycle",
-            "UPDATE settings_values SET value_json = '\"eng\"' WHERE id = 'presentation-fixture'",
-            vec![],
-        )
-        .await?;
+        // Returning to the old language bumps the revision again, so neither
+        // the older English run nor the French run built before the switch
+        // can publish.
         restarted.refresh_discovery_presentation("eng", now).await?;
+        assert_eq!(selection_revision(&restarted).await?, 3);
         assert!(
             !restarted
                 .discovery_run_matches_presentation(&old.id)
                 .await?
         );
-        assert!(
+        assert_superseded(
+            restarted.commit_discovery_public_feed(&stale).await,
+            &old.id,
+        );
+        // Same language as the new selection, but built under revision 2.
+        let mut older_revision = current.clone();
+        older_revision.language = "eng".to_string();
+        assert_superseded(
             restarted
-                .commit_discovery_public_feed(&stale)
-                .await
-                .is_err()
+                .commit_discovery_public_feed(&DiscoveryPublicFeedCommit {
+                    state: restarted
+                        .get_discovery_sync_state("default")
+                        .await?
+                        .unwrap(),
+                    run: older_revision,
+                    sections: vec![],
+                    items: vec![],
+                })
+                .await,
+            &current.id,
         );
         assert_eq!(
             restarted

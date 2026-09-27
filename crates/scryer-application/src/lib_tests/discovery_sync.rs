@@ -2937,6 +2937,45 @@ async fn metadata_language_change_refreshes_public_discovery_feed() {
 }
 
 #[tokio::test]
+async fn discovery_sync_skips_a_superseded_public_feed_commit_without_failing() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let app = app.with_test_overrides(|builder| builder.with_discovery_store(discovery.clone()));
+    *discovery.supersede_public_feed_commits.lock().await = true;
+    let now = Utc::now();
+    *discovery.state.lock().await = Some(DiscoverySyncStateRecord {
+        updated_at: now,
+        ..DiscoverySyncStateRecord::default()
+    });
+
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("a superseded commit is a clean skip, not a job failure");
+
+    assert_eq!(gateway.public_feed_inputs.lock().await.len(), 1);
+    assert!(discovery.public_feed_commits.lock().await.is_empty());
+    let state = discovery
+        .state
+        .lock()
+        .await
+        .clone()
+        .expect("state should persist");
+    assert!(state.last_public_feed_generation_id.is_none());
+    assert_eq!(state.transient_failure_count, 0);
+    assert!(state.backoff_until.is_none());
+    let runs = discovery.runs.lock().await;
+    let public_runs = runs
+        .iter()
+        .filter(|run| run.kind == "public_feed")
+        .collect::<Vec<_>>();
+    assert_eq!(public_runs.len(), 1);
+    assert_eq!(public_runs[0].status, "superseded");
+    assert!(public_runs[0].error_text.is_none());
+    assert!(public_runs[0].completed_at.is_some());
+}
+
+#[tokio::test]
 async fn discovery_sync_snapshot_polling_status_resumes_existing_request_and_commits() {
     let gateway = Arc::new(SnapshotMetadataGateway::default());
     {
@@ -5627,6 +5666,9 @@ struct RecordingDiscoveryRepository {
     // the personalized generation the caller asked for is the only observable
     // that proves the visibility gate was applied.
     filter_option_context_run_ids: Mutex<Vec<Option<String>>>,
+    // Simulates a metadata language change landing between the SMG fetch and
+    // the public-feed commit: the store rolls the commit back as superseded.
+    supersede_public_feed_commits: Mutex<bool>,
 }
 
 #[async_trait]
@@ -5828,6 +5870,11 @@ impl DiscoveryRepository for RecordingDiscoveryRepository {
         &self,
         commit: &DiscoveryPublicFeedCommit,
     ) -> AppResult<()> {
+        if *self.supersede_public_feed_commits.lock().await {
+            return Err(AppError::DiscoveryPresentationSuperseded {
+                run_id: commit.run.id.clone(),
+            });
+        }
         *self.state.lock().await = Some(commit.state.clone());
         self.runs.lock().await.push(commit.run.clone());
         self.sections

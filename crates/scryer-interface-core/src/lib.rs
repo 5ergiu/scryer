@@ -547,7 +547,10 @@ pub fn to_gql_error(err: AppError) -> Error {
         AppError::ImportEvidenceUnavailable(message) => repository_gql_error(message),
         error @ AppError::ImportSourceInspection { .. }
         | error @ AppError::UnsupportedImportSource { .. }
-        | error @ AppError::ImportSourceChanged { .. } => repository_gql_error(error.to_string()),
+        | error @ AppError::ImportSourceChanged { .. }
+        | error @ AppError::DiscoveryPresentationSuperseded { .. } => {
+            repository_gql_error(error.to_string())
+        }
         AppError::Repository(message) => repository_gql_error(message),
     }
 }
@@ -636,6 +639,7 @@ fn app_error_kind(err: &AppError) -> &'static str {
         AppError::ImportSourceInspection { .. } => "ImportSourceInspection",
         AppError::UnsupportedImportSource { .. } => "UnsupportedImportSource",
         AppError::ImportSourceChanged { .. } => "ImportSourceChanged",
+        AppError::DiscoveryPresentationSuperseded { .. } => "DiscoveryPresentationSuperseded",
         AppError::Repository(_) => "Repository",
     }
 }
