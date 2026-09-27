@@ -39,7 +39,7 @@ macro_rules! notification_event_mappings {
             media_file_upgraded => DomainEventPayload::MediaFileUpgraded(_) => DomainEventPayload::MediaFileUpgraded(data) => DomainEventType::MediaFileUpgraded => NotificationEventType::Upgrade => build_media_file_upgraded_notification(data),
             media_file_renamed => DomainEventPayload::MediaFileRenamed(_) => DomainEventPayload::MediaFileRenamed(data) => DomainEventType::MediaFileRenamed => NotificationEventType::Rename => build_media_file_renamed_notification(data),
             media_file_deleted_upgrade => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeletedForUpgrade => build_media_file_deleted_notification(data, NotificationEventType::FileDeletedForUpgrade),
-            media_file_deleted => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeleted => build_media_file_deleted_notification(data, NotificationEventType::FileDeleted),
+            media_file_deleted => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk | MediaFileDeletedReason::RecycleBinPurged, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk | MediaFileDeletedReason::RecycleBinPurged, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeleted => build_media_file_deleted_notification(data, NotificationEventType::FileDeleted),
             post_processing_completed => DomainEventPayload::PostProcessingCompleted(_) => DomainEventPayload::PostProcessingCompleted(data) => DomainEventType::PostProcessingCompleted => NotificationEventType::PostProcessingCompleted => build_post_processing_completed_notification(data),
             subtitle_downloaded => DomainEventPayload::SubtitleDownloaded(_) => DomainEventPayload::SubtitleDownloaded(data) => DomainEventType::SubtitleDownloaded => NotificationEventType::SubtitleDownloaded => build_subtitle_downloaded_notification(data),
             subtitle_search_failed => DomainEventPayload::SubtitleSearchFailed(_) => DomainEventPayload::SubtitleSearchFailed(data) => DomainEventType::SubtitleSearchFailed => NotificationEventType::SubtitleSearchFailed => build_subtitle_search_failed_notification(data),
@@ -3042,5 +3042,87 @@ mod file_delete_subscription_tests {
             .is_empty(),
             "a plain deletion must not reach a File Deleted for Upgrade subscriber"
         );
+    }
+
+    /// A file destroyed for good is still a file deletion, so it must reach File Deleted subscribers.
+    #[tokio::test]
+    async fn recycle_bin_purge_is_delivered_to_file_deleted_subscribers() {
+        assert_eq!(
+            dispatched_event_types(
+                NotificationEventType::FileDeleted,
+                MediaFileDeletedReason::RecycleBinPurged
+            )
+            .await,
+            vec![NotificationEventType::FileDeleted]
+        );
+
+        assert!(
+            dispatched_event_types(
+                NotificationEventType::FileDeletedForUpgrade,
+                MediaFileDeletedReason::RecycleBinPurged
+            )
+            .await
+            .is_empty(),
+            "a permanent purge is not an upgrade cleanup"
+        );
+    }
+
+    /// Every deletion reason must classify into a notification. A reason with no dispatch arm is
+    /// dropped silently, which is how the recycle bin purge went unannounced.
+    #[test]
+    fn every_media_file_deleted_reason_builds_a_notification() {
+        let cases = [
+            (
+                MediaFileDeletedReason::Deleted,
+                NotificationEventType::FileDeleted,
+                "File deleted: Harbor Lantern",
+                "Deleted media file from disk: ",
+            ),
+            (
+                MediaFileDeletedReason::MissingOnDisk,
+                NotificationEventType::FileDeleted,
+                "File deleted: Harbor Lantern",
+                "Deleted media file from disk: ",
+            ),
+            (
+                MediaFileDeletedReason::RecycleBinPurged,
+                NotificationEventType::FileDeleted,
+                "Recycle bin purged: Harbor Lantern",
+                "Permanently deleted recycled media file: ",
+            ),
+            (
+                MediaFileDeletedReason::UpgradeCleanup,
+                NotificationEventType::FileDeletedForUpgrade,
+                "Deleted for upgrade: Harbor Lantern",
+                "Removed old media file during upgrade: ",
+            ),
+        ];
+
+        for (reason, expected_event_type, expected_title, expected_message_prefix) in cases {
+            let built = build_notification(&media_file_deleted_event("evt-fixture", reason))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "deletion reason '{}' built no notification",
+                        reason.as_str()
+                    )
+                });
+
+            assert_eq!(
+                built.payload.event_type,
+                expected_event_type,
+                "deletion reason '{}' classified as the wrong event type",
+                reason.as_str()
+            );
+            assert_eq!(built.payload.summary_title, expected_title);
+            assert!(
+                built
+                    .payload
+                    .summary_message
+                    .starts_with(expected_message_prefix),
+                "deletion reason '{}' produced '{}'",
+                reason.as_str(),
+                built.payload.summary_message
+            );
+        }
     }
 }
