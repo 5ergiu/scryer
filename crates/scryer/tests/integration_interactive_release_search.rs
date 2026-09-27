@@ -591,6 +591,81 @@ async fn wait_for_snapshot(
 // ── 1. Fast indexer streams in while a slow one is still searching ────────
 
 #[tokio::test]
+async fn dolby_vision_profile_edits_reach_fresh_interactive_searches() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let indexer = MockServer::start().await;
+        let release = "Star.Trek.Discovery.S05E06.1080p.Hybrid.PMTP.WEB-DL.DDP5.1.HDR.DV.HEVC-NTb-AsRequested";
+        mount_healthy(&indexer, release, "dv-diagnostic").await;
+        let (app, user, _index_dir) = setup_app(vec![indexer_config(
+            "dv-indexer",
+            format!("{}/api", indexer.uri()),
+            "fixture-key",
+            chrono::Utc::now(),
+        )])
+        .await;
+        let title = app
+            .add_title(&user, NewTitle {
+                name: "Star Trek Discovery".into(),
+                facet: MediaFacet::Series,
+                monitored: false,
+                ..Default::default()
+            })
+            .await
+            .expect("add synthetic series");
+        for allowed in [false, true, false] {
+            let mut profile = scryer_application::builtin_default_quality_profile();
+            profile.criteria.dolby_vision_allowed = allowed;
+            profile.criteria.detected_hdr_allowed = true;
+            profile.criteria.scoring_overrides.block_dv_without_fallback = Some(false);
+            let settings = app.save_quality_profile_settings(&user, SaveQualityProfileSettings {
+                global_profile_id: Some(profile.id.clone()),
+                profiles: vec![profile],
+                replace_existing: true,
+                category_selections: vec![],
+                global_scoring_persona: None,
+                category_persona_selections: vec![],
+            }).await.expect("save profile");
+            assert_eq!(settings.profiles[0].criteria.dolby_vision_allowed, allowed);
+            for request in [InteractiveReleaseSearchRequest {
+                query: Some("Star Trek Discovery S05E06".into()),
+                kind: Some(InteractiveSearchKind::Series),
+                ..Default::default()
+            }, InteractiveReleaseSearchRequest {
+                title_id: Some(title.id.clone()),
+                season: Some("5".into()),
+                episode: Some("6".into()),
+                ..Default::default()
+            }] {
+                let start = app
+                    .start_interactive_release_search(&user, request)
+                    .await
+                    .expect("start fresh search");
+                let done = loop {
+                    let snapshot = app
+                        .interactive_release_search(&user, &start.id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if snapshot.state != InteractiveReleaseSearchState::Running {
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                assert_eq!(done.results.len(), 1, "{done:?}");
+                let result = &done.results[0];
+                assert!(result.parsed_release_metadata.as_ref().unwrap().is_dolby_vision);
+                let decision = result.quality_profile_decision.as_ref().expect("scored result");
+                assert_eq!(
+                    decision.block_codes.iter().any(|code| code == "dolby_vision_not_allowed"),
+                    !allowed,
+                    "{decision:?}"
+                );
+            }
+        }
+    }).await.expect("diagnostic completed within failure bound");
+}
+
+#[tokio::test]
 async fn fast_indexer_results_stream_in_before_slow_indexer_completes() {
     let fast = MockServer::start().await;
     mount_healthy(&fast, "Paperman.2012.1080p.WEB-DL-FASTGRP", "fast-1").await;
