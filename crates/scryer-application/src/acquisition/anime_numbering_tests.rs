@@ -1928,3 +1928,323 @@ mod alternate_order {
         assert_eq!(candidate.episode_numbers, vec![17]);
     }
 }
+
+// ── franchise names spelled apart from the cour titles ────────────────────
+
+/// Three TVDB seasons of twelve with absolute numbers, `ep-<season>-<number>`.
+fn three_season_catalog() -> Vec<Episode> {
+    (1..=36u32)
+        .map(|absolute| {
+            let season = absolute.div_ceil(12);
+            let number = (absolute - 1) % 12 + 1;
+            episode(
+                &format!("ep-{season}-{number}"),
+                season,
+                number,
+                Some(absolute),
+                "",
+            )
+        })
+        .collect()
+}
+
+/// Three community cours that coincide with the three TVDB seasons.
+fn three_cour_bridge(cour_titles: [&[&str]; 3]) -> AnimeNumberingBridge {
+    let seasons = cour_titles
+        .iter()
+        .enumerate()
+        .map(|(offset, titles)| {
+            let index = i32::try_from(offset).expect("small index") + 1;
+            AnimeCommunitySeason {
+                index,
+                anidb_id: None,
+                anilist_id: None,
+                mal_id: None,
+                titles: titles.iter().map(|title| (*title).to_string()).collect(),
+                ranges: vec![AnimeCommunitySeasonRange {
+                    community_episode_start: 1,
+                    community_episode_end: Some(12),
+                    tvdb_season: index,
+                    tvdb_episode_start: 1,
+                    tvdb_episode_end: Some(12),
+                }],
+                absolute_start: Some((index - 1) * 12 + 1),
+                contiguous_absolute_start: None,
+                episode_count: Some(12),
+            }
+        })
+        .collect();
+    AnimeNumberingBridge {
+        source: Default::default(),
+        generated_on: "2026-09-26".to_string(),
+        corroborating_order: None,
+        seasons,
+    }
+}
+
+/// Catalog names that differ from the first cour's title only in how they are
+/// written, each paired with that cour's titles and the bare franchise name a
+/// release carries.
+const FRANCHISE_SPELLINGS: [(&str, &[&str], &str); 7] = [
+    (
+        "[Lantern Verge] - [Mein*Star]",
+        &["Lantern Verge: Mein Star", "Lantern Verge"],
+        "Lantern Verge",
+    ),
+    (
+        "I`ll Hold the Lantern",
+        &["I'll Hold the Lantern"],
+        "I'll Hold the Lantern",
+    ),
+    (
+        "I’ll Hold the Lantern",
+        &["I'll Hold the Lantern"],
+        "I'll Hold the Lantern",
+    ),
+    ("“Cinder” Atlas", &["\"Cinder\" Atlas"], "Cinder Atlas"),
+    (
+        "Cinder Atlas: Ember Tide",
+        &["Cinder Atlas Ember Tide", "Cinder Atlas"],
+        "Cinder Atlas",
+    ),
+    (
+        "Cinder Atlas：Ember Tide",
+        &["Cinder Atlas - Ember Tide", "Cinder Atlas"],
+        "Cinder Atlas",
+    ),
+    ("Cinder Átlas", &["Cinder Atlas"], "Cinder Atlas"),
+];
+
+fn later_cours(first: &'static [&'static str]) -> [&'static [&'static str]; 3] {
+    [
+        first,
+        &["Lantern Verge 2nd Season", "Cinder Atlas Season 2"],
+        &[
+            "Lantern Verge: Glass Meridian",
+            "Cinder Atlas: Glass Meridian",
+        ],
+    ]
+}
+
+fn anchored_index(
+    bridge: &AnimeNumberingBridge,
+    series: &Title,
+    parsed: &ParsedEpisodeMetadata,
+    variants: &[String],
+) -> Option<i32> {
+    let episodes = three_season_catalog();
+    anchored_community_season(&NumberingInput {
+        bridge,
+        title: series,
+        episodes: &episodes,
+        parsed,
+        parsed_title_variants: variants,
+        reference_date: None,
+        forced_alternate_numbering: false,
+    })
+    .map(|season| season.index)
+}
+
+/// The catalog spells the series one way, the first cour's title another,
+/// and a release names the bare franchise. That is the series' own name, so
+/// it anchors to no cour, and `S02E01` / `S03E01` keep the season they state.
+#[test]
+fn a_franchise_name_spelled_apart_from_the_first_cour_keeps_the_stated_season() {
+    for (canonical, first_cour, franchise) in FRANCHISE_SPELLINGS {
+        let bridge = three_cour_bridge(later_cours(first_cour));
+        let series = title(canonical);
+        let variants = vec![canonical.to_string(), franchise.to_string()];
+        for season in [1_u32, 2, 3] {
+            let resolution = resolve(
+                &bridge,
+                &series,
+                &three_season_catalog(),
+                &parsed(Some(season), &[1]),
+                &variants,
+                None,
+            );
+            assert_eq!(
+                resolution,
+                NumberingResolution::Unchanged,
+                "{canonical} / {franchise} S{season:02}E01"
+            );
+        }
+        assert_eq!(
+            anchored_index(&bridge, &series, &absolute_only_parse(13), &variants),
+            None,
+            "{canonical}: the bare franchise name anchored a cour"
+        );
+    }
+}
+
+/// A catalog name in a language the bridge does not carry at all shares no
+/// spelling with any cour. The bare franchise name is still recognisable as
+/// the stem every cour's title grows from, so it anchors nothing; and even a
+/// name that does match the first cour yields to an explicit `S02`.
+#[test]
+fn a_canonical_name_the_bridge_does_not_carry_still_keeps_the_stated_season() {
+    let bridge = three_cour_bridge([
+        &["Lantern Verge"],
+        &["Lantern Verge 2nd Season"],
+        &["Lantern Verge: Glass Meridian"],
+    ]);
+    let series = title("Фонарь на грани");
+    let variants = vec!["Lantern Verge".to_string()];
+
+    for season in [2_u32, 3] {
+        assert_eq!(
+            resolve(
+                &bridge,
+                &series,
+                &three_season_catalog(),
+                &parsed(Some(season), &[1]),
+                &variants,
+                None,
+            ),
+            NumberingResolution::Unchanged,
+            "S{season:02}E01"
+        );
+    }
+    assert_eq!(
+        anchored_index(&bridge, &series, &absolute_only_parse(13), &variants),
+        None
+    );
+}
+
+/// A season token that contradicts the named cour wins over the name for a
+/// single episode, the way it already does for packs: `S03E02` under cour 2's
+/// title is read by its season token, not as cour 2's second episode.
+#[test]
+fn an_explicit_season_that_contradicts_the_named_cour_wins() {
+    let resolution = resolve(
+        &bridge(),
+        &title(SERIES_NAME),
+        &official_episodes(true),
+        &parsed(Some(3), &[2]),
+        &["Lantern Verge Ember Circuit".to_string()],
+        None,
+    );
+
+    let candidate = resolution.resolved().expect("community candidate");
+    assert_eq!(candidate.kind, NumberingCandidateKind::Community);
+    assert_eq!(candidate.episode_numbers, vec![28]);
+
+    // The cour's own index agrees with the name and keeps the anchor.
+    let resolution = resolve(
+        &bridge(),
+        &title(SERIES_NAME),
+        &official_episodes(true),
+        &parsed(Some(2), &[2]),
+        &["Lantern Verge Ember Circuit".to_string()],
+        None,
+    );
+    let candidate = resolution.resolved().expect("title-anchored candidate");
+    assert_eq!(candidate.kind, NumberingCandidateKind::TitleAnchored);
+    assert_eq!(candidate.episode_numbers, vec![16]);
+}
+
+/// Loosening the franchise comparison must not cost a genuine cour name its
+/// anchor, whichever way the catalog spells the series.
+#[test]
+fn a_genuine_cour_name_still_anchors_beside_a_loosely_spelled_franchise() {
+    for canonical in ["[Lantern Verge] - [Mein*Star]", "Фонарь на грани"] {
+        let bridge = three_cour_bridge([
+            &["Lantern Verge: Mein Star", "Lantern Verge"],
+            &["Lantern Verge Season 2", "Lantern Verge 2nd Season"],
+            &["Lantern Verge: Glass Meridian"],
+        ]);
+        let series = title(canonical);
+        for (variant, expected) in [
+            ("Lantern Verge Season 2", 2),
+            ("Lantern Verge 2nd Season", 2),
+            ("Lantern Verge Glass Meridian", 3),
+            ("Lantern Verge - Glass*Meridian", 3),
+        ] {
+            let variants = vec![canonical.to_string(), variant.to_string()];
+            assert_eq!(
+                anchored_index(&bridge, &series, &absolute_only_parse(3), &variants),
+                Some(expected),
+                "{canonical} / {variant}"
+            );
+        }
+    }
+}
+
+/// A leading run of the series' own name is the franchise; the same words
+/// followed by more are not. `Lantern Verge 2` is not inside `Lantern Verge`.
+#[test]
+fn only_a_leading_run_of_the_series_name_counts_as_the_franchise() {
+    let bridge = three_cour_bridge([
+        &["Lantern Verge: Mein Star"],
+        &["Lantern Verge 2"],
+        &["Lantern Verge: Glass Meridian"],
+    ]);
+    let series = title("Lantern Verge Mein Star");
+
+    assert_eq!(
+        anchored_index(
+            &bridge,
+            &series,
+            &absolute_only_parse(3),
+            &["Lantern Verge".to_string()]
+        ),
+        None
+    );
+    assert_eq!(
+        anchored_index(
+            &bridge,
+            &series,
+            &absolute_only_parse(3),
+            &["Lantern Verge 2".to_string()]
+        ),
+        Some(2)
+    );
+}
+
+/// Two cours whose titles differ only by punctuation are one name to the
+/// loose comparison, so naming it pins neither and refuses the release.
+#[test]
+fn cour_titles_differing_only_by_punctuation_are_ambiguous() {
+    let bridge = three_cour_bridge([
+        &["Lantern Verge"],
+        &["Lantern Verge: Ember Circuit"],
+        &["Lantern Verge - Ember*Circuit"],
+    ]);
+    let variants = vec!["Lantern Verge Ember Circuit".to_string()];
+
+    assert!(matches!(
+        exact_cour_title_match(SERIES_NAME, &bridge, &variants),
+        ExactCourTitleMatch::Ambiguous
+    ));
+    let resolution = resolve(
+        &bridge,
+        &title(SERIES_NAME),
+        &three_season_catalog(),
+        &parsed(Some(1), &[3]),
+        &variants,
+        None,
+    );
+    assert!(resolution.is_ambiguous(), "{resolution:?}");
+}
+
+/// A release that names only the franchise and carries a bare number has no
+/// cour to be read within, so the catalog's own absolute reading places it.
+/// That is the ordinary shape of an absolute-numbered release and stays
+/// resolvable; only a name that collides between cours refuses.
+#[test]
+fn a_bare_franchise_name_with_an_absolute_number_reads_absolutely() {
+    let (canonical, first_cour, franchise) = FRANCHISE_SPELLINGS[0];
+    let bridge = three_cour_bridge(later_cours(first_cour));
+    let resolution = resolve(
+        &bridge,
+        &title(canonical),
+        &three_season_catalog(),
+        &absolute_only_parse(13),
+        &[canonical.to_string(), franchise.to_string()],
+        None,
+    );
+
+    let candidate = resolution.resolved().expect("absolute candidate");
+    assert_eq!(candidate.kind, NumberingCandidateKind::Absolute);
+    assert_eq!(candidate.episode_ids, vec!["ep-2-1".to_string()]);
+}

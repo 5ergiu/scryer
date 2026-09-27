@@ -3635,6 +3635,14 @@ fn parse_identity_at(
     index: usize,
     context: &ContextIndex,
 ) -> Option<(ReleaseIdentity, usize, i32, &'static str)> {
+    // A channel layout beside an audio codec (`[EAC3 2.0]`, `AAC2.0`) is the
+    // audio track, whatever the catalog holds. Letting its digit open an
+    // identity reads `2` as an episode, and a catalog that happens to carry
+    // absolute 2 would then reward that reading over the release's own
+    // `SxxEyy`.
+    if family != ParseFamily::Movie && is_audio_channel_layout_digit(tokens, index) {
+        return None;
+    }
     match family {
         ParseFamily::Movie => None,
         ParseFamily::StandardEpisode => {
@@ -4334,6 +4342,57 @@ fn audio_channel_has_audio_context(tokens: &[Token], index: usize) -> bool {
             let token_index = start + offset;
             token_index != index && token_has_audio_codec(token.normalized.as_str())
         })
+}
+
+/// Whether the token is one digit of a dotted channel layout (`2.0`, `5.1`,
+/// `7.1`) that sits against an audio codec in the same bracket or group. The
+/// lexer splits `2.0` into `2` and `0` joined by a dot; either half qualifies.
+/// A codec glued to the head digit (`AAC2.0` lexes as `AAC2`, `0`) counts too.
+fn is_audio_channel_layout_digit(tokens: &[Token], index: usize) -> bool {
+    let is_digit = |token: &Token| {
+        token.normalized.len() == 1 && token.normalized.as_bytes()[0].is_ascii_digit()
+    };
+    let joined = |head: &Token, tail: &Token| {
+        tail.separator_before == SeparatorKind::Dot && same_technical_scope(head, tail)
+    };
+    let codec_beside = |head: usize, tail: usize| {
+        head.checked_sub(1)
+            .and_then(|before| tokens.get(before))
+            .into_iter()
+            .chain(tokens.get(tail + 1))
+            .any(|candidate| {
+                same_technical_scope(candidate, &tokens[head])
+                    && token_has_audio_codec(candidate.normalized.as_str())
+            })
+    };
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    if !is_digit(token) {
+        return false;
+    }
+    if let Some(next) = tokens.get(index + 1)
+        && is_digit(next)
+        && joined(token, next)
+        && codec_beside(index, index + 1)
+    {
+        return true;
+    }
+    let Some(previous) = index.checked_sub(1).and_then(|before| tokens.get(before)) else {
+        return false;
+    };
+    if !joined(previous, token) {
+        return false;
+    }
+    if is_digit(previous) {
+        return codec_beside(index - 1, index);
+    }
+    previous
+        .normalized
+        .as_bytes()
+        .last()
+        .is_some_and(u8::is_ascii_digit)
+        && token_has_audio_codec(previous.normalized.as_str())
 }
 
 fn token_has_audio_codec(token: &str) -> bool {

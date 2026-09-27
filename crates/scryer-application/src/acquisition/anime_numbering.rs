@@ -731,6 +731,22 @@ fn title_anchored_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
     let Some(community_season) = anchored_community_season(input) else {
         return Vec::new();
     };
+    // An explicit season token that is neither `1` nor the named cour's own
+    // index says something the name does not. `S02E01` under a name that
+    // happens to match cour 1 is season 2's first episode, not cour 1's; the
+    // name loses, exactly as it does for a pack or for search admission.
+    // `S01` stays compatible: groups that title a release per cour restart
+    // their season numbering with it.
+    let cour_index = u32::try_from(community_season.index).ok();
+    if input
+        .parsed
+        .season
+        .into_iter()
+        .chain(input.parsed.season_numbers.iter().copied())
+        .any(|season| season != 1 && Some(season) != cour_index)
+    {
+        return Vec::new();
+    }
     let reason = format!(
         "release names community season {} (\"{}\")",
         community_season.index,
@@ -791,18 +807,14 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
         ExactCourTitleMatch::None => {}
     }
 
-    let parsed_titles = normalized_parsed_titles(input.parsed_title_variants);
-    if parsed_titles.is_empty() {
-        return None;
-    }
-    let canonical = crate::app_usecase_rss::normalize_for_matching(&input.title.name);
-    let distinguishing = parsed_titles
-        .iter()
-        .filter(|parsed| **parsed != canonical)
-        .collect::<Vec<_>>();
+    let franchise = FranchiseNames::new(&input.title.name, input.bridge);
+    let distinguishing =
+        franchise.distinguishing_titles(&normalized_parsed_titles(input.parsed_title_variants));
     if distinguishing.is_empty() {
         return None;
     }
+    let distinguishing = distinguishing.iter().collect::<Vec<_>>();
+    let canonical = crate::app_usecase_rss::normalize_for_matching(&input.title.name);
 
     // A cour catalogued under the series' own name is the franchise, not a
     // season within it, and it is dropped before the fuzzy rule sees it.
@@ -810,6 +822,7 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
         .bridge
         .seasons
         .iter()
+        .filter(|season| !franchise.cour_answers_to_series(season))
         .map(|season| {
             let season_titles = season
                 .titles
@@ -819,10 +832,107 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
                 .collect::<Vec<_>>();
             (season, season_titles)
         })
-        .filter(|(_, season_titles)| !season_titles.contains(&canonical))
         .collect::<Vec<_>>();
 
     fuzzy_anchored_community_season(input, &distinguishing, &canonical, &cours)
+}
+
+/// What the series' own name is, read loosely enough that punctuation,
+/// diacritics and a metadata language the bridge does not carry cannot
+/// disguise it as a cour.
+///
+/// The canonical name comes from the catalog in the operator's metadata
+/// language (`[Lantern Verge] - [Mein*Star]`), the cour titles from a
+/// different provider in several others (`Lantern Verge: Mein Star`), and a
+/// release names whichever it likes. Compared spelling for spelling, the
+/// franchise's own name slips past every guard and anchors to the first cour.
+/// These comparisons therefore use
+/// [`scryer_domain::title_spelling::title_identity_loose_form`], and only
+/// these: nothing here is persisted or used as a lookup key.
+struct FranchiseNames {
+    /// The canonical name's loose words.
+    canonical: Vec<String>,
+    /// Each cour's titles as loose words.
+    cours: Vec<Vec<Vec<String>>>,
+}
+
+impl FranchiseNames {
+    fn new(canonical_title: &str, bridge: &AnimeNumberingBridge) -> Self {
+        Self {
+            canonical: loose_words(canonical_title),
+            cours: bridge
+                .seasons
+                .iter()
+                .map(|season| {
+                    season
+                        .titles
+                        .iter()
+                        .map(|title| loose_words(title))
+                        .filter(|words| !words.is_empty())
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// The parsed names that say something the franchise name does not.
+    fn distinguishing_titles(&self, parsed_titles: &[String]) -> Vec<String> {
+        parsed_titles
+            .iter()
+            .filter(|parsed| !self.names_only_the_franchise(&loose_words(parsed)))
+            .cloned()
+            .collect()
+    }
+
+    /// A name is the franchise rather than one of its cours when it is the
+    /// series' canonical name or a leading run of its words (`Lantern Verge`
+    /// inside `Lantern Verge Mein Star`), or when it is the stem every cour's
+    /// title grows from. The stem rule covers a canonical name in a
+    /// language the bridge does not carry at all, where nothing else ties
+    /// the bare franchise name back to the series.
+    ///
+    /// Direction matters: `Lantern Verge 2` is not inside `Lantern Verge`, so
+    /// a genuine cour name still distinguishes.
+    fn names_only_the_franchise(&self, words: &[String]) -> bool {
+        if words.is_empty() {
+            return true;
+        }
+        let compact = words.concat();
+        if (1..=self.canonical.len()).any(|end| self.canonical[..end].concat() == compact) {
+            return true;
+        }
+        let extends = |title: &Vec<String>| title.len() > words.len() && title.starts_with(words);
+        let equals = |title: &Vec<String>| title.concat() == compact;
+        self.cours.len() > 1
+            && self.cours.iter().any(|titles| titles.iter().any(extends))
+            && self
+                .cours
+                .iter()
+                .all(|titles| titles.iter().any(|title| extends(title) || equals(title)))
+    }
+
+    /// Whether this cour is catalogued under the series' own name.
+    fn cour_answers_to_series(&self, season: &AnimeCommunitySeason) -> bool {
+        let canonical = self.canonical.concat();
+        !canonical.is_empty()
+            && season
+                .titles
+                .iter()
+                .any(|title| loose_words(title).concat() == canonical)
+    }
+
+    /// Whether a cour title and a parsed name are the same name.
+    fn same_name(left: &str, right: &str) -> bool {
+        let left = loose_words(left).concat();
+        !left.is_empty() && left == loose_words(right).concat()
+    }
+}
+
+fn loose_words(value: &str) -> Vec<String> {
+    scryer_domain::title_spelling::title_identity_loose_form(value)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Return the only community cour whose own title the parsed release names
@@ -865,37 +975,27 @@ fn exact_cour_title_matches<'a>(
     bridge: &'a AnimeNumberingBridge,
     parsed_title_variants: &[String],
 ) -> Vec<&'a AnimeCommunitySeason> {
-    let parsed_titles = normalized_parsed_titles(parsed_title_variants);
-    if parsed_titles.is_empty() {
-        return Vec::new();
-    }
-    let canonical = crate::app_usecase_rss::normalize_for_matching(canonical_title);
-    let distinguishing = parsed_titles
-        .iter()
-        .filter(|parsed| **parsed != canonical)
-        .collect::<Vec<_>>();
+    let franchise = FranchiseNames::new(canonical_title, bridge);
+    let distinguishing =
+        franchise.distinguishing_titles(&normalized_parsed_titles(parsed_title_variants));
     if distinguishing.is_empty() {
         return Vec::new();
     }
 
-    let mut matched = Vec::new();
-    for season in &bridge.seasons {
-        let season_titles = season
-            .titles
-            .iter()
-            .map(|title| crate::app_usecase_rss::normalize_for_matching(title))
-            .filter(|title| !title.is_empty())
-            .collect::<Vec<_>>();
-        if season_titles.contains(&canonical)
-            || !season_titles
-                .iter()
-                .any(|season_title| distinguishing.contains(&season_title))
-        {
-            continue;
-        }
-        matched.push(season);
-    }
-    matched
+    // Names are compared loosely, so two cours whose titles differ only by
+    // punctuation both match and the name stays ambiguous.
+    bridge
+        .seasons
+        .iter()
+        .filter(|season| !franchise.cour_answers_to_series(season))
+        .filter(|season| {
+            season.titles.iter().any(|season_title| {
+                distinguishing
+                    .iter()
+                    .any(|parsed| FranchiseNames::same_name(season_title, parsed))
+            })
+        })
+        .collect()
 }
 
 /// The refusal an ambiguous cour name produces. The colliding cours are
