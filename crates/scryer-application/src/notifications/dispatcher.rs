@@ -1065,7 +1065,7 @@ fn file_payload(updates: &[MediaPathUpdate]) -> Option<NotificationFilePayload> 
     }
 
     Some(NotificationFilePayload {
-        primary_path: updates.first().map(|update| update.path.clone()),
+        primary_path: primary_file_path(updates),
         media_updates: updates
             .iter()
             .map(|update| NotificationMediaUpdatePayload {
@@ -1078,6 +1078,18 @@ fn file_payload(updates: &[MediaPathUpdate]) -> Option<NotificationFilePayload> 
             })
             .collect(),
     })
+}
+
+/// The path the notification is about, which is the file that now exists. A rename reports the old
+/// path first (deleted) and the new one second, so `first` would point plugins at a file that is
+/// already gone. Deletions and upgrade cleanups have no created update and keep reporting the first
+/// path.
+fn primary_file_path(updates: &[MediaPathUpdate]) -> Option<String> {
+    updates
+        .iter()
+        .find(|update| update.update_type == MediaUpdateType::Created)
+        .or_else(|| updates.first())
+        .map(|update| update.path.clone())
 }
 
 async fn enrich_notification(
@@ -1901,6 +1913,89 @@ mod tests {
         assert_eq!(
             resolve_severity(&submitted),
             NotificationSeverityPayload::Error
+        );
+    }
+
+    fn path_update(path: &str, update_type: MediaUpdateType) -> MediaPathUpdate {
+        MediaPathUpdate {
+            path: path.to_string(),
+            update_type,
+        }
+    }
+
+    fn primary_path_of(updates: &[MediaPathUpdate]) -> Option<String> {
+        file_payload(updates).and_then(|payload| payload.primary_path)
+    }
+
+    /// A rename reports the old path first and the new one second (library/rename.rs), so taking the
+    /// first update would hand plugins the path of a file that no longer exists.
+    #[test]
+    fn a_renames_primary_path_is_the_surviving_file() {
+        let old = path_update("/library/Old/movie.mkv", MediaUpdateType::Deleted);
+        let new = path_update("/library/New/movie.mkv", MediaUpdateType::Created);
+
+        assert_eq!(
+            primary_path_of(&[old.clone(), new.clone()]),
+            Some(new.path.clone())
+        );
+        assert_eq!(
+            primary_path_of(&[new.clone(), old]),
+            Some(new.path.clone()),
+            "the created path wins whatever order the producer reported"
+        );
+    }
+
+    /// A rename must keep reporting both paths; only the primary path changes meaning.
+    #[test]
+    fn a_rename_still_reports_every_path_in_order() {
+        let payload = file_payload(&[
+            path_update("/library/Old/movie.mkv", MediaUpdateType::Deleted),
+            path_update("/library/New/movie.mkv", MediaUpdateType::Created),
+        ])
+        .expect("two updates should produce a file section");
+
+        assert_eq!(
+            payload.primary_path.as_deref(),
+            Some("/library/New/movie.mkv")
+        );
+        assert_eq!(
+            payload
+                .media_updates
+                .iter()
+                .map(|update| update.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/library/Old/movie.mkv", "/library/New/movie.mkv"]
+        );
+    }
+
+    /// Events without a created update — import, upgrade, delete — keep reporting the first path.
+    #[test]
+    fn a_primary_path_falls_back_to_the_first_update() {
+        for update_type in [
+            MediaUpdateType::Created,
+            MediaUpdateType::Modified,
+            MediaUpdateType::Deleted,
+        ] {
+            assert_eq!(
+                primary_path_of(&[path_update("/library/movie.mkv", update_type)]),
+                Some("/library/movie.mkv".to_string()),
+                "single {update_type:?} update should be the primary path"
+            );
+        }
+
+        assert_eq!(
+            primary_path_of(&[
+                path_update("/library/one.mkv", MediaUpdateType::Deleted),
+                path_update("/library/two.mkv", MediaUpdateType::Deleted),
+            ]),
+            Some("/library/one.mkv".to_string()),
+            "with no created update the first path still wins"
+        );
+
+        assert_eq!(
+            primary_path_of(&[]),
+            None,
+            "no updates means no file section"
         );
     }
 
