@@ -1030,6 +1030,7 @@ async fn identical_metadata_identity_is_isolated_by_library_title() {
         .expect("second library title should insert");
 
     let tag_a = scryer_domain::CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:genre:library-a".to_string(),
         category: "genre".to_string(),
         name: "Library A".to_string(),
@@ -1294,6 +1295,7 @@ async fn full_empty_title_tags_clear_while_partial_updates_preserve() {
         .expect("title should insert");
 
     let tag = scryer_domain::CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:genre:test-preserve".to_string(),
         category: "genre".to_string(),
         name: "Test Preserve".to_string(),
@@ -3106,6 +3108,7 @@ async fn bulk_title_reads_hydrate_canonical_tags_only_when_the_projection_asks()
         .expect("title should insert");
 
     let tag = scryer_domain::CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:genre:projection".to_string(),
         category: "genre".to_string(),
         name: "Projection".to_string(),

@@ -92,6 +92,7 @@ pub(super) fn discovery_item_record(
         overview: non_empty_string(&item.overview),
         content_type: non_empty_string(&item.content_type),
         canonical_tags: discovery_canonical_tags(item),
+        affinity_signals: item.affinity_signals.clone(),
         is_adult: item.is_adult,
         content_ratings: item.content_ratings.clone(),
         rating: item.rating,

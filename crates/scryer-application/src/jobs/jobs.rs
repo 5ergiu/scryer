@@ -1561,6 +1561,9 @@ impl AppUseCase {
             .await?
             .unwrap_or_default();
         state.next_public_feed_eligible_at = Some(now);
+        state.next_context_snapshot_eligible_at = Some(now);
+        state.dirty_since = Some(now);
+        state.dirty_reason_mask |= 1;
         state.updated_at = now;
         self.services
             .library
@@ -2175,6 +2178,11 @@ impl AppUseCase {
             language: self.metadata_language().await,
             ..DiscoveryContextDefaults::default()
         };
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&defaults.language, now)
+            .await?;
         let existing_state = self
             .services
             .library
@@ -3034,6 +3042,12 @@ impl AppUseCase {
     ) -> AppResult<DiscoveryContextSnapshotRunSummary> {
         let mut resumed_run = None;
         if let Some(run_id) = state.inflight_context_snapshot_run_id.clone() {
+            let presentation_current = self
+                .services
+                .library
+                .discovery
+                .discovery_run_matches_presentation(&run_id)
+                .await?;
             match self
                 .services
                 .library
@@ -3041,7 +3055,13 @@ impl AppUseCase {
                 .get_discovery_sync_run(&run_id)
                 .await?
             {
-                Some(run) if run.smg_request_id.is_some() => {
+                Some(run)
+                    if presentation_current
+                        && run.smg_request_id.is_some()
+                        && crate::normalize_metadata_language_code(&run.language).as_deref()
+                            == Some(defaults.language.as_str())
+                        && run.region == defaults.region =>
+                {
                     resumed_run = Some(run);
                 }
                 _ => {

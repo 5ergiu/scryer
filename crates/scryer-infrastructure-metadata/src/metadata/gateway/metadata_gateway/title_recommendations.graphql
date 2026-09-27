@@ -56,7 +56,8 @@ query TitleRecommendations(
         is_adult
         is_spoiler
       }
-      canonical_tags {
+      affinity_signals { affinity_key category tier signal_class confidence sources source_tag_keys }
+  canonical_tags {
         key
         category
         name

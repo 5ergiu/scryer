@@ -6041,6 +6041,8 @@ fn genres_from_gateway(genres: Vec<String>) -> Vec<String> {
 
 #[derive(Clone, Debug, Deserialize)]
 struct CanonicalTagItem {
+    #[serde(default)]
+    affinity_signals: Vec<scryer_domain::CanonicalMediaAffinitySignal>,
     key: String,
     category: String,
     name: String,
@@ -6133,6 +6135,7 @@ fn canonical_tags_from_gateway(items: Vec<CanonicalTagItem>) -> Vec<CanonicalMed
             }
 
             Some(CanonicalMediaTag {
+                affinity_signals: item.affinity_signals,
                 key: key.to_string(),
                 category: category.to_string(),
                 name: name.to_string(),

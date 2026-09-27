@@ -1489,6 +1489,7 @@ mod tests {
 
     fn canonical_genre_tag(key: &str, name: &str) -> CanonicalMediaTag {
         CanonicalMediaTag {
+            affinity_signals: Vec::new(),
             key: format!("canonical:genre:{key}"),
             category: "genre".to_string(),
             name: name.to_string(),

@@ -582,6 +582,8 @@ pub struct DiscoveryItemLibraryProvenanceRecord {
     pub library_id: Option<String>,
 }
 
+pub type DiscoveryAffinitySignalRecord = scryer_domain::CanonicalMediaAffinitySignal;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct DiscoveryItemRecord {
     pub id: String,
@@ -604,6 +606,8 @@ pub struct DiscoveryItemRecord {
     pub overview: Option<String>,
     pub content_type: Option<String>,
     pub canonical_tags: Vec<CanonicalMediaTag>,
+    #[serde(default)]
+    pub affinity_signals: Vec<DiscoveryAffinitySignalRecord>,
     pub is_adult: bool,
     pub content_ratings: Vec<DiscoveryContentRating>,
     pub rating: Option<f64>,
@@ -696,6 +700,18 @@ pub trait DiscoveryRepository: Send + Sync {
         scope_key: &str,
     ) -> AppResult<Option<DiscoverySyncStateRecord>>;
     async fn upsert_discovery_sync_state(&self, state: &DiscoverySyncStateRecord) -> AppResult<()>;
+    /// Persist the selected presentation and invalidate both generations atomically.
+    async fn refresh_discovery_presentation(
+        &self,
+        _language: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+    async fn discovery_run_matches_presentation(&self, _run_id: &str) -> AppResult<bool> {
+        Ok(true)
+    }
+
     async fn try_acquire_discovery_sync_lease(
         &self,
         scope_key: &str,

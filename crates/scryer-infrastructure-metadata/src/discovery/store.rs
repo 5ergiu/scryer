@@ -126,6 +126,7 @@ const TITLE_COLUMNS: &[&str] = &[
     "content_type",
     "is_adult",
     "content_ratings_json",
+    "affinity_signals_json",
     "tmdb_collection_id",
     "tmdb_collection_name",
     "created_at",
@@ -204,6 +205,51 @@ impl DiscoveryRepository for DiscoveryStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn discovery_run_matches_presentation(&self, run_id: &str) -> AppResult<bool> {
+        let stale = SqlRuntime::fetch_optional(self.datastore.read_exec(),
+            "SELECT p.language FROM discovery_presentation_selection p JOIN discovery_sync_runs r ON r.id = {}
+             WHERE p.scope_key = 'default' AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
+            &[SqlArg::Text(run_id.to_string())]).await?;
+        Ok(stale.is_none())
+    }
+
+    async fn refresh_discovery_presentation(
+        &self,
+        language: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        let language = normalize_discovery_language(language);
+        SqlRuntime::run_in_transaction(&self.datastore, "refresh_discovery_presentation", move |tx| {
+            let language = language.clone();
+            Box::pin(async move {
+                if discovery_selected_language_tx(tx).await? != language {
+                    return Err(AppError::Repository("discovery_presentation_superseded".to_string()));
+                }
+                let changed = SqlRuntime::execute(SqlExec::Tx(tx),
+                    "INSERT INTO discovery_presentation_selection (scope_key, language, revision) VALUES ('default', {}, 1)
+                     ON CONFLICT(scope_key) DO UPDATE SET language = excluded.language,
+                     revision = discovery_presentation_selection.revision + 1
+                     WHERE discovery_presentation_selection.language <> excluded.language", &[SqlArg::Text(language)]).await?;
+                // Reconciliation is also called by every polling job. Invalidate
+                // once per persisted selection, preserving retry deadlines on
+                // subsequent calls even if a generation is absent or pending.
+                if changed == 0 {
+                    return Ok(());
+                }
+                SqlRuntime::execute(SqlExec::Tx(tx),
+                    "UPDATE discovery_sync_state SET next_context_snapshot_eligible_at = {}, next_public_feed_eligible_at = {},
+                     dirty_since = COALESCE(dirty_since, {}), dirty_reason_mask = dirty_reason_mask | 1
+                     WHERE scope_key = 'default' AND (
+                       NOT EXISTS (SELECT 1 FROM discovery_sync_runs r JOIN discovery_presentation_selection p ON p.scope_key = 'default'
+                         WHERE r.id = discovery_sync_state.last_success_generation_id AND r.presentation_revision = p.revision AND r.language = p.language)
+                       OR NOT EXISTS (SELECT 1 FROM discovery_sync_runs r JOIN discovery_presentation_selection p ON p.scope_key = 'default'
+                         WHERE r.id = discovery_sync_state.last_public_feed_generation_id AND r.presentation_revision = p.revision AND r.language = p.language))",
+                    &[SqlArg::Timestamp(now), SqlArg::Timestamp(now), SqlArg::Timestamp(now)]).await?;
+                Ok(())
+            })
+        }).await
     }
 
     async fn try_acquire_discovery_sync_lease(
@@ -341,11 +387,10 @@ impl DiscoveryRepository for DiscoveryStore {
     }
 
     async fn upsert_discovery_sync_run(&self, run: &DiscoverySyncRunRecord) -> AppResult<()> {
-        let columns = split_columns(DISCOVERY_SYNC_RUN_COLUMNS);
         SqlRuntime::execute_write(
             &self.datastore,
             "upsert_discovery_sync_run",
-            &upsert_sql("discovery_sync_runs", &columns, &["id"]),
+            &upsert_discovery_sync_run_sql(),
             sync_run_args(&self.datastore, run)?,
         )
         .await?;
@@ -369,6 +414,7 @@ impl DiscoveryRepository for DiscoveryStore {
                 let commit = std::sync::Arc::clone(&commit);
                 Box::pin(async move {
                     upsert_sync_run_tx(tx, &datastore, &commit.run).await?;
+                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     upsert_sync_state_tx(tx, &commit.state).await?;
                     delete_for_run_tx(tx, "discovery_submitted_subjects", &commit.run.id).await?;
                     delete_item_children_for_run_tx(tx, &commit.run.id).await?;
@@ -424,6 +470,7 @@ impl DiscoveryRepository for DiscoveryStore {
                 let commit = std::sync::Arc::clone(&commit);
                 Box::pin(async move {
                     upsert_sync_run_tx(tx, &datastore, &commit.run).await?;
+                    guard_discovery_presentation_tx(tx, &commit.run).await?;
                     upsert_sync_state_tx(tx, &commit.state).await?;
                     delete_item_children_for_run_tx(tx, &commit.run.id).await?;
                     delete_for_run_tx(tx, "discovery_items", &commit.run.id).await?;
@@ -474,6 +521,7 @@ impl DiscoveryRepository for DiscoveryStore {
                             error,
                         );
                     })?;
+                guard_discovery_presentation_tx(tx, &commit.run).await?;
                 upsert_sync_state_tx(tx, &commit.state)
                     .await
                     .inspect_err(|error| {
@@ -1696,6 +1744,7 @@ fn discovery_item_projection_with_presentation(
         format!("{title_alias}.content_type AS content_type"),
         format!("{title_alias}.is_adult AS is_adult"),
         format!("{title_alias}.content_ratings_json AS content_ratings_json"),
+        format!("{title_alias}.affinity_signals_json AS affinity_signals_json"),
         typed_null_rating_expression(datastore).to_string(),
         format!("{item_alias}.best_source AS best_source"),
         format!("{item_alias}.source_count AS source_count"),
@@ -1720,7 +1769,7 @@ fn discovery_item_projection_with_presentation(
 
 fn discovery_item_row_columns() -> String {
     format!(
-        "{}, is_adult, content_ratings_json, discovery_title_id",
+        "{}, is_adult, content_ratings_json, affinity_signals_json, discovery_title_id",
         ITEM_COLUMNS.join(", ")
     )
 }
@@ -1752,6 +1801,7 @@ fn title_more_like_this_projection(datastore: &StoreDatastore) -> String {
         "t.content_type AS content_type".to_string(),
         "t.is_adult AS is_adult".to_string(),
         "t.content_ratings_json AS content_ratings_json".to_string(),
+        "t.affinity_signals_json AS affinity_signals_json".to_string(),
         typed_null_rating_expression(datastore).to_string(),
         "title_more_like_this_items.best_source AS best_source".to_string(),
         "title_more_like_this_items.source_count AS source_count".to_string(),
@@ -1957,6 +2007,7 @@ fn merge_recommendation_item_from_normalized(
     fill_missing(&mut item.studio_slug, &normalized.studio_slug);
     item.is_adult |= normalized.is_adult;
     fill_empty(&mut item.canonical_tags, &normalized.canonical_tags);
+    fill_empty(&mut item.affinity_signals, &normalized.affinity_signals);
     fill_empty(&mut item.content_ratings, &normalized.content_ratings);
     fill_empty(&mut item.rating_sources, &normalized.rating_sources);
     fill_empty(&mut item.external_ratings, &normalized.external_ratings);
@@ -4029,6 +4080,7 @@ fn upsert_discovery_title_sql() -> String {
             ),
             is_adult = excluded.is_adult,
             content_ratings_json = excluded.content_ratings_json,
+            affinity_signals_json = excluded.affinity_signals_json,
             tmdb_collection_id = COALESCE(
                 NULLIF(excluded.tmdb_collection_id, ''),
                 discovery_titles.tmdb_collection_id
@@ -4082,6 +4134,59 @@ async fn upsert_sync_state_tx(
     Ok(())
 }
 
+fn upsert_discovery_sync_run_sql() -> String {
+    let columns = split_columns(DISCOVERY_SYNC_RUN_COLUMNS);
+    let updates = columns
+        .iter()
+        .filter(|column| **column != "id")
+        .map(|column| format!("{column} = excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO discovery_sync_runs ({DISCOVERY_SYNC_RUN_COLUMNS}, presentation_revision)
+        VALUES ({}, COALESCE((SELECT revision FROM discovery_presentation_selection WHERE scope_key = 'default'), 0))
+        ON CONFLICT(id) DO UPDATE SET {updates}", placeholders(columns.len()))
+}
+
+async fn discovery_selected_language_tx(tx: &mut SqlTx<'_>) -> AppResult<String> {
+    // Serialize with updates of the existing global metadata preference. This
+    // prevents a delayed refresh request from restoring an older selection.
+    SqlRuntime::execute(SqlExec::Tx(tx),
+        "UPDATE settings_values SET value_json = value_json WHERE scope = 'system' AND scope_id IS NULL
+         AND setting_definition_id IN (SELECT id FROM settings_definitions WHERE key_name = 'metadata_language' AND scope = 'system')", &[]).await?;
+    let row = SqlRuntime::fetch_optional(SqlExec::Tx(tx),
+        "SELECT CAST(v.value_json AS TEXT) AS value_json FROM settings_values v JOIN settings_definitions d ON d.id = v.setting_definition_id
+         WHERE d.key_name = 'metadata_language' AND v.scope = 'system' AND v.scope_id IS NULL ORDER BY v.updated_at DESC LIMIT 1", &[]).await?;
+    let language = row
+        .map(|row| row.text("value_json"))
+        .transpose()?
+        .and_then(|raw| serde_json::from_str::<String>(&raw).ok())
+        .unwrap_or_else(|| "eng".to_string());
+    Ok(normalize_discovery_language(&language))
+}
+
+async fn guard_discovery_presentation_tx(
+    tx: &mut SqlTx<'_>,
+    run: &DiscoverySyncRunRecord,
+) -> AppResult<()> {
+    if discovery_selected_language_tx(tx).await? != normalize_discovery_language(&run.language) {
+        return Err(AppError::Repository(
+            "discovery_presentation_superseded".to_string(),
+        ));
+    }
+    // A no-op write serializes selection changes with publication on both engines.
+    SqlRuntime::execute(SqlExec::Tx(tx), "UPDATE discovery_presentation_selection SET revision = revision WHERE scope_key = 'default'", &[]).await?;
+    let stale = SqlRuntime::fetch_optional(SqlExec::Tx(tx),
+        "SELECT p.language FROM discovery_presentation_selection p JOIN discovery_sync_runs r ON r.id = {}
+         WHERE p.scope_key = 'default' AND (p.language <> r.language OR p.revision <> r.presentation_revision)",
+        &[SqlArg::Text(run.id.clone())]).await?;
+    if stale.is_some() {
+        return Err(AppError::Repository(
+            "discovery_presentation_superseded".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn upsert_sync_run_tx(
     tx: &mut SqlTx<'_>,
     datastore: &StoreDatastore,
@@ -4089,11 +4194,7 @@ async fn upsert_sync_run_tx(
 ) -> AppResult<()> {
     SqlRuntime::execute(
         SqlExec::Tx(tx),
-        &upsert_sql(
-            "discovery_sync_runs",
-            &split_columns(DISCOVERY_SYNC_RUN_COLUMNS),
-            &["id"],
-        ),
+        &upsert_discovery_sync_run_sql(),
         &sync_run_args(datastore, run)?,
     )
     .await?;
@@ -4361,6 +4462,8 @@ fn item_from_row(row: &SqlRow) -> AppResult<DiscoveryItemRecord> {
         overview: row.opt_text("overview")?,
         content_type: row.opt_text("content_type")?,
         canonical_tags: Vec::new(),
+        affinity_signals: serde_json::from_str(&row.text("affinity_signals_json")?)
+            .map_err(repo_err)?,
         is_adult: row.bool("is_adult")?,
         content_ratings: discovery_content_ratings_from_json(&row.text("content_ratings_json")?)?,
         rating: row.opt_f64("rating")?,
@@ -5373,6 +5476,7 @@ fn title_args(
         SqlArg::OptText(item.content_type.clone()),
         SqlArg::Bool(item.is_adult),
         SqlArg::Text(content_ratings_json),
+        SqlArg::Text(serde_json::to_string(&item.affinity_signals).map_err(repo_err)?),
         SqlArg::OptText(item.tmdb_collection_id.clone()),
         SqlArg::OptText(item.tmdb_collection_name.clone()),
         SqlArg::Timestamp(item.created_at),
@@ -5791,6 +5895,7 @@ mod tests {
         labels
             .iter()
             .map(|label| CanonicalMediaTag {
+                affinity_signals: Vec::new(),
                 key: format!(
                     "canonical:genre:{}",
                     label.trim().to_ascii_lowercase().replace(' ', "_")
@@ -5968,6 +6073,7 @@ mod tests {
         first.poster_url = Some("https://example.com/poster-201.jpg".to_string());
         first.canonical_tags = canonical_genre_tags(&["Drama"]);
         first.canonical_tags.push(CanonicalMediaTag {
+            affinity_signals: Vec::new(),
             key: "canonical:theme:found-family".to_string(),
             category: "theme".to_string(),
             name: "Found Family".to_string(),
@@ -6056,6 +6162,7 @@ mod tests {
 
         let tags = vec![
             CanonicalMediaTag {
+                affinity_signals: Vec::new(),
                 key: "canonical:genre:drama".to_string(),
                 category: "genre".to_string(),
                 name: "Drama".to_string(),
@@ -6066,6 +6173,7 @@ mod tests {
                 is_spoiler: false,
             },
             CanonicalMediaTag {
+                affinity_signals: Vec::new(),
                 key: "canonical:theme:noir".to_string(),
                 category: "theme".to_string(),
                 name: "Noir".to_string(),
@@ -6841,6 +6949,7 @@ mod tests {
             item.resolved = true;
             item.display_title = "Typed Null Movie".to_string();
             item.sort_title = Some("Typed Null Movie".to_string());
+            item.poster_url = Some("https://example.test/typed-null.jpg".to_string());
             item.rating = None;
             item.external_ratings.clear();
             store.replace_discovery_items(run_id, &[item]).await?;
@@ -6858,10 +6967,10 @@ mod tests {
                     10,
                 )
                 .await?;
-            services.pool().close().await;
-
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].item.target_key, "tmdb:movie:1000");
+            exercise_discovery_presentation_and_evidence(&store).await?;
+            services.pool().close().await;
             Ok(())
         }
         .await;
@@ -6874,6 +6983,232 @@ mod tests {
             AppError::Repository(format!("failed to drop test schema: {error}"))
         })?;
         result
+    }
+
+    async fn exercise_discovery_presentation_and_evidence(store: &DiscoveryStore) -> AppResult<()> {
+        let now = Utc::now();
+        store
+            .upsert_discovery_sync_state(&DiscoverySyncStateRecord {
+                updated_at: now,
+                ..Default::default()
+            })
+            .await?;
+        store.refresh_discovery_presentation("eng", now).await?;
+        let old = discovery_prune_run("presentation-old", "public_feed", "complete", now);
+        store.upsert_discovery_sync_run(&old).await?;
+        let mut item = discovery_prune_item(&old.id, now);
+        item.affinity_signals = vec![scryer_application::DiscoveryAffinitySignalRecord {
+            affinity_key: "affinity:theme:friendship".to_string(),
+            category: "theme".to_string(),
+            tier: "strong".to_string(),
+            confidence: 0.95,
+            sources: vec!["anilist".to_string()],
+            ..Default::default()
+        }];
+        store
+            .replace_discovery_items(&old.id, &[item.clone()])
+            .await?;
+        let rows = SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            "SELECT affinity_signals_json FROM discovery_titles WHERE target_key = {}",
+            &[SqlArg::Text(item.target_key.clone())],
+        )
+        .await?;
+        assert_eq!(rows.len(), 1);
+        let signals: Vec<scryer_application::DiscoveryAffinitySignalRecord> =
+            serde_json::from_str(&rows[0].text("affinity_signals_json")?).map_err(repo_err)?;
+        assert_eq!(signals, item.affinity_signals);
+        let owned_tag = scryer_domain::CanonicalMediaTag {
+            key: "canonical:theme:friendship".into(),
+            category: "theme".into(),
+            name: "Friendship".into(),
+            affinity_signals: signals.clone(),
+            ..Default::default()
+        };
+        SqlRuntime::execute_write(&store.datastore, "owned-evidence-fixture",
+            "INSERT INTO titles (id, library_id, name, name_normalized, facet, root_folder_id, created_at)
+             VALUES ('owned-evidence', 'movie_default_library', 'Owned Evidence', 'owned evidence', 'movie', 'canonical_root_for_movie_default_library', {})",
+            vec![SqlArg::Timestamp(now)]).await?;
+        let written_tag = owned_tag.clone();
+        SqlRuntime::run_in_transaction(&store.datastore, "owned-evidence-write", move |tx| {
+            let tag = written_tag.clone();
+            Box::pin(async move {
+                crate::media::canonical_tags::replace_title_metadata_tags_tx(
+                    tx,
+                    "owned-evidence",
+                    &[tag],
+                )
+                .await
+            })
+        })
+        .await?;
+        let owned = crate::media::canonical_tags::load_title_metadata_tags(
+            store.datastore.read_exec(),
+            &["owned-evidence".into()],
+        )
+        .await?;
+        assert_eq!(owned.get("owned-evidence"), Some(&vec![owned_tag]));
+        let mut previous = store.get_discovery_sync_state("default").await?.unwrap();
+        previous.last_public_feed_generation_id = Some(old.id.clone());
+        store
+            .commit_discovery_public_feed(&DiscoveryPublicFeedCommit {
+                state: previous,
+                run: old.clone(),
+                sections: vec![],
+                items: vec![item],
+            })
+            .await?;
+        let mut scheduled = store.get_discovery_sync_state("default").await?.unwrap();
+        let retry = now + chrono::Duration::hours(2);
+        scheduled.next_public_feed_eligible_at = Some(retry);
+        scheduled.next_context_snapshot_eligible_at = Some(retry);
+        store.upsert_discovery_sync_state(&scheduled).await?;
+        store
+            .refresh_discovery_presentation("eng", now + chrono::Duration::minutes(5))
+            .await?;
+        let unchanged = store.get_discovery_sync_state("default").await?.unwrap();
+        assert_eq!(unchanged.next_public_feed_eligible_at, Some(retry));
+        assert_eq!(unchanged.next_context_snapshot_eligible_at, Some(retry));
+        // Persist the real global setting, then refresh. A delayed English
+        // request must not override the new French selection.
+        SqlRuntime::execute_write(&store.datastore,"fixture-language-definition",
+            "INSERT INTO settings_definitions(id,category,scope,key_name,data_type,default_value_json,created_at,updated_at)
+             VALUES('presentation-fixture','system','system','metadata_language','string','null',{}, {})
+             ON CONFLICT(category,scope,key_name) DO NOTHING",vec![SqlArg::Timestamp(now),SqlArg::Timestamp(now)]).await?;
+        SqlRuntime::execute_write(&store.datastore,"fixture-language-value",
+            "INSERT INTO settings_values(id,setting_definition_id,scope,value_json,source,created_at,updated_at)
+             SELECT 'presentation-fixture',id,'system','\"fra\"','test',{},{} FROM settings_definitions WHERE key_name='metadata_language' AND scope='system'",
+            vec![SqlArg::Timestamp(now),SqlArg::Timestamp(now)]).await?;
+        store.refresh_discovery_presentation("fra", now).await?;
+        let mut pending = store.get_discovery_sync_state("default").await?.unwrap();
+        assert_eq!(pending.next_public_feed_eligible_at, Some(now));
+        assert_eq!(pending.next_context_snapshot_eligible_at, Some(now));
+        pending.next_public_feed_eligible_at = Some(retry);
+        pending.next_context_snapshot_eligible_at = Some(retry);
+        store.upsert_discovery_sync_state(&pending).await?;
+        store
+            .refresh_discovery_presentation("fra", now + chrono::Duration::minutes(5))
+            .await?;
+        let pending = store.get_discovery_sync_state("default").await?.unwrap();
+        assert_eq!(pending.next_public_feed_eligible_at, Some(retry));
+        assert_eq!(pending.next_context_snapshot_eligible_at, Some(retry));
+        assert!(
+            store
+                .refresh_discovery_presentation("eng", now)
+                .await
+                .is_err()
+        );
+        assert!(!store.discovery_run_matches_presentation(&old.id).await?);
+        let state = store.get_discovery_sync_state("default").await?.unwrap();
+        assert_eq!(
+            state.last_public_feed_generation_id.as_deref(),
+            Some(old.id.as_str())
+        );
+        let restarted = DiscoveryStore::new(store.datastore.clone());
+        assert!(
+            !restarted
+                .discovery_run_matches_presentation(&old.id)
+                .await?
+        );
+        let stale = DiscoveryPublicFeedCommit {
+            state: state.clone(),
+            run: old.clone(),
+            sections: vec![],
+            items: vec![],
+        };
+        assert!(store.commit_discovery_public_feed(&stale).await.is_err());
+        let mut current =
+            discovery_prune_run("presentation-current", "public_feed", "complete", now);
+        current.language = "fra".to_string();
+        store.upsert_discovery_sync_run(&current).await?;
+        let mut complete_state = state;
+        complete_state.last_public_feed_generation_id = Some(current.id.clone());
+        store
+            .commit_discovery_public_feed(&DiscoveryPublicFeedCommit {
+                state: complete_state,
+                run: current.clone(),
+                sections: vec![],
+                items: vec![],
+            })
+            .await?;
+        assert!(store.commit_discovery_public_feed(&stale).await.is_err());
+        assert_eq!(
+            store
+                .get_discovery_sync_state("default")
+                .await?
+                .unwrap()
+                .last_public_feed_generation_id,
+            Some(current.id.clone())
+        );
+        // Returning to the old language does not resurrect an earlier revision.
+        SqlRuntime::execute_write(
+            &store.datastore,
+            "fixture-language-cycle",
+            "UPDATE settings_values SET value_json = '\"eng\"' WHERE id = 'presentation-fixture'",
+            vec![],
+        )
+        .await?;
+        restarted.refresh_discovery_presentation("eng", now).await?;
+        assert!(
+            !restarted
+                .discovery_run_matches_presentation(&old.id)
+                .await?
+        );
+        assert!(
+            restarted
+                .commit_discovery_public_feed(&stale)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            restarted
+                .get_discovery_sync_state("default")
+                .await?
+                .unwrap()
+                .last_public_feed_generation_id,
+            Some(current.id)
+        );
+        // Replay the actual additive migration over populated pre-evidence
+        // tables. This shared fixture executes for both datastore engines.
+        SqlRuntime::run_in_transaction(&store.datastore, "evidence-upgrade-fixture", |tx| {
+            Box::pin(async move {
+                for sql in [
+                    "ALTER TABLE discovery_titles DROP COLUMN affinity_signals_json",
+                    "ALTER TABLE title_metadata_tags DROP COLUMN affinity_signals_json",
+                    "ALTER TABLE discovery_title_metadata_tags DROP COLUMN affinity_signals_json",
+                    "ALTER TABLE discovery_sync_runs DROP COLUMN presentation_revision",
+                    "DROP TABLE discovery_presentation_selection",
+                    "UPDATE titles SET metadata_hydration_next_attempt_at = NULL WHERE id = 'owned-evidence'",
+                ] {
+                    SqlRuntime::execute(SqlExec::Tx(tx), sql, &[]).await?;
+                }
+                let sqlite = include_str!("../../../scryer/src/db/migrations/0262_discovery_affinity_evidence.sql");
+                let postgres = include_str!("../../../scryer/src/db/postgres/migrations/0262_discovery_affinity_evidence.sql");
+                assert_eq!(sqlite, postgres);
+                for sql in sqlite.split(';').map(str::trim).filter(|sql| !sql.is_empty()) {
+                    SqlRuntime::execute(SqlExec::Tx(tx), sql, &[]).await?;
+                }
+                let row = SqlRuntime::fetch_optional(SqlExec::Tx(tx),
+                    "SELECT metadata_hydration_next_attempt_at FROM titles WHERE id = 'owned-evidence'", &[]).await?.unwrap();
+                assert!(row.opt_timestamp("metadata_hydration_next_attempt_at")?.is_some());
+                Ok(())
+            })
+        }).await?;
+        let legacy = crate::media::canonical_tags::load_title_metadata_tags(
+            store.datastore.read_exec(),
+            &["owned-evidence".into()],
+        )
+        .await?;
+        assert!(legacy["owned-evidence"][0].affinity_signals.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_discovery_presentation_and_affinity_are_durable() -> AppResult<()> {
+        let db = std::env::temp_dir().join(format!("discovery_presentation_{}.db", Id::new().0));
+        let services = SqliteServices::new(db.to_string_lossy()).await?;
+        exercise_discovery_presentation_and_evidence(&DiscoveryStore::new(services.datastore()))
+            .await
     }
 
     #[tokio::test]
@@ -7164,6 +7499,7 @@ mod tests {
                         overview: Some("Rich canonical overview".to_string()),
                         content_type: Some(String::new()),
                         canonical_tags: canonical_genre_tags(&["Drama", "Drama"]),
+                        affinity_signals: Vec::new(),
                         is_adult: true,
                         content_ratings: vec![DiscoveryContentRating {
                             country: "US".to_string(),
@@ -7291,6 +7627,7 @@ mod tests {
                         overview: None,
                         content_type: Some("series".to_string()),
                         canonical_tags: canonical_genre_tags(&["Drama"]),
+                        affinity_signals: Vec::new(),
                         is_adult: false,
                         content_ratings: Vec::new(),
                         rating: None,
@@ -9119,6 +9456,7 @@ mod tests {
             overview: None,
             content_type: Some("movie".to_string()),
             canonical_tags: Vec::new(),
+            affinity_signals: Vec::new(),
             is_adult: false,
             content_ratings: Vec::new(),
             rating: None,

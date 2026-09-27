@@ -1339,7 +1339,7 @@ pub(super) fn discovery_library_affinity_profile_from_titles(
         // sourced from canonical genre tags.
         theme_labels: top_owned_title_labels(
             titles,
-            |title| canonical_tag_labels(&title.canonical_tags, "theme"),
+            |title| qualified_owned_theme_labels(&title.canonical_tags),
             DISCOVERY_RAIL_LADDER_LABELS,
             support_floor,
         ),

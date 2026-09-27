@@ -945,7 +945,22 @@ pub fn normalize_external_id_kind(kind: &str) -> Option<String> {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CanonicalMediaAffinitySignal {
+    pub affinity_key: String,
+    pub category: String,
+    pub tier: String,
+    pub signal_class: String,
+    pub confidence: f64,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub source_tag_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct CanonicalMediaTag {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affinity_signals: Vec<CanonicalMediaAffinitySignal>,
     pub key: String,
     pub category: String,
     pub name: String,

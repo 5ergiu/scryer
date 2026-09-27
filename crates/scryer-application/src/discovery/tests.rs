@@ -1060,6 +1060,18 @@ fn affinity_test_item(id: &str, content_type: &str, facet_terms: &[&str]) -> Dis
     // facet terms, because a facet term carries no provenance and the
     // corroboration gate needs some. Fixtures mirror that, and the tests that
     // are *about* corroboration override these tags to make their point.
+    item.affinity_signals = facet_terms
+        .iter()
+        .filter_map(|term| term.strip_prefix("canonical:theme:"))
+        .map(|key| crate::DiscoveryAffinitySignalRecord {
+            affinity_key: format!("affinity:theme:{key}"),
+            category: "theme".to_string(),
+            tier: "strong".to_string(),
+            confidence: 0.95,
+            sources: vec!["anilist".to_string()],
+            ..Default::default()
+        })
+        .collect();
     item.canonical_tags = facet_terms
         .iter()
         .filter_map(|term| canonical_discovery_facet_label(term, "genre"))
@@ -1327,6 +1339,7 @@ fn affinity_theme_labels_come_from_canonical_tags_not_from_the_user_tag_bag() {
     let mut bag_only = test_title("bag-only", "Bag Only", MediaFacet::Series, Vec::new());
     bag_only.tags = vec!["isekai".to_string(), "keep".to_string()];
     bag_only.canonical_tags = vec![CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:theme:slow-burn".to_string(),
         category: "theme".to_string(),
         name: "Slow Burn".to_string(),
@@ -1440,6 +1453,7 @@ fn anime_affinity_label_survives_the_generic_label_filter() {
 fn provider_genre_tag(name: &str) -> CanonicalMediaTag {
     let slug = name.to_ascii_lowercase();
     CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: format!("canonical:genre:{slug}"),
         category: "genre".to_string(),
         name: name.to_string(),
@@ -1456,6 +1470,7 @@ fn provider_genre_tag(name: &str) -> CanonicalMediaTag {
 fn community_tag_genre_tag(name: &str) -> CanonicalMediaTag {
     let slug = name.to_ascii_lowercase();
     CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: format!("canonical:genre:{slug}"),
         category: "genre".to_string(),
         name: name.to_string(),
@@ -2555,6 +2570,7 @@ fn test_discovery_item(
         overview: None,
         content_type: content_type.map(str::to_string),
         canonical_tags: vec![],
+        affinity_signals: Vec::new(),
         is_adult: false,
         content_ratings: Vec::new(),
         rating: None,
@@ -2609,4 +2625,90 @@ fn test_discovery_section(
         total_count: items.len() as i64,
         items,
     }
+}
+
+#[test]
+fn discovery_theme_requires_typed_strong_or_independent_evidence() {
+    let mut item = affinity_test_item("theme-evidence", "series", &["canonical:theme:friendship"]);
+    assert!(discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    item.affinity_signals[0].tier = "support".to_string();
+    assert!(!discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    item.affinity_signals[0].sources = vec!["tmdb".to_string(), "TMDB".to_string()];
+    assert!(!discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    item.affinity_signals[0].sources.push("anilist".to_string());
+    assert!(discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    item.affinity_signals[0].confidence = 0.89;
+    assert!(!discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    item.affinity_signals.clear();
+    assert!(!discovery_item_matches_affinity_label(
+        &item,
+        "Friendship",
+        "theme",
+        false
+    ));
+    assert!(
+        canonical_affinity_labels_for_profile(&[item], &["Friendship".to_string()], "theme")
+            .is_empty()
+    );
+}
+
+#[test]
+fn discovery_owned_themes_require_the_same_evidence_as_candidates() {
+    let mut title = test_title("owned-theme", "Owned Theme", MediaFacet::Movie, vec![]);
+    title.canonical_tags = vec![CanonicalMediaTag {
+        key: "canonical:theme:friendship".into(),
+        category: "theme".into(),
+        name: "Friendship".into(),
+        confidence: Some(0.95),
+        sources: vec!["tmdb".into()],
+        affinity_signals: vec![crate::DiscoveryAffinitySignalRecord {
+            affinity_key: "affinity:theme:friendship".into(),
+            category: "theme".into(),
+            tier: "support".into(),
+            confidence: 0.95,
+            sources: vec!["tmdb".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let profile = |title: &Title| {
+        discovery_library_affinity_profile_from_titles(&vec![title.clone(); 10], true)
+    };
+    assert!(profile(&title).theme_labels.is_empty());
+    title.canonical_tags[0].affinity_signals[0].tier = "strong".into();
+    assert_eq!(profile(&title).theme_labels, vec!["Friendship"]);
+    title.canonical_tags[0].affinity_signals[0].tier = "support".into();
+    title.canonical_tags[0].affinity_signals[0]
+        .sources
+        .push("anilist".into());
+    assert_eq!(profile(&title).theme_labels, vec!["Friendship"]);
+    title.canonical_tags[0].affinity_signals[0].confidence = 0.89;
+    assert!(profile(&title).theme_labels.is_empty());
+    title.canonical_tags[0].affinity_signals.clear();
+    assert!(profile(&title).theme_labels.is_empty());
 }

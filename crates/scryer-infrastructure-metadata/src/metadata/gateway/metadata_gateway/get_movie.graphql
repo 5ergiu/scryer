@@ -54,6 +54,7 @@ query GetMovie($tvdbId: Int!, $language: String!) {
         claim_side
       }
       canonical_tags {
+    affinity_signals { affinity_key category tier signal_class confidence sources source_tag_keys }
         key
         category
         name

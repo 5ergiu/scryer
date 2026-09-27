@@ -130,8 +130,8 @@ async fn replace_metadata_tags_tx(
         tx.execute(
             &format!(
                 "INSERT INTO {} (
-                    {}, tag_key, category, name, confidence, is_adult, is_spoiler, sort_index
-                ) VALUES ({{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}})",
+                    {}, tag_key, category, name, confidence, is_adult, is_spoiler, sort_index, affinity_signals_json
+                ) VALUES ({{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}})",
                 tables.tags, tables.owner_column
             ),
             &[
@@ -143,6 +143,7 @@ async fn replace_metadata_tags_tx(
                 SqlArg::Bool(tag.is_adult),
                 SqlArg::Bool(tag.is_spoiler),
                 SqlArg::I32(sort_index as i32),
+                SqlArg::Text(serde_json::to_string(&tag.affinity_signals).map_err(|error| scryer_application::AppError::Repository(error.to_string()))?),
             ],
         )
         .await?;
@@ -257,6 +258,7 @@ async fn load_metadata_tags(
             t.category AS category,
             t.name AS name,
             t.confidence AS confidence,
+            t.affinity_signals_json AS affinity_signals_json,
             t.is_adult AS is_adult,
             t.is_spoiler AS is_spoiler,
             ts.source AS source,
@@ -590,6 +592,10 @@ fn rows_to_tags_by_owner(
             owner_tags.tags.insert(
                 tag_key.clone(),
                 CanonicalMediaTag {
+                    affinity_signals: serde_json::from_str(&row.text("affinity_signals_json")?)
+                        .map_err(|error| {
+                            scryer_application::AppError::Repository(error.to_string())
+                        })?,
                     key: tag_key.clone(),
                     category: row.text("category")?,
                     name: row.text("name")?,

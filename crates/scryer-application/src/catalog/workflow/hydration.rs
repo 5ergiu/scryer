@@ -2027,6 +2027,11 @@ impl AppUseCase {
             )
             .await?;
 
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&language, self.runtime.environment.now())
+            .await?;
         let cleared = self
             .services
             .catalog

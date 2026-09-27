@@ -50,6 +50,7 @@ fn canonical_genre_tags(labels: &[&str]) -> Vec<CanonicalMediaTag> {
         .map(|label| {
             let slug = label.to_ascii_lowercase().replace(' ', "-");
             CanonicalMediaTag {
+                affinity_signals: Vec::new(),
                 key: format!("canonical:genre:{slug}"),
                 category: "genre".to_string(),
                 name: (*label).to_string(),
@@ -141,6 +142,17 @@ fn rail_floor_padding_items(
                     .map(|theme| format!("canonical:theme:{}", theme.to_ascii_lowercase())),
             );
             item.matched_subject_keys = vec!["tmdb:movie:603".to_string()];
+            item.affinity_signals = themes
+                .iter()
+                .map(|theme| crate::DiscoveryAffinitySignalRecord {
+                    affinity_key: format!("affinity:theme:{}", theme.to_ascii_lowercase()),
+                    category: "theme".to_string(),
+                    tier: "strong".to_string(),
+                    confidence: 0.95,
+                    sources: vec!["mal".to_string()],
+                    ..Default::default()
+                })
+                .collect();
             item
         })
         .collect()
@@ -150,6 +162,17 @@ fn canonical_theme_tags(labels: &[&str]) -> Vec<CanonicalMediaTag> {
     labels
         .iter()
         .map(|label| CanonicalMediaTag {
+            affinity_signals: vec![crate::DiscoveryAffinitySignalRecord {
+                affinity_key: format!(
+                    "affinity:theme:{}",
+                    label.to_ascii_lowercase().replace(' ', "-")
+                ),
+                category: "theme".to_string(),
+                tier: "strong".to_string(),
+                confidence: 1.0,
+                sources: vec!["anilist".to_string()],
+                ..Default::default()
+            }],
             key: format!(
                 "canonical:theme:{}",
                 label.to_ascii_lowercase().replace(' ', "-")
@@ -591,6 +614,15 @@ async fn discovery_home_and_items_use_local_rows_and_library_view_rbac() {
         true,
     );
     isekai_item.matched_subject_keys = linked_subject_keys.clone();
+    isekai_item.affinity_signals = vec![crate::DiscoveryAffinitySignalRecord {
+        affinity_key: "affinity:theme:isekai".to_string(),
+        category: "theme".to_string(),
+        tier: "strong".to_string(),
+        confidence: 0.95,
+        sources: vec!["mal".to_string()],
+        ..Default::default()
+    }];
+
     isekai_item
         .facet_terms
         .push("canonical:theme:isekai".to_string());
@@ -2847,7 +2879,7 @@ async fn metadata_language_change_refreshes_public_discovery_feed() {
     *discovery.state.lock().await = Some(DiscoverySyncStateRecord {
         last_success_generation_id: Some("snapshot-old".to_string()),
         last_public_feed_generation_id: Some("public-old".to_string()),
-        next_context_snapshot_eligible_at: Some(now - chrono::Duration::minutes(1)),
+        next_context_snapshot_eligible_at: Some(now + chrono::Duration::hours(24)),
         next_incremental_reload_eligible_at: Some(now + chrono::Duration::hours(4)),
         next_public_feed_eligible_at: Some(now + chrono::Duration::hours(24)),
         updated_at: now,
@@ -4907,6 +4939,7 @@ async fn discovery_sync_snapshot_dirty_clear_requires_inflight_fingerprint_match
         ..DiscoverySyncStateRecord::default()
     });
     let mut run = discovery_run_record("run-inflight", now, "deferred");
+    run.language = "eng".to_string();
     run.smg_request_id = Some("request-1".to_string());
     run.subject_fingerprint = Some("fingerprint-stale".to_string());
     run.completed_at = None;
@@ -7083,6 +7116,7 @@ fn discovery_item_record(
         overview: None,
         content_type: Some(target_kind.to_string()),
         canonical_tags: canonical_genre_tags(genre_labels),
+        affinity_signals: Vec::new(),
         is_adult: false,
         content_ratings: Vec::new(),
         rating: Some(7.5),
@@ -7298,6 +7332,7 @@ fn test_discovery_title() -> DiscoveryTitle {
         background_url: String::new(),
         source_tags: Vec::new(),
         canonical_tags: Vec::new(),
+        affinity_signals: Vec::new(),
         is_adult: false,
         content_ratings: Vec::new(),
         sources: vec!["popular".to_string()],
