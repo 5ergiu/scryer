@@ -812,6 +812,7 @@ fn build_post_processing_completed_notification(
         &[],
         &[],
     );
+    payload.severity = Some(post_processing_severity(data.result));
     payload.import = Some(NotificationImportPayload {
         status: Some(
             match data.result {
@@ -824,6 +825,16 @@ fn build_post_processing_completed_notification(
         ..Default::default()
     });
     BuiltNotification { payload }
+}
+
+/// A script that timed out or failed is not routine news, and the event type alone cannot say which
+/// one happened.
+fn post_processing_severity(result: PostProcessingResult) -> NotificationSeverityPayload {
+    match result {
+        PostProcessingResult::Succeeded => NotificationSeverityPayload::Info,
+        PostProcessingResult::TimedOut => NotificationSeverityPayload::Warning,
+        PostProcessingResult::Failed => NotificationSeverityPayload::Error,
+    }
 }
 
 fn build_subtitle_downloaded_notification(data: &SubtitleDownloadedEventData) -> BuiltNotification {
@@ -1085,7 +1096,7 @@ async fn enrich_notification(
             .map(|user_id| NotificationActorPayload {
                 user_id: Some(user_id.clone()),
             });
-    notification.payload.severity = Some(notification_severity(notification.payload.event_type));
+    notification.payload.severity = Some(resolve_severity(&notification.payload));
     notification.payload.is_test =
         matches!(notification.payload.event_type, NotificationEventType::Test);
 
@@ -1108,6 +1119,14 @@ async fn enrich_notification(
     enrich_release_from_media_files(&mut notification.payload);
 
     notification
+}
+
+/// A builder that knows more than the event type — a post-processing result, say — may set severity
+/// itself. An explicit value wins; otherwise severity stays a pure function of the event type.
+fn resolve_severity(payload: &NotificationPayload) -> NotificationSeverityPayload {
+    payload
+        .severity
+        .unwrap_or_else(|| notification_severity(payload.event_type))
 }
 
 fn notification_severity(event_type: NotificationEventType) -> NotificationSeverityPayload {
@@ -1778,6 +1797,111 @@ mod tests {
             None,
             Some("anime")
         ));
+    }
+
+    fn post_processing_event(result: PostProcessingResult) -> DomainEvent {
+        DomainEvent {
+            sequence: 12,
+            event_id: "evt-post-processing".to_string(),
+            occurred_at: Utc::now(),
+            actor_kind: DomainEventActorKind::System,
+            actor_user_id: None,
+            actor_display_name: "System".to_string(),
+            title_id: Some("title-1".to_string()),
+            facet: Some(MediaFacet::Movie),
+            correlation_id: None,
+            causation_id: None,
+            schema_version: 1,
+            stream: scryer_domain::DomainEventStream::Global,
+            payload: DomainEventPayload::PostProcessingCompleted(
+                PostProcessingCompletedEventData {
+                    title: title_context("Post Processed Movie", MediaFacet::Movie),
+                    script_name: "notify.sh".to_string(),
+                    result,
+                    exit_code: Some(1),
+                },
+            ),
+        }
+    }
+
+    /// A script that failed used to be announced with the same severity as one that succeeded,
+    /// because severity was derived from the event type alone.
+    #[test]
+    fn post_processing_severity_follows_the_script_result() {
+        for (result, expected) in [
+            (
+                PostProcessingResult::Succeeded,
+                NotificationSeverityPayload::Info,
+            ),
+            (
+                PostProcessingResult::TimedOut,
+                NotificationSeverityPayload::Warning,
+            ),
+            (
+                PostProcessingResult::Failed,
+                NotificationSeverityPayload::Error,
+            ),
+        ] {
+            let built = build_notification(&post_processing_event(result))
+                .expect("post-processing payload should build a notification");
+            assert_eq!(
+                resolve_severity(&built.payload),
+                expected,
+                "post-processing result {result:?} was announced as the wrong severity"
+            );
+        }
+    }
+
+    /// Only a builder that knows more than the event type may set a severity. Everything else stays
+    /// unset, so `resolve_severity` keeps deriving it from the event type.
+    #[test]
+    fn only_the_post_processing_builder_sets_an_explicit_severity() {
+        for event in notification_sample_events() {
+            let built = build_notification(&event).expect("sample payload should build");
+            let is_post_processing =
+                built.payload.event_type == NotificationEventType::PostProcessingCompleted;
+            assert_eq!(
+                built.payload.severity.is_some(),
+                is_post_processing,
+                "unexpected explicit severity for {}",
+                built.payload.event_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_severity_prefers_an_explicit_value_and_falls_back_to_the_event_type() {
+        let mut payload = base_notification_payload(
+            NotificationEventType::PostProcessingCompleted,
+            "summary".to_string(),
+            "message".to_string(),
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            resolve_severity(&payload),
+            NotificationSeverityPayload::Info
+        );
+
+        payload.severity = Some(NotificationSeverityPayload::Error);
+        assert_eq!(
+            resolve_severity(&payload),
+            NotificationSeverityPayload::Error
+        );
+
+        let submitted = base_notification_payload(
+            NotificationEventType::SubtitleSearchFailed,
+            "summary".to_string(),
+            "message".to_string(),
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            resolve_severity(&submitted),
+            NotificationSeverityPayload::Error
+        );
     }
 
     fn notification_sample_events() -> Vec<DomainEvent> {
