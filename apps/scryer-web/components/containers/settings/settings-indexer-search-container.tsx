@@ -22,7 +22,11 @@ import {
   type InteractiveSearchKind,
 } from "@/lib/graphql/release-search";
 import type { IndexerRecord, Release } from "@/lib/types";
-import { earliestSearchExpiry, indexerSearchExpiresAt } from "@/lib/utils/indexer-search-expiry";
+import {
+  earliestSearchExpiry,
+  expireIndexerSearches,
+  indexerSearchExpiresAt,
+} from "@/lib/utils/indexer-search-expiry";
 import {
   downloadIndexerSearchArtifacts,
   type IndexerSearchArtifactTarget,
@@ -117,28 +121,65 @@ export function SettingsIndexerSearchContainer() {
   >(() => new Map());
 
   const searchAbortRef = React.useRef<AbortController | null>(null);
+  // The search the current controller is polling, once its first snapshot names it.
+  const activeSearchIdRef = React.useRef<string | null>(null);
   const deadlinesRef = React.useRef(new Map<string, number>());
+  // Mirrors searchIdByRowKey so expiry can prune rows synchronously.
+  const rowOwnersRef = React.useRef<ReadonlyMap<string, string>>(new Map());
   const [expiresAt, setExpiresAt] = React.useState<number | null>(null);
 
-  const expireResults = React.useCallback(() => {
-    const deadline = earliestSearchExpiry(deadlinesRef.current);
-    if (deadline === null || Date.now() < deadline) return false;
-    searchAbortRef.current?.abort();
-    searchAbortRef.current = null;
-    deadlinesRef.current.clear();
-    setExpiresAt(null);
-    setReleases([]);
-    setIndexers([]);
-    setSearchIdByRowKey(new Map());
-    setSelectedRowKeys([]);
-    setExpandedRowKey(null);
-    setGrabTargets(null);
-    setSelectedFacets([]);
-    setSizeRangeGiB(null);
-    setSearching(false);
-    setHasSearched(false);
-    return true;
+  const publishRowOwners = React.useCallback((next: ReadonlyMap<string, string>) => {
+    rowOwnersRef.current = next;
+    setSearchIdByRowKey(next);
   }, []);
+
+  // Each search expires on its own deadline; returns whether any did.
+  const expireResults = React.useCallback(() => {
+    const expiry = expireIndexerSearches({
+      deadlines: deadlinesRef.current,
+      rowOwners: rowOwnersRef.current,
+      activeSearchId: activeSearchIdRef.current,
+      now: Date.now(),
+    });
+    if (!expiry) return false;
+    deadlinesRef.current = expiry.deadlines;
+    if (expiry.activeExpired) {
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      activeSearchIdRef.current = null;
+      setSearching(false);
+    }
+    if (expiry.deadlines.size === 0 && searchAbortRef.current === null) {
+      setExpiresAt(null);
+      setReleases([]);
+      setIndexers([]);
+      publishRowOwners(new Map());
+      setSelectedRowKeys([]);
+      setExpandedRowKey(null);
+      setGrabTargets(null);
+      setSelectedFacets([]);
+      setSizeRangeGiB(null);
+      setSearching(false);
+      setHasSearched(false);
+      return true;
+    }
+    const { isRowLive } = expiry;
+    setExpiresAt(earliestSearchExpiry(expiry.deadlines));
+    setReleases((current) =>
+      current.filter((release) => isRowLive(indexerSearchRowKey(release))),
+    );
+    publishRowOwners(expiry.rowOwners);
+    setSelectedRowKeys((current) => current.filter(isRowLive));
+    setExpandedRowKey((current) =>
+      current !== null && isRowLive(current) ? current : null,
+    );
+    setGrabTargets((current) =>
+      current?.every((release) => isRowLive(indexerSearchRowKey(release)))
+        ? current
+        : null,
+    );
+    return true;
+  }, [publishRowOwners]);
 
   React.useEffect(() => {
     if (expiresAt === null) return;
@@ -208,15 +249,15 @@ export function SettingsIndexerSearchContainer() {
       }
       const isRetry = retryIndexerIds != null;
       if (isRetry && expireResults()) return;
-      const baseReleases = isRetry ? releases : [];
       const baseIndexers = isRetry ? indexers : [];
 
       searchAbortRef.current?.abort();
       const controller = new AbortController();
       searchAbortRef.current = controller;
+      activeSearchIdRef.current = null;
 
       if (!isRetry) {
-        deadlinesRef.current.clear();
+        deadlinesRef.current = new Map();
         setExpiresAt(null);
         setGrabTargets(null);
         setReleases([]);
@@ -225,7 +266,7 @@ export function SettingsIndexerSearchContainer() {
         setExpandedRowKey(null);
         setSelectedFacets([]);
         setSizeRangeGiB(null);
-        setSearchIdByRowKey(new Map());
+        publishRowOwners(new Map());
       }
       setHasSearched(true);
       setSearching(true);
@@ -250,21 +291,26 @@ export function SettingsIndexerSearchContainer() {
             signal: controller.signal,
             onUpdate: (snapshot) => {
               if (controller.signal.aborted || searchAbortRef.current !== controller) return;
-              if (expireResults()) return;
+              // Earlier searches may expire while this one runs; only this
+              // search's own deadline stops it.
+              expireResults();
+              if (controller.signal.aborted) return;
+              activeSearchIdRef.current = snapshot.searchId;
               deadlinesRef.current.set(snapshot.searchId, indexerSearchExpiresAt(snapshot));
-              if (expireResults()) return;
+              expireResults();
+              if (controller.signal.aborted) return;
               setExpiresAt(earliestSearchExpiry(deadlinesRef.current));
               setNowMs(Date.now());
-              setSearchIdByRowKey((current) => {
-                const next = new Map(current);
-                for (const release of snapshot.releases) {
-                  next.set(indexerSearchRowKey(release), snapshot.searchId);
-                }
-                return next;
-              });
-              setReleases(
+              const nextOwners = new Map(rowOwnersRef.current);
+              for (const release of snapshot.releases) {
+                nextOwners.set(indexerSearchRowKey(release), snapshot.searchId);
+              }
+              publishRowOwners(nextOwners);
+              // A retry merges into the rows still live, so rows of a search
+              // that expired meanwhile do not come back.
+              setReleases((current) =>
                 isRetry
-                  ? mergeIndexerSearchReleases(baseReleases, snapshot.releases)
+                  ? mergeIndexerSearchReleases(current, snapshot.releases)
                   : snapshot.releases,
               );
               setIndexers(
@@ -282,6 +328,7 @@ export function SettingsIndexerSearchContainer() {
       } finally {
         if (searchAbortRef.current === controller) {
           searchAbortRef.current = null;
+          activeSearchIdRef.current = null;
           setSearching(false);
         }
       }
@@ -293,8 +340,8 @@ export function SettingsIndexerSearchContainer() {
       expireResults,
       indexers,
       kind,
+      publishRowOwners,
       query,
-      releases,
       selectedIndexerIds,
       setGlobalStatus,
       t,
@@ -308,6 +355,7 @@ export function SettingsIndexerSearchContainer() {
   const handleCancelSearch = React.useCallback(() => {
     searchAbortRef.current?.abort();
     searchAbortRef.current = null;
+    activeSearchIdRef.current = null;
     setSearching(false);
   }, []);
 
