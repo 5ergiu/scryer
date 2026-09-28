@@ -41,6 +41,9 @@ pub struct LeaveReport {
     pub guarded: u64,
     /// Rows whose action failed; left unhandled and retried next sync.
     pub failed: u64,
+    /// Rows whose title was no longer in the library; marked handled with
+    /// nothing to act on.
+    pub gone: u64,
 }
 
 /// Run the on-leave action for every departed, not-yet-handled row of the
@@ -111,6 +114,14 @@ pub async fn handle_departures(
                 report.acted += 1;
                 handled.push(row.item_key);
             }
+            // A title that is no longer in the library has nothing left to
+            // unmonitor, tag or record against, so the departure is done;
+            // retrying it would fail the same way on every sync. Nothing is
+            // removed here: the title was already gone.
+            Err(_) if !title_still_exists(actions, &title_id).await => {
+                report.gone += 1;
+                handled.push(row.item_key);
+            }
             Err(_) => report.failed += 1,
         }
     }
@@ -121,6 +132,13 @@ pub async fn handle_departures(
             .await?;
     }
     Ok(report)
+}
+
+/// Whether a title whose on-leave action failed is still in the library. A
+/// lookup that fails counts as present, so the departure stays owed and is
+/// retried rather than written off on a passing storage error.
+async fn title_still_exists(actions: &dyn ListActions, title_id: &str) -> bool {
+    actions.title_exists(title_id).await.unwrap_or(true)
 }
 
 /// The title a departed row's on-leave action would touch: only a title this

@@ -197,6 +197,91 @@ fn a_settled_request_is_kept_but_a_departed_one_is_decided_again() {
     assert_eq!(decisions(&returned), vec![ItemDecision::Candidate]);
 }
 
+fn synced_subscription() -> ListSubscription {
+    let mut subscription = subscription("list-a");
+    subscription.sync.last_at = Some(at(10));
+    subscription
+}
+
+fn refused(reason: &str) -> ListMembership {
+    let mut row = membership("list-a", "alpha", ListMembershipState::Rejected);
+    row.state_reason = Some(reason.to_string());
+    row
+}
+
+#[test]
+fn a_refused_add_is_kept_while_nothing_that_could_lift_it_changed() {
+    for reason in ["rejected", "not_found"] {
+        let evaluated = evaluate(
+            &synced_subscription(),
+            vec![resolved_item("alpha")],
+            &[],
+            &existing(vec![refused(reason)]),
+        );
+        assert_eq!(
+            decisions(&evaluated),
+            vec![ItemDecision::Keep {
+                state: ListMembershipState::Rejected
+            }],
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_add_is_tried_again_once_the_item_resolves_differently() {
+    let mut item = resolved_item("alpha");
+    item.external_ids.push(tmdb("alpha-new-id"));
+    let evaluated = evaluate(
+        &synced_subscription(),
+        vec![item],
+        &[],
+        &existing(vec![refused("not_found")]),
+    );
+    assert_eq!(decisions(&evaluated), vec![ItemDecision::Candidate]);
+
+    let mut item = resolved_item("alpha");
+    item.smg_title_id = Some(7);
+    let evaluated = evaluate(
+        &synced_subscription(),
+        vec![item],
+        &[],
+        &existing(vec![refused("rejected")]),
+    );
+    assert_eq!(decisions(&evaluated), vec![ItemDecision::Candidate]);
+}
+
+#[test]
+fn a_refused_add_is_tried_again_after_the_list_is_edited() {
+    let mut edited = synced_subscription();
+    edited.updated_at = at(15);
+    let evaluated = evaluate(
+        &edited,
+        vec![resolved_item("alpha")],
+        &[],
+        &existing(vec![refused("rejected")]),
+    );
+    assert_eq!(decisions(&evaluated), vec![ItemDecision::Candidate]);
+}
+
+#[test]
+fn a_request_a_reviewer_rejected_stays_rejected_after_an_edit() {
+    let mut edited = synced_subscription();
+    edited.updated_at = at(15);
+    let evaluated = evaluate(
+        &edited,
+        vec![resolved_item("alpha")],
+        &[],
+        &existing(vec![refused("request_rejected")]),
+    );
+    assert_eq!(
+        decisions(&evaluated),
+        vec![ItemDecision::Keep {
+            state: ListMembershipState::Rejected
+        }]
+    );
+}
+
 #[test]
 fn a_pending_item_is_a_candidate_again() {
     let previous = existing(vec![membership(

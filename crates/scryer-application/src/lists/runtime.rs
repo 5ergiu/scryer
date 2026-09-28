@@ -228,6 +228,17 @@ impl ListActions for AppListActions<'_> {
             .map(|_| ())
     }
 
+    async fn title_exists(&self, title_id: &str) -> AppResult<bool> {
+        Ok(self
+            .app
+            .services
+            .catalog
+            .titles
+            .get_by_id(title_id)
+            .await?
+            .is_some())
+    }
+
     async fn record_departure(
         &self,
         subscription: &ListSubscription,

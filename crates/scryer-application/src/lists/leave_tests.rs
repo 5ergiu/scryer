@@ -205,6 +205,74 @@ async fn a_failed_action_stays_unhandled_and_is_retried() {
 }
 
 #[tokio::test]
+async fn a_departure_whose_title_is_gone_is_handled_and_not_retried() {
+    for on_leave in [ListOnLeave::Unmonitor, ListOnLeave::Tag] {
+        let mut list = subscription("list-a");
+        list.on_leave = on_leave;
+        let store = MemoryListStore::with_subscriptions(vec![list.clone()]);
+        store.insert_rows(vec![departed_added("list-a", "alpha")]);
+        let actions = RecordingActions::default();
+        actions
+            .missing_titles
+            .lock()
+            .unwrap()
+            .insert("title-alpha".to_string());
+
+        let first = handle_departures(&list, &store, &store, &actions)
+            .await
+            .expect("leave step");
+        assert_eq!(first.gone, 1, "{on_leave:?}");
+        assert_eq!(first.failed, 0, "{on_leave:?}");
+        assert_eq!(first.acted, 0, "{on_leave:?}");
+        assert!(store.row("list-a", "alpha").left_handled);
+        assert!(
+            !has_runnable_leave_action(&list, &store.rows("list-a"), &store, &store)
+                .await
+                .expect("guard check"),
+            "{on_leave:?}: nothing forces the list to be read again"
+        );
+
+        let second = handle_departures(&list, &store, &store, &actions)
+            .await
+            .expect("leave step");
+        assert_eq!(second.departed, 0, "{on_leave:?}");
+        assert_eq!(actions.calls().len(), 1, "{on_leave:?}: one attempt only");
+        assert_eq!(*actions.title_lookups.lock().unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_action_on_a_present_title_stays_owed() {
+    let mut list = subscription("list-a");
+    list.on_leave = ListOnLeave::Unmonitor;
+    let store = MemoryListStore::with_subscriptions(vec![list.clone()]);
+    store.insert_rows(vec![departed_added("list-a", "alpha")]);
+    let actions = RecordingActions {
+        fail_departures: std::sync::Mutex::new(1),
+        ..RecordingActions::default()
+    };
+
+    let first = handle_departures(&list, &store, &store, &actions)
+        .await
+        .expect("leave step");
+    assert_eq!(first.failed, 1);
+    assert_eq!(first.gone, 0);
+    assert_eq!(*actions.title_lookups.lock().unwrap(), 1);
+    assert!(!store.row("list-a", "alpha").left_handled);
+    assert!(
+        has_runnable_leave_action(&list, &store.rows("list-a"), &store, &store)
+            .await
+            .expect("guard check")
+    );
+
+    let second = handle_departures(&list, &store, &store, &actions)
+        .await
+        .expect("leave step");
+    assert_eq!(second.acted, 1);
+    assert!(store.row("list-a", "alpha").left_handled);
+}
+
+#[tokio::test]
 async fn log_records_the_departure_as_its_whole_action() {
     let mut list = subscription("list-a");
     list.on_leave = ListOnLeave::Log;
@@ -277,6 +345,10 @@ impl ListActions for FailingDepartureRecord {
 
     async fn tag_title(&self, title_id: &str, tag: &str) -> crate::AppResult<()> {
         self.0.tag_title(title_id, tag).await
+    }
+
+    async fn title_exists(&self, title_id: &str) -> crate::AppResult<bool> {
+        self.0.title_exists(title_id).await
     }
 
     async fn record_departure(

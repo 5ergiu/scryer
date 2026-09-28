@@ -26,7 +26,7 @@ use scryer_domain::{
 use serde::Serialize;
 
 use super::act::{ListActions, act_on_candidate};
-use super::evaluate::{ItemDecision, count_states, evaluate};
+use super::evaluate::{ItemDecision, count_states, edited_since_last_sync, evaluate};
 use super::fetch::{ListChartSource, ListFailure, ListFailureClass, fetch_list};
 use super::leave::{handle_departures, has_runnable_leave_action};
 use super::plugin::ListPluginProvider;
@@ -331,7 +331,13 @@ pub async fn sync_subscription(
                 row.state = ListMembershipState::InLibrary;
                 row.title_id = Some(title_id);
             }
-            ItemDecision::Keep { state } => row.state = state,
+            ItemDecision::Keep { state } => {
+                row.state = state;
+                // The reason belongs to the settled outcome and stays with
+                // it; evaluation reads it to tell a refused add from a
+                // rejected request.
+                row.state_reason = previous.and_then(|row| row.state_reason.clone());
+            }
             ItemDecision::Unresolved => row.state = ListMembershipState::Unresolved,
             ItemDecision::Deferred => row.state = ListMembershipState::Pending,
             ItemDecision::Candidate => {
@@ -443,11 +449,7 @@ async fn has_unfinished_work(
     context: &ListSyncContext<'_>,
     subscription: &ListSubscription,
 ) -> AppResult<bool> {
-    let edited = subscription
-        .sync
-        .last_at
-        .is_none_or(|last_at| subscription.updated_at > last_at);
-    if edited {
+    if edited_since_last_sync(subscription) {
         return Ok(true);
     }
     let rows = context

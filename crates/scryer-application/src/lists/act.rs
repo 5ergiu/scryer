@@ -51,6 +51,11 @@ pub trait ListActions: Send + Sync {
 
     async fn tag_title(&self, title_id: &str, tag: &str) -> AppResult<()>;
 
+    /// Whether the title is still in the library. Only read after an
+    /// on-leave action failed, to tell a title that is gone from a failure
+    /// worth retrying.
+    async fn title_exists(&self, title_id: &str) -> AppResult<bool>;
+
     /// Record that a title the list added has left it, and which on-leave
     /// action ran. For `Log` this record is the whole action.
     async fn record_departure(
@@ -92,9 +97,10 @@ impl ActOutcome {
 }
 
 /// Act on one candidate according to the subscription's mode. A failure is
-/// recorded on the outcome and never aborts the sync: the item stays
-/// `Pending` and is tried again next sync, or `BlockedPermission` when the
-/// owner may not add or request into the routed library.
+/// recorded on the outcome and never aborts the sync. A passing failure
+/// leaves the item `Pending`, tried again next sync; a refusal settles it as
+/// `Rejected` (see [`failed_action_state`]); and it is `BlockedPermission`
+/// when the owner may not add or request into the routed library.
 pub async fn act_on_candidate(
     actions: &dyn ListActions,
     subscription: &ListSubscription,
@@ -156,12 +162,29 @@ pub async fn act_on_candidate(
 
     result.unwrap_or_else(|error| ActOutcome {
         reason: Some(action_failure_reason(&error)),
-        ..ActOutcome::state(match error {
-            AppError::Unauthorized(_) => ListMembershipState::BlockedPermission,
-            _ => ListMembershipState::Pending,
-        })
+        ..ActOutcome::state(failed_action_state(&error))
     })
 }
+
+/// Where a failed action leaves its item.
+///
+/// A refusal (the add or request is invalid, or something it names does not
+/// exist) comes back the same way however often the same item is tried, so
+/// it settles as `Rejected` rather than `Pending`. A `Pending` item makes
+/// every sync read the whole list again to retry it; a settled one does not.
+/// Evaluation reopens it once the item or the list's settings change. Every
+/// other failure (network, rate limit, gateway or storage trouble) may pass,
+/// so the item stays `Pending` and is retried next sync.
+fn failed_action_state(error: &AppError) -> ListMembershipState {
+    match error {
+        AppError::Unauthorized(_) => ListMembershipState::BlockedPermission,
+        AppError::Validation(_) | AppError::NotFound(_) => ListMembershipState::Rejected,
+        _ => ListMembershipState::Pending,
+    }
+}
+
+const REFUSED_REASON: &str = "rejected";
+const NOT_FOUND_REASON: &str = "not_found";
 
 /// A short, stable reason for a failed action. The error text is not copied:
 /// it can name the title, and the membership row is shown to the list's
@@ -169,9 +192,15 @@ pub async fn act_on_candidate(
 fn action_failure_reason(error: &AppError) -> String {
     match error {
         AppError::Unauthorized(_) => "not_permitted",
-        AppError::Validation(_) => "rejected",
-        AppError::NotFound(_) => "not_found",
+        AppError::Validation(_) => REFUSED_REASON,
+        AppError::NotFound(_) => NOT_FOUND_REASON,
         _ => "action_failed",
     }
     .to_string()
+}
+
+/// Whether a membership reason records an action this engine tried and was
+/// refused, as opposed to a reviewer rejecting the request it made.
+pub(super) fn is_refused_action_reason(reason: &str) -> bool {
+    matches!(reason, REFUSED_REASON | NOT_FOUND_REASON)
 }

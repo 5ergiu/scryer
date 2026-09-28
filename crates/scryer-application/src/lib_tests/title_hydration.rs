@@ -99,6 +99,9 @@ async fn consume_title_hydration_wake(app: &AppUseCase) {
 struct MovieTitleResolutionGateway {
     /// Answer every title-surface request with a gateway error.
     failing: bool,
+    /// While set, identity resolution fails: with a rate limit carrying this
+    /// `Retry-After` when one is given, with a plain gateway error otherwise.
+    resolve_failure: std::sync::Mutex<Option<Option<std::time::Duration>>>,
     unresolved: bool,
     redirected_from: Option<i64>,
     calls: Mutex<Vec<(Vec<MovieTitleRef>, bool)>>,
@@ -233,6 +236,16 @@ impl MetadataGateway for MovieTitleResolutionGateway {
             .push((refs.to_vec(), create_missing));
         if self.failing {
             return Err(AppError::Repository("fixture title surface failure".into()));
+        }
+        if let Some(retry_after) = *self.resolve_failure.lock().unwrap() {
+            return Err(match retry_after {
+                Some(retry_after) => AppError::rate_limited_temporary_unavailable(
+                    "fixture gateway rate limited",
+                    Some(retry_after),
+                    crate::RateLimitCooldownAction::AlreadyRecorded,
+                ),
+                None => AppError::Repository("fixture gateway unavailable".into()),
+            });
         }
         if self.unresolved {
             return Ok(refs
@@ -448,6 +461,137 @@ async fn movie_smg_identity_backfill_reports_a_gateway_error_as_a_failed_tick() 
             .iter()
             .all(|external_id| !external_id.source.eq_ignore_ascii_case("smg"))
     }));
+}
+
+fn backfill_clock(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_900_000_000 + seconds, 0).expect("fixture instant")
+}
+
+/// Run the backfill phase at `seconds` on the fixed clock and return how many
+/// identity batches the gateway has been sent so far.
+async fn backfill_phase_at(
+    app: &AppUseCase,
+    gateway: &MovieTitleResolutionGateway,
+    schedule: &mut crate::catalog::title_hydration::MovieSmgIdentityBackfillSchedule,
+    seconds: i64,
+) -> usize {
+    app.runtime
+        .environment
+        .set_fixed_now_for_tests(Some(backfill_clock(seconds)));
+    let token = tokio_util::sync::CancellationToken::new();
+    assert!(
+        crate::catalog::title_hydration::run_movie_smg_identity_backfill_phase(
+            app, &token, schedule
+        )
+        .await,
+        "the phase is not cancelled"
+    );
+    gateway.calls.lock().await.len()
+}
+
+async fn smg_linked_titles(titles: &MockTitleRepo) -> usize {
+    titles
+        .store
+        .lock()
+        .await
+        .iter()
+        .filter(|title| {
+            title
+                .external_ids
+                .iter()
+                .any(|external_id| external_id.source == "smg")
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn movie_smg_identity_backfill_backs_off_while_the_gateway_fails_and_resets_on_recovery() {
+    let gateway = Arc::new(MovieTitleResolutionGateway::default());
+    *gateway.resolve_failure.lock().unwrap() = Some(None);
+    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    app.add_title_with_outcome(&user, hydration_test_title("Backoff A", 951_101))
+        .await
+        .expect("title should be created");
+    let mut schedule = Default::default();
+
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 0).await, 1);
+    // Each failure waits out the next rung: 30 s, then 1 minute, then 5.
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 5).await, 1);
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 29).await,
+        1
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 30).await,
+        2
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 89).await,
+        2
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 90).await,
+        3
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 389).await,
+        3
+    );
+
+    // The gateway recovers: the batch waiting out its backoff goes through.
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 390).await,
+        4
+    );
+    assert_eq!(smg_linked_titles(&titles).await, 1);
+
+    // A success resets the ladder: the next failure waits 30 s, not 15 minutes.
+    app.add_title_with_outcome(&user, hydration_test_title("Backoff B", 951_102))
+        .await
+        .expect("title should be created");
+    *gateway.resolve_failure.lock().unwrap() = Some(None);
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 395).await,
+        5
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 424).await,
+        5
+    );
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 425).await,
+        6
+    );
+    assert_eq!(smg_linked_titles(&titles).await, 2);
+}
+
+#[tokio::test]
+async fn movie_smg_identity_backfill_waits_out_a_gateway_retry_after() {
+    let gateway = Arc::new(MovieTitleResolutionGateway::default());
+    *gateway.resolve_failure.lock().unwrap() = Some(Some(std::time::Duration::from_secs(12 * 60)));
+    let (app, user, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    app.add_title_with_outcome(&user, hydration_test_title("Retry After", 951_103))
+        .await
+        .expect("title should be created");
+    let mut schedule = Default::default();
+
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 0).await, 1);
+    // Twelve minutes climbs to the first rung that covers it: fifteen.
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 12 * 60).await,
+        1
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 15 * 60 - 1).await,
+        1
+    );
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 15 * 60).await,
+        2
+    );
 }
 
 #[tokio::test]
