@@ -42,6 +42,7 @@ import {
   PUBLIC_LIST_MODES,
   publicProviders,
   recognizeListUrl,
+  followListOfferedKinds,
   subscriptionToDraft,
 } from "./lists.ts";
 
@@ -629,4 +630,29 @@ test("a new follow starts with a per-sync cap that can be cleared", () => {
   assert.equal(DEFAULT_LIST_MAX_PER_SYNC, 25);
   const cleared = listDraftProblems({ ...draft, maxPerSync: null });
   assert.equal(cleared.includes("lists.follow.problem.maxPerSync"), false);
+});
+
+test("the follow form offers the kinds the source declares, keeping kinds already saved", () => {
+  const catalogItem = manifest().groups[0].items[0];
+  assert.deepEqual(
+    followListOfferedKinds({ sourceKinds: catalogItem.kinds, providerCoverage: manifest().coverage }),
+    ["MOVIE"],
+  );
+  assert.deepEqual(
+    followListOfferedKinds({
+      sourceKinds: ["MOVIE"],
+      providerCoverage: ["MOVIE", "SERIES"],
+      savedKinds: ["SERIES"],
+    }),
+    ["MOVIE", "SERIES"],
+  );
+  assert.deepEqual(
+    followListOfferedKinds({ sourceKinds: [], providerCoverage: ["SERIES", "MOVIE"] }),
+    ["MOVIE", "SERIES"],
+  );
+  assert.deepEqual(followListOfferedKinds({}), ["MOVIE", "SERIES", "ANIME"]);
+  assert.deepEqual(
+    followListOfferedKinds({ requestedKinds: ["ANIME"], sourceKinds: ["MOVIE"], providerCoverage: ["MOVIE"] }),
+    ["ANIME"],
+  );
 });

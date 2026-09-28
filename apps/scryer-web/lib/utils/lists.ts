@@ -209,6 +209,35 @@ export function findProviderItem(
 }
 
 /**
+ * The kinds the follow form offers. The server keeps a follow to the kinds its
+ * own source declares, so the catalog entry for that source type is the guide;
+ * the provider's overall coverage is only a fallback when the source is not in
+ * the catalog. Kinds an existing follow already saved stay offered so the list
+ * can always be saved again.
+ */
+export function followListOfferedKinds({
+  requestedKinds,
+  sourceKinds,
+  providerCoverage,
+  savedKinds,
+}: {
+  requestedKinds?: readonly Facet[] | null;
+  sourceKinds?: readonly Facet[] | null;
+  providerCoverage?: readonly Facet[] | null;
+  savedKinds?: readonly Facet[] | null;
+}): Facet[] {
+  const base = requestedKinds?.length
+    ? requestedKinds
+    : sourceKinds?.length
+      ? sourceKinds
+      : providerCoverage?.length
+        ? providerCoverage
+        : LIST_KINDS;
+  const offered = new Set<Facet>([...base, ...(savedKinds ?? [])]);
+  return LIST_KINDS.filter((kind) => offered.has(kind));
+}
+
+/**
  * Provider URL patterns are written for the server's regex engine. Rewrite the
  * two constructs JavaScript spells differently: `(?P<name>` groups and a
  * leading `(?i)` flag.

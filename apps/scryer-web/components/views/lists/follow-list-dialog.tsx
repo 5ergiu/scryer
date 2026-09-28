@@ -32,6 +32,8 @@ import type { Facet } from "@/lib/types/titles";
 import {
   defaultListRoute,
   emptyListDraft,
+  findProviderItem,
+  followListOfferedKinds,
   isListModeSelectable,
   LIST_KINDS,
   LIST_ON_LEAVE_OPTIONS,
@@ -124,12 +126,19 @@ function FollowListDialogBody({
   const manifest = target.manifest;
   const item = target.kind === "new" ? target.item : null;
   const paramDefinitions = item?.params ?? [];
-  const offeredKinds: readonly Facet[] =
-    target.kind === "new" && target.kinds.length > 0
-      ? target.kinds
-      : manifest?.coverage.length
-        ? manifest.coverage
-        : LIST_KINDS;
+  const sourceItem =
+    target.kind === "new"
+      ? target.item
+      : manifest
+        ? (findProviderItem([manifest], manifest.providerType, target.subscription.source.sourceType)?.item ??
+          null)
+        : null;
+  const offeredKinds: readonly Facet[] = followListOfferedKinds({
+    requestedKinds: target.kind === "new" ? target.kinds : null,
+    sourceKinds: sourceItem?.kinds,
+    providerCoverage: manifest?.coverage,
+    savedKinds: target.kind === "edit" ? target.subscription.kinds : null,
+  });
   const intervalSeconds =
     target.kind === "edit" ? target.subscription.intervalSeconds : (item?.defaultIntervalSeconds ?? null);
   const interval = intervalSeconds ? listIntervalParts(intervalSeconds) : null;
