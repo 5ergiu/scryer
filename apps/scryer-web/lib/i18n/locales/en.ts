@@ -5316,6 +5316,8 @@ const en: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}}: {{reason}}",
   "grabDialog.error.expired":
     "That release is no longer in a live search. Run the search again.",
+  "grabDialog.error.additionalScope":
+    "{{name}} covers more than one episode, so it cannot be queued as an additional file. Only a movie or a single episode can.",
   // Title tags: the administrator-defined registry in Settings, the per-title
   // picker, the bulk pickers, and the catalog filter.
   "settings.titleTags": "Tags",

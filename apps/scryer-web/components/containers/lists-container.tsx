@@ -50,7 +50,7 @@ import {
   draftToSubscribeInput,
   draftToUpdateInput,
   listParamInput,
-  listSyncPollDelayMs,
+  listSyncWatchSchedule,
   listSyncWatchSettled,
   type AddListExclusionInput,
   type ListSyncWatchSnapshot,
@@ -120,7 +120,15 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
       setProviders((providersResult.data?.listProviders ?? []) as ListProviderManifest[]);
       if (canManageLists) {
         const optionsResult = await client.query(listRouteOptionsQuery, {}).toPromise();
-        if (optionsResult.error) throw optionsResult.error;
+        // Libraries and profiles only feed the follow form's routing choices;
+        // failing to read them must not take the lists themselves down.
+        if (optionsResult.error) {
+          setRouteOptions({ libraries: [], qualityProfiles: [] });
+          setGlobalStatus(
+            userFacingGraphQlErrorMessage(optionsResult.error, t("status.failedToLoad")),
+          );
+          return;
+        }
         setRouteOptions({
           libraries: (optionsResult.data?.libraries ?? []) as LibraryRecord[],
           qualityProfiles: (optionsResult.data?.qualityProfileSettings?.profiles ?? []) as Array<{
@@ -134,7 +142,7 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
     } finally {
       setLoading(false);
     }
-  }, [canManageLists, client, loadSubscriptions, t]);
+  }, [canManageLists, client, loadSubscriptions, setGlobalStatus, t]);
 
   const loadExclusions = React.useCallback(async () => {
     if (!canManageLists) return;
@@ -393,75 +401,105 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
     [client, detail, loadDetail, markBusy, refreshAfterChange, setGlobalStatus, t],
   );
 
-  // "Sync now" only queues a sync, so the table and an open detail panel keep
-  // refreshing, backing off, until the sync visibly finishes or the budget runs
-  // out. Detail refreshes stop as soon as the panel closes or shows another list.
+  // "Sync now" and "Sync all" only queue syncs, so the table and an open detail
+  // panel keep refreshing, backing off, until each queued sync visibly finishes
+  // or its budget runs out. One poll serves every watched list, so queuing many
+  // lists costs one table refresh per tick, not one per list. Detail refreshes
+  // stop as soon as the panel closes or shows a list no longer watched.
   const detailRef = React.useRef(detail);
   React.useEffect(() => {
     detailRef.current = detail;
   }, [detail]);
-  const syncWatchTimersRef = React.useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const syncWatchesRef = React.useRef(
+    new Map<string, { baseline: ListSyncWatchSnapshot; startedAt: number }>(),
+  );
+  const syncWatchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped whenever the poll restarts or the page unmounts; a tick that
+  // started under an older generation drops its result.
+  const syncWatchGenerationRef = React.useRef(0);
 
   React.useEffect(() => {
-    const timers = syncWatchTimersRef.current;
+    const watches = syncWatchesRef.current;
     return () => {
-      for (const timer of timers.values()) clearTimeout(timer);
-      timers.clear();
+      syncWatchGenerationRef.current += 1;
+      if (syncWatchTimerRef.current !== null) clearTimeout(syncWatchTimerRef.current);
+      syncWatchTimerRef.current = null;
+      watches.clear();
     };
   }, []);
 
   const watchSync = React.useCallback(
-    (subscription: ListSubscription) => {
-      const id = subscription.id;
-      const timers = syncWatchTimersRef.current;
-      const existing = timers.get(id);
-      if (existing !== undefined) clearTimeout(existing);
+    (queued: readonly ListSubscription[]) => {
+      if (queued.length === 0) return;
+      const watches = syncWatchesRef.current;
+      const shownDetail = detailRef.current;
+      const now = Date.now();
+      for (const subscription of queued) {
+        watches.set(subscription.id, {
+          baseline: {
+            lastAt: subscription.sync.lastAt,
+            state: subscription.sync.state,
+            runIds:
+              shownDetail?.id === subscription.id && shownDetail.subscription
+                ? shownDetail.runs.map((run) => run.id)
+                : null,
+          },
+          startedAt: now,
+        });
+      }
 
-      const openDetail = detailRef.current;
-      const baseline: ListSyncWatchSnapshot = {
-        lastAt: subscription.sync.lastAt,
-        state: subscription.sync.state,
-        runIds: openDetail?.id === id && openDetail.subscription ? openDetail.runs.map((run) => run.id) : null,
-      };
-      const startedAt = Date.now();
+      // A newly queued sync restarts the poll at its quickest refresh.
+      const generation = ++syncWatchGenerationRef.current;
+      if (syncWatchTimerRef.current !== null) clearTimeout(syncWatchTimerRef.current);
+      syncWatchTimerRef.current = null;
       let attempt = 0;
 
       const schedule = () => {
-        const delay = listSyncPollDelayMs(attempt, Date.now() - startedAt);
+        const startedAtById = new Map(
+          [...watches].map(([id, watch]) => [id, watch.startedAt] as const),
+        );
+        const next = listSyncWatchSchedule(attempt, startedAtById, Date.now());
         attempt += 1;
-        if (delay === null) {
-          timers.delete(id);
-          return;
+        const keep = new Set(next?.keep ?? []);
+        for (const id of [...watches.keys()]) {
+          if (!keep.has(id)) watches.delete(id);
         }
-        timers.set(id, setTimeout(() => void tick(), delay));
+        syncWatchTimerRef.current = next ? setTimeout(() => void tick(), next.delay) : null;
       };
 
       const tick = async () => {
-        let current: ListSubscription | undefined;
+        syncWatchTimerRef.current = null;
+        let loaded: ListSubscription[] | null = null;
         try {
-          current = (await loadSubscriptions()).find((entry) => entry.id === id);
+          loaded = await loadSubscriptions();
         } catch {
           // A failed refresh is retried on the next tick.
         }
-        if (!timers.has(id)) return;
-        if (!current) {
-          timers.delete(id);
+        if (generation !== syncWatchGenerationRef.current) return;
+        if (!loaded) {
+          schedule();
           return;
         }
         const shown = detailRef.current;
         const runs =
-          shown?.id === id ? await loadDetail(id, shown.membershipOffset, { background: true }) : null;
-        if (!timers.has(id)) return;
-        const settled = listSyncWatchSettled(baseline, {
-          lastAt: current.sync.lastAt,
-          state: current.sync.state,
-          runIds: runs ? runs.map((run) => run.id) : null,
-        });
-        if (settled) {
-          timers.delete(id);
-          return;
+          shown && watches.has(shown.id)
+            ? await loadDetail(shown.id, shown.membershipOffset, { background: true })
+            : null;
+        if (generation !== syncWatchGenerationRef.current) return;
+        for (const [id, watch] of [...watches]) {
+          const current = loaded.find((entry) => entry.id === id);
+          if (
+            !current ||
+            listSyncWatchSettled(watch.baseline, {
+              lastAt: current.sync.lastAt,
+              state: current.sync.state,
+              runIds: runs && shown?.id === id ? runs.map((run) => run.id) : null,
+            })
+          ) {
+            watches.delete(id);
+          }
         }
-        schedule();
+        if (watches.size > 0) schedule();
       };
 
       schedule();
@@ -478,7 +516,7 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
           .toPromise();
         if (result.error) throw result.error;
         setGlobalStatus(t("lists.status.syncQueued", { name: subscription.name }));
-        watchSync(subscription);
+        watchSync([subscription]);
       } catch (error) {
         setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")));
       } finally {
@@ -493,10 +531,12 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
       const result = await client.mutation(syncAllListsMutation, { scope: "PUBLIC" }).toPromise();
       if (result.error) throw result.error;
       setGlobalStatus(t("lists.status.syncAllQueued"));
+      const queuedIds = new Set<string>(result.data?.syncAllLists?.subscriptionIds ?? []);
+      watchSync(subscriptions.filter((subscription) => queuedIds.has(subscription.id)));
     } catch (error) {
       setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")));
     }
-  }, [client, setGlobalStatus, t]);
+  }, [client, setGlobalStatus, subscriptions, t, watchSync]);
 
   const unsubscribe = React.useCallback(
     async (subscription: ListSubscription): Promise<boolean> => {

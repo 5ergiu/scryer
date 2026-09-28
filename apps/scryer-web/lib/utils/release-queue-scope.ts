@@ -36,14 +36,15 @@ export function releaseQueueScopeInput(
   return candidateScope ?? fallback;
 }
 
-export function releaseSupportsAdditionalFileQueue(
-  release: Pick<Release, "queueScope">,
+/**
+ * Whether the server queues an additional file under this scope: a movie
+ * title, a single episode, or a series movie. A season, an episode set, a
+ * whole series and a title-less grab are refused.
+ */
+export function queueScopeAcceptsAdditionalFile(
+  scope: QueueDownloadScopeInput,
   titleFacet: string | null | undefined,
 ): boolean {
-  const scope = release.queueScope ? queueScopeToInput(release.queueScope) : null;
-  if (!scope) {
-    return false;
-  }
   if ("episode" in scope) {
     return true;
   }
@@ -51,9 +52,17 @@ export function releaseSupportsAdditionalFileQueue(
     return true;
   }
   if ("title" in scope) {
-    return titleFacet?.toUpperCase() === "MOVIE";
+    return titleFacet?.trim().toUpperCase() === "MOVIE";
   }
   return false;
+}
+
+export function releaseSupportsAdditionalFileQueue(
+  release: Pick<Release, "queueScope">,
+  titleFacet: string | null | undefined,
+): boolean {
+  const scope = release.queueScope ? queueScopeToInput(release.queueScope) : null;
+  return scope !== null && queueScopeAcceptsAdditionalFile(scope, titleFacet);
 }
 
 /// Whether the release's resolved scope brings down more than the one episode a

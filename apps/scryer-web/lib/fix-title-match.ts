@@ -33,6 +33,25 @@ export function buildFixTitleMatchSearchVariables(
   };
 }
 
+export type FixTitleMatchTarget = { smgId?: number; tvdbId?: string };
+
+/**
+ * The identity a chosen search result rematches to, for every facet: its SMG
+ * title id and/or its TVDB id. The server takes either one alone (for series
+ * and anime a TVDB id wins when both are sent). Null when the result carries
+ * neither, which is when Apply stays disabled.
+ */
+export function fixTitleMatchTarget(
+  result: { smgId?: number | null; tvdbId?: string | null } | null | undefined,
+): FixTitleMatchTarget | null {
+  if (!result) return null;
+  const target: FixTitleMatchTarget = {};
+  if (result.smgId != null && result.smgId > 0) target.smgId = result.smgId;
+  const tvdbId = result.tvdbId?.trim();
+  if (tvdbId) target.tvdbId = tvdbId;
+  return target.smgId === undefined && target.tvdbId === undefined ? null : target;
+}
+
 export async function handleFixTitleMatchComplete({
   warnings,
   refreshTitleDetail,

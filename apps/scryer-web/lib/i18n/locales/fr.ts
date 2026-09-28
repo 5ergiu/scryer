@@ -2626,6 +2626,8 @@ const fr: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}} : {{reason}}",
   "grabDialog.error.expired":
     "Cette release ne fait plus partie d'une recherche active. Relancez la recherche.",
+  "grabDialog.error.additionalScope":
+    "{{name}} couvre plus d'un épisode et ne peut donc pas être mis en file comme fichier supplémentaire. Seuls un film ou un épisode unique le peuvent.",
 
   // ── Règles de demandes ──────────────────────────────────────────────
   "settings.requestRules": "Règles de demandes",

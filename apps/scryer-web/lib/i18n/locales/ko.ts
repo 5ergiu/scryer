@@ -2514,6 +2514,8 @@ const ko: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}}: {{reason}}",
   "grabDialog.error.expired":
     "이 릴리스는 더 이상 진행 중인 검색에 없습니다. 검색을 다시 실행하세요.",
+  "grabDialog.error.additionalScope":
+    "{{name}}은(는) 여러 에피소드를 포함하므로 추가 파일로 대기열에 넣을 수 없습니다. 영화나 단일 에피소드만 가능합니다.",
 
   // ── 요청 규칙 ─────────────────────────────────────────────────────
   "settings.requestRules": "요청 규칙",

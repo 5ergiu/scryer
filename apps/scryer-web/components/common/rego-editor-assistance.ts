@@ -1,7 +1,7 @@
 import { autocompletion, snippetCompletion, type Completion } from "@codemirror/autocomplete";
 import { EditorView, hoverTooltip } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
-import { regoCatalog, regoCodeAt, regoCompletionContext, regoFieldCompletions, regoFields, normalizeRegoPath, type RegoFamily } from "@/lib/utils/rego-assistance";
+import { regoCatalog, regoCodeAt, regoCompletionContext, regoFieldCompletions, regoFields, normalizeRegoPath, REGO_INDEX_SOURCE, type RegoFamily } from "@/lib/utils/rego-assistance";
 
 type Translate = (key: string) => string;
 
@@ -12,7 +12,7 @@ export function regoAssistance(family: RegoFamily, t: Translate, readOnly: boole
   const hover = hoverTooltip((view, position) => {
     const source = view.state.doc.toString();
     if (!regoCodeAt(source, position)) return null;
-    const pattern = /\b(?:input|scryer|object|lower|upper|count|startswith)\b(?:\.[A-Za-z_]\w*|\[\s*(?:\d+|[A-Za-z_]\w*)?\s*\])*/g;
+    const pattern = new RegExp(String.raw`\b(?:input|scryer|object|lower|upper|count|startswith)\b(?:\.[A-Za-z_]\w*|${REGO_INDEX_SOURCE})*`, "g");
     for (const match of source.matchAll(pattern)) {
       if (position < match.index || position > match.index + match[0].length) continue;
       const name = normalizeRegoPath(match[0]);

@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ReleaseQueueScope } from "@/lib/types/releases";
 import {
   hasPrimaryMediaFile,
+  queueScopeAcceptsAdditionalFile,
   queueScopeReplacesPrimary,
   releaseCoversMultipleEpisodes,
   releaseSupportsAdditionalFileQueue,
@@ -61,6 +62,23 @@ test("additional-file queue eligibility uses the signed release queue scope", ()
   }
 
   assert.equal(releaseSupportsAdditionalFileQueue({ queueScope: null }, "movie"), false);
+});
+
+test("an additional file is queued only for a movie, one episode or a series movie", () => {
+  // A season subject that bound a single-episode release queues that episode.
+  assert.equal(queueScopeAcceptsAdditionalFile({ episode: "episode-4" }, "series"), true);
+  assert.equal(queueScopeAcceptsAdditionalFile({ seriesMovie: "series-movie-1" }, "anime"), true);
+  assert.equal(queueScopeAcceptsAdditionalFile({ title: true }, " MOVIE "), true);
+
+  assert.equal(queueScopeAcceptsAdditionalFile({ collection: "season-2" }, "series"), false);
+  assert.equal(queueScopeAcceptsAdditionalFile({ episodeSet: ["episode-4"] }, "series"), false);
+  assert.equal(
+    queueScopeAcceptsAdditionalFile({ episodeSet: ["episode-4", "episode-5"] }, "anime"),
+    false,
+  );
+  assert.equal(queueScopeAcceptsAdditionalFile({ title: true }, "series"), false);
+  assert.equal(queueScopeAcceptsAdditionalFile({ title: true }, "anime"), false);
+  assert.equal(queueScopeAcceptsAdditionalFile({ title: true }, null), false);
 });
 
 test("manual replacement selection requires an existing primary file", () => {

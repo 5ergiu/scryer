@@ -22,6 +22,7 @@ import type {
   TitleListMembership,
 } from "../types/lists.ts";
 import type { ExternalId, Facet } from "../types/titles.ts";
+import { allOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
 import { selectorToken } from "./dom-ids.ts";
 
 export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "outline";
@@ -209,6 +210,35 @@ export function findProviderItem(
 }
 
 /**
+ * The kinds the follow form offers. The server keeps a follow to the kinds its
+ * own source declares, so the catalog entry for that source type is the guide;
+ * the provider's overall coverage is only a fallback when the source is not in
+ * the catalog. Kinds an existing follow already saved stay offered so the list
+ * can always be saved again.
+ */
+export function followListOfferedKinds({
+  requestedKinds,
+  sourceKinds,
+  providerCoverage,
+  savedKinds,
+}: {
+  requestedKinds?: readonly Facet[] | null;
+  sourceKinds?: readonly Facet[] | null;
+  providerCoverage?: readonly Facet[] | null;
+  savedKinds?: readonly Facet[] | null;
+}): Facet[] {
+  const base = requestedKinds?.length
+    ? requestedKinds
+    : sourceKinds?.length
+      ? sourceKinds
+      : providerCoverage?.length
+        ? providerCoverage
+        : LIST_KINDS;
+  const offered = new Set<Facet>([...base, ...(savedKinds ?? [])]);
+  return LIST_KINDS.filter((kind) => offered.has(kind));
+}
+
+/**
  * Provider URL patterns are written for the server's regex engine. Rewrite the
  * two constructs JavaScript spells differently: `(?P<name>` groups and a
  * leading `(?i)` flag.
@@ -233,6 +263,20 @@ export type ListUrlRecognition = {
 };
 
 /**
+ * A captured URL segment, percent-decoded when it decodes cleanly. A malformed
+ * sequence (a lone `%`) keeps the raw text: recognition runs while the user
+ * types, the server preview re-reads the URL itself, and a throw here would
+ * take down the page.
+ */
+function decodeListUrlCapture(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Instant client-side recognition for the add-by-URL box. The server preview
  * stays authoritative; this only drives the recognition strip.
  */
@@ -250,7 +294,7 @@ export function recognizeListUrl(
       const params: ListParam[] = [];
       for (const capture of urlPattern.captures) {
         const value = match.groups?.[capture.group];
-        if (value) params.push({ key: capture.param, value: decodeURIComponent(value) });
+        if (value) params.push({ key: capture.param, value: decodeListUrlCapture(value) });
       }
       return {
         manifest,
@@ -571,6 +615,27 @@ export function listSyncPollDelayMs(attempt: number, elapsedMs: number): number 
   return delay;
 }
 
+/**
+ * The next refresh of the one poll that follows every queued sync, however
+ * many lists were queued. Each watched list keeps its own budget, counted from
+ * when its sync was queued; lists past it are dropped. Null once none is left.
+ */
+export function listSyncWatchSchedule(
+  attempt: number,
+  startedAtById: ReadonlyMap<string, number>,
+  now: number,
+): { delay: number; keep: string[] } | null {
+  let delay: number | null = null;
+  const keep: string[] = [];
+  for (const [id, startedAt] of startedAtById) {
+    const next = listSyncPollDelayMs(attempt, now - startedAt);
+    if (next === null) continue;
+    delay = next;
+    keep.push(id);
+  }
+  return delay === null ? null : { delay, keep };
+}
+
 /** What the settings form holds for one field the user touched. */
 export type ListProviderSettingEdit = { value: string; clear: boolean };
 
@@ -617,6 +682,14 @@ export function listProviderSettingsMissing(
       return edit.value.trim() === "";
     })
     .map((field) => field.key);
+}
+
+/**
+ * Live events after which a title's list memberships may read differently: a
+ * public list adding the title, or a list dropping it.
+ */
+export function titleListMembershipChanged(titleId: string | null | undefined): DomainEventPredicate {
+  return allOf(forTitle(titleId), forEventTypes("LIST_TITLE_ADDED", "LIST_TITLE_LEFT"));
 }
 
 export type TitleListProvenance = { kind: "added" | "left"; name: string };

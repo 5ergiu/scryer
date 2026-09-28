@@ -2623,6 +2623,8 @@ const es: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}}: {{reason}}",
   "grabDialog.error.expired":
     "Ese lanzamiento ya no está en una búsqueda activa. Vuelve a ejecutar la búsqueda.",
+  "grabDialog.error.additionalScope":
+    "{{name}} abarca más de un episodio, así que no se puede poner en cola como archivo adicional. Solo es posible con una película o un único episodio.",
 
   // ── Reglas de solicitudes ───────────────────────────────────────────
   "settings.requestRules": "Reglas de solicitudes",
