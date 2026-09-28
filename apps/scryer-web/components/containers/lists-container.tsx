@@ -49,6 +49,7 @@ import type { LibraryRecord } from "@/lib/types/titles";
 import {
   draftToSubscribeInput,
   draftToUpdateInput,
+  listParamInput,
   listSyncPollDelayMs,
   listSyncWatchSettled,
   type AddListExclusionInput,
@@ -316,7 +317,7 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
           input: {
             provider: source.provider,
             sourceType: source.sourceType,
-            params: source.params.filter((param) => param.value.trim()),
+            params: source.params.filter((param) => param.value.trim()).map(listParamInput),
             url: source.url,
           },
         },

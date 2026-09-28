@@ -20,7 +20,7 @@ import type {
   ListSyncRun,
 } from "@/lib/types/lists";
 import type { LibraryRecord } from "@/lib/types/titles";
-import type { AddListExclusionInput } from "@/lib/utils/lists";
+import { listParamInput, type AddListExclusionInput } from "@/lib/utils/lists";
 
 import { AddByUrlCard } from "./add-by-url-card";
 import { ExclusionsTable } from "./exclusions-table";
@@ -121,7 +121,7 @@ export function ListsView(props: ListsViewProps) {
       source: {
         provider: preview.provider ?? "",
         sourceType: preview.sourceType ?? "",
-        params: preview.params,
+        params: preview.params.map(listParamInput),
         url,
       },
       manifest,
