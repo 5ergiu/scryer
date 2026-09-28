@@ -43,7 +43,11 @@ import { useConfigStepUp } from "@/lib/hooks/use-config-step-up";
 import { TranslateContext } from "@/lib/context/translate-context";
 import { GlobalStatusContext } from "@/lib/context/global-status-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
-import { useExperimentalFeaturesEnabled, useInstanceFeatures } from "@/lib/context/instance-features-context";
+import {
+  useExperimentalFeaturesEnabled,
+  useInstanceFeatures,
+  useInstanceFeaturesLoaded,
+} from "@/lib/context/instance-features-context";
 import { RootHeader } from "@/components/root/root-header";
 import { buildRouteCommands } from "@/components/root/route-commands";
 import { JobRunProvider } from "@/components/root/job-run-provider";
@@ -112,6 +116,7 @@ import {
   defaultSettingsSection,
   isMediaSettingsSection,
   isProtectedSettingsRoute,
+  shouldLeaveListsPage,
 } from "@/lib/utils/routes";
 import { cn } from "@/lib/utils";
 import {
@@ -521,8 +526,12 @@ function MainContent({
   canManageLists: boolean;
 }) {
   const { apiExplorerEnabled } = useInstanceFeatures();
+  const instanceFeaturesLoaded = useInstanceFeaturesLoaded();
   if (view === "api-explorer") {
     if (!canAccessApiExplorer(canManageSystemSettings, apiExplorerEnabled)) {
+      if (!instanceFeaturesLoaded) {
+        return <ViewLoadingFallback />;
+      }
       return <div role="status" className="p-8 text-muted-foreground">API explorer is unavailable.</div>;
     }
     return <ApiExplorerContainer key={userId} />;
@@ -812,6 +821,7 @@ function AuthenticatedHomePage({
   // The palette must not offer a page the sidebar is hiding, so the same
   // instance-wide switch decides both.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
+  const instanceFeaturesLoaded = useInstanceFeaturesLoaded();
   const { canPrompt, isInstalled, isIosSafari, promptInstall } =
     useInstallPrompt();
 
@@ -1623,12 +1633,22 @@ function AuthenticatedHomePage({
   ]);
 
   useEffect(() => {
-    if (!routeIsCanonical || view !== "lists" || canAccessLists) {
+    if (
+      !routeIsCanonical ||
+      view !== "lists" ||
+      !shouldLeaveListsPage(canAccessLists, instanceFeaturesLoaded)
+    ) {
       return;
     }
 
     navigateToAccessibleDefault();
-  }, [canAccessLists, navigateToAccessibleDefault, routeIsCanonical, view]);
+  }, [
+    canAccessLists,
+    instanceFeaturesLoaded,
+    navigateToAccessibleDefault,
+    routeIsCanonical,
+    view,
+  ]);
 
   useEffect(() => {
     if (!routeIsCanonical || view !== "activity" || canAccessActivity) {

@@ -196,6 +196,7 @@ async fn a_held_public_list_request_is_announced_as_held() {
 #[tokio::test]
 async fn unfollowing_a_public_list_is_announced() {
     let harness = bootstrap_media_request_app();
+    super::list_experimental_gate::set_experimental_features(&harness, true).await;
     *harness.lists.subscriptions.lock().unwrap() = vec![subscription("public-list-one")];
     let mut manager = harness.manager.clone();
     manager.authorization.app = AppPermissionMask::MANAGE_LISTS;
@@ -257,6 +258,7 @@ async fn a_title_page_names_only_the_public_lists_that_hold_it() {
     use crate::lists::test_support::membership;
 
     let harness = bootstrap_media_request_app();
+    super::list_experimental_gate::set_experimental_features(&harness, true).await;
     let mut personal = subscription("personal-list-one");
     personal.scope = scryer_domain::ListScope::Personal;
     *harness.lists.subscriptions.lock().unwrap() = vec![subscription("public-list-one"), personal];

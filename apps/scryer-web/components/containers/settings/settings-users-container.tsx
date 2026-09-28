@@ -468,7 +468,18 @@ export function SettingsUsersContainer() {
         open={pendingDeleteUser !== null}
         contentId="settings-user-delete-dialog"
         title={t("label.delete")}
-        description={pendingDeleteUser ? t("status.deletingUser", { name: pendingDeleteUser.username }) : ""}
+        description={
+          pendingDeleteUser
+            ? [
+                t("status.deletingUser", { name: pendingDeleteUser.username }),
+                // Lists go with the member who followed them; say so only
+                // while lists exist on this instance.
+                ...(experimentalFeaturesEnabled
+                  ? [t("status.deletingUserListsWarning")]
+                  : []),
+              ].join(" ")
+            : ""
+        }
         confirmLabel={t("label.delete")}
         cancelLabel={t("label.cancel")}
         confirmButtonId="settings-user-delete-confirm"

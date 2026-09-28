@@ -3119,6 +3119,7 @@ const ru: LocaleDictionary = {
         "Редактирование провайдера субтитров {{name}}",
 
     "status.deletingUser": "Удалить пользователя {{name}}?",
+    "status.deletingUserListsWarning": "Списки, на которые подписан этот пользователь, и история их синхронизации тоже будут удалены.",
     "status.userLoginEnabled":
         "Вход для пользователя {{name}} включён.",
     "status.userLoginDisabled":
@@ -6368,8 +6369,8 @@ const ru: LocaleDictionary = {
   "lists.exclusions.removeTitle": "Снять исключение для {{name}}?",
   "lists.exclusions.removeDescription": "Списки смогут снова добавить этот тайтл при следующей синхронизации.",
   "lists.exclusions.deleteCheckbox": "Также исключить из списков",
-  "lists.exclusions.deleteNoIds": "{{name}} удалён, но у него нет внешних ID для исключения из списков.",
-  "lists.exclusions.deleteFailed": "{{name}} удалён, но исключить его из списков не удалось. Добавьте исключение на странице «Списки».",
+  "lists.exclusions.deleteNoIds": "У {{name}} нет внешних ID для исключения из списков, поэтому он не удалён.",
+  "lists.exclusions.deleteFailed": "Не удалось исключить {{name}} из списков, поэтому он не удалён. Попробуйте ещё раз или удалите его без исключения.",
   "lists.policy.heading": "Политика списков участников",
   "lists.policy.help": "Определяет, как личные списки участников превращаются в запросы.",
   "lists.policy.empty": "Нет участников.",

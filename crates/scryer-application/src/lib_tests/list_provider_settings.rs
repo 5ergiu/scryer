@@ -16,12 +16,14 @@ fn field(key: &str, field_type: ConfigFieldType) -> ConfigFieldDef {
     .expect("config field")
 }
 
-fn harness_with_provider() -> MediaRequestTestHarness {
+async fn harness_with_provider() -> MediaRequestTestHarness {
     let lists = ScriptedLists::with_config_fields(vec![
         field("instance_key", ConfigFieldType::Password),
         field("region", ConfigFieldType::String),
     ]);
-    bootstrap_media_request_app_with_list_plugins(Arc::new(ScriptedProvider(lists)))
+    let harness = bootstrap_media_request_app_with_list_plugins(Arc::new(ScriptedProvider(lists)));
+    super::list_experimental_gate::set_experimental_features(&harness, true).await;
+    harness
 }
 
 fn list_manager() -> User {
@@ -36,7 +38,7 @@ fn list_manager() -> User {
 
 #[tokio::test]
 async fn stored_values_reach_the_provider_and_a_secret_stays_hidden() {
-    let harness = harness_with_provider();
+    let harness = harness_with_provider().await;
     let manager = list_manager();
 
     let view = harness
@@ -99,7 +101,7 @@ async fn stored_values_reach_the_provider_and_a_secret_stays_hidden() {
 
 #[tokio::test]
 async fn only_a_list_manager_reads_or_changes_provider_values() {
-    let harness = harness_with_provider();
+    let harness = harness_with_provider().await;
 
     let read = harness.app.list_provider_settings(&harness.user).await;
     assert!(matches!(read, Err(AppError::Unauthorized(_))), "{read:?}");
@@ -124,7 +126,7 @@ async fn only_a_list_manager_reads_or_changes_provider_values() {
 
 #[tokio::test]
 async fn an_unknown_provider_is_not_found() {
-    let harness = harness_with_provider();
+    let harness = harness_with_provider().await;
     let result = harness
         .app
         .update_list_provider_settings(&list_manager(), "unknown-provider", BTreeMap::new())
@@ -134,7 +136,7 @@ async fn an_unknown_provider_is_not_found() {
 
 #[tokio::test]
 async fn the_catalog_shows_whether_a_value_is_stored_only_to_a_list_manager() {
-    let harness = harness_with_provider();
+    let harness = harness_with_provider().await;
     let manager = list_manager();
     harness
         .app

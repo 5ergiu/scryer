@@ -1522,6 +1522,7 @@ const es: LocaleDictionary = {
   "status.editingIndexer": "Editando indexador {{name}}",
   "status.editingDownloadClient": "Editando cliente de descarga {{name}}",
   "status.deletingUser": "¿Eliminar usuario {{name}}?",
+  "status.deletingUserListsWarning": "Las listas que sigue este usuario y su historial de sincronización también se eliminan.",
   "status.deletingIndexer": "¿Eliminar indexador {{name}}?",
   "status.userRequired":
     "El nombre de usuario y la contraseña son obligatorios.",
@@ -3029,8 +3030,8 @@ const es: LocaleDictionary = {
   "lists.exclusions.removeTitle": "¿Quitar la exclusión de {{name}}?",
   "lists.exclusions.removeDescription": "Las listas podrán volver a añadir este título en su próxima sincronización.",
   "lists.exclusions.deleteCheckbox": "Excluir también de las listas",
-  "lists.exclusions.deleteNoIds": "{{name}} se eliminó, pero no tiene ID externos para excluirlo de las listas.",
-  "lists.exclusions.deleteFailed": "{{name}} se eliminó, pero no se pudo excluir de las listas. Añade la exclusión en la página Listas.",
+  "lists.exclusions.deleteNoIds": "{{name}} no tiene ID externos para excluirlo de las listas, así que no se eliminó.",
+  "lists.exclusions.deleteFailed": "No se pudo excluir {{name}} de las listas, así que no se eliminó. Inténtalo de nuevo o elimínalo sin la exclusión.",
   "lists.policy.heading": "Política de listas de miembros",
   "lists.policy.help": "Controla cómo las listas personales de los miembros se convierten en solicitudes.",
   "lists.policy.empty": "No hay miembros que mostrar.",

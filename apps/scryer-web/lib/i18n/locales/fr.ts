@@ -1527,6 +1527,7 @@ const fr: LocaleDictionary = {
   "status.editingDownloadClient":
     "Modification du client de téléchargement {{name}}",
   "status.deletingUser": "Supprimer l'utilisateur {{name}} ?",
+  "status.deletingUserListsWarning": "Les listes suivies par cet utilisateur et leur historique de synchronisation sont également supprimés.",
   "status.deletingIndexer": "Supprimer l'indexeur {{name}} ?",
   "status.userRequired": "Le nom d'utilisateur et le mot de passe sont requis.",
   "status.passwordRequired": "Le mot de passe est requis.",
@@ -3032,8 +3033,8 @@ const fr: LocaleDictionary = {
   "lists.exclusions.removeTitle": "Retirer l'exclusion de {{name}} ?",
   "lists.exclusions.removeDescription": "Les listes pourront de nouveau ajouter ce titre lors de leur prochaine synchronisation.",
   "lists.exclusions.deleteCheckbox": "Exclure aussi des listes",
-  "lists.exclusions.deleteNoIds": "{{name}} a été supprimé, mais n'a pas d'ID externe pour l'exclure des listes.",
-  "lists.exclusions.deleteFailed": "{{name}} a été supprimé, mais l'exclusion des listes a échoué. Ajoutez l'exclusion depuis la page Listes.",
+  "lists.exclusions.deleteNoIds": "{{name}} n'a aucun identifiant externe permettant de l'exclure des listes ; il n'a donc pas été supprimé.",
+  "lists.exclusions.deleteFailed": "Impossible d'exclure {{name}} des listes ; il n'a donc pas été supprimé. Réessayez ou supprimez-le sans l'exclusion.",
   "lists.policy.heading": "Politique de listes des membres",
   "lists.policy.help": "Détermine comment les listes personnelles des membres deviennent des demandes.",
   "lists.policy.empty": "Aucun membre à afficher.",
