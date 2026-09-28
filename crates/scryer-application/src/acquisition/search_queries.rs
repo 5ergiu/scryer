@@ -225,6 +225,20 @@ fn community_numbering_scope(
     crate::anime_numbering::community_coordinates_for_tvdb_episode(bridge, season_num, episode_num)
 }
 
+/// The AniDB entry of the bridge cour a wanted TVDB episode sits in, read from
+/// the same scope the community query forms are, so the id an episode search
+/// sends and the queries it asks agree about which cour the episode is in.
+pub(crate) fn community_cour_anidb_id(
+    title: &Title,
+    season_num: i32,
+    episode_num: i32,
+    bridge: Option<&AnimeNumberingBridge>,
+) -> Option<String> {
+    community_numbering_scope(title, season_num, episode_num, bridge)?
+        .anidb_id
+        .map(|id| id.to_string())
+}
+
 pub(crate) fn community_numbering_queries(
     title: &Title,
     episode: Option<&Episode>,

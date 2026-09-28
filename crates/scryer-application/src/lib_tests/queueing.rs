@@ -6842,3 +6842,247 @@ async fn a_token_whose_listing_ticket_fails_its_binding_persists_no_listing() {
     assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
     assert_eq!(persisted_listing(&fixture).await, None);
 }
+
+/// A TVDB season that two AniDB entries split between them: the first cour is
+/// entry 7001, which the title carries, and the second is entry 7002.
+fn split_season_bridge() -> scryer_domain::AnimeNumberingBridge {
+    let cour = |index: i32, anidb_id: i64, name: &str, tvdb_start: i32| {
+        scryer_domain::AnimeCommunitySeason {
+            index,
+            anidb_id: Some(anidb_id),
+            titles: vec![name.into()],
+            ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                community_episode_start: 1,
+                community_episode_end: Some(12),
+                tvdb_season: 1,
+                tvdb_episode_start: tvdb_start,
+                tvdb_episode_end: Some(tvdb_start + 11),
+            }],
+            episode_count: Some(12),
+            ..Default::default()
+        }
+    };
+    scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
+        generated_on: "2026-01-01".into(),
+        corroborating_order: None,
+        seasons: vec![
+            cour(1, 7001, "Harbor Lantern Saga", 1),
+            cour(2, 7002, "Harbor Lantern Saga Second Tide", 13),
+        ],
+    }
+}
+
+struct AnidbSelectionFixture {
+    app: AppUseCase,
+    shows: std::sync::Arc<super::support_library_show::MockShowRepo>,
+    title: Title,
+}
+
+impl AnidbSelectionFixture {
+    async fn new(facet: MediaFacet, bridge: Option<scryer_domain::AnimeNumberingBridge>) -> Self {
+        let shows = std::sync::Arc::new(super::support_library_show::MockShowRepo::default());
+        let (app, user) = bootstrap();
+        let app = app.with_test_overrides({
+            let shows = shows.clone();
+            move |services| services.with_shows(shows)
+        });
+        let title = app
+            .add_title(
+                &user,
+                NewTitle {
+                    name: "Harbor Lantern Saga".into(),
+                    facet,
+                    monitored: true,
+                    external_ids: vec![scryer_domain::ExternalId::new("anidb", "7001")],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create title");
+        if let Some(bridge) = bridge {
+            app.services
+                .catalog
+                .shows
+                .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+                .await
+                .expect("store the numbering bridge");
+        }
+        Self { app, shows, title }
+    }
+
+    async fn episode(&self, episode_number: u32) -> Episode {
+        let episode = Episode {
+            id: Id::new().0,
+            title_id: self.title.id.clone(),
+            collection_id: Some("season-1".to_string()),
+            episode_type: scryer_domain::EpisodeType::Standard,
+            episode_number: Some(episode_number.to_string()),
+            season_number: Some("1".to_string()),
+            episode_label: None,
+            title: None,
+            air_date: None,
+            duration_seconds: Some(1_440),
+            has_multi_audio: false,
+            has_subtitle: false,
+            is_filler: false,
+            is_recap: false,
+            absolute_number: None,
+            contiguous_absolute_number: None,
+            overview: None,
+            tvdb_id: None,
+            tmdb_id: None,
+            image_url: None,
+            monitored: true,
+            created_at: Utc::now(),
+        };
+        self.shows.episodes.lock().await.push(episode.clone());
+        episode
+    }
+
+    fn wanted(&self, episode: &Episode) -> AcquisitionScopeState {
+        let now = Utc::now().to_rfc3339();
+        AcquisitionScopeState {
+            id: Id::new().0,
+            title_id: self.title.id.clone(),
+            title_name: Some(self.title.name.clone()),
+            title_slug: self.title.slug.clone(),
+            title_facet: Some(self.title.facet.as_str().to_string()),
+            library_id: Some(self.title.library_id.clone()),
+            library_name: None,
+            library_slug: None,
+            episode_id: Some(episode.id.clone()),
+            collection_id: episode.collection_id.clone(),
+            series_movie_link_id: None,
+            season_number: episode.season_number.clone(),
+            episode_number: episode.episode_number.clone(),
+            media_type: "episode".to_string(),
+            last_search_at: None,
+            status: AcquisitionScopeStatus::Wanted,
+            grabbed_release: None,
+            landed_bar: None,
+            latest_release_decision: None,
+            mismatch_recovery_eligible: false,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// The AniDB id the automatic and the interactive lane each send for one
+    /// episode.
+    async fn anidb_ids(&self, episode: &Episode) -> (Option<String>, Option<String>) {
+        let wanted = self.wanted(episode);
+        let search_title = self
+            .app
+            .release_search_title_for_wanted_item(&self.title, &wanted, Some(episode), None)
+            .await;
+        let automatic = self
+            .app
+            .resolve_release_search_subject_for_wanted_item(
+                &self.title,
+                &search_title,
+                &wanted,
+                Some(episode),
+            )
+            .await
+            .expect("automatic subject")
+            .anidb_id;
+        let interactive = self
+            .app
+            .resolve_release_search_subject_for_episode(
+                &self.title,
+                episode.season_number.as_deref().unwrap(),
+                episode.episode_number.as_deref().unwrap(),
+            )
+            .await
+            .expect("interactive subject")
+            .anidb_id;
+        (automatic, interactive)
+    }
+}
+
+fn scoped_anidb_id(scope_id: &str, anidb_id: &str, source_scope: Option<&str>) -> ScopedExternalId {
+    ScopedExternalId {
+        scope_id: scope_id.to_string(),
+        source: "anidb".to_string(),
+        external_id: anidb_id.to_string(),
+        provenance: "anibridge".to_string(),
+        source_scope: source_scope.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn episode_search_sends_the_anidb_id_of_the_cour_the_episode_sits_in() {
+    let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, Some(split_season_bridge())).await;
+    let first_cour = fixture.episode(5).await;
+    let second_cour = fixture.episode(20).await;
+
+    let expected_first = Some("7001".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&first_cour).await,
+        (expected_first.clone(), expected_first)
+    );
+    let expected_second = Some("7002".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&second_cour).await,
+        (expected_second.clone(), expected_second)
+    );
+}
+
+#[tokio::test]
+async fn episode_scoped_anidb_id_wins_over_the_bridge_and_prefers_the_r_scope() {
+    let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, Some(split_season_bridge())).await;
+    let episode = fixture.episode(20).await;
+    *fixture.shows.episode_external_ids.lock().await = vec![
+        scoped_anidb_id(&episode.id, "7100", None),
+        scoped_anidb_id(&episode.id, "7200", Some("R")),
+    ];
+    *fixture.shows.collection_external_ids.lock().await =
+        vec![scoped_anidb_id("season-1", "7300", Some("R"))];
+
+    let expected = Some("7200".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&episode).await,
+        (expected.clone(), expected)
+    );
+}
+
+#[tokio::test]
+async fn season_scoped_anidb_id_still_applies_without_a_cour_or_episode_id() {
+    let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, None).await;
+    let episode = fixture.episode(20).await;
+    *fixture.shows.collection_external_ids.lock().await =
+        vec![scoped_anidb_id("season-1", "7300", Some("R"))];
+
+    let expected = Some("7300".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&episode).await,
+        (expected.clone(), expected)
+    );
+}
+
+#[tokio::test]
+async fn episode_search_without_scoped_ids_or_bridge_keeps_the_title_anidb_id() {
+    let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, None).await;
+    let episode = fixture.episode(20).await;
+
+    let expected = Some("7001".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&episode).await,
+        (expected.clone(), expected)
+    );
+}
+
+#[tokio::test]
+async fn non_anime_episode_search_ignores_episode_scoped_and_cour_anidb_ids() {
+    let fixture = AnidbSelectionFixture::new(MediaFacet::Series, Some(split_season_bridge())).await;
+    let episode = fixture.episode(20).await;
+    *fixture.shows.episode_external_ids.lock().await =
+        vec![scoped_anidb_id(&episode.id, "7200", Some("R"))];
+
+    let expected = Some("7001".to_string());
+    assert_eq!(
+        fixture.anidb_ids(&episode).await,
+        (expected.clone(), expected)
+    );
+}

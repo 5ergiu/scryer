@@ -30,9 +30,9 @@ use super::acquisition::{
 use super::*;
 use crate::acquisition_search_queries::{
     anidb_id_from_external_ids, build_movie_search_queries, build_search_queries,
-    community_numbering_context, community_numbering_queries, imdb_id_from_title,
-    mal_id_from_external_ids, movie_text_search_query, tmdb_id_from_external_ids,
-    tvdb_id_from_external_ids,
+    community_cour_anidb_id, community_numbering_context, community_numbering_queries,
+    imdb_id_from_title, mal_id_from_external_ids, movie_text_search_query,
+    tmdb_id_from_external_ids, tvdb_id_from_external_ids,
 };
 use crate::delay_profile::DelayProfile;
 use crate::quality::release_parser::ParseDisposition;
@@ -2038,17 +2038,60 @@ impl AppUseCase {
             })
     }
 
-    /// `reads`, when supplied, answers repeated collection lookups within one
-    /// title walk.
+    /// The AniDB id an episode search sends in place of the title-level one,
+    /// shared by the automatic and interactive lanes so both ask for the same
+    /// entry. In order: the episode's own scoped id, the id of the bridge cour
+    /// the episode sits in, then the id scoped to the episode's season. A TVDB
+    /// season spanning several cours has no season-scoped id, and the
+    /// title-level id callers fall back to names the first cour only. The first
+    /// two are read for anime only.
+    ///
+    /// `official` is the episode's TVDB (season, episode) when the caller has
+    /// it without a catalog row; otherwise it is read off `episode`. `reads`,
+    /// when supplied, answers repeated collection lookups within one title
+    /// walk.
     pub(crate) async fn local_scoped_anidb_id_for_episode(
         &self,
+        title: &Title,
         episode: Option<&Episode>,
+        official: Option<(u32, u32)>,
         reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
     ) -> Option<String> {
-        let episode = episode?;
-        // Prefer season/collection-scoped AniDB mappings, then let callers fall
-        // back to the title-level AniDB ID.
-        let collection_id = episode.collection_id.as_deref()?;
+        if title.facet == MediaFacet::Anime {
+            if let Some(episode) = episode
+                && let Ok(episode_ids) = self
+                    .services
+                    .catalog
+                    .shows
+                    .list_episode_external_ids(&episode.id)
+                    .await
+                && let Some(anidb_id) = preferred_scoped_external_id(&episode_ids, "anidb")
+            {
+                return Some(anidb_id);
+            }
+
+            let official = official.or_else(|| {
+                let episode = episode?;
+                let season = episode.season_number.as_deref()?.trim().parse().ok()?;
+                let number = episode.episode_number.as_deref()?.trim().parse().ok()?;
+                Some((season, number))
+            });
+            if let Some((season, number)) = official
+                && let (Ok(season), Ok(number)) = (i32::try_from(season), i32::try_from(number))
+                && let Ok(bridge) = self
+                    .services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                && let Some(anidb_id) =
+                    community_cour_anidb_id(title, season, number, bridge.as_ref())
+            {
+                return Some(anidb_id);
+            }
+        }
+
+        let collection_id = episode?.collection_id.as_deref()?;
         self.local_scoped_anidb_id_for_collection(collection_id, reads)
             .await
     }
@@ -2100,7 +2143,9 @@ impl AppUseCase {
         };
 
         if item.media_type == "episode"
-            && let Some(anidb_id) = self.local_scoped_anidb_id_for_episode(episode, reads).await
+            && let Some(anidb_id) = self
+                .local_scoped_anidb_id_for_episode(title, episode, None, reads)
+                .await
         {
             let mut search_title = search_title;
             search_title.external_ids.retain(|id| {
@@ -2638,7 +2683,12 @@ impl AppUseCase {
             .as_deref()
             .and_then(crate::normalize::normalize_numeric_id);
         let anidb_id = self
-            .local_scoped_anidb_id_for_episode(episode_record.as_ref(), None)
+            .local_scoped_anidb_id_for_episode(
+                title,
+                episode_record.as_ref(),
+                Some((season_num, episode_num)),
+                None,
+            )
             .await
             .or(title_anidb_id);
 

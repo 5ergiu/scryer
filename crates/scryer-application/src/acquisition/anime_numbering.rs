@@ -1812,6 +1812,8 @@ pub(crate) struct CommunityCoordinates {
     pub(crate) season: i32,
     pub(crate) episode: i32,
     pub(crate) season_title: Option<String>,
+    /// The community season's own AniDB entry, when the bridge knows it.
+    pub(crate) anidb_id: Option<i64>,
 }
 
 /// Translate a wanted TVDB episode into the community numbering release groups
@@ -1831,6 +1833,7 @@ pub(crate) fn community_coordinates_for_tvdb_episode(
             .first()
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty()),
+        anidb_id: season.anidb_id.filter(|id| *id > 0),
     })
 }
 
