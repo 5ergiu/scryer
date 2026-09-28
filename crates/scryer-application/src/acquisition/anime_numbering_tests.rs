@@ -2358,7 +2358,7 @@ fn a_trailing_article_canonical_is_still_the_franchise() {
     let projected = crate::app_usecase_rss::normalize_for_matching(canonical);
 
     assert!(matches!(
-        exact_cour_title_match(canonical, &bridge, &[projected.clone()]),
+        exact_cour_title_match(canonical, &bridge, std::slice::from_ref(&projected)),
         ExactCourTitleMatch::None
     ));
     assert!(matches!(

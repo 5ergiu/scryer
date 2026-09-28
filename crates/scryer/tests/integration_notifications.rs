@@ -1186,6 +1186,12 @@ async fn notification_event_types_query_returns_only_dispatchable_subscription_e
             "media_request_approved",
             "media_request_rejected",
             "media_request_canceled",
+            "list_title_added",
+            "list_item_held",
+            "list_request_submitted",
+            "list_title_left",
+            "list_sync_failed",
+            "list_unfollowed",
         ]
     );
 }

@@ -607,17 +607,25 @@ mod tests {
     }
 
     #[test]
-    fn restore_manifest_validation_dates_missing_transfer_tables_and_combines_legacy_changes() {
+    fn restore_manifest_validation_dates_missing_tables_and_combines_legacy_changes() {
         let introduced = [
             ("rule_pack_installations", 225),
             ("rule_pack_members", 225),
             ("location_transfer_progress", 234),
             ("location_transfer_titles", 234),
             ("location_file_resolutions", 235),
+            ("user_list_accounts", 259),
+            ("list_subscriptions", 259),
+            ("list_subscription_routes", 259),
+            ("list_memberships", 259),
+            ("list_exclusions", 259),
+            ("list_exclusion_external_ids", 259),
+            ("user_list_policies", 259),
+            ("list_sync_runs", 259),
         ];
         let mut export_tables = vec!["titles".to_string()];
         export_tables.extend(introduced.iter().map(|(table, _)| table.to_string()));
-        for source_version in [224, 225, 233, 234, 235, 236] {
+        for source_version in [224, 225, 233, 234, 235, 236, 258, 259, 260] {
             let mut row_counts = BTreeMap::from_iter([("titles".to_string(), 1)]);
             row_counts.extend(
                 introduced

@@ -2545,6 +2545,7 @@ mod tests {
                 .batch_ensure_setting_definitions(backup_matrix_setting_definitions())
                 .await?;
             seed_backup_matrix_data(&settings, &titles, &users).await?;
+            seed_backup_matrix_lists(services.pool()).await?;
             seed_backup_matrix_title_image(&images).await?;
             seed_backup_matrix_runtime_state(
                 &datastore,
@@ -2658,6 +2659,13 @@ mod tests {
             let images = TitleImageStore::new(datastore.clone());
             let users = UserStore::new(datastore.clone());
             verify_backup_matrix_data(&settings, &titles, &users).await?;
+            verify_backup_matrix_lists(services.pool()).await?;
+            let presentation_rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM discovery_presentation_selection")
+                    .fetch_one(services.pool())
+                    .await
+                    .map_err(|error| AppError::Repository(error.to_string()))?;
+            assert_eq!(presentation_rows, 0, "discovery revision state must reset");
             verify_backup_matrix_runtime_state(&datastore).await?;
             verify_backup_matrix_sequence_safety_state(&datastore).await?;
             verify_backup_matrix_title_image_restore(&images).await?;
@@ -2669,6 +2677,78 @@ mod tests {
         async fn cleanup(self) -> AppResult<()> {
             cleanup_postgres_schema(self.admin_pool, self.schema).await
         }
+    }
+
+    async fn seed_backup_matrix_lists(pool: &sqlx::SqlitePool) -> AppResult<()> {
+        for statement in [
+            "INSERT INTO user_list_accounts
+             (id, user_id, provider, external_user_id, username, credential_encrypted,
+              linked_at, updated_at)
+             SELECT 'backup-account', id, 'fixture', 'external-fixture', 'fixture-user',
+                    'fixture-ciphertext', '2026-01-01', '2026-01-01' FROM users LIMIT 1",
+            "INSERT INTO list_subscriptions
+             (id, scope, owner_user_id, provider, source_type, source_origin, name, mode,
+              on_leave, interval_seconds, credential_id, created_at, updated_at)
+             SELECT 'backup-list', 'personal', id, 'fixture', 'watchlist', 'provider_fetch',
+                    'Fixture list', 'hold', 'unmonitor', 3600, 'backup-account',
+                    '2026-01-01', '2026-01-01' FROM users LIMIT 1",
+            "INSERT INTO list_subscription_routes
+             (subscription_id, kind, library_id, monitor_type, tags_json)
+             SELECT 'backup-list', 'movie', id, 'all', '[\"fixture-tag\"]'
+             FROM libraries LIMIT 1",
+            "INSERT INTO list_memberships
+             (subscription_id, item_key, kind, state, added_by_list, first_seen_at,
+              last_seen_at, left_at, left_handled)
+             VALUES ('backup-list', 'fixture-item', 'movie', 'left', 1,
+                     '2026-01-01', '2026-01-02', '2026-01-03', 1)",
+            "INSERT INTO list_exclusions
+             (id, kind, display_title, scope, subscription_id, created_at)
+             VALUES ('backup-exclusion', 'movie', 'Excluded fixture', 'list',
+                     'backup-list', '2026-01-01')",
+            "INSERT INTO list_exclusion_external_ids (exclusion_id, source, value)
+             VALUES ('backup-exclusion', 'tmdb', '12345')",
+            "INSERT INTO user_list_policies (user_id, policy, updated_at)
+             SELECT id, 'approval', '2026-01-01' FROM users LIMIT 1",
+            "INSERT INTO list_sync_runs
+             (id, subscription_id, started_at, finished_at, outcome, counts_json)
+             VALUES ('backup-sync', 'backup-list', '2026-01-01', '2026-01-02',
+                     'succeeded', '{\"added\":1}')",
+            "INSERT INTO discovery_presentation_selection (scope_key, language, revision)
+             VALUES ('fixture-scope', 'sv', 7)",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(pool)
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+        }
+        verify_backup_matrix_lists(pool).await
+    }
+
+    async fn verify_backup_matrix_lists(pool: &sqlx::SqlitePool) -> AppResult<()> {
+        for (query, expected) in [
+            ("SELECT credential_encrypted FROM user_list_accounts WHERE id = 'backup-account'",
+             "fixture-ciphertext"),
+            ("SELECT credential_id || ':' || on_leave FROM list_subscriptions WHERE id = 'backup-list'",
+             "backup-account:unmonitor"),
+            ("SELECT tags_json FROM list_subscription_routes WHERE subscription_id = 'backup-list'",
+             "[\"fixture-tag\"]"),
+            ("SELECT state || ':' || added_by_list || ':' || left_handled || ':' || first_seen_at
+              FROM list_memberships WHERE subscription_id = 'backup-list'",
+             "left:1:1:2026-01-01"),
+            ("SELECT subscription_id FROM list_exclusions WHERE id = 'backup-exclusion'",
+             "backup-list"),
+            ("SELECT source || ':' || value FROM list_exclusion_external_ids
+              WHERE exclusion_id = 'backup-exclusion'", "tmdb:12345"),
+            ("SELECT policy FROM user_list_policies", "approval"),
+            ("SELECT counts_json FROM list_sync_runs WHERE id = 'backup-sync'", "{\"added\":1}"),
+        ] {
+            let actual: String = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+                .fetch_one(pool)
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+            assert_eq!(actual, expected, "backup must preserve list state: {query}");
+        }
+        Ok(())
     }
 
     async fn seed_backup_matrix_data<S, T, U>(settings: &S, titles: &T, users: &U) -> AppResult<()>

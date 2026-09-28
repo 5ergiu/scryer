@@ -487,6 +487,42 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         classification: BackupTableClassification::Export,
     },
     BackupTableCatalogEntry {
+        table: "user_list_accounts",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_subscriptions",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_subscription_routes",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_memberships",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_exclusions",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_exclusion_external_ids",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "user_list_policies",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "list_sync_runs",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "discovery_presentation_selection",
+        classification: BackupTableClassification::ResetOnRestore,
+    },
+    BackupTableCatalogEntry {
         table: "title_search_terms",
         classification: BackupTableClassification::Rebuild,
     },
@@ -1346,6 +1382,14 @@ pub fn validate_restore_manifest_table_set(
                     "rule_pack_installations" | "rule_pack_members" => number < 225,
                     "location_transfer_progress" | "location_transfer_titles" => number < 234,
                     "location_file_resolutions" => number < 235,
+                    "user_list_accounts"
+                    | "list_subscriptions"
+                    | "list_subscription_routes"
+                    | "list_memberships"
+                    | "list_exclusions"
+                    | "list_exclusion_external_ids"
+                    | "user_list_policies"
+                    | "list_sync_runs" => number < 259,
                     _ => false,
                 })
             })

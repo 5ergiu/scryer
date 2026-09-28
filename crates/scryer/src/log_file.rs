@@ -119,19 +119,19 @@ pub(crate) struct LogFileGuard {
 impl Drop for LogFileGuard {
     fn drop(&mut self) {
         let active = self.writer.0.lock().unwrap();
-        if let Some(file) = &active.file {
-            if let Err(error) = file.sync_all() {
-                report("flush", &error);
-            }
+        if let Some(file) = &active.file
+            && let Err(error) = file.sync_all()
+        {
+            report("flush", &error);
         }
         let work = active.work.clone();
         work.queue.lock().unwrap().shutdown = true;
         work.changed.notify_all();
         drop(active);
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                eprintln!("Scryer log compression worker panicked; sealed logs preserved");
-            }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            eprintln!("Scryer log compression worker panicked; sealed logs preserved");
         }
     }
 }
@@ -371,11 +371,11 @@ impl Active {
                 Err(e) => return Err(e),
             }
         };
-        if let Some(file) = self.file.as_mut() {
-            if let Err(error) = file.flush().and_then(|_| file.sync_all()) {
-                let _ = fs::remove_file(&sealed); // Our exclusive empty reservation.
-                return Err(error);
-            }
+        if let Some(file) = self.file.as_mut()
+            && let Err(error) = file.flush().and_then(|_| file.sync_all())
+        {
+            let _ = fs::remove_file(&sealed); // Our exclusive empty reservation.
+            return Err(error);
         }
         drop(self.file.take());
         if let Err(error) = work

@@ -937,7 +937,7 @@ impl FranchiseNames {
         self.cours.get(position).is_some_and(|titles| {
             titles.iter().any(|title| {
                 let title = title.concat();
-                parsed.iter().any(|name| *name == title)
+                parsed.contains(&title)
             })
         })
     }
