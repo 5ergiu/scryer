@@ -410,14 +410,16 @@ pub(crate) fn tvdb_id_from_external_ids(external_ids: &[ExternalId]) -> Option<S
     external_ids
         .iter()
         .find(|id| id.source.eq_ignore_ascii_case("tvdb"))
-        .map(|id| id.value.clone())
+        .map(|id| id.value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn anidb_id_from_external_ids(external_ids: &[ExternalId]) -> Option<String> {
     external_ids
         .iter()
         .find(|id| id.source.eq_ignore_ascii_case("anidb"))
-        .map(|id| id.value.clone())
+        .map(|id| id.value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn mal_id_from_external_ids(external_ids: &[ExternalId]) -> Option<String> {
@@ -458,6 +460,32 @@ mod tests {
             "Amber Circuit"
         );
         assert_eq!(movie_text_search_query("  ", Some(2026)), "");
+    }
+
+    #[test]
+    fn provider_id_helpers_trim_values_and_drop_empty_ones() {
+        let external_id = |source: &str, value: &str| ExternalId {
+            source: source.to_string(),
+            kind: None,
+            value: value.to_string(),
+        };
+        let helpers: [(&str, fn(&[ExternalId]) -> Option<String>); 4] = [
+            ("tvdb", tvdb_id_from_external_ids),
+            ("anidb", anidb_id_from_external_ids),
+            ("tmdb", tmdb_id_from_external_ids),
+            ("mal", mal_id_from_external_ids),
+        ];
+
+        for (source, helper) in helpers {
+            assert_eq!(
+                helper(&[external_id(source, " 81234 ")]),
+                Some("81234".to_string()),
+                "{source}"
+            );
+            assert_eq!(helper(&[external_id(source, "")]), None, "{source}");
+            assert_eq!(helper(&[external_id(source, "   ")]), None, "{source}");
+            assert_eq!(helper(&[]), None, "{source}");
+        }
     }
 
     // ── community-numbered anime queries ──────────────────────────────────

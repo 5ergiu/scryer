@@ -459,10 +459,16 @@ fn record_query_coverage_outcomes(
 /// row as a cooldown rather than a failure.
 pub(crate) const RATE_LIMITED_INDEXER_REASON: &str = "indexer is cooling down after a rate limit";
 
-/// Whether an incomplete-indexer reason describes a cooldown the indexer asked
-/// for, as opposed to something that went wrong.
+/// Opening words of the reason an indexer skipped by an interactive search
+/// gets when its configured query budget has no slot soon enough.
+pub(crate) const QUERY_BUDGET_INDEXER_REASON: &str = "indexer is over its query budget";
+
+/// Whether an incomplete-indexer reason describes a wait on the indexer's
+/// pacing (a cooldown it asked for, or its own query budget), as opposed to
+/// something that went wrong.
 pub(crate) fn reason_is_rate_limit(reason: &str) -> bool {
     reason.starts_with(RATE_LIMITED_INDEXER_REASON)
+        || reason.starts_with(QUERY_BUDGET_INDEXER_REASON)
 }
 
 pub(crate) fn incomplete_indexer_reason(outcome: IndexerSearchOutcome) -> Option<String> {
@@ -473,6 +479,11 @@ pub(crate) fn incomplete_indexer_reason(outcome: IndexerSearchOutcome) -> Option
             retry_after,
             ..
         } => (RATE_LIMITED_INDEXER_REASON, retry_after),
+        IndexerSearchOutcome::Partial {
+            reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+            retry_after,
+            ..
+        } => (QUERY_BUDGET_INDEXER_REASON, retry_after),
         // Unattested legacy responses are operationally successful; they only
         // withhold convergence coverage until the plugin declares semantics.
         IndexerSearchOutcome::Partial {
