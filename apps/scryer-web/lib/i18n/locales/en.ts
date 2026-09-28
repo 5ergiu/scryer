@@ -60,6 +60,7 @@ const en: LocaleDictionary = {
     "Search now for this whole season and choose which release to queue.",
   "label.refresh": "Refresh",
   "label.refreshing": "Refreshing…",
+  "label.retry": "Retry",
   "label.save": "Save",
   "label.saving": "Saving…",
   "label.loading": "Loading…",
