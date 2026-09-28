@@ -1456,31 +1456,6 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     if (!title) return;
     setDeleteLoading(true);
     try {
-      // The exclusion is recorded first, as its own request, while the title
-      // and its external ids still exist. It never changes what the delete
-      // removes; if it cannot be recorded, the title is left in place.
-      if (canManageLists && alsoExcludeFromLists) {
-        const exclusion = exclusionInputFromTitle({
-          facet: title.facet as Facet,
-          name: title.name,
-          year: title.year,
-          externalIds: title.externalIds,
-        });
-        if (!exclusion) {
-          setGlobalStatus(t("lists.exclusions.deleteNoIds", { name: title.name }));
-          return;
-        }
-        const exclusionFailed = await client
-          .mutation(addListExclusionMutation, { input: exclusion })
-          .toPromise()
-          .then((result) => Boolean(result.error))
-          .catch(() => true);
-        if (exclusionFailed) {
-          setGlobalStatus(t("lists.exclusions.deleteFailed", { name: title.name }));
-          return;
-        }
-      }
-
       const payload: {
         titleId: string;
         deleteFilesOnDisk?: boolean;
@@ -1508,7 +1483,32 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
       setGlobalStatus(t("status.titleDeleted", { name: title.name }));
       setDeleteDialogOpen(false);
       setDeleteFilesOnDisk(false);
-      setAlsoExcludeFromLists(false);
+
+      // The exclusion is a separate request made only after the delete has
+      // succeeded, so it can never change what the delete removes.
+      if (canManageLists && alsoExcludeFromLists) {
+        setAlsoExcludeFromLists(false);
+        const exclusion = exclusionInputFromTitle({
+          facet: title.facet as Facet,
+          name: title.name,
+          year: title.year,
+          externalIds: title.externalIds,
+        });
+        if (!exclusion) {
+          setGlobalStatus(t("lists.exclusions.deleteNoIds", { name: title.name }));
+        } else {
+          const exclusionFailed = await client
+            .mutation(addListExclusionMutation, { input: exclusion })
+            .toPromise()
+            .then((result) => Boolean(result.error))
+            .catch(() => true);
+          if (exclusionFailed) {
+            setGlobalStatus(
+              t("lists.exclusions.deleteFailed", { name: title.name }),
+            );
+          }
+        }
+      }
 
       if (onBackToList) {
         onBackToList();
