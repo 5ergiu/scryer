@@ -104,6 +104,37 @@ struct StrategyExecutionOutcome {
     over_query_budget: Option<std::time::Duration>,
 }
 
+/// Strategies of one plan tier whose pacing slots come together, dispatched
+/// to the plugin as one plan once they do.
+struct PacedPlanSlice {
+    dispatch_at: tokio::time::Instant,
+    strategies: Vec<PreparedSearchStrategy>,
+    slots: Vec<PacingSlot>,
+}
+
+/// A plan strategy that never reached the indexer: paced out, cancelled, or
+/// past the search deadline before its slot came.
+fn undispatched_plan_outcome(
+    strategy: PreparedSearchStrategy,
+    error: AppError,
+    over_query_budget: Option<std::time::Duration>,
+) -> StrategyExecutionOutcome {
+    StrategyExecutionOutcome {
+        strategy_id: strategy.strategy_id,
+        label: strategy.labels.first().cloned().unwrap_or_default(),
+        labels: strategy.labels,
+        title_guard_mode: strategy.title_guard_mode,
+        response: Err(error),
+        page_reservation: None,
+        request_fired: false,
+        elapsed: std::time::Duration::ZERO,
+        retry_after: None,
+        rate_limited: false,
+        timed_out: false,
+        over_query_budget,
+    }
+}
+
 enum StrategyTierOutcomes {
     Legacy(tokio::task::JoinSet<StrategyExecutionOutcome>),
     Plan(StrategyPlanOutcomeStream),
@@ -2304,6 +2335,14 @@ impl IndexerRateLimiter {
     /// reserved and the request is refused at once with the wait it would
     /// have needed.
     async fn acquire(&self, pacing: &IndexerPacing) -> Result<(), PacingWaitExceeded> {
+        self.reserve(pacing)?.wait().await;
+        Ok(())
+    }
+
+    /// Reserve this domain's next slot without waiting for it, under the same
+    /// rules as [`Self::acquire`]. The slot is spent once [`PacingSlot::wait`]
+    /// completes; dropping it before then gives its budget entry back.
+    fn reserve(&self, pacing: &IndexerPacing) -> Result<PacingSlot, PacingWaitExceeded> {
         let recovering = self
             .registry
             .destination_recovering(&DestinationKey::from(pacing.domain_key.as_str()));
@@ -2320,7 +2359,10 @@ impl IndexerRateLimiter {
             );
         }
         if interval.is_zero() && pacing.max_queries_per_minute.is_none() {
-            return Ok(());
+            return Ok(PacingSlot {
+                dispatch_at: tokio::time::Instant::now(),
+                reservation: None,
+            });
         }
 
         // The guard is built only after the lock is released: its `Drop`
@@ -2382,17 +2424,33 @@ impl IndexerRateLimiter {
             }
             (dispatch_at, reservation_id)
         };
-        let mut reservation = reservation_id.map(|id| QueryBudgetReservation {
+        let reservation = reservation_id.map(|id| QueryBudgetReservation {
             state: self.state.clone(),
             domain_key: pacing.domain_key.clone(),
             id,
             dispatched: false,
         });
-        tokio::time::sleep_until(dispatch_at).await;
-        if let Some(reservation) = reservation.as_mut() {
+        Ok(PacingSlot {
+            dispatch_at,
+            reservation,
+        })
+    }
+}
+
+/// One reserved pacing slot for one indexer request.
+struct PacingSlot {
+    dispatch_at: tokio::time::Instant,
+    reservation: Option<QueryBudgetReservation>,
+}
+
+impl PacingSlot {
+    /// Wait until the slot comes; the request is then dispatched and its
+    /// budget entry stays spent.
+    async fn wait(mut self) {
+        tokio::time::sleep_until(self.dispatch_at).await;
+        if let Some(reservation) = self.reservation.as_mut() {
             reservation.dispatched = true;
         }
-        Ok(())
     }
 }
 
@@ -3620,222 +3678,368 @@ impl MultiIndexerSearchClient {
         let plan_cancel_token = context.cancel_token.child_token();
         let cancel_on_drop = plan_cancel_token.clone();
         let controller = tokio::spawn(async move {
-            let plan_id = uuid::Uuid::new_v4().to_string();
-            let mut expected = strategies
-                .iter()
-                .map(|strategy| (strategy.strategy_id.clone(), strategy.clone()))
-                .collect::<HashMap<_, _>>();
-            let requests = strategies
-                .iter()
-                .map(|strategy| strategy.request.clone())
-                .collect();
-
-            let permit = match initial_permit {
-                Some(permit) => Ok(permit),
-                None => {
-                    acquire_search_permit(
-                        context.search_limit.clone(),
-                        &plan_cancel_token,
-                        context.deadline_at,
-                    )
-                    .await
-                }
-            };
-            let permit = match permit {
-                Ok(permit) => permit,
-                Err(error) => {
-                    let timed_out = matches!(error, SearchPermitError::DeadlineExpired);
-                    let message = match error {
-                        SearchPermitError::Cancelled => {
-                            "indexer strategy plan canceled".to_string()
-                        }
-                        SearchPermitError::DeadlineExpired => {
-                            "indexer search timed out before plan dispatch".to_string()
-                        }
-                        SearchPermitError::Closed(error) => {
-                            format!("indexer search limiter closed: {error}")
-                        }
-                    };
-                    for strategy in expected.into_values() {
-                        if outcome_tx
-                            .send(StrategyExecutionOutcome {
-                                strategy_id: strategy.strategy_id,
-                                label: strategy.labels.first().cloned().unwrap_or_default(),
-                                labels: strategy.labels,
-                                title_guard_mode: strategy.title_guard_mode,
-                                response: Err(AppError::Repository(message.clone())),
-                                page_reservation: None,
-                                request_fired: false,
-                                elapsed: std::time::Duration::ZERO,
-                                retry_after: None,
-                                rate_limited: false,
-                                timed_out,
-                                over_query_budget: None,
-                            })
-                            .await
-                            .is_err()
+            // The plugin fires a plan's strategies itself and the host cannot
+            // gate the requests inside it, so every strategy reserves its
+            // pacing slot here, up front and in order — as the legacy tier's
+            // concurrently spawned strategies do — and the tier is dispatched
+            // as one plan per group of strategies whose slots come together.
+            // An unpaced indexer keeps a single plan; a paced one sends each
+            // strategy when its own slot comes. N strategies cost N slots.
+            let mut slices = Vec::<PacedPlanSlice>::new();
+            for strategy in strategies {
+                match context.rate_limiter.reserve(&context.pacing) {
+                    Ok(slot) => match slices.last_mut() {
+                        Some(slice)
+                            if slot.dispatch_at
+                                <= slice.dispatch_at.max(tokio::time::Instant::now()) =>
                         {
+                            slice.strategies.push(strategy);
+                            slice.slots.push(slot);
+                        }
+                        _ => slices.push(PacedPlanSlice {
+                            dispatch_at: slot.dispatch_at,
+                            strategies: vec![strategy],
+                            slots: vec![slot],
+                        }),
+                    },
+                    Err(PacingWaitExceeded { wait }) => {
+                        let outcome = undispatched_plan_outcome(
+                            strategy,
+                            AppError::Repository(format!(
+                                "indexer is over its query budget; next slot in {}s",
+                                wait.as_secs()
+                            )),
+                            Some(wait),
+                        );
+                        if outcome_tx.send(outcome).await.is_err() {
                             plan_cancel_token.cancel();
-                            break;
+                            return;
                         }
                     }
-                    return;
-                }
-            };
-
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-            let event_sink = IndexerSearchStrategyEventSink::new(event_tx);
-            let request = IndexerSearchPlanRequest {
-                plan_id: plan_id.clone(),
-                strategies: requests,
-            };
-            let client = context.client.clone();
-            let operation = context.operation;
-            let mode = context.mode;
-            let request_cancel = plan_cancel_token.child_token();
-            let request_deadline =
-                effective_request_deadline(context.search_timeout, context.deadline_at);
-            let request_window_cancel = plan_cancel_token.clone();
-            let started_at = std::time::Instant::now();
-            let invocation = tokio::spawn(async move {
-                let _permit = permit;
-                match within_search_window(
-                    client.search_plan(request, mode, operation, request_cancel, event_sink),
-                    &request_window_cancel,
-                    Some(request_deadline),
-                )
-                .await
-                {
-                    Ok(result) => (result, false),
-                    Err(SearchWindowError::Cancelled) => (
-                        Err(AppError::canceled("indexer strategy plan canceled")),
-                        false,
-                    ),
-                    Err(SearchWindowError::DeadlineExpired) => (
-                        Err(AppError::Repository("indexer search plan timed out".into())),
-                        true,
-                    ),
-                }
-            });
-
-            let mut invocation = Some(invocation);
-            let mut invocation_result = None;
-            let mut emitted = HashSet::new();
-            let mut protocol_error = None::<String>;
-            while invocation.is_some() || !event_rx.is_closed() || !event_rx.is_empty() {
-                tokio::select! {
-                    event = event_rx.recv(), if !event_rx.is_closed() || !event_rx.is_empty() => {
-                        let Some(IndexerSearchStrategyEvent { strategy_id, response }) = event else {
-                            continue;
-                        };
-                        let Some(strategy) = expected.get(&strategy_id).cloned() else {
-                            protocol_error = Some(format!("indexer strategy plan emitted unknown strategy {strategy_id}"));
-                            continue;
-                        };
-                        if !emitted.insert(strategy_id.clone()) {
-                            protocol_error = Some(format!("indexer strategy plan emitted duplicate strategy {strategy_id}"));
-                            continue;
-                        }
-                        let rate_limit_signal = response
-                            .as_ref()
-                            .err()
-                            .and_then(rate_limit_signal_from_error);
-                        let retry_after = response.as_ref().err().and_then(|error| {
-                            strategy_retry_after(error, rate_limit_signal.as_ref())
-                        });
-                        let page_reservation = if response
-                            .as_ref()
-                            .is_ok_and(|response| !response.results.is_empty())
-                        {
-                            tokio::select! {
-                                _ = plan_cancel_token.cancelled() => None,
-                                reservation = page_sink.reserve() => reservation,
-                            }
-                        } else {
-                            None
-                        };
-                        if outcome_tx
-                            .send(StrategyExecutionOutcome {
-                                strategy_id,
-                                label: strategy.labels.first().cloned().unwrap_or_default(),
-                                labels: strategy.labels,
-                                title_guard_mode: strategy.title_guard_mode,
-                                request_fired: true,
-                                response,
-                                page_reservation,
-                                elapsed: started_at.elapsed(),
-                                retry_after,
-                                rate_limited: rate_limit_signal.is_some(),
-                                timed_out: false,
-                                over_query_budget: None,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            plan_cancel_token.cancel();
-                            break;
-                        }
-                    }
-                    joined = async { invocation.as_mut().expect("guarded invocation").await }, if invocation.is_some() => {
-                        invocation_result = Some(match joined {
-                            Ok(result) => result,
-                            Err(error) => (
-                                Err(AppError::Repository(format!("indexer strategy plan task failed: {error}"))),
-                                false,
-                            ),
-                        });
-                        invocation = None;
-                    }
-                }
-                if invocation.is_none() && event_rx.is_empty() {
-                    break;
                 }
             }
 
-            let (summary, timed_out) = invocation_result.unwrap_or_else(|| {
-                (
-                    Err(AppError::Repository(
-                        "indexer strategy plan ended without a summary".to_string(),
-                    )),
-                    false,
-                )
-            });
-            let invocation_error = match summary {
-                Ok(summary) => {
-                    if summary.plan_id != plan_id {
-                        protocol_error =
-                            Some("indexer strategy plan summary ID mismatch".to_string());
-                    }
-                    let summary_id_count = summary.emitted_strategy_ids.len();
-                    let summary_ids = summary
-                        .emitted_strategy_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>();
-                    if summary_ids.len() != summary_id_count || summary_ids != emitted {
-                        protocol_error = Some(
-                            "indexer strategy plan summary did not match emitted events"
-                                .to_string(),
-                        );
-                    } else if emitted.len() != expected.len()
-                        || expected
-                            .keys()
-                            .any(|strategy_id| !emitted.contains(strategy_id))
-                    {
-                        protocol_error =
-                            Some("indexer strategy plan omitted a submitted strategy".to_string());
-                    }
-                    None
-                }
-                Err(error) => Some(error.to_string()),
-            };
+            let mut initial_permit = initial_permit;
+            let slices = slices
+                .into_iter()
+                .map(|slice| {
+                    Self::run_paced_plan_slice(
+                        &context,
+                        slice,
+                        initial_permit.take(),
+                        &page_sink,
+                        &outcome_tx,
+                        &plan_cancel_token,
+                    )
+                })
+                .collect::<Vec<_>>();
+            futures_util::future::join_all(slices).await;
+        });
 
-            if let Some(error) = protocol_error.as_deref() {
+        StrategyTierOutcomes::Plan(StrategyPlanOutcomeStream {
+            receiver: outcome_rx,
+            controller,
+            cancel_token: cancel_on_drop,
+        })
+    }
+
+    /// Wait for one slice's pacing slots, then dispatch its strategies as one
+    /// plan. A slice that never reaches its slot reports each strategy as not
+    /// dispatched, exactly as the legacy tier does.
+    async fn run_paced_plan_slice(
+        context: &StrategyTierContext,
+        slice: PacedPlanSlice,
+        initial_permit: Option<OwnedSemaphorePermit>,
+        page_sink: &IndexerSearchPageSink,
+        outcome_tx: &tokio::sync::mpsc::Sender<StrategyExecutionOutcome>,
+        plan_cancel_token: &CancellationToken,
+    ) {
+        let PacedPlanSlice {
+            strategies, slots, ..
+        } = slice;
+        // Pace before taking a concurrency permit, like the legacy tier.
+        let paced = within_search_window(
+            async move {
+                for slot in slots {
+                    slot.wait().await;
+                }
+            },
+            plan_cancel_token,
+            context.deadline_at,
+        )
+        .await;
+        if let Err(error) = paced {
+            for strategy in strategies {
+                let response = match error {
+                    SearchWindowError::Cancelled => AppError::canceled("indexer strategy canceled"),
+                    SearchWindowError::DeadlineExpired => {
+                        AppError::Repository("indexer search timed out before dispatch".into())
+                    }
+                };
+                if outcome_tx
+                    .send(undispatched_plan_outcome(strategy, response, None))
+                    .await
+                    .is_err()
+                {
+                    plan_cancel_token.cancel();
+                    return;
+                }
+            }
+            return;
+        }
+        Self::dispatch_plan_slice(
+            context,
+            strategies,
+            initial_permit,
+            page_sink,
+            outcome_tx,
+            plan_cancel_token,
+        )
+        .await;
+    }
+
+    async fn dispatch_plan_slice(
+        context: &StrategyTierContext,
+        strategies: Vec<PreparedSearchStrategy>,
+        initial_permit: Option<OwnedSemaphorePermit>,
+        page_sink: &IndexerSearchPageSink,
+        outcome_tx: &tokio::sync::mpsc::Sender<StrategyExecutionOutcome>,
+        plan_cancel_token: &CancellationToken,
+    ) {
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let mut expected = strategies
+            .iter()
+            .map(|strategy| (strategy.strategy_id.clone(), strategy.clone()))
+            .collect::<HashMap<_, _>>();
+        let requests = strategies
+            .iter()
+            .map(|strategy| strategy.request.clone())
+            .collect();
+
+        let permit = match initial_permit {
+            Some(permit) => Ok(permit),
+            None => {
+                acquire_search_permit(
+                    context.search_limit.clone(),
+                    plan_cancel_token,
+                    context.deadline_at,
+                )
+                .await
+            }
+        };
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) => {
+                let timed_out = matches!(error, SearchPermitError::DeadlineExpired);
+                let message = match error {
+                    SearchPermitError::Cancelled => "indexer strategy plan canceled".to_string(),
+                    SearchPermitError::DeadlineExpired => {
+                        "indexer search timed out before plan dispatch".to_string()
+                    }
+                    SearchPermitError::Closed(error) => {
+                        format!("indexer search limiter closed: {error}")
+                    }
+                };
+                for strategy in expected.into_values() {
+                    if outcome_tx
+                        .send(StrategyExecutionOutcome {
+                            strategy_id: strategy.strategy_id,
+                            label: strategy.labels.first().cloned().unwrap_or_default(),
+                            labels: strategy.labels,
+                            title_guard_mode: strategy.title_guard_mode,
+                            response: Err(AppError::Repository(message.clone())),
+                            page_reservation: None,
+                            request_fired: false,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out,
+                            over_query_budget: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        plan_cancel_token.cancel();
+                        break;
+                    }
+                }
+                return;
+            }
+        };
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let event_sink = IndexerSearchStrategyEventSink::new(event_tx);
+        let request = IndexerSearchPlanRequest {
+            plan_id: plan_id.clone(),
+            strategies: requests,
+        };
+        let client = context.client.clone();
+        let operation = context.operation;
+        let mode = context.mode;
+        let request_cancel = plan_cancel_token.child_token();
+        let request_deadline =
+            effective_request_deadline(context.search_timeout, context.deadline_at);
+        let request_window_cancel = plan_cancel_token.clone();
+        let started_at = std::time::Instant::now();
+        let invocation = tokio::spawn(async move {
+            let _permit = permit;
+            match within_search_window(
+                client.search_plan(request, mode, operation, request_cancel, event_sink),
+                &request_window_cancel,
+                Some(request_deadline),
+            )
+            .await
+            {
+                Ok(result) => (result, false),
+                Err(SearchWindowError::Cancelled) => (
+                    Err(AppError::canceled("indexer strategy plan canceled")),
+                    false,
+                ),
+                Err(SearchWindowError::DeadlineExpired) => (
+                    Err(AppError::Repository("indexer search plan timed out".into())),
+                    true,
+                ),
+            }
+        });
+
+        let mut invocation = Some(invocation);
+        let mut invocation_result = None;
+        let mut emitted = HashSet::new();
+        let mut protocol_error = None::<String>;
+        while invocation.is_some() || !event_rx.is_closed() || !event_rx.is_empty() {
+            tokio::select! {
+                event = event_rx.recv(), if !event_rx.is_closed() || !event_rx.is_empty() => {
+                    let Some(IndexerSearchStrategyEvent { strategy_id, response }) = event else {
+                        continue;
+                    };
+                    let Some(strategy) = expected.get(&strategy_id).cloned() else {
+                        protocol_error = Some(format!("indexer strategy plan emitted unknown strategy {strategy_id}"));
+                        continue;
+                    };
+                    if !emitted.insert(strategy_id.clone()) {
+                        protocol_error = Some(format!("indexer strategy plan emitted duplicate strategy {strategy_id}"));
+                        continue;
+                    }
+                    let rate_limit_signal = response
+                        .as_ref()
+                        .err()
+                        .and_then(rate_limit_signal_from_error);
+                    let retry_after = response.as_ref().err().and_then(|error| {
+                        strategy_retry_after(error, rate_limit_signal.as_ref())
+                    });
+                    let page_reservation = if response
+                        .as_ref()
+                        .is_ok_and(|response| !response.results.is_empty())
+                    {
+                        tokio::select! {
+                            _ = plan_cancel_token.cancelled() => None,
+                            reservation = page_sink.reserve() => reservation,
+                        }
+                    } else {
+                        None
+                    };
+                    if outcome_tx
+                        .send(StrategyExecutionOutcome {
+                            strategy_id,
+                            label: strategy.labels.first().cloned().unwrap_or_default(),
+                            labels: strategy.labels,
+                            title_guard_mode: strategy.title_guard_mode,
+                            request_fired: true,
+                            response,
+                            page_reservation,
+                            elapsed: started_at.elapsed(),
+                            retry_after,
+                            rate_limited: rate_limit_signal.is_some(),
+                            timed_out: false,
+                            over_query_budget: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        plan_cancel_token.cancel();
+                        break;
+                    }
+                }
+                joined = async { invocation.as_mut().expect("guarded invocation").await }, if invocation.is_some() => {
+                    invocation_result = Some(match joined {
+                        Ok(result) => result,
+                        Err(error) => (
+                            Err(AppError::Repository(format!("indexer strategy plan task failed: {error}"))),
+                            false,
+                        ),
+                    });
+                    invocation = None;
+                }
+            }
+            if invocation.is_none() && event_rx.is_empty() {
+                break;
+            }
+        }
+
+        let (summary, timed_out) = invocation_result.unwrap_or_else(|| {
+            (
+                Err(AppError::Repository(
+                    "indexer strategy plan ended without a summary".to_string(),
+                )),
+                false,
+            )
+        });
+        let invocation_error = match summary {
+            Ok(summary) => {
+                if summary.plan_id != plan_id {
+                    protocol_error = Some("indexer strategy plan summary ID mismatch".to_string());
+                }
+                let summary_id_count = summary.emitted_strategy_ids.len();
+                let summary_ids = summary
+                    .emitted_strategy_ids
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                if summary_ids.len() != summary_id_count || summary_ids != emitted {
+                    protocol_error = Some(
+                        "indexer strategy plan summary did not match emitted events".to_string(),
+                    );
+                } else if emitted.len() != expected.len()
+                    || expected
+                        .keys()
+                        .any(|strategy_id| !emitted.contains(strategy_id))
+                {
+                    protocol_error =
+                        Some("indexer strategy plan omitted a submitted strategy".to_string());
+                }
+                None
+            }
+            Err(error) => Some(error.to_string()),
+        };
+
+        if let Some(error) = protocol_error.as_deref() {
+            if outcome_tx
+                .send(StrategyExecutionOutcome {
+                    strategy_id: format!("protocol:{plan_id}"),
+                    label: "protocol".to_string(),
+                    labels: vec!["protocol".to_string()],
+                    title_guard_mode: TitleGuardMode::SkipTitleMatch,
+                    response: Err(AppError::Repository(error.to_string())),
+                    page_reservation: None,
+                    request_fired: true,
+                    elapsed: started_at.elapsed(),
+                    retry_after: None,
+                    rate_limited: false,
+                    timed_out,
+                    over_query_budget: None,
+                })
+                .await
+                .is_err()
+            {
+                plan_cancel_token.cancel();
+                return;
+            }
+            for strategy in expected.values() {
                 if outcome_tx
                     .send(StrategyExecutionOutcome {
-                        strategy_id: format!("protocol:{plan_id}"),
-                        label: "protocol".to_string(),
-                        labels: vec!["protocol".to_string()],
-                        title_guard_mode: TitleGuardMode::SkipTitleMatch,
+                        strategy_id: strategy.strategy_id.clone(),
+                        label: strategy.labels.first().cloned().unwrap_or_default(),
+                        labels: strategy.labels.clone(),
+                        title_guard_mode: strategy.title_guard_mode,
                         response: Err(AppError::Repository(error.to_string())),
                         page_reservation: None,
                         request_fired: true,
@@ -3851,67 +4055,38 @@ impl MultiIndexerSearchClient {
                     plan_cancel_token.cancel();
                     return;
                 }
-                for strategy in expected.values() {
-                    if outcome_tx
-                        .send(StrategyExecutionOutcome {
-                            strategy_id: strategy.strategy_id.clone(),
-                            label: strategy.labels.first().cloned().unwrap_or_default(),
-                            labels: strategy.labels.clone(),
-                            title_guard_mode: strategy.title_guard_mode,
-                            response: Err(AppError::Repository(error.to_string())),
-                            page_reservation: None,
-                            request_fired: true,
-                            elapsed: started_at.elapsed(),
-                            retry_after: None,
-                            rate_limited: false,
-                            timed_out,
-                            over_query_budget: None,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        plan_cancel_token.cancel();
-                        return;
-                    }
-                }
-            } else {
-                for strategy_id in &emitted {
-                    expected.remove(strategy_id);
-                }
-                let missing_error = invocation_error
-                    .as_deref()
-                    .unwrap_or("indexer strategy plan omitted a strategy result");
-                for strategy in expected.into_values() {
-                    if outcome_tx
-                        .send(StrategyExecutionOutcome {
-                            strategy_id: strategy.strategy_id,
-                            label: strategy.labels.first().cloned().unwrap_or_default(),
-                            labels: strategy.labels,
-                            title_guard_mode: strategy.title_guard_mode,
-                            response: Err(AppError::Repository(missing_error.to_string())),
-                            page_reservation: None,
-                            request_fired: true,
-                            elapsed: started_at.elapsed(),
-                            retry_after: None,
-                            rate_limited: false,
-                            timed_out,
-                            over_query_budget: None,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        plan_cancel_token.cancel();
-                        return;
-                    }
+            }
+        } else {
+            for strategy_id in &emitted {
+                expected.remove(strategy_id);
+            }
+            let missing_error = invocation_error
+                .as_deref()
+                .unwrap_or("indexer strategy plan omitted a strategy result");
+            for strategy in expected.into_values() {
+                if outcome_tx
+                    .send(StrategyExecutionOutcome {
+                        strategy_id: strategy.strategy_id,
+                        label: strategy.labels.first().cloned().unwrap_or_default(),
+                        labels: strategy.labels,
+                        title_guard_mode: strategy.title_guard_mode,
+                        response: Err(AppError::Repository(missing_error.to_string())),
+                        page_reservation: None,
+                        request_fired: true,
+                        elapsed: started_at.elapsed(),
+                        retry_after: None,
+                        rate_limited: false,
+                        timed_out,
+                        over_query_budget: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    plan_cancel_token.cancel();
+                    return;
                 }
             }
-        });
-
-        StrategyTierOutcomes::Plan(StrategyPlanOutcomeStream {
-            receiver: outcome_rx,
-            controller,
-            cancel_token: cancel_on_drop,
-        })
+        }
     }
 }
 
@@ -12350,6 +12525,463 @@ mod tests {
                 Some(retry_after),
                 "the plan path must carry the provider's delay to the backoff: {outcome:?}"
             );
+        }
+    }
+
+    /// A strategy-plan client that answers every strategy with an empty
+    /// complete page and records when each plan was dispatched and which
+    /// strategies it carried.
+    #[derive(Default)]
+    struct PacedPlanIndexerClient {
+        plans: StdMutex<Vec<(tokio::time::Instant, Vec<String>)>>,
+    }
+
+    impl PacedPlanIndexerClient {
+        /// Each plan as (seconds since `since`, strategy ids).
+        fn plans_since(&self, since: tokio::time::Instant) -> Vec<(u64, Vec<String>)> {
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .iter()
+                .map(|(at, ids)| (at.duration_since(since).as_secs(), ids.clone()))
+                .collect()
+        }
+
+        fn dispatched_strategy_count(&self) -> usize {
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .iter()
+                .map(|(_, ids)| ids.len())
+                .sum()
+        }
+    }
+
+    #[async_trait]
+    impl IndexerClient for PacedPlanIndexerClient {
+        fn search_plan_capability(&self) -> Option<IndexerSearchPlanCapability> {
+            Some(IndexerSearchPlanCapability {
+                version: 1,
+                max_parallel_strategies: 4,
+            })
+        }
+
+        async fn search_plan(
+            &self,
+            request: IndexerSearchPlanRequest,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _cancel_token: CancellationToken,
+            event_sink: IndexerSearchStrategyEventSink,
+        ) -> AppResult<IndexerSearchPlanSummary> {
+            let ids = request
+                .strategies
+                .iter()
+                .map(|strategy| strategy.strategy_id.clone())
+                .collect::<Vec<_>>();
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .push((tokio::time::Instant::now(), ids.clone()));
+            for strategy_id in &ids {
+                event_sink
+                    .send(IndexerSearchStrategyEvent {
+                        strategy_id: strategy_id.clone(),
+                        response: Ok(IndexerSearchResponse {
+                            completion: IndexerSearchCompletion::Complete,
+                            indexer_outcomes: Vec::new(),
+                            results: Vec::new(),
+                            api_current: None,
+                            api_max: None,
+                            grab_current: None,
+                            grab_max: None,
+                        }),
+                    })
+                    .await
+                    .expect("plan event receiver should remain open");
+            }
+            Ok(IndexerSearchPlanSummary {
+                plan_id: request.plan_id,
+                emitted_strategy_ids: ids,
+            })
+        }
+
+        async fn search(
+            &self,
+            _query: String,
+            _ids: HashMap<String, String>,
+            _category: Option<String>,
+            _facet: Option<String>,
+            _id_search_facet: Option<String>,
+            _newznab_categories: Option<Vec<String>>,
+            _indexer_routing: Option<IndexerRoutingPlan>,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _season: Option<u32>,
+            _episode: Option<u32>,
+            _absolute_episode: Option<u32>,
+            _year: Option<i32>,
+            _tagged_aliases: Vec<scryer_domain::TaggedAlias>,
+            _learning_context: Option<IndexerSearchLearningContext>,
+            _cancel_token: CancellationToken,
+        ) -> AppResult<IndexerSearchResponse> {
+            Err(AppError::Repository("unary search was not expected".into()))
+        }
+    }
+
+    /// Generous failure bound for a paced plan tier on the paused clock.
+    const PACED_PLAN_BOUND: std::time::Duration = std::time::Duration::from_secs(600);
+
+    fn paced_plan_context(
+        client: Arc<dyn IndexerClient>,
+        limiter: &IndexerRateLimiter,
+        pacing: IndexerPacing,
+        cancel_token: CancellationToken,
+        deadline_at: Option<tokio::time::Instant>,
+    ) -> StrategyTierContext {
+        StrategyTierContext {
+            client,
+            search_limit: Arc::new(Semaphore::new(4)),
+            rate_limiter: limiter.clone(),
+            search_timeout: std::time::Duration::from_secs(30),
+            pacing,
+            category: None,
+            per_indexer_categories: None,
+            prowlarr_nab_proxy: false,
+            mode: SearchMode::Auto,
+            operation: IndexerErrorOperation::AutomaticSearch,
+            year: None,
+            tagged_aliases: Vec::new(),
+            cancel_token,
+            deadline_at,
+        }
+    }
+
+    fn paced_plan_tier(
+        context: StrategyTierContext,
+        strategy_ids: &[&str],
+    ) -> StrategyTierOutcomes {
+        let (page_tx, _page_rx) = tokio::sync::mpsc::channel(4);
+        MultiIndexerSearchClient::execute_plan_strategy_tier(
+            context,
+            strategy_ids
+                .iter()
+                .map(|strategy_id| prepared_strategy(strategy_id))
+                .collect(),
+            None,
+            IndexerSearchPageSink::new(page_tx, 4),
+        )
+    }
+
+    async fn drain_plan_outcomes(
+        outcomes: &mut StrategyTierOutcomes,
+    ) -> Vec<StrategyExecutionOutcome> {
+        tokio::time::timeout(PACED_PLAN_BOUND, async {
+            let mut collected = Vec::new();
+            while let Some(outcome) = outcomes.join_next().await {
+                collected.push(outcome.expect("plan controller does not use join tasks"));
+            }
+            collected
+        })
+        .await
+        .expect("the plan tier should finish")
+    }
+
+    async fn run_paced_plan_tier(
+        client: &Arc<PacedPlanIndexerClient>,
+        limiter: &IndexerRateLimiter,
+        pacing: IndexerPacing,
+        strategy_ids: &[&str],
+    ) -> Vec<StrategyExecutionOutcome> {
+        let context = paced_plan_context(
+            client.clone(),
+            limiter,
+            pacing,
+            CancellationToken::new(),
+            None,
+        );
+        drain_plan_outcomes(&mut paced_plan_tier(context, strategy_ids)).await
+    }
+
+    fn plan(at_secs: u64, strategy_ids: &[&str]) -> (u64, Vec<String>) {
+        (
+            at_secs,
+            strategy_ids.iter().map(|id| id.to_string()).collect(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unpaced_plan_tier_dispatches_one_plan() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            test_pacing("plan-unpaced", 0),
+            &["first", "second", "third"],
+        )
+        .await;
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![plan(0, &["first", "second", "third"])]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_plan_tier_trickles_one_strategy_per_slot() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        let pacing = IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes =
+            run_paced_plan_tier(&client, &limiter, pacing, &["first", "second", "third"]).await;
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![
+                plan(0, &["first"]),
+                plan(2, &["second"]),
+                plan(4, &["third"]),
+            ],
+            "the plugin must not fire a background tier faster than the trickle"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_waits_out_a_configured_interval() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = Some(5);
+        let pacing = IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes =
+            run_paced_plan_tier(&client, &limiter, pacing, &["first", "second", "third"]).await;
+
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![
+                plan(0, &["first"]),
+                plan(5, &["second"]),
+                plan(10, &["third"]),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_spends_one_budget_slot_per_strategy() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let pacing = budgeted_pacing("plan-budget", 0, 2);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            pacing.clone(),
+            &["first", "second", "third"],
+        )
+        .await;
+
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![plan(0, &["first", "second"]), plan(60, &["third"])],
+            "two a minute: the third strategy waits for the first to leave the window"
+        );
+
+        // The tier's three dispatches are on the budget: the next request
+        // waits for the 60 s one to leave the window.
+        let next = sequential_dispatches(&limiter, &pacing, 2, started_at).await;
+        assert_dispatches(&next, &[60.0, 120.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_plan_tier_skips_strategies_past_the_wait_cap() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            interactive_budgeted_pacing("plan-interactive", 1),
+            &["first", "second"],
+        )
+        .await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+        let skipped = outcomes
+            .iter()
+            .find(|outcome| outcome.strategy_id == "second")
+            .expect("the skipped strategy reports an outcome");
+        assert!(!skipped.request_fired, "{skipped:?}");
+        assert_eq!(
+            skipped.over_query_budget,
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert!(!skipped.timed_out && !skipped.rate_limited, "{skipped:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_plan_tier_ends_its_pacing_wait_at_once() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let pacing = budgeted_pacing("plan-cancel", 0, 1);
+        let cancel_token = CancellationToken::new();
+        let started_at = tokio::time::Instant::now();
+        let mut outcomes = paced_plan_tier(
+            paced_plan_context(
+                client.clone(),
+                &limiter,
+                pacing.clone(),
+                cancel_token.clone(),
+                None,
+            ),
+            &["first", "second"],
+        );
+
+        let first = tokio::time::timeout(PACED_PLAN_BOUND, outcomes.join_next())
+            .await
+            .expect("the first strategy should dispatch at once")
+            .expect("the plan tier reports the first strategy")
+            .expect("plan controller does not use join tasks");
+        assert_eq!(first.strategy_id, "first");
+        assert!(strategy_execution_is_complete(&first));
+
+        // The second strategy is waiting for its 60 s budget slot.
+        cancel_token.cancel();
+        let rest = drain_plan_outcomes(&mut outcomes).await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].strategy_id, "second");
+        assert!(!rest[0].request_fired);
+        assert!(
+            rest[0]
+                .response
+                .as_ref()
+                .is_err_and(|error| error.is_canceled()),
+            "{:?}",
+            rest[0]
+        );
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+
+        // The cancelled strategy gave its budget slot back.
+        let next = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&next, &[60.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_pacing_wait_stops_at_the_search_deadline() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+        let deadline_at = started_at + std::time::Duration::from_secs(10);
+
+        let outcomes = drain_plan_outcomes(&mut paced_plan_tier(
+            paced_plan_context(
+                client.clone(),
+                &limiter,
+                test_pacing("plan-deadline", 60),
+                CancellationToken::new(),
+                Some(deadline_at),
+            ),
+            &["first", "second"],
+        ))
+        .await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(10));
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+        let late = outcomes
+            .iter()
+            .find(|outcome| outcome.strategy_id == "second")
+            .expect("the late strategy reports an outcome");
+        assert!(!late.request_fired, "{late:?}");
+        assert!(late.over_query_budget.is_none());
+        assert!(
+            late.response
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("before dispatch")),
+            "{late:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_search_skips_a_plan_indexer_over_its_query_budget() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.max_queries_per_minute = Some(1);
+
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client: client.clone(),
+                caps: movie_caps(),
+            }),
+        );
+        let search = || {
+            multi.search(
+                "12 Lanterns of Winter".to_string(),
+                HashMap::from([("imdb_id".to_string(), "tt12004567".to_string())]),
+                None,
+                Some("movie".to_string()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                None,
+                None,
+                None,
+                vec![],
+            )
+        };
+
+        search().await.expect("first search should succeed");
+        assert_eq!(
+            client.dispatched_strategy_count(),
+            1,
+            "one query a minute: the plan path sends one strategy"
+        );
+
+        let second = search().await.expect("second search should succeed");
+        assert_eq!(
+            client.dispatched_strategy_count(),
+            1,
+            "an over-budget plan indexer is not asked"
+        );
+        let outcome = second
+            .indexer_outcomes
+            .iter()
+            .find(|outcome| outcome.indexer_id == "idx-1")
+            .expect("the skipped indexer reports an outcome");
+        match outcome.outcome {
+            IndexerSearchOutcome::Partial {
+                empty: true,
+                reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+                retry_after: Some(retry_after),
+            } => assert!(
+                retry_after > INTERACTIVE_PACING_MAX_WAIT,
+                "retry after {retry_after:?}"
+            ),
+            other => panic!("expected an over-budget outcome, got {other:?}"),
         }
     }
 
