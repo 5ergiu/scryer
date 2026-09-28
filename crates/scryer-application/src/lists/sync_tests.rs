@@ -704,3 +704,206 @@ async fn a_kept_departure_does_not_defeat_the_unchanged_skip() {
 
     assert_eq!(report.unchanged, 1);
 }
+
+/// Two lists over one library, both listing "alpha": `list-a` adds it with
+/// the given on-leave action, and `list-b` (synced first a minute later)
+/// finds it already in the library.
+async fn title_on_two_lists(on_leave: ListOnLeave) -> Harness {
+    let mut adder = subscription("list-a");
+    adder.on_leave = on_leave;
+    adder.interval_seconds = 60;
+    let mut follower = subscription("list-b");
+    follower.interval_seconds = 60;
+    follower.sync.next_at = Some(at(5));
+    let mut harness = Harness::new(vec![adder, follower]);
+    harness.lists.serve("list-a", &["alpha", "beta"]);
+    harness.lists.serve("list-b", &["alpha", "gamma"]);
+    harness.sync_at(at(0)).await;
+    harness.resolver.in_library = HashMap::from([
+        ("alpha-id".to_string(), "title-alpha".to_string()),
+        ("beta-id".to_string(), "title-beta".to_string()),
+    ]);
+    harness.sync_at(at(5)).await;
+    assert!(harness.store.row("list-a", "alpha").added_by_list);
+    let follower_row = harness.store.row("list-b", "alpha");
+    assert_eq!(follower_row.state, ListMembershipState::InLibrary);
+    assert_eq!(follower_row.title_id.as_deref(), Some("title-alpha"));
+    assert!(!follower_row.added_by_list);
+    harness
+}
+
+fn unmonitors_of(actions: &RecordingActions, title_id: &str) -> usize {
+    actions
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(call, RecordedAction::SetMonitored { title_id: id, .. } if id == title_id)
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn the_adding_list_acts_once_when_it_drops_the_title_first() {
+    let harness = title_on_two_lists(ListOnLeave::Unmonitor).await;
+
+    // The adding list drops the title while the other list still has it.
+    harness.lists.serve("list-a", &["beta"]);
+    harness.sync_at(at(10)).await;
+    let row = harness.store.row("list-a", "alpha");
+    assert!(row.left_at.is_some());
+    assert!(!row.left_handled, "the action is owed, not cancelled");
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 0);
+
+    // While the guard holds, neither list is read beyond its one fetch.
+    let fetches_before = harness.lists.fetched.lock().unwrap().len();
+    let quiet = harness.sync_at(at(20)).await;
+    assert_eq!(quiet.unchanged, 2);
+    assert_eq!(
+        harness.lists.fetched.lock().unwrap().len(),
+        fetches_before + 2,
+        "a held-back departure does not force a full read"
+    );
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 0);
+
+    // The other list drops it too. It did not add the title, so it does
+    // nothing itself; the adding list's owed action runs at its next sync.
+    harness.lists.serve("list-b", &["gamma"]);
+    harness.sync_at(at(30)).await;
+    assert!(harness.store.row("list-b", "alpha").left_at.is_some());
+    harness.sync_at(at(40)).await;
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 1);
+    assert!(harness.store.row("list-a", "alpha").left_handled);
+
+    let settled = harness.sync_at(at(50)).await;
+    assert_eq!(settled.unchanged, 2);
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 1);
+}
+
+#[tokio::test]
+async fn the_adding_list_acts_once_when_the_other_list_drops_the_title_first() {
+    let harness = title_on_two_lists(ListOnLeave::Unmonitor).await;
+
+    harness.lists.serve("list-b", &["gamma"]);
+    harness.sync_at(at(10)).await;
+    assert!(harness.store.row("list-b", "alpha").left_handled);
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 0);
+
+    harness.lists.serve("list-a", &["beta"]);
+    harness.sync_at(at(20)).await;
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 1);
+    assert!(harness.store.row("list-a", "alpha").left_handled);
+
+    harness.sync_at(at(30)).await;
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 1);
+}
+
+#[tokio::test]
+async fn a_title_another_list_still_wants_is_left_alone() {
+    let harness = title_on_two_lists(ListOnLeave::Tag).await;
+
+    harness.lists.serve("list-a", &["beta"]);
+    for minutes in [10, 20, 30] {
+        harness.sync_at(at(minutes)).await;
+    }
+
+    assert!(
+        !harness
+            .actions
+            .calls()
+            .iter()
+            .any(|call| matches!(call, RecordedAction::Tag { .. })),
+        "no tag while the other list keeps the title"
+    );
+    assert!(!harness.store.row("list-a", "alpha").left_handled);
+}
+
+#[tokio::test]
+async fn a_failed_owed_action_is_retried_after_the_guard_lifts() {
+    let harness = title_on_two_lists(ListOnLeave::Unmonitor).await;
+    harness.lists.serve("list-a", &["beta"]);
+    harness.sync_at(at(10)).await;
+    harness.lists.serve("list-b", &["gamma"]);
+    harness.sync_at(at(20)).await;
+
+    *harness.actions.fail_departures.lock().unwrap() = 1;
+    harness.sync_at(at(30)).await;
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 1);
+    assert!(
+        !harness.store.row("list-a", "alpha").left_handled,
+        "the failed action waits for a retry"
+    );
+
+    let retry = harness.sync_at(at(40)).await;
+    assert_eq!(retry.departures_acted, 1);
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 2);
+    assert!(harness.store.row("list-a", "alpha").left_handled);
+
+    harness.sync_at(at(50)).await;
+    assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 2);
+}
+
+#[tokio::test]
+async fn one_run_syncs_every_due_list_across_batches() {
+    let count = LIST_SYNC_BATCH_LIMIT * 2 + 7;
+    let ids = (0..count)
+        .map(|index| format!("list-{index:03}"))
+        .collect::<Vec<_>>();
+    let harness = Harness::new(ids.iter().map(|id| subscription(id)).collect());
+    for id in &ids {
+        harness.lists.serve(id, &["alpha"]);
+    }
+
+    let report = harness.sync_at(at(0)).await;
+
+    assert_eq!(report.considered, count as u64);
+    assert_eq!(report.synced, count as u64);
+    assert_eq!(
+        harness.store.runs.lock().unwrap().len(),
+        count,
+        "each list is synced once"
+    );
+    assert_eq!(
+        harness.sync_at(at(0)).await.considered,
+        0,
+        "nothing is left due"
+    );
+}
+
+#[tokio::test]
+async fn a_list_that_stays_due_is_tried_once_and_does_not_hide_the_rest() {
+    // More stuck lists than one batch, all ahead of the healthy ones.
+    let stuck = (0..LIST_SYNC_BATCH_LIMIT + 3)
+        .map(|index| format!("stuck-{index:03}"))
+        .collect::<Vec<_>>();
+    let healthy = (0..5)
+        .map(|index| format!("healthy-{index}"))
+        .collect::<Vec<_>>();
+    let harness = Harness::new(
+        stuck
+            .iter()
+            .chain(healthy.iter())
+            .map(|id| subscription(id))
+            .collect(),
+    );
+    for id in stuck.iter().chain(healthy.iter()) {
+        harness.lists.serve(id, &["alpha"]);
+    }
+    harness
+        .store
+        .fail_record_sync_for
+        .lock()
+        .unwrap()
+        .extend(stuck.iter().cloned());
+
+    let report = harness.sync_at(at(0)).await;
+
+    assert_eq!(report.considered, (stuck.len() + healthy.len()) as u64);
+    assert_eq!(report.failed, stuck.len() as u64);
+    assert_eq!(report.synced, healthy.len() as u64);
+    for id in &healthy {
+        assert_eq!(
+            harness.store.row(id, "alpha").state,
+            ListMembershipState::Added
+        );
+    }
+}

@@ -16,6 +16,73 @@ use crate::stored_paths::{path_to_stored_string, stored_path_to_path_buf};
 
 const MAX_PENDING_IMPORTS_PAGE_SIZE: i64 = 200;
 
+/// The identities a pending import's chosen title is looked up by, tried in
+/// this order: SMG title id, TVDB id, TMDB id, and for a movie also its IMDb
+/// id. Each is the first id of that source among `external_ids` whose kind
+/// fits the facet. Every one is tried because any may be the one the library
+/// stored: a series SMG knows only from TMDB has no TVDB id, and a title
+/// added before SMG ids were stored has no SMG id. The resolver and the
+/// search annotation both use this, so a candidate shown as already in the
+/// library is exactly one the resolver finds there.
+fn pending_import_target_identities(
+    facet: &MediaFacet,
+    external_ids: &[ExternalId],
+) -> Vec<(&'static str, String)> {
+    let sources: &[&'static str] = match facet {
+        MediaFacet::Movie => &["smg", "tvdb", "tmdb", "imdb"],
+        MediaFacet::Series | MediaFacet::Anime => &["smg", "tvdb", "tmdb"],
+    };
+    sources
+        .iter()
+        .filter_map(|source| {
+            external_ids
+                .iter()
+                .find(|external_id| {
+                    external_id.source.trim().eq_ignore_ascii_case(source)
+                        && !external_id.value.trim().is_empty()
+                        && crate::normalize::external_id_kind_fits_facet(external_id, facet)
+                })
+                .map(|external_id| (*source, external_id.value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Whether `title` carries `source:value` as an id of `facet`'s kind. The
+/// title store matches source and value only; a TMDB id must also be kinded
+/// for the facet (or not kinded), so an anime title's `tmdb:movie:N` never
+/// stands for series `N`.
+fn title_carries_identity(title: &Title, facet: &MediaFacet, source: &str, value: &str) -> bool {
+    !source.eq_ignore_ascii_case("tmdb")
+        || title.external_ids.iter().any(|external_id| {
+            external_id.source.trim().eq_ignore_ascii_case("tmdb")
+                && external_id.value.trim() == value
+                && crate::normalize::external_id_kind_fits_facet(external_id, facet)
+        })
+}
+
+/// The ids a title search result names its title by, in the order the web
+/// client sends them when that result is chosen: the result's own ids first,
+/// then its SMG, TVDB and IMDb ids.
+fn search_result_external_ids(result: &RichMetadataSearchItem) -> Vec<ExternalId> {
+    let mut external_ids = result.external_ids.clone();
+    if let Some(smg_id) = result.smg_id {
+        external_ids.push(ExternalId::new("smg", smg_id.to_string()));
+    }
+    let tvdb_id = result.tvdb_id.trim();
+    if !tvdb_id.is_empty() {
+        external_ids.push(ExternalId::new("tvdb", tvdb_id));
+    }
+    if let Some(imdb_id) = result
+        .imdb_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|imdb_id| !imdb_id.is_empty())
+    {
+        external_ids.push(ExternalId::new("imdb", imdb_id));
+    }
+    external_ids
+}
+
 fn build_pending_import_search_attempt(
     attempt: &LibraryScanUnmatchedSearchAttempt,
 ) -> PendingImportSearchAttempt {
@@ -606,53 +673,11 @@ impl AppUseCase {
         request.root_folder_id = None;
         request.min_availability = None;
 
-        // The identities the chosen title is named by. A movie is looked up
-        // by its first one, as before. A series is looked up by every one it
-        // carries, in the order SMG title id, TVDB id, TMDB id: a series SMG
-        // knows only from TMDB has no TVDB id, and a catalog title added
-        // before SMG ids were stored has no SMG id.
-        let identity_value = |source: &str| {
-            request
-                .external_ids
-                .iter()
-                .find(|external_id| {
-                    external_id.source.eq_ignore_ascii_case(source)
-                        && !external_id.value.trim().is_empty()
-                })
-                .map(|external_id| external_id.value.trim().to_string())
-        };
-        let target_identities: Vec<(&'static str, String)> = match item.facet {
-            MediaFacet::Movie => request
-                .external_ids
-                .iter()
-                .find_map(|external_id| {
-                    let source = if external_id.source.eq_ignore_ascii_case("smg") {
-                        Some("smg")
-                    } else if external_id.source.eq_ignore_ascii_case("tvdb") {
-                        Some("tvdb")
-                    } else if external_id.source.eq_ignore_ascii_case("tmdb") {
-                        Some("tmdb")
-                    } else if external_id.source.eq_ignore_ascii_case("imdb") {
-                        Some("imdb")
-                    } else {
-                        None
-                    }?;
-                    let value = external_id.value.trim();
-                    (!value.is_empty()).then(|| (source, value.to_string()))
-                })
-                .map(|identity| vec![identity])
-                .ok_or_else(|| AppError::Validation("a title identity is required".into()))?,
-            MediaFacet::Series | MediaFacet::Anime => {
-                let identities = ["smg", "tvdb", "tmdb"]
-                    .into_iter()
-                    .filter_map(|source| identity_value(source).map(|value| (source, value)))
-                    .collect::<Vec<_>>();
-                if identities.is_empty() {
-                    return Err(AppError::Validation("a title identity is required".into()));
-                }
-                identities
-            }
-        };
+        let target_identities =
+            pending_import_target_identities(&item.facet, &request.external_ids);
+        if target_identities.is_empty() {
+            return Err(AppError::Validation("a title identity is required".into()));
+        }
 
         let mut existing_match = None;
         for (source, value) in &target_identities {
@@ -667,22 +692,7 @@ impl AppUseCase {
                     value,
                 )
                 .await?
-                // The store matches source and value only. TMDB reuses one
-                // number for a movie and a series, and an anime title also
-                // carries its mapped movies' TMDB ids (`tmdb:movie:N`), so a
-                // series' TMDB id binds only to a stored id kinded as a
-                // series or unkinded.
-                .filter(|title| {
-                    *source != "tmdb"
-                        || title.external_ids.iter().any(|external_id| {
-                            external_id.source.eq_ignore_ascii_case("tmdb")
-                                && external_id.value.trim() == value
-                                && external_id.kind.as_deref().is_none_or(|kind| {
-                                    kind.trim().is_empty()
-                                        || kind.trim().eq_ignore_ascii_case("series")
-                                })
-                        })
-                });
+                .filter(|title| title_carries_identity(title, &item.facet, source, value));
             if existing_match.is_some() {
                 break;
             }
@@ -949,56 +959,79 @@ impl AppUseCase {
             Err(error) => return Err(error),
         };
 
-        let distinct_ids = |id_of: &dyn Fn(&RichMetadataSearchItem) -> Option<String>| {
-            let mut seen = HashSet::new();
-            results
-                .iter()
-                .filter_map(id_of)
-                .filter(|id| seen.insert(id.clone()))
-                .collect::<Vec<_>>()
-        };
-        let result_tvdb_id = |result: &RichMetadataSearchItem| {
-            let tvdb_id = result.tvdb_id.trim();
-            (!tvdb_id.is_empty()).then(|| tvdb_id.to_string())
-        };
-        let result_smg_id =
-            |result: &RichMetadataSearchItem| result.smg_id.map(|smg_id| smg_id.to_string());
-        let tvdb_ids = distinct_ids(&result_tvdb_id);
-        let smg_ids = distinct_ids(&result_smg_id);
         // Candidates the library already owns are annotated, not dropped: when
         // the only real candidate is already there, hiding it made the dialog
         // look like a search failure. The UI turns the annotation into an
-        // "attach to existing title" action instead.
+        // "attach to existing title" action instead. A candidate is annotated
+        // exactly when resolving it would find that title, so each is looked
+        // up by the same identities, in the same order, as the resolver.
+        let identities_by_result = results
+            .iter()
+            .map(|result| {
+                pending_import_target_identities(&item.facet, &search_result_external_ids(result))
+            })
+            .collect::<Vec<_>>();
+        let mut values_by_source: Vec<(&'static str, Vec<String>)> = Vec::new();
+        for (source, value) in identities_by_result.iter().flatten() {
+            match values_by_source
+                .iter_mut()
+                .find(|(known, _)| known == source)
+            {
+                Some((_, values)) => {
+                    if !values.contains(value) {
+                        values.push(value.clone());
+                    }
+                }
+                None => values_by_source.push((source, vec![value.clone()])),
+            }
+        }
         let titles = &self.services.catalog.titles;
-        let existing_title_ids_by_tvdb_id = titles
-            .map_existing_external_ids_to_title_ids_in_library_and_facet(
-                &item.library_id,
-                item.facet.clone(),
-                "tvdb",
-                &tvdb_ids,
-            )
-            .await?;
-        let existing_title_ids_by_smg_id = if smg_ids.is_empty() {
-            std::collections::BTreeMap::new()
-        } else {
-            titles
+        let mut existing_title_ids: HashMap<(&'static str, String), String> = HashMap::new();
+        for (source, values) in &values_by_source {
+            let found = titles
                 .map_existing_external_ids_to_title_ids_in_library_and_facet(
                     &item.library_id,
                     item.facet.clone(),
-                    "smg",
-                    &smg_ids,
+                    source,
+                    values,
                 )
+                .await?;
+            existing_title_ids.extend(
+                found
+                    .into_iter()
+                    .map(|(value, title_id)| ((*source, value), title_id)),
+            );
+        }
+        // The batch lookup matches source and value only, so a TMDB match is
+        // kept only when the title carries the id in a kind that names this
+        // facet, as the resolver requires.
+        let tmdb_title_ids = existing_title_ids
+            .iter()
+            .filter(|((source, _), _)| *source == "tmdb")
+            .map(|(_, title_id)| title_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !tmdb_title_ids.is_empty() {
+            let tmdb_titles = titles
+                .get_by_ids(&tmdb_title_ids)
                 .await?
-        };
+                .into_iter()
+                .map(|title| (title.id.clone(), title))
+                .collect::<HashMap<_, _>>();
+            existing_title_ids.retain(|(source, value), title_id| {
+                *source != "tmdb"
+                    || tmdb_titles.get(title_id).is_some_and(|title| {
+                        title_carries_identity(title, &item.facet, source, value)
+                    })
+            });
+        }
 
         let mut annotated = Vec::with_capacity(limit as usize);
-        for result in results {
-            let existing_title_id = result_smg_id(&result)
-                .and_then(|smg_id| existing_title_ids_by_smg_id.get(&smg_id).cloned())
-                .or_else(|| {
-                    result_tvdb_id(&result)
-                        .and_then(|tvdb_id| existing_title_ids_by_tvdb_id.get(&tvdb_id).cloned())
-                });
+        for (result, identities) in results.into_iter().zip(identities_by_result) {
+            let existing_title_id = identities
+                .into_iter()
+                .find_map(|identity| existing_title_ids.get(&identity).cloned());
 
             annotated.push(PendingImportTitleSearchItem {
                 item: result,

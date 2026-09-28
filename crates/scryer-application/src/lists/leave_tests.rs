@@ -1,6 +1,7 @@
 use scryer_domain::{ListMembershipState, ListOnLeave, ListSubscription};
 
 use super::*;
+use crate::lists::ports::ListMembershipRepository;
 use crate::lists::test_support::{
     MemoryListStore, RecordedAction, RecordingActions, at, membership, subscription,
 };
@@ -80,7 +81,63 @@ async fn another_enabled_list_on_the_same_library_guards_the_title() {
 
     assert_eq!(report.guarded, 1);
     assert!(actions.calls().is_empty());
+    assert!(
+        !store.row("list-a", "alpha").left_handled,
+        "the action is owed until the other list lets go of the title"
+    );
+    assert!(
+        !has_runnable_leave_action(&list, &store.rows("list-a"), &store, &store)
+            .await
+            .expect("guard check"),
+        "a held-back departure is not work for an unchanged list"
+    );
+}
+
+#[tokio::test]
+async fn a_held_back_departure_runs_once_the_other_list_drops_the_title() {
+    let mut list = subscription("list-a");
+    list.on_leave = ListOnLeave::Unmonitor;
+    let other = subscription("list-b");
+    let store = MemoryListStore::with_subscriptions(vec![list.clone(), other]);
+    let mut still_listed = membership("list-b", "alpha", ListMembershipState::InLibrary);
+    still_listed.title_id = Some("title-alpha".to_string());
+    store.insert_rows(vec![departed_added("list-a", "alpha"), still_listed]);
+    let actions = RecordingActions::default();
+
+    handle_departures(&list, &store, &store, &actions)
+        .await
+        .expect("leave step");
+    assert!(actions.calls().is_empty());
+
+    // The other list drops the title as well.
+    store
+        .mark_left("list-b", at(60), at(60))
+        .await
+        .expect("mark left");
+    assert!(
+        has_runnable_leave_action(&list, &store.rows("list-a"), &store, &store)
+            .await
+            .expect("guard check")
+    );
+
+    let report = handle_departures(&list, &store, &store, &actions)
+        .await
+        .expect("leave step");
+    assert_eq!(report.acted, 1);
     assert!(store.row("list-a", "alpha").left_handled);
+    assert_eq!(
+        actions.calls(),
+        vec![
+            RecordedAction::SetMonitored {
+                title_id: "title-alpha".to_string(),
+                monitored: false,
+            },
+            RecordedAction::Departure {
+                title_id: "title-alpha".to_string(),
+                action: ListOnLeave::Unmonitor,
+            },
+        ]
+    );
 }
 
 #[tokio::test]

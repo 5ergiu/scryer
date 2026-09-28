@@ -154,6 +154,9 @@ pub(crate) struct MemoryListStore {
     /// Membership writes for these subscription ids fail, as a broken store
     /// would.
     pub fail_upserts_for: Mutex<HashSet<String>>,
+    /// Sync outcomes for these subscription ids cannot be saved, so they stay
+    /// due.
+    pub fail_record_sync_for: Mutex<HashSet<String>>,
 }
 
 impl MemoryListStore {
@@ -249,6 +252,9 @@ impl ListSubscriptionRepository for MemoryListStore {
         sync: &ListSyncStatus,
         counts: &ListCounts,
     ) -> AppResult<()> {
+        if self.fail_record_sync_for.lock().unwrap().contains(id) {
+            return Err(AppError::Repository("fixture store failure".into()));
+        }
         let mut rows = self.subscriptions.lock().unwrap();
         if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
             row.sync = sync.clone();

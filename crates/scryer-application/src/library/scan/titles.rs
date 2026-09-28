@@ -312,9 +312,10 @@ pub(crate) fn find_existing_series_title_index_for_metadata_match(
             .iter()
             .find(|external_id| {
                 external_id.source.eq_ignore_ascii_case("tmdb")
-                    && external_id.kind.as_deref().is_none_or(|kind| {
-                        kind.trim().is_empty() || kind.trim().eq_ignore_ascii_case("series")
-                    })
+                    && crate::normalize::external_id_kind_fits_facet(
+                        external_id,
+                        &MediaFacet::Series,
+                    )
             })
             .map(|external_id| external_id.value.trim().to_string())
             .filter(|value| !value.is_empty());
@@ -325,10 +326,10 @@ pub(crate) fn find_existing_series_title_index_for_metadata_match(
             title.external_ids.iter().any(|external_id| {
                 external_id.source.eq_ignore_ascii_case(source)
                     && external_id.value.trim() == value
-                    && (!source.eq_ignore_ascii_case("tmdb")
-                        || external_id.kind.as_deref().is_none_or(|kind| {
-                            kind.trim().is_empty() || kind.trim().eq_ignore_ascii_case("series")
-                        }))
+                    && crate::normalize::external_id_kind_fits_facet(
+                        external_id,
+                        &MediaFacet::Series,
+                    )
             })
         };
         for (source, value) in [("smg", smg_id), ("tmdb", tmdb_id)] {

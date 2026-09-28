@@ -10356,3 +10356,179 @@ async fn a_pending_import_bound_by_hand_keeps_its_episodes_through_a_rescan() {
     assert_eq!(summary.relinked, 0);
     assert_eq!(fixture.media_files.linked_episode_ids(&row.id).await, bound);
 }
+
+/// A title search result known only by the given ids: no TVDB id, as a
+/// series SMG knows only from TMDB has none.
+fn pending_import_search_result_with_ids(
+    name: &str,
+    type_hint: &str,
+    external_ids: Vec<ExternalId>,
+) -> RichMetadataSearchItem {
+    RichMetadataSearchItem {
+        tvdb_id: String::new(),
+        external_ids,
+        type_hint: Some(type_hint.to_string()),
+        ..pending_import_search_result("", name)
+    }
+}
+
+/// An app whose title search answers `results`, with one title of `facet`
+/// already in the default library carrying `existing_ids`, and one pending
+/// import of that facet. Returns the app, the user and the existing title id.
+async fn pending_import_identity_fixture(
+    facet: MediaFacet,
+    results: Vec<RichMetadataSearchItem>,
+    existing_ids: Vec<ExternalId>,
+) -> (AppUseCase, User, String) {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, titles) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
+        settings,
+        library_scanner,
+        unmatched_items.clone(),
+        Arc::new(PendingImportSearchMetadataGateway {
+            series: HashMap::new(),
+            results,
+        }),
+    );
+
+    let mut request =
+        pending_import_title_request(facet.clone(), "Fixture Owned Title", None, None);
+    request.root_folder_id = None;
+    request.min_availability = None;
+    let existing = app
+        .create_title_without_hydration(&user, request)
+        .await
+        .expect("seed existing title")
+        .title;
+    {
+        let mut store = titles.store.lock().await;
+        let stored = store
+            .iter_mut()
+            .find(|title| title.id == existing.id)
+            .expect("seeded title is stored");
+        stored.external_ids = existing_ids;
+    }
+
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&build_test_unmatched_item(
+            "identity-pending-import-1",
+            facet,
+            "/fixture-root",
+            "/fixture-root/Fixture.Owned.Title.2020.mkv",
+            "Fixture Owned Title",
+            "Fixture Owned Title",
+            Some(2020),
+        ))
+        .await
+        .expect("seed pending import");
+    (app, user, existing.id)
+}
+
+async fn annotated_existing_ids(app: &AppUseCase, user: &User) -> Vec<Option<String>> {
+    app.pending_import_title_search(user, "identity-pending-import-1", "Fixture", 8, "eng", None)
+        .await
+        .expect("search pending import titles")
+        .into_iter()
+        .map(|result| result.existing_title_id)
+        .collect()
+}
+
+async fn resolve_without_attach(
+    app: &AppUseCase,
+    user: &User,
+    facet: MediaFacet,
+    external_ids: Vec<ExternalId>,
+) -> AppResult<ResolvePendingImportResult> {
+    let mut request = pending_import_title_request(facet, "Fixture Owned Title", None, Some(2020));
+    request.external_ids = external_ids;
+    app.resolve_pending_import(user, "identity-pending-import-1", request, false)
+        .await
+}
+
+#[tokio::test]
+async fn a_series_candidate_known_only_by_tmdb_is_shown_as_owned_and_resolves_that_way() {
+    let owned = ExternalId::with_kind("tmdb", "series", "515001");
+    let (app, user, existing_id) = pending_import_identity_fixture(
+        MediaFacet::Series,
+        vec![
+            pending_import_search_result_with_ids(
+                "Fixture Owned Series",
+                "series",
+                vec![owned.clone()],
+            ),
+            pending_import_search_result_with_ids(
+                "Fixture New Series",
+                "series",
+                vec![ExternalId::with_kind("tmdb", "series", "616001")],
+            ),
+        ],
+        vec![owned.clone()],
+    )
+    .await;
+
+    assert_eq!(
+        annotated_existing_ids(&app, &user).await,
+        vec![Some(existing_id), None]
+    );
+
+    let error = resolve_without_attach(&app, &user, MediaFacet::Series, vec![owned])
+        .await
+        .expect_err("the resolver finds the same title");
+    assert!(
+        error
+            .to_string()
+            .contains("title already exists in this library")
+    );
+}
+
+#[tokio::test]
+async fn a_movie_kinded_tmdb_id_does_not_mark_a_series_candidate_as_owned() {
+    // An anime title carries its mapped film's TMDB id with the movie kind;
+    // the same number as a series names a different show.
+    let (app, user, _) = pending_import_identity_fixture(
+        MediaFacet::Anime,
+        vec![pending_import_search_result_with_ids(
+            "Fixture Other Show",
+            "series",
+            vec![ExternalId::with_kind("tmdb", "series", "515002")],
+        )],
+        vec![
+            ExternalId::with_kind("tvdb", "series", "770002"),
+            ExternalId::with_kind("tmdb", "movie", "515002"),
+        ],
+    )
+    .await;
+
+    assert_eq!(annotated_existing_ids(&app, &user).await, vec![None]);
+}
+
+#[tokio::test]
+async fn a_movie_candidate_known_only_by_tmdb_is_shown_as_owned_and_resolves_that_way() {
+    let owned = ExternalId::with_kind("tmdb", "movie", "424201");
+    let (app, user, existing_id) = pending_import_identity_fixture(
+        MediaFacet::Movie,
+        vec![pending_import_search_result_with_ids(
+            "Fixture Owned Movie",
+            "movie",
+            vec![owned.clone()],
+        )],
+        vec![owned.clone()],
+    )
+    .await;
+
+    assert_eq!(
+        annotated_existing_ids(&app, &user).await,
+        vec![Some(existing_id)]
+    );
+
+    let error = resolve_without_attach(&app, &user, MediaFacet::Movie, vec![owned])
+        .await
+        .expect_err("the resolver finds the same title");
+    assert!(
+        error
+            .to_string()
+            .contains("title already exists in this library")
+    );
+}
