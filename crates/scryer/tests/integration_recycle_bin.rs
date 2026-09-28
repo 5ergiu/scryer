@@ -2387,3 +2387,163 @@ async fn batch_recycle_jobs_guard_duplicates_without_blocking_independent_entrie
         JobRunStatus::Completed
     );
 }
+
+/// A media file plus an unrelated neighbour in the same folder, both under
+/// `root`, with distinct content so a mix-up is visible.
+fn seed_media_with_neighbour(root: &Path, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let folder = root.join(format!("{name} (2001)"));
+    std::fs::create_dir_all(&folder).expect("create title folder");
+    let media = folder.join(format!("{name}.mkv"));
+    let neighbour = folder.join(format!("{name}.nfo"));
+    std::fs::write(&media, format!("{name} media")).expect("write media file");
+    std::fs::write(&neighbour, format!("{name} neighbour")).expect("write neighbour file");
+    (media, neighbour)
+}
+
+fn removal_manifest(source: &Path) -> RecycleManifest {
+    RecycleManifest {
+        schema: None,
+        entry_id: None,
+        source_operation_id: None,
+        recycled_at: Utc::now().to_rfc3339(),
+        original_path: source.to_string_lossy().to_string(),
+        original_file_id: None,
+        size_bytes: 0,
+        title_id: None,
+        media_root: None,
+        reason: "file_deleted".to_string(),
+        status: None,
+        replacement_file_id: None,
+        replacement_path: None,
+        media_row: None,
+    }
+}
+
+/// Recycle `name`'s media file out of `root` through the bin the settings
+/// resolve for that root, and check what landed in the bin.
+async fn recycle_from_root_and_expect_success(ctx: &TestContext, root: &Path, name: &str) {
+    let (media, neighbour) = seed_media_with_neighbour(root, name);
+    let config = ctx
+        .app
+        .recycle_bin_config_for_media_root(Some(root.to_string_lossy().as_ref()))
+        .await;
+    assert_eq!(config.validation_error, None);
+    assert_eq!(config.source_roots, vec![root.to_path_buf()]);
+
+    let result = recycle_file(&config, &media, removal_manifest(&media))
+        .await
+        .expect("recycle should succeed")
+        .expect("file should be recycled");
+
+    assert!(!media.exists(), "the recycled file leaves its folder");
+    assert!(result.recycled_path.starts_with(&config.base_path));
+    assert_eq!(
+        std::fs::read_to_string(&result.recycled_path).expect("read recycled file"),
+        format!("{name} media")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&neighbour).expect("read neighbour"),
+        format!("{name} neighbour")
+    );
+}
+
+#[tokio::test]
+async fn custom_recycle_bin_inside_another_library_root_refuses_and_keeps_the_file() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    let root_a = temp.path().join("library-a");
+    let root_b = temp.path().join("library-b");
+    std::fs::create_dir_all(&root_a).expect("create root a");
+    std::fs::create_dir_all(&root_b).expect("create root b");
+    seed_library(&ctx, "Movies A", &root_a).await;
+    seed_library(&ctx, "Movies B", &root_b).await;
+    // Stored directly: the bin sits inside a root of a library other than the
+    // one the file is removed from, the shape a later library root creates.
+    let bin = root_b.join("shared-bin");
+    set_custom_recycle_bin_path(&ctx, &bin).await;
+
+    for (root, name) in [
+        (&root_a, "Synthetic Feature A"),
+        (&root_b, "Synthetic Feature B"),
+    ] {
+        let (media, neighbour) = seed_media_with_neighbour(root, name);
+        let config = ctx
+            .app
+            .recycle_bin_config_for_media_root(Some(root.to_string_lossy().as_ref()))
+            .await;
+        let validation_error = config
+            .validation_error
+            .clone()
+            .expect("a bin inside a library root is refused");
+        assert!(
+            validation_error.contains(&*root_b.to_string_lossy()),
+            "the refusal names the root the bin sits in: {validation_error}"
+        );
+        assert!(!config.cleanup_enabled);
+        assert_eq!(
+            config.source_roots,
+            vec![root.clone()],
+            "the source root stays the one the file is removed from"
+        );
+
+        let error = recycle_file(&config, &media, removal_manifest(&media))
+            .await
+            .expect_err("recycling into a bin inside a library root is refused");
+        assert!(
+            error.to_string().contains("recycle bin path is unsafe"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&media).expect("the refused file stays in place"),
+            format!("{name} media")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&neighbour).expect("read neighbour"),
+            format!("{name} neighbour")
+        );
+    }
+    assert!(!bin.exists(), "a refused recycle creates no bin");
+}
+
+#[tokio::test]
+async fn custom_recycle_bin_outside_every_library_root_recycles_from_each_library() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    let root_a = temp.path().join("library-a");
+    let root_b = temp.path().join("library-b");
+    std::fs::create_dir_all(&root_a).expect("create root a");
+    std::fs::create_dir_all(&root_b).expect("create root b");
+    seed_library(&ctx, "Movies A", &root_a).await;
+    seed_library(&ctx, "Movies B", &root_b).await;
+    set_custom_recycle_bin_path(&ctx, &temp.path().join("outside-bin")).await;
+
+    recycle_from_root_and_expect_success(&ctx, &root_a, "Synthetic Feature A").await;
+    recycle_from_root_and_expect_success(&ctx, &root_b, "Synthetic Feature B").await;
+}
+
+#[tokio::test]
+async fn default_recycle_bins_recycle_from_each_library_into_their_own_root() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    let root_a = temp.path().join("library-a");
+    let root_b = temp.path().join("library-b");
+    std::fs::create_dir_all(&root_a).expect("create root a");
+    std::fs::create_dir_all(&root_b).expect("create root b");
+    seed_library(&ctx, "Movies A", &root_a).await;
+    seed_library(&ctx, "Movies B", &root_b).await;
+
+    for (root, name) in [
+        (&root_a, "Synthetic Feature A"),
+        (&root_b, "Synthetic Feature B"),
+    ] {
+        let config = ctx
+            .app
+            .recycle_bin_config_for_media_root(Some(root.to_string_lossy().as_ref()))
+            .await;
+        assert_eq!(config.base_path, root.join(".scryer-recycle"));
+        recycle_from_root_and_expect_success(&ctx, root, name).await;
+    }
+}

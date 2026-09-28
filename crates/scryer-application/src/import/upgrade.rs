@@ -105,7 +105,7 @@ pub(crate) async fn resolve_old_file_recycle_context(
     crate::fs_safety::ensure_root_available(&old_file_media_root)?;
 
     let recycle_config = app
-        .recycle_bin_configs_for_media_roots(media_roots)
+        .recycle_bin_configs_for_recycling(media_roots)
         .await
         .into_iter()
         .find_map(|(media_root, config)| {
