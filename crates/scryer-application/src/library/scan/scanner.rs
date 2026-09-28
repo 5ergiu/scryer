@@ -715,7 +715,7 @@ pub struct SeriesMetadata {
     pub target_key: Option<String>,
     /// SMG's title id. Set only when the series came from the title surface.
     pub smg_id: Option<i64>,
-    /// `tvdb` or `tmdb`; empty when the legacy TVDB documents supplied it.
+    /// `tvdb` or `tmdb`; empty when a TVDB-keyed document supplied it.
     pub primary_source: String,
     /// The series' TVDB id, or `0` for a TMDB-primary series.
     pub tvdb_id: i64,
@@ -742,8 +742,8 @@ pub struct SeriesMetadata {
     pub anime_mappings: Vec<AnimeMapping>,
     pub anime_movies: Vec<AnimeMovie>,
     /// Community (AniDB/AniList/MAL) season layout for this series, when SMG
-    /// could build one. `None` for non-anime, for an SMG that predates the
-    /// field, and for anime whose community numbering matches TVDB's.
+    /// could build one. `None` for non-anime and for anime whose community
+    /// numbering matches TVDB's.
     pub anime_numbering_bridge: Option<scryer_domain::AnimeNumberingBridge>,
     /// TVDB's published episode orders for this series, when the caller asked
     /// for them. Single-series hydration does; bulk hydration cannot, because
@@ -907,16 +907,13 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<MovieTitleBulkResult> {
         let _ = (refs, language);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway titles is not implemented".into(),
         ))
     }
 
     /// Fetch series by SMG title id through the `titles` operation. Refs
     /// without an SMG id are resolved from their provider ids first. The
     /// result's `by_ref_index` is keyed by the index into `refs`.
-    ///
-    /// Series have no legacy TVDB-keyed path: a gateway without the title
-    /// surface answers with an error that surfaces to the caller unchanged.
     async fn get_series_titles(
         &self,
         refs: &[SeriesTitleRef],
@@ -926,7 +923,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<SeriesTitleBulkResult> {
         let _ = (refs, language, include_episodes, include_episode_orders);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway titles is not implemented".into(),
         ))
     }
 
@@ -937,7 +934,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<Vec<TitleResolution>> {
         let _ = (refs, create_missing);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway resolveTitles is not implemented".into(),
         ))
     }
 
@@ -951,7 +948,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<Vec<TitleResolution>> {
         let _ = (refs, kind, create_missing);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway resolveTitles is not implemented".into(),
         ))
     }
 
@@ -1003,7 +1000,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<Vec<RichMetadataSearchItem>> {
         let _ = (query, kind, limit, language, year);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway searchTitles is not implemented".into(),
         ))
     }
 
@@ -1016,7 +1013,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
         let _ = (queries, kind, language, create_missing);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway searchTitlesBatch is not implemented".into(),
         ))
     }
 

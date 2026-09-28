@@ -290,7 +290,7 @@ pub(crate) async fn hydrate_referenced_movie_metadata(
 /// redirect) addresses the series. A TMDB-primary series has no TVDB id, so
 /// its TMDB id is the only provider id it can be matched and searched by. A
 /// TVDB-backed series gains nothing else, so its persisted identity stays
-/// what the legacy TVDB documents produced.
+/// what the TVDB-keyed documents produced.
 fn series_title_extra_external_ids(
     series: &SeriesMetadata,
     existing: &[ExternalId],

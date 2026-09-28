@@ -1,6 +1,6 @@
 //! Series hydration through SMG's title surface (`titles` by SMG title id).
-//! Series have no legacy TVDB-keyed fallback: SMG always serves the title
-//! surface, so a series it cannot answer is a clear hydration failure.
+//! SMG always serves the title surface, so a series it cannot answer is a
+//! clear hydration failure.
 
 use super::*;
 
@@ -82,15 +82,15 @@ fn tvdb_series(tvdb_id: i64, smg_id: Option<i64>, name: &str) -> SeriesMetadata 
 
 #[derive(Default)]
 struct SeriesTitleGateway {
-    /// Answer `get_series_titles` as an SMG without the title surface.
-    unsupported: bool,
+    /// Answer `get_series_titles` with a gateway error.
+    failing: bool,
     /// Series the title surface serves.
     titles: Vec<SeriesMetadata>,
     redirects: Vec<(i64, i64)>,
     title_calls: Mutex<Vec<(Vec<SeriesTitleRef>, bool, bool)>>,
-    /// Series TVDB ids asked of the legacy `metadataBulk` document. Series
-    /// never use it, so every test expects this to stay empty.
-    legacy_calls: Mutex<Vec<i64>>,
+    /// Series TVDB ids asked of the TVDB-keyed `metadataBulk` document.
+    /// Series hydration never uses it, so every test expects this to stay empty.
+    metadata_bulk_calls: Mutex<Vec<i64>>,
 }
 
 #[async_trait]
@@ -150,7 +150,7 @@ impl MetadataGateway for SeriesTitleGateway {
         series_tvdb_ids: &[i64],
         _language: &str,
     ) -> AppResult<BulkMetadataResult> {
-        self.legacy_calls
+        self.metadata_bulk_calls
             .lock()
             .await
             .extend(series_tvdb_ids.iter().copied());
@@ -169,10 +169,8 @@ impl MetadataGateway for SeriesTitleGateway {
             include_episodes,
             include_episode_orders,
         ));
-        if self.unsupported {
-            return Err(AppError::Repository(
-                "Unknown argument \"clientCapabilities\" on field \"Query.titles\".".into(),
-            ));
+        if self.failing {
+            return Err(AppError::Repository("fixture title surface failure".into()));
         }
         let mut result = SeriesTitleBulkResult {
             redirects: self.redirects.clone(),
@@ -326,7 +324,7 @@ async fn a_tmdb_primary_series_hydrates_by_its_smg_title_id() {
         title_calls[0].1 && title_calls[0].2,
         "single hydration asks for episodes and orders"
     );
-    assert!(gateway.legacy_calls.lock().await.is_empty());
+    assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -361,7 +359,7 @@ async fn a_tvdb_series_hydrates_identically_by_tvdb_ref_or_smg_id() {
         let title_calls = gateway.title_calls.lock().await;
         assert_eq!(title_calls.len(), 1);
         assert_eq!(title_calls[0].0[0].tvdb_id, Some(tvdb_id));
-        assert!(gateway.legacy_calls.lock().await.is_empty());
+        assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
         outcomes.push((
             hydrated.name.clone(),
             external_id_values(&hydrated, "tvdb"),
@@ -422,7 +420,7 @@ async fn a_tvdb_series_the_title_surface_cannot_resolve_fails_clearly() {
             .contains("SMG could not resolve the series from its external ids"),
         "unexpected error: {error}"
     );
-    assert!(gateway.legacy_calls.lock().await.is_empty());
+    assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -512,7 +510,7 @@ async fn a_series_missing_from_smg_without_a_tvdb_id_fails_clearly() {
         outcome.failed_titles.get(&created.id).map(String::as_str),
         Some("bulk metadata response missing title")
     );
-    assert!(gateway.legacy_calls.lock().await.is_empty());
+    assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -591,7 +589,7 @@ async fn bulk_series_hydration_serves_both_surfaces_and_skips_episode_orders() {
         !title_calls[0].2,
         "bulk hydration never asks for episode orders"
     );
-    assert!(gateway.legacy_calls.lock().await.is_empty());
+    assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -599,7 +597,7 @@ async fn series_hydration_fails_clearly_when_the_title_surface_errors() {
     let tvdb_id = 81_006;
     let smg_id = 3_600_001;
     let gateway = Arc::new(SeriesTitleGateway {
-        unsupported: true,
+        failing: true,
         ..Default::default()
     });
     let (app, user, _) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
@@ -629,9 +627,9 @@ async fn series_hydration_fails_clearly_when_the_title_surface_errors() {
     let error = app
         .hydrate_title_single_apq_with_language(target(&tvdb_title), "eng")
         .await
-        .expect_err("a TVDB series has no legacy fallback");
+        .expect_err("a TVDB series surfaces the title-surface error");
     assert!(
-        error.to_string().contains("clientCapabilities"),
+        error.to_string().contains("fixture title surface failure"),
         "unexpected error: {error}"
     );
 
@@ -645,7 +643,7 @@ async fn series_hydration_fails_clearly_when_the_title_surface_errors() {
             .failed_titles
             .get(&title.id)
             .expect("every series in the chunk fails");
-        assert!(reason.contains("clientCapabilities"), "{reason}");
+        assert!(reason.contains("fixture title surface failure"), "{reason}");
     }
-    assert!(gateway.legacy_calls.lock().await.is_empty());
+    assert!(gateway.metadata_bulk_calls.lock().await.is_empty());
 }

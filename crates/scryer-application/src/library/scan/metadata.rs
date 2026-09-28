@@ -598,7 +598,7 @@ pub(crate) async fn execute_batch_metadata_searches(
         if queries.is_empty() {
             continue;
         }
-        let movie_results = match await_cancellable_app_result(
+        let Some(movie_results) = await_cancellable_app_result(
             cancel_token,
             metadata_gateway.search_titles_batch(
                 &queries,
@@ -607,30 +607,16 @@ pub(crate) async fn execute_batch_metadata_searches(
                 create_missing,
             ),
         )
-        .await
-        {
-            Ok(Some(results)) => results,
-            Ok(None) => return Ok(HashMap::new()),
-            Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
-                let Some(results) = await_cancellable_app_result(
-                    cancel_token,
-                    metadata_gateway.search_tvdb_batch(&queries, metadata_language),
-                )
-                .await?
-                else {
-                    return Ok(HashMap::new());
-                };
-                results
-            }
-            Err(error) => return Err(error),
+        .await?
+        else {
+            return Ok(HashMap::new());
         };
         batched_results.extend(movie_results);
     }
 
-    // Series go through the title surface only: a series SMG knows only from
-    // TMDB has no TVDB id and is found nowhere else, and there is no legacy
-    // TVDB search for series. Queries that carry an external id may ask SMG to
-    // create the series, exactly like movies.
+    // Series go through the title surface too: a series SMG knows only from
+    // TMDB has no TVDB id and is found nowhere else. Queries that carry an
+    // external id may ask SMG to create the series, exactly like movies.
     let (series_queries_with_external_id, series_queries_without_external_id): (Vec<_>, Vec<_>) =
         series_queries.into_iter().partition(|query| {
             query.imdb_id.is_some() || query.tmdb_id.is_some() || query.tvdb_id.is_some()

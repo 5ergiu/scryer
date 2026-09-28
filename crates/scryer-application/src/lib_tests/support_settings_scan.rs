@@ -363,6 +363,24 @@ pub(super) struct EmptySearchMetadataGateway;
 
 #[async_trait]
 impl MetadataGateway for EmptySearchMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,

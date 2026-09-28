@@ -840,30 +840,18 @@ impl AppUseCase {
                     let language = self
                         .resolve_metadata_language_for_title(&existing_title)
                         .await;
-                    let movie = match self
+                    let movie = self
                         .services
                         .library
                         .metadata_gateway
                         .get_movie_titles(std::slice::from_ref(&requested_ref), &language)
-                        .await
-                    {
-                        Ok(result) => result.by_ref_index.get(&0).cloned().ok_or_else(|| {
+                        .await?
+                        .by_ref_index
+                        .get(&0)
+                        .cloned()
+                        .ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".into())
-                        })?,
-                        Err(error) if title_queries_not_supported(&error) => {
-                            let tvdb_id = requested_ref.tvdb_id.ok_or_else(|| {
-                                AppError::Repository(
-                                    "legacy metadata gateway requires a tvdb id".into(),
-                                )
-                            })?;
-                            self.services
-                                .library
-                                .metadata_gateway
-                                .get_movie(tvdb_id, &language)
-                                .await?
-                        }
-                        Err(error) => return Err(error),
-                    };
+                        })?;
                     let resolved_ref = MovieTitleRef {
                         smg_id: movie.smg_id.or(requested_ref.smg_id),
                         tvdb_id: movie.tvdb_id.or(requested_ref.tvdb_id),
