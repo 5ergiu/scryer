@@ -3066,13 +3066,38 @@ impl MultiIndexerSearchClient {
         is_rss_request: bool,
         learning_context: Option<&IndexerSearchLearningContext>,
     ) -> Arc<Semaphore> {
-        let background_pass = mode == SearchMode::Auto
-            && (is_rss_request
-                || learning_context.is_some_and(|context| context.candidate_reuse_allowed));
-        if background_pass {
+        if Self::is_background_pass(mode, is_rss_request, learning_context) {
             self.background_search_limit.clone()
         } else {
             self.interactive_search_limit.clone()
+        }
+    }
+
+    /// Whether a search pass belongs to a machine-initiated sweep (RSS or a
+    /// consenting convergence lane) rather than to someone waiting on it.
+    fn is_background_pass(
+        mode: SearchMode,
+        is_rss_request: bool,
+        learning_context: Option<&IndexerSearchLearningContext>,
+    ) -> bool {
+        mode == SearchMode::Auto
+            && (is_rss_request
+                || learning_context.is_some_and(|context| context.candidate_reuse_allowed))
+    }
+
+    /// The pacing class for a pass's indexer requests. It follows the same
+    /// lane split as the search semaphore: an operator's Auto-mode search (for
+    /// example a title walk someone started) is paced as interactive, while
+    /// RSS and the background convergence lanes keep the background trickle.
+    fn pacing_intent(
+        mode: SearchMode,
+        is_rss_request: bool,
+        learning_context: Option<&IndexerSearchLearningContext>,
+    ) -> SchedulerIntent {
+        if is_rss_request || Self::is_background_pass(mode, is_rss_request, learning_context) {
+            Self::scheduler_intent(mode, is_rss_request)
+        } else {
+            SchedulerIntent::InteractiveSearch
         }
     }
 
@@ -5440,8 +5465,10 @@ impl IndexerClient for MultiIndexerSearchClient {
             let fallback_strategies = fallback_strategies.clone();
             let search_limit = search_limit.clone();
             let rate_limiter = self.rate_limiter.clone();
-            let pacing =
-                IndexerPacing::resolve(config, Self::scheduler_intent(mode, is_rss_request));
+            let pacing = IndexerPacing::resolve(
+                config,
+                Self::pacing_intent(mode, is_rss_request, learning_context.as_ref()),
+            );
             let task_cancel_token = cancel_token.child_token();
             let scheduler_lease_for_task = scheduler_lease.clone();
             let live_search_admitted = scheduler_lease_for_task.is_some();
@@ -13960,6 +13987,59 @@ mod tests {
             )),
             "interactive mode always uses the interactive lane"
         );
+    }
+
+    #[test]
+    fn operator_auto_searches_are_paced_as_interactive() {
+        let background = IndexerSearchLearningContext {
+            title_id: "title-1".into(),
+            facet: "series".into(),
+            subject_kind: ReleaseSearchSubjectKind::Episode,
+            search_session_id: "session".into(),
+            background_value: Some(0.5),
+            candidate_reuse_allowed: true,
+        };
+        let operator = IndexerSearchLearningContext {
+            candidate_reuse_allowed: false,
+            background_value: None,
+            ..background.clone()
+        };
+        let intent = |mode, is_rss, context: Option<&IndexerSearchLearningContext>| {
+            MultiIndexerSearchClient::pacing_intent(mode, is_rss, context)
+        };
+
+        assert_eq!(
+            intent(SearchMode::Auto, false, Some(&operator)),
+            SchedulerIntent::InteractiveSearch,
+            "an operator-started walk is paced for the person waiting on it"
+        );
+        assert_eq!(
+            intent(SearchMode::Auto, false, Some(&background)),
+            SchedulerIntent::BackgroundAcquisition,
+            "the background convergence walk keeps the trickle"
+        );
+        assert_eq!(
+            intent(SearchMode::Auto, true, None),
+            SchedulerIntent::BackgroundRss
+        );
+        assert_eq!(
+            intent(SearchMode::Interactive, false, Some(&background)),
+            SchedulerIntent::InteractiveSearch
+        );
+
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        let operator_pacing =
+            IndexerPacing::resolve(&config, intent(SearchMode::Auto, false, Some(&operator)));
+        assert_eq!(operator_pacing.interval, std::time::Duration::ZERO);
+        assert_eq!(operator_pacing.max_wait, Some(INTERACTIVE_PACING_MAX_WAIT));
+        let background_pacing =
+            IndexerPacing::resolve(&config, intent(SearchMode::Auto, false, Some(&background)));
+        assert_eq!(
+            background_pacing.interval,
+            BACKGROUND_INDEXER_REQUEST_INTERVAL
+        );
+        assert_eq!(background_pacing.max_wait, None);
     }
 
     #[tokio::test]
