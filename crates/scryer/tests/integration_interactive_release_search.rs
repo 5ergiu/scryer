@@ -666,6 +666,66 @@ async fn dolby_vision_profile_edits_reach_fresh_interactive_searches() {
 }
 
 #[tokio::test]
+async fn title_tags_reach_rule_tester_and_interactive_search() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let indexer = MockServer::start().await;
+        let release = "Synthetic.Feature.2024.1080p.WEB-DL.DDP5.1-GROUPA";
+        mount_healthy(&indexer, release, "tag-rule-fixture").await;
+        let (app, user, _index_dir) = setup_app(vec![indexer_config(
+            "tag-indexer",
+            format!("{}/api", indexer.uri()),
+            "fixture-key",
+            chrono::Utc::now(),
+        )]).await;
+        app.create_title_tag_definition(&user, "swedish", None).await.unwrap();
+        let source = r#"preferred_groups := {"groupa", "groupb"}
+score_entry["preferred_release_group"] := 400 if {
+    "swedish" in input.context.tags
+    input.release.release_group != null
+    input.release.release_group != ""
+    lower(input.release.release_group) in preferred_groups
+}"#;
+        let rule = app.create_rule_set(
+            &user, "Preferred group".into(), String::new(), source.into(),
+            vec![MediaFacet::Movie], 0, Some(true),
+        ).await.unwrap();
+        for tagged in [true, false] {
+            let title = app.add_title(&user, NewTitle {
+                name: "Synthetic Feature".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                tags: if tagged { vec!["swedish".into()] } else { vec![] },
+                ..Default::default()
+            }).await.unwrap();
+            let query = format!(
+                "mutation {{ testRuleSet(input: {{ titleId: {}, testRuleSetId: {}, releaseName: {} }}) {{ context {{ tags }} parsed {{ releaseGroup }} draftContribution {{ score matched }} errors {{ message }} }} }}",
+                serde_json::to_string(&title.id).unwrap(),
+                serde_json::to_string(&rule.id).unwrap(),
+                serde_json::to_string(release).unwrap(),
+            );
+            let schema = scryer_interface::build_schema(app.clone(), common::disabled_auth_runtime_handle());
+            let response = schema.execute(async_graphql::Request::new(query).data(user.clone())).await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let value = response.data.into_json().unwrap();
+            let preview = &value["testRuleSet"];
+            assert_eq!(preview["context"]["tags"], json!(title.tags));
+            assert_eq!(preview["draftContribution"]["score"], if tagged { 400 } else { 0 }, "{preview}");
+            let start = app.start_interactive_release_search(&user, title_request(&title.id)).await.unwrap();
+            let done = loop {
+                let snapshot = app.interactive_release_search(&user, &start.id).await.unwrap().unwrap();
+                if snapshot.state != InteractiveReleaseSearchState::Running {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            };
+            assert_eq!(done.results.len(), 1, "{done:?}");
+            let decision = done.results[0].quality_profile_decision.as_ref().expect("scored search result");
+            assert_eq!(decision.scoring_log.iter().any(|entry| entry.code == "preferred_release_group" && entry.delta == 400), tagged, "{decision:?}");
+        }
+    }).await.expect("tag-rule fixture completed within failure bound");
+}
+
+#[tokio::test]
 async fn fast_indexer_results_stream_in_before_slow_indexer_completes() {
     let fast = MockServer::start().await;
     mount_healthy(&fast, "Paperman.2012.1080p.WEB-DL-FASTGRP", "fast-1").await;
