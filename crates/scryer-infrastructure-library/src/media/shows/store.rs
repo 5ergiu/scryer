@@ -471,6 +471,13 @@ impl ShowRepository for ShowStore {
         list_episode_external_ids_query(self.read_target(), episode_id).await
     }
 
+    async fn list_episode_external_ids_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        list_episode_external_ids_for_title_query(self.read_target(), title_id).await
+    }
+
     async fn get_episode_by_id(&self, episode_id: &str) -> AppResult<Option<Episode>> {
         get_episode_by_id_query(self.read_target(), episode_id).await
     }
@@ -1382,6 +1389,25 @@ async fn list_episode_external_ids_query(
          FROM episode_external_ids WHERE episode_id = {} \
          ORDER BY source ASC, external_id ASC, source_scope ASC",
         &[SqlArg::Text(episode_id.to_string())],
+    )
+    .await?;
+    rows.iter().map(row_to_scoped_external_id).collect()
+}
+
+/// [`list_episode_external_ids_query`] for every episode of a title at once.
+/// Rows are selected by the episode they belong to, exactly as the
+/// per-episode query selects them, rather than by the row's own `title_id`.
+async fn list_episode_external_ids_for_title_query(
+    target: SqlTarget<'_>,
+    title_id: &str,
+) -> AppResult<Vec<ScopedExternalId>> {
+    let rows = SqlRuntime::fetch_all(
+        SqlExec::Target(target),
+        "SELECT episode_id AS scope_id, source, external_id, provenance, source_scope \
+         FROM episode_external_ids \
+         WHERE episode_id IN (SELECT id FROM episodes WHERE title_id = {}) \
+         ORDER BY episode_id ASC, source ASC, external_id ASC, source_scope ASC",
+        &[SqlArg::Text(title_id.to_string())],
     )
     .await?;
     rows.iter().map(row_to_scoped_external_id).collect()
@@ -2754,6 +2780,110 @@ mod collection_ordered_path_tests {
         assert_eq!(ids(&batched), ["ep-a1", "ep-a2", "ep-a3", "ep-b1", "ep-b2"]);
         assert!(
             list_episodes_for_titles_query(SqlTarget::Sqlite(&pool), &[])
+                .await
+                .expect("empty listing")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn title_episode_external_ids_match_the_per_episode_listing() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open SQLite pool");
+        sqlx::query("CREATE TABLE episodes (id TEXT PRIMARY KEY, title_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create episodes table");
+        sqlx::query(
+            "CREATE TABLE episode_external_ids (
+                id TEXT PRIMARY KEY, title_id TEXT NOT NULL, episode_id TEXT NOT NULL,
+                source TEXT NOT NULL, external_id TEXT NOT NULL, provenance TEXT NOT NULL,
+                source_scope TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create episode_external_ids table");
+        for (id, title_id) in [
+            ("ep-a1", "title-a"),
+            ("ep-a2", "title-a"),
+            ("ep-b1", "title-b"),
+        ] {
+            sqlx::query("INSERT INTO episodes (id, title_id) VALUES (?, ?)")
+                .bind(id)
+                .bind(title_id)
+                .execute(&pool)
+                .await
+                .expect("insert episode");
+        }
+        // Inserted out of order. The `ep-a2` row names another title on the
+        // row itself; the per-episode listing still returns it, so the title
+        // listing must too.
+        for (id, row_title, episode_id, source, external_id, scope) in [
+            ("x1", "title-a", "ep-a2", "tvdb", "900", ""),
+            ("x2", "title-a", "ep-a1", "anidb", "71", "b"),
+            ("x3", "title-b", "ep-b1", "anidb", "80", ""),
+            ("x4", "title-a", "ep-a1", "anidb", "71", "a"),
+            ("x5", "title-other", "ep-a2", "anidb", "72", ""),
+            ("x6", "title-a", "ep-a1", "anidb", "70", ""),
+        ] {
+            sqlx::query(
+                "INSERT INTO episode_external_ids (
+                    id, title_id, episode_id, source, external_id, provenance, source_scope
+                ) VALUES (?, ?, ?, ?, ?, 'anibridge', ?)",
+            )
+            .bind(id)
+            .bind(row_title)
+            .bind(episode_id)
+            .bind(source)
+            .bind(external_id)
+            .bind(scope)
+            .execute(&pool)
+            .await
+            .expect("insert episode external id");
+        }
+        let target = || SqlTarget::Sqlite(&pool);
+        let key = |ids: &[scryer_application::ScopedExternalId]| {
+            ids.iter()
+                .map(|id| {
+                    format!(
+                        "{}/{}/{}/{}",
+                        id.scope_id,
+                        id.source,
+                        id.external_id,
+                        id.source_scope.as_deref().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let batched = super::list_episode_external_ids_for_title_query(target(), "title-a")
+            .await
+            .expect("title listing");
+        let mut per_episode = Vec::new();
+        for episode_id in ["ep-a1", "ep-a2"] {
+            per_episode.extend(
+                super::list_episode_external_ids_query(target(), episode_id)
+                    .await
+                    .expect("episode listing"),
+            );
+        }
+        assert_eq!(key(&batched), key(&per_episode));
+        assert_eq!(
+            key(&batched),
+            [
+                "ep-a1/anidb/70/",
+                "ep-a1/anidb/71/a",
+                "ep-a1/anidb/71/b",
+                "ep-a2/anidb/72/",
+                "ep-a2/tvdb/900/",
+            ]
+        );
+        assert!(
+            super::list_episode_external_ids_for_title_query(target(), "title-none")
                 .await
                 .expect("empty listing")
                 .is_empty()

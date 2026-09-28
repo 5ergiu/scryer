@@ -3169,6 +3169,20 @@ pub trait ShowRepository: Send + Sync {
     }
     async fn list_episode_external_ids(&self, episode_id: &str)
     -> AppResult<Vec<ScopedExternalId>>;
+    /// The scoped external ids of every episode of one title: for each
+    /// episode, exactly the rows `list_episode_external_ids` returns, in the
+    /// same order, grouped by episode id. The default fans out per episode;
+    /// SQL stores override with a single query.
+    async fn list_episode_external_ids_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        let mut ids = Vec::new();
+        for episode in self.list_episodes_for_title(title_id).await? {
+            ids.extend(self.list_episode_external_ids(&episode.id).await?);
+        }
+        Ok(ids)
+    }
     async fn get_episode_by_id(&self, episode_id: &str) -> AppResult<Option<Episode>>;
     /// Batch-load episodes by id for dataloaders. Missing ids are absent from
     /// the result. The default fans out to `get_episode_by_id`; SQL stores

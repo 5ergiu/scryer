@@ -5342,6 +5342,99 @@ async fn covered_background_walk_reads_no_persona_or_acquisition_thresholds() {
     }
 }
 
+/// The rotation cursors are written only when they move. A cycle that ends
+/// where the stored cursor already points leaves the settings row alone; a
+/// cycle that moves it writes the new position.
+#[tokio::test]
+async fn background_cycle_writes_the_rotation_cursor_only_when_it_moves() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client = Arc::new(
+        FixedReleaseIndexerClient::new("Cursor Write Fixture.2024.1080p.WEB-DL")
+            .with_fired_indexers(["indexer-a"])
+            .with_empty_response(),
+    );
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client,
+        download_submissions,
+        pending_releases,
+        wanted_items.clone(),
+        indexer_client,
+    );
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let coverage = Arc::new(RecordingScopeIndexerCoverageRepo::new());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_scope_indexer_coverage_store(coverage.clone())
+            .with_settings(settings.clone())
+    });
+    seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Cursor Write Fixture", 2024)
+        .await;
+
+    // A freshly added title is hot, so it rotates through the hot lane.
+    let cursor_key = crate::acquisition::convergence::BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY;
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            cursor_key,
+            "\"scope-that-no-longer-exists\"",
+        )
+        .await;
+
+    settings.reset_write_log();
+    let outcome = app.run_background_acquisition_cycle_once().await;
+    assert_eq!(
+        outcome.targets_derived, 1,
+        "fixture: one missing movie scope"
+    );
+    assert_eq!(
+        settings
+            .write_log()
+            .iter()
+            .filter(|key| key.as_str() == cursor_key)
+            .count(),
+        1,
+        "a cursor that moved is written: {:?}",
+        settings.write_log()
+    );
+    let moved_to = app
+        .background_acquisition_hot_resume_position()
+        .await
+        .expect("the moved cursor reads back");
+    assert_ne!(moved_to, "scope-that-no-longer-exists");
+
+    settings.reset_write_log();
+    app.run_background_acquisition_cycle_once().await;
+    assert!(
+        settings.write_log().is_empty(),
+        "an unchanged cursor is not written again: {:?}",
+        settings.write_log()
+    );
+    assert_eq!(
+        app.background_acquisition_hot_resume_position()
+            .await
+            .as_deref(),
+        Some(moved_to.as_str())
+    );
+
+    // The store call compares against the position the cycle read, in the
+    // trimmed form reads return.
+    settings.reset_write_log();
+    app.store_background_acquisition_resume_position(Some(&moved_to), Some(&moved_to))
+        .await;
+    app.store_background_acquisition_hot_resume_position(None, None)
+        .await;
+    assert!(settings.write_log().is_empty());
+    app.store_background_acquisition_hot_resume_position(None, Some("hot-scope"))
+        .await;
+    assert_eq!(
+        settings.write_log(),
+        vec![crate::acquisition::convergence::BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY]
+    );
+}
+
 /// The failure loop never costs an indexer query. A grab that fails is
 /// blocklisted and its scope re-opened under its existing coverage; the cursor
 /// then walks the scope's saved search results in order, and once they are
@@ -6968,6 +7061,32 @@ impl AnidbSelectionFixture {
         }
     }
 
+    /// The subject a title walk resolves for one episode, with or without the
+    /// walk's catalog memo.
+    async fn walk_subject(
+        &self,
+        episode: &Episode,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> crate::acquisition_release_search::ResolvedReleaseSearchSubject {
+        let wanted = self.wanted(episode);
+        let search_title = self
+            .app
+            .release_search_title_for_wanted_item(&self.title, &wanted, Some(episode), reads)
+            .await;
+        self.app
+            .resolve_pending_release_search_subject_for_wanted_item(
+                &self.title,
+                &search_title,
+                &wanted,
+                Some(episode),
+                reads,
+            )
+            .await
+            .expect("subject resolves")
+            .for_convergence()
+            .clone()
+    }
+
     /// The AniDB id the automatic and the interactive lane each send for one
     /// episode.
     async fn anidb_ids(&self, episode: &Episode) -> (Option<String>, Option<String>) {
@@ -7008,6 +7127,97 @@ fn scoped_anidb_id(scope_id: &str, anidb_id: &str, source_scope: Option<&str>) -
         external_id: anidb_id.to_string(),
         provenance: "anibridge".to_string(),
         source_scope: source_scope.map(str::to_string),
+    }
+}
+
+/// A title walk resolves every anime episode subject from what it already
+/// holds: the title's episode ids are read once for the whole walk, and the
+/// absolute scale comes from the walk's episode list rather than a catalog
+/// query per stage. Each subject is the one the unshared path resolves.
+#[tokio::test]
+async fn a_title_walk_resolves_anime_subjects_from_its_own_catalog_reads() {
+    use std::sync::atomic::Ordering;
+
+    for contiguous_title in [false, true] {
+        let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, None).await;
+        let mut episodes = Vec::new();
+        for number in 1..=3_u32 {
+            let mut episode = fixture.episode(number).await;
+            episode.absolute_number = Some(number.to_string());
+            // On the contiguous title only the last episode carries a
+            // contiguous number, so the first two need the title's scale.
+            if contiguous_title && number == 3 {
+                episode.contiguous_absolute_number = Some(3);
+            }
+            episodes.push(episode);
+        }
+        *fixture.shows.episodes.lock().await = episodes.clone();
+        *fixture.shows.episode_external_ids.lock().await =
+            vec![scoped_anidb_id(&episodes[0].id, "7101", None)];
+        *fixture.shows.collection_external_ids.lock().await =
+            vec![scoped_anidb_id("season-1", "7100", None)];
+
+        let mut unshared = Vec::new();
+        for episode in &episodes {
+            unshared.push(fixture.walk_subject(episode, None).await);
+        }
+
+        let counts = || {
+            [
+                fixture
+                    .shows
+                    .episode_external_id_reads
+                    .load(Ordering::SeqCst),
+                fixture
+                    .shows
+                    .title_episode_external_id_reads
+                    .load(Ordering::SeqCst),
+                fixture.shows.absolute_scale_reads.load(Ordering::SeqCst),
+            ]
+        };
+        let before = counts();
+        let reads = crate::acquisition::title_reads::TitleCatalogReads::with_episodes(
+            &fixture.title.id,
+            episodes.clone(),
+        );
+        let mut shared = Vec::new();
+        for episode in &episodes {
+            shared.push(fixture.walk_subject(episode, Some(&reads)).await);
+        }
+        let after = counts();
+
+        assert_eq!(
+            format!("{shared:?}"),
+            format!("{unshared:?}"),
+            "the walk resolves exactly what the unshared path does (contiguous title: {contiguous_title})"
+        );
+        assert_eq!(after[0] - before[0], 0, "no per-episode external id read");
+        assert_eq!(
+            after[1] - before[1],
+            1,
+            "the title's episode ids are read once per walk"
+        );
+        assert_eq!(
+            after[2] - before[2],
+            0,
+            "the absolute scale needs no catalog query"
+        );
+
+        assert_eq!(shared[0].anidb_id.as_deref(), Some("7101"));
+        assert_eq!(shared[1].anidb_id.as_deref(), Some("7100"));
+        let expected_absolute = if contiguous_title {
+            [None, None, Some(3)]
+        } else {
+            [Some(1), Some(2), Some(3)]
+        };
+        assert_eq!(
+            shared
+                .iter()
+                .map(|subject| subject.absolute_episode)
+                .collect::<Vec<_>>(),
+            expected_absolute,
+            "the scale is the title's (contiguous title: {contiguous_title})"
+        );
     }
 }
 

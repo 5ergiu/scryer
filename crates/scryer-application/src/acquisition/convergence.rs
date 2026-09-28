@@ -364,29 +364,53 @@ impl AppUseCase {
             .filter(|value| !value.is_empty())
     }
 
-    /// Persist the cold-lane rotation position for the next cycle.
+    /// Persist the cold-lane rotation position for the next cycle. `read` is
+    /// the position this cycle started from; an unchanged position is not
+    /// written again.
     pub(crate) async fn store_background_acquisition_resume_position(
         &self,
-        position: Option<&str>,
-    ) {
-        self.store_acquisition_cursor_position(BACKGROUND_ACQUISITION_RESUME_AFTER_KEY, position)
-            .await;
-    }
-
-    /// Persist the hot-lane rotation position for the next cycle.
-    pub(crate) async fn store_background_acquisition_hot_resume_position(
-        &self,
+        read: Option<&str>,
         position: Option<&str>,
     ) {
         self.store_acquisition_cursor_position(
-            BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY,
+            BACKGROUND_ACQUISITION_RESUME_AFTER_KEY,
+            read,
             position,
         )
         .await;
     }
 
-    async fn store_acquisition_cursor_position(&self, key: &str, position: Option<&str>) {
-        let value = position.unwrap_or_default();
+    /// Persist the hot-lane rotation position for the next cycle. `read` is
+    /// the position this cycle started from; an unchanged position is not
+    /// written again.
+    pub(crate) async fn store_background_acquisition_hot_resume_position(
+        &self,
+        read: Option<&str>,
+        position: Option<&str>,
+    ) {
+        self.store_acquisition_cursor_position(
+            BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY,
+            read,
+            position,
+        )
+        .await;
+    }
+
+    /// `read` is what [`Self::acquisition_cursor_position`] returned for `key`
+    /// at the start of this cycle, so it is already trimmed and never empty.
+    /// The new position is compared in that same form: a position that reads
+    /// back as the one the cycle started from would change nothing, so the
+    /// settings row is left alone.
+    async fn store_acquisition_cursor_position(
+        &self,
+        key: &str,
+        read: Option<&str>,
+        position: Option<&str>,
+    ) {
+        let value = position.map(str::trim).unwrap_or_default();
+        if read.unwrap_or_default() == value {
+            return;
+        }
         let Ok(value_json) = serde_json::to_string(value) else {
             return;
         };

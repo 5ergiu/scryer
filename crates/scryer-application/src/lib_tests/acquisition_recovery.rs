@@ -667,6 +667,211 @@ async fn standby_delay_parks_the_best_row_stops_the_walk_and_promotion_grabs_whe
     );
 }
 
+/// One movie scope with one saved result, over repositories the test keeps.
+async fn saved_movie_result_fixture(
+    name: &str,
+    release_title: &str,
+) -> (
+    AppUseCase,
+    Title,
+    AcquisitionScopeState,
+    PendingRelease,
+    Arc<StubDownloadClient>,
+    Arc<TrackingPendingReleaseRepo>,
+) {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking(
+        download_client.clone(),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases.clone(),
+        wanted_items.clone(),
+    );
+    let (title, wanted_id) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, name, 2024).await;
+    let standby = pending_movie_release(
+        &wanted_id,
+        &title,
+        release_title,
+        PendingReleaseStatus::Standby,
+    );
+    pending_releases
+        .insert_pending_release(&standby)
+        .await
+        .expect("seed standby row");
+    let wanted = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted_id)
+        .await
+        .expect("load wanted scope")
+        .expect("wanted scope exists");
+    pending_releases.reset_status_writes();
+    (
+        app,
+        title,
+        wanted,
+        standby,
+        download_client,
+        pending_releases,
+    )
+}
+
+/// The acting pass claims the row before anything else and leaves it grabbed.
+fn assert_claimed_then_grabbed(pending_releases: &TrackingPendingReleaseRepo, id: &str) {
+    let writes = pending_releases.status_writes();
+    assert_eq!(
+        writes.first(),
+        Some(&(id.to_string(), PendingReleaseStatus::Processing)),
+        "{writes:?}"
+    );
+    assert_eq!(
+        writes.last(),
+        Some(&(id.to_string(), PendingReleaseStatus::Grabbed)),
+        "{writes:?}"
+    );
+}
+
+async fn walk_saved_movie_result(
+    app: &AppUseCase,
+    wanted: &AcquisitionScopeState,
+) -> crate::acquisition_workflow::StandbyRecoveryOutcome {
+    let snapshot = crate::acquisition_workflow::DownloadClientSnapshot::fetch(app).await;
+    crate::acquisition_workflow::try_saved_candidates(
+        app,
+        wanted,
+        None,
+        None,
+        &snapshot,
+        &Utc::now(),
+    )
+    .await
+}
+
+/// A blocklisted saved result is skipped from reads alone, so repeating the
+/// walk while the block stands writes nothing. Lifting the block is a changed
+/// answer, and the row is claimed and grabbed.
+#[tokio::test]
+async fn a_blocklisted_saved_result_costs_no_writes_until_the_block_is_lifted() {
+    let release = "Saved.Blocked.Fixture.2024.1080p.WEB-DL-GRP";
+    let (app, title, wanted, standby, download_client, pending_releases) =
+        saved_movie_result_fixture("Saved Blocked Fixture", release).await;
+    app.services
+        .workflow
+        .blocklist_repo
+        .block(&NewBlocklistEntry {
+            title_id: title.id.clone(),
+            release_name: release.to_ascii_uppercase(),
+            indexer_id: String::new(),
+            info_hash: None,
+            reason: Some("operator block".to_string()),
+        })
+        .await
+        .expect("block the saved result");
+
+    for _ in 0..2 {
+        let outcome = walk_saved_movie_result(&app, &wanted).await;
+        assert!(
+            !matches!(
+                outcome,
+                crate::acquisition_workflow::StandbyRecoveryOutcome::Recovered { .. }
+            ),
+            "a blocked row is never grabbed: {outcome:?}"
+        );
+        assert!(
+            pending_releases.status_writes().is_empty(),
+            "an unchanged block writes nothing: {:?}",
+            pending_releases.status_writes()
+        );
+    }
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .is_empty()
+    );
+
+    for entry in app
+        .services
+        .workflow
+        .blocklist_repo
+        .list_for_title(&title.id, 10)
+        .await
+        .expect("list blocklist")
+    {
+        app.services
+            .workflow
+            .blocklist_repo
+            .remove(&entry.id)
+            .await
+            .expect("lift the block");
+    }
+    let outcome = walk_saved_movie_result(&app, &wanted).await;
+
+    assert!(
+        matches!(
+            outcome,
+            crate::acquisition_workflow::StandbyRecoveryOutcome::Recovered { .. }
+        ),
+        "a lifted block lets the row be grabbed: {outcome:?}"
+    );
+    assert_claimed_then_grabbed(&pending_releases, &standby.id);
+    assert_eq!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .clone(),
+        vec![release.to_string()]
+    );
+}
+
+/// A saved result the client already holds reports the scope covered from the
+/// snapshot alone, so repeating the walk writes nothing. Once the client no
+/// longer lists it, the row is claimed and grabbed.
+#[tokio::test]
+async fn a_saved_result_the_client_holds_costs_no_writes_until_it_leaves_the_client() {
+    let release = "Saved.Held.Fixture.2024.1080p.WEB-DL-GRP";
+    let (app, title, wanted, standby, download_client, pending_releases) =
+        saved_movie_result_fixture("Saved Held Fixture", release).await;
+    let mut held = queue_history_fixture_item("held-job", DownloadQueueState::Downloading, 0);
+    held.title_name = release.to_string();
+    *download_client.queue_items.lock().await = vec![held];
+
+    for _ in 0..2 {
+        let outcome = walk_saved_movie_result(&app, &wanted).await;
+        assert!(
+            matches!(
+                outcome,
+                crate::acquisition_workflow::StandbyRecoveryOutcome::Active { .. }
+            ),
+            "the held release covers the scope: {outcome:?}"
+        );
+        assert!(
+            pending_releases.status_writes().is_empty(),
+            "an unchanged client listing writes nothing: {:?}",
+            pending_releases.status_writes()
+        );
+    }
+
+    download_client.queue_items.lock().await.clear();
+    // The client snapshot is cached for seconds; drop it rather than wait.
+    app.runtime
+        .acquisition
+        .download_submission_guards
+        .forget_settled_download(&title.id);
+    let outcome = walk_saved_movie_result(&app, &wanted).await;
+
+    assert!(
+        matches!(
+            outcome,
+            crate::acquisition_workflow::StandbyRecoveryOutcome::Recovered { .. }
+        ),
+        "a release the client dropped is grabbed again: {outcome:?}"
+    );
+    assert_claimed_then_grabbed(&pending_releases, &standby.id);
+}
+
 #[tokio::test]
 async fn waiting_promotion_reparks_when_the_delay_profile_grows() {
     let download_client = Arc::new(StubDownloadClient::default());
@@ -4591,15 +4796,17 @@ async fn seed_recent_failed_season_pack_fixture_with_indexer(
     seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
         indexer_client,
         Arc::new(TrackingAcquisitionScopeStateRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
     )
     .await
 }
 
-/// The same fixture with the scope-state repository supplied by the caller, for
-/// a test that needs a hook inside the scope writes the walk makes.
+/// The same fixture with the scope-state and saved-result repositories supplied
+/// by the caller, for a test that needs a hook inside the writes the walk makes.
 async fn seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
     indexer_client: Arc<TrackingIndexerClient>,
     wanted_items: Arc<TrackingAcquisitionScopeStateRepo>,
+    pending_releases: Arc<TrackingPendingReleaseRepo>,
 ) -> (
     AppUseCase,
     Title,
@@ -4608,7 +4815,6 @@ async fn seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
 ) {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
-    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
         download_client.clone(),
         download_submissions,
@@ -13810,6 +14016,7 @@ async fn a_title_walk_holding_the_writer_gate_still_finishes_while_progress_is_w
         Arc::new(TrackingAcquisitionScopeStateRepo::gated_on(
             writer_gate.clone(),
         )),
+        Arc::new(TrackingPendingReleaseRepo::default()),
     )
     .await;
     let job_runs = Arc::new(RecordingJobRunRepo::gated_on(writer_gate.clone()));
@@ -14901,11 +15108,29 @@ async fn seed_monitored_movie_for_cycle(
 async fn season_pack_downloading_fixture(
     season_pack_titles: Vec<String>,
 ) -> (AppUseCase, Title, Arc<StubDownloadClient>) {
+    season_pack_downloading_fixture_with_pending_releases(
+        season_pack_titles,
+        Arc::new(TrackingPendingReleaseRepo::default()),
+    )
+    .await
+}
+
+/// The same fixture over a saved-result repository the caller keeps, to read
+/// back the status writes a walk makes.
+async fn season_pack_downloading_fixture_with_pending_releases(
+    season_pack_titles: Vec<String>,
+    pending_releases: Arc<TrackingPendingReleaseRepo>,
+) -> (AppUseCase, Title, Arc<StubDownloadClient>) {
     let queued_pack = season_pack_titles[0].clone();
     let indexer_client =
         Arc::new(TrackingIndexerClient::default().with_season_pack_titles(season_pack_titles));
     let (app, title, _indexer_client, download_client) =
-        seed_recent_failed_season_pack_fixture_with_indexer(indexer_client).await;
+        seed_recent_failed_season_pack_fixture_with_indexer_and_scope_states(
+            indexer_client,
+            Arc::new(TrackingAcquisitionScopeStateRepo::default()),
+            pending_releases,
+        )
+        .await;
 
     app.run_background_acquisition_cycle_once().await;
     assert_eq!(
@@ -15438,6 +15663,80 @@ async fn a_queue_covered_saved_pack_skips_later_rows_within_its_scope() {
     assert_eq!(
         pending_status(&app, &equal_id).await,
         PendingReleaseStatus::Standby
+    );
+}
+
+/// A saved pack the queued pack covers is settled from reads, so repeating the
+/// walk while the queued pack downloads writes nothing. Once the queued pack
+/// has failed and left the client, the saved pack is claimed and grabbed.
+#[tokio::test]
+async fn a_queue_covered_saved_pack_costs_no_writes_until_the_queued_pack_leaves() {
+    let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
+    let equal_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupB".to_string();
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (app, title, download_client) = season_pack_downloading_fixture_with_pending_releases(
+        vec![queued_pack.clone()],
+        pending_releases.clone(),
+    )
+    .await;
+    let equal_id = save_season_standby(&app, &title, &equal_pack, 5_000).await;
+    pending_releases.reset_status_writes();
+
+    for _ in 0..2 {
+        let outcomes = walk_season_saved_results(&app, &title, "7").await;
+        assert!(
+            outcomes.iter().all(|outcome| matches!(
+                outcome,
+                crate::acquisition_workflow::StandbyRecoveryOutcome::Active { .. }
+            )),
+            "the queued pack covers the season: {outcomes:?}"
+        );
+        assert!(
+            pending_releases.status_writes().is_empty(),
+            "an unchanged queue writes nothing: {:?}",
+            pending_releases.status_writes()
+        );
+    }
+
+    set_queued_pack_state(
+        &app,
+        &title,
+        &download_client,
+        &queued_pack,
+        DownloadQueueState::Failed,
+        TrackedDownloadState::Failed,
+    )
+    .await;
+    download_client.queue_items.lock().await.clear();
+    for mut state in season_scope_states(&app, &title, "7").await {
+        state.grabbed_release = None;
+        state.status = AcquisitionScopeStatus::Wanted;
+        app.services
+            .workflow
+            .acquisition_scope_states
+            .upsert_acquisition_scope_state(&state)
+            .await
+            .expect("release the failed grab");
+    }
+    let outcomes = walk_season_saved_results(&app, &title, "7").await;
+
+    assert!(
+        download_client
+            .submitted_release_titles
+            .lock()
+            .await
+            .contains(&equal_pack),
+        "with the queued pack gone the saved pack is grabbed: {outcomes:?}"
+    );
+    assert_eq!(
+        pending_status(&app, &equal_id).await,
+        PendingReleaseStatus::Grabbed
+    );
+    let writes = pending_releases.status_writes();
+    assert_eq!(
+        writes.first(),
+        Some(&(equal_id.clone(), PendingReleaseStatus::Processing)),
+        "the acting pass claims the row first: {writes:?}"
     );
 }
 

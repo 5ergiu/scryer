@@ -1777,6 +1777,74 @@ pub(crate) async fn try_saved_candidates(
         effective_wanted.grabbed_release = None;
         effective_wanted.last_search_at = None;
 
+        let blocklisted = crate::app_usecase_discovery::is_release_blocklisted(
+            standby.indexer_id.as_deref(),
+            &standby.release_title,
+            standby.info_hash.as_deref(),
+            &db_blocklist,
+        );
+        // A pinned route (an indexer-to-client mapping) names the one client
+        // this release can reach. An unreadable queue then hides nothing worth
+        // deferring for — there is no second client that could already hold it
+        // — and parking here is what leaves the operator with no attempt row
+        // explaining why the pinned client never ran. Let the grab reach the
+        // router, which asks the pinned client and records its answer.
+        let blind_queue = dl_snapshot.queue_listing_failed();
+        let route_pinned = blind_queue
+            && !blocklisted
+            && app
+                .release_route_is_pinned(standby.indexer_id.as_deref())
+                .await;
+
+        // A `standby` row that would come out of this pass still `standby` is
+        // settled from reads before the claim, so a scope whose answer has not
+        // changed costs no writes: a blocklisted row, a release the client
+        // already holds, and a release a queued one covers. The claim is only
+        // taken for a pass that acts on the row. A client-refused row is
+        // `waiting` and leaves `standby` on every path, so it is claimed first
+        // as before.
+        let mut judged = None;
+        if standby.status == PendingReleaseStatus::Standby {
+            if blocklisted {
+                continue;
+            }
+            if !blind_queue && dl_snapshot.is_active(&standby.release_title) {
+                return StandbyRecoveryOutcome::Active {
+                    scope: standby_scope,
+                    stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
+                };
+            }
+            if !blind_queue || route_pinned {
+                let judgement = app
+                    .judge_pending_release(
+                        &effective_wanted,
+                        &standby,
+                        now,
+                        super::pending::PendingGrabTrigger::Automatic,
+                    )
+                    .await;
+                if let Ok(super::pending::PendingJudgement::Decided(
+                    super::pending::PendingGrabOutcome::QueueCovered {
+                        queued_release,
+                        reason,
+                        message,
+                    },
+                )) = &judgement
+                {
+                    log_saved_result_queue_covered(
+                        item,
+                        &standby,
+                        queued_release,
+                        reason,
+                        message,
+                    );
+                    covered_scopes.push(standby_scope);
+                    continue;
+                }
+                judged = Some(judgement);
+            }
+        }
+
         // From the row's own status: a client-refused row arrives here still
         // `waiting`, and a stale expectation would skip it.
         let claimed = app
@@ -1795,12 +1863,7 @@ pub(crate) async fn try_saved_candidates(
             continue;
         }
 
-        if crate::app_usecase_discovery::is_release_blocklisted(
-            standby.indexer_id.as_deref(),
-            &standby.release_title,
-            standby.info_hash.as_deref(),
-            &db_blocklist,
-        ) {
+        if blocklisted {
             // A blocklist entry is removable, so it is not evidence the release
             // is bad — only that the operator does not want it now. Keep the row
             // walkable rather than burning the corpus behind it.
@@ -1813,17 +1876,6 @@ pub(crate) async fn try_saved_candidates(
             continue;
         }
 
-        // A pinned route (an indexer-to-client mapping) names the one client
-        // this release can reach. An unreadable queue then hides nothing worth
-        // deferring for — there is no second client that could already hold it
-        // — and parking here is what leaves the operator with no attempt row
-        // explaining why the pinned client never ran. Let the grab reach the
-        // router, which asks the pinned client and records its answer.
-        let blind_queue = dl_snapshot.queue_listing_failed();
-        let route_pinned = blind_queue
-            && app
-                .release_route_is_pinned(standby.indexer_id.as_deref())
-                .await;
         if blind_queue && !route_pinned {
             // Cannot confirm the release isn't already active; keep the standby
             // for a later cycle rather than expiring it on an unknown signal.
@@ -1872,15 +1924,31 @@ pub(crate) async fn try_saved_candidates(
         // Automatic: no operator asked for this release, so it is judged against
         // current policy the same way the delay-expiry promoter judges its rows.
         // Reacquiring into a swarm too small to finish would just fail again.
-        match app
-            .try_grab_pending_release(
-                &effective_wanted,
-                &standby,
-                now,
-                super::pending::PendingGrabTrigger::Automatic,
-            )
-            .await
-        {
+        // A row judged before its claim is not judged twice.
+        let outcome = match judged {
+            Some(Ok(super::pending::PendingJudgement::Decided(outcome))) => Ok(outcome),
+            Some(Ok(super::pending::PendingJudgement::Admitted(admitted))) => {
+                app.grab_admitted_pending_release(
+                    &effective_wanted,
+                    &standby,
+                    now,
+                    super::pending::PendingGrabTrigger::Automatic,
+                    admitted,
+                )
+                .await
+            }
+            Some(Err(error)) => Err(error),
+            None => {
+                app.try_grab_pending_release(
+                    &effective_wanted,
+                    &standby,
+                    now,
+                    super::pending::PendingGrabTrigger::Automatic,
+                )
+                .await
+            }
+        };
+        match outcome {
             Ok(super::pending::PendingGrabOutcome::Grabbed { scope }) => {
                 let grabbed_at = now.to_rfc3339();
                 let _ = app
@@ -1970,13 +2038,12 @@ pub(crate) async fn try_saved_candidates(
                 // queue, rather than costing a claim, a submissions read and an
                 // admission pass each cycle. Rows reaching beyond the scope are
                 // still judged.
-                debug!(
-                    title_id = item.title_id.as_str(),
-                    standby_release = standby.release_title.as_str(),
-                    queued_release = queued_release.as_str(),
-                    reason = ?reason,
-                    detail = message.as_str(),
-                    "saved search result not grabbed: a queued release already covers this scope"
+                log_saved_result_queue_covered(
+                    item,
+                    &standby,
+                    &queued_release,
+                    &reason,
+                    &message,
                 );
                 let _ = app
                     .services
@@ -2021,6 +2088,23 @@ pub(crate) async fn try_saved_candidates(
         },
         None => StandbyRecoveryOutcome::Exhausted { stale_indexer_ids },
     }
+}
+
+fn log_saved_result_queue_covered(
+    item: &AcquisitionScopeState,
+    standby: &PendingRelease,
+    queued_release: &str,
+    reason: &crate::admission::AdmissionRejectionReason,
+    message: &str,
+) {
+    debug!(
+        title_id = item.title_id.as_str(),
+        standby_release = standby.release_title.as_str(),
+        queued_release,
+        reason = ?reason,
+        detail = message,
+        "saved search result not grabbed: a queued release already covers this scope"
+    );
 }
 
 /// Whether a saved row's scope fetches nothing beyond a scope a queued release

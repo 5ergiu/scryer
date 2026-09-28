@@ -299,6 +299,9 @@ pub(super) struct MockShowRepo {
     pub(super) title_collection_reads: std::sync::atomic::AtomicUsize,
     pub(super) collection_episode_reads: std::sync::atomic::AtomicUsize,
     pub(super) titles_episode_reads: std::sync::atomic::AtomicUsize,
+    pub(super) episode_external_id_reads: std::sync::atomic::AtomicUsize,
+    pub(super) title_episode_external_id_reads: std::sync::atomic::AtomicUsize,
+    pub(super) absolute_scale_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -687,12 +690,42 @@ impl ShowRepository for MockShowRepo {
         &self,
         episode_id: &str,
     ) -> AppResult<Vec<ScopedExternalId>> {
+        self.episode_external_id_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let ids = self.episode_external_ids.lock().await;
         Ok(ids
             .iter()
             .filter(|item| item.scope_id == episode_id)
             .cloned()
             .collect())
+    }
+
+    async fn list_episode_external_ids_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        self.title_episode_external_id_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let episode_ids = self
+            .episodes
+            .lock()
+            .await
+            .iter()
+            .filter(|episode| episode.title_id == title_id)
+            .map(|episode| episode.id.clone())
+            .collect::<HashSet<_>>();
+        let mut ids = self
+            .episode_external_ids
+            .lock()
+            .await
+            .iter()
+            .filter(|item| episode_ids.contains(&item.scope_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Stable: rows of one episode keep the order the per-episode read
+        // returns them in.
+        ids.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+        Ok(ids)
     }
 
     async fn get_episode_by_id(&self, episode_id: &str) -> AppResult<Option<Episode>> {
@@ -847,6 +880,8 @@ impl ShowRepository for MockShowRepo {
         &self,
         title_id: &str,
     ) -> AppResult<scryer_domain::AbsoluteScale> {
+        self.absolute_scale_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let episodes = self.episodes.lock().await;
         Ok(scryer_domain::AbsoluteScale::for_catalog(
             episodes

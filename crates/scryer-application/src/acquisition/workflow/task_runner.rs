@@ -225,10 +225,16 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
         resume.as_deref(),
         max_scopes,
     );
-    app.store_background_acquisition_hot_resume_position(selection.hot_resume_after.as_deref())
-        .await;
-    app.store_background_acquisition_resume_position(selection.resume_after.as_deref())
-        .await;
+    app.store_background_acquisition_hot_resume_position(
+        hot_resume.as_deref(),
+        selection.hot_resume_after.as_deref(),
+    )
+    .await;
+    app.store_background_acquisition_resume_position(
+        resume.as_deref(),
+        selection.resume_after.as_deref(),
+    )
+    .await;
     if selection.indices.is_empty() {
         return BackgroundAcquisitionCycleOutcome {
             targets_derived: targets.len(),
@@ -3028,7 +3034,13 @@ async fn prune_stale_standby_coverage(
         .release_search_title_for_wanted_item(title, item, episode, Some(&context.reads))
         .await;
     let pending_subject = match app
-        .resolve_pending_release_search_subject_for_wanted_item(title, &search_title, item, episode)
+        .resolve_pending_release_search_subject_for_wanted_item(
+            title,
+            &search_title,
+            item,
+            episode,
+            Some(&context.reads),
+        )
         .await
     {
         Ok(pending_subject) => pending_subject,
@@ -3360,6 +3372,7 @@ async fn process_single_target(
             &search_title,
             item,
             episode.as_ref(),
+            Some(&context.reads),
         )
         .await?;
     // Season-pack shaping only, so season 0 is excluded: the specials season is
