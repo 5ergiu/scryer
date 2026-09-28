@@ -1008,8 +1008,12 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // `TitleCatalogPresenceValue` enum on top: ENUM 175->176, public types
     // 916->917; their other changes are additive fields on existing types.
     assert!(public_type_names.contains(&"TitleCatalogPresenceValue"));
-    assert_eq!(public_types.len(), 917);
-    assert_eq!(kind_count("OBJECT"), 497);
+    // Moving recycle bin entries with a changed location reports the move and
+    // its failures in two payloads: public types 917->919, OBJECT 497->499.
+    assert!(public_type_names.contains(&"RecycleBinRelocationPayload"));
+    assert!(public_type_names.contains(&"RecycleBinRelocationFailurePayload"));
+    assert_eq!(public_types.len(), 919);
+    assert_eq!(kind_count("OBJECT"), 499);
     assert_eq!(kind_count("INPUT_OBJECT"), 232);
     assert_eq!(kind_count("ENUM"), 176);
     assert_eq!(kind_count("SCALAR"), 10);
