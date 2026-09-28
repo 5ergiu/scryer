@@ -1464,6 +1464,7 @@ const ko: LocaleDictionary = {
   "status.editingIndexer": "인덱서 {{name}} 편집 중",
   "status.editingDownloadClient": "다운로드 클라이언트 {{name}} 편집 중",
   "status.deletingUser": "사용자 {{name}}을(를) 삭제하시겠습니까?",
+  "status.deletingUserListsWarning": "이 사용자가 팔로우하는 목록과 해당 동기화 기록도 함께 삭제됩니다.",
   "status.deletingIndexer": "인덱서 {{name}}을(를) 삭제하시겠습니까?",
   "status.userRequired": "사용자명과 비밀번호가 필요합니다.",
   "status.passwordRequired": "비밀번호가 필요합니다.",

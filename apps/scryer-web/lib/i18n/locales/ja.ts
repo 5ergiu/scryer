@@ -1495,6 +1495,7 @@ const ja: LocaleDictionary = {
   "status.editingIndexer": "インデクサー{{name}}を編集中",
   "status.editingDownloadClient": "ダウンロードクライアント{{name}}を編集中",
   "status.deletingUser": "ユーザー{{name}}を削除しますか？",
+  "status.deletingUserListsWarning": "このユーザーがフォローしているリストとその同期履歴も削除されます。",
   "status.deletingIndexer": "インデクサー{{name}}を削除しますか？",
   "status.userRequired": "ユーザー名とパスワードは必須です。",
   "status.passwordRequired": "パスワードは必須です。",

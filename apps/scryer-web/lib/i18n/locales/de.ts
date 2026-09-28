@@ -1521,6 +1521,7 @@ const de: LocaleDictionary = {
   "status.editingIndexer": "Indexer {{name}} bearbeiten",
   "status.editingDownloadClient": "Download-Client {{name}} bearbeiten",
   "status.deletingUser": "Benutzer {{name}} löschen?",
+  "status.deletingUserListsWarning": "Die Listen, denen dieser Benutzer folgt, und ihr Synchronisierungsverlauf werden ebenfalls gelöscht.",
   "status.deletingIndexer": "Indexer {{name}} löschen?",
   "status.userRequired": "Benutzername und Passwort sind erforderlich.",
   "status.passwordRequired": "Passwort ist erforderlich.",

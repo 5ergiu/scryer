@@ -2438,6 +2438,7 @@ const nl: LocaleDictionary = {
   "status.editingDownloadClient": "Downloadclient {{name}} bewerken",
   "status.editingSubtitleProvider": "Ondertitelprovider {{name}} bewerken",
   "status.deletingUser": "Gebruiker {{name}} verwijderen?",
+  "status.deletingUserListsWarning": "De lijsten die deze gebruiker volgt en hun synchronisatiegeschiedenis worden ook verwijderd.",
   "status.userLoginEnabled": "Login ingeschakeld voor {{name}}.",
   "status.userLoginDisabled": "Login uitgeschakeld voor {{name}}.",
   "status.deletingIndexer": "Indexer {{name}} verwijderen?",

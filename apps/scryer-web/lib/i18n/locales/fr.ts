@@ -1527,6 +1527,7 @@ const fr: LocaleDictionary = {
   "status.editingDownloadClient":
     "Modification du client de téléchargement {{name}}",
   "status.deletingUser": "Supprimer l'utilisateur {{name}} ?",
+  "status.deletingUserListsWarning": "Les listes suivies par cet utilisateur et leur historique de synchronisation sont également supprimés.",
   "status.deletingIndexer": "Supprimer l'indexeur {{name}} ?",
   "status.userRequired": "Le nom d'utilisateur et le mot de passe sont requis.",
   "status.passwordRequired": "Le mot de passe est requis.",

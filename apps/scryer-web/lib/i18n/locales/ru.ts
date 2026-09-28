@@ -3119,7 +3119,7 @@ const ru: LocaleDictionary = {
         "Редактирование провайдера субтитров {{name}}",
 
     "status.deletingUser": "Удалить пользователя {{name}}?",
-
+    "status.deletingUserListsWarning": "Списки, на которые подписан этот пользователь, и история их синхронизации тоже будут удалены.",
     "status.userLoginEnabled":
         "Вход для пользователя {{name}} включён.",
     "status.userLoginDisabled":

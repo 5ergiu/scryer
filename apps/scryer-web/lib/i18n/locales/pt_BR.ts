@@ -1510,6 +1510,7 @@ const pt_BR: LocaleDictionary = {
   "status.editingIndexer": "Editando indexador {{name}}",
   "status.editingDownloadClient": "Editando cliente de download {{name}}",
   "status.deletingUser": "Excluir usuário {{name}}?",
+  "status.deletingUserListsWarning": "As listas que este usuário segue e o histórico de sincronização delas também são excluídos.",
   "status.deletingIndexer": "Excluir indexador {{name}}?",
   "status.userRequired": "Nome de usuário e senha são obrigatórios.",
   "status.passwordRequired": "A senha é obrigatória.",

@@ -2894,6 +2894,7 @@ const en: LocaleDictionary = {
   "status.editingDownloadClient": "Editing download client {{name}}",
   "status.editingSubtitleProvider": "Editing subtitle provider {{name}}",
   "status.deletingUser": "Delete user {{name}}?",
+  "status.deletingUserListsWarning": "The lists this user follows and their sync history are deleted too.",
   "status.userDeleted": "Deleted user {{name}}.",
   "status.userLoginEnabled": "Enabled login for {{name}}.",
   "status.userLoginDisabled": "Disabled login for {{name}}.",

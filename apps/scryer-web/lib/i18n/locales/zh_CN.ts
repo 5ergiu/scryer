@@ -1407,6 +1407,7 @@ const zh_CN: LocaleDictionary = {
   "status.editingIndexer": "正在编辑索引器 {{name}}",
   "status.editingDownloadClient": "正在编辑下载客户端 {{name}}",
   "status.deletingUser": "删除用户 {{name}}？",
+  "status.deletingUserListsWarning": "此用户关注的列表及其同步记录也会一并删除。",
   "status.deletingIndexer": "删除索引器 {{name}}？",
   "status.userRequired": "用户名和密码为必填项。",
   "status.passwordRequired": "密码为必填项。",
