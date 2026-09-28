@@ -279,6 +279,7 @@ fn from_acquisition_settings(
         cross_tier_min_delta: 0,
         forced_upgrade_delta_bypass: 0,
         poll_interval_seconds: settings.poll_interval_seconds,
+        walk_interval_seconds: settings.walk_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,
     }

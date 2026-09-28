@@ -124,9 +124,14 @@ type AcquisitionSettingsPayload {
 	"""
 	forcedUpgradeDeltaBypass: Int! @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
-	Acquisition polling interval in seconds.
+	How often, in seconds, download clients are checked for failed grabs.
 	"""
 	pollIntervalSeconds: Int!
+	"""
+	How often, in seconds, the catalog is walked for missing and
+	upgradable media. Changes that wake acquisition still walk at once.
+	"""
+	walkIntervalSeconds: Int!
 	"""
 	Maximum long-tail scopes processed per cycle.
 	"""
@@ -30059,9 +30064,15 @@ input UpdateAcquisitionSettingsInput {
 	"""
 	forcedUpgradeDeltaBypass: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
 	"""
-	Scheduler poll interval in seconds.
+	How often, in seconds, download clients are checked for failed grabs.
 	"""
 	pollIntervalSeconds: Int!
+	"""
+	How often, in seconds, the catalog is walked for missing and
+	upgradable media. Omitted by older clients, which keeps the stored
+	value.
+	"""
+	walkIntervalSeconds: Int
 	"""
 	Maximum long-tail scopes processed per cycle.
 	"""

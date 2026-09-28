@@ -163,14 +163,18 @@ impl BackgroundAcquisitionCycleOutcome {
     }
 }
 
-async fn run_background_acquisition_cycle(app: &AppUseCase) -> BackgroundAcquisitionCycleOutcome {
+async fn run_background_acquisition_cycle(
+    app: &AppUseCase,
+    pass: BackgroundAcquisitionPass,
+) -> BackgroundAcquisitionCycleOutcome {
     let blocked_facets = blocked_acquisition_facets_after_quiet_wait(app).await;
-    run_background_acquisition_cycle_with_blocked_facets(app, &blocked_facets).await
+    run_background_acquisition_cycle_with_blocked_facets(app, &blocked_facets, pass).await
 }
 
 pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     app: &AppUseCase,
     blocked_facets: &[MediaFacet],
+    pass: BackgroundAcquisitionPass,
 ) -> BackgroundAcquisitionCycleOutcome {
     let cycle_started = std::time::Instant::now();
     prune_standby_candidates(app).await;
@@ -181,6 +185,20 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     // any indexer is queried.
     let dl_snapshot = DownloadClientSnapshot::fetch(app).await;
     check_grabbed_for_failures(app, &dl_snapshot).await;
+    // Between walks the tick stops here, unless failure handling (this pass's
+    // or the download lifecycle's since the last walk) re-opened a scope: that
+    // scope's saved results are tried now, as they were before the walk had
+    // its own cadence. The walk never runs on its own: it always follows a
+    // fetch and failure check in the same pass, so it decides on a snapshot
+    // exactly as fresh as it did before the split.
+    let scope_reopened = app
+        .runtime
+        .acquisition
+        .scope_reopened_since_walk
+        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    if pass == BackgroundAcquisitionPass::FailureCheckOnly && !scope_reopened {
+        return BackgroundAcquisitionCycleOutcome::default();
+    }
 
     let now = Utc::now();
     let settings = match app.background_acquisition_settings().await {
@@ -593,7 +611,17 @@ impl AppUseCase {
     pub(crate) async fn run_background_acquisition_cycle_once(
         &self,
     ) -> BackgroundAcquisitionCycleOutcome {
-        run_background_acquisition_cycle(self).await
+        run_background_acquisition_cycle(self, BackgroundAcquisitionPass::Full).await
+    }
+
+    /// One pass of the given kind, so a test can show what the tick between
+    /// walks does and does not touch.
+    #[cfg(test)]
+    pub(crate) async fn run_background_acquisition_pass_once(
+        &self,
+        pass: BackgroundAcquisitionPass,
+    ) -> BackgroundAcquisitionCycleOutcome {
+        run_background_acquisition_cycle(self, pass).await
     }
 }
 
@@ -5160,6 +5188,126 @@ fn arm_deferred_acquisition_retry(
     Some(armed.map_or(deadline, |armed| armed.min(deadline)))
 }
 
+/// How much of a background acquisition cycle one trigger runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundAcquisitionPass {
+    /// Read the download clients and handle failed grabs, then stop.
+    FailureCheckOnly,
+    /// The failure check, then the catalog scan, batch selection and walk.
+    Full,
+}
+
+/// What started a background acquisition cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundAcquisitionTrigger {
+    PollTick,
+    Wake,
+    DeferredRetry,
+}
+
+/// Puts the title walk on its own, slower cadence without moving the failure
+/// check off the poll tick.
+///
+/// The poll tick keeps its period and runs the failure check every time, as it
+/// always has; the walk rides on every Nth tick, where N ticks cover the walk
+/// interval. Riding on the tick instead of a timer of its own keeps the failure
+/// check at exactly the instants it ran before, and means every walk decides
+/// on the download-client snapshot its own pass just read. A walk the interval
+/// cannot express (walk shorter than poll) runs on every tick.
+///
+/// A wake or a deferred-work re-arm walks at once, as before, and restarts the
+/// count: it has just done what the next scheduled walk would have done.
+///
+/// A tick between walks also walks when failure handling has re-opened a
+/// scope since the last walk (see `scope_reopened_since_walk`); that decision
+/// is made inside the pass and does not move this count.
+#[derive(Debug)]
+struct AcquisitionWalkCadence {
+    poll_period: std::time::Duration,
+    walk_period: std::time::Duration,
+    ticks_per_walk: u64,
+    ticks_since_walk: u64,
+    /// Deferred work whose cooldown lifts after the next tick but before the
+    /// next scheduled walk. The first tick at or after it walks, so the scope
+    /// is not left waiting for the rest of the walk interval. Shorter
+    /// deferrals keep their exact re-arm timer, which runs a full pass.
+    walk_retry_at: Option<tokio::time::Instant>,
+}
+
+impl AcquisitionWalkCadence {
+    fn new(poll_period: std::time::Duration, walk_period: std::time::Duration) -> Self {
+        let mut cadence = Self {
+            poll_period,
+            walk_period,
+            ticks_per_walk: 1,
+            ticks_since_walk: 0,
+            walk_retry_at: None,
+        };
+        cadence.set_walk_period(walk_period);
+        cadence
+    }
+
+    /// Apply a changed walk interval without a restart. Ticks already counted
+    /// since the last walk still count, so shortening the interval past them
+    /// walks on the next tick.
+    fn set_walk_period(&mut self, walk_period: std::time::Duration) {
+        let poll_secs = self.poll_period.as_secs().max(1);
+        let walk_secs = walk_period.as_secs().max(1);
+        self.walk_period = walk_period;
+        self.ticks_per_walk = walk_secs.div_ceil(poll_secs).max(1);
+    }
+
+    fn pass_for(
+        &mut self,
+        trigger: BackgroundAcquisitionTrigger,
+        now: tokio::time::Instant,
+    ) -> BackgroundAcquisitionPass {
+        match trigger {
+            BackgroundAcquisitionTrigger::Wake | BackgroundAcquisitionTrigger::DeferredRetry => {
+                BackgroundAcquisitionPass::Full
+            }
+            BackgroundAcquisitionTrigger::PollTick => {
+                self.ticks_since_walk = self.ticks_since_walk.saturating_add(1);
+                let retry_due = self.walk_retry_at.is_some_and(|at| at <= now);
+                if self.ticks_since_walk >= self.ticks_per_walk || retry_due {
+                    BackgroundAcquisitionPass::Full
+                } else {
+                    BackgroundAcquisitionPass::FailureCheckOnly
+                }
+            }
+        }
+    }
+
+    /// Record a finished pass. Only a walk moves the cadence.
+    fn record(
+        &mut self,
+        pass: BackgroundAcquisitionPass,
+        outcome: BackgroundAcquisitionCycleOutcome,
+        now: tokio::time::Instant,
+    ) {
+        if pass != BackgroundAcquisitionPass::Full {
+            return;
+        }
+        self.ticks_since_walk = 0;
+        self.walk_retry_at = outcome
+            .deferred_retry_delay(self.walk_period)
+            .filter(|delay| *delay >= self.poll_period)
+            .map(|delay| now + delay);
+    }
+}
+
+fn acquisition_walk_interval_may_have_changed(
+    changed: Result<Vec<String>, tokio::sync::broadcast::error::RecvError>,
+) -> bool {
+    match changed {
+        Ok(keys) => keys
+            .iter()
+            .any(|key| key == crate::settings::runtime::ACQUISITION_WALK_INTERVAL_SECONDS_KEY),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+    }
+}
+
 /// Dispatch long evaluation work without blocking acquisition or queueing
 /// another evaluation behind it. The owner reaps and drains admitted work.
 fn spawn_single_scheduled_task(
@@ -5194,7 +5342,10 @@ pub async fn start_background_acquisition_poller(
             crate::AcquisitionSettings {
                 enabled: true,
                 same_tier_min_delta: 120,
-                poll_interval_seconds: 60,
+                poll_interval_seconds:
+                    crate::settings::runtime::DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS,
+                walk_interval_seconds:
+                    crate::settings::runtime::DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS,
                 long_tail_backfill_max_scopes_per_cycle:
                     crate::acquisition::convergence::DEFAULT_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE
                         as i32,
@@ -5407,6 +5558,10 @@ pub async fn start_background_acquisition_poller(
     let acquisition_poll_period =
         std::time::Duration::from_secs(settings.poll_interval_seconds.max(1) as u64);
     let mut poll_interval = new_skip_interval(acquisition_poll_period);
+    let mut walk_cadence = AcquisitionWalkCadence::new(
+        acquisition_poll_period,
+        std::time::Duration::from_secs(settings.walk_interval_seconds.max(1) as u64),
+    );
     let mut registry_refresh_interval = tokio::time::interval(std::time::Duration::from_hours(1));
     let mut health_check_interval = tokio::time::interval(std::time::Duration::from_hours(6));
     let mut staged_nzb_prune_interval = tokio::time::interval(std::time::Duration::from_hours(1));
@@ -5460,6 +5615,9 @@ pub async fn start_background_acquisition_poller(
     }
 
     let wake = app.runtime.acquisition.acquisition_wake.clone();
+    // The walk interval applies without a restart. The poll interval, and so
+    // the failure check's cadence, is still read once at startup.
+    let mut settings_changed = app.runtime.events.settings_changed_broadcast.subscribe();
 
     /// Run a scheduled task inside a spawned task to isolate panics.
     /// If the task panics, the error is logged and the scheduler loop continues.
@@ -5506,18 +5664,25 @@ pub async fn start_background_acquisition_poller(
     /// outcome carried back so the loop can re-arm on deferred work. A cycle
     /// that panicked reports the default outcome — nothing deferred — so a
     /// panicking cycle cannot drive a retry loop.
-    async fn run_acquisition_cycle_task(app: &AppUseCase) -> BackgroundAcquisitionCycleOutcome {
+    async fn run_acquisition_cycle_task(
+        app: &AppUseCase,
+        walk_cadence: &mut AcquisitionWalkCadence,
+        trigger: BackgroundAcquisitionTrigger,
+    ) -> BackgroundAcquisitionCycleOutcome {
+        let pass = walk_cadence.pass_for(trigger, tokio::time::Instant::now());
         let sink = Arc::new(Mutex::new(BackgroundAcquisitionCycleOutcome::default()));
         let recorded = Arc::clone(&sink);
         let app = app.clone();
         run_task("background_acquisition_cycle", async move {
-            let outcome = run_background_acquisition_cycle(&app).await;
+            let outcome = run_background_acquisition_cycle(&app, pass).await;
             *recorded
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
         })
         .await;
-        *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        let outcome = *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        walk_cadence.record(pass, outcome, tokio::time::Instant::now());
+        outcome
     }
 
     // Bounded re-arm for a scope whose every uncovered indexer was cooling
@@ -5541,7 +5706,12 @@ pub async fn start_background_acquisition_poller(
                 break;
             }
             _ = wake.notified() => {
-                let outcome = run_acquisition_cycle_task(&app).await;
+                let outcome = run_acquisition_cycle_task(
+                    &app,
+                    &mut walk_cadence,
+                    BackgroundAcquisitionTrigger::Wake,
+                )
+                .await;
                 deferred_retry_at = arm_deferred_acquisition_retry(
                     outcome,
                     deferred_retry_at,
@@ -5549,7 +5719,12 @@ pub async fn start_background_acquisition_poller(
                 );
             }
             _ = poll_interval.tick() => {
-                let outcome = run_acquisition_cycle_task(&app).await;
+                let outcome = run_acquisition_cycle_task(
+                    &app,
+                    &mut walk_cadence,
+                    BackgroundAcquisitionTrigger::PollTick,
+                )
+                .await;
                 deferred_retry_at = arm_deferred_acquisition_retry(
                     outcome,
                     deferred_retry_at,
@@ -5559,9 +5734,26 @@ pub async fn start_background_acquisition_poller(
             // The fired deadline is dropped rather than carried forward, so a
             // cycle that clears the deferral disarms the timer entirely.
             _ = tokio::time::sleep_until(deferred_retry_deadline), if deferred_retry_at.is_some() => {
-                let outcome = run_acquisition_cycle_task(&app).await;
+                let outcome = run_acquisition_cycle_task(
+                    &app,
+                    &mut walk_cadence,
+                    BackgroundAcquisitionTrigger::DeferredRetry,
+                )
+                .await;
                 deferred_retry_at =
                     arm_deferred_acquisition_retry(outcome, None, acquisition_poll_period);
+            }
+            changed = settings_changed.recv() => {
+                if acquisition_walk_interval_may_have_changed(changed) {
+                    match app.acquisition_settings().await {
+                        Ok(settings) => walk_cadence.set_walk_period(std::time::Duration::from_secs(
+                            settings.walk_interval_seconds.max(1) as u64,
+                        )),
+                        Err(error) => {
+                            warn!(error = %error, "failed to reload the acquisition walk interval");
+                        }
+                    }
+                }
             }
             _ = registry_refresh_interval.tick() => {
                 let app = app.clone();
@@ -5839,6 +6031,210 @@ mod task_runner_tests {
         assert!(spawn_single_scheduled_task(&mut tasks, async {}));
         tasks.join_next().await.unwrap().unwrap();
         assert!(tasks.is_empty());
+    }
+
+    fn secs(value: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(value)
+    }
+
+    /// Drive `ticks` poll ticks, recording each pass, and return the passes.
+    fn drive_poll_ticks(
+        cadence: &mut AcquisitionWalkCadence,
+        start: tokio::time::Instant,
+        poll: std::time::Duration,
+        ticks: u32,
+    ) -> Vec<BackgroundAcquisitionPass> {
+        (1..=ticks)
+            .map(|tick| {
+                let now = start + poll * tick;
+                let pass = cadence.pass_for(BackgroundAcquisitionTrigger::PollTick, now);
+                cadence.record(pass, BackgroundAcquisitionCycleOutcome::default(), now);
+                pass
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_cadence_checks_failures_every_tick_and_walks_every_fifth() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let poll = secs(crate::settings::runtime::DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS as u64);
+        let walk = secs(crate::settings::runtime::DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS as u64);
+        assert_eq!((poll, walk), (secs(60), secs(300)));
+        let mut cadence = AcquisitionWalkCadence::new(poll, walk);
+
+        let passes = drive_poll_ticks(&mut cadence, tokio::time::Instant::now(), poll, 10);
+
+        // Every tick runs the failure check (both kinds of pass do); only
+        // every fifth one goes on to walk.
+        assert_eq!(
+            passes,
+            vec![
+                Check, Check, Check, Check, Full, Check, Check, Check, Check, Full
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_intervals_walk_on_every_tick_like_the_single_cadence_did() {
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(60));
+        let passes = drive_poll_ticks(&mut cadence, tokio::time::Instant::now(), secs(60), 4);
+        assert!(
+            passes
+                .iter()
+                .all(|pass| *pass == BackgroundAcquisitionPass::Full)
+        );
+
+        // A walk interval shorter than the poll interval cannot beat the tick.
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(20));
+        let passes = drive_poll_ticks(&mut cadence, tokio::time::Instant::now(), secs(60), 3);
+        assert!(
+            passes
+                .iter()
+                .all(|pass| *pass == BackgroundAcquisitionPass::Full)
+        );
+    }
+
+    #[test]
+    fn a_walk_interval_that_is_not_a_multiple_rounds_up_to_the_next_tick() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let mut cadence = AcquisitionWalkCadence::new(secs(30), secs(100));
+        let passes = drive_poll_ticks(&mut cadence, tokio::time::Instant::now(), secs(30), 8);
+        assert_eq!(
+            passes,
+            vec![Check, Check, Check, Full, Check, Check, Check, Full]
+        );
+    }
+
+    #[test]
+    fn a_wake_walks_at_once_and_restarts_the_walk_count() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let start = tokio::time::Instant::now();
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start, secs(60), 2),
+            vec![Check, Check]
+        );
+
+        // Two ticks into the interval, a wake does not wait for the fifth.
+        let woken_at = start + secs(150);
+        let pass = cadence.pass_for(BackgroundAcquisitionTrigger::Wake, woken_at);
+        assert_eq!(pass, Full);
+        cadence.record(pass, BackgroundAcquisitionCycleOutcome::default(), woken_at);
+
+        // The walk it ran restarts the count: the next scheduled walk is a
+        // full interval later, not two ticks later.
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(120), secs(60), 5),
+            vec![Check, Check, Check, Check, Full]
+        );
+
+        // A wake right after a walk still walks.
+        let pass = cadence.pass_for(BackgroundAcquisitionTrigger::Wake, start + secs(421));
+        assert_eq!(pass, Full);
+        assert_eq!(
+            cadence.pass_for(
+                BackgroundAcquisitionTrigger::DeferredRetry,
+                start + secs(422)
+            ),
+            Full
+        );
+    }
+
+    #[test]
+    fn deferred_work_lifting_before_the_next_walk_walks_on_the_first_tick_after_it() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let start = tokio::time::Instant::now();
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+        let walked_at = start;
+        cadence.record(
+            Full,
+            BackgroundAcquisitionCycleOutcome {
+                deferred_scopes: 1,
+                retry_after: Some(secs(90)),
+                ..BackgroundAcquisitionCycleOutcome::default()
+            },
+            walked_at,
+        );
+        // 60 s: still cooling. 120 s: lifted at 90 s, so this tick walks.
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start, secs(60), 2),
+            vec![Check, Full]
+        );
+        // That walk found nothing deferred, so the retry is spent.
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(120), secs(60), 5),
+            vec![Check, Check, Check, Check, Full]
+        );
+
+        // A deferral shorter than the tick is left to the exact re-arm timer,
+        // and one past the walk interval waits for the walk.
+        for retry_after in [secs(20), secs(400)] {
+            let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+            cadence.record(
+                Full,
+                BackgroundAcquisitionCycleOutcome {
+                    deferred_scopes: 1,
+                    retry_after: Some(retry_after),
+                    ..BackgroundAcquisitionCycleOutcome::default()
+                },
+                start,
+            );
+            assert_eq!(cadence.walk_retry_at, None, "retry_after = {retry_after:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_walk_interval_applies_to_the_running_cadence() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let start = tokio::time::Instant::now();
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start, secs(60), 2),
+            vec![Check, Check]
+        );
+
+        // Two ticks already counted: a one-minute walk walks on the next tick.
+        cadence.set_walk_period(secs(60));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(120), secs(60), 3),
+            vec![Full, Full, Full]
+        );
+
+        cadence.set_walk_period(secs(180));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(300), secs(60), 3),
+            vec![Check, Check, Full]
+        );
+
+        let key = crate::settings::runtime::ACQUISITION_WALK_INTERVAL_SECONDS_KEY;
+        assert!(acquisition_walk_interval_may_have_changed(Ok(vec![
+            key.to_string()
+        ])));
+        assert!(!acquisition_walk_interval_may_have_changed(Ok(vec![
+            "acquisition.poll_interval_seconds".to_string()
+        ])));
+        assert!(acquisition_walk_interval_may_have_changed(Err(
+            tokio::sync::broadcast::error::RecvError::Lagged(1)
+        )));
+    }
+
+    #[test]
+    fn a_failure_check_pass_leaves_the_walk_cadence_alone() {
+        let start = tokio::time::Instant::now();
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+        let pass = cadence.pass_for(BackgroundAcquisitionTrigger::PollTick, start + secs(60));
+        assert_eq!(pass, BackgroundAcquisitionPass::FailureCheckOnly);
+        cadence.record(
+            pass,
+            BackgroundAcquisitionCycleOutcome {
+                deferred_scopes: 3,
+                retry_after: Some(secs(90)),
+                ..BackgroundAcquisitionCycleOutcome::default()
+            },
+            start + secs(60),
+        );
+        assert_eq!(cadence.ticks_since_walk, 1);
+        assert_eq!(cadence.walk_retry_at, None);
     }
 
     #[tokio::test]

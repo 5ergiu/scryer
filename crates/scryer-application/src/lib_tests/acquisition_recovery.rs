@@ -147,6 +147,26 @@ fn standby_listing_stamped_at(grabbed_at: &str) -> String {
 
 #[tokio::test]
 async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
+    failed_grab_retries_standby_candidate(
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+    )
+    .await;
+}
+
+/// The tick between walks still reads the download clients and handles a
+/// failed grab exactly as a full cycle does: failure handling never waits for
+/// the walk.
+#[tokio::test]
+async fn failure_check_pass_between_walks_retries_standby_candidate_after_failed_grab() {
+    failed_grab_retries_standby_candidate(
+        crate::acquisition_workflow::BackgroundAcquisitionPass::FailureCheckOnly,
+    )
+    .await;
+}
+
+async fn failed_grab_retries_standby_candidate(
+    pass: crate::acquisition_workflow::BackgroundAcquisitionPass,
+) {
     let download_client = Arc::new(StubDownloadClient::default());
     let info_hash = "abcdef0123456789abcdef0123456789abcdef01";
     download_client.set_grab_info_hash(Some(info_hash)).await;
@@ -284,7 +304,7 @@ async fn acquisition_cycle_retries_standby_candidate_after_failed_grab() {
         "Failed.Release.1080p.WEB-DL",
     )];
 
-    app.run_background_acquisition_cycle_once().await;
+    app.run_background_acquisition_pass_once(pass).await;
 
     let updated = wanted_items
         .get_acquisition_scope_state_by_id(&wanted.id)
@@ -4460,6 +4480,84 @@ async fn series_pack_candidate_overlapping_an_earlier_cycle_claim_is_not_submitt
             .any(|submission| submission.source_title.as_deref() == Some(pack_title.as_str())),
         "the S01-S02 pack overlaps S01 recovered earlier in this cycle"
     );
+}
+
+/// Between walks the tick reads the download clients and stops: it derives no
+/// targets, walks no title and queries no indexer. The walk that follows does.
+#[tokio::test]
+async fn failure_check_pass_does_not_walk_until_the_full_pass() {
+    let pack_title = "Series.Pack.Scope.S01-S04.1080p.WEB-DL-PACK".to_string();
+    let indexer_client =
+        Arc::new(TrackingIndexerClient::default().with_title_pack_titles([pack_title]));
+    let (app, _title, indexer_client, _episode_ids) =
+        seed_series_pack_scope_fixture(indexer_client).await;
+
+    let between_walks = app
+        .run_background_acquisition_pass_once(
+            crate::acquisition_workflow::BackgroundAcquisitionPass::FailureCheckOnly,
+        )
+        .await;
+    assert_eq!(between_walks.targets_derived, 0);
+    assert_eq!(between_walks.titles_walked, 0);
+    assert!(
+        indexer_client.searches.lock().await.is_empty(),
+        "the tick between walks must not search"
+    );
+
+    let walk = app
+        .run_background_acquisition_pass_once(
+            crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        )
+        .await;
+    assert!(walk.targets_derived > 0);
+    assert_eq!(walk.titles_walked, 1);
+    assert!(!indexer_client.searches.lock().await.is_empty());
+}
+
+/// A scope re-opened by failure handling outside the pass (the download
+/// lifecycle's own failure processing) is walked on the next tick, not left
+/// for the next scheduled walk; the walk consumes the request.
+#[tokio::test]
+async fn failure_check_pass_walks_when_failure_handling_reopened_a_scope() {
+    let pack_title = "Series.Pack.Scope.S01-S04.1080p.WEB-DL-PACK".to_string();
+    let indexer_client =
+        Arc::new(TrackingIndexerClient::default().with_title_pack_titles([pack_title]));
+    let (app, _title, indexer_client, _episode_ids) =
+        seed_series_pack_scope_fixture(indexer_client).await;
+    let reopened = &app.runtime.acquisition.scope_reopened_since_walk;
+    reopened.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let walk = app
+        .run_background_acquisition_pass_once(
+            crate::acquisition_workflow::BackgroundAcquisitionPass::FailureCheckOnly,
+        )
+        .await;
+    assert_eq!(walk.titles_walked, 1);
+    assert!(!indexer_client.searches.lock().await.is_empty());
+    assert!(!reopened.load(std::sync::atomic::Ordering::SeqCst));
+
+    let searches_after_walk = indexer_client.searches.lock().await.len();
+    let between_walks = app
+        .run_background_acquisition_pass_once(
+            crate::acquisition_workflow::BackgroundAcquisitionPass::FailureCheckOnly,
+        )
+        .await;
+    assert_eq!(between_walks.titles_walked, 0);
+    assert_eq!(
+        indexer_client.searches.lock().await.len(),
+        searches_after_walk
+    );
+}
+
+#[tokio::test]
+async fn acquisition_intervals_default_to_one_minute_checks_and_five_minute_walks() {
+    let (app, _) = bootstrap();
+    let settings = app
+        .acquisition_settings()
+        .await
+        .expect("acquisition settings load");
+    assert_eq!(settings.poll_interval_seconds, 60);
+    assert_eq!(settings.walk_interval_seconds, 300);
 }
 
 #[tokio::test]
@@ -9310,6 +9408,7 @@ async fn acquisition_cycle_active_anime_scan_does_not_block_due_movie_search() {
     crate::acquisition_workflow::run_background_acquisition_cycle_with_blocked_facets(
         &app,
         &[MediaFacet::Anime],
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
     )
     .await;
 
@@ -9493,6 +9592,7 @@ async fn acquisition_cycle_active_movie_scan_does_not_block_due_series_search() 
     crate::acquisition_workflow::run_background_acquisition_cycle_with_blocked_facets(
         &app,
         &[MediaFacet::Movie],
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
     )
     .await;
 
@@ -9631,6 +9731,7 @@ async fn acquisition_cycle_active_series_scan_defers_due_series_search() {
     crate::acquisition_workflow::run_background_acquisition_cycle_with_blocked_facets(
         &app,
         &[MediaFacet::Series],
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
     )
     .await;
 
@@ -9770,6 +9871,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
     crate::acquisition_workflow::run_background_acquisition_cycle_with_blocked_facets(
         &app,
         &[MediaFacet::Anime],
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
     )
     .await;
 
@@ -9896,6 +9998,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
     crate::acquisition_workflow::run_background_acquisition_cycle_with_blocked_facets(
         &app,
         &[MediaFacet::Anime],
+        crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
     )
     .await;
 

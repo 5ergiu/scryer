@@ -1324,6 +1324,15 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
             SettingDefinitionSeed {
                 category: "acquisition".into(),
                 scope: "system".into(),
+                key_name: "acquisition.walk_interval_seconds".into(),
+                data_type: "number".into(),
+                default_value_json: "300".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "acquisition".into(),
+                scope: "system".into(),
                 key_name: "acquisition.long_tail_backfill_max_scopes_per_cycle".into(),
                 data_type: "number".into(),
                 default_value_json: "500".into(),

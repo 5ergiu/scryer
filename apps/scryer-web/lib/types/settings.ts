@@ -23,6 +23,7 @@ export type AcquisitionSettings = {
   enabled: boolean;
   sameTierMinDelta: number;
   pollIntervalSeconds: number;
+  walkIntervalSeconds: number;
   syncIntervalSeconds: number;
   batchSize: number;
 };

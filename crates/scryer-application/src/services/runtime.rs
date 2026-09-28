@@ -1032,6 +1032,11 @@ pub(crate) struct CachedWantedProjection {
 #[derive(Clone)]
 pub struct AppRuntimeAcquisitionState {
     pub acquisition_wake: Arc<tokio::sync::Notify>,
+    /// Set when failure handling re-opens a scope; the next background pass
+    /// walks even if its own walk is not due, so the scope's saved results are
+    /// tried on the next poll tick, as they were before the walk had a cadence
+    /// of its own. Cleared when a walk starts.
+    pub(crate) scope_reopened_since_walk: Arc<std::sync::atomic::AtomicBool>,
     pub download_submission_guards: DownloadSubmissionGuardTable,
     pub download_failure_guards: DownloadFailureGuardTable,
     /// Per-title exclusion between the background convergence walk and an
@@ -2546,6 +2551,7 @@ impl AppRuntimeState {
             },
             acquisition: AppRuntimeAcquisitionState {
                 acquisition_wake: Arc::new(tokio::sync::Notify::new()),
+                scope_reopened_since_walk: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 download_submission_guards: DownloadSubmissionGuardTable::default(),
                 download_failure_guards: DownloadFailureGuardTable::default(),
                 title_walk_locks: AcquisitionTitleWalkLocks::default(),

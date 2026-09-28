@@ -127,8 +127,11 @@ pub struct AcquisitionSettingsPayload {
         deprecation = "Inert: the stored value is no longer read; removed in the next minor."
     )]
     pub forced_upgrade_delta_bypass: i32,
-    /// Acquisition polling interval in seconds.
+    /// How often, in seconds, download clients are checked for failed grabs.
     pub poll_interval_seconds: i32,
+    /// How often, in seconds, the catalog is walked for missing and
+    /// upgradable media. Changes that wake acquisition still walk at once.
+    pub walk_interval_seconds: i32,
     /// Maximum long-tail scopes processed per cycle.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Number of days before long-tail scopes are reconverged.
@@ -1141,8 +1144,12 @@ pub struct UpdateAcquisitionSettingsInput {
         deprecation = "Inert: the stored value is no longer read; removed in the next minor."
     )]
     pub forced_upgrade_delta_bypass: Option<i32>,
-    /// Scheduler poll interval in seconds.
+    /// How often, in seconds, download clients are checked for failed grabs.
     pub poll_interval_seconds: i32,
+    /// How often, in seconds, the catalog is walked for missing and
+    /// upgradable media. Omitted by older clients, which keeps the stored
+    /// value.
+    pub walk_interval_seconds: Option<i32>,
     /// Maximum long-tail scopes processed per cycle.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Days between long-tail reconvergence passes.
