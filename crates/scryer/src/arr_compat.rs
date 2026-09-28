@@ -898,4 +898,79 @@ mod tests {
             }
         }).await.expect("bounded catalog fixture");
     }
+
+    #[tokio::test]
+    async fn arr_compat_series_without_a_tvdb_id_reports_null_not_zero() {
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let context = TestContext::new().await;
+            let admin = context.app.find_or_create_default_user().await.unwrap();
+            let key = context
+                .app
+                .create_api_key(
+                    &admin,
+                    scryer_application::CreateApiKey {
+                        label: "Fixture".into(),
+                        expiry: scryer_application::ApiKeyExpiryPreset::Never,
+                    },
+                )
+                .await
+                .unwrap();
+            context
+                .app
+                .add_title(
+                    &admin,
+                    scryer_domain::NewTitle {
+                        name: "Paper Lantern Bay".into(),
+                        facet: MediaFacet::Series,
+                        monitored: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            context
+                .app
+                .add_title(
+                    &admin,
+                    scryer_domain::NewTitle {
+                        name: "Harbor Signal Line".into(),
+                        facet: MediaFacet::Series,
+                        monitored: true,
+                        external_ids: vec![scryer_domain::ExternalId {
+                            source: "tvdb".into(),
+                            kind: None,
+                            value: "424242".into(),
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let response = test_router(&context)
+                .oneshot(
+                    Request::builder()
+                        .uri("/compat/sonarr/api/v3/series")
+                        .header("X-Api-Key", &key.raw_key)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let values: Vec<Value> =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                    .unwrap();
+            let tvdb_id = |name: &str| {
+                values
+                    .iter()
+                    .find(|value| value["title"] == name)
+                    .map(|value| value["tvdbId"].clone())
+                    .unwrap_or_else(|| panic!("{name} listed"))
+            };
+            assert_eq!(tvdb_id("Paper Lantern Bay"), Value::Null);
+            assert_eq!(tvdb_id("Harbor Signal Line"), json!(424242));
+        })
+        .await
+        .expect("bounded series fixture");
+    }
 }
