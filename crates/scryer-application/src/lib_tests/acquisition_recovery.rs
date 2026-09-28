@@ -12845,6 +12845,49 @@ async fn a_season_scoped_interactive_walk_never_spends_a_bare_title_query() {
     );
 }
 
+/// The search client picks the pacing lane from the learning context: only a
+/// context that consents to corpus reuse is a background pass. An operator's
+/// walk must never carry that consent, so its indexer requests are paced as
+/// interactive; the background cycle's walk always carries it.
+#[tokio::test]
+async fn an_operator_walk_searches_in_the_interactive_lane_and_the_cycle_in_the_background_lane() {
+    let (app, title, indexer_client) = seed_recent_failed_season_pack_fixture().await;
+    crate::acquisition::workflow::run_interactive_title_acquisition_walk(
+        &app,
+        &title.id,
+        None,
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("interactive title walk");
+    let operator_contexts = indexer_client.learning_contexts.lock().await.clone();
+    assert!(!operator_contexts.is_empty(), "the operator walk searched");
+    for context in &operator_contexts {
+        let context = context.as_ref().expect("walk searches carry a context");
+        assert!(
+            !context.candidate_reuse_allowed && context.background_value.is_none(),
+            "an operator walk search must stay in the interactive lane: {context:?}"
+        );
+    }
+
+    let (app, _title, indexer_client) = seed_recent_failed_season_pack_fixture().await;
+    app.run_background_acquisition_cycle_once().await;
+    let background_contexts = indexer_client.learning_contexts.lock().await.clone();
+    assert!(
+        !background_contexts.is_empty(),
+        "the background cycle searched"
+    );
+    for context in &background_contexts {
+        let context = context.as_ref().expect("walk searches carry a context");
+        assert!(
+            context.candidate_reuse_allowed && context.background_value.is_some(),
+            "a background walk search must stay in the background lane: {context:?}"
+        );
+    }
+}
+
 /// Convergence exists to stop the *background* cycle re-querying a scope whose
 /// indexers have all answered. An operator asking for a search is new
 /// information, so the interactive walk runs the queries anyway — and still

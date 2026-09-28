@@ -176,6 +176,9 @@ pub(super) struct RecordedIndexerSearch {
 #[derive(Default, Clone)]
 pub(super) struct TrackingIndexerClient {
     pub(super) searches: Arc<Mutex<Vec<RecordedIndexerSearch>>>,
+    /// The learning context each search carried; the search client reads its
+    /// lane from it (search semaphore, corpus reuse, request pacing).
+    pub(super) learning_contexts: Arc<Mutex<Vec<Option<crate::IndexerSearchLearningContext>>>>,
     pub(super) season_pack_titles: Vec<String>,
     pub(super) title_pack_titles: Vec<String>,
     pub(super) fail_scoped_queries: bool,
@@ -255,9 +258,10 @@ impl IndexerClient for TrackingIndexerClient {
         _absolute_episode: Option<u32>,
         _year: Option<i32>,
         _tagged_aliases: Vec<TaggedAlias>,
-        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        learning_context: Option<crate::IndexerSearchLearningContext>,
         _cancel_token: tokio_util::sync::CancellationToken,
     ) -> AppResult<IndexerSearchResponse> {
+        self.learning_contexts.lock().await.push(learning_context);
         self.searches.lock().await.push(RecordedIndexerSearch {
             query: query.clone(),
             season,
