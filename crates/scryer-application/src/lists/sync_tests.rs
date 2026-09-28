@@ -841,3 +841,69 @@ async fn a_failed_owed_action_is_retried_after_the_guard_lifts() {
     harness.sync_at(at(50)).await;
     assert_eq!(unmonitors_of(&harness.actions, "title-alpha"), 2);
 }
+
+#[tokio::test]
+async fn one_run_syncs_every_due_list_across_batches() {
+    let count = LIST_SYNC_BATCH_LIMIT * 2 + 7;
+    let ids = (0..count)
+        .map(|index| format!("list-{index:03}"))
+        .collect::<Vec<_>>();
+    let harness = Harness::new(ids.iter().map(|id| subscription(id)).collect());
+    for id in &ids {
+        harness.lists.serve(id, &["alpha"]);
+    }
+
+    let report = harness.sync_at(at(0)).await;
+
+    assert_eq!(report.considered, count as u64);
+    assert_eq!(report.synced, count as u64);
+    assert_eq!(
+        harness.store.runs.lock().unwrap().len(),
+        count,
+        "each list is synced once"
+    );
+    assert_eq!(
+        harness.sync_at(at(0)).await.considered,
+        0,
+        "nothing is left due"
+    );
+}
+
+#[tokio::test]
+async fn a_list_that_stays_due_is_tried_once_and_does_not_hide_the_rest() {
+    // More stuck lists than one batch, all ahead of the healthy ones.
+    let stuck = (0..LIST_SYNC_BATCH_LIMIT + 3)
+        .map(|index| format!("stuck-{index:03}"))
+        .collect::<Vec<_>>();
+    let healthy = (0..5)
+        .map(|index| format!("healthy-{index}"))
+        .collect::<Vec<_>>();
+    let harness = Harness::new(
+        stuck
+            .iter()
+            .chain(healthy.iter())
+            .map(|id| subscription(id))
+            .collect(),
+    );
+    for id in stuck.iter().chain(healthy.iter()) {
+        harness.lists.serve(id, &["alpha"]);
+    }
+    harness
+        .store
+        .fail_record_sync_for
+        .lock()
+        .unwrap()
+        .extend(stuck.iter().cloned());
+
+    let report = harness.sync_at(at(0)).await;
+
+    assert_eq!(report.considered, (stuck.len() + healthy.len()) as u64);
+    assert_eq!(report.failed, stuck.len() as u64);
+    assert_eq!(report.synced, healthy.len() as u64);
+    for id in &healthy {
+        assert_eq!(
+            harness.store.row(id, "alpha").state,
+            ListMembershipState::Added
+        );
+    }
+}

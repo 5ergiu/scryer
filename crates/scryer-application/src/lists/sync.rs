@@ -16,7 +16,7 @@
 //! Subscriptions run one after another, so an instance never has two fetches
 //! in flight against the same provider.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use scryer_domain::{
@@ -39,7 +39,8 @@ use super::provider_settings::ListProviderConfigs;
 use super::resolve::{ListItemResolver, resolve_items};
 use crate::AppResult;
 
-/// How many due subscriptions one tick takes on.
+/// How many due subscriptions one read of the due set takes on. A run keeps
+/// reading batches until nothing it has not yet tried is due.
 pub const LIST_SYNC_BATCH_LIMIT: usize = 50;
 
 /// Shown on a sync whose fetch came back with no items. An empty answer is
@@ -130,54 +131,79 @@ pub fn log_list_sync_report(report: &ListSyncReport) {
 /// Sync every subscription due at `now`. Only reading the due set can fail the
 /// pass; any error inside one subscription's sync is counted as that
 /// subscription's failure and the pass continues.
+///
+/// The due set is read in batches until it holds nothing this run has not
+/// tried. Every outcome moves a list's next sync past `now`, so a synced list
+/// leaves the due set; one whose outcome could not be saved stays due and is
+/// tried once per run only. Each read asks for that many more rows, so lists
+/// stuck at the front of the due set never hide the ones behind them.
 pub async fn sync_due_subscriptions(
     context: &ListSyncContext<'_>,
     now: DateTime<Utc>,
     job_run_id: Option<String>,
 ) -> AppResult<ListSyncReport> {
-    let due = context
-        .subscriptions
-        .list_due(now, LIST_SYNC_BATCH_LIMIT)
-        .await?;
     let mut report = ListSyncReport::default();
-    for subscription in due {
-        report.considered += 1;
-        let outcome = match sync_subscription(context, &subscription, now, job_run_id.clone()).await
-        {
-            Ok(outcome) => outcome,
-            // A store error on one list is that list's failure: it is
-            // recorded against the list and the pass moves on.
-            Err(error) => {
-                tracing::warn!(
-                    subscription_id = %subscription.id,
-                    error = %error,
-                    "list sync failed on a storage error; continuing with the next list"
-                );
-                record_storage_failure(context, &subscription, now, job_run_id.clone()).await
-            }
-        };
-        match outcome {
-            SubscriptionSyncOutcome::Synced {
-                counts,
-                departures_acted,
-            } => {
-                report.synced += 1;
-                report.added += counts.added;
-                report.requested += counts.requested;
-                report.held += counts.held;
-                report.departures_acted += departures_acted;
-            }
-            SubscriptionSyncOutcome::Unchanged => report.unchanged += 1,
-            SubscriptionSyncOutcome::Off => report.off += 1,
-            SubscriptionSyncOutcome::Failed(failure) => {
-                report.failed += 1;
-                report
-                    .failures
-                    .push(job_failure_label(&subscription, &failure));
-            }
+    let mut tried = HashSet::new();
+    loop {
+        let due = context
+            .subscriptions
+            .list_due(now, tried.len().saturating_add(LIST_SYNC_BATCH_LIMIT))
+            .await?
+            .into_iter()
+            .filter(|subscription| !tried.contains(&subscription.id))
+            .take(LIST_SYNC_BATCH_LIMIT)
+            .collect::<Vec<_>>();
+        if due.is_empty() {
+            return Ok(report);
+        }
+        for subscription in due {
+            tried.insert(subscription.id.clone());
+            sync_one_due(context, &subscription, now, job_run_id.clone(), &mut report).await;
         }
     }
-    Ok(report)
+}
+
+async fn sync_one_due(
+    context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
+    now: DateTime<Utc>,
+    job_run_id: Option<String>,
+    report: &mut ListSyncReport,
+) {
+    report.considered += 1;
+    let outcome = match sync_subscription(context, subscription, now, job_run_id.clone()).await {
+        Ok(outcome) => outcome,
+        // A store error on one list is that list's failure: it is
+        // recorded against the list and the pass moves on.
+        Err(error) => {
+            tracing::warn!(
+                subscription_id = %subscription.id,
+                error = %error,
+                "list sync failed on a storage error; continuing with the next list"
+            );
+            record_storage_failure(context, subscription, now, job_run_id.clone()).await
+        }
+    };
+    match outcome {
+        SubscriptionSyncOutcome::Synced {
+            counts,
+            departures_acted,
+        } => {
+            report.synced += 1;
+            report.added += counts.added;
+            report.requested += counts.requested;
+            report.held += counts.held;
+            report.departures_acted += departures_acted;
+        }
+        SubscriptionSyncOutcome::Unchanged => report.unchanged += 1,
+        SubscriptionSyncOutcome::Off => report.off += 1,
+        SubscriptionSyncOutcome::Failed(failure) => {
+            report.failed += 1;
+            report
+                .failures
+                .push(job_failure_label(subscription, &failure));
+        }
+    }
 }
 
 /// Sync one subscription. Repository errors propagate; provider, gateway and
