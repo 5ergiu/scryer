@@ -318,9 +318,17 @@ pub(crate) fn find_existing_series_title_index_for_metadata_match(
             })
             .map(|external_id| external_id.value.trim().to_string())
             .filter(|value| !value.is_empty());
+        // TMDB reuses one number for a movie and a series, and an anime title
+        // also carries its mapped movies' TMDB ids (`tmdb:movie:N`), so a
+        // stored TMDB id binds only when it is kinded as a series or unkinded.
         let has_id = |title: &Title, source: &str, value: &str| {
             title.external_ids.iter().any(|external_id| {
-                external_id.source.eq_ignore_ascii_case(source) && external_id.value.trim() == value
+                external_id.source.eq_ignore_ascii_case(source)
+                    && external_id.value.trim() == value
+                    && (!source.eq_ignore_ascii_case("tmdb")
+                        || external_id.kind.as_deref().is_none_or(|kind| {
+                            kind.trim().is_empty() || kind.trim().eq_ignore_ascii_case("series")
+                        }))
             })
         };
         for (source, value) in [("smg", smg_id), ("tmdb", tmdb_id)] {

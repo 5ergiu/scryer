@@ -246,6 +246,19 @@ impl MetadataQueries {
                     .map_err(|_| to_gql_error(AppError::Validation("invalid tvdb id".to_string())))
             })
             .transpose()?;
+        // A numeric id that is not positive names nothing; reject it rather
+        // than send it to the gateway or silently read it as absent.
+        for (name, id) in [
+            ("smg id", input.smg_id),
+            ("tvdb id", tvdb_id),
+            ("tmdb id", input.tmdb_id),
+        ] {
+            if id.is_some_and(|id| id <= 0) {
+                return Err(to_gql_error(AppError::Validation(format!(
+                    "{name} must be positive"
+                ))));
+            }
+        }
         let series_ref = SeriesTitleRef {
             smg_id: input.smg_id,
             tvdb_id,
@@ -333,7 +346,12 @@ impl MetadataQueries {
                 .seasons
                 .into_iter()
                 .map(|s| MetadataSeasonPayload {
-                    tvdb_id: s.tvdb_id.to_string(),
+                    // A TMDB-primary series' seasons have no TVDB id; like the
+                    // series and its episodes, that reads as an empty string.
+                    tvdb_id: (s.tvdb_id > 0)
+                        .then(|| s.tvdb_id.to_string())
+                        .unwrap_or_default(),
+                    tmdb_id: s.tmdb_id,
                     number: s.number,
                     label: s.label,
                     episode_type: s.episode_type,

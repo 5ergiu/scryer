@@ -176,10 +176,17 @@ impl SeriesTitleRef {
                 .map(|external_id| external_id.value.trim())
                 .filter(|value| !value.is_empty())
         };
+        // A stored id that is not a positive number names nothing SMG could
+        // answer, so it is read as absent rather than sent.
+        let numeric_id = |source: &str| {
+            external_id(source)
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|id| *id > 0)
+        };
         let reference = Self {
-            smg_id: external_id("smg").and_then(|value| value.parse().ok()),
-            tvdb_id: external_id("tvdb").and_then(|value| value.parse().ok()),
-            tmdb_id: external_id("tmdb").and_then(|value| value.parse().ok()),
+            smg_id: numeric_id("smg"),
+            tvdb_id: numeric_id("tvdb"),
+            tmdb_id: numeric_id("tmdb"),
             imdb_id: external_id("imdb").map(str::to_string).or_else(|| {
                 title
                     .imdb_id
@@ -908,9 +915,8 @@ pub trait MetadataGateway: Send + Sync {
     /// without an SMG id are resolved from their provider ids first. The
     /// result's `by_ref_index` is keyed by the index into `refs`.
     ///
-    /// Gateways without the title surface answer with an error that
-    /// `title_queries_not_supported` recognises; callers fall back to
-    /// [`MetadataGateway::get_series`] by TVDB id.
+    /// Series have no legacy TVDB-keyed path: a gateway without the title
+    /// surface answers with an error that surfaces to the caller unchanged.
     async fn get_series_titles(
         &self,
         refs: &[SeriesTitleRef],

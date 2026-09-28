@@ -169,6 +169,18 @@ function metadataResultSmgId(result: MetadataTvdbSearchItem): string {
   return result.smgId == null ? "" : String(result.smgId).trim();
 }
 
+/**
+ * The key two search results are the same title under: the SMG title id when
+ * SMG supplied one, else the TVDB id. Empty when the result has neither, which
+ * a caller must treat as "unknown", never as equal to another empty key.
+ */
+function metadataResultIdentityKey(result: MetadataTvdbSearchItem): string {
+  const smgId = metadataResultSmgId(result);
+  if (smgId) return `smg:${smgId}`;
+  const tvdbId = metadataResultTvdbId(result);
+  return tvdbId ? `tvdb:${tvdbId}` : "";
+}
+
 function metadataResultCatalogLookupKeys(result: MetadataTvdbSearchItem): string[] {
   const smgId = metadataResultSmgId(result);
   const tvdbId = metadataResultTvdbId(result);
@@ -934,7 +946,7 @@ export function useGlobalSearch({
         const { data, error } = await client.query(metadataSeriesQuery, {
           input: {
             smgId: smgId ? Number(smgId) : undefined,
-            tvdbId: smgId ? undefined : tvdbId || undefined,
+            tvdbId: tvdbId || undefined,
             includeEpisodes: false,
             language: uiLanguage,
           },
@@ -1177,12 +1189,20 @@ export function useGlobalSearch({
           const animeResults = canViewCatalog
             ? filterCatalogedMetadataResults(rankedAnime, nextCatalogLookup)
             : rankedAnime;
-          const animeTvdbIds = new Set(animeResults.map((item) => metadataResultTvdbId(item)));
+          // A TMDB-primary result has no TVDB id, so results are told apart
+          // by SMG id first; an empty key never joins the set, or every
+          // TVDB-less series would be dropped as a duplicate of one anime.
+          const animeIdentityKeys = new Set(
+            animeResults.map(metadataResultIdentityKey).filter(Boolean),
+          );
           const seriesResults = (
             canViewCatalog
               ? filterCatalogedMetadataResults(rankedSeries, nextCatalogLookup)
               : rankedSeries
-          ).filter((item) => !animeTvdbIds.has(metadataResultTvdbId(item)));
+          ).filter((item) => {
+            const key = metadataResultIdentityKey(item);
+            return !key || !animeIdentityKeys.has(key);
+          });
           const nextMetadata: MetadataSearchResults = {
             movie: movieResults,
             series: seriesResults,
@@ -1194,7 +1214,14 @@ export function useGlobalSearch({
             const unchanged = Object.keys(nextMetadata).every((key) => {
               const prev = previous[key] ?? [];
               const next = nextMetadata[key] ?? [];
-              return prev.length === next.length && prev.every((item, i) => item.tvdbId === next[i]?.tvdbId);
+              return (
+                prev.length === next.length &&
+                prev.every(
+                  (item, i) =>
+                    next[i] !== undefined &&
+                    metadataResultIdentityKey(item) === metadataResultIdentityKey(next[i]),
+                )
+              );
             });
             return unchanged ? previous : nextMetadata;
           });

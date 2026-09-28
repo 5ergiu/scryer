@@ -2687,6 +2687,64 @@ mod tests {
         );
     }
 
+    /// TMDB reuses one number for a movie and a series, and an anime title
+    /// carries its mapped movies' ids as `tmdb:movie`. A TVDB-less series
+    /// result must bind only to a stored TMDB id kinded as a series (or
+    /// unkinded), never to the movie one.
+    #[test]
+    fn series_metadata_match_without_tvdb_id_ignores_movie_kinded_tmdb_ids() {
+        let mut anime_with_movie = build_series_title("anime-with-movie");
+        anime_with_movie.name = "Anime With Film".to_string();
+        anime_with_movie.external_ids = vec![
+            scryer_domain::ExternalId::with_kind("tvdb", "series", "77001"),
+            scryer_domain::ExternalId::with_kind("tmdb", "movie", "5150"),
+        ];
+        let mut tmdb_series = build_series_title("tmdb-series");
+        tmdb_series.name = "TMDB Series".to_string();
+        tmdb_series.external_ids = vec![
+            scryer_domain::ExternalId::with_kind("smg", "title", "303"),
+            scryer_domain::ExternalId::with_kind("tmdb", "series", "5150"),
+        ];
+        let existing_titles = vec![anime_with_movie, tmdb_series];
+        let (by_name, by_tvdb, _, _) = build_series_title_indexes(&existing_titles);
+        let selected = MetadataSearchItem {
+            tvdb_id: String::new(),
+            smg_id: None,
+            primary_source: Some("tmdb".to_string()),
+            external_ids: vec![scryer_domain::ExternalId::with_kind(
+                "tmdb", "series", "5150",
+            )],
+            name: "Different Metadata Name".to_string(),
+            year: None,
+            auto_match_safe: true,
+            auto_match_signals: Vec::new(),
+        };
+
+        assert_eq!(
+            find_existing_series_title_index_for_metadata_match(
+                &selected,
+                &existing_titles,
+                &by_name,
+                &by_tvdb,
+            ),
+            Some(1),
+            "the series-kinded TMDB id binds, the movie-kinded one does not"
+        );
+
+        let only_the_anime = existing_titles[..1].to_vec();
+        let (by_name, by_tvdb, _, _) = build_series_title_indexes(&only_the_anime);
+        assert_eq!(
+            find_existing_series_title_index_for_metadata_match(
+                &selected,
+                &only_the_anime,
+                &by_name,
+                &by_tvdb,
+            ),
+            None,
+            "a movie-kinded TMDB id alone never binds a series result"
+        );
+    }
+
     #[test]
     fn deferred_episodic_title_work_requests_full_file_walk() {
         let work = deferred_episodic_title_work(

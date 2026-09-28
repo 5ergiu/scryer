@@ -189,8 +189,11 @@ pub struct MetadataAnimeMoviePayload {
 #[derive(SimpleObject, Clone)]
 /// Metadata gateway season record.
 pub struct MetadataSeasonPayload {
-    /// TVDB season ID.
+    /// TVDB season ID, or an empty string when the season has none (a
+    /// TMDB-primary series).
     pub tvdb_id: String,
+    /// TMDB season ID, when the metadata provider knows one.
+    pub tmdb_id: Option<i64>,
     /// Numeric season number assigned by the metadata provider.
     pub number: i32,
     /// Season label.

@@ -13,6 +13,8 @@ export type Facet = "MOVIE" | "SERIES" | "ANIME";
 
 export type ExternalId = {
   source: string;
+  /** Entity kind the id names at its source (`series`, `movie`, `title`), when stored. */
+  kind?: string | null;
   value: string;
 };
 

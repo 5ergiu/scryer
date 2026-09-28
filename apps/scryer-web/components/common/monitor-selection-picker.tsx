@@ -228,8 +228,10 @@ export function MonitorSelectionPicker({
       const { data, error } = await client
         .query(metadataSeriesQuery, {
           input: {
+            // Both ids go: the backend reads the SMG id first and still
+            // resolves by TVDB id when SMG reports that id missing.
             smgId: normalizedSmgId ?? undefined,
-            tvdbId: normalizedSmgId ? undefined : normalizedTvdbId || undefined,
+            tvdbId: normalizedTvdbId || undefined,
             includeEpisodes: false,
             language,
           },

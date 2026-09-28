@@ -17046,9 +17046,14 @@ Metadata gateway season record.
 """
 type MetadataSeasonPayload {
 	"""
-	TVDB season ID.
+	TVDB season ID, or an empty string when the season has none (a
+	TMDB-primary series).
 	"""
 	tvdbId: String!
+	"""
+	TMDB season ID, when the metadata provider knows one.
+	"""
+	tmdbId: Int
 	"""
 	Numeric season number assigned by the metadata provider.
 	"""

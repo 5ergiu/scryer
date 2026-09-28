@@ -666,7 +666,23 @@ impl AppUseCase {
                     source,
                     value,
                 )
-                .await?;
+                .await?
+                // The store matches source and value only. TMDB reuses one
+                // number for a movie and a series, and an anime title also
+                // carries its mapped movies' TMDB ids (`tmdb:movie:N`), so a
+                // series' TMDB id binds only to a stored id kinded as a
+                // series or unkinded.
+                .filter(|title| {
+                    *source != "tmdb"
+                        || title.external_ids.iter().any(|external_id| {
+                            external_id.source.eq_ignore_ascii_case("tmdb")
+                                && external_id.value.trim() == value
+                                && external_id.kind.as_deref().is_none_or(|kind| {
+                                    kind.trim().is_empty()
+                                        || kind.trim().eq_ignore_ascii_case("series")
+                                })
+                        })
+                });
             if existing_match.is_some() {
                 break;
             }

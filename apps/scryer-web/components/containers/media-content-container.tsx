@@ -147,6 +147,7 @@ import { useDownloadConflictConfirmation } from "@/components/common/download-co
 import { DeletePreviewSummary } from "@/components/common/delete-preview-summary";
 import { BulkRenamePreviewSummary } from "@/components/common/bulk-rename-preview-summary";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
+import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
 import { reportAutomaticSearchFailure } from "@/lib/hooks/use-title-search-action";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -3515,16 +3516,10 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
 
       const tvdbId = String(candidate.tvdbId).trim();
-      const smgId = candidate.smgId == null ? "" : String(candidate.smgId).trim();
-      const tmdbId = candidate.tmdbId == null ? "" : String(candidate.tmdbId).trim();
       const imdbId = candidate.imdbId?.trim();
-      const externalIds = [
-        ...(candidate.externalIds ?? []),
-        ...(smgId ? [{ source: "smg", value: smgId }] : []),
-        ...(tvdbId ? [{ source: "tvdb", value: tvdbId }] : []),
-        ...(tmdbId ? [{ source: "tmdb", value: tmdbId }] : []),
-        ...(imdbId ? [{ source: "imdb", value: imdbId }] : []),
-      ];
+      // Kinded like every other add flow, so a series' TMDB id is stored as
+      // `tmdb:series` and never mistaken for a movie's.
+      const externalIds = metadataResultExternalIds(candidate, queueFacet);
 
       const monitorType = monitoredForQueue ? "ALL_EPISODES" : "NONE";
       try {

@@ -1523,6 +1523,7 @@ export const TITLE_CATALOG_SEARCH_FIELDS = `
     createdAt
     externalIds {
       source
+      kind
       value
     }`;
 
@@ -4178,6 +4179,7 @@ const METADATA_SEARCH_FIELDS = `
     primarySource
     externalIds {
       source
+      kind
       value
     }
     name

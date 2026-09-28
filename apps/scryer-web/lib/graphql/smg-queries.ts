@@ -10,7 +10,7 @@ export type MetadataTvdbSearchItem = {
   primarySource?: string | null;
   name: string;
   imdbId: string | null;
-  externalIds?: Array<{ source: string; value: string }>;
+  externalIds?: Array<{ source: string; kind?: string | null; value: string }>;
   slug: string | null;
   type: string | null;
   year: number | null;

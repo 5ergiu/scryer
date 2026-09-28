@@ -9,6 +9,7 @@ import {
 } from "../../lib/facets/registry.ts";
 import type { MetadataTvdbSearchItem } from "../../lib/graphql/smg-queries.ts";
 import type { MetadataSearchResults } from "../../lib/hooks/use-global-search.ts";
+import { tmdbKindNamesSeries } from "../../lib/utils/metadata-result-external-ids.ts";
 import type {
   Facet,
   LibraryRecord,
@@ -355,7 +356,18 @@ export function metadataSearchItemFromCatalogTitle(
   if (!smgId && !tvdbId) {
     return null;
   }
-  const tmdbId = catalogTitleExternalId(title, "tmdb");
+  // A series row's own TMDB id is the one kinded as a series (or unkinded);
+  // an anime row also carries its mapped movies' ids as `tmdb:movie`.
+  const tmdbId =
+    title.facet === "MOVIE"
+      ? catalogTitleExternalId(title, "tmdb")
+      : ((title.externalIds ?? [])
+          .find(
+            (externalId) =>
+              externalId.source.trim().toLowerCase() === "tmdb" &&
+              tmdbKindNamesSeries(externalId.kind),
+          )
+          ?.value.trim() ?? null);
   const parsedSmgId = smgId ? Number(smgId) : Number.NaN;
   const parsedTmdbId = tmdbId ? Number(tmdbId) : Number.NaN;
   return {
@@ -366,6 +378,7 @@ export function metadataSearchItemFromCatalogTitle(
     imdbId: title.imdbId?.trim() || catalogTitleExternalId(title, "imdb"),
     externalIds: (title.externalIds ?? []).map((externalId) => ({
       source: externalId.source,
+      kind: externalId.kind ?? undefined,
       value: externalId.value,
     })),
     slug: title.slug ?? null,

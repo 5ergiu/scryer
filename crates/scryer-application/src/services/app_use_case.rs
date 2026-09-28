@@ -979,6 +979,13 @@ impl AppUseCase {
         {
             return Err(AppError::Validation("a title identity is required".into()));
         }
+        if [series_ref.smg_id, series_ref.tvdb_id, series_ref.tmdb_id]
+            .into_iter()
+            .flatten()
+            .any(|id| id <= 0)
+        {
+            return Err(AppError::Validation("title ids must be positive".into()));
+        }
         crate::catalog_workflow::fetch_series_by_ref(
             self.services.library.metadata_gateway.as_ref(),
             series_ref,
