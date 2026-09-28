@@ -51,6 +51,11 @@ pub trait ListActions: Send + Sync {
 
     async fn tag_title(&self, title_id: &str, tag: &str) -> AppResult<()>;
 
+    /// Whether the title is still in the library. Only read after an
+    /// on-leave action failed, to tell a title that is gone from a failure
+    /// worth retrying.
+    async fn title_exists(&self, title_id: &str) -> AppResult<bool>;
+
     /// Record that a title the list added has left it, and which on-leave
     /// action ran. For `Log` this record is the whole action.
     async fn record_departure(

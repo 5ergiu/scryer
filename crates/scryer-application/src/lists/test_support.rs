@@ -546,13 +546,17 @@ pub(crate) enum RecordedAction {
 
 /// Records every call. `fail_departures` makes the on-leave calls fail that
 /// many times before succeeding; `reuse_titles` makes adds report an existing
-/// title.
+/// title; titles in `missing_titles` are gone from the library, so acting on
+/// them fails as not found.
 #[derive(Default)]
 pub(crate) struct RecordingActions {
     pub calls: Mutex<Vec<RecordedAction>>,
     pub fail_departures: Mutex<u32>,
     pub reuse_titles: bool,
     pub refuse_adds: Option<fn() -> AppError>,
+    pub missing_titles: Mutex<HashSet<String>>,
+    /// How many times a title's existence was looked up.
+    pub title_lookups: Mutex<u32>,
 }
 
 impl RecordingActions {
@@ -561,7 +565,17 @@ impl RecordingActions {
     }
 
     fn departure_call(&self, call: RecordedAction) -> AppResult<()> {
+        let missing = match &call {
+            RecordedAction::SetMonitored { title_id, .. }
+            | RecordedAction::Tag { title_id, .. } => {
+                self.missing_titles.lock().unwrap().contains(title_id)
+            }
+            _ => false,
+        };
         self.calls.lock().unwrap().push(call);
+        if missing {
+            return Err(AppError::NotFound("fixture title".into()));
+        }
         let mut remaining = self.fail_departures.lock().unwrap();
         if *remaining > 0 {
             *remaining -= 1;
@@ -619,6 +633,11 @@ impl ListActions for RecordingActions {
             title_id: title_id.to_string(),
             tag: tag.to_string(),
         })
+    }
+
+    async fn title_exists(&self, title_id: &str) -> AppResult<bool> {
+        *self.title_lookups.lock().unwrap() += 1;
+        Ok(!self.missing_titles.lock().unwrap().contains(title_id))
     }
 
     async fn record_departure(
