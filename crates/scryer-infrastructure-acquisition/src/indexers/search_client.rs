@@ -1759,16 +1759,24 @@ fn query_ends_with_absolute_number(query: &str) -> bool {
 fn is_freetext_strategy_label(label: &str) -> bool {
     matches!(
         label,
-        "freetext" | "freetext_alias" | ANIME_ABSOLUTE_TEXT_LABEL | ANIME_COUR_TEXT_LABEL
+        "freetext"
+            | "freetext_alias"
+            | ANIME_ABSOLUTE_TEXT_LABEL
+            | ANIME_COUR_TEXT_LABEL
+            | ANIME_COUR_NAME_TEXT_LABEL
     )
 }
 
 /// An anime text query that asks for the episode by an absolute or
-/// cour-relative number rather than by its official coordinates.
+/// cour-relative number under the series name rather than by its official
+/// coordinates.
 const ANIME_ABSOLUTE_TEXT_LABEL: &str = "freetext_anime_abs";
 /// An anime text query that asks for the episode under the community cour's
 /// own season and episode numbering.
 const ANIME_COUR_TEXT_LABEL: &str = "freetext_anime_cour";
+/// An anime text query that asks for the episode under a cour's own name with
+/// its cour-relative episode number.
+const ANIME_COUR_NAME_TEXT_LABEL: &str = "freetext_anime_cour_name";
 
 /// The episode numbering a strategy asks under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1779,16 +1787,19 @@ enum AutoNumberingForm {
     Absolute,
     /// The community cour's own season and episode numbering.
     Community,
+    /// A cour's own name with its cour-relative episode number.
+    CourName,
 }
 
 /// The numbering form a strategy asks under. Automatic anime search keeps one
 /// strategy per form in each tier, so the absolute ID query runs next to the
-/// season/episode one, and the community and absolute text query forms
-/// survive the tier split next to the plain one.
+/// season/episode one, and the community, cour-name and absolute text query
+/// forms survive the tier split next to the plain one.
 fn auto_numbering_form(label: &str) -> AutoNumberingForm {
     match label {
         "ids_abs" | ANIME_ABSOLUTE_TEXT_LABEL => AutoNumberingForm::Absolute,
         ANIME_COUR_TEXT_LABEL => AutoNumberingForm::Community,
+        ANIME_COUR_NAME_TEXT_LABEL => AutoNumberingForm::CourName,
         _ => AutoNumberingForm::Official,
     }
 }
@@ -1806,6 +1817,7 @@ fn learning_strategy_key(label: &str) -> Option<&'static str> {
         | "freetext_alias"
         | ANIME_ABSOLUTE_TEXT_LABEL
         | ANIME_COUR_TEXT_LABEL
+        | ANIME_COUR_NAME_TEXT_LABEL
         | "fallback" => Some("v2:freetext"),
         _ => None,
     }
@@ -2047,8 +2059,9 @@ fn auto_strategy_rank(strategy: &SearchStrategy) -> (u8, u8) {
         "fallback" => (1, 2),
         ANIME_ABSOLUTE_TEXT_LABEL => (1, 3),
         ANIME_COUR_TEXT_LABEL => (1, 4),
+        ANIME_COUR_NAME_TEXT_LABEL => (1, 5),
         _ if !strategy.ids.is_empty() => (0, 4),
-        _ => (1, 5),
+        _ => (1, 6),
     }
 }
 
@@ -5071,6 +5084,10 @@ impl IndexerClient for MultiIndexerSearchClient {
             }
 
             let mut strategies = Vec::new();
+            let series_name = numbering_context
+                .anime
+                .as_ref()
+                .map(|anime| anime.canonical_title.as_str());
             for strategy_query in &queries {
                 strategies.extend(build_strategies(&StrategyParams {
                     query: strategy_query,
@@ -5085,6 +5102,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                     text_dispatch_mode: resolved_caps.text_dispatch_mode,
                     is_alias_query: false,
                     facet_omitted,
+                    series_name,
                 }));
 
                 if facet == "anime"
@@ -5104,6 +5122,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         text_dispatch_mode: resolved_caps.text_dispatch_mode,
                         is_alias_query: true,
                         facet_omitted,
+                        series_name,
                     }));
                 }
             }
@@ -6301,6 +6320,10 @@ struct StrategyParams<'a> {
     /// The caller asked for a facet-less search: text strategies keep the
     /// borrowed facet for capability resolution but do not send it.
     facet_omitted: bool,
+    /// The series' own name when the search carries an anime numbering
+    /// bridge. A dashed anime episode query under any other name asks under a
+    /// cour's own name.
+    series_name: Option<&'a str>,
 }
 
 /// The query facet controls text-search endpoint shape. The ID facet controls
@@ -6408,13 +6431,24 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
     });
     // A dashed anime episode can be cour-relative or absolute. Keep it in
     // the text query without adding coordinates from a different numbering.
-    let dashed_anime_episode = query_facet == "anime"
-        && query.rsplit_once(" - ").is_some_and(|(title, number)| {
-            let number = number.trim();
-            !title.trim().is_empty()
+    let dashed_anime_title = query
+        .rsplit_once(" - ")
+        .filter(|_| query_facet == "anime")
+        .and_then(|(title, number)| {
+            let (title, number) = (title.trim(), number.trim());
+            (!title.is_empty()
                 && !number.is_empty()
-                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(title)
         });
+    let dashed_anime_episode = dashed_anime_title.is_some();
+    // A dashed query under a name other than the series' own asks under a
+    // cour's name, which is a separate question to the indexer.
+    let dashed_cour_name = dashed_anime_title.is_some_and(|title| {
+        p.series_name
+            .map(str::trim)
+            .is_some_and(|series_name| !title.eq_ignore_ascii_case(series_name))
+    });
     let community_coordinates = terminal_coordinates
         .filter(|_| matches!(query_facet, "series" | "anime"))
         .filter(|(query_season, query_episode, _)| {
@@ -6428,6 +6462,8 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
     // order, which `community_coordinates` above already admits.
     let anime_numbering_label = if is_alias_query {
         None
+    } else if dashed_cour_name {
+        Some(ANIME_COUR_NAME_TEXT_LABEL)
     } else if query_facet == "anime"
         && (dashed_anime_episode || query_ends_with_absolute_number(query))
     {
@@ -10127,6 +10163,7 @@ mod tests {
             text_dispatch_mode: resolved.text_dispatch_mode,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
         assert!(strategies.iter().any(|strategy| {
             strategy.label == "ids_sxex"
@@ -11476,6 +11513,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::None,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);
@@ -11511,6 +11549,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::None,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);
@@ -12661,6 +12700,7 @@ mod tests {
                         text_dispatch_mode: mode,
                         is_alias_query,
                         facet_omitted: false,
+                        series_name: None,
                     });
                     let text = strategies
                         .iter()
@@ -12740,6 +12780,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 3);
@@ -12791,6 +12832,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 2);
@@ -13380,6 +13422,187 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learned_cour_name_text_result_is_a_working_alternative_and_text_is_never_suppressed() {
+        let repo: StdArc<dyn IndexerSearchLearningRepository> =
+            StdArc::new(InMemorySearchLearningRepository::default());
+        let context = IndexerSearchLearningContext {
+            title_id: "title-1".into(),
+            facet: "anime".into(),
+            subject_kind: ReleaseSearchSubjectKind::Episode,
+            search_session_id: "test-session".into(),
+            background_value: None,
+            candidate_reuse_allowed: true,
+        };
+
+        record_strategy_learning_outcome(
+            &repo,
+            Some(&context),
+            SearchMode::Auto,
+            "idx",
+            "Indexer",
+            ANIME_COUR_NAME_TEXT_LABEL,
+            1,
+        )
+        .await;
+        for label in ["ids_abs", ANIME_ABSOLUTE_TEXT_LABEL] {
+            for _ in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD {
+                record_strategy_learning_outcome(
+                    &repo,
+                    Some(&context),
+                    SearchMode::Auto,
+                    "idx",
+                    "Indexer",
+                    label,
+                    0,
+                )
+                .await;
+            }
+        }
+
+        let records = repo
+            .list_for_title("idx", "title-1", "anime")
+            .await
+            .expect("learning records");
+        let text_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:freetext")
+            .expect("shared text record");
+        assert_eq!(text_record.usable_successes, 1);
+        assert_eq!(
+            text_record.empty_successes,
+            LEARNED_EMPTY_SUPPRESSION_THRESHOLD
+        );
+        assert!(!text_record.suppressed);
+
+        let abs_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:ids_abs")
+            .expect("ids_abs record");
+        assert!(abs_record.suppressed);
+
+        let other_title = IndexerSearchLearningContext {
+            title_id: "title-2".into(),
+            ..context
+        };
+        record_strategy_learning_outcome(
+            &repo,
+            Some(&other_title),
+            SearchMode::Auto,
+            "idx",
+            "Indexer",
+            "ids_sxex",
+            1,
+        )
+        .await;
+        for _ in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD {
+            record_strategy_learning_outcome(
+                &repo,
+                Some(&other_title),
+                SearchMode::Auto,
+                "idx",
+                "Indexer",
+                ANIME_COUR_NAME_TEXT_LABEL,
+                0,
+            )
+            .await;
+        }
+        let records = repo
+            .list_for_title("idx", "title-2", "anime")
+            .await
+            .expect("learning records");
+        let text_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:freetext")
+            .expect("shared text record");
+        assert_eq!(text_record.usable_successes, 0);
+        assert_eq!(
+            text_record.empty_successes,
+            LEARNED_EMPTY_SUPPRESSION_THRESHOLD
+        );
+        assert!(!text_record.suppressed, "text forms are never suppressed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn automatic_anime_search_learns_both_id_forms_and_suppresses_the_empty_one() {
+        let repo: StdArc<dyn IndexerSearchLearningRepository> =
+            StdArc::new(InMemorySearchLearningRepository::default());
+        let (client, calls) = scripted_search_client(anime_caps(), |call| {
+            if call.ids.contains_key("anidb_id") && call.season == Some(2) {
+                response_with_titles(&["Blade.Summit.S02E03.720p.WEB-DL"])
+            } else {
+                response_with_titles(&[])
+            }
+        });
+        let client = client.with_search_learning_repository(repo.clone());
+
+        let run = |session: usize| {
+            let client = &client;
+            async move {
+                let context = IndexerSearchLearningContext {
+                    title_id: "title-1".into(),
+                    facet: "anime".into(),
+                    subject_kind: ReleaseSearchSubjectKind::Episode,
+                    search_session_id: format!("session-{session}"),
+                    background_value: None,
+                    candidate_reuse_allowed: false,
+                };
+                <MultiIndexerSearchClient as IndexerClient>::search(
+                    client,
+                    "Blade Summit S02E03".into(),
+                    HashMap::from([("anidb_id".to_string(), "1535".to_string())]),
+                    Some("anime".into()),
+                    Some("anime".into()),
+                    None,
+                    None,
+                    None,
+                    SearchMode::Auto,
+                    IndexerErrorOperation::AutomaticSearch,
+                    Some(2),
+                    Some(3),
+                    Some(21),
+                    None,
+                    vec![],
+                    Some(context),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("automatic search should succeed")
+            }
+        };
+
+        for session in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize {
+            let response = run(session).await;
+            assert_eq!(response.results.len(), 1, "session {session}");
+        }
+
+        let records = repo
+            .list_for_title("idx-1", "title-1", "anime")
+            .await
+            .expect("learning records");
+        let record = |key: &str| records.iter().find(|record| record.key.strategy_key == key);
+        let sxex = record("v2:ids_sxex").expect("ids_sxex is learned next to ids_abs");
+        assert_eq!(sxex.usable_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert!(!sxex.suppressed);
+        let abs = record("v2:ids_abs").expect("ids_abs record");
+        assert_eq!(abs.empty_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert_eq!(abs.usable_successes, 0);
+        assert!(abs.suppressed);
+        assert!(
+            record("v2:freetext").is_none_or(|text| text.usable_successes == 0),
+            "no text query succeeded"
+        );
+
+        calls.lock().expect("call log mutex").clear();
+        run(LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize).await;
+        let calls = calls.lock().expect("call log mutex");
+        assert!(
+            calls.iter().all(|call| call.absolute_episode.is_none()),
+            "the suppressed absolute ID query is skipped"
+        );
+        assert!(calls.iter().any(|call| call.ids.contains_key("anidb_id")));
+    }
+
+    #[tokio::test]
     async fn learned_stale_reprobe_usable_outcome_clears_suppression() {
         let repo_impl = InMemorySearchLearningRepository::default();
         let key = IndexerSearchLearningKey {
@@ -13738,6 +13961,164 @@ mod tests {
         assert_eq!(labels, vec!["freetext", "freetext_anime_abs"]);
     }
 
+    fn cour_name_test_caps() -> IndexerProviderCapabilities {
+        IndexerProviderCapabilities {
+            supported_ids: HashMap::from([
+                ("anime".into(), vec!["anidb_id".into()]),
+                ("series".into(), vec!["tvdb_id".into()]),
+            ]),
+            season_param: Some("s".into()),
+            episode_param: Some("ep".into()),
+            query_param: Some("q".into()),
+            search_inputs: vec![
+                IndexerSearchInputCapability::TitleQuery,
+                IndexerSearchInputCapability::Season,
+                IndexerSearchInputCapability::Episode,
+                IndexerSearchInputCapability::AbsoluteEpisode,
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn cour_name_test_strategies(
+        queries: &[&str],
+        facet: &str,
+        series_name: Option<&str>,
+    ) -> Vec<SearchStrategy> {
+        let caps = cour_name_test_caps();
+        let ids = HashMap::from([("anidb_id".to_string(), "40117".to_string())]);
+        queries
+            .iter()
+            .flat_map(|query| {
+                build_strategies(&StrategyParams {
+                    query,
+                    query_facet: facet,
+                    id_facet: facet,
+                    ids: &ids,
+                    season: Some(1),
+                    episode: Some(14),
+                    absolute_episode: Some(14),
+                    caps: &caps,
+                    id_dispatch_mode: IdDispatchMode::Aggregate,
+                    text_dispatch_mode: TextDispatchMode::FacetScoped,
+                    is_alias_query: false,
+                    facet_omitted: false,
+                    series_name,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn auto_anime_strategy_tier_keeps_cour_name_query_next_to_absolute_and_community_pair() {
+        let strategies = cour_name_test_strategies(
+            &[
+                "Lantern Verge 014",
+                "Lantern Verge S01E14",
+                "Lantern Verge",
+                "Lantern Verge S02E03",
+                "Ember Tide Arc - 03",
+                "Lantern Verge - 14",
+            ],
+            "anime",
+            Some("Lantern Verge"),
+        );
+
+        let (primary, fallback) = split_strategy_tiers(SearchMode::Auto, "anime", strategies);
+
+        assert_eq!(
+            primary
+                .iter()
+                .map(|strategy| strategy.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ids_abs", "ids_sxex"]
+        );
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|strategy| (strategy.label.as_str(), strategy.request_query.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("freetext", "Lantern Verge S01E14"),
+                ("freetext_anime_abs", "Lantern Verge 014"),
+                ("freetext_anime_cour", "Lantern Verge S02E03"),
+                ("freetext_anime_cour_name", "Ember Tide Arc - 03"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dashed_query_under_the_series_name_stays_in_the_absolute_form() {
+        for query in ["Lantern Verge - 14", "lantern verge - 14"] {
+            let strategies = cour_name_test_strategies(&[query], "anime", Some("Lantern Verge"));
+            let text = strategies
+                .iter()
+                .find(|strategy| strategy.label.starts_with("freetext"))
+                .expect("a text strategy");
+            assert_eq!(text.label, "freetext_anime_abs", "query {query}");
+        }
+
+        let (_, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "anime",
+            cour_name_test_strategies(
+                &["Lantern Verge 014", "Lantern Verge - 14"],
+                "anime",
+                Some("Lantern Verge"),
+            ),
+        );
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|strategy| strategy.request_query.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Lantern Verge 014"]
+        );
+    }
+
+    #[test]
+    fn cour_name_query_needs_the_series_name_and_the_anime_facet() {
+        let without_bridge = cour_name_test_strategies(&["Ember Tide Arc - 03"], "anime", None);
+        assert!(
+            without_bridge
+                .iter()
+                .any(|strategy| strategy.label == "freetext_anime_abs")
+        );
+
+        let series =
+            cour_name_test_strategies(&["Ember Tide Arc - 03"], "series", Some("Lantern Verge"));
+        let text = series
+            .iter()
+            .find(|strategy| strategy.label.starts_with("freetext"))
+            .expect("a text strategy");
+        assert_eq!(text.label, "freetext");
+        assert_eq!(
+            (text.season, text.episode, text.absolute_episode),
+            (Some(1), Some(14), Some(14))
+        );
+    }
+
+    #[test]
+    fn cour_name_strategy_carries_no_coordinates() {
+        let strategies =
+            cour_name_test_strategies(&["Ember Tide Arc - 03"], "anime", Some("Lantern Verge"));
+        let text = strategies
+            .iter()
+            .find(|strategy| strategy.label == "freetext_anime_cour_name")
+            .expect("a cour-name text strategy");
+        assert_eq!(text.request_query, "Ember Tide Arc - 03");
+        assert_eq!(
+            (text.season, text.episode, text.absolute_episode),
+            (None, None, None)
+        );
+        assert!(text.ids.is_empty());
+        assert_eq!(
+            learning_strategy_key(&text.label),
+            Some("v2:freetext"),
+            "the cour-name form learns under the shared text key"
+        );
+    }
+
     #[test]
     fn series_auto_strategy_tier_still_keeps_one_text_strategy() {
         let (primary, fallback) = split_strategy_tiers(
@@ -13795,6 +14176,7 @@ mod tests {
                 text_dispatch_mode: TextDispatchMode::FacetScoped,
                 is_alias_query: false,
                 facet_omitted: false,
+                series_name: None,
             });
             let text = strategies
                 .iter()
@@ -13834,6 +14216,7 @@ mod tests {
                 text_dispatch_mode: TextDispatchMode::FacetScoped,
                 is_alias_query: false,
                 facet_omitted: false,
+                series_name: None,
             });
             let text = strategies
                 .iter()
@@ -14463,6 +14846,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: true,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);
