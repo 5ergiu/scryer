@@ -809,26 +809,14 @@ impl AppUseCase {
             scryer_domain::LibraryPermission::View,
         )
         .await?;
-        let gateway = &self.services.library.metadata_gateway;
         // Every kind goes through the title surface: a series SMG knows only
-        // from TMDB has no TVDB id and is reachable nowhere else. Only movies
-        // keep the legacy TVDB search fallback; series have none.
+        // from TMDB has no TVDB id and is reachable nowhere else.
         let kind = type_hint.trim().to_ascii_lowercase();
-        match gateway
+        self.services
+            .library
+            .metadata_gateway
             .search_titles(query, &kind, limit, language, year)
             .await
-        {
-            Ok(results) => Ok(results),
-            Err(error)
-                if kind == "movie"
-                    && crate::catalog_workflow::title_queries_not_supported(&error) =>
-            {
-                gateway
-                    .search_tvdb_rich(query, type_hint, limit, language, year)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
     }
 
     pub async fn search_metadata_tvdb(
@@ -927,30 +915,17 @@ impl AppUseCase {
             return Err(AppError::Validation("a title identity is required".into()));
         }
 
-        match self
+        let result = self
             .services
             .library
             .metadata_gateway
             .get_movie_titles(std::slice::from_ref(movie_ref), language)
-            .await
-        {
-            Ok(result) => {
-                result.by_ref_index.get(&0).cloned().ok_or_else(|| {
-                    AppError::NotFound("movie metadata response missing title".into())
-                })
-            }
-            Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
-                let tvdb_id = movie_ref.tvdb_id.ok_or_else(|| {
-                    AppError::Repository("legacy metadata gateway requires a tvdb id".into())
-                })?;
-                self.services
-                    .library
-                    .metadata_gateway
-                    .get_movie(tvdb_id, language)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
+            .await?;
+        result
+            .by_ref_index
+            .get(&0)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound("movie metadata response missing title".into()))
     }
 
     /// Fetch one series by whichever identity the caller holds, in the order

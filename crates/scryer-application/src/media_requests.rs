@@ -2000,25 +2000,6 @@ impl AppUseCase {
                         .ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".to_string())
                         }),
-                    Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
-                        let Some(tvdb_id) = movie_ref.tvdb_id else {
-                            return MediaRequestMetadataEnrichment::unavailable(
-                                external_ids,
-                                "movie_subject_unidentifiable",
-                            );
-                        };
-                        self.services
-                            .library
-                            .metadata_gateway
-                            .get_movie(tvdb_id, &language)
-                            .await
-                            .map(|movie| {
-                                raw_movie = Some((movie.clone(), "smg_movie"));
-                                crate::catalog::facets::handler::movie_to_hydration_result(
-                                    movie, &language,
-                                )
-                            })
-                    }
                     Err(error) => Err(error),
                 }
             }

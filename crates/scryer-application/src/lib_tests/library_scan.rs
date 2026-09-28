@@ -109,6 +109,24 @@ struct HydratingMovieSearchGateway {
 
 #[async_trait]
 impl MetadataGateway for HydratingMovieSearchGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -184,6 +202,24 @@ struct CountingRecommendationMetadataGateway {
 
 #[async_trait]
 impl MetadataGateway for CountingRecommendationMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -606,16 +642,17 @@ type MetadataSearchBatch = (Vec<MetadataSearchQuery>, String, bool);
 struct RecordingExactIdMetadataGateway {
     batch_queries: Arc<Mutex<Vec<Vec<MetadataSearchQuery>>>>,
     title_batch_queries: Arc<Mutex<Vec<MetadataSearchBatch>>>,
-    title_id_movies_enabled: bool,
+    /// Answer movie title searches with a TMDB-primary title instead of the
+    /// TVDB-backed identity match every other search gets.
+    tmdb_primary_movie_matches: bool,
     rich_external_ids: bool,
-    raw_title_id_error: bool,
     detail_calls: Arc<AtomicUsize>,
 }
 
 impl RecordingExactIdMetadataGateway {
-    fn with_title_id_movies() -> Self {
+    fn with_tmdb_primary_movie_matches() -> Self {
         Self {
-            title_id_movies_enabled: true,
+            tmdb_primary_movie_matches: true,
             ..Default::default()
         }
     }
@@ -625,14 +662,6 @@ impl RecordingExactIdMetadataGateway {
     /// movie does.
     fn with_rich_external_ids(mut self) -> Self {
         self.rich_external_ids = true;
-        self
-    }
-
-    /// An SMG that predates the title-id surface answers `searchTitlesBatch`
-    /// with a raw GraphQL validation error, not with the mapped capability
-    /// message the client produces once its probe recognises one.
-    fn with_raw_unknown_field_error(mut self) -> Self {
-        self.raw_title_id_error = true;
         self
     }
 
@@ -721,12 +750,10 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
             kind.to_string(),
             create_missing,
         ));
-        if !self.title_id_movies_enabled {
-            return Err(AppError::Repository(if self.raw_title_id_error {
-                "Cannot query field \"searchTitlesBatch\" on type \"Query\".".to_string()
-            } else {
-                "metadata gateway does not support title-id queries".to_string()
-            }));
+        if !self.tmdb_primary_movie_matches {
+            // Recorded as a title batch above; answered with the same identity
+            // matches as the TVDB batch.
+            return self.search_tvdb_batch(queries, language).await;
         }
 
         assert_eq!(kind, "movie");
@@ -834,6 +861,24 @@ impl BlockingBulkHydrationMetadataGateway {
 
 #[async_trait]
 impl MetadataGateway for BlockingBulkHydrationMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -3378,7 +3423,8 @@ async fn movie_full_scan_creates_a_tmdb_primary_title_from_a_radarr_hint() {
     });
 
     let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway = Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies());
+    let metadata_gateway =
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches());
     let library_scanner = Arc::new(MutableLibraryScanner::default());
     library_scanner
         .set_library_files(vec![build_test_library_file(&movie_path)])
@@ -3575,8 +3621,9 @@ async fn movie_full_scan_keeps_every_identity_from_a_rich_gateway_match() {
     });
 
     let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway =
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies().with_rich_external_ids());
+    let metadata_gateway = Arc::new(
+        RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches().with_rich_external_ids(),
+    );
     let library_scanner = Arc::new(MutableLibraryScanner::default());
     library_scanner
         .set_library_files(vec![build_test_library_file(&movie_path)])
@@ -3637,100 +3684,6 @@ async fn movie_full_scan_keeps_every_identity_from_a_rich_gateway_match() {
             ("tvdb".to_string(), "444444".to_string()),
         ],
         "a scan-created movie keeps every identity the gateway returned"
-    );
-}
-
-/// An SMG old enough to lack `searchTitlesBatch` rejects it with a raw GraphQL
-/// validation error naming that field. The scan must read that as a capability
-/// signal and fall back to the legacy batched search -- not fail the whole
-/// batch and leave the library unmatched.
-#[tokio::test]
-async fn movie_full_scan_falls_back_on_a_raw_unknown_field_error() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let movie_root = tempdir.path().join("movies");
-    let movie_folder = movie_root.join("Legacy Fallback Movie (1999)");
-    std::fs::create_dir_all(&movie_folder).expect("create movie folder");
-    let movie_file = movie_folder.join("Legacy.Fallback.Movie.1999.mkv");
-    std::fs::write(&movie_file, b"movie").expect("write movie file");
-    let movie_path = movie_file.to_string_lossy().to_string();
-
-    let mut scan_hints = LibraryScanHintSet::new();
-    scan_hints.push(LibraryScanHint {
-        source: LibraryScanHintSource::ExternalImportRadarr,
-        facet: LibraryScanHintFacet::Movie,
-        path_key: crate::library_scan_file_leaf_key(&movie_path).expect("file leaf path key"),
-        full_path_key: crate::library_scan_file_full_path_key(&movie_path),
-        ids: vec![
-            ExternalIdHint::normalized(ExternalIdProvider::Tmdb, "800000")
-                .expect("normalized tmdb id"),
-        ],
-    });
-
-    let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway =
-        Arc::new(RecordingExactIdMetadataGateway::default().with_raw_unknown_field_error());
-    let library_scanner = Arc::new(MutableLibraryScanner::default());
-    library_scanner
-        .set_library_files(vec![build_test_library_file(&movie_path)])
-        .await;
-    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
-        settings,
-        library_scanner,
-        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        metadata_gateway.clone(),
-    );
-
-    app.update_media_settings(
-        &user,
-        MediaFacet::Movie,
-        empty_update_media_settings_with_roots(vec![build_root_folder_entry(&movie_root, true)]),
-    )
-    .await
-    .expect("store movie root");
-
-    let session = app
-        .trigger_library_scan_by_id_with_hints(
-            &user,
-            &scryer_domain::default_library_id_for_facet(&MediaFacet::Movie),
-            Some(scan_hints),
-        )
-        .await
-        .expect("trigger hinted movie scan");
-    let projected =
-        wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
-            matches!(
-                session.status,
-                LibraryScanStatus::Completed | LibraryScanStatus::Warning
-            )
-        })
-        .await;
-    assert_eq!(
-        projected.summary.as_ref().map(|summary| summary.matched),
-        Some(1)
-    );
-
-    assert!(
-        !metadata_gateway.title_batch_queries().await.is_empty(),
-        "the scan tries the title-id surface first"
-    );
-    let legacy_queries = metadata_gateway.batch_queries().await;
-    assert_eq!(legacy_queries.iter().flatten().count(), 1);
-    assert_eq!(
-        legacy_queries[0][0].tmdb_id.as_deref(),
-        Some("800000"),
-        "the raw validation error falls back to the legacy batched search"
-    );
-
-    let titles = app
-        .list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
-        .await
-        .expect("list movie titles");
-    assert_eq!(titles.len(), 1);
-    assert!(
-        titles[0]
-            .external_ids
-            .iter()
-            .any(|id| id.source.eq_ignore_ascii_case("tvdb") && id.value == "800000")
     );
 }
 
@@ -9053,7 +9006,7 @@ async fn movie_full_scan_assigns_the_root_the_candidate_was_found_under() {
         Arc::new(StoredSettingsRepo::default()),
         library_scanner,
         Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches()),
     );
 
     app.update_media_settings(
@@ -9207,7 +9160,7 @@ async fn movie_full_scan_heals_an_existing_title_onto_the_root_holding_its_files
         Arc::new(StoredSettingsRepo::default()),
         library_scanner,
         Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches()),
     );
 
     app.update_media_settings(

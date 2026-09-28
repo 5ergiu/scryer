@@ -941,23 +941,10 @@ impl AppUseCase {
         let search_limit = limit.saturating_mul(3).clamp(limit, 100);
         let gateway = &self.services.library.metadata_gateway;
         // The title surface finds every title, including a series SMG knows
-        // only from TMDB, which has no TVDB id. Only movies keep the legacy
-        // TVDB search fallback; series have none.
-        let results = match gateway
+        // only from TMDB, which has no TVDB id.
+        let results = gateway
             .search_titles(query, item.facet.as_str(), search_limit, language, year)
-            .await
-        {
-            Ok(results) => results,
-            Err(error)
-                if item.facet == MediaFacet::Movie
-                    && crate::catalog_workflow::title_queries_not_supported(&error) =>
-            {
-                gateway
-                    .search_tvdb_rich(query, item.facet.as_str(), search_limit, language, year)
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
+            .await?;
 
         // Candidates the library already owns are annotated, not dropped: when
         // the only real candidate is already there, hiding it made the dialog

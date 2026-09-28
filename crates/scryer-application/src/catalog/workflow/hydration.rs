@@ -147,7 +147,6 @@ pub(crate) struct HydrationTarget {
 pub(crate) struct HydrationBatchOutcome {
     pub(crate) hydrated_titles: HashMap<String, Title>,
     pub(crate) failed_titles: HashMap<String, String>,
-    pub(crate) deferred_titles: HashSet<String>,
 }
 
 /// Does this hydration failure reproduce identically on every retry?
@@ -162,33 +161,6 @@ pub(crate) fn is_non_retryable_hydration_failure(reason: &str) -> bool {
         || reason.contains("duplicate key value violates unique constraint"))
         && reason.contains("title_external_ids")
 }
-
-/// The selections the SMG title-id surface introduced, lowercased and quoted the
-/// way a GraphQL validation error names an unknown field. A gateway that
-/// predates the surface answers any of them with `Cannot query field "<name>"`,
-/// which is the same capability signal as the mapped gateway error -- and is
-/// what a caller sees when the raw validation error reaches this layer.
-const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 6] = [
-    "\"titles\"",
-    "\"resolvetitles\"",
-    "\"searchtitles\"",
-    "\"searchtitlesbatch\"",
-    "\"title_id\"",
-    // A gateway whose title surface predates series answers the `series`
-    // selection with `Cannot query field "series" on type "TitleBulkResult"`.
-    "\"titlebulkresult\"",
-];
-
-/// The client-capability declaration the title operations carry, lowercased the
-/// way a GraphQL validation error quotes it. A gateway that predates it answers
-/// `Unknown argument "clientCapabilities" on field "Query.titles"` (or rejects
-/// the `ClientCapability` type or `TMDB_PRIMARY_SERIES` value); that is the same
-/// "title surface unavailable" signal as an unknown title field.
-const TITLE_CAPABILITY_UNKNOWN_MARKERS: [&str; 3] = [
-    "unknown argument \"clientcapabilities\"",
-    "unknown type \"clientcapability\"",
-    "\"tmdb_primary_series\"",
-];
 
 /// Derive a numbering bridge from the episode orders TVDB publishes.
 ///
@@ -227,35 +199,6 @@ fn numbering_bridge_from_orders(
     })
 }
 
-/// Whether a gateway error means the SMG title-id surface (`titles`,
-/// `resolveTitles`, `searchTitles*`, including their `clientCapabilities`
-/// argument and the `series` half of `titles`) is unavailable, so the caller
-/// should use the legacy TVDB-keyed documents instead.
-pub(crate) fn title_queries_not_supported(error: &AppError) -> bool {
-    let AppError::Repository(message) = error else {
-        return false;
-    };
-    let message = message.to_ascii_lowercase();
-    if message.contains("title-id")
-        && (message.contains("does not support")
-            || message.contains("not supported")
-            || message.contains("unsupported"))
-    {
-        return true;
-    }
-
-    if TITLE_CAPABILITY_UNKNOWN_MARKERS
-        .iter()
-        .any(|marker| message.contains(marker))
-    {
-        return true;
-    }
-
-    message.contains("cannot query field")
-        && TITLE_ID_UNKNOWN_FIELD_MARKERS
-            .iter()
-            .any(|marker| message.contains(marker))
-}
 impl AppUseCase {
     async fn emit_hydration_started(&self, title: &Title) {
         self.emit_metadata_hydration_updated_event(title, MetadataHydrationState::Started, None)
@@ -298,79 +241,6 @@ mod location_lock_tests {
         assert!(matches!(result, Err(AppError::LocationOperationBusy(_))));
         let current = app.get_title(&user, &title.id).await.unwrap().unwrap();
         assert_eq!(current.metadata_fetched_at, before);
-    }
-}
-
-#[cfg(test)]
-mod title_id_capability_tests {
-    use super::*;
-
-    #[test]
-    fn the_mapped_gateway_error_is_a_capability_error() {
-        assert!(title_queries_not_supported(&AppError::Repository(
-            "metadata gateway does not support title-id queries".into()
-        )));
-    }
-
-    /// Every title-id operation names its own root field when an old gateway
-    /// rejects it, so the raw validation error must be read as the same
-    /// capability signal no matter which operation hit the gateway first.
-    #[test]
-    fn a_raw_unknown_field_error_is_a_capability_error_for_every_operation() {
-        for field in [
-            "titles",
-            "resolveTitles",
-            "searchTitles",
-            "searchTitlesBatch",
-            "title_id",
-        ] {
-            let error =
-                AppError::Repository(format!("Cannot query field \"{field}\" on type \"Query\"."));
-            assert!(
-                title_queries_not_supported(&error),
-                "unknown field {field} should be read as a capability error"
-            );
-        }
-    }
-
-    /// A pre-0.0.311 gateway rejects the capability declaration itself rather
-    /// than a field; that must read as "title surface unavailable" too.
-    #[test]
-    fn an_unknown_client_capabilities_argument_is_a_capability_error() {
-        for message in [
-            "Unknown argument \"clientCapabilities\" on field \"Query.titles\".",
-            "Unknown argument \"clientCapabilities\" on field \"Query.searchTitlesMulti\".",
-            "Unknown type \"ClientCapability\".",
-            "Value \"TMDB_PRIMARY_SERIES\" does not exist in \"ClientCapability\" enum.",
-        ] {
-            assert!(
-                title_queries_not_supported(&AppError::Repository(message.into())),
-                "{message} should be read as a capability error"
-            );
-        }
-    }
-
-    #[test]
-    fn a_title_surface_without_series_is_a_capability_error() {
-        assert!(title_queries_not_supported(&AppError::Repository(
-            "Cannot query field \"series\" on type \"TitleBulkResult\".".into()
-        )));
-    }
-
-    #[test]
-    fn unrelated_gateway_failures_are_not_capability_errors() {
-        assert!(!title_queries_not_supported(&AppError::Repository(
-            "metadata gateway request failed (503): upstream unavailable".into()
-        )));
-        assert!(!title_queries_not_supported(&AppError::Repository(
-            "Cannot query field \"seedMinimums\" on type \"Query\".".into()
-        )));
-        assert!(!title_queries_not_supported(&AppError::Repository(
-            "Unknown argument \"includeCredits\" on field \"Query.series\".".into()
-        )));
-        assert!(!title_queries_not_supported(&AppError::Validation(
-            "metadata gateway does not support title-id queries".into()
-        )));
     }
 }
 
@@ -1161,86 +1031,6 @@ impl AppUseCase {
                                 }
                             }
                         }
-                        Err(error) if title_queries_not_supported(&error) => {
-                            let fallback_targets = movie_targets
-                                .iter()
-                                .filter(|(_, movie_ref)| movie_ref.tvdb_id.is_some())
-                                .collect::<Vec<_>>();
-                            let fallback_ids = fallback_targets
-                                .iter()
-                                .filter_map(|(_, movie_ref)| movie_ref.tvdb_id)
-                                .collect::<Vec<_>>();
-                            for (target, movie_ref) in &movie_targets {
-                                if movie_ref.tvdb_id.is_none() {
-                                    outcome.deferred_titles.insert(target.title.id.clone());
-                                }
-                            }
-                            if !fallback_ids.is_empty() {
-                                let legacy_result = await_cancellable(
-                                    cancel_token,
-                                    self.services.library.metadata_gateway.get_metadata_bulk(
-                                        &fallback_ids,
-                                        &[],
-                                        &language,
-                                    ),
-                                )
-                                .await;
-                                let Some(legacy_result) = legacy_result else {
-                                    break 'languages;
-                                };
-                                match legacy_result {
-                                    Ok(legacy_result) => {
-                                        for (target, movie_ref) in fallback_targets {
-                                            let title_id = target.title.id.clone();
-                                            let tvdb_id =
-                                                movie_ref.tvdb_id.expect("filtered above");
-                                            let Some(movie) = legacy_result.movies.get(&tvdb_id)
-                                            else {
-                                                self.emit_hydration_failed(
-                                                    &target.title,
-                                                    "bulk metadata response missing title",
-                                                )
-                                                .await;
-                                                outcome.failed_titles.insert(
-                                                    title_id,
-                                                    "bulk metadata response missing title"
-                                                        .to_string(),
-                                                );
-                                                continue;
-                                            };
-                                            let refreshed = self
-                                                .complete_movie_hydration(
-                                                    target,
-                                                    movie.clone(),
-                                                    &language,
-                                                    &[],
-                                                )
-                                                .await?;
-                                            if refreshed.metadata_fetched_at.is_some() {
-                                                outcome
-                                                    .hydrated_titles
-                                                    .insert(refreshed.id.clone(), refreshed);
-                                            } else {
-                                                outcome.failed_titles.insert(
-                                                    title_id,
-                                                    "metadata could not be persisted".to_string(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        let reason = error.to_string();
-                                        for (target, _) in fallback_targets {
-                                            self.emit_hydration_failed(&target.title, &reason)
-                                                .await;
-                                            outcome
-                                                .failed_titles
-                                                .insert(target.title.id.clone(), reason.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         Err(error) => {
                             let reason = error.to_string();
                             for (target, _) in &movie_targets {
@@ -1377,34 +1167,16 @@ impl AppUseCase {
                     .ok_or_else(|| {
                         AppError::Repository("no movie external id found".to_string())
                     })?;
-                let (movie, redirects) = match self
+                let result = self
                     .services
                     .library
                     .metadata_gateway
                     .get_movie_titles(std::slice::from_ref(&movie_ref), language)
-                    .await
-                {
-                    Ok(result) => (
-                        result.by_ref_index.get(&0).cloned().ok_or_else(|| {
-                            AppError::NotFound("movie metadata response missing title".to_string())
-                        })?,
-                        result.redirects,
-                    ),
-                    Err(error) if title_queries_not_supported(&error) => {
-                        let tvdb_id = movie_ref.tvdb_id.ok_or_else(|| {
-                            AppError::Repository("no tvdb external id found".to_string())
-                        })?;
-                        (
-                            self.services
-                                .library
-                                .metadata_gateway
-                                .get_movie(tvdb_id, language)
-                                .await?,
-                            Vec::new(),
-                        )
-                    }
-                    Err(error) => return Err(error),
-                };
+                    .await?;
+                let movie = result.by_ref_index.get(&0).cloned().ok_or_else(|| {
+                    AppError::NotFound("movie metadata response missing title".to_string())
+                })?;
+                let redirects = result.redirects;
                 let refreshed = self
                     .complete_movie_hydration(&target, movie, language, &redirects)
                     .await?;

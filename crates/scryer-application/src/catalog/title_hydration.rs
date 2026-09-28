@@ -30,7 +30,6 @@ pub(crate) struct MovieSmgIdentityBackfillSummary {
 
 pub(crate) enum MovieSmgIdentityBackfillTick {
     Completed(MovieSmgIdentityBackfillSummary),
-    NotSupported,
     Cancelled,
     Failed(crate::AppError),
 }
@@ -134,9 +133,6 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
             _ = token.cancelled() => return MovieSmgIdentityBackfillTick::Cancelled,
             result = app.services.library.metadata_gateway.resolve_movie_titles(&references, false) => match result {
                 Ok(resolutions) => resolutions,
-                Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
-                    return MovieSmgIdentityBackfillTick::NotSupported;
-                }
                 Err(error) => return MovieSmgIdentityBackfillTick::Failed(error),
             },
         };
@@ -207,12 +203,8 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
 async fn run_movie_smg_identity_backfill_phase(
     app: &AppUseCase,
     token: &tokio_util::sync::CancellationToken,
-    enabled: &mut bool,
     last_tick: &mut Option<std::time::Instant>,
 ) -> bool {
-    if !*enabled {
-        return true;
-    }
     if last_tick
         .is_some_and(|last_tick| last_tick.elapsed() < MOVIE_SMG_IDENTITY_BACKFILL_TICK_INTERVAL)
     {
@@ -246,13 +238,6 @@ async fn run_movie_smg_identity_backfill_phase(
             }
             true
         }
-        MovieSmgIdentityBackfillTick::NotSupported => {
-            *enabled = false;
-            warn!(
-                "movie SMG identity backfill disabled because the metadata gateway does not support title-id queries"
-            );
-            true
-        }
         MovieSmgIdentityBackfillTick::Cancelled => false,
         MovieSmgIdentityBackfillTick::Failed(error) => {
             metrics::counter!("scryer_movie_smg_identity_backfill_errors_total").increment(1);
@@ -267,7 +252,6 @@ pub async fn start_background_title_hydration_loop(
     token: tokio_util::sync::CancellationToken,
 ) {
     let worker = PollingWorker::new("title_hydration", token.clone());
-    let mut movie_smg_identity_backfill_enabled = true;
     let mut movie_smg_identity_backfill_last_tick = None;
     info!(
         max_batch = TITLE_HYDRATION_MAX_BATCH,
@@ -309,7 +293,6 @@ pub async fn start_background_title_hydration_loop(
                 && !run_movie_smg_identity_backfill_phase(
                     &app,
                     &token,
-                    &mut movie_smg_identity_backfill_enabled,
                     &mut movie_smg_identity_backfill_last_tick,
                 )
                 .await
@@ -426,7 +409,6 @@ pub async fn start_background_title_hydration_loop(
                 && !run_movie_smg_identity_backfill_phase(
                     &app,
                     &token,
-                    &mut movie_smg_identity_backfill_enabled,
                     &mut movie_smg_identity_backfill_last_tick,
                 )
                 .await
@@ -456,24 +438,6 @@ pub async fn start_background_title_hydration_loop(
                 for title_id in outcome.hydrated_titles.keys() {
                     metrics::counter!("scryer_title_metadata_hydration_success_total").increment(1);
                     original_attempts.remove(title_id);
-                }
-
-                for title_id in outcome.deferred_titles {
-                    if let Err(error) = app
-                        .services
-                        .catalog
-                        .titles
-                        .clear_title_metadata_hydration_retry_state(&title_id)
-                        .await
-                    {
-                        warn!(
-                            hydration_source = HydrationSource::BackgroundDue.as_str(),
-                            title_id = %title_id,
-                            error = %error,
-                            "title hydration loop: failed to park title unsupported by the legacy metadata gateway"
-                        );
-                    }
-                    original_attempts.remove(&title_id);
                 }
 
                 for (title_id, reason) in outcome.failed_titles {
@@ -546,7 +510,6 @@ pub async fn start_background_title_hydration_loop(
             && !run_movie_smg_identity_backfill_phase(
                 &app,
                 &token,
-                &mut movie_smg_identity_backfill_enabled,
                 &mut movie_smg_identity_backfill_last_tick,
             )
             .await
