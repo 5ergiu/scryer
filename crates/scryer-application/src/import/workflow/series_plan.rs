@@ -670,7 +670,8 @@ fn plan_parsed_pack_identity(
         };
         let absolute_numbers = parsed_absolute_numbers(identity);
         if !absolute_numbers.is_empty() {
-            let Some(absolute) = catalog_episodes_for_absolute_numbers(catalog, &absolute_numbers)
+            let Some(absolute) =
+                catalog_episodes_for_raw_absolute_numbers(catalog, &absolute_numbers)
             else {
                 return missing_catalog_member("absolute episode companion");
             };
@@ -839,6 +840,29 @@ fn catalog_episodes_for_absolute_numbers(
 ) -> Option<Vec<scryer_domain::Episode>> {
     // Matched on the title's one absolute scale; see `AbsoluteScale`.
     let scale = scryer_domain::AbsoluteScale::for_catalog(catalog);
+    catalog_episodes_for_absolute_numbers_on_scale(catalog, numbers, scale)
+}
+
+/// Catalog episodes for absolutes read on the raw scale, whatever scale the
+/// title matches on. A resolved numbering translation stamps the catalog
+/// episode's raw `absolute_number`, so a stamped companion is only comparable
+/// on that scale.
+fn catalog_episodes_for_raw_absolute_numbers(
+    catalog: &[scryer_domain::Episode],
+    numbers: &[u32],
+) -> Option<Vec<scryer_domain::Episode>> {
+    catalog_episodes_for_absolute_numbers_on_scale(
+        catalog,
+        numbers,
+        scryer_domain::AbsoluteScale::Raw,
+    )
+}
+
+fn catalog_episodes_for_absolute_numbers_on_scale(
+    catalog: &[scryer_domain::Episode],
+    numbers: &[u32],
+    scale: scryer_domain::AbsoluteScale,
+) -> Option<Vec<scryer_domain::Episode>> {
     resolve_unique_catalog_numbers(numbers, |number| {
         catalog
             .iter()
@@ -1318,6 +1342,81 @@ mod series_plan_tests {
         let catalog = vec![catalog_episode("ep-1", 1, 1), catalog_episode("ep-2", 2, 2)];
         assert!(matches!(
             plan_parsed_pack_identity(false, &hybrid_identity(2), None, &catalog),
+            PlannedMemberDraft::Hold {
+                reason_code: "member_identity_conflict",
+                ..
+            }
+        ));
+    }
+
+    /// A catalog episode whose contiguous absolute differs from its raw one,
+    /// which puts the whole catalog on the contiguous scale.
+    fn contiguous_catalog_episode(
+        id: &str,
+        episode: u32,
+        raw_absolute: u32,
+        contiguous_absolute: i32,
+    ) -> scryer_domain::Episode {
+        scryer_domain::Episode {
+            contiguous_absolute_number: Some(contiguous_absolute),
+            ..catalog_episode(id, episode, raw_absolute)
+        }
+    }
+
+    /// Two episodes the raw scale skips past, so raw runs two ahead of
+    /// contiguous from S01E50 on.
+    fn contiguous_scaled_catalog() -> Vec<scryer_domain::Episode> {
+        (50..=54)
+            .map(|episode| {
+                contiguous_catalog_episode(
+                    &format!("ep-{episode}"),
+                    episode,
+                    episode + 2,
+                    episode as i32,
+                )
+            })
+            .collect()
+    }
+
+    fn stamped_identity(episodes: &[u32], absolutes: &[u32]) -> crate::ParsedEpisodeMetadata {
+        crate::ParsedEpisodeMetadata {
+            season: Some(1),
+            season_numbers: vec![1],
+            episode_numbers: episodes.to_vec(),
+            absolute_episode: absolutes.first().copied(),
+            absolute_episode_numbers: absolutes.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_raw_stamped_member_resolves_on_a_contiguous_scaled_catalog() {
+        let catalog = contiguous_scaled_catalog();
+        assert_eq!(
+            scryer_domain::AbsoluteScale::for_catalog(&catalog),
+            scryer_domain::AbsoluteScale::Contiguous
+        );
+
+        assert!(matches!(
+            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[53]), None, &catalog),
+            PlannedMemberDraft::Resolved(ref episodes)
+                if episodes.len() == 1 && episodes[0].id == "ep-51"
+        ));
+        assert!(matches!(
+            plan_parsed_pack_identity(true, &stamped_identity(&[51, 52], &[53, 54]), None, &catalog),
+            PlannedMemberDraft::Resolved(ref episodes)
+                if episodes.iter().map(|episode| episode.id.as_str()).collect::<Vec<_>>()
+                    == ["ep-51", "ep-52"]
+        ));
+    }
+
+    #[test]
+    fn a_wrong_stamped_absolute_is_still_held_on_a_contiguous_scaled_catalog() {
+        let catalog = contiguous_scaled_catalog();
+
+        // 55 is S01E53's raw absolute, not S01E51's.
+        assert!(matches!(
+            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[55]), None, &catalog),
             PlannedMemberDraft::Hold {
                 reason_code: "member_identity_conflict",
                 ..
