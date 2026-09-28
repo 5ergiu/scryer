@@ -3787,7 +3787,7 @@ impl AppUseCase {
         Ok(seed)
     }
 
-    async fn finish_job_run(
+    pub(crate) async fn finish_job_run(
         &self,
         mut run: JobRunRecord,
         event_actor: DomainEventActor,
@@ -3815,10 +3815,11 @@ impl AppUseCase {
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
         let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        self.runtime
+        let rerun = self
+            .runtime
             .jobs
             .job_run_tracker
-            .upsert_active_run(JobRun::from_record(&updated, library_scan_progress))
+            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, library_scan_progress))
             .await;
         let payload = if matches!(run.status, JobRunStatus::Failed) {
             DomainEventPayload::JobRunFailed(JobRunFailedEventData {
@@ -3840,7 +3841,28 @@ impl AppUseCase {
                 payload,
             ))
             .await;
+        if let Some(actor) = rerun {
+            self.start_requested_rerun(actor, updated.job_key);
+        }
         Ok(())
+    }
+
+    /// Start the run asked for while the one that just ended was active.
+    /// Boxed with a named `Send` future so the job runner, which ends runs
+    /// here, does not recurse into its own future type.
+    fn start_requested_rerun(&self, actor: User, job_key: JobKey) {
+        let app = self.clone();
+        let start: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(async move {
+                if let Err(error) = app.start_manual_job_run(&actor, job_key).await {
+                    warn!(
+                        job_key = job_key.as_str(),
+                        error = %error,
+                        "could not start a job run requested while the job was running"
+                    );
+                }
+            });
+        tokio::spawn(start);
     }
 
     async fn fail_job_run(
@@ -3858,10 +3880,11 @@ impl AppUseCase {
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
         let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        self.runtime
+        let rerun = self
+            .runtime
             .jobs
             .job_run_tracker
-            .upsert_active_run(JobRun::from_record(&updated, None))
+            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, None))
             .await;
         let _ = self
             .append_domain_event(new_job_run_domain_event(
@@ -3874,6 +3897,9 @@ impl AppUseCase {
                 }),
             ))
             .await;
+        if let Some(actor) = rerun {
+            self.start_requested_rerun(actor, updated.job_key);
+        }
         Ok(())
     }
 }

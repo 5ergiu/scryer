@@ -107,12 +107,8 @@ async fn sync_now_clears_the_stored_fingerprint_so_the_list_is_read_in_full() {
     assert_eq!(list_sync_starts(&harness).await, 1);
 }
 
-#[tokio::test]
-async fn following_a_list_starts_its_first_sync_at_once() {
-    let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
-
-    let followed = harness
+async fn follow_fixture_list(harness: &MediaRequestTestHarness) -> scryer_domain::ListSubscription {
+    harness
         .app
         .subscribe_public_list(
             &list_manager(),
@@ -130,7 +126,46 @@ async fn following_a_list_starts_its_first_sync_at_once() {
             },
         )
         .await
-        .expect("list followed");
+        .expect("list followed")
+}
+
+/// Waits for a list sync run other than `other_than` to end.
+async fn next_list_sync_run_end(
+    runs: &mut tokio::sync::broadcast::Receiver<JobRun>,
+    other_than: Option<&str>,
+) -> JobRun {
+    within_deadline("a list sync run to end", async {
+        loop {
+            let run = runs.recv().await.expect("job run events stay open");
+            if run.job_key == JobKey::ListSync
+                && run.status.is_terminal()
+                && Some(run.id.as_str()) != other_than
+            {
+                return run;
+            }
+        }
+    })
+    .await
+}
+
+fn sync_runs_of(harness: &MediaRequestTestHarness, subscription_id: &str) -> usize {
+    harness
+        .lists
+        .runs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|run| run.subscription_id == subscription_id)
+        .count()
+}
+
+#[tokio::test]
+async fn following_a_list_starts_its_first_sync_at_once() {
+    let harness = bootstrap_media_request_app();
+    set_experimental_features(&harness, true).await;
+    let mut runs = harness.app.runtime.jobs.job_run_tracker.subscribe();
+
+    let followed = follow_fixture_list(&harness).await;
 
     let stored = harness.lists.subscription(&followed.id);
     assert!(stored.sync.next_at.is_some(), "the new list is due now");
@@ -138,6 +173,74 @@ async fn following_a_list_starts_its_first_sync_at_once() {
         list_sync_starts(&harness).await,
         1,
         "following starts the first sync instead of waiting for the schedule"
+    );
+    next_list_sync_run_end(&mut runs, None).await;
+    assert_eq!(sync_runs_of(&harness, &followed.id), 1, "synced once");
+}
+
+#[tokio::test]
+async fn a_list_followed_while_a_sync_is_running_is_synced_when_that_sync_ends() {
+    let harness = bootstrap_media_request_app();
+    set_experimental_features(&harness, true).await;
+    let app = &harness.app;
+    let tracker = &app.runtime.jobs.job_run_tracker;
+    // A sync already mid-pass: it read its due set before the list below
+    // was followed, so it will not reach that list.
+    let now = chrono::Utc::now();
+    let running = JobRunRecord {
+        id: "list-sync-in-progress".to_string(),
+        job_key: JobKey::ListSync,
+        operation_type: JobKey::ListSync.as_str().to_string(),
+        status: JobRunStatus::Running,
+        trigger_source: JobTriggerSource::ScheduledInterval,
+        actor_user_id: None,
+        progress_json: None,
+        summary_json: None,
+        summary_text: None,
+        error_text: None,
+        started_at: now,
+        completed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    tracker
+        .upsert_active_run(JobRun::from_record(&running, None))
+        .await;
+
+    let followed = follow_fixture_list(&harness).await;
+    // "Sync now" during the same run goes the same way.
+    app.sync_public_list_now(&list_manager(), &followed.id)
+        .await
+        .expect("sync now accepted");
+    assert_eq!(
+        list_sync_starts(&harness).await,
+        0,
+        "no second sync runs beside the one in progress"
+    );
+    assert_eq!(sync_runs_of(&harness, &followed.id), 0);
+
+    let mut runs = tracker.subscribe();
+    app.finish_job_run(
+        running,
+        crate::domain_events::DomainEventActor::system(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the running sync ends");
+
+    next_list_sync_run_end(&mut runs, Some("list-sync-in-progress")).await;
+    assert_eq!(
+        list_sync_starts(&harness).await,
+        1,
+        "requests made during one run share a single follow-up run"
+    );
+    assert_eq!(
+        sync_runs_of(&harness, &followed.id),
+        1,
+        "the followed list is synced without waiting for the schedule"
     );
 }
 

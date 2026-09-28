@@ -724,6 +724,9 @@ pub struct LibraryProbeSignature {
 struct JobRunTrackerState {
     active_runs: HashMap<String, JobRun>,
     next_run_at: HashMap<JobKey, DateTime<Utc>>,
+    /// One more run asked for while a run of the job was active, with the
+    /// user who asked. Taken when the last active run of that job ends.
+    rerun_requests: HashMap<JobKey, scryer_domain::User>,
 }
 
 #[derive(Clone)]
@@ -846,15 +849,50 @@ impl JobRunTracker {
     }
 
     pub async fn upsert_active_run(&self, run: JobRun) {
-        {
+        self.upsert_active_run_taking_rerun(run).await;
+    }
+
+    /// Record `run` like [`Self::upsert_active_run`]. When it ends the last
+    /// active run of its job, also take that job's pending rerun request, in
+    /// the same step, so a request made while the run was active is never
+    /// left behind.
+    pub async fn upsert_active_run_taking_rerun(&self, run: JobRun) -> Option<scryer_domain::User> {
+        let rerun = {
             let mut state = self.state.lock().await;
             if run.status.is_terminal() {
                 state.active_runs.remove(&run.id);
+                let still_active = state
+                    .active_runs
+                    .values()
+                    .any(|active| active.job_key == run.job_key);
+                if still_active {
+                    None
+                } else {
+                    state.rerun_requests.remove(&run.job_key)
+                }
             } else {
                 state.active_runs.insert(run.id.clone(), run.clone());
+                None
             }
-        }
+        };
         let _ = self.broadcast.send(run);
+        rerun
+    }
+
+    /// Ask for one more run of `job_key` once the active one ends. Returns
+    /// false, recording nothing, when no run of the job is active. Requests
+    /// made during one run collapse into a single rerun.
+    pub async fn request_rerun_if_active(
+        &self,
+        job_key: JobKey,
+        actor: &scryer_domain::User,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if !state.active_runs.values().any(|run| run.job_key == job_key) {
+            return false;
+        }
+        state.rerun_requests.insert(job_key, actor.clone());
+        true
     }
 
     pub async fn merge_library_scan_progress(&self, session: LibraryScanSession) {
@@ -1149,6 +1187,118 @@ mod tests {
             .upsert_active_run(active_after_merge[0].clone())
             .await;
         assert!(tracker.list_active().await.is_empty());
+    }
+
+    fn list_sync_run(id: &str, status: JobRunStatus) -> JobRun {
+        let now = Utc::now();
+        JobRun {
+            id: id.to_string(),
+            operation_type: JobKey::ListSync.as_str().to_string(),
+            actor_user_id: None,
+            job_key: JobKey::ListSync,
+            display_name: JobKey::ListSync.display_name().to_string(),
+            category: JobCategory::Maintenance,
+            section: JobSection::Maintenance,
+            status,
+            trigger_source: JobTriggerSource::ScheduledInterval,
+            started_at: now,
+            completed_at: status.is_terminal().then_some(now),
+            summary_json: None,
+            summary_text: None,
+            error_text: None,
+            progress_json: None,
+            library_scan_progress: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rerun_is_refused_when_no_run_of_the_job_is_active() {
+        let tracker = JobRunTracker::new();
+        let requester = scryer_domain::User::new_admin("requester");
+
+        assert!(
+            !tracker
+                .request_rerun_if_active(JobKey::ListSync, &requester)
+                .await
+        );
+
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+        let rerun = tracker
+            .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+            .await;
+        assert!(rerun.is_none(), "a refused request leaves nothing behind");
+    }
+
+    #[tokio::test]
+    async fn requests_during_a_run_collapse_into_one_rerun_taken_when_it_ends() {
+        let tracker = JobRunTracker::new();
+        let first = scryer_domain::User::new_admin("first-requester");
+        let second = scryer_domain::User::new_admin("second-requester");
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &first)
+                .await
+        );
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &second)
+                .await
+        );
+        assert!(
+            !tracker
+                .request_rerun_if_active(JobKey::RssSync, &first)
+                .await,
+            "another job's run does not count"
+        );
+
+        let rerun = tracker
+            .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Failed))
+            .await
+            .expect("the run's end takes the request");
+        assert_eq!(rerun.username, second.username);
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+                .await
+                .is_none(),
+            "the request is taken once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_waits_for_the_last_active_run_of_the_job() {
+        let tracker = JobRunTracker::new();
+        let requester = scryer_domain::User::new_admin("requester");
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+        tracker
+            .upsert_active_run(list_sync_run("run-2", JobRunStatus::Running))
+            .await;
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &requester)
+                .await
+        );
+
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+                .await
+                .is_none()
+        );
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-2", JobRunStatus::Completed))
+                .await
+                .is_some()
+        );
     }
 
     /// One gauge series as seen by the local recorder: `(name, labels, value)`.
