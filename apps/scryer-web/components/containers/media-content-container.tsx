@@ -4240,11 +4240,13 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     }));
 
     try {
-      // Catalog rows may not carry external ids, so read them while the title
-      // still exists. The exclusion itself is only sent after the delete.
-      let exclusion: AddListExclusionInput | null = null;
+      // The exclusion is recorded first, as its own request, while the title
+      // and its external ids still exist. It never changes what the delete
+      // removes; if it cannot be recorded, the title is left in place.
       if (excludeFromLists) {
-        exclusion = exclusionInputFromTitle(titleToDelete);
+        // Catalog rows may not carry external ids, so read them if needed.
+        let exclusion: AddListExclusionInput | null =
+          exclusionInputFromTitle(titleToDelete);
         if (!exclusion) {
           const lookup = await client
             .query(listExclusionTitleQuery, { id: titleId }, { requestPolicy: "network-only" })
@@ -4252,6 +4254,19 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
             .catch(() => null);
           const found = lookup?.data?.title as TitleRecord | null | undefined;
           exclusion = found ? exclusionInputFromTitle(found) : null;
+        }
+        if (!exclusion) {
+          setGlobalStatus(t("lists.exclusions.deleteNoIds", { name: titleToDelete.name }));
+          return;
+        }
+        const exclusionFailed = await client
+          .mutation(addListExclusionMutation, { input: exclusion })
+          .toPromise()
+          .then((exclusionResult) => Boolean(exclusionResult.error))
+          .catch(() => true);
+        if (exclusionFailed) {
+          setGlobalStatus(t("lists.exclusions.deleteFailed", { name: titleToDelete.name }));
+          return;
         }
       }
 
@@ -4309,23 +4324,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         handleCloseOverview();
       }
       setGlobalStatus(`Queued deletion for ${titleToDelete.name}.`);
-
-      // A separate request made only after the delete was accepted, so it can
-      // never change what the delete removes.
-      if (excludeFromLists && acceptedIds.includes(titleId)) {
-        if (!exclusion) {
-          setGlobalStatus(t("lists.exclusions.deleteNoIds", { name: titleToDelete.name }));
-        } else {
-          const exclusionFailed = await client
-            .mutation(addListExclusionMutation, { input: exclusion })
-            .toPromise()
-            .then((exclusionResult) => Boolean(exclusionResult.error))
-            .catch(() => true);
-          if (exclusionFailed) {
-            setGlobalStatus(t("lists.exclusions.deleteFailed", { name: titleToDelete.name }));
-          }
-        }
-      }
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : t("status.failedToDelete"),
