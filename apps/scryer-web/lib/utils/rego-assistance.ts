@@ -31,14 +31,27 @@ export function regoFields(family: RegoFamily): RegoField[] {
   return [...fields.values()];
 }
 
+/**
+ * One bracketed index in a Rego path: `[0]`, `[_]`, `[ i ]` or `[ ]`. The
+ * trailing whitespace belongs to the optional index so blank brackets split
+ * their whitespace only one way; a run of `[ ]` would otherwise backtrack
+ * exponentially while the user types.
+ */
+export const REGO_INDEX_SOURCE = String.raw`\[\s*(?:(?:\d+|[A-Za-z_]\w*)\s*)?\]`;
+
+const REGO_INDEX_GLOBAL = new RegExp(REGO_INDEX_SOURCE, "g");
+const REGO_COMPLETION_PATH = new RegExp(
+  String.raw`(?:\b(?:input|scryer|object|strings|array|regex)\b(?:\.[A-Za-z_]\w*|${REGO_INDEX_SOURCE})*\.)?(?:[A-Za-z_]\w*)?$`,
+);
+
 export function normalizeRegoPath(path: string): string {
-  return path.replace(/\[\s*(?:\d+|[A-Za-z_]\w*)?\s*\]/g, "[]");
+  return path.replace(REGO_INDEX_GLOBAL, "[]");
 }
 
 export function regoCompletionContext(source: string, position: number) {
   if (!regoCodeAt(source, position)) return null;
   const before = source.slice(0, position);
-  const match = before.match(/(?:\b(?:input|scryer|object|strings|array|regex)\b(?:\.[A-Za-z_]\w*|\[\s*(?:\d+|[A-Za-z_]\w*)?\s*\])*\.)?(?:[A-Za-z_]\w*)?$/);
+  const match = before.match(REGO_COMPLETION_PATH);
   if (!match) return null;
   const text = match[0];
   const dot = text.lastIndexOf(".");

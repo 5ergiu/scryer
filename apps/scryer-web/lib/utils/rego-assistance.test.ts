@@ -4,7 +4,7 @@ import test from "node:test";
 import { EditorState, type Transaction } from "@codemirror/state";
 import { snippet, nextSnippetField } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
-import { regoCatalog, regoContracts, regoFields, regoFieldCompletions, regoCompletionContext, type RegoFamily } from "./rego-assistance.ts";
+import { regoCatalog, regoContracts, regoFields, regoFieldCompletions, regoCompletionContext, normalizeRegoPath, REGO_INDEX_SOURCE, type RegoFamily } from "./rego-assistance.ts";
 import { regoDiagnostics, regoSourceLine } from "./rego-diagnostics.ts";
 
 for (const family of ["release", "request", "maintenance"] as RegoFamily[]) {
@@ -45,6 +45,35 @@ test("cursor context excludes comments, strings and unsupported aliases", () => 
   assert.equal(regoCompletionContext("input.", 6)?.from, 6);
   const numbered = "input.release.is_hdr10";
   assert.equal(regoCompletionContext(numbered, numbered.length)?.prefix, "is_hdr10");
+});
+
+test("the bracket index accepts exactly what the whitespace-ambiguous form accepted", () => {
+  const ambiguous = /^\[\s*(?:\d+|[A-Za-z_]\w*)?\s*\]$/;
+  const current = new RegExp(`^${REGO_INDEX_SOURCE}$`);
+  const alphabet = ["[", "]", " ", "\t", "1", "a", "_", "-"];
+  let candidates = [""];
+  for (let length = 1; length <= 6; length++) {
+    candidates = candidates.flatMap((prefix) => alphabet.map((char) => prefix + char));
+    for (const candidate of candidates) {
+      assert.equal(current.test(candidate), ambiguous.test(candidate), JSON.stringify(candidate));
+    }
+  }
+  assert.equal(normalizeRegoPath("input.file.audio_streams[ ].codec"), "input.file.audio_streams[].codec");
+  assert.equal(normalizeRegoPath("input.file.audio_streams[ 3 ][i]"), "input.file.audio_streams[][]");
+});
+
+test("a long run of blank bracket groups does not stall completion or normalization", () => {
+  const blanks = "[  ]".repeat(200);
+  for (const tail of ["-", " ", "["]) {
+    const source = `input${blanks}${tail}`;
+    const context = regoCompletionContext(source, source.length);
+    assert.equal(context?.parent ?? "", "");
+  }
+  const typed = `input.file.audio_streams${blanks}.co`;
+  const context = regoCompletionContext(typed, typed.length)!;
+  assert.equal(context.parent, `input.file.audio_streams${"[]".repeat(200)}`);
+  assert.equal(context.prefix, "co");
+  assert.equal(normalizeRegoPath(`input${"[  ".repeat(200)}`), `input${"[  ".repeat(200)}`);
 });
 
 test("every field and catalog item has a localized description", () => {
