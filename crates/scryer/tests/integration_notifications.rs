@@ -529,10 +529,18 @@ fn lifecycle_metadata(
         })
         .collect::<Vec<_>>();
 
+    // Mirrors `primary_file_path` in the dispatcher: the reported path is the file that now
+    // exists, so a rename (old deleted first, new created second) reports the new path.
+    let primary_path = updates
+        .iter()
+        .find(|(_, update_type)| *update_type == "created")
+        .unwrap_or(&updates[0])
+        .0;
+
     HashMap::from([
         ("title_name".to_string(), json!(title_name)),
         ("title_facet".to_string(), json!(facet)),
-        ("file_path".to_string(), json!(updates[0].0)),
+        ("file_path".to_string(), json!(primary_path)),
         ("media_updates".to_string(), Value::Array(media_updates)),
         ("external_ids".to_string(), external_ids),
     ])
@@ -2061,6 +2069,8 @@ async fn notification_dispatcher_delivers_structured_lifecycle_metadata() {
             "rename",
             "Renamed: Example Show".to_string(),
             "Renamed 1 file(s) for 'Example Show'.".to_string(),
+            // The rename's primary path is the surviving file; the discarded old path only
+            // appears inside media_updates.
             lifecycle_metadata(
                 "Example Show",
                 "series",
