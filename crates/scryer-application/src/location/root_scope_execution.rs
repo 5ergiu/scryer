@@ -250,6 +250,25 @@ impl AppUseCase {
             message: refusal.detail,
             code: refusal.code,
         })?;
+        // A path change makes the destination a new root, so it must stay
+        // clear of the custom recycle bin like any other root. Refused here,
+        // before anything moves, rather than when the root is repointed.
+        if destination_root.is_none()
+            && let Some((_, reason)) = self
+                .recycle_bin_conflict_for_library_roots(
+                    std::iter::empty(),
+                    [destination_root_path.to_string_lossy().as_ref()],
+                )
+                .await
+        {
+            return Err(AppError::LocationRootRefused {
+                message: format!(
+                    "{} cannot become a root: {reason}",
+                    destination_root_path.display()
+                ),
+                code: crate::location::root_scope::refusal_codes::CHANGE_DESTINATION_CONFLICTS_WITH_RECYCLE_BIN,
+            });
+        }
 
         // One read of the library's titles answers both questions: which titles
         // the operation accounts for (FR-023) and which titles the destination

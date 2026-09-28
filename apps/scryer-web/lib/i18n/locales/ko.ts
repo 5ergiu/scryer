@@ -2370,6 +2370,7 @@ const ko: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "새 경로에 이미 콘텐츠가 있습니다. 비어 있거나 새로운 디렉터리를 선택하세요.",
   "rootChange.refusal.root_change_destination_parent_missing": "새 경로의 상위 디렉터리가 없습니다.",
   "rootChange.refusal.root_change_destination_is_configured_root": "그 경로는 이미 다른 라이브러리의 루트로 설정되어 있습니다.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "그 경로는 사용자 지정 휴지통과 겹칩니다. 휴지통을 포함하거나 휴지통 안에 있는 경로는 사용할 수 없습니다.",
   "rootChange.refusal.root_change_mode_not_supported": "루트 변경은 항상 파일을 옮깁니다. '파일이 이미 있음'은 여기서 제공되지 않습니다.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "절대 경로를 입력하세요.",
   "rootChange.refusal.root_consolidation_same_root": "루트를 자기 자신으로 통합할 수 없습니다.",

@@ -2295,6 +2295,7 @@ const zh_CN: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "新路径中已有内容。请选择一个空目录或新目录。",
   "rootChange.refusal.root_change_destination_parent_missing": "新路径的上级目录不存在。",
   "rootChange.refusal.root_change_destination_is_configured_root": "该路径已被配置为另一个媒体库的根目录。",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "该路径与自定义回收站重叠：它既不能包含回收站，也不能位于回收站之内。",
   "rootChange.refusal.root_change_mode_not_supported": "更改根目录总是移动文件；此处不提供“文件已就位”。",
   "rootChange.refusal.root_consolidation_path_not_absolute": "请填写绝对路径。",
   "rootChange.refusal.root_consolidation_same_root": "根目录不能并入其自身。",

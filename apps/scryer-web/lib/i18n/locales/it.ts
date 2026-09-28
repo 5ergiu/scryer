@@ -2456,6 +2456,7 @@ const it: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "Il nuovo percorso contiene già dei dati. Scegli una directory vuota o nuova.",
   "rootChange.refusal.root_change_destination_parent_missing": "La directory superiore del nuovo percorso non esiste.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Quel percorso è già configurato come radice di un'altra libreria.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Quel percorso si sovrappone al cestino personalizzato: non deve contenere il cestino né trovarsi al suo interno.",
   "rootChange.refusal.root_change_mode_not_supported": "Un cambio di radice sposta sempre i file; «i file sono già lì» non è disponibile qui.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Indica un percorso assoluto.",
   "rootChange.refusal.root_consolidation_same_root": "Una radice non può confluire in se stessa.",

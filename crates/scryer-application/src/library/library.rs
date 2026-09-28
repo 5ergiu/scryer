@@ -537,6 +537,28 @@ impl AppUseCase {
         Ok(())
     }
 
+    /// Refuse a new or changed root that would hold, be, or sit inside the
+    /// custom recycle bin. `existing_roots` are the library's roots before the
+    /// edit; those are never checked, so an edit that keeps them still saves.
+    pub(crate) async fn validate_library_roots_against_recycle_bin(
+        &self,
+        existing_roots: &[scryer_domain::LibraryRoot],
+        roots: &[LibraryRootDraft],
+    ) -> AppResult<()> {
+        if let Some((path, reason)) = self
+            .recycle_bin_conflict_for_library_roots(
+                existing_roots.iter().map(|root| root.path.as_str()),
+                roots.iter().map(|root| root.path.as_str()),
+            )
+            .await
+        {
+            return Err(AppError::Validation(format!(
+                "library root '{path}' cannot be used: {reason}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn require_library_management_permission(
         &self,
         actor: &User,
@@ -593,6 +615,8 @@ impl AppUseCase {
             ));
         }
         self.validate_library_root_conflicts(None, &roots).await?;
+        self.validate_library_roots_against_recycle_bin(&[], &roots)
+            .await?;
         let now = Utc::now();
         let library = Library {
             id: Id::new().0,
@@ -678,6 +702,10 @@ impl AppUseCase {
         };
         self.validate_library_root_conflicts(Some(&existing.id), &roots)
             .await?;
+        if roots_were_provided {
+            self.validate_library_roots_against_recycle_bin(&existing.roots, &roots)
+                .await?;
+        }
         let slug = if existing.is_default {
             scryer_domain::default_library_slug_for_facet(&existing.facet).to_string()
         } else {

@@ -126,6 +126,39 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// The first of `roots` a configured custom recycle bin conflicts with,
+    /// and why: the root would hold the bin, be the bin, or sit inside it.
+    ///
+    /// Only roots being added or changed are checked, so a root in
+    /// `existing_roots` that already conflicts never blocks an edit. Without a
+    /// custom bin there is nothing to check; one that is refused whatever the
+    /// roots are is not a conflict of any root either.
+    pub(crate) async fn recycle_bin_conflict_for_library_roots<'a>(
+        &self,
+        existing_roots: impl IntoIterator<Item = &'a str>,
+        roots: impl IntoIterator<Item = &'a str>,
+    ) -> Option<(String, String)> {
+        let (_, custom_path, _) = self.recycle_bin_config_values().await;
+        let bin = PathBuf::from(custom_path?);
+        if Self::recycle_bin_validation_error(&bin, true, &[]).is_some() {
+            return None;
+        }
+        let normalize = |root: &str| Self::normalize_recycle_config_path(Path::new(root.trim()));
+        let existing_roots = existing_roots
+            .into_iter()
+            .map(normalize)
+            .collect::<HashSet<_>>();
+        roots.into_iter().find_map(|root| {
+            let normalized = normalize(root);
+            if normalized.as_os_str().is_empty() || existing_roots.contains(&normalized) {
+                return None;
+            }
+            Self::recycle_bin_validation_error(&bin, true, std::slice::from_ref(&normalized))
+                .map(|reason| (root.trim().to_string(), reason))
+        })
+    }
+}
+impl AppUseCase {
     /// Every current library root a custom recycle bin must stay outside,
     /// whichever root the file being recycled comes from.
     ///

@@ -974,6 +974,9 @@ pub mod refusal_codes {
     /// (see `AppUseCase::resolve_root_scope_destination`).
     pub const CHANGE_DESTINATION_IS_CONFIGURED_ROOT: &str =
         "root_change_destination_is_configured_root";
+    /// The new path would hold the custom recycle bin, be it, or sit inside it.
+    pub const CHANGE_DESTINATION_CONFLICTS_WITH_RECYCLE_BIN: &str =
+        "root_change_destination_conflicts_with_recycle_bin";
     /// Source and destination are the same root.
     pub const FOLD_SAME_ROOT: &str = "root_consolidation_same_root";
     /// The destination root is not a readable directory right now, so what it

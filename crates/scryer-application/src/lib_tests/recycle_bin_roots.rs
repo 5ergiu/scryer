@@ -575,3 +575,278 @@ async fn title_delete_leaves_a_custom_bin_untouched_when_library_roots_are_unrea
     assert!(deleted_entry.exists());
     assert!(kept_entry.exists());
 }
+
+// ── A new or changed library root must stay clear of the custom bin ─────────
+
+fn root_draft(path: &Path) -> LibraryRootDraft {
+    LibraryRootDraft {
+        path: path.to_string_lossy().to_string(),
+        is_default: true,
+    }
+}
+
+/// A custom bin at `<temp>/disk/bin`, with `disk` and the bin created.
+async fn app_with_custom_bin(fixture: &Fixture) -> (AppUseCase, User, PathBuf) {
+    let bin = fixture.temp.path().join("disk").join("bin");
+    std::fs::create_dir_all(&bin).expect("create custom bin");
+    let (app, user) = movie_app(&fixture.root_a()).await;
+    let app =
+        app.with_test_overrides(|services| services.with_settings(settings_with_bin(Some(&bin))));
+    (app, user, bin)
+}
+
+async fn library_names(app: &AppUseCase) -> Vec<String> {
+    app.services
+        .catalog
+        .libraries
+        .list(None)
+        .await
+        .expect("list libraries")
+        .into_iter()
+        .map(|library| library.name)
+        .collect()
+}
+
+fn assert_bin_conflict(error: AppError, root: &Path) {
+    match error {
+        AppError::Validation(message) => {
+            assert!(
+                message.contains(&*root.to_string_lossy())
+                    && message.contains("custom recycle bin path"),
+                "unexpected refusal: {message}"
+            );
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn creating_a_library_whose_root_conflicts_with_the_custom_bin_is_refused() {
+    let fixture = Fixture::new();
+    let (app, user, bin) = app_with_custom_bin(&fixture).await;
+    let libraries_before = library_names(&app).await;
+
+    for root in [
+        fixture.temp.path().join("disk"),
+        bin.clone(),
+        bin.join("inside"),
+    ] {
+        let error = app
+            .create_library(
+                &user,
+                MediaFacet::Movie,
+                "Synthetic Conflicting Library".to_string(),
+                vec![root_draft(&root)],
+                None,
+            )
+            .await
+            .expect_err("a root holding, equal to, or inside the bin is refused");
+        assert_bin_conflict(error, &root);
+    }
+    assert_eq!(library_names(&app).await, libraries_before);
+    assert!(!bin.join("inside").exists(), "the check creates nothing");
+}
+
+#[tokio::test]
+async fn creating_a_library_with_an_unrelated_root_is_accepted() {
+    let fixture = Fixture::new();
+    let (app, user, _) = app_with_custom_bin(&fixture).await;
+
+    let library = app
+        .create_library(
+            &user,
+            MediaFacet::Movie,
+            "Synthetic Library B".to_string(),
+            vec![root_draft(&fixture.root_b())],
+            None,
+        )
+        .await
+        .expect("a root clear of the bin is accepted");
+    assert_eq!(library.roots.len(), 1);
+}
+
+#[tokio::test]
+async fn without_a_custom_bin_any_root_is_accepted() {
+    let fixture = Fixture::new();
+    let (app, user) = movie_app(&fixture.root_a()).await;
+    let app = app.with_test_overrides(|services| services.with_settings(settings_with_bin(None)));
+    let disk = fixture.temp.path().join("disk");
+    std::fs::create_dir_all(disk.join("bin")).expect("create folders");
+
+    for (name, root) in [
+        ("Synthetic Library One", disk.clone()),
+        ("Synthetic Library Two", disk.join("bin").join("inside")),
+    ] {
+        app.create_library(
+            &user,
+            MediaFacet::Movie,
+            name.to_string(),
+            vec![root_draft(&root)],
+            None,
+        )
+        .await
+        .expect("nothing to conflict with");
+    }
+}
+
+#[tokio::test]
+async fn updating_a_library_refuses_only_new_roots_that_conflict_with_the_custom_bin() {
+    let fixture = Fixture::new();
+    let (app, user, bin) = app_with_custom_bin(&fixture).await;
+    let disk = fixture.temp.path().join("disk");
+    let now = Utc::now();
+    // Stored directly: a root that already holds the bin, the shape a bin
+    // saved before this check leaves behind.
+    let library = app
+        .services
+        .catalog
+        .libraries
+        .create(
+            Library {
+                id: "synthetic-library-b".to_string(),
+                facet: MediaFacet::Movie,
+                name: "Synthetic Library B".to_string(),
+                slug: "synthetic-library-b".to_string(),
+                is_default: false,
+                roots: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            },
+            vec![root_draft(&disk)],
+        )
+        .await
+        .expect("create library with a conflicting root");
+
+    let renamed = app
+        .update_library(
+            &user,
+            &library.id,
+            Some("Synthetic Library Renamed".to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("a rename never checks the roots it keeps");
+    assert_eq!(renamed.name, "Synthetic Library Renamed");
+
+    app.update_library(
+        &user,
+        &library.id,
+        None,
+        Some(vec![root_draft(&disk), root_draft(&fixture.root_b())]),
+        None,
+    )
+    .await
+    .expect("the unchanged root is not rechecked and the new one is clear");
+
+    let error = app
+        .update_library(
+            &user,
+            &library.id,
+            None,
+            Some(vec![root_draft(&disk), root_draft(&bin.join("inside"))]),
+            None,
+        )
+        .await
+        .expect_err("an added root inside the bin is refused");
+    assert_bin_conflict(error, &bin.join("inside"));
+    let roots = app
+        .services
+        .catalog
+        .libraries
+        .get_by_id(&library.id)
+        .await
+        .expect("read library")
+        .expect("library exists")
+        .roots
+        .into_iter()
+        .map(|root| root.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots,
+        vec![
+            disk.to_string_lossy().to_string(),
+            fixture.root_b().to_string_lossy().to_string()
+        ],
+        "the refused update wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn media_settings_refuse_a_default_library_root_that_conflicts_with_the_custom_bin() {
+    let fixture = Fixture::new();
+    let (app, user, bin) = app_with_custom_bin(&fixture).await;
+    let root = bin.join("inside");
+
+    let error = app
+        .update_media_settings(
+            &user,
+            MediaFacet::Movie,
+            empty_update_media_settings_with_roots(vec![RootFolderEntry {
+                path: root.to_string_lossy().to_string(),
+                is_default: true,
+            }]),
+        )
+        .await
+        .expect_err("a default-library root inside the bin is refused");
+    assert_bin_conflict(error, &root);
+
+    let error = app
+        .update_library_paths(
+            &user,
+            UpdateLibraryPaths {
+                movie_path: root.to_string_lossy().to_string(),
+                series_path: String::new(),
+                anime_path: None,
+            },
+        )
+        .await
+        .expect_err("the legacy library path save is refused the same way");
+    assert_bin_conflict(error, &root);
+}
+
+#[tokio::test]
+async fn a_root_change_into_the_custom_bin_is_refused_before_anything_moves() {
+    use crate::location::model::LocationExecutionMode;
+    use crate::location::root_scope::refusal_codes;
+    use crate::location::root_scope_execution::{RootScopeCall, RootScopeCallDestination};
+
+    let fixture = Fixture::new();
+    let (app, user, bin) = app_with_custom_bin(&fixture).await;
+    let (media, neighbour) = fixture.seed_media(&fixture.root_a(), "Synthetic Feature");
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let library = app
+        .services
+        .catalog
+        .libraries
+        .get_by_id(&library_id)
+        .await
+        .expect("read library")
+        .expect("default library");
+    let call = |destination: &Path| RootScopeCall {
+        library_id: library_id.clone(),
+        root_id: library.roots[0].id.clone(),
+        destination: RootScopeCallDestination::Path(destination.to_string_lossy().to_string()),
+        mode: LocationExecutionMode::MoveWithScryer,
+    };
+
+    let error = app
+        .preview_root_scope(&user, &call(&bin.join("new-root")))
+        .await
+        .expect_err("a new root inside the bin is refused");
+    assert!(
+        matches!(
+            &error,
+            AppError::LocationRootRefused { code, .. }
+                if *code == refusal_codes::CHANGE_DESTINATION_CONFLICTS_WITH_RECYCLE_BIN
+        ),
+        "got {error:?}"
+    );
+    assert_untouched(&media, "Synthetic Feature media");
+    assert_untouched(&neighbour, "Synthetic Feature neighbour");
+    assert!(!bin.join("new-root").exists());
+
+    app.preview_root_scope(&user, &call(&fixture.temp.path().join("new-disk")))
+        .await
+        .expect("a new root clear of the bin plans as before");
+}

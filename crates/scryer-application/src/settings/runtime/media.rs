@@ -835,6 +835,7 @@ impl AppUseCase {
                     &normalized,
                     SETTINGS_SOURCE_TYPED_GRAPHQL,
                     Some(actor.id.clone()),
+                    true,
                 )
                 .await?,
             );
@@ -849,6 +850,7 @@ impl AppUseCase {
                     &root_folders,
                     SETTINGS_SOURCE_TYPED_GRAPHQL,
                     Some(actor.id.clone()),
+                    true,
                 )
                 .await?,
             );
