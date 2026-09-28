@@ -366,7 +366,15 @@ export function ListDetailPanel({
                         })}
                       </span>
                       {run.errorMessage ? (
-                        <span className="basis-full text-[var(--scry-danger-text)]">{run.errorMessage}</span>
+                        <span
+                          className={
+                            run.outcome === "FAILED"
+                              ? "basis-full text-[var(--scry-danger-text)]"
+                              : "basis-full text-[var(--scry-warning-text)]"
+                          }
+                        >
+                          {run.errorMessage}
+                        </span>
                       ) : null}
                     </li>
                   ))}
