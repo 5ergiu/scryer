@@ -98,6 +98,10 @@ struct StrategyExecutionOutcome {
     retry_after: Option<std::time::Duration>,
     rate_limited: bool,
     timed_out: bool,
+    /// Set when the strategy was not dispatched because the indexer's
+    /// pacing slot lay further out than an interactive search waits; carries
+    /// how long the wait would have been.
+    over_query_budget: Option<std::time::Duration>,
 }
 
 enum StrategyTierOutcomes {
@@ -1252,6 +1256,9 @@ enum IndexerSkipReason {
     DeadlineExpired,
     /// Every automatic strategy was learned-suppressed.
     StrategiesSuppressed,
+    /// An interactive search found the indexer's next pacing slot further out
+    /// than it waits.
+    QueryBudgetExceeded,
 }
 
 impl IndexerSkipReason {
@@ -1270,6 +1277,7 @@ impl IndexerSkipReason {
             Self::ClientSetupFailed => "client_setup_failed",
             Self::DeadlineExpired => "deadline_expired",
             Self::StrategiesSuppressed => "strategies_suppressed",
+            Self::QueryBudgetExceeded => "query_budget_exceeded",
         }
     }
 
@@ -1290,6 +1298,7 @@ impl IndexerSkipReason {
             Self::ClientSetupFailed => "client setup failed",
             Self::DeadlineExpired => "candidate deadline expired while queued",
             Self::StrategiesSuppressed => "all automatic search strategies are learned-suppressed",
+            Self::QueryBudgetExceeded => "over its query budget for an interactive search",
         }
     }
 }
@@ -2123,17 +2132,34 @@ struct IndexerPacing {
     /// The provider's sustained query budget. It belongs to the provider, not
     /// to a lane, so every intent draws on it.
     max_queries_per_minute: Option<u32>,
+    /// The longest a request waits for its slot. An interactive search has a
+    /// user waiting on it, so a slot further out than this skips the indexer
+    /// for that search instead of holding it for minutes. Background intents
+    /// have no deadline to defend and always wait.
+    max_wait: Option<std::time::Duration>,
+}
+
+/// The longest an interactive search waits for one indexer's pacing slot.
+const INTERACTIVE_PACING_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An indexer's next pacing slot lies further out than the request may wait.
+/// Nothing was reserved: the skipped request spends none of the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacingWaitExceeded {
+    wait: std::time::Duration,
 }
 
 impl IndexerPacing {
     /// The configured interval always applies. Background intents additionally
     /// obey the trickle floor, so a provider that declares a *slower* limit
     /// keeps it while one that declares a faster one (or none) still trickles.
+    /// Only an interactive search caps how long it waits for a slot.
     fn resolve(config: &IndexerConfig, intent: SchedulerIntent) -> Self {
         let configured = std::time::Duration::from_secs(
             config.rate_limit_seconds.unwrap_or_default().max(0) as u64,
         );
-        let interval = if matches!(intent, SchedulerIntent::InteractiveSearch) {
+        let interactive = matches!(intent, SchedulerIntent::InteractiveSearch);
+        let interval = if interactive {
             configured
         } else {
             configured.max(BACKGROUND_INDEXER_REQUEST_INTERVAL)
@@ -2145,6 +2171,7 @@ impl IndexerPacing {
                 .max_queries_per_minute
                 .filter(|budget| *budget >= 1)
                 .map(|budget| u32::try_from(budget).unwrap_or(u32::MAX)),
+            max_wait: interactive.then_some(INTERACTIVE_PACING_MAX_WAIT),
         }
     }
 }
@@ -2259,7 +2286,11 @@ impl IndexerRateLimiter {
     /// rate-limit cooldown but not yet proven its ladder rung, the interval
     /// doubles (a zero one becomes the background trickle) and the budget is
     /// halved.
-    async fn acquire(&self, pacing: &IndexerPacing) {
+    ///
+    /// When the slot lies further out than the pacing's `max_wait`, nothing is
+    /// reserved and the request is refused at once with the wait it would
+    /// have needed.
+    async fn acquire(&self, pacing: &IndexerPacing) -> Result<(), PacingWaitExceeded> {
         let recovering = self
             .registry
             .destination_recovering(&DestinationKey::from(pacing.domain_key.as_str()));
@@ -2276,7 +2307,7 @@ impl IndexerRateLimiter {
             );
         }
         if interval.is_zero() && pacing.max_queries_per_minute.is_none() {
-            return;
+            return Ok(());
         }
 
         // The guard is built only after the lock is released: its `Drop`
@@ -2297,24 +2328,39 @@ impl IndexerRateLimiter {
                     .unwrap_or(now)
                     .max(now)
             };
-            let reservation_id = match pacing.max_queries_per_minute {
+            let budget = pacing.max_queries_per_minute.map(|budget| {
+                let budget = budget as usize;
+                if recovering {
+                    (budget / 2).max(1)
+                } else {
+                    budget
+                }
+            });
+            match budget {
                 Some(budget) => {
-                    let mut budget = budget as usize;
-                    if recovering {
-                        budget = (budget / 2).max(1);
-                    }
-                    let id = state.next_reservation_id;
-                    state.next_reservation_id += 1;
                     let log = state.budgets.entry(pacing.domain_key.clone()).or_default();
                     dispatch_at = dispatch_at.max(log.earliest_slot(budget, now));
-                    log.promise(dispatch_at, id);
-                    Some(id)
                 }
                 None => {
                     state.budgets.remove(&pacing.domain_key);
-                    None
                 }
-            };
+            }
+            // Refuse before promising anything, so a request that will not
+            // wait leaves both the budget and the interval slot untouched.
+            let wait = dispatch_at.saturating_duration_since(now);
+            if pacing.max_wait.is_some_and(|max_wait| wait > max_wait) {
+                return Err(PacingWaitExceeded { wait });
+            }
+            let reservation_id = budget.map(|_| {
+                let id = state.next_reservation_id;
+                state.next_reservation_id += 1;
+                state
+                    .budgets
+                    .entry(pacing.domain_key.clone())
+                    .or_default()
+                    .promise(dispatch_at, id);
+                id
+            });
             if !interval.is_zero() {
                 let next_slot = dispatch_at.checked_add(interval).unwrap_or(dispatch_at);
                 state
@@ -2333,6 +2379,7 @@ impl IndexerRateLimiter {
         if let Some(reservation) = reservation.as_mut() {
             reservation.dispatched = true;
         }
+        Ok(())
     }
 }
 
@@ -3322,7 +3369,26 @@ impl MultiIndexerSearchClient {
                 )
                 .await
                 {
-                    Ok(()) => {}
+                    Ok(Ok(())) => {}
+                    Ok(Err(PacingWaitExceeded { wait })) => {
+                        return StrategyExecutionOutcome {
+                            strategy_id: strategy_id.clone(),
+                            labels: strategy_labels.clone(),
+                            label: strategy_label,
+                            title_guard_mode,
+                            request_fired: false,
+                            response: Err(AppError::Repository(format!(
+                                "indexer is over its query budget; next slot in {}s",
+                                wait.as_secs()
+                            ))),
+                            page_reservation: None,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out: false,
+                            over_query_budget: Some(wait),
+                        };
+                    }
                     Err(SearchWindowError::Cancelled) => {
                         return StrategyExecutionOutcome {
                             strategy_id: strategy_id.clone(),
@@ -3336,6 +3402,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         };
                     }
                     Err(SearchWindowError::DeadlineExpired) => {
@@ -3353,6 +3420,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         };
                     }
                 }
@@ -3433,6 +3501,7 @@ impl MultiIndexerSearchClient {
                                         retry_after: None,
                                         rate_limited: false,
                                         timed_out: false,
+                                        over_query_budget: None,
                                     };
                                 }
                                 reservation = page_sink.reserve() => reservation,
@@ -3452,6 +3521,7 @@ impl MultiIndexerSearchClient {
                                     retry_after: None,
                                     rate_limited: false,
                                     timed_out: false,
+                                    over_query_budget: None,
                                 };
                             };
                             Some(reservation)
@@ -3471,6 +3541,7 @@ impl MultiIndexerSearchClient {
                             retry_after,
                             rate_limited,
                             timed_out,
+                            over_query_budget: None,
                         };
                     }
                     Err(SearchPermitError::Cancelled) => {
@@ -3496,6 +3567,7 @@ impl MultiIndexerSearchClient {
                     retry_after: None,
                     rate_limited: false,
                     timed_out: false,
+                    over_query_budget: None,
                 }
             });
         }
@@ -3585,6 +3657,7 @@ impl MultiIndexerSearchClient {
                                 retry_after: None,
                                 rate_limited: false,
                                 timed_out,
+                                over_query_budget: None,
                             })
                             .await
                             .is_err()
@@ -3681,6 +3754,7 @@ impl MultiIndexerSearchClient {
                                 retry_after,
                                 rate_limited: rate_limit_signal.is_some(),
                                 timed_out: false,
+                                over_query_budget: None,
                             })
                             .await
                             .is_err()
@@ -3756,6 +3830,7 @@ impl MultiIndexerSearchClient {
                         retry_after: None,
                         rate_limited: false,
                         timed_out,
+                        over_query_budget: None,
                     })
                     .await
                     .is_err()
@@ -3777,6 +3852,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out,
+                            over_query_budget: None,
                         })
                         .await
                         .is_err()
@@ -3806,6 +3882,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out,
+                            over_query_budget: None,
                         })
                         .await
                         .is_err()
@@ -4761,7 +4838,15 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 )
                                 .await
                                 {
-                                    Ok(()) => {}
+                                    Ok(Ok(())) => {}
+                                    // Background RSS pacing always waits for its
+                                    // slot; this arm only keeps the match total.
+                                    Ok(Err(PacingWaitExceeded { wait })) => {
+                                        return Err(format!(
+                                            "RSS indexer is over its query budget; next slot in {}s",
+                                            wait.as_secs()
+                                        ));
+                                    }
                                     Err(SearchWindowError::Cancelled) => {
                                         return Err("RSS indexer search canceled".to_string());
                                     }
@@ -5189,6 +5274,10 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let mut batch_had_timeout = false;
                 let mut batch_health = StrategyBatchHealth::default();
                 let mut quota_observation = IndexerQuotaObservation::default();
+                // The shortest wait among strategies an interactive search
+                // declined to pace for; set means the indexer was over its
+                // query budget for this search.
+                let mut query_budget_wait: Option<std::time::Duration> = None;
 
                 let primary_context = StrategyTierContext {
                         client: client.clone(),
@@ -5273,12 +5362,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         },
                     };
                     batch_had_timeout |= outcome.timed_out;
                     if !outcome.request_fired {
                         all_strategies_complete = false;
                         only_unattested_incompleteness = false;
+                        if let Some(wait) = outcome.over_query_budget {
+                            query_budget_wait =
+                                Some(query_budget_wait.map_or(wait, |known| known.min(wait)));
+                        }
                         if outcome.response.as_ref().is_err_and(|err| err.is_canceled()) {
                             return (
                                 indexer_id,
@@ -5517,13 +5611,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                     }
                 }
 
-                if should_run_fallback_tier(
-                    mode,
-                    primary_usable_result_count,
-                    primary_attempted,
-                    primary_had_error,
-                    &fallback_strategies,
-                ) {
+                // An indexer over its query budget is skipped for the rest of
+                // this search: its fallback would be refused the same way.
+                if query_budget_wait.is_none()
+                    && should_run_fallback_tier(
+                        mode,
+                        primary_usable_result_count,
+                        primary_attempted,
+                        primary_had_error,
+                        &fallback_strategies,
+                    )
+                {
                     debug!(
                         indexer = indexer_name.as_str(),
                         facet = facet.as_str(),
@@ -5608,12 +5706,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 retry_after: None,
                                 rate_limited: false,
                                 timed_out: false,
+                                over_query_budget: None,
                             },
                         };
                         batch_had_timeout |= outcome.timed_out;
                         if !outcome.request_fired {
                             all_strategies_complete = false;
                             only_unattested_incompleteness = false;
+                            if let Some(wait) = outcome.over_query_budget {
+                                query_budget_wait =
+                                    Some(query_budget_wait.map_or(wait, |known| known.min(wait)));
+                            }
                             if outcome.response.as_ref().is_err_and(|err| err.is_canceled()) {
                                 return (
                                     indexer_id,
@@ -5899,6 +6002,16 @@ impl IndexerClient for MultiIndexerSearchClient {
                     );
                 }
 
+                if !any_strategy_fired && query_budget_wait.is_some() {
+                    log_indexer_skip(
+                        mode,
+                        is_rss_request,
+                        indexer_name.as_str(),
+                        IndexerSkipReason::QueryBudgetExceeded,
+                        None,
+                    );
+                }
+
                 let task_indexer_outcomes = scheduler_blocked_outcome
                     .filter(|_| !all_strategies_complete)
                     .map(|outcome| IndexerQueryOutcome {
@@ -5919,9 +6032,13 @@ impl IndexerClient for MultiIndexerSearchClient {
                             IndexerSearchCompletion::Complete
                         } else {
                             IndexerSearchCompletion::Partial {
-                                reason: only_unattested_incompleteness
-                                    .then_some(IndexerSearchIncompleteReason::Unattested),
-                                retry_after: scheduler_retry_after,
+                                reason: if query_budget_wait.is_some() {
+                                    Some(IndexerSearchIncompleteReason::QueryBudgetExhausted)
+                                } else {
+                                    only_unattested_incompleteness
+                                        .then_some(IndexerSearchIncompleteReason::Unattested)
+                                },
+                                retry_after: scheduler_retry_after.or(query_budget_wait),
                             }
                         },
                         api_current: quota_observation.api_current,
@@ -7011,6 +7128,7 @@ mod tests {
             retry_after: None,
             rate_limited: false,
             timed_out: false,
+            over_query_budget: None,
         };
 
         assert!(strategy_execution_is_complete(&execution(
@@ -9821,6 +9939,75 @@ mod tests {
             recorded[0].ids,
             HashMap::from([("imdb_id".to_string(), "tt12004567".to_string())])
         );
+    }
+
+    #[tokio::test]
+    async fn interactive_search_skips_an_indexer_over_its_query_budget() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.max_queries_per_minute = Some(1);
+
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_| response_with_titles(&["12.Lanterns.of.Winter.2013"])),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: movie_caps(),
+            }),
+        );
+        let search = || {
+            multi.search(
+                "12 Lanterns of Winter".to_string(),
+                HashMap::from([("imdb_id".to_string(), "tt12004567".to_string())]),
+                None,
+                Some("movie".to_string()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                None,
+                None,
+                None,
+                vec![],
+            )
+        };
+
+        let first = search().await.expect("first search should succeed");
+        assert_eq!(first.results.len(), 1);
+        assert_eq!(calls.lock().expect("calls").len(), 1);
+
+        // The one query this minute is spent; the next slot is about a
+        // minute out, past what an interactive search waits.
+        let second = search().await.expect("second search should succeed");
+        assert!(second.results.is_empty());
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "an over-budget indexer is not asked"
+        );
+        let outcome = second
+            .indexer_outcomes
+            .iter()
+            .find(|outcome| outcome.indexer_id == "idx-1")
+            .expect("the skipped indexer reports an outcome");
+        match outcome.outcome {
+            IndexerSearchOutcome::Partial {
+                empty: true,
+                reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+                retry_after: Some(retry_after),
+            } => assert!(
+                retry_after > INTERACTIVE_PACING_MAX_WAIT,
+                "retry after {retry_after:?}"
+            ),
+            other => panic!("expected an over-budget outcome, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -13752,6 +13939,7 @@ mod tests {
             domain_key: "indexer-1".into(),
             interval: std::time::Duration::ZERO,
             max_queries_per_minute: None,
+            max_wait: None,
         }
     }
 
@@ -13760,6 +13948,7 @@ mod tests {
             domain_key: domain_key.into(),
             interval: std::time::Duration::from_secs(interval_secs),
             max_queries_per_minute: None,
+            max_wait: None,
         }
     }
 
@@ -13777,15 +13966,24 @@ mod tests {
 
         let (first, second, third) = tokio::join!(
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
         );
@@ -13809,23 +14007,31 @@ mod tests {
         let limiter = IndexerRateLimiter::new();
         let unpaced = test_pacing("idx", 0);
 
-        limiter.acquire(&unpaced).await;
+        limiter
+            .acquire(&unpaced)
+            .await
+            .expect("an uncapped request waits for its slot");
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             limiter.acquire(&unpaced),
         )
         .await
-        .expect("a zero interval should not pace; host RPS owns default pacing");
+        .expect("a zero interval should not pace; host RPS owns default pacing")
+        .expect("an uncapped request waits for its slot");
 
-        limiter.acquire(&test_pacing("idx", 1)).await;
+        limiter
+            .acquire(&test_pacing("idx", 1))
+            .await
+            .expect("an uncapped request waits for its slot");
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             limiter.acquire(&test_pacing("other-idx", 1)),
         )
         .await
-        .expect("a different rate-limit domain should have an independent pacing schedule");
+        .expect("a different rate-limit domain should have an independent pacing schedule")
+        .expect("an uncapped request waits for its slot");
     }
 
     #[test]
@@ -13903,7 +14109,10 @@ mod tests {
     ) -> Vec<f64> {
         let mut dispatches = Vec::with_capacity(count);
         for _ in 0..count {
-            limiter.acquire(pacing).await;
+            limiter
+                .acquire(pacing)
+                .await
+                .expect("an uncapped request waits for its slot");
             dispatches.push(since.elapsed().as_secs_f64());
         }
         dispatches
@@ -14023,7 +14232,10 @@ mod tests {
                 background.clone()
             };
             async move {
-                limiter.acquire(&pacing).await;
+                limiter
+                    .acquire(&pacing)
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed().as_secs_f64()
             }
         });
@@ -14065,6 +14277,102 @@ mod tests {
         // Had the cancelled request kept its slot this one would wait until 70 s.
         let next = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
         assert_dispatches(&next, &[60.0]);
+    }
+
+    fn interactive_budgeted_pacing(domain_key: &str, per_minute: u32) -> IndexerPacing {
+        IndexerPacing {
+            max_wait: Some(INTERACTIVE_PACING_MAX_WAIT),
+            ..budgeted_pacing(domain_key, 0, per_minute)
+        }
+    }
+
+    #[test]
+    fn only_interactive_pacing_caps_its_wait() {
+        let mut config = mock_indexer_config();
+        config.max_queries_per_minute = Some(1);
+
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch).max_wait,
+            Some(INTERACTIVE_PACING_MAX_WAIT),
+        );
+        for intent in [
+            SchedulerIntent::BackgroundAcquisition,
+            SchedulerIntent::BackgroundRss,
+        ] {
+            assert_eq!(
+                IndexerPacing::resolve(&config, intent).max_wait,
+                None,
+                "{intent:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_pacing_refuses_a_long_wait_at_once_without_spending_budget() {
+        use futures_util::FutureExt as _;
+
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let interactive = interactive_budgeted_pacing("capped-idx", 1);
+        let started_at = tokio::time::Instant::now();
+
+        limiter
+            .acquire(&interactive)
+            .now_or_never()
+            .expect("the first slot is free")
+            .expect("the first slot is within the cap");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+
+        // The budget has room again at 60 s: a 50 s wait is past the cap.
+        for _ in 0..3 {
+            let refused = limiter
+                .acquire(&interactive)
+                .now_or_never()
+                .expect("an over-cap wait is refused without waiting");
+            assert_eq!(
+                refused,
+                Err(PacingWaitExceeded {
+                    wait: std::time::Duration::from_secs(50)
+                })
+            );
+        }
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(10));
+
+        // The refusals reserved nothing: an uncapped request still gets the
+        // 60 s slot rather than one pushed out behind them.
+        let background = budgeted_pacing("capped-idx", 0, 1);
+        let next = sequential_dispatches(&limiter, &background, 1, started_at).await;
+        assert_dispatches(&next, &[60.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_pacing_waits_out_a_short_wait() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let interactive = interactive_budgeted_pacing("short-wait-idx", 1);
+        let started_at = tokio::time::Instant::now();
+
+        let first = sequential_dispatches(&limiter, &interactive, 1, started_at).await;
+        assert_dispatches(&first, &[0.0]);
+        tokio::time::advance(std::time::Duration::from_secs(40)).await;
+
+        // The next slot is 20 s away, inside the cap: the request waits for it.
+        let mut waiting = Box::pin(limiter.acquire(&interactive));
+        assert!(!is_ready(&mut waiting).await, "the slot has not come yet");
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+        assert_eq!(waiting.await, Ok(()));
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_pacing_waits_out_a_long_wait() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        config.max_queries_per_minute = Some(1);
+        let background = IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition);
+        let started_at = tokio::time::Instant::now();
+
+        let dispatches = sequential_dispatches(&limiter, &background, 2, started_at).await;
+        assert_dispatches(&dispatches, &[0.0, 60.0]);
     }
 
     #[tokio::test(start_paused = true)]

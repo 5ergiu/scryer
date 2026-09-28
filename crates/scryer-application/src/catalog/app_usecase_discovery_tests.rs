@@ -762,3 +762,16 @@ fn a_rate_limited_indexer_reads_as_a_cooldown_with_its_retry_time() {
     assert!(!reason_is_rate_limit(&upstream));
     assert!(!reason_is_rate_limit("timed out"));
 }
+
+#[test]
+fn an_indexer_over_its_query_budget_reads_as_a_wait_with_its_next_slot() {
+    let reason = incomplete_indexer_reason(IndexerSearchOutcome::Partial {
+        empty: true,
+        reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+        retry_after: Some(std::time::Duration::from_secs(45)),
+    })
+    .expect("a skipped over-budget indexer is an incomplete outcome");
+
+    assert_eq!(reason, "indexer is over its query budget; retry after 45s");
+    assert!(reason_is_rate_limit(&reason));
+}

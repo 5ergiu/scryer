@@ -2531,6 +2531,9 @@ pub enum IndexerSearchIncompleteReason {
     FanoutBranchFailed,
     SaturatedPartition,
     Unattested,
+    /// An interactive search skipped the indexer instead of waiting out its
+    /// query budget. Nothing was sent and none of the budget was spent.
+    QueryBudgetExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
