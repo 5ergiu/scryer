@@ -665,7 +665,7 @@ impl AppUseCase {
         .await
     }
 
-    /// Follow a public list. Its first sync is due at once.
+    /// Follow a public list. Its first sync starts at once.
     pub async fn subscribe_public_list(
         &self,
         actor: &User,
@@ -715,6 +715,16 @@ impl AppUseCase {
         subscription.on_leave = input.on_leave;
         subscription.sync.next_at = Some(subscription.created_at);
         let created = lists.subscriptions.create(subscription).await?;
+        // Start the first sync now, the way "sync now" does, instead of
+        // waiting for the next scheduled pass. The follow already stands; if
+        // the sync cannot start, the list is due and the next pass takes it.
+        if let Err(error) = self.queue_list_syncs(actor, vec![created.clone()]).await {
+            tracing::warn!(
+                subscription_id = %created.id,
+                error = %error,
+                "could not start the first sync of a followed list"
+            );
+        }
         Ok(redact_for_viewer(created, true))
     }
 
@@ -841,8 +851,11 @@ impl AppUseCase {
         let now = Utc::now();
         let mut queued = Vec::new();
         for subscription in subscriptions.into_iter().filter(|row| row.enabled) {
+            // A manual sync reads and processes the whole list; a stored
+            // fingerprint would let the provider answer "unchanged".
             let status = ListSyncStatus {
                 next_at: Some(now),
+                fetch_fingerprint: None,
                 ..subscription.sync.clone()
             };
             self.services

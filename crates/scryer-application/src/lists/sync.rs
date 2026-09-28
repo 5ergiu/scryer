@@ -4,8 +4,14 @@
 //! departures, persist. The isolation rule follows the media-server signal
 //! sweep: a fetch or resolve failure records `fail` with a plain-words message
 //! and stops there. Departures are computed only from a list that was
-//! actually read, so a broken provider can never make every title "leave".
+//! actually read, so a broken provider can never make every title "leave",
+//! and a fetch that returns no items skips departures entirely.
 //! One subscription failing never stops the next one.
+//!
+//! A provider's "unchanged" answer skips the rest of the sync, unless the list
+//! still has work: settings edited since its last sync, items the per-sync cap
+//! left pending, or an on-leave action that has not run. Then the whole list
+//! is read again and processed.
 //!
 //! Subscriptions run one after another, so an instance never has two fetches
 //! in flight against the same provider.
@@ -22,7 +28,7 @@ use serde::Serialize;
 use super::act::{ListActions, act_on_candidate};
 use super::evaluate::{ItemDecision, count_states, evaluate};
 use super::fetch::{ListChartSource, ListFailure, ListFailureClass, fetch_list};
-use super::leave::handle_departures;
+use super::leave::{awaits_leave_action, handle_departures};
 use super::plugin::ListPluginProvider;
 use super::ports::{
     ListExclusionRepository, ListMembershipRepository, ListSubscriptionRepository,
@@ -35,6 +41,15 @@ use crate::AppResult;
 
 /// How many due subscriptions one tick takes on.
 pub const LIST_SYNC_BATCH_LIMIT: usize = 50;
+
+/// Shown on a sync whose fetch came back with no items. An empty answer is
+/// not evidence that anything left the list, so nothing was marked as leaving.
+pub const LIST_SYNC_EMPTY_FETCH_NOTE: &str =
+    "The provider returned no items, so no title was treated as having left the list.";
+
+/// Shown on a list whose sync stopped on a storage error.
+pub const LIST_SYNC_STORAGE_FAILURE_MESSAGE: &str =
+    "Scryer could not save this list's sync. It will retry at the next interval.";
 
 /// The longest a provider's `Retry-After` may pause a subscription.
 pub const MAX_RATE_LIMIT_PAUSE_SECONDS: i64 = 24 * 3600;
@@ -112,7 +127,9 @@ pub fn log_list_sync_report(report: &ListSyncReport) {
     );
 }
 
-/// Sync every subscription due at `now`.
+/// Sync every subscription due at `now`. Only reading the due set can fail the
+/// pass; any error inside one subscription's sync is counted as that
+/// subscription's failure and the pass continues.
 pub async fn sync_due_subscriptions(
     context: &ListSyncContext<'_>,
     now: DateTime<Utc>,
@@ -125,7 +142,20 @@ pub async fn sync_due_subscriptions(
     let mut report = ListSyncReport::default();
     for subscription in due {
         report.considered += 1;
-        let outcome = sync_subscription(context, &subscription, now, job_run_id.clone()).await?;
+        let outcome = match sync_subscription(context, &subscription, now, job_run_id.clone()).await
+        {
+            Ok(outcome) => outcome,
+            // A store error on one list is that list's failure: it is
+            // recorded against the list and the pass moves on.
+            Err(error) => {
+                tracing::warn!(
+                    subscription_id = %subscription.id,
+                    error = %error,
+                    "list sync failed on a storage error; continuing with the next list"
+                );
+                record_storage_failure(context, &subscription, now, job_run_id.clone()).await
+            }
+        };
         match outcome {
             SubscriptionSyncOutcome::Synced {
                 counts,
@@ -209,7 +239,7 @@ pub async fn sync_subscription(
         subscription,
         context.plugins,
         context.charts,
-        credential,
+        credential.clone(),
         &config,
     )
     .await
@@ -219,29 +249,30 @@ pub async fn sync_subscription(
     };
 
     if fetched.unchanged {
-        let status = ListSyncStatus {
-            state: ListSyncState::Ok,
-            last_at: Some(now),
-            next_at: Some(next_sync_at(subscription, now)),
-            error_message: None,
-            error_at: None,
-            paused_until: None,
-            fetch_fingerprint: fetched
-                .fingerprint
-                .or_else(|| subscription.sync.fetch_fingerprint.clone()),
+        if !has_unfinished_work(context, subscription).await? {
+            return record_unchanged(context, subscription, run, now, fetched.fingerprint).await;
+        }
+        // The provider's "unchanged" carries no items. Work is still left, so
+        // read the whole list again rather than treat it as empty.
+        let mut whole = subscription.clone();
+        whole.sync.fetch_fingerprint = None;
+        fetched = match fetch_list(&whole, context.plugins, context.charts, credential, &config)
+            .await
+        {
+            Ok(fetched) => fetched,
+            Err(failure) => return record_failure(context, subscription, run, now, failure).await,
         };
-        context
-            .subscriptions
-            .record_sync(&subscription.id, &status, &subscription.counts)
-            .await?;
-        run.counts = subscription.counts;
-        finish_run(context, run, now).await?;
-        return Ok(SubscriptionSyncOutcome::Unchanged);
+        if fetched.unchanged {
+            return record_unchanged(context, subscription, run, now, fetched.fingerprint).await;
+        }
     }
 
     // The same item listed twice keeps its first position only, and is acted
     // on once.
     fetched.dedupe();
+    if fetched.items.is_empty() {
+        return record_empty_fetch(context, subscription, run, now, fetched.fingerprint).await;
+    }
     let resolved = match resolve_items(subscription, fetched.items, context.resolver).await {
         Ok(resolved) => resolved,
         Err(_) => {
@@ -376,6 +407,135 @@ fn membership_row(
 
 fn next_sync_at(subscription: &ListSubscription, now: DateTime<Utc>) -> DateTime<Utc> {
     now + Duration::seconds(subscription.interval_seconds.max(60))
+}
+
+/// Whether a list the provider reports as unchanged still has work a sync
+/// must do: settings edited since its last sync, items the per-sync cap left
+/// pending, or a departure whose on-leave action has not run.
+async fn has_unfinished_work(
+    context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
+) -> AppResult<bool> {
+    let edited = subscription
+        .sync
+        .last_at
+        .is_none_or(|last_at| subscription.updated_at > last_at);
+    if edited {
+        return Ok(true);
+    }
+    Ok(context
+        .memberships
+        .list_by_subscription(&subscription.id)
+        .await?
+        .iter()
+        .any(|row| {
+            (row.left_at.is_none() && row.state == ListMembershipState::Pending)
+                || awaits_leave_action(subscription, row)
+        }))
+}
+
+/// Record a sync the provider answered with "unchanged": only the timestamps
+/// move.
+async fn record_unchanged(
+    context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
+    mut run: ListSyncRun,
+    now: DateTime<Utc>,
+    fingerprint: Option<String>,
+) -> AppResult<SubscriptionSyncOutcome> {
+    let status = ListSyncStatus {
+        state: ListSyncState::Ok,
+        last_at: Some(now),
+        next_at: Some(next_sync_at(subscription, now)),
+        error_message: None,
+        error_at: None,
+        paused_until: None,
+        fetch_fingerprint: fingerprint.or_else(|| subscription.sync.fetch_fingerprint.clone()),
+    };
+    context
+        .subscriptions
+        .record_sync(&subscription.id, &status, &subscription.counts)
+        .await?;
+    run.counts = subscription.counts;
+    finish_run(context, run, now).await?;
+    Ok(SubscriptionSyncOutcome::Unchanged)
+}
+
+/// Record a fetch that returned no items. Departures are skipped entirely:
+/// no member is marked as having left and no on-leave action runs, and the
+/// run says so. Memberships and counts stay as the last sync left them.
+async fn record_empty_fetch(
+    context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
+    mut run: ListSyncRun,
+    now: DateTime<Utc>,
+    fingerprint: Option<String>,
+) -> AppResult<SubscriptionSyncOutcome> {
+    let status = ListSyncStatus {
+        state: ListSyncState::Ok,
+        last_at: Some(now),
+        next_at: Some(next_sync_at(subscription, now)),
+        error_message: None,
+        error_at: None,
+        paused_until: None,
+        fetch_fingerprint: fingerprint,
+    };
+    context
+        .subscriptions
+        .record_sync(&subscription.id, &status, &subscription.counts)
+        .await?;
+    run.counts = subscription.counts;
+    run.error_message = Some(LIST_SYNC_EMPTY_FETCH_NOTE.to_string());
+    finish_run(context, run, now).await?;
+    Ok(SubscriptionSyncOutcome::Synced {
+        counts: ListCounts::default(),
+        departures_acted: 0,
+    })
+}
+
+/// Record a sync that stopped on a storage error, as far as the store still
+/// allows. Both writes are best effort: the store that just failed may fail
+/// again, and the pass must go on either way.
+async fn record_storage_failure(
+    context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
+    now: DateTime<Utc>,
+    job_run_id: Option<String>,
+) -> SubscriptionSyncOutcome {
+    let status = ListSyncStatus {
+        state: ListSyncState::Fail,
+        error_message: Some(LIST_SYNC_STORAGE_FAILURE_MESSAGE.to_string()),
+        error_at: Some(now),
+        next_at: Some(next_sync_at(subscription, now)),
+        ..subscription.sync.clone()
+    };
+    if let Err(error) = context
+        .subscriptions
+        .record_sync(&subscription.id, &status, &subscription.counts)
+        .await
+    {
+        tracing::warn!(
+            subscription_id = %subscription.id,
+            error = %error,
+            "could not record a list sync storage failure"
+        );
+    }
+    let mut run = ListSyncRun::started(subscription.id.clone(), job_run_id);
+    run.started_at = now;
+    run.outcome = ListSyncRunOutcome::Failed;
+    run.counts = subscription.counts;
+    run.error_message = Some(LIST_SYNC_STORAGE_FAILURE_MESSAGE.to_string());
+    if let Err(error) = finish_run(context, run, now).await {
+        tracing::warn!(
+            subscription_id = %subscription.id,
+            error = %error,
+            "could not record a failed list sync run"
+        );
+    }
+    SubscriptionSyncOutcome::Failed(ListFailure {
+        class: ListFailureClass::Failed,
+        message: LIST_SYNC_STORAGE_FAILURE_MESSAGE.to_string(),
+    })
 }
 
 /// Record a failed fetch or resolve. Counts, memberships and titles are left

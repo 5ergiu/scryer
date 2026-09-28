@@ -59,14 +59,11 @@ pub async fn handle_departures(
     let mut other_subscriptions: HashMap<String, Option<ListSubscription>> = HashMap::new();
 
     for row in departed {
-        let title_id = match (&row.title_id, row.added_by_list, subscription.on_leave) {
-            (Some(title_id), true, on_leave) if on_leave != ListOnLeave::Keep => title_id.clone(),
+        let Some(title_id) = acting_title(subscription, &row).map(str::to_string) else {
             // Keep, a title the list did not add, or no title at all: the
             // departure is recorded on the row and nothing else happens.
-            _ => {
-                handled.push(row.item_key);
-                continue;
-            }
+            handled.push(row.item_key);
+            continue;
         };
 
         if still_wanted_elsewhere(
@@ -125,6 +122,22 @@ pub async fn handle_departures(
             .await?;
     }
     Ok(report)
+}
+
+/// The title a departed row's on-leave action would touch: only a title this
+/// list added, and only when the list's on-leave action is not `Keep`.
+fn acting_title<'a>(subscription: &ListSubscription, row: &'a ListMembership) -> Option<&'a str> {
+    match (&row.title_id, row.added_by_list, subscription.on_leave) {
+        (Some(title_id), true, on_leave) if on_leave != ListOnLeave::Keep => Some(title_id),
+        _ => None,
+    }
+}
+
+/// Whether `row` departed and its on-leave action has not run yet, either
+/// because it failed or because the sync stopped before reaching it. Such a
+/// list must be processed again even when its provider reports no change.
+pub fn awaits_leave_action(subscription: &ListSubscription, row: &ListMembership) -> bool {
+    row.left_at.is_some() && !row.left_handled && acting_title(subscription, row).is_some()
 }
 
 /// Whether any other enabled subscription, of either scope, still lists this
