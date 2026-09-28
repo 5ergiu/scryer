@@ -483,3 +483,224 @@ async fn an_item_listed_twice_is_acted_on_once() {
         .count();
     assert_eq!(adds, 2);
 }
+
+fn count_calls(actions: &RecordingActions, matches: fn(&RecordedAction) -> bool) -> usize {
+    actions.calls().iter().filter(|call| matches(call)).count()
+}
+
+#[tokio::test]
+async fn an_unchanged_capped_list_still_drains_its_pending_items() {
+    let mut list = subscription("list-a");
+    list.max_per_sync = Some(1);
+    list.interval_seconds = 60;
+    let harness = Harness::new(vec![list]);
+    harness.lists.serve("list-a", &["alpha", "beta", "gamma"]);
+
+    harness.sync_at(at(0)).await;
+    assert_eq!(
+        harness.store.row("list-a", "beta").state,
+        ListMembershipState::Pending
+    );
+
+    // The provider answers "unchanged" from here on; pending items remain, so
+    // each sync reads the list again and takes the next capped item.
+    let second = harness.sync_at(at(10)).await;
+    assert_eq!(second.synced, 1);
+    assert_eq!(
+        harness.store.row("list-a", "beta").state,
+        ListMembershipState::Added
+    );
+    assert_eq!(
+        harness.store.row("list-a", "gamma").state,
+        ListMembershipState::Pending
+    );
+
+    harness.sync_at(at(20)).await;
+    assert_eq!(
+        harness.store.row("list-a", "gamma").state,
+        ListMembershipState::Added
+    );
+
+    let fetches_before = harness.lists.fetched.lock().unwrap().len();
+    let drained = harness.sync_at(at(30)).await;
+    assert_eq!(drained.unchanged, 1, "nothing is left, so the skip applies");
+    assert_eq!(
+        harness.lists.fetched.lock().unwrap().len(),
+        fetches_before + 1,
+        "a drained list is not read a second time"
+    );
+    assert_eq!(
+        count_calls(&harness.actions, |call| matches!(
+            call,
+            RecordedAction::Add { .. }
+        )),
+        3
+    );
+}
+
+#[tokio::test]
+async fn an_edited_list_is_processed_even_when_unchanged() {
+    let mut list = subscription("list-a");
+    list.interval_seconds = 60;
+    list.routes = Vec::new();
+    let harness = Harness::new(vec![list]);
+    harness.lists.serve("list-a", &["alpha"]);
+
+    harness.sync_at(at(0)).await;
+    assert_eq!(
+        harness.store.row("list-a", "alpha").state,
+        ListMembershipState::Filtered,
+        "no route for the kind yet"
+    );
+
+    // An edit after the last sync adds the missing route.
+    {
+        let mut subscriptions = harness.store.subscriptions.lock().unwrap();
+        let edited = subscriptions
+            .iter_mut()
+            .find(|row| row.id == "list-a")
+            .unwrap();
+        edited.routes = vec![crate::lists::test_support::route(
+            scryer_domain::MediaFacet::Movie,
+            crate::lists::test_support::LIBRARY,
+        )];
+        edited.updated_at = at(5);
+    }
+
+    let report = harness.sync_at(at(10)).await;
+    assert_eq!(report.synced, 1);
+    assert_eq!(
+        harness.store.row("list-a", "alpha").state,
+        ListMembershipState::Added
+    );
+
+    let later = harness.sync_at(at(20)).await;
+    assert_eq!(later.unchanged, 1, "the edit was processed once");
+}
+
+#[tokio::test]
+async fn an_empty_fetch_marks_nobody_left_and_runs_no_leave_action() {
+    let mut list = subscription("list-a");
+    list.on_leave = ListOnLeave::Unmonitor;
+    list.interval_seconds = 60;
+    let harness = Harness::new(vec![list]);
+    harness.lists.serve("list-a", &["alpha", "beta"]);
+    harness.sync_at(at(0)).await;
+
+    harness.lists.serve("list-a", &[]);
+    let report = harness.sync_at(at(10)).await;
+
+    assert_eq!(report.departures_acted, 0);
+    for key in ["alpha", "beta"] {
+        let row = harness.store.row("list-a", key);
+        assert_eq!(row.left_at, None, "{key} is still a member");
+        assert_eq!(row.state, ListMembershipState::Added);
+    }
+    assert_eq!(
+        count_calls(&harness.actions, |call| matches!(
+            call,
+            RecordedAction::SetMonitored { .. } | RecordedAction::Departure { .. }
+        )),
+        0
+    );
+    let list = harness.store.subscription("list-a");
+    assert_eq!(list.sync.state, ListSyncState::Ok);
+    assert_eq!(
+        list.counts.added, 2,
+        "counts stay as the last sync left them"
+    );
+    let runs = harness.store.runs.lock().unwrap().clone();
+    let last = runs.last().expect("the empty sync has a run");
+    assert_eq!(last.outcome, ListSyncRunOutcome::Succeeded);
+    assert_eq!(
+        last.error_message.as_deref(),
+        Some(LIST_SYNC_EMPTY_FETCH_NOTE),
+        "the run says departures were skipped"
+    );
+}
+
+#[tokio::test]
+async fn a_storage_failure_on_one_list_does_not_stop_the_next() {
+    let harness = Harness::new(vec![subscription("list-a"), subscription("list-b")]);
+    harness.lists.serve("list-a", &["alpha"]);
+    harness.lists.serve("list-b", &["beta"]);
+    harness
+        .store
+        .fail_upserts_for
+        .lock()
+        .unwrap()
+        .insert("list-a".to_string());
+
+    let report = harness.sync_at(at(0)).await;
+
+    assert_eq!(report.considered, 2);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.synced, 1);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0].contains("list-a"));
+    assert_eq!(
+        harness.store.row("list-b", "beta").state,
+        ListMembershipState::Added
+    );
+    let failed = harness.store.subscription("list-a");
+    assert_eq!(failed.sync.state, ListSyncState::Fail);
+    assert_eq!(
+        failed.sync.error_message.as_deref(),
+        Some(LIST_SYNC_STORAGE_FAILURE_MESSAGE)
+    );
+    let runs = harness.store.runs.lock().unwrap().clone();
+    let failed_run = runs
+        .iter()
+        .find(|run| run.subscription_id == "list-a")
+        .expect("the failed list has a run");
+    assert_eq!(failed_run.outcome, ListSyncRunOutcome::Failed);
+}
+
+#[tokio::test]
+async fn a_failed_leave_action_is_retried_while_the_list_is_unchanged() {
+    let mut list = subscription("list-a");
+    list.on_leave = ListOnLeave::Log;
+    list.interval_seconds = 60;
+    let harness = Harness::new(vec![list]);
+    harness.lists.serve("list-a", &["alpha", "beta"]);
+    harness.sync_at(at(0)).await;
+
+    harness.lists.serve("list-a", &["alpha"]);
+    *harness.actions.fail_departures.lock().unwrap() = 1;
+    harness.sync_at(at(10)).await;
+    assert!(
+        !harness.store.row("list-a", "beta").left_handled,
+        "the failed action waits for a retry"
+    );
+
+    // Same list again: the provider says "unchanged", but the retry is owed.
+    let report = harness.sync_at(at(20)).await;
+    assert_eq!(report.synced, 1);
+    assert_eq!(report.departures_acted, 1);
+    assert!(harness.store.row("list-a", "beta").left_handled);
+    assert_eq!(
+        count_calls(&harness.actions, |call| matches!(
+            call,
+            RecordedAction::Departure { .. }
+        )),
+        2
+    );
+
+    let settled = harness.sync_at(at(30)).await;
+    assert_eq!(settled.unchanged, 1, "a handled departure is not retried");
+}
+
+#[tokio::test]
+async fn a_kept_departure_does_not_defeat_the_unchanged_skip() {
+    let mut list = subscription("list-a");
+    list.interval_seconds = 60;
+    let harness = Harness::new(vec![list]);
+    harness.lists.serve("list-a", &["alpha", "beta"]);
+    harness.sync_at(at(0)).await;
+    harness.lists.serve("list-a", &["alpha"]);
+    harness.sync_at(at(10)).await;
+
+    let report = harness.sync_at(at(20)).await;
+
+    assert_eq!(report.unchanged, 1);
+}

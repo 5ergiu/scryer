@@ -151,6 +151,9 @@ pub(crate) struct MemoryListStore {
     pub accounts: Mutex<Vec<UserListAccount>>,
     pub policies: Mutex<Vec<UserListPolicy>>,
     pub runs: Mutex<Vec<ListSyncRun>>,
+    /// Membership writes for these subscription ids fail, as a broken store
+    /// would.
+    pub fail_upserts_for: Mutex<HashSet<String>>,
 }
 
 impl MemoryListStore {
@@ -288,6 +291,15 @@ impl ListSubscriptionRepository for MemoryListStore {
 #[async_trait]
 impl ListMembershipRepository for MemoryListStore {
     async fn upsert_many(&self, memberships: &[ListMembership]) -> AppResult<u64> {
+        {
+            let failing = self.fail_upserts_for.lock().unwrap();
+            if memberships
+                .iter()
+                .any(|row| failing.contains(&row.subscription_id))
+            {
+                return Err(AppError::Repository("fixture store failure".into()));
+            }
+        }
         let mut rows = self.memberships.lock().unwrap();
         for incoming in memberships {
             match rows.iter_mut().find(|row| {
