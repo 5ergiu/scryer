@@ -137,6 +137,18 @@ export function canAccessListsPage(
   return experimentalFeaturesEnabled && (canViewCatalog || canManageLists);
 }
 
+/**
+ * Whether to send the reader away from the Lists page. The instance switches
+ * load after first paint with experimental features assumed off, so a reload
+ * or bookmark of the page waits for them instead of bouncing to the default.
+ */
+export function shouldLeaveListsPage(
+  canAccessLists: boolean,
+  instanceFeaturesLoaded: boolean,
+): boolean {
+  return instanceFeaturesLoaded && !canAccessLists;
+}
+
 /** The instance-wide exclusions pane is a list-management surface only. */
 export function canAccessListExclusions(
   canManageLists: boolean,
