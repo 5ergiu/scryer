@@ -19,10 +19,19 @@ pub struct MetadataMovieInput {
 }
 
 #[derive(InputObject, Clone)]
-/// Metadata gateway series lookup by provider ID and language.
+/// Metadata gateway series lookup by any known identity and language.
+///
+/// Identities are tried in order: SMG title ID, then TVDB, then TMDB/IMDb.
+/// At least one must be supplied.
 pub struct MetadataSeriesInput {
-    /// TVDB series ID.
-    pub tvdb_id: String,
+    /// TVDB series ID, when known.
+    pub tvdb_id: Option<String>,
+    /// SMG canonical series title ID, when known.
+    pub smg_id: Option<i64>,
+    /// TMDB series ID, when known.
+    pub tmdb_id: Option<i64>,
+    /// IMDb series ID, when known.
+    pub imdb_id: Option<String>,
     /// Whether episode metadata should be included; omitted uses the service default.
     pub include_episodes: Option<bool>,
     /// Optional metadata language code.
@@ -122,8 +131,12 @@ pub struct MetadataMoviePayload {
 #[derive(SimpleObject, Clone)]
 /// Full metadata gateway series record with seasons and optional episodes.
 pub struct MetadataSeriesPayload {
-    /// TVDB series ID.
+    /// TVDB series ID, or an empty string for a TMDB-primary series.
     pub tvdb_id: String,
+    /// SMG canonical series title ID, or null when unavailable.
+    pub smg_id: Option<i64>,
+    /// TMDB series ID, or null when unavailable.
+    pub tmdb_id: Option<i64>,
     /// Series title.
     pub name: String,
     /// Normalized sort name.
@@ -189,8 +202,10 @@ pub struct MetadataSeasonPayload {
 #[derive(SimpleObject, Clone)]
 /// Metadata gateway episode record.
 pub struct MetadataEpisodePayload {
-    /// TVDB episode ID.
+    /// TVDB episode ID, or an empty string when the episode has none.
     pub tvdb_id: String,
+    /// TMDB episode ID, or null when unavailable.
+    pub tmdb_id: Option<i64>,
     /// Episode number within the season.
     pub episode_number: i32,
     /// Numeric season containing this episode.

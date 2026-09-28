@@ -117,7 +117,6 @@ const OP_SEARCH_TVDB_BATCH: &str = "SearchTvdbBatch";
 const OP_SEARCH_TVDB_RICH: &str = "SearchTvdbRich";
 const OP_SEARCH_TVDB_MULTI: &str = "SearchTvdbMulti";
 const OP_GET_MOVIE: &str = "GetMovie";
-const OP_GET_SERIES: &str = "GetSeries";
 const OP_METADATA_BULK: &str = "MetadataBulk";
 const OP_TITLES: &str = "Titles";
 const OP_RESOLVE_TITLES: &str = "ResolveTitles";
@@ -524,7 +523,6 @@ pub struct MetadataGatewayClient {
     search_rich_hash: String,
     search_multi_hash: String,
     movie_hash: String,
-    series_hash: String,
     titles_hash: String,
     resolve_titles_hash: String,
     search_titles_hash: String,
@@ -550,7 +548,6 @@ impl MetadataGatewayClient {
         let search_rich_hash = apq_hash(graphql_docs::SEARCH_TVDB_RICH_QUERY);
         let search_multi_hash = apq_hash(graphql_docs::SEARCH_TVDB_MULTI_QUERY);
         let movie_hash = apq_hash(graphql_docs::GET_MOVIE_QUERY);
-        let series_hash = apq_hash(graphql_docs::GET_SERIES_QUERY);
         let titles_hash = apq_hash(graphql_docs::TITLES_QUERY);
         let resolve_titles_hash = apq_hash(graphql_docs::RESOLVE_TITLES_QUERY);
         let search_titles_hash = apq_hash(graphql_docs::SEARCH_TITLES_QUERY);
@@ -586,7 +583,6 @@ impl MetadataGatewayClient {
             %search_rich_hash,
             %search_multi_hash,
             %movie_hash,
-            %series_hash,
             %title_recommendations_hash,
             %collection_completions_hash,
             %submit_discovery_context_snapshot_hash,
@@ -615,7 +611,6 @@ impl MetadataGatewayClient {
             search_rich_hash,
             search_multi_hash,
             movie_hash,
-            series_hash,
             titles_hash,
             resolve_titles_hash,
             search_titles_hash,
@@ -646,7 +641,6 @@ impl MetadataGatewayClient {
         let search_rich_hash = apq_hash(graphql_docs::SEARCH_TVDB_RICH_QUERY);
         let search_multi_hash = apq_hash(graphql_docs::SEARCH_TVDB_MULTI_QUERY);
         let movie_hash = apq_hash(graphql_docs::GET_MOVIE_QUERY);
-        let series_hash = apq_hash(graphql_docs::GET_SERIES_QUERY);
         let titles_hash = apq_hash(graphql_docs::TITLES_QUERY);
         let resolve_titles_hash = apq_hash(graphql_docs::RESOLVE_TITLES_QUERY);
         let search_titles_hash = apq_hash(graphql_docs::SEARCH_TITLES_QUERY);
@@ -690,7 +684,6 @@ impl MetadataGatewayClient {
             search_rich_hash,
             search_multi_hash,
             movie_hash,
-            series_hash,
             titles_hash,
             resolve_titles_hash,
             search_titles_hash,
@@ -1625,14 +1618,20 @@ impl MetadataGatewayClient {
         }
     }
 
+    /// Run a title-id operation. `legacy_fallback` is true only for movie
+    /// operations, which still fall back to the legacy TVDB documents: they
+    /// honour and set the process-wide legacy latch. Series operations have no
+    /// legacy path, so they never consult or flip it; their errors surface
+    /// unchanged.
     async fn execute_title_id_apq<T: serde::de::DeserializeOwned>(
         &self,
         operation_name: &'static str,
         query: &str,
         hash: &str,
         variables: serde_json::Value,
+        legacy_fallback: bool,
     ) -> AppResult<T> {
-        if Self::legacy_title_id_only() {
+        if legacy_fallback && Self::legacy_title_id_only() {
             return Err(Self::title_id_queries_unsupported());
         }
 
@@ -1656,8 +1655,9 @@ impl MetadataGatewayClient {
         operation_name: &'static str,
         query: &str,
         variables: serde_json::Value,
+        legacy_fallback: bool,
     ) -> AppResult<T> {
-        if Self::legacy_title_id_only() {
+        if legacy_fallback && Self::legacy_title_id_only() {
             return Err(Self::title_id_queries_unsupported());
         }
 
@@ -1694,7 +1694,7 @@ impl MetadataGatewayClient {
         language: &str,
         take: impl Fn(TitlesResult) -> Vec<(i64, T)>,
     ) -> AppResult<TitleRefFetch<T>> {
-        if Self::legacy_title_id_only() {
+        if kind.legacy_fallback() && Self::legacy_title_id_only() {
             return Err(Self::title_id_queries_unsupported());
         }
 
@@ -1875,6 +1875,7 @@ impl MetadataGatewayClient {
                     graphql_docs::TITLES_QUERY,
                     &self.titles_hash,
                     kind.titles_variables(ids, language),
+                    kind.legacy_fallback(),
                 )
                 .await?;
             for redirect in &data.titles.redirects {
@@ -1921,6 +1922,7 @@ impl MetadataGatewayClient {
                         "kind": kind,
                         "createMissing": create_missing,
                     }),
+                    title_kind_has_legacy_fallback(kind),
                 )
                 .await?;
             let offset = chunk_index * METADATA_GATEWAY_MAX_TITLE_BULK_BATCH;
@@ -2760,12 +2762,12 @@ mod tests {
     use super::{
         ArtworkItem, InstanceAuth, MetadataExternalIdItem, MetadataGatewayClient,
         MetadataSearchQuery, MovieItem, MovieTitleRef, MtlsState, OP_DISCOVER_PUBLIC_FEED,
-        OP_GET_MOVIE, OP_GET_SERIES, OP_METADATA_BULK, OP_SEARCH_TVDB, OP_SEARCH_TVDB_BATCH,
-        OP_SEARCH_TVDB_MULTI, OP_SEARCH_TVDB_RICH, SearchTvdbBatchResult, SearchTvdbResponse,
-        SeriesItem, SeriesTitleRef, SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce,
-        apq_cache_key, apq_hash, build_bulk_artwork_url_query, build_search_tvdb_batch_query,
-        canonical_request_host, canonical_request_path_and_query, compatibility_poll_phase,
-        enrollment_retry_delay, external_ids_from_gateway, is_version_incompatible_response,
+        OP_GET_MOVIE, OP_METADATA_BULK, OP_SEARCH_TVDB, OP_SEARCH_TVDB_BATCH, OP_SEARCH_TVDB_MULTI,
+        OP_SEARCH_TVDB_RICH, SearchTvdbBatchResult, SearchTvdbResponse, SeriesItem, SeriesTitleRef,
+        SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce, apq_cache_key, apq_hash,
+        build_bulk_artwork_url_query, build_search_tvdb_batch_query, canonical_request_host,
+        canonical_request_path_and_query, compatibility_poll_phase, enrollment_retry_delay,
+        external_ids_from_gateway, is_version_incompatible_response,
         map_metadata_gateway_outbound_error, movie_metadata_from_item,
         next_version_compatibility_poll_delay_at, normalize_artwork_url,
         normalize_optional_artwork_url, parse_version_compatibility_incompatible,
@@ -2848,7 +2850,6 @@ mod tests {
             }
             "search_tvdb_multi" => json!({ "query": "Fixture", "limit": 25, "language": "eng" }),
             "get_movie" => json!({ "tvdbId": 1, "language": "eng" }),
-            "get_series" => json!({ "id": "1", "includeEpisodes": true, "language": "eng" }),
             "metadata_bulk" => {
                 json!({ "movieTvdbIds": [], "seriesTvdbIds": (1..=50).collect::<Vec<_>>(), "language": "eng", "includeEpisodes": true })
             }
@@ -2911,7 +2912,6 @@ mod tests {
                 graphql_docs::SEARCH_TVDB_MULTI_QUERY,
             ),
             ("get_movie", OP_GET_MOVIE, graphql_docs::GET_MOVIE_QUERY),
-            ("get_series", OP_GET_SERIES, graphql_docs::GET_SERIES_QUERY),
             (
                 "metadata_bulk",
                 OP_METADATA_BULK,
@@ -3010,21 +3010,21 @@ mod tests {
             let encoded = serde_json::to_vec_pretty(&corpus).expect("serialize fixture corpus");
             std::fs::write(path, encoded).expect("write fixture corpus");
         }
-        assert_eq!(corpus.len(), 29);
+        assert_eq!(corpus.len(), 28);
         assert_eq!(
-            corpus[6]["variables"]["movieTvdbIds"]
+            corpus[5]["variables"]["movieTvdbIds"]
                 .as_array()
                 .map(Vec::len),
             Some(0)
         );
         assert_eq!(
-            corpus[6]["variables"]["seriesTvdbIds"]
+            corpus[5]["variables"]["seriesTvdbIds"]
                 .as_array()
                 .map(Vec::len),
             Some(50)
         );
         assert_eq!(
-            corpus[26]["query"]
+            corpus[25]["query"]
                 .as_str()
                 .expect("movie query")
                 .matches(": movie(")
@@ -3032,7 +3032,7 @@ mod tests {
             100
         );
         assert_eq!(
-            corpus[27]["query"]
+            corpus[26]["query"]
                 .as_str()
                 .expect("series query")
                 .matches(": series(")
@@ -3040,12 +3040,12 @@ mod tests {
             100
         );
         assert_eq!(
-            corpus[28]["query"]
+            corpus[27]["query"]
                 .as_str()
                 .expect("combined query")
                 .matches(": movie(")
                 .count()
-                + corpus[28]["query"]
+                + corpus[27]["query"]
                     .as_str()
                     .expect("combined query")
                     .matches(": series(")
@@ -3203,16 +3203,6 @@ mod tests {
             "data": {
                 "movie": {
                     "movie": movie_item_payload(tvdb_id)
-                }
-            }
-        })
-    }
-
-    fn series_payload(tvdb_id: i64) -> serde_json::Value {
-        json!({
-            "data": {
-                "series": {
-                    "series": series_item_payload(tvdb_id)
                 }
             }
         })
@@ -3377,12 +3367,12 @@ mod tests {
         let queries = [
             graphql_docs::METADATA_BULK_QUERY,
             graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::TITLES_QUERY,
         ];
 
         assert!(graphql_docs::METADATA_BULK_QUERY.contains("metadataBulk"));
         assert!(graphql_docs::METADATA_BULK_QUERY.contains("external_ratings"));
-        assert!(graphql_docs::GET_SERIES_QUERY.contains("tagged_aliases"));
+        assert!(graphql_docs::TITLES_QUERY.contains("tagged_aliases"));
         assert!(
             queries
                 .iter()
@@ -3395,11 +3385,7 @@ mod tests {
     /// document the facts silently become empty everywhere, so pin the selections themselves.
     #[test]
     fn request_fact_selections_are_present_in_every_title_document() {
-        let queries = [
-            graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
-            graphql_docs::TITLES_QUERY,
-        ];
+        let queries = [graphql_docs::GET_MOVIE_QUERY, graphql_docs::TITLES_QUERY];
         for query in queries {
             for selection in [
                 "genres",
@@ -3746,7 +3732,7 @@ mod tests {
     #[test]
     fn series_queries_select_the_contiguous_absolute_scale() {
         for query in [
-            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::TITLES_QUERY,
             graphql_docs::METADATA_BULK_QUERY,
         ] {
             assert!(query.contains("contiguous_absolute_number"));
@@ -3846,29 +3832,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_series_still_uses_single_title_query() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/graphql"))
-            .and(query_param("operationName", OP_GET_SERIES))
-            .respond_with(ResponseTemplate::new(200).set_body_json(series_payload(424536)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-
-        let series = client
-            .get_series(424536, "eng")
-            .await
-            .expect("single series request should still work");
-
-        assert_eq!(series.tvdb_id, 424536);
-        assert_eq!(series.name, "Fixture Series");
-        assert_eq!(series.target_key, None);
-        assert_fixture_credits(&series.credits);
-    }
-
-    #[tokio::test]
     async fn metadata_bulk_maps_credits_for_movies_and_series() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3932,7 +3895,7 @@ mod tests {
         let queries = [
             graphql_docs::METADATA_BULK_QUERY,
             graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::TITLES_QUERY,
         ];
 
         for query in queries {
@@ -4538,7 +4501,6 @@ mod tests {
             graphql_docs::COLLECTION_COMPLETIONS_QUERY,
             graphql_docs::TITLE_RECOMMENDATIONS_QUERY,
             graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
             graphql_docs::METADATA_BULK_QUERY,
             graphql_docs::TITLES_QUERY,
         ];
@@ -6298,7 +6260,17 @@ enum TitleFetchKind {
     },
 }
 
+/// Whether a title-id operation of `kind` still has a legacy TVDB fallback.
+/// Only movies do; series and anime are served by the title surface alone.
+fn title_kind_has_legacy_fallback(kind: &str) -> bool {
+    kind.trim().eq_ignore_ascii_case("movie")
+}
+
 impl TitleFetchKind {
+    fn legacy_fallback(self) -> bool {
+        matches!(self, Self::Movie)
+    }
+
     fn resolve_kind(self) -> &'static str {
         match self {
             Self::Movie => "movie",
@@ -6845,16 +6817,6 @@ struct ArtworkEpisodeItem {
     episode_number: i32,
     #[serde(default)]
     image_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SeriesResponse {
-    series: SeriesResult,
-}
-
-#[derive(Deserialize)]
-struct SeriesResult {
-    series: SeriesItem,
 }
 
 #[derive(Deserialize)]
@@ -7423,32 +7385,6 @@ impl MetadataGateway for MetadataGatewayClient {
         Ok(movie_metadata_from_item(data.movie.movie))
     }
 
-    async fn get_series(&self, tvdb_id: i64, language: &str) -> AppResult<SeriesMetadata> {
-        let variables = json!({
-            "id": tvdb_id.to_string(),
-            "includeEpisodes": true,
-            // Episode orders are what a release-numbering bridge is built from,
-            // and single-series hydration is the only caller that builds one.
-            "includeEpisodeOrders": true,
-            "language": language,
-        });
-
-        let data: SeriesResponse = self
-            .execute_graphql_apq(
-                OP_GET_SERIES,
-                graphql_docs::GET_SERIES_QUERY,
-                &self.series_hash,
-                variables,
-            )
-            .await?;
-        let s = data.series.series;
-
-        // One mapper, one place: `get_metadata_bulk` and `get_series` deserialize the same
-        // `SeriesItem`, so a widened selection cannot land in one read path and be dropped
-        // by the other.
-        Ok(series_metadata_from_item(s))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],
@@ -7675,6 +7611,7 @@ impl MetadataGateway for MetadataGatewayClient {
                     "language": language,
                     "year": year,
                 }),
+                title_kind_has_legacy_fallback(kind),
             )
             .await?;
         Ok(data
@@ -7726,6 +7663,7 @@ impl MetadataGateway for MetadataGatewayClient {
                         "language": language,
                         "createMissing": create_missing,
                     }),
+                    title_kind_has_legacy_fallback(kind),
                 )
                 .await?;
             if data.search_titles_batch.len() != chunk.len() {

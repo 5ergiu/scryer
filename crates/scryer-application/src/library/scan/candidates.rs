@@ -1,5 +1,6 @@
 use super::*;
 use crate::library_scan_titles::find_existing_movie_title_index_for_metadata_match;
+use crate::library_scan_titles::find_existing_series_title_index_for_metadata_match;
 use crate::library_scan_unmatched::{
     IgnoredLibraryScanItemArgs, LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
     LIBRARY_SCAN_TITLE_ALREADY_OWNS_ANOTHER_FOLDER, build_title_bound_unmatched_scan_item,
@@ -1507,7 +1508,7 @@ pub(super) async fn process_resolved_series_full_scan_candidate(
         return Ok(());
     };
 
-    if let Some(index) = find_existing_title_index_for_metadata_match(
+    if let Some(index) = find_existing_series_title_index_for_metadata_match(
         &selected,
         existing_titles,
         existing_titles_by_name,
@@ -1766,7 +1767,7 @@ pub(super) async fn process_resolved_series_refresh_candidate(
         return Ok(());
     };
 
-    if let Some(index) = find_existing_title_index_for_metadata_match(
+    if let Some(index) = find_existing_series_title_index_for_metadata_match(
         &selected,
         existing_titles,
         existing_titles_by_name,
@@ -2097,6 +2098,7 @@ pub(super) async fn process_resolved_movie_refresh_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library_scan_titles::find_existing_title_index_for_metadata_match;
     use async_trait::async_trait;
     use chrono::Utc;
     use scryer_domain::MediaFacet;

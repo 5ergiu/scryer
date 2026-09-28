@@ -904,14 +904,26 @@ impl AppUseCase {
                     (identity_ids, Some(resolved_ref))
                 }
             }
-            MediaFacet::Series | MediaFacet::Anime => {
-                let tvdb_id = target_tvdb_id
-                    .ok_or_else(|| AppError::Validation("tvdb id is required".into()))?;
-                (
+            MediaFacet::Series | MediaFacet::Anime => match (target_tvdb_id, target_smg_id) {
+                // A TVDB id keeps the rematch exactly as it always was.
+                (Some(tvdb_id), _) => (
                     vec![ExternalId::with_kind("tvdb", "series", tvdb_id.to_string())],
                     None,
-                )
-            }
+                ),
+                // A series with no TVDB id (TMDB-primary) is named by SMG's
+                // title id; hydration fetches it by that id and fills in the
+                // provider ids SMG holds for it.
+                (None, Some(smg_id)) if smg_id > 0 => (
+                    vec![ExternalId::with_kind("smg", "title", smg_id.to_string())],
+                    None,
+                ),
+                (None, Some(_)) => {
+                    return Err(AppError::Validation("smg id must be positive".into()));
+                }
+                (None, None) => {
+                    return Err(AppError::Validation("a title identity is required".into()));
+                }
+            },
         };
 
         for identity_id in &replacement_identity_ids {

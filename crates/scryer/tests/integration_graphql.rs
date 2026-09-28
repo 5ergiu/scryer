@@ -1887,6 +1887,186 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
         .expect("settings definitions should seed");
 }
 
+/// The SMG operation name and variables of a GraphQL request, whether it was
+/// sent as an APQ GET or a POST.
+fn smg_request_operation(request: &wiremock::Request) -> (Option<String>, Value) {
+    if request.method.as_str() == "GET" {
+        let mut operation = None;
+        let mut variables = Value::Null;
+        for (name, value) in request.url.query_pairs() {
+            match name.as_ref() {
+                "operationName" => operation = Some(value.into_owned()),
+                "variables" => variables = serde_json::from_str(&value).unwrap_or(Value::Null),
+                _ => {}
+            }
+        }
+        return (operation, variables);
+    }
+    let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    (
+        body["operationName"].as_str().map(str::to_string),
+        body["variables"].clone(),
+    )
+}
+
+/// Serve TVDB-backed series through SMG's title surface: `searchTitlesBatch`
+/// finds a series by its TVDB id hint or exact name, `resolveTitles` resolves a
+/// series ref by its TVDB id (or SMG id) to the given SMG title id, and
+/// `titles` answers that id with the series. `fixture` is a legacy
+/// `metadataBulk` response; each of its series is served under
+/// `first_smg_id + index`. Series have no legacy fallback, so this is the only
+/// way a test gateway can hydrate one.
+async fn mount_series_title_surface(ctx: &TestContext, first_smg_id: i64, fixture: &str) {
+    let fixture: Value = serde_json::from_str(fixture).expect("fixture is JSON");
+    let served = fixture["data"]["metadataBulk"]["series"]
+        .as_array()
+        .expect("fixture carries metadataBulk series")
+        .iter()
+        .enumerate()
+        .map(|(index, series)| {
+            let smg_id = first_smg_id + index as i64;
+            let tvdb_id = series["tvdb_id"].as_i64().expect("fixture series tvdb id");
+            let mut item = series.clone();
+            item["id"] = json!(smg_id);
+            item["kind"] = json!("series");
+            item["primary_source"] = json!("tvdb");
+            item["external_ids"] = json!([
+                { "source": "smg", "kind": "series", "id": smg_id.to_string(), "key": format!("smg:title:{smg_id}") },
+                { "source": "tvdb", "kind": "series", "id": tvdb_id.to_string(), "key": format!("tvdb:series:{tvdb_id}") },
+            ]);
+            (smg_id, tvdb_id, item)
+        })
+        .collect::<Vec<_>>();
+
+    Mock::given(path("/graphql"))
+        .and(|request: &wiremock::Request| {
+            matches!(
+                smg_request_operation(request).0.as_deref(),
+                Some("ResolveTitles" | "Titles" | "SearchTitlesBatch")
+            )
+        })
+        .respond_with(move |request: &wiremock::Request| {
+            let (operation, variables) = smg_request_operation(request);
+            let body = if operation.as_deref() == Some("SearchTitlesBatch") {
+                let items = variables["requests"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|request| {
+                        let query = request["query"].as_str().unwrap_or_default();
+                        let results = served
+                            .iter()
+                            .filter(|(_, tvdb_id, item)| {
+                                request["tvdbId"].as_str() == Some(tvdb_id.to_string().as_str())
+                                    || (!query.trim().is_empty()
+                                        && item["name"].as_str().is_some_and(|name| {
+                                            name.eq_ignore_ascii_case(query.trim())
+                                        }))
+                            })
+                            .map(|(smg_id, tvdb_id, item)| {
+                                json!({
+                                    "title_id": smg_id,
+                                    "kind": "series",
+                                    "primary_source": "tvdb",
+                                    "tvdb_id": tvdb_id,
+                                    "name": item["name"].clone(),
+                                    "year": item["year"].clone(),
+                                    "external_ids": item["external_ids"].clone(),
+                                    "auto_match_safe": true,
+                                    "auto_match_signals": ["external_id:tvdb"],
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        json!({
+                            "query": request["query"].clone(),
+                            "type": request["type"].clone(),
+                            "year": request["year"].clone(),
+                            "limit": request["limit"].clone(),
+                            "total_results": results.len(),
+                            "results": results,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({ "data": { "searchTitlesBatch": items } })
+            } else if operation.as_deref() == Some("ResolveTitles") {
+                let kind = variables["kind"].as_str().unwrap_or("series").to_string();
+                let resolutions = variables["refs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .map(|(ref_index, reference)| {
+                        let matched = served.iter().find(|(smg_id, tvdb_id, _)| {
+                            reference["id"].as_i64() == Some(*smg_id)
+                                || reference["externalIds"].as_array().is_some_and(|ids| {
+                                    ids.iter().any(|id| {
+                                        id["source"] == "tvdb"
+                                            && id["id"].as_str()
+                                                == Some(tvdb_id.to_string().as_str())
+                                    })
+                                })
+                        });
+                        match matched {
+                            Some((smg_id, _, item)) => json!({
+                                "ref_index": ref_index,
+                                "resolved": true,
+                                "title_id": smg_id,
+                                "kind": kind,
+                                "primary_source": "tvdb",
+                                "redirected_from": null,
+                                "created": false,
+                                "external_ids": item["external_ids"].clone(),
+                                "reason": "matched external identifier",
+                            }),
+                            None => json!({
+                                "ref_index": ref_index,
+                                "resolved": false,
+                                "title_id": null,
+                                "kind": kind,
+                                "primary_source": "",
+                                "redirected_from": null,
+                                "created": false,
+                                "external_ids": [],
+                                "reason": "no match",
+                            }),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                json!({ "data": { "resolveTitles": resolutions } })
+            } else {
+                let ids = variables["ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64)
+                    .collect::<Vec<_>>();
+                let series = served
+                    .iter()
+                    .filter(|(smg_id, _, _)| ids.contains(smg_id))
+                    .map(|(_, _, item)| item.clone())
+                    .collect::<Vec<_>>();
+                let missing_ids = ids
+                    .iter()
+                    .filter(|id| !served.iter().any(|(smg_id, _, _)| smg_id == *id))
+                    .collect::<Vec<_>>();
+                json!({
+                    "data": {
+                        "titles": {
+                            "movies": [],
+                            "series": series,
+                            "missing_ids": missing_ids,
+                            "redirects": [],
+                        }
+                    }
+                })
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        })
+        .with_priority(1)
+        .mount(&ctx.smg_server)
+        .await;
+}
+
 async fn mount_smg_mocks(ctx: &TestContext, fixture_path: &str) {
     let fixture = load_fixture(fixture_path);
     let get_fixture = fixture.clone();

@@ -85,10 +85,6 @@ impl MetadataGateway for FolderMatchMetadataGateway {
         self.calls.fetch_add(1, Ordering::SeqCst);
         EmptySearchMetadataGateway.get_movie(id, language).await
     }
-    async fn get_series(&self, id: i64, language: &str) -> AppResult<SeriesMetadata> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        EmptySearchMetadataGateway.get_series(id, language).await
-    }
     async fn get_metadata_bulk(
         &self,
         movies: &[i64],

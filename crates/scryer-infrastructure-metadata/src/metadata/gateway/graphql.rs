@@ -25,7 +25,6 @@ pub const SEARCH_TVDB_RICH_QUERY: &str = include_str!("metadata_gateway/search_t
 pub const SEARCH_TVDB_MULTI_QUERY: &str =
     include_str!("metadata_gateway/search_tvdb_multi.graphql");
 pub const GET_MOVIE_QUERY: &str = include_str!("metadata_gateway/get_movie.graphql");
-pub const GET_SERIES_QUERY: &str = include_str!("metadata_gateway/get_series.graphql");
 pub const METADATA_BULK_QUERY: &str = include_str!("metadata_gateway/metadata_bulk.graphql");
 pub const TITLES_QUERY: &str = include_str!("metadata_gateway/titles.graphql");
 pub const RESOLVE_TITLES_QUERY: &str = include_str!("metadata_gateway/resolve_titles.graphql");

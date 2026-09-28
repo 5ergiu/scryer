@@ -1,27 +1,5 @@
 use super::*;
 
-/// Series hydration asks SMG's title surface first. These fixtures model a
-/// TVDB-backed series SMG has not seeded there yet: `resolveTitles` resolves
-/// nothing, so hydration falls back to the legacy TVDB document the
-/// catch-all mock serves.
-async fn mount_title_surface_without_the_series(ctx: &TestContext) {
-    let unresolved = json!({ "data": { "resolveTitles": [] } });
-    Mock::given(method("GET"))
-        .and(path("/graphql"))
-        .and(query_param("operationName", "ResolveTitles"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved.clone()))
-        .with_priority(1)
-        .mount(&ctx.smg_server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("ResolveTitles"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved))
-        .with_priority(1)
-        .mount(&ctx.smg_server)
-        .await;
-}
-
 async fn update_library_paths_for_scan(
     ctx: &TestContext,
     movie_path: &str,
@@ -790,12 +768,12 @@ async fn library_series_scan_hydrates_without_creating_wanted_for_unmonitored_ti
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8801, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
         .mount(&ctx.smg_server)
         .await;
-    mount_title_surface_without_the_series(&ctx).await;
 
     let media_root = tempfile::tempdir().expect("media root tempdir");
     let show_dir = media_root.path().join("Test Show Name");
@@ -941,12 +919,12 @@ async fn library_anime_scan_hydrates_and_relinks_files_from_discovered_folder_pa
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8802, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
         .mount(&ctx.smg_server)
         .await;
-    mount_title_surface_without_the_series(&ctx).await;
 
     let media_root = tempfile::tempdir().expect("media root tempdir");
     let show_dir = media_root.path().join("Anime Scan [SubsPlease]");
@@ -1110,12 +1088,12 @@ async fn library_anime_scan_prefers_tvshow_nfo_identity_for_nightfall_fixture() 
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8803, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
         .mount(&ctx.smg_server)
         .await;
-    mount_title_surface_without_the_series(&ctx).await;
 
     let nightfall_tvshow_nfo = r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <tvshow>

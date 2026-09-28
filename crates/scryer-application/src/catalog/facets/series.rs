@@ -4,7 +4,7 @@ use scryer_domain::MediaFacet;
 use crate::facet_handler::{
     FacetHandler, HydrationResult, hydrate_referenced_movie_metadata, series_to_hydration_result,
 };
-use crate::{AppResult, MetadataGateway};
+use crate::{AppResult, MetadataGateway, SeriesTitleRef};
 
 /// Handles both TV and Anime facets (they share series behavior
 /// with different scope IDs and rename templates).
@@ -70,11 +70,35 @@ impl FacetHandler for SeriesFacetHandler {
         tvdb_id: i64,
         language: &str,
     ) -> AppResult<HydrationResult> {
-        let series = gateway.get_series(tvdb_id, language).await?;
+        self.hydrate_series_metadata(
+            gateway,
+            &SeriesTitleRef {
+                tvdb_id: Some(tvdb_id),
+                ..Default::default()
+            },
+            language,
+        )
+        .await
+    }
+
+    async fn hydrate_series_metadata(
+        &self,
+        gateway: &dyn MetadataGateway,
+        series_ref: &SeriesTitleRef,
+        language: &str,
+    ) -> AppResult<HydrationResult> {
+        let (series, _) =
+            crate::catalog_workflow::fetch_series_by_ref(gateway, series_ref, language, true, true)
+                .await?;
         let movie_metadata = hydrate_referenced_movie_metadata(gateway, &[&series], language)
             .await
             .inspect_err(|error| {
-                tracing::warn!(tvdb_id, error = %error, "linked movie metadata hydration failed");
+                tracing::warn!(
+                    smg_id = ?series.smg_id,
+                    tvdb_id = series.tvdb_id,
+                    error = %error,
+                    "linked movie metadata hydration failed"
+                );
             })
             .unwrap_or_default();
         let mut result = series_to_hydration_result(series, language);

@@ -1850,6 +1850,41 @@ fn movie_title_ref_from_external_ids(external_ids: &[ExternalId]) -> Option<crat
     .then_some(movie_ref)
 }
 
+/// The identity a series (or anime) request names, read in the order SMG
+/// title id, TVDB id, TMDB id, IMDb id. TMDB and IMDb ids kinded as something
+/// other than a series (an anime request can carry its movies' ids) are not
+/// the series' own.
+fn series_title_ref_from_external_ids(
+    external_ids: &[ExternalId],
+) -> Option<crate::SeriesTitleRef> {
+    let external_id = |source: &str| {
+        let series_only = matches!(source, "tmdb" | "imdb");
+        external_ids
+            .iter()
+            .find(|external_id| {
+                external_id.source.trim().eq_ignore_ascii_case(source)
+                    && (!series_only
+                        || external_id.kind.as_deref().is_none_or(|kind| {
+                            let kind = kind.trim();
+                            kind.is_empty() || kind.eq_ignore_ascii_case("series")
+                        }))
+            })
+            .map(|external_id| external_id.value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    let series_ref = crate::SeriesTitleRef {
+        smg_id: external_id("smg").and_then(|value| value.parse().ok()),
+        tvdb_id: external_id("tvdb").and_then(|value| value.parse().ok()),
+        tmdb_id: external_id("tmdb").and_then(|value| value.parse().ok()),
+        imdb_id: external_id("imdb").map(str::to_string),
+    };
+    (series_ref.smg_id.is_some()
+        || series_ref.tvdb_id.is_some()
+        || series_ref.tmdb_id.is_some()
+        || series_ref.imdb_id.is_some())
+    .then_some(series_ref)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MediaRequestMetadataEnrichment {
     pub(crate) external_ids: Vec<ExternalId>,
@@ -1988,11 +2023,7 @@ impl AppUseCase {
                 }
             }
             MediaFacet::Series | MediaFacet::Anime => {
-                let Some(tvdb_id) = external_ids
-                    .iter()
-                    .find(|external_id| external_id.source == "tvdb")
-                    .and_then(|external_id| external_id.value.trim().parse::<i64>().ok())
-                else {
+                let Some(mut series_ref) = series_title_ref_from_external_ids(&external_ids) else {
                     return MediaRequestMetadataEnrichment::unavailable(
                         external_ids,
                         "series_subject_unidentifiable",
@@ -2000,7 +2031,8 @@ impl AppUseCase {
                 };
                 let Some(handler) = self.facet_registry.get(facet) else {
                     tracing::warn!(
-                        tvdb_id,
+                        smg_id = ?series_ref.smg_id,
+                        tvdb_id = ?series_ref.tvdb_id,
                         facet = facet.as_str(),
                         "failed to enrich media request external IDs because facet handler is missing"
                     );
@@ -2009,12 +2041,36 @@ impl AppUseCase {
                         "facet_handler_missing",
                     );
                 };
+                let gateway = self.services.library.metadata_gateway.as_ref();
+                if series_ref.smg_id.is_none() && series_ref.tvdb_id.is_none() {
+                    // Only provider ids SMG may not hold yet (TMDB, IMDb): let
+                    // SMG resolve and, when it can, create the series, the way
+                    // list imports do, then address it by its SMG title id.
+                    match gateway
+                        .resolve_titles(
+                            &[crate::lists::gateway::title_ref(&external_ids)],
+                            crate::lists::gateway::gateway_kind(facet),
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(resolutions) => {
+                            series_ref.smg_id = resolutions
+                                .into_iter()
+                                .find(|resolution| resolution.ref_index == 0 && resolution.resolved)
+                                .and_then(|resolution| resolution.smg_id);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                facet = facet.as_str(),
+                                "media request series could not be resolved by provider id"
+                            );
+                        }
+                    }
+                }
                 handler
-                    .hydrate_metadata(
-                        self.services.library.metadata_gateway.as_ref(),
-                        tvdb_id,
-                        &language,
-                    )
+                    .hydrate_series_metadata(gateway, &series_ref, &language)
                     .await
             }
         };

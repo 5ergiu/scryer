@@ -164,12 +164,6 @@ impl MetadataGateway for MovieTitleResolutionGateway {
             .ok_or_else(|| AppError::NotFound(format!("movie {tvdb_id}")))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::Repository(
-            "not used by identity backfill tests".into(),
-        ))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],

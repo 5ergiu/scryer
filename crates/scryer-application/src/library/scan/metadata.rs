@@ -627,10 +627,29 @@ pub(crate) async fn execute_batch_metadata_searches(
         batched_results.extend(movie_results);
     }
 
-    if !series_queries.is_empty() {
+    // Series go through the title surface only: a series SMG knows only from
+    // TMDB has no TVDB id and is found nowhere else, and there is no legacy
+    // TVDB search for series. Queries that carry an external id may ask SMG to
+    // create the series, exactly like movies.
+    let (series_queries_with_external_id, series_queries_without_external_id): (Vec<_>, Vec<_>) =
+        series_queries.into_iter().partition(|query| {
+            query.imdb_id.is_some() || query.tmdb_id.is_some() || query.tvdb_id.is_some()
+        });
+    for (queries, create_missing) in [
+        (series_queries_without_external_id, false),
+        (series_queries_with_external_id, true),
+    ] {
+        if queries.is_empty() {
+            continue;
+        }
         let Some(series_results) = await_cancellable_app_result(
             cancel_token,
-            metadata_gateway.search_tvdb_batch(&series_queries, metadata_language),
+            metadata_gateway.search_titles_batch(
+                &queries,
+                METADATA_TYPE_SERIES,
+                metadata_language,
+                create_missing,
+            ),
         )
         .await?
         else {
@@ -1813,7 +1832,7 @@ mod tests {
     use crate::library_discovery::extract_library_queries;
     use crate::{
         BulkMetadataResult, ExternalIdHint, LibraryFileBatchReceiver, MovieMetadata,
-        MultiMetadataSearchResult, RichMetadataSearchItem, SeriesMetadata,
+        MultiMetadataSearchResult, RichMetadataSearchItem,
     };
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
@@ -1914,6 +1933,16 @@ mod tests {
             Ok(results)
         }
 
+        async fn search_titles_batch(
+            &self,
+            queries: &[MetadataSearchQuery],
+            _kind: &str,
+            language: &str,
+            _create_missing: bool,
+        ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+            self.search_tvdb_batch(queries, language).await
+        }
+
         async fn search_tvdb_rich(
             &self,
             _query: &str,
@@ -1935,10 +1964,6 @@ mod tests {
         }
 
         async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-            panic!("unused in test")
-        }
-
-        async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
             panic!("unused in test")
         }
 
@@ -2015,6 +2040,16 @@ mod tests {
                 .collect())
         }
 
+        async fn search_titles_batch(
+            &self,
+            queries: &[MetadataSearchQuery],
+            _kind: &str,
+            language: &str,
+            _create_missing: bool,
+        ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+            self.search_tvdb_batch(queries, language).await
+        }
+
         async fn search_tvdb_rich(
             &self,
             _query: &str,
@@ -2036,10 +2071,6 @@ mod tests {
         }
 
         async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-            panic!("unused in test")
-        }
-
-        async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
             panic!("unused in test")
         }
 

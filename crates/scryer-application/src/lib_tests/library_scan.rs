@@ -158,10 +158,6 @@ impl MetadataGateway for HydratingMovieSearchGateway {
         }
     }
 
-    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(format!("series {tvdb_id}")))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],
@@ -230,10 +226,6 @@ impl MetadataGateway for CountingRecommendationMetadataGateway {
             .get(&tvdb_id)
             .cloned()
             .ok_or_else(|| AppError::NotFound(format!("movie {tvdb_id}")))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::Repository("not implemented in tests".into()))
     }
 
     async fn get_metadata_bulk(
@@ -716,9 +708,14 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
         &self,
         queries: &[MetadataSearchQuery],
         kind: &str,
-        _language: &str,
+        language: &str,
         create_missing: bool,
     ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        if kind != "movie" {
+            // Series always search through the title surface; this fixture
+            // answers them with the same identity matches as its TVDB batch.
+            return self.search_tvdb_batch(queries, language).await;
+        }
         self.title_batch_queries.lock().await.push((
             queries.to_vec(),
             kind.to_string(),
@@ -786,13 +783,6 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
         self.detail_calls.fetch_add(1, Ordering::SeqCst);
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        self.detail_calls.fetch_add(1, Ordering::SeqCst);
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -888,12 +878,6 @@ impl MetadataGateway for BlockingBulkHydrationMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -3225,27 +3209,30 @@ async fn series_full_scan_keeps_hinted_batch_intact_across_unhinted_folder() {
     })
     .await;
 
-    // Hinted and unhinted candidates share one match queue: the exact-ID
-    // lookups and the fuzzy lookup travel in the same searchTvdbBatch call
-    // instead of separate hinted-only batches.
+    // Hinted and unhinted candidates share one match queue. The title
+    // surface sends the exact-ID lookups (which may create a missing series)
+    // and the fuzzy lookup (which may not) as two searchTitlesBatch requests,
+    // exactly like movies, and the 22 hinted lookups stay in one batch.
     let batches = metadata_gateway.batch_queries().await;
-    assert_eq!(batches.len(), 1);
-    let exact_queries = batches[0]
+    assert_eq!(batches.len(), 2);
+    let is_exact = |query: &MetadataSearchQuery| {
+        query.query.is_empty()
+            && query.type_hint == "series"
+            && query.tvdb_id.is_some()
+            && query.imdb_id.is_none()
+            && query.tmdb_id.is_none()
+    };
+    let exact_batch = batches
         .iter()
-        .filter(|query| {
-            query.query.is_empty()
-                && query.type_hint == "series"
-                && query.tvdb_id.is_some()
-                && query.imdb_id.is_none()
-                && query.tmdb_id.is_none()
-        })
-        .count();
-    assert_eq!(exact_queries, 22);
-    assert!(
-        batches[0]
+        .find(|batch| batch.iter().any(is_exact))
+        .expect("the hinted lookups travel together");
+    assert_eq!(exact_batch.len(), 22);
+    assert!(exact_batch.iter().all(is_exact));
+    assert!(batches.iter().any(|batch| {
+        batch
             .iter()
             .any(|query| !query.query.trim().is_empty() && query.tvdb_id.is_none())
-    );
+    }));
 }
 
 #[tokio::test]
@@ -7302,7 +7289,7 @@ fn pending_import_title_request(
 
 struct PendingImportSearchMetadataGateway {
     results: Vec<RichMetadataSearchItem>,
-    /// Series served to bulk hydration, keyed by TVDB id.
+    /// Series served to hydration through the title surface, keyed by TVDB id.
     series: HashMap<i64, SeriesMetadata>,
 }
 
@@ -7349,11 +7336,37 @@ impl MetadataGateway for PendingImportSearchMetadataGateway {
         Err(AppError::Repository("not implemented in tests".into()))
     }
 
-    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        self.series
-            .get(&tvdb_id)
-            .cloned()
-            .ok_or_else(|| AppError::Repository("not implemented in tests".into()))
+    async fn search_titles(
+        &self,
+        _query: &str,
+        _kind: &str,
+        _limit: i32,
+        _language: &str,
+        _year: Option<i32>,
+    ) -> AppResult<Vec<RichMetadataSearchItem>> {
+        Ok(self.results.clone())
+    }
+
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        _language: &str,
+        _include_episodes: bool,
+        _include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        let mut result = SeriesTitleBulkResult::default();
+        for (ref_index, series_ref) in refs.iter().enumerate() {
+            match series_ref
+                .tvdb_id
+                .and_then(|tvdb_id| self.series.get(&tvdb_id))
+            {
+                Some(series) => {
+                    result.by_ref_index.insert(ref_index, series.clone());
+                }
+                None => result.missing_ref_indexes.push(ref_index),
+            }
+        }
+        Ok(result)
     }
 
     async fn get_metadata_bulk(

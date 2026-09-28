@@ -10,7 +10,7 @@ use crate::lists::fetch::{ListFailureClass, fetch_list};
 use crate::lists::test_support::{ScriptedCharts, ScriptedLists, ScriptedProvider, subscription};
 use crate::{
     AppError, BulkMetadataResult, MetadataSearchItem, MetadataSearchQuery, MovieMetadata,
-    MultiMetadataSearchResult, RichMetadataSearchItem, SeriesMetadata, TitleResolution,
+    MultiMetadataSearchResult, RichMetadataSearchItem, TitleResolution,
 };
 
 fn id(source: &str, value: &str) -> ExternalId {
@@ -190,10 +190,6 @@ impl MetadataGateway for RecordingResolveGateway {
     }
 
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-        unimplemented!("list resolver fixture only resolves titles")
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
         unimplemented!("list resolver fixture only resolves titles")
     }
 

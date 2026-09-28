@@ -29,8 +29,7 @@ use crate::library_scan_metadata::{
 use crate::library_scan_titles::{
     TitleNameIndex, append_movie_title, append_series_title, build_movie_probe_path_indexes,
     build_movie_title_indexes, build_new_title_from_metadata_match,
-    build_series_title_folder_path_index, build_series_title_indexes,
-    find_existing_title_index_for_metadata_match, title_year_compatible,
+    build_series_title_folder_path_index, build_series_title_indexes, title_year_compatible,
     update_movie_probe_path_index, update_series_title_folder_path_index,
 };
 use crate::library_scan_unmatched::{

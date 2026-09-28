@@ -31,7 +31,7 @@ use crate::{
     DiscoverySyncStateRecord, DiscoveryTitle, DomainEventRepository, JobCategory, JobKey, JobRun,
     JobRunStatus, JobSection, JobTriggerSource, LibraryRootDraft, MetadataGateway,
     MetadataSearchItem, MetadataSearchQuery, MovieMetadata, MultiMetadataSearchResult,
-    RichMetadataSearchItem, SeriesMetadata, TitleRecommendationsInput,
+    RichMetadataSearchItem, TitleRecommendationsInput,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -5447,10 +5447,6 @@ impl MetadataGateway for SnapshotMetadataGateway {
     }
 
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-        Err(unused_gateway_call())
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
         Err(unused_gateway_call())
     }
 

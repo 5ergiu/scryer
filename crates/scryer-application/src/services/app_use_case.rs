@@ -810,23 +810,24 @@ impl AppUseCase {
         )
         .await?;
         let gateway = &self.services.library.metadata_gateway;
-        if type_hint.eq_ignore_ascii_case("movie") {
-            match gateway
-                .search_titles(query, "movie", limit, language, year)
-                .await
+        // Every kind goes through the title surface: a series SMG knows only
+        // from TMDB has no TVDB id and is reachable nowhere else. Only movies
+        // keep the legacy TVDB search fallback; series have none.
+        let kind = type_hint.trim().to_ascii_lowercase();
+        match gateway
+            .search_titles(query, &kind, limit, language, year)
+            .await
+        {
+            Ok(results) => Ok(results),
+            Err(error)
+                if kind == "movie"
+                    && crate::catalog_workflow::title_queries_not_supported(&error) =>
             {
-                Ok(results) => Ok(results),
-                Err(error) if crate::catalog_workflow::title_queries_not_supported(&error) => {
-                    gateway
-                        .search_tvdb_rich(query, type_hint, limit, language, year)
-                        .await
-                }
-                Err(error) => Err(error),
+                gateway
+                    .search_tvdb_rich(query, type_hint, limit, language, year)
+                    .await
             }
-        } else {
-            gateway
-                .search_tvdb_rich(query, type_hint, limit, language, year)
-                .await
+            Err(error) => Err(error),
         }
     }
 
@@ -952,22 +953,41 @@ impl AppUseCase {
         }
     }
 
-    pub async fn get_metadata_series(
+    /// Fetch one series by whichever identity the caller holds, in the order
+    /// SMG title id, TVDB id, TMDB id, IMDb id. SMG's title surface answers
+    /// every series, including a TMDB-primary one with no TVDB id; provider ids
+    /// are resolved to an SMG title id first. There is no legacy fallback.
+    pub async fn get_metadata_series_by_ref(
         &self,
         actor: &User,
-        tvdb_id: i64,
+        series_ref: &SeriesTitleRef,
         language: &str,
+        include_episodes: bool,
     ) -> AppResult<SeriesMetadata> {
         self.require_any_library_permission_for_service(
             actor,
             scryer_domain::LibraryPermission::View,
         )
         .await?;
-        self.services
-            .library
-            .metadata_gateway
-            .get_series(tvdb_id, language)
-            .await
+        if series_ref.smg_id.is_none()
+            && series_ref.tvdb_id.is_none()
+            && series_ref.tmdb_id.is_none()
+            && series_ref
+                .imdb_id
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(AppError::Validation("a title identity is required".into()));
+        }
+        crate::catalog_workflow::fetch_series_by_ref(
+            self.services.library.metadata_gateway.as_ref(),
+            series_ref,
+            language,
+            include_episodes,
+            false,
+        )
+        .await
+        .map(|(series, _)| series)
     }
 
     pub async fn list_title_media_files(

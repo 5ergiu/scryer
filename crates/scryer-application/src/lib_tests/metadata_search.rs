@@ -137,10 +137,6 @@ impl MetadataGateway for RecordingSearchMetadataGateway {
         Err(AppError::NotFound("movie".into()))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound("series".into()))
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],

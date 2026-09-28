@@ -884,8 +884,6 @@ pub trait MetadataGateway: Send + Sync {
 
     async fn get_movie(&self, tvdb_id: i64, language: &str) -> AppResult<MovieMetadata>;
 
-    async fn get_series(&self, tvdb_id: i64, language: &str) -> AppResult<SeriesMetadata>;
-
     /// Fetch metadata for movies and series in a single GraphQL round-trip.
     /// Returns resolved results; IDs that fail to resolve are omitted from the maps.
     async fn get_metadata_bulk(
@@ -1296,12 +1294,6 @@ impl MetadataGateway for NullMetadataGateway {
     }
 
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-        Err(AppError::Repository(
-            "metadata gateway is not configured".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
         Err(AppError::Repository(
             "metadata gateway is not configured".into(),
         ))

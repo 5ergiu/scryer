@@ -2124,10 +2124,24 @@ async fn graphql_introspection_search_metadata_uses_media_facet_enum() {
             .iter()
             .filter_map(|field| field["name"].as_str())
             .collect::<Vec<_>>(),
-        vec!["tvdbId", "includeEpisodes", "language"]
+        vec![
+            "tvdbId",
+            "smgId",
+            "tmdbId",
+            "imdbId",
+            "includeEpisodes",
+            "language"
+        ]
     );
-    assert_eq!(series_input_fields[0]["type"]["kind"], "NON_NULL");
-    assert_eq!(series_input_fields[0]["type"]["ofType"]["name"], "String");
+    for (field, scalar) in [
+        (&series_input_fields[0], "String"),
+        (&series_input_fields[1], "Int"),
+        (&series_input_fields[2], "Int"),
+        (&series_input_fields[3], "String"),
+    ] {
+        assert_eq!(field["type"]["kind"], "SCALAR");
+        assert_eq!(field["type"]["name"], scalar);
+    }
 }
 
 #[tokio::test]

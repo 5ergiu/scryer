@@ -606,7 +606,22 @@ impl AppUseCase {
         request.root_folder_id = None;
         request.min_availability = None;
 
-        let (target_identity_source, target_identity_value) = match item.facet {
+        // The identities the chosen title is named by. A movie is looked up
+        // by its first one, as before. A series is looked up by every one it
+        // carries, in the order SMG title id, TVDB id, TMDB id: a series SMG
+        // knows only from TMDB has no TVDB id, and a catalog title added
+        // before SMG ids were stored has no SMG id.
+        let identity_value = |source: &str| {
+            request
+                .external_ids
+                .iter()
+                .find(|external_id| {
+                    external_id.source.eq_ignore_ascii_case(source)
+                        && !external_id.value.trim().is_empty()
+                })
+                .map(|external_id| external_id.value.trim().to_string())
+        };
+        let target_identities: Vec<(&'static str, String)> = match item.facet {
             MediaFacet::Movie => request
                 .external_ids
                 .iter()
@@ -625,33 +640,38 @@ impl AppUseCase {
                     let value = external_id.value.trim();
                     (!value.is_empty()).then(|| (source, value.to_string()))
                 })
+                .map(|identity| vec![identity])
                 .ok_or_else(|| AppError::Validation("a title identity is required".into()))?,
             MediaFacet::Series | MediaFacet::Anime => {
-                let target_tvdb_id = request
-                    .external_ids
-                    .iter()
-                    .find(|external_id| {
-                        external_id.source.eq_ignore_ascii_case("tvdb")
-                            && !external_id.value.trim().is_empty()
-                    })
-                    .map(|external_id| external_id.value.trim().to_string())
-                    .ok_or_else(|| AppError::Validation("tvdb id is required".into()))?;
-                ("tvdb", target_tvdb_id)
+                let identities = ["smg", "tvdb", "tmdb"]
+                    .into_iter()
+                    .filter_map(|source| identity_value(source).map(|value| (source, value)))
+                    .collect::<Vec<_>>();
+                if identities.is_empty() {
+                    return Err(AppError::Validation("a title identity is required".into()));
+                }
+                identities
             }
         };
 
-        if let Some(existing_title) = self
-            .services
-            .catalog
-            .titles
-            .find_by_external_id_in_library_and_facet(
-                &item.library_id,
-                item.facet.clone(),
-                target_identity_source,
-                &target_identity_value,
-            )
-            .await?
-        {
+        let mut existing_match = None;
+        for (source, value) in &target_identities {
+            existing_match = self
+                .services
+                .catalog
+                .titles
+                .find_by_external_id_in_library_and_facet(
+                    &item.library_id,
+                    item.facet.clone(),
+                    source,
+                    value,
+                )
+                .await?;
+            if existing_match.is_some() {
+                break;
+            }
+        }
+        if let Some(existing_title) = existing_match {
             if !attach_to_existing_title {
                 return Err(AppError::Validation(
                     "title already exists in this library".into(),
@@ -893,29 +913,48 @@ impl AppUseCase {
 
         let limit = limit.clamp(1, 100);
         let search_limit = limit.saturating_mul(3).clamp(limit, 100);
-        let results = self
-            .services
-            .library
-            .metadata_gateway
-            .search_tvdb_rich(query, item.facet.as_str(), search_limit, language, year)
-            .await?;
+        let gateway = &self.services.library.metadata_gateway;
+        // The title surface finds every title, including a series SMG knows
+        // only from TMDB, which has no TVDB id. Only movies keep the legacy
+        // TVDB search fallback; series have none.
+        let results = match gateway
+            .search_titles(query, item.facet.as_str(), search_limit, language, year)
+            .await
+        {
+            Ok(results) => results,
+            Err(error)
+                if item.facet == MediaFacet::Movie
+                    && crate::catalog_workflow::title_queries_not_supported(&error) =>
+            {
+                gateway
+                    .search_tvdb_rich(query, item.facet.as_str(), search_limit, language, year)
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
 
-        let mut seen_tvdb_ids = HashSet::new();
-        let tvdb_ids = results
-            .iter()
-            .map(|result| result.tvdb_id.trim())
-            .filter(|tvdb_id| !tvdb_id.is_empty())
-            .filter(|tvdb_id| seen_tvdb_ids.insert((*tvdb_id).to_string()))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let distinct_ids = |id_of: &dyn Fn(&RichMetadataSearchItem) -> Option<String>| {
+            let mut seen = HashSet::new();
+            results
+                .iter()
+                .filter_map(id_of)
+                .filter(|id| seen.insert(id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let result_tvdb_id = |result: &RichMetadataSearchItem| {
+            let tvdb_id = result.tvdb_id.trim();
+            (!tvdb_id.is_empty()).then(|| tvdb_id.to_string())
+        };
+        let result_smg_id =
+            |result: &RichMetadataSearchItem| result.smg_id.map(|smg_id| smg_id.to_string());
+        let tvdb_ids = distinct_ids(&result_tvdb_id);
+        let smg_ids = distinct_ids(&result_smg_id);
         // Candidates the library already owns are annotated, not dropped: when
         // the only real candidate is already there, hiding it made the dialog
         // look like a search failure. The UI turns the annotation into an
         // "attach to existing title" action instead.
-        let existing_title_ids_by_tvdb_id = self
-            .services
-            .catalog
-            .titles
+        let titles = &self.services.catalog.titles;
+        let existing_title_ids_by_tvdb_id = titles
             .map_existing_external_ids_to_title_ids_in_library_and_facet(
                 &item.library_id,
                 item.facet.clone(),
@@ -923,15 +962,27 @@ impl AppUseCase {
                 &tvdb_ids,
             )
             .await?;
+        let existing_title_ids_by_smg_id = if smg_ids.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            titles
+                .map_existing_external_ids_to_title_ids_in_library_and_facet(
+                    &item.library_id,
+                    item.facet.clone(),
+                    "smg",
+                    &smg_ids,
+                )
+                .await?
+        };
 
         let mut annotated = Vec::with_capacity(limit as usize);
         for result in results {
-            let existing_title_id = {
-                let tvdb_id = result.tvdb_id.trim();
-                (!tvdb_id.is_empty())
-                    .then(|| existing_title_ids_by_tvdb_id.get(tvdb_id).cloned())
-                    .flatten()
-            };
+            let existing_title_id = result_smg_id(&result)
+                .and_then(|smg_id| existing_title_ids_by_smg_id.get(&smg_id).cloned())
+                .or_else(|| {
+                    result_tvdb_id(&result)
+                        .and_then(|tvdb_id| existing_title_ids_by_tvdb_id.get(&tvdb_id).cloned())
+                });
 
             annotated.push(PendingImportTitleSearchItem {
                 item: result,

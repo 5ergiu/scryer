@@ -20,6 +20,7 @@ use scryer_domain::{
 use scryer_infrastructure_sql::types::SettingDefinitionSeed;
 
 const IRON_VALE_TVDB_ID: i64 = 420_424;
+const IRON_VALE_SMG_ID: i64 = 9_424;
 const MINIMUM_IRON_VALE_IMPORTED_FILE_COUNT: usize = 12;
 
 fn admin() -> User {
@@ -281,24 +282,118 @@ async fn install_iron_vale_metadata_fixture(ctx: &TestContext) {
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
         .mount(&ctx.smg_server)
         .await;
-    // Series hydration asks SMG's title surface first; model a TVDB-backed
-    // series it has not seeded, so hydration falls back to the legacy
-    // document above.
-    let unresolved = json!({ "data": { "resolveTitles": [] } });
-    Mock::given(method("GET"))
-        .and(path("/graphql"))
-        .and(query_param("operationName", "ResolveTitles"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved.clone()))
+    // Series hydrate only through SMG's title surface: the TVDB id resolves to
+    // an SMG title id, and `titles` answers that id with the series.
+    let fixture: serde_json::Value =
+        serde_json::from_str(&build_iron_vale_metadata_fixture()).expect("fixture is JSON");
+    let mut series = fixture["data"]["metadataBulk"]["series"][0].clone();
+    let external_ids = json!([
+        { "source": "smg", "kind": "series", "id": IRON_VALE_SMG_ID.to_string(), "key": format!("smg:title:{IRON_VALE_SMG_ID}") },
+        { "source": "tvdb", "kind": "series", "id": IRON_VALE_TVDB_ID.to_string(), "key": format!("tvdb:series:{IRON_VALE_TVDB_ID}") },
+    ]);
+    series["id"] = json!(IRON_VALE_SMG_ID);
+    series["kind"] = json!("series");
+    series["primary_source"] = json!("tvdb");
+    series["external_ids"] = external_ids.clone();
+    // A library scan finds the series folder through `searchTitlesBatch`,
+    // which echoes each request with the series as its match.
+    let search_result = json!({
+        "title_id": IRON_VALE_SMG_ID,
+        "kind": "series",
+        "primary_source": "tvdb",
+        "tvdb_id": IRON_VALE_TVDB_ID,
+        "name": series["name"].clone(),
+        "year": series["year"].clone(),
+        "external_ids": external_ids.clone(),
+        "auto_match_safe": true,
+        "auto_match_signals": ["external_id:tvdb"]
+    });
+    Mock::given(path("/graphql"))
+        .and(|request: &wiremock::Request| {
+            smg_operation(request).0.as_deref() == Some("SearchTitlesBatch")
+        })
+        .respond_with(move |request: &wiremock::Request| {
+            let (_, variables) = smg_operation(request);
+            let items = variables["requests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|request| {
+                    json!({
+                        "query": request["query"].clone(),
+                        "type": request["type"].clone(),
+                        "year": request["year"].clone(),
+                        "limit": request["limit"].clone(),
+                        "total_results": 1,
+                        "results": [search_result.clone()]
+                    })
+                })
+                .collect::<Vec<_>>();
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": { "searchTitlesBatch": items } }))
+        })
         .with_priority(1)
         .mount(&ctx.smg_server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("ResolveTitles"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved))
-        .with_priority(1)
-        .mount(&ctx.smg_server)
-        .await;
+    let resolved = json!({ "data": { "resolveTitles": [{
+        "ref_index": 0,
+        "resolved": true,
+        "title_id": IRON_VALE_SMG_ID,
+        "kind": "series",
+        "primary_source": "tvdb",
+        "redirected_from": null,
+        "created": false,
+        "external_ids": external_ids,
+        "reason": "matched external identifier"
+    }] } });
+    let titles = json!({ "data": { "titles": {
+        "movies": [],
+        "series": [series],
+        "missing_ids": [],
+        "redirects": []
+    } } });
+    for (operation, body) in [("ResolveTitles", resolved), ("Titles", titles)] {
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", operation))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+            .with_priority(1)
+            .mount(&ctx.smg_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains(format!(
+                "\"operationName\":\"{operation}\""
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(1)
+            .mount(&ctx.smg_server)
+            .await;
+    }
+}
+
+/// The operation name and variables of an SMG request (APQ GET or POST).
+fn smg_operation(request: &wiremock::Request) -> (Option<String>, serde_json::Value) {
+    if request.method.as_str() == "GET" {
+        let mut operation = None;
+        let mut variables = serde_json::Value::Null;
+        for (name, value) in request.url.query_pairs() {
+            match name.as_ref() {
+                "operationName" => operation = Some(value.into_owned()),
+                "variables" => {
+                    variables = serde_json::from_str(&value).unwrap_or(serde_json::Value::Null)
+                }
+                _ => {}
+            }
+        }
+        return (operation, variables);
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+    (
+        body["operationName"].as_str().map(str::to_string),
+        body["variables"].clone(),
+    )
 }
 
 fn build_iron_vale_metadata_fixture() -> String {

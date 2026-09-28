@@ -16814,9 +16814,13 @@ Metadata gateway episode record.
 """
 type MetadataEpisodePayload {
 	"""
-	TVDB episode ID.
+	TVDB episode ID, or an empty string when the episode has none.
 	"""
 	tvdbId: String!
+	"""
+	TMDB episode ID, or null when unavailable.
+	"""
+	tmdbId: Int
 	"""
 	Episode number within the season.
 	"""
@@ -17060,13 +17064,28 @@ type MetadataSeasonPayload {
 }
 
 """
-Metadata gateway series lookup by provider ID and language.
+Metadata gateway series lookup by any known identity and language.
+
+Identities are tried in order: SMG title ID, then TVDB, then TMDB/IMDb.
+At least one must be supplied.
 """
 input MetadataSeriesInput {
 	"""
-	TVDB series ID.
+	TVDB series ID, when known.
 	"""
-	tvdbId: String!
+	tvdbId: String
+	"""
+	SMG canonical series title ID, when known.
+	"""
+	smgId: Int
+	"""
+	TMDB series ID, when known.
+	"""
+	tmdbId: Int
+	"""
+	IMDb series ID, when known.
+	"""
+	imdbId: String
 	"""
 	Whether episode metadata should be included; omitted uses the service default.
 	"""
@@ -17082,9 +17101,17 @@ Full metadata gateway series record with seasons and optional episodes.
 """
 type MetadataSeriesPayload {
 	"""
-	TVDB series ID.
+	TVDB series ID, or an empty string for a TMDB-primary series.
 	"""
 	tvdbId: String!
+	"""
+	SMG canonical series title ID, or null when unavailable.
+	"""
+	smgId: Int
+	"""
+	TMDB series ID, or null when unavailable.
+	"""
+	tmdbId: Int
 	"""
 	Series title.
 	"""
@@ -23562,7 +23589,7 @@ type QueryRoot {
 	"""
 	metadataSeries(
 		"""
-		TVDB identity, language, and whether episode metadata should be included, defaulting to true.
+		Series identity (SMG, TVDB, TMDB or IMDb), language, and whether episode metadata should be included, defaulting to true.
 		"""
 		input: MetadataSeriesInput!
 	): MetadataSeriesPayload!

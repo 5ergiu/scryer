@@ -431,6 +431,22 @@ pub trait FacetHandler: Send + Sync {
         tvdb_id: i64,
         language: &str,
     ) -> AppResult<HydrationResult>;
+
+    /// Hydrate a series (or anime) by whichever identity the caller holds,
+    /// so a series with no TVDB id can be hydrated by its SMG title id.
+    /// Facets without series metadata reject it.
+    async fn hydrate_series_metadata(
+        &self,
+        gateway: &dyn MetadataGateway,
+        series_ref: &crate::SeriesTitleRef,
+        language: &str,
+    ) -> AppResult<HydrationResult> {
+        let _ = (gateway, series_ref, language);
+        Err(crate::AppError::Validation(format!(
+            "{} titles have no series metadata",
+            self.facet_id()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -785,10 +801,24 @@ mod tests {
             Ok(test_movie(test_credits()))
         }
 
-        async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-            let mut series = test_series(vec![]);
-            series.credits = test_credits();
-            Ok(series)
+        async fn get_series_titles(
+            &self,
+            refs: &[crate::SeriesTitleRef],
+            _language: &str,
+            _include_episodes: bool,
+            _include_episode_orders: bool,
+        ) -> AppResult<crate::SeriesTitleBulkResult> {
+            let by_ref_index = (0..refs.len())
+                .map(|index| {
+                    let mut series = test_series(vec![]);
+                    series.credits = test_credits();
+                    (index, series)
+                })
+                .collect();
+            Ok(crate::SeriesTitleBulkResult {
+                by_ref_index,
+                ..Default::default()
+            })
         }
 
         async fn get_metadata_bulk(

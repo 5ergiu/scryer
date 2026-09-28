@@ -195,8 +195,7 @@ impl AppUseCase {
             ..Default::default()
         };
         let mut movie_targets = Vec::new();
-        let mut series_ids = Vec::new();
-        let mut series_title_by_tvdb = HashMap::<i64, &Title>::new();
+        let mut series_title_targets = Vec::new();
 
         for title in titles {
             match title.facet {
@@ -207,17 +206,18 @@ impl AppUseCase {
                     }
                 }
                 MediaFacet::Series | MediaFacet::Anime => {
-                    let Some(tvdb_id) = title_tvdb_id(title) else {
-                        continue;
-                    };
-                    summary.titles_linked += 1;
-                    series_ids.push(tvdb_id);
-                    series_title_by_tvdb.insert(tvdb_id, title);
+                    // Every series, TVDB-backed or TMDB-primary, is answered
+                    // by SMG's title surface by title id; a TVDB-backed title
+                    // with no SMG id yet is resolved by its TVDB ref.
+                    if let Some(series_ref) = crate::catalog_workflow::series_title_ref(title) {
+                        summary.titles_linked += 1;
+                        series_title_targets.push((title, series_ref));
+                    }
                 }
             }
         }
 
-        if movie_targets.is_empty() && series_ids.is_empty() {
+        if movie_targets.is_empty() && series_title_targets.is_empty() {
             return Ok(summary);
         }
 
@@ -311,115 +311,37 @@ impl AppUseCase {
             }
         }
 
-        let series_artwork = if series_ids.is_empty() {
-            None
-        } else {
-            Some(
-                self.services
-                    .library
-                    .metadata_gateway
-                    .get_artwork_urls_bulk(&[], &series_ids, language)
-                    .await?,
-            )
-        };
-
-        for tvdb_id in series_ids {
-            let Some(title) = series_title_by_tvdb.get(&tvdb_id) else {
-                continue;
-            };
-            let Some(urls) = series_artwork
-                .as_ref()
-                .and_then(|artwork| artwork.series.get(&tvdb_id))
-            else {
-                summary.missing_artwork_results += 1;
-                summary.missing_title_artwork_results += 1;
-                tracing::debug!(
-                    title_id = %title.id,
-                    tvdb_id,
-                    "title image cache refresh skipped series with missing artwork result"
-                );
-                continue;
-            };
-            if urls.poster_url.is_none() && urls.background_url.is_none() {
-                summary.missing_artwork_results += 1;
-                summary.missing_incoming_image_urls += 1;
-                tracing::debug!(
-                    title_id = %title.id,
-                    tvdb_id,
-                    "title image cache refresh skipped series artwork update with no usable image URLs"
-                );
-            }
-            if let Some(update) = title_artwork_update(
-                title,
-                urls.poster_url.as_ref(),
-                urls.background_url.as_ref(),
-            ) {
-                title_updates.push(update);
-            }
-
-            let episodes = self
+        if !series_title_targets.is_empty() {
+            let refs = series_title_targets
+                .iter()
+                .map(|(_, series_ref)| series_ref.clone())
+                .collect::<Vec<_>>();
+            match self
                 .services
-                .catalog
-                .shows
-                .list_episodes_for_title(&title.id)
-                .await?;
-            let mut episode_by_tvdb = HashMap::<i64, &scryer_domain::Episode>::new();
-            let mut episode_by_numbers =
-                HashMap::<(String, String), &scryer_domain::Episode>::new();
-            for episode in &episodes {
-                if let Some(tvdb_id) = episode
-                    .tvdb_id
-                    .as_deref()
-                    .and_then(|value| value.trim().parse::<i64>().ok())
-                {
-                    episode_by_tvdb.insert(tvdb_id, episode);
+                .library
+                .metadata_gateway
+                .get_series_titles(&refs, language, true, false)
+                .await
+            {
+                Ok(result) => {
+                    for (ref_index, (title, _)) in series_title_targets.iter().enumerate() {
+                        let Some(series) = result.by_ref_index.get(&ref_index) else {
+                            summary.missing_artwork_results += 1;
+                            summary.missing_title_artwork_results += 1;
+                            continue;
+                        };
+                        let urls = series_artwork_urls_from_metadata(series);
+                        self.collect_series_artwork_updates(
+                            title,
+                            &urls,
+                            &mut summary,
+                            &mut title_updates,
+                            &mut episode_updates,
+                        )
+                        .await?;
+                    }
                 }
-                if let (Some(season), Some(number)) = (
-                    episode.season_number.as_deref(),
-                    episode.episode_number.as_deref(),
-                ) {
-                    episode_by_numbers.insert((season.to_string(), number.to_string()), episode);
-                }
-            }
-
-            for incoming in &urls.episodes {
-                let existing = episode_by_tvdb.get(&incoming.tvdb_id).copied().or_else(|| {
-                    episode_by_numbers
-                        .get(&(
-                            incoming.season_number.to_string(),
-                            incoming.episode_number.to_string(),
-                        ))
-                        .copied()
-                });
-                let Some(existing) = existing else {
-                    summary.missing_artwork_results += 1;
-                    summary.missing_episode_matches += 1;
-                    tracing::debug!(
-                        title_id = %title.id,
-                        series_tvdb_id = tvdb_id,
-                        episode_tvdb_id = incoming.tvdb_id,
-                        season_number = incoming.season_number,
-                        episode_number = incoming.episode_number,
-                        "title image cache refresh skipped incoming episode still with no local episode match"
-                    );
-                    continue;
-                };
-                if incoming.image_url.is_none() {
-                    summary.missing_artwork_results += 1;
-                    summary.missing_incoming_image_urls += 1;
-                    tracing::debug!(
-                        title_id = %title.id,
-                        episode_id = %existing.id,
-                        episode_tvdb_id = incoming.tvdb_id,
-                        "title image cache refresh skipped incoming episode still with no usable image URL"
-                    );
-                    continue;
-                };
-                if let Some(update) =
-                    episode_image_url_update(existing, incoming.image_url.as_ref())
-                {
-                    episode_updates.push(update);
-                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -437,14 +359,121 @@ impl AppUseCase {
             .await?;
         Ok(summary)
     }
+
+    /// Queue the title and episode artwork updates one series' incoming
+    /// artwork implies. Episodes are matched by TVDB id when both sides have
+    /// one, else by season and episode number.
+    async fn collect_series_artwork_updates(
+        &self,
+        title: &Title,
+        urls: &crate::SeriesArtworkUrls,
+        summary: &mut TitleImageCacheRefreshSummary,
+        title_updates: &mut Vec<TitleArtworkUrlUpdate>,
+        episode_updates: &mut Vec<EpisodeImageUrlUpdate>,
+    ) -> AppResult<()> {
+        if urls.poster_url.is_none() && urls.background_url.is_none() {
+            summary.missing_artwork_results += 1;
+            summary.missing_incoming_image_urls += 1;
+            tracing::debug!(
+                title_id = %title.id,
+                "title image cache refresh skipped series artwork update with no usable image URLs"
+            );
+        }
+        if let Some(update) =
+            title_artwork_update(title, urls.poster_url.as_ref(), urls.background_url.as_ref())
+        {
+            title_updates.push(update);
+        }
+
+        let episodes = self
+            .services
+            .catalog
+            .shows
+            .list_episodes_for_title(&title.id)
+            .await?;
+        let mut episode_by_tvdb = HashMap::<i64, &scryer_domain::Episode>::new();
+        let mut episode_by_numbers = HashMap::<(String, String), &scryer_domain::Episode>::new();
+        for episode in &episodes {
+            if let Some(tvdb_id) = episode
+                .tvdb_id
+                .as_deref()
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .filter(|tvdb_id| *tvdb_id > 0)
+            {
+                episode_by_tvdb.insert(tvdb_id, episode);
+            }
+            if let (Some(season), Some(number)) = (
+                episode.season_number.as_deref(),
+                episode.episode_number.as_deref(),
+            ) {
+                episode_by_numbers.insert((season.to_string(), number.to_string()), episode);
+            }
+        }
+
+        for incoming in &urls.episodes {
+            let existing = (incoming.tvdb_id > 0)
+                .then(|| episode_by_tvdb.get(&incoming.tvdb_id).copied())
+                .flatten()
+                .or_else(|| {
+                    episode_by_numbers
+                        .get(&(
+                            incoming.season_number.to_string(),
+                            incoming.episode_number.to_string(),
+                        ))
+                        .copied()
+                });
+            let Some(existing) = existing else {
+                summary.missing_artwork_results += 1;
+                summary.missing_episode_matches += 1;
+                tracing::debug!(
+                    title_id = %title.id,
+                    episode_tvdb_id = incoming.tvdb_id,
+                    season_number = incoming.season_number,
+                    episode_number = incoming.episode_number,
+                    "title image cache refresh skipped incoming episode still with no local episode match"
+                );
+                continue;
+            };
+            if incoming.image_url.is_none() {
+                summary.missing_artwork_results += 1;
+                summary.missing_incoming_image_urls += 1;
+                tracing::debug!(
+                    title_id = %title.id,
+                    episode_id = %existing.id,
+                    episode_tvdb_id = incoming.tvdb_id,
+                    "title image cache refresh skipped incoming episode still with no usable image URL"
+                );
+                continue;
+            };
+            if let Some(update) = episode_image_url_update(existing, incoming.image_url.as_ref()) {
+                episode_updates.push(update);
+            }
+        }
+        Ok(())
+    }
 }
 
-fn title_tvdb_id(title: &Title) -> Option<i64> {
-    title
-        .external_ids
-        .iter()
-        .find(|external_id| external_id.source.trim().eq_ignore_ascii_case("tvdb"))
-        .and_then(|external_id| external_id.value.trim().parse::<i64>().ok())
+/// The artwork a series fetched through SMG's title surface carries, in the
+/// shape the TVDB-keyed artwork document answers with.
+fn series_artwork_urls_from_metadata(series: &crate::SeriesMetadata) -> crate::SeriesArtworkUrls {
+    let non_empty = |value: &str| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    crate::SeriesArtworkUrls {
+        poster_url: non_empty(&series.poster_url),
+        background_url: series.background_url.as_deref().and_then(non_empty),
+        episodes: series
+            .episodes
+            .iter()
+            .map(|episode| crate::EpisodeArtworkUrls {
+                tvdb_id: episode.tvdb_id,
+                season_number: episode.season_number,
+                episode_number: episode.episode_number,
+                image_url: non_empty(&episode.image_url),
+            })
+            .collect(),
+    }
 }
 
 fn title_artwork_update(

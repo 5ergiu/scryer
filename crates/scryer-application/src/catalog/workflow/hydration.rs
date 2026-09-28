@@ -983,8 +983,7 @@ pub(crate) fn series_hydration_ref(target: &HydrationTarget) -> Option<SeriesTit
 
 const SERIES_METADATA_MISSING_TITLE: &str = "series metadata response missing title";
 
-/// The failure reported for a series SMG's title surface does not have and no
-/// TVDB id can reach through the legacy documents.
+/// The failure reported for a series SMG's title surface does not have.
 fn series_missing_from_gateway(reference: &SeriesTitleRef) -> AppError {
     match reference.smg_id {
         Some(smg_id) => AppError::NotFound(format!(
@@ -994,6 +993,34 @@ fn series_missing_from_gateway(reference: &SeriesTitleRef) -> AppError {
             "{SERIES_METADATA_MISSING_TITLE}: SMG could not resolve the series from its external ids"
         )),
     }
+}
+
+/// Fetch one series by its identity through SMG's title surface: by SMG title
+/// id, or by resolving the ref's provider ids (TVDB, TMDB, IMDb) to one when it
+/// has none. There is no legacy TVDB-keyed path for series; SMG is always the
+/// latest release, so a series the title surface cannot reach is a failure.
+///
+/// Returns the series and the SMG redirects its fetch followed.
+pub(crate) async fn fetch_series_by_ref(
+    gateway: &dyn MetadataGateway,
+    series_ref: &SeriesTitleRef,
+    language: &str,
+    include_episodes: bool,
+    include_episode_orders: bool,
+) -> AppResult<(SeriesMetadata, Vec<(i64, i64)>)> {
+    let mut result = gateway
+        .get_series_titles(
+            std::slice::from_ref(series_ref),
+            language,
+            include_episodes,
+            include_episode_orders,
+        )
+        .await?;
+    result
+        .by_ref_index
+        .remove(&0)
+        .map(|series| (series, result.redirects))
+        .ok_or_else(|| series_missing_from_gateway(series_ref))
 }
 
 impl AppUseCase {
@@ -1410,56 +1437,31 @@ impl AppUseCase {
         }
     }
 
-    /// Fetch one series for hydration: SMG's title surface first (by SMG title
+    /// Fetch one series for hydration through SMG's title surface (by SMG title
     /// id, resolving provider ids when the title has none yet), with episodes
     /// and episode orders.
-    ///
-    /// The legacy `series(id:)` document by TVDB id is used when the gateway
-    /// has no title surface, and for a TVDB-backed series the title surface
-    /// does not have: that document reads the series through from TVDB, so a
-    /// TVDB-backed series stays exactly as reachable as it was. Only a series
-    /// with no TVDB id fails, and only when both paths are closed to it.
     async fn fetch_series_for_single_hydration(
         &self,
         series_ref: &SeriesTitleRef,
         language: &str,
     ) -> AppResult<(SeriesMetadata, Vec<(i64, i64)>)> {
-        let gateway = &self.services.library.metadata_gateway;
-        let legacy = |tvdb_id: i64| async move {
-            gateway
-                .get_series(tvdb_id, language)
-                .await
-                .map(|series| (series, Vec::new()))
-        };
-        match gateway
-            .get_series_titles(std::slice::from_ref(series_ref), language, true, true)
-            .await
-        {
-            Ok(mut result) => match result.by_ref_index.remove(&0) {
-                Some(series) => Ok((series, result.redirects)),
-                None => match series_ref.tvdb_id {
-                    Some(tvdb_id) => legacy(tvdb_id).await,
-                    None => Err(series_missing_from_gateway(series_ref)),
-                },
-            },
-            Err(error) if title_queries_not_supported(&error) => {
-                let tvdb_id = series_ref.tvdb_id.ok_or_else(|| {
-                    AppError::Repository("no tvdb external id found".to_string())
-                })?;
-                legacy(tvdb_id).await
-            }
-            Err(error) => Err(error),
-        }
+        fetch_series_by_ref(
+            self.services.library.metadata_gateway.as_ref(),
+            series_ref,
+            language,
+            true,
+            true,
+        )
+        .await
     }
 
     /// Fetch a bulk chunk's series, one entry per target in order: the series
     /// and the SMG redirects its fetch followed, or the failure reason.
     ///
     /// Same routing as [`Self::fetch_series_for_single_hydration`], except that
-    /// episode orders are not requested: bulk hydration never carried them
-    /// (`metadataBulk` cannot), and the numbering-bridge bookkeeping relies on
-    /// that. Legacy fallbacks are batched into one `metadataBulk` request.
-    /// `None` means the scan was cancelled.
+    /// episode orders are not requested: bulk hydration never carried them,
+    /// and the numbering-bridge bookkeeping relies on that. `None` means the
+    /// scan was cancelled.
     async fn fetch_series_for_bulk_hydration(
         &self,
         series_targets: &[(HydrationTarget, SeriesTitleRef)],
@@ -1472,8 +1474,6 @@ impl AppUseCase {
             .iter()
             .map(|(_, series_ref)| series_ref.clone())
             .collect::<Vec<_>>();
-        let mut fetched = vec![None; refs.len()];
-        let mut legacy_indexes = Vec::new();
 
         match await_cancellable(
             cancel_token,
@@ -1481,67 +1481,19 @@ impl AppUseCase {
         )
         .await?
         {
-            Ok(mut result) => {
-                for (index, series_ref) in refs.iter().enumerate() {
-                    match result.by_ref_index.remove(&index) {
-                        Some(series) => {
-                            fetched[index] = Some(Ok((series, result.redirects.clone())));
-                        }
-                        None if series_ref.tvdb_id.is_some() => legacy_indexes.push(index),
-                        None => fetched[index] = Some(Err(MISSING.to_string())),
-                    }
-                }
-            }
-            Err(error) if title_queries_not_supported(&error) => {
-                for (index, series_ref) in refs.iter().enumerate() {
-                    if series_ref.tvdb_id.is_some() {
-                        legacy_indexes.push(index);
-                    } else {
-                        fetched[index] = Some(Err("no tvdb external id found".to_string()));
-                    }
-                }
-            }
+            Ok(mut result) => Some(
+                (0..refs.len())
+                    .map(|index| match result.by_ref_index.remove(&index) {
+                        Some(series) => Ok((series, result.redirects.clone())),
+                        None => Err(MISSING.to_string()),
+                    })
+                    .collect(),
+            ),
             Err(error) => {
                 let reason = error.to_string();
-                return Some(refs.iter().map(|_| Err(reason.clone())).collect());
+                Some(refs.iter().map(|_| Err(reason.clone())).collect())
             }
         }
-
-        if !legacy_indexes.is_empty() {
-            let tvdb_ids = legacy_indexes
-                .iter()
-                .filter_map(|index| refs[*index].tvdb_id)
-                .collect::<Vec<_>>();
-            match await_cancellable(
-                cancel_token,
-                gateway.get_metadata_bulk(&[], &tvdb_ids, language),
-            )
-            .await?
-            {
-                Ok(legacy) => {
-                    for index in legacy_indexes {
-                        let tvdb_id = refs[index].tvdb_id.expect("legacy refs carry a tvdb id");
-                        fetched[index] = Some(match legacy.series.get(&tvdb_id) {
-                            Some(series) => Ok((series.clone(), Vec::new())),
-                            None => Err(MISSING.to_string()),
-                        });
-                    }
-                }
-                Err(error) => {
-                    let reason = error.to_string();
-                    for index in legacy_indexes {
-                        fetched[index] = Some(Err(reason.clone()));
-                    }
-                }
-            }
-        }
-
-        Some(
-            fetched
-                .into_iter()
-                .map(|entry| entry.unwrap_or_else(|| Err(MISSING.to_string())))
-                .collect(),
-        )
     }
 
     pub(crate) async fn hydrate_titles_bulk(

@@ -9,7 +9,9 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 use common::{TestContext, load_fixture};
-use scryer_application::{IndexerClient, IndexerPluginProvider, MetadataSearchQuery, SearchMode};
+use scryer_application::{
+    IndexerClient, IndexerPluginProvider, MetadataSearchQuery, SearchMode, SeriesTitleRef,
+};
 use scryer_domain::{LibraryPermissionMask, User, UserAuthorization};
 
 fn admin() -> User {
@@ -1138,32 +1140,39 @@ async fn smg_get_movie() {
 }
 
 #[tokio::test]
-async fn smg_get_series() {
+async fn smg_get_series_by_smg_title_id() {
     let ctx = TestContext::new().await;
-    Mock::given(method("GET"))
-        .and(path("/graphql"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(load_fixture("smg/get_series.json")),
-        )
-        .mount(&ctx.smg_server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(load_fixture("smg/get_series.json")),
-        )
-        .mount(&ctx.smg_server)
-        .await;
+    for http_method in ["GET", "POST"] {
+        Mock::given(method(http_method))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(load_fixture("smg/titles_movie.json")),
+            )
+            .mount(&ctx.smg_server)
+            .await;
+    }
 
     let series = ctx
         .app
-        .get_metadata_series(&admin(), 345678, "eng")
+        .get_metadata_series_by_ref(
+            &admin(),
+            &SeriesTitleRef {
+                smg_id: Some(303),
+                ..Default::default()
+            },
+            "eng",
+            true,
+        )
         .await
-        .expect("get_series should succeed");
+        .expect("a TMDB-primary series should load by SMG title id");
 
-    assert_eq!(series.name, "Test Show Name");
-    assert_eq!(series.seasons.len(), 2);
-    assert_eq!(series.episodes.len(), 3);
+    assert_eq!(series.smg_id, Some(303));
+    assert_eq!(series.tvdb_id, 0);
+    assert_eq!(series.tmdb_id, Some(3030));
+    assert_eq!(series.name, "TMDB Primary Series");
+    assert_eq!(series.seasons.len(), 1);
+    assert_eq!(series.episodes.len(), 1);
+    assert_eq!(series.episodes[0].tmdb_id, Some(3_030_101));
 }
 
 #[tokio::test]

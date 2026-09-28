@@ -1598,12 +1598,6 @@ impl MetadataGateway for FixedBatchSearchMetadataGateway {
         ))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
-        ))
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],

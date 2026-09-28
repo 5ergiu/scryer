@@ -410,12 +410,6 @@ impl MetadataGateway for EmptySearchMetadataGateway {
         ))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
-        ))
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],
@@ -514,6 +508,16 @@ impl MetadataGateway for BlockingBatchMetadataGateway {
             .collect())
     }
 
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        _kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        self.search_tvdb_batch(queries, language).await
+    }
+
     async fn search_tvdb_rich(
         &self,
         _query: &str,
@@ -537,12 +541,6 @@ impl MetadataGateway for BlockingBatchMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
