@@ -534,3 +534,180 @@ fn exclusive_rename_fallback_preserves_a_dangling_symlink_collision() {
     assert_eq!(fs::read_to_string(&source).unwrap(), "ours");
     assert_eq!(fs::read_link(&destination).unwrap(), Path::new("missing"));
 }
+
+fn unrelated_files(dir: &Path) -> Vec<PathBuf> {
+    let paths: Vec<_> = [
+        "unrelated.gz",
+        "scryer.log.1.gz",
+        "scryer.log.scryer-rotate-invalid.sealed",
+        "notes.txt",
+    ]
+    .iter()
+    .map(|name| dir.join(name))
+    .collect();
+    for path in &paths {
+        fs::write(path, b"preserve").unwrap();
+    }
+    paths
+}
+fn assert_preserved(paths: &[PathBuf]) {
+    for path in paths {
+        assert_eq!(fs::read(path).unwrap(), b"preserve", "{}", path.display());
+    }
+}
+// Waits until the worker has parked the head job with exactly `len` queued.
+fn parked(writer: &LogFileWriter, len: usize) {
+    let work = writer.0.lock().unwrap().work.clone();
+    let queue = work.queue.lock().unwrap();
+    let (queue, result) = work
+        .changed
+        .wait_timeout_while(queue, Duration::from_secs(30), |q| {
+            !(q.parked == Some(len) && q.jobs.len() == len)
+        })
+        .unwrap();
+    assert!(
+        !result.timed_out() && queue.parked == Some(len),
+        "worker did not park"
+    );
+}
+fn denied(writer: &LogFileWriter) -> usize {
+    let work = writer.0.lock().unwrap().work.clone();
+    work.faults.denied.load(Ordering::SeqCst)
+}
+fn deny(writer: &LogFileWriter, step: Option<&'static str>) {
+    *writer.0.lock().unwrap().work.faults.deny.lock().unwrap() = step;
+}
+
+#[test]
+fn failures_that_cannot_pass_on_their_own_are_classified_for_parking() {
+    let dir = tempfile::tempdir().unwrap();
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::NotFound,
+        io::ErrorKind::InvalidData,
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::ReadOnlyFilesystem,
+    ] {
+        assert!(waits_for_queue_change(&io::Error::from(kind)), "{kind:?}");
+    }
+    for kind in [
+        io::ErrorKind::Other,
+        io::ErrorKind::Interrupted,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::StorageFull,
+        io::ErrorKind::AlreadyExists,
+    ] {
+        assert!(!waits_for_queue_change(&io::Error::from(kind)), "{kind:?}");
+    }
+    assert!(!waits_for_queue_change(&io::Error::other(
+        "archive collision; existing file preserved"
+    )));
+
+    let not_regular = regular(dir.path()).unwrap_err();
+    assert!(waits_for_queue_change(&not_regular));
+    assert_eq!(not_regular.to_string(), "log segment is not a regular file");
+    assert!(waits_for_queue_change(
+        &regular(&dir.path().join("missing")).unwrap_err()
+    ));
+
+    let path = dir.path().join("scryer.log");
+    let sealed = segment(&path, 0);
+    fs::write(&sealed, "source").unwrap();
+    let mut other = flate2::write::GzEncoder::new(
+        File::create(sealed.with_extension("gz")).unwrap(),
+        flate2::Compression::default(),
+    );
+    other.write_all(b"different").unwrap();
+    other.finish().unwrap();
+    let collision = publish(&sealed, &Faults::default()).unwrap_err();
+    assert!(waits_for_queue_change(&collision));
+    assert_eq!(collision.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        collision.to_string(),
+        "archive collision; existing file preserved"
+    );
+}
+
+#[test]
+fn unrecoverable_failure_parks_until_a_rollover_queues_another_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let unrelated = unrelated_files(dir.path());
+    let path = dir.path().join("scryer.log");
+    let (_, clock) = clock();
+    let (writer, guard) = open_with_clock(&path, policy(1, 1), clock).unwrap();
+    event(&writer, "a\n");
+    event(&writer, "b\n");
+    idle(&writer);
+    let first = managed_files(&path, "gz").unwrap();
+    assert_eq!(first.len(), 1);
+
+    deny(&writer, Some("compression"));
+    event(&writer, "c\n");
+    parked(&writer, 1);
+    assert_eq!(denied(&writer), 1);
+    let pending = managed_files(&path, "sealed").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(fs::read_to_string(&pending[0]).unwrap(), "b\n");
+    assert_eq!(managed_files(&path, "gz").unwrap(), first);
+
+    // Below the rotation ceiling the parked segment still defers rollover.
+    event(&writer, "d\n");
+    assert_eq!(managed_files(&path, "sealed").unwrap(), pending);
+    // At the ceiling a rollover queues a segment, which retries the parked job.
+    event(&writer, "e\n");
+    parked(&writer, 2);
+    assert_eq!(denied(&writer), 2);
+    assert_eq!(managed_files(&path, "sealed").unwrap().len(), 2);
+    assert_eq!(fs::read_to_string(&pending[0]).unwrap(), "b\n");
+    assert_eq!(managed_files(&path, "gz").unwrap(), first);
+
+    deny(&writer, None);
+    event(&writer, "f\n");
+    event(&writer, "g\n");
+    idle(&writer);
+    drop(guard);
+    assert_eq!(denied(&writer), 2);
+    assert!(managed_files(&path, "sealed").unwrap().is_empty());
+    assert_eq!(all(&path), ["e\nf\n", "g\n"]);
+    assert_preserved(&unrelated);
+}
+
+#[test]
+fn transient_failure_retries_on_the_backoff_timer_without_a_new_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let unrelated = unrelated_files(dir.path());
+    let path = dir.path().join("scryer.log");
+    let (_, clock) = clock();
+    let (writer, guard) = open_with_clock(&path, policy(1, 5), clock).unwrap();
+    event(&writer, "a\n");
+    *writer.0.lock().unwrap().work.faults.fail.lock().unwrap() = Some("compression");
+    event(&writer, "b\n");
+    // No further rollover queues anything, so only the timer can retry.
+    idle(&writer);
+    drop(guard);
+    assert!(managed_files(&path, "sealed").unwrap().is_empty());
+    assert_eq!(all(&path), ["a\n", "b\n"]);
+    assert_preserved(&unrelated);
+}
+
+#[test]
+fn shutdown_while_parked_returns_and_preserves_the_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let unrelated = unrelated_files(dir.path());
+    let path = dir.path().join("scryer.log");
+    let sealed = segment(&path, 0);
+    fs::write(&sealed, "source").unwrap();
+    let archive = sealed.with_extension("gz");
+    let mut other = flate2::write::GzEncoder::new(
+        File::create(&archive).unwrap(),
+        flate2::Compression::default(),
+    );
+    other.write_all(b"unrelated").unwrap();
+    other.finish().unwrap();
+    let (writer, guard) = open_log_file(&path, policy(100, 5)).unwrap();
+    parked(&writer, 1);
+    drop(guard);
+    assert_eq!(fs::read_to_string(&sealed).unwrap(), "source");
+    assert_eq!(gzip(&archive), "unrelated");
+    assert_preserved(&unrelated);
+}
