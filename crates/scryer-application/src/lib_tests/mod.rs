@@ -94,6 +94,7 @@ pub(crate) use support_bootstrap_fixtures::bootstrap_application_upgrade;
 use support_bootstrap_fixtures::*;
 use support_catalog::*;
 use support_events_requests::*;
+pub(crate) use support_imports::MockMediaFileRepo;
 use support_imports::*;
 use support_indexers_metadata::*;
 use support_library_show::*;
