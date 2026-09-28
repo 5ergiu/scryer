@@ -704,6 +704,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tmdb_primary_series_searches_by_tmdb_and_imdb_without_a_tvdb_id() {
+        let mut title = anime_title();
+        title.facet = scryer_domain::MediaFacet::Series;
+        title.imdb_id = Some("tt7700303".to_string());
+        title.external_ids = vec![
+            ExternalId::with_kind("smg", "title", "303"),
+            ExternalId::with_kind("tmdb", "series", "880303"),
+        ];
+        let episode = official_episode(2, None);
+        let item = wanted_episode_item(&episode);
+
+        let result = build_search_queries(
+            &title,
+            &item,
+            Some(&episode),
+            &FacetRegistry::new(),
+            None,
+            AbsoluteScale::for_catalog([&episode]),
+        );
+
+        assert_eq!(result.tvdb_id, None);
+        assert_eq!(result.tmdb_id.as_deref(), Some("880303"));
+        assert_eq!(result.imdb_id.as_deref(), Some("tt7700303"));
+        assert_eq!(result.season, Some(1));
+        assert_eq!(result.episode, Some(2));
+        assert!(result.queries.contains(&"Lantern Verge S01E02".to_string()));
+    }
+
+    #[test]
     fn an_episode_no_community_season_covers_adds_nothing() {
         // Official season 2 is outside every bridge range.
         let mut episode = official_episode(1, None);
