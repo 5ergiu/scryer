@@ -1639,7 +1639,7 @@ impl MetadataGatewayClient {
             .execute_graphql_apq(operation_name, query, hash, variables)
             .await
         {
-            Err(error) if Self::observe_title_id_operation_error(&error) => {
+            Err(error) if legacy_fallback && Self::observe_title_id_operation_error(&error) => {
                 Err(Self::title_id_queries_unsupported())
             }
             Ok(result) => {
@@ -1669,7 +1669,7 @@ impl MetadataGatewayClient {
             }))
             .await
         {
-            Err(error) if Self::observe_title_id_operation_error(&error) => {
+            Err(error) if legacy_fallback && Self::observe_title_id_operation_error(&error) => {
                 Err(Self::title_id_queries_unsupported())
             }
             Ok(result) => {
@@ -5743,6 +5743,47 @@ mod tests {
                 json!({"query": "作品", "limit": limit, "language": "jpn"})
             );
         }
+    }
+
+    #[tokio::test]
+    async fn series_title_validation_error_surfaces_without_flipping_the_movie_latch() {
+        let _guard = title_id_capability_test_lock().lock().await;
+        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
+        super::LEGACY_TITLE_ID_ONLY_LOGGED.store(false, Ordering::Release);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors": [{ "message": "Cannot query field \"titles\" on type \"Query\"." }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+
+        let error = client
+            .get_series_titles(
+                &[SeriesTitleRef {
+                    smg_id: Some(303),
+                    ..Default::default()
+                }],
+                "eng",
+                false,
+                false,
+            )
+            .await
+            .expect_err("a series title-surface error has no legacy path to fall back to");
+        assert!(
+            error.to_string().contains("Cannot query field"),
+            "series errors surface unchanged, got {error}"
+        );
+        assert!(
+            !super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire),
+            "a series operation must never flip the movie-only legacy latch"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
