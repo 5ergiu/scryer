@@ -126,12 +126,46 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// Every current library root a custom recycle bin must stay outside,
+    /// whichever root the file being recycled comes from.
+    ///
+    /// Without a custom bin there is nothing to check, so nothing is read. A
+    /// failed read comes back as the reason to refuse the recycle, never as an
+    /// empty list, so the check is never skipped.
+    async fn recycle_bin_library_roots(
+        &self,
+        custom_path: Option<&str>,
+    ) -> Result<Vec<PathBuf>, String> {
+        if custom_path.is_none() {
+            return Ok(Vec::new());
+        }
+        self.all_library_root_folders()
+            .await
+            .map(|roots| {
+                roots
+                    .into_iter()
+                    .map(|root| Self::normalize_recycle_config_path(Path::new(root.path.trim())))
+                    .filter(|root| !root.as_os_str().is_empty())
+                    .collect()
+            })
+            .map_err(|error| {
+                format!(
+                    "custom recycle bin path could not be checked against the library roots: {error}"
+                )
+            })
+    }
+}
+impl AppUseCase {
+    /// `configured_roots` are the roots the source file may come from.
+    /// `library_roots` are further roots a custom bin must also stay outside,
+    /// or why they could not be read, which refuses a custom bin outright.
     fn recycle_bin_config_from_values(
         enabled: bool,
         custom_path: Option<&str>,
         retention_days: u32,
         media_root: Option<&str>,
         configured_roots: &[PathBuf],
+        library_roots: Result<&[PathBuf], &str>,
     ) -> crate::recycle_bin::RecycleBinConfig {
         Self::recycle_bin_config_from_path_values(
             enabled,
@@ -139,6 +173,7 @@ impl AppUseCase {
             retention_days,
             media_root.map(Path::new),
             configured_roots,
+            library_roots,
         )
     }
 
@@ -148,6 +183,7 @@ impl AppUseCase {
         retention_days: u32,
         media_root: Option<&Path>,
         configured_roots: &[PathBuf],
+        library_roots: Result<&[PathBuf], &str>,
     ) -> crate::recycle_bin::RecycleBinConfig {
         let custom_path_configured = custom_path.is_some();
         let base_path = if let Some(path) = custom_path {
@@ -161,7 +197,14 @@ impl AppUseCase {
             &base_path,
             custom_path_configured,
             configured_roots,
-        );
+        )
+        .or_else(|| match library_roots {
+            Ok(roots) => {
+                Self::recycle_bin_validation_error(&base_path, custom_path_configured, roots)
+            }
+            Err(error) if custom_path_configured => Some(error.to_string()),
+            Err(_) => None,
+        });
         let cleanup_enabled = validation_error.is_none();
 
         crate::recycle_bin::RecycleBinConfig {
@@ -175,11 +218,15 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// The bin a file removed from `media_root` goes to. The source file must
+    /// live under `media_root`; a custom bin must stay outside every current
+    /// library root, not only this one.
     pub async fn recycle_bin_config_for_media_root(
         &self,
         media_root: Option<&str>,
     ) -> crate::recycle_bin::RecycleBinConfig {
         let (enabled, custom_path, retention_days) = self.recycle_bin_config_values().await;
+        let library_roots = self.recycle_bin_library_roots(custom_path.as_deref()).await;
         let configured_roots = media_root
             .into_iter()
             .map(|root| Self::normalize_recycle_config_path(Path::new(root.trim())))
@@ -191,15 +238,18 @@ impl AppUseCase {
             retention_days,
             media_root,
             &configured_roots,
+            library_roots.as_deref().map_err(String::as_str),
         )
     }
 }
 impl AppUseCase {
+    /// [`Self::recycle_bin_config_for_media_root`] for a root held as a path.
     pub(crate) async fn recycle_bin_config_for_media_root_path(
         &self,
         media_root: Option<&Path>,
     ) -> crate::recycle_bin::RecycleBinConfig {
         let (enabled, custom_path, retention_days) = self.recycle_bin_config_values().await;
+        let library_roots = self.recycle_bin_library_roots(custom_path.as_deref()).await;
         let configured_roots = media_root
             .into_iter()
             .map(Self::normalize_recycle_config_path)
@@ -211,10 +261,14 @@ impl AppUseCase {
             retention_days,
             media_root,
             &configured_roots,
+            library_roots.as_deref().map_err(String::as_str),
         )
     }
 }
 impl AppUseCase {
+    /// Bins for a set of roots, checked only against those roots. Callers
+    /// that pass every library root get the full check; a caller about to
+    /// recycle from a subset uses [`Self::recycle_bin_configs_for_recycling`].
     pub async fn recycle_bin_configs_for_media_roots<I>(
         &self,
         media_roots: I,
@@ -222,7 +276,37 @@ impl AppUseCase {
     where
         I: IntoIterator<Item = String>,
     {
-        let (enabled, custom_path, retention_days) = self.recycle_bin_config_values().await;
+        let values = self.recycle_bin_config_values().await;
+        Self::recycle_bin_configs_from_values(values, media_roots, Ok(&[]))
+    }
+
+    /// Bins for a set of roots a file is about to be recycled from. The source
+    /// file must live under one of `media_roots`; a custom bin must stay
+    /// outside every current library root.
+    pub(crate) async fn recycle_bin_configs_for_recycling<I>(
+        &self,
+        media_roots: I,
+    ) -> Vec<(String, crate::recycle_bin::RecycleBinConfig)>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let values = self.recycle_bin_config_values().await;
+        let library_roots = self.recycle_bin_library_roots(values.1.as_deref()).await;
+        Self::recycle_bin_configs_from_values(
+            values,
+            media_roots,
+            library_roots.as_deref().map_err(String::as_str),
+        )
+    }
+
+    fn recycle_bin_configs_from_values<I>(
+        (enabled, custom_path, retention_days): (bool, Option<String>, u32),
+        media_roots: I,
+        library_roots: Result<&[PathBuf], &str>,
+    ) -> Vec<(String, crate::recycle_bin::RecycleBinConfig)>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let media_roots = media_roots
             .into_iter()
             .map(|media_root| media_root.trim().to_string())
@@ -243,6 +327,7 @@ impl AppUseCase {
                 retention_days,
                 Some(media_root.as_str()),
                 &configured_roots,
+                library_roots,
             );
             if !seen_paths.insert(Self::normalize_recycle_config_path(&config.base_path)) {
                 continue;
@@ -438,6 +523,7 @@ impl AppUseCase {
                             retention_days,
                             None,
                             &configured_roots,
+                            Ok(&[]),
                         ),
                     )
                 })
@@ -455,7 +541,9 @@ impl AppUseCase {
                         custom_path.as_deref(),
                         retention_days,
                         Some(root.as_str()),
+                        // Already every library root, so nothing further to check.
                         &configured_roots,
+                        Ok(&[]),
                     ),
                 )
             })
