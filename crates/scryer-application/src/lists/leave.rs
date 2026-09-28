@@ -6,6 +6,13 @@
 //! list dropped) and reveals nothing, because it only answers "is someone
 //! else still asking for this".
 //!
+//! A departure the guard holds back stays unhandled. Its action is still
+//! owed: once no other enabled list wants the title (the other list dropped
+//! it too, was disabled, or was deleted), the next sync of this list runs it.
+//! A list that did not add the title never acts on it, so a title on two
+//! lists gets the on-leave action of the list that added it exactly once,
+//! whichever list drops it first.
+//!
 //! The actions are `Keep` (nothing), `Log` (a recorded departure),
 //! `Unmonitor`, and `Tag` (the registered `left-list` tag). `Unmonitor` and
 //! `Tag` are recorded as departures too, so the title's history says why it
@@ -55,8 +62,8 @@ pub async fn handle_departures(
         departed: departed.len() as u64,
         ..LeaveReport::default()
     };
+    let mut guard = LeaveGuard::load(subscription, &departed, memberships, subscriptions).await?;
     let mut handled = Vec::new();
-    let mut other_subscriptions: HashMap<String, Option<ListSubscription>> = HashMap::new();
 
     for row in departed {
         let Some(title_id) = acting_title(subscription, &row).map(str::to_string) else {
@@ -66,18 +73,10 @@ pub async fn handle_departures(
             continue;
         };
 
-        if still_wanted_elsewhere(
-            subscription,
-            &row,
-            &title_id,
-            memberships,
-            subscriptions,
-            &mut other_subscriptions,
-        )
-        .await?
-        {
+        if guard.holds(subscription, &row, &title_id).await? {
+            // The action is owed, not cancelled: the row stays unhandled so
+            // it runs once the other list lets go of the title as well.
             report.guarded += 1;
-            handled.push(row.item_key);
             continue;
         }
 
@@ -133,50 +132,119 @@ fn acting_title<'a>(subscription: &ListSubscription, row: &'a ListMembership) ->
     }
 }
 
-/// Whether `row` departed and its on-leave action has not run yet, either
-/// because it failed or because the sync stopped before reaching it. Such a
-/// list must be processed again even when its provider reports no change.
+/// Whether `row` departed and its on-leave action has not run yet: it failed,
+/// the sync stopped before reaching it, or another list still wanted the
+/// title at the time.
 pub fn awaits_leave_action(subscription: &ListSubscription, row: &ListMembership) -> bool {
     row.left_at.is_some() && !row.left_handled && acting_title(subscription, row).is_some()
 }
 
-/// Whether any other enabled subscription, of either scope, still lists this
-/// title and routes its kind to the same library.
-async fn still_wanted_elsewhere(
+/// Whether any of `rows` has an on-leave action that a sync could run now:
+/// it awaits its action and no other enabled list still wants the title.
+/// Such a list must be processed again even when its provider reports no
+/// change. A departure another list still holds back does not count, so it
+/// never forces the list to be read again while that stays true.
+pub async fn has_runnable_leave_action(
     subscription: &ListSubscription,
-    row: &ListMembership,
-    title_id: &str,
+    rows: &[ListMembership],
     memberships: &dyn ListMembershipRepository,
     subscriptions: &dyn ListSubscriptionRepository,
-    cache: &mut HashMap<String, Option<ListSubscription>>,
 ) -> AppResult<bool> {
-    let library_id = subscription
-        .route_for(row.kind.clone())
-        .map(|route| route.library_id.clone());
-    for other in memberships.list_by_title(title_id).await? {
-        if other.subscription_id == subscription.id || other.left_at.is_some() {
-            continue;
-        }
-        if !cache.contains_key(&other.subscription_id) {
-            let loaded = subscriptions.get_by_id(&other.subscription_id).await?;
-            cache.insert(other.subscription_id.clone(), loaded);
-        }
-        let Some(Some(other_subscription)) = cache.get(&other.subscription_id) else {
+    let waiting = rows
+        .iter()
+        .filter(|row| awaits_leave_action(subscription, row))
+        .cloned()
+        .collect::<Vec<_>>();
+    if waiting.is_empty() {
+        return Ok(false);
+    }
+    let mut guard = LeaveGuard::load(subscription, &waiting, memberships, subscriptions).await?;
+    for row in &waiting {
+        let Some(title_id) = acting_title(subscription, row) else {
             continue;
         };
-        if !other_subscription.enabled {
-            continue;
-        }
-        let other_library = other_subscription
-            .route_for(other.kind)
-            .map(|route| route.library_id.as_str());
-        // Without a known library on this side, any enabled list keeping the
-        // title is enough to leave it alone.
-        if library_id.is_none() || other_library == library_id.as_deref() {
+        if !guard.holds(subscription, row, title_id).await? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Answers "does another enabled list still want this title" for a batch of
+/// departed rows. Every title's memberships are read in one query up front;
+/// the other subscriptions are read once each, on first use.
+struct LeaveGuard<'a> {
+    subscriptions: &'a dyn ListSubscriptionRepository,
+    by_title: HashMap<String, Vec<ListMembership>>,
+    loaded: HashMap<String, Option<ListSubscription>>,
+}
+
+impl<'a> LeaveGuard<'a> {
+    async fn load(
+        subscription: &ListSubscription,
+        departed: &[ListMembership],
+        memberships: &dyn ListMembershipRepository,
+        subscriptions: &'a dyn ListSubscriptionRepository,
+    ) -> AppResult<Self> {
+        let mut title_ids = departed
+            .iter()
+            .filter_map(|row| acting_title(subscription, row))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        title_ids.sort();
+        title_ids.dedup();
+        let mut by_title: HashMap<String, Vec<ListMembership>> = HashMap::new();
+        if !title_ids.is_empty() {
+            for row in memberships.list_by_titles(&title_ids).await? {
+                if let Some(title_id) = row.title_id.clone() {
+                    by_title.entry(title_id).or_default().push(row);
+                }
+            }
+        }
+        Ok(Self {
+            subscriptions,
+            by_title,
+            loaded: HashMap::new(),
+        })
+    }
+
+    /// Whether any other enabled subscription, of either scope, still lists
+    /// this title and routes its kind to the same library.
+    async fn holds(
+        &mut self,
+        subscription: &ListSubscription,
+        row: &ListMembership,
+        title_id: &str,
+    ) -> AppResult<bool> {
+        let library_id = subscription
+            .route_for(row.kind.clone())
+            .map(|route| route.library_id.clone());
+        let others = self.by_title.get(title_id).cloned().unwrap_or_default();
+        for other in others {
+            if other.subscription_id == subscription.id || other.left_at.is_some() {
+                continue;
+            }
+            if !self.loaded.contains_key(&other.subscription_id) {
+                let loaded = self.subscriptions.get_by_id(&other.subscription_id).await?;
+                self.loaded.insert(other.subscription_id.clone(), loaded);
+            }
+            let Some(Some(other_subscription)) = self.loaded.get(&other.subscription_id) else {
+                continue;
+            };
+            if !other_subscription.enabled {
+                continue;
+            }
+            let other_library = other_subscription
+                .route_for(other.kind)
+                .map(|route| route.library_id.as_str());
+            // Without a known library on this side, any enabled list keeping
+            // the title is enough to leave it alone.
+            if library_id.is_none() || other_library == library_id.as_deref() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]

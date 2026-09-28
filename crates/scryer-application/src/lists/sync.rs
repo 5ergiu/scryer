@@ -28,7 +28,7 @@ use serde::Serialize;
 use super::act::{ListActions, act_on_candidate};
 use super::evaluate::{ItemDecision, count_states, evaluate};
 use super::fetch::{ListChartSource, ListFailure, ListFailureClass, fetch_list};
-use super::leave::{awaits_leave_action, handle_departures};
+use super::leave::{handle_departures, has_runnable_leave_action};
 use super::plugin::ListPluginProvider;
 use super::ports::{
     ListExclusionRepository, ListMembershipRepository, ListSubscriptionRepository,
@@ -411,7 +411,8 @@ fn next_sync_at(subscription: &ListSubscription, now: DateTime<Utc>) -> DateTime
 
 /// Whether a list the provider reports as unchanged still has work a sync
 /// must do: settings edited since its last sync, items the per-sync cap left
-/// pending, or a departure whose on-leave action has not run.
+/// pending, or a departure whose on-leave action has not run and could run
+/// now. A departure another list still holds back is not work yet.
 async fn has_unfinished_work(
     context: &ListSyncContext<'_>,
     subscription: &ListSubscription,
@@ -423,15 +424,23 @@ async fn has_unfinished_work(
     if edited {
         return Ok(true);
     }
-    Ok(context
+    let rows = context
         .memberships
         .list_by_subscription(&subscription.id)
-        .await?
+        .await?;
+    if rows
         .iter()
-        .any(|row| {
-            (row.left_at.is_none() && row.state == ListMembershipState::Pending)
-                || awaits_leave_action(subscription, row)
-        }))
+        .any(|row| row.left_at.is_none() && row.state == ListMembershipState::Pending)
+    {
+        return Ok(true);
+    }
+    has_runnable_leave_action(
+        subscription,
+        &rows,
+        context.memberships,
+        context.subscriptions,
+    )
+    .await
 }
 
 /// Record a sync the provider answered with "unchanged": only the timestamps
