@@ -2895,7 +2895,6 @@ const ko: LocaleDictionary = {
   "lists.detail.titles": "작품 ({{count}})",
   "lists.detail.title": "작품",
   "lists.detail.state": "상태",
-  "lists.detail.leftAt": "{{time}}에 목록에서 빠짐",
   "lists.detail.noTitles": "아직 기록된 작품이 없습니다.",
   "lists.detail.pageRange": "{{total}}개 중 {{from}}–{{to}}",
   "lists.detail.previousPage": "이전",

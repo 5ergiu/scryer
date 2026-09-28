@@ -10152,10 +10152,6 @@ type ListMembershipPayload {
 	When a sync last saw the title on the list.
 	"""
 	lastSeenAt: DateTime!
-	"""
-	When the title left the list, or null while it is on it.
-	"""
-	leftAt: DateTime
 }
 
 """

@@ -2814,7 +2814,6 @@ const zh_CN: LocaleDictionary = {
   "lists.detail.titles": "作品（{{count}}）",
   "lists.detail.title": "作品",
   "lists.detail.state": "状态",
-  "lists.detail.leftAt": "于 {{time}} 离开列表",
   "lists.detail.noTitles": "尚未记录任何作品。",
   "lists.detail.pageRange": "第 {{from}}–{{to}} 个，共 {{total}} 个",
   "lists.detail.previousPage": "上一页",

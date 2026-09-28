@@ -36,9 +36,18 @@ pub trait ListActions: Send + Sync {
         search: bool,
     ) -> AppResult<AddedTitle>;
 
+    /// Whether the subscription's owner may manage titles in the route's
+    /// library. Manage Titles shadows Request, so such an owner's Request
+    /// list adds its titles instead of requesting them.
+    async fn owner_manages_titles(
+        &self,
+        subscription: &ListSubscription,
+        route: &ListRoute,
+    ) -> AppResult<bool>;
+
     /// Submit a media request owned by the subscription's owner. `hold` asks
-    /// for a request that waits for review whatever the owner's grants allow.
-    /// Returns the request id.
+    /// for a request that waits for review whatever the owner's grants and
+    /// the request rules would allow. Returns the request id.
     async fn submit_request(
         &self,
         subscription: &ListSubscription,
@@ -119,43 +128,40 @@ pub async fn act_on_candidate(
         };
     };
 
-    // A personal list never adds straight into a library: whatever mode it
-    // carries, its titles go through the owner's own request.
+    // A personal list never adds straight into a library on its mode alone:
+    // whatever mode it carries, it acts as a Request list, so its titles are
+    // added only for an owner who could add them by hand.
     let mode = match subscription.mode {
         ListMode::Search | ListMode::Add if subscription.is_personal() => ListMode::Request,
         mode => mode,
     };
     let result = match mode {
-        ListMode::Search | ListMode::Add => actions
-            .add_title(subscription, route, item, mode == ListMode::Search)
+        ListMode::Search | ListMode::Add => {
+            add_outcome(actions, subscription, route, item, mode == ListMode::Search).await
+        }
+        // Hold parks every item for review, whoever owns the list.
+        ListMode::Hold => actions
+            .submit_request(subscription, route, item, true)
             .await
-            .map(|added| {
-                if added.created {
-                    ActOutcome {
-                        title_id: Some(added.title_id),
-                        added_by_list: true,
-                        ..ActOutcome::state(ListMembershipState::Added)
-                    }
-                } else {
-                    ActOutcome {
-                        title_id: Some(added.title_id),
-                        ..ActOutcome::state(ListMembershipState::InLibrary)
-                    }
-                }
+            .map(|request_id| ActOutcome {
+                request_id: Some(request_id),
+                ..ActOutcome::state(ListMembershipState::Held)
             }),
-        ListMode::Hold | ListMode::Request => {
-            let hold = mode == ListMode::Hold;
-            actions
-                .submit_request(subscription, route, item, hold)
-                .await
-                .map(|request_id| ActOutcome {
-                    request_id: Some(request_id),
-                    ..ActOutcome::state(if hold {
-                        ListMembershipState::Held
-                    } else {
-                        ListMembershipState::Requested
-                    })
-                })
+        ListMode::Request => {
+            // Manage Titles shadows Request: an owner who may add the title
+            // themselves gets it added, searched as an approved request would
+            // be, rather than a request that only they could approve.
+            match actions.owner_manages_titles(subscription, route).await {
+                Ok(true) => add_outcome(actions, subscription, route, item, true).await,
+                Ok(false) => actions
+                    .submit_request(subscription, route, item, false)
+                    .await
+                    .map(|request_id| ActOutcome {
+                        request_id: Some(request_id),
+                        ..ActOutcome::state(ListMembershipState::Requested)
+                    }),
+                Err(error) => Err(error),
+            }
         }
         ListMode::Discover => Ok(ActOutcome::state(ListMembershipState::Discover)),
     };
@@ -185,6 +191,30 @@ fn failed_action_state(error: &AppError) -> ListMembershipState {
 
 const REFUSED_REASON: &str = "rejected";
 const NOT_FOUND_REASON: &str = "not_found";
+
+/// Add the candidate's title to the route's library. A title the library
+/// already held is `InLibrary`, and the list did not add it.
+async fn add_outcome(
+    actions: &dyn ListActions,
+    subscription: &ListSubscription,
+    route: &ListRoute,
+    item: &ResolvedItem,
+    search: bool,
+) -> AppResult<ActOutcome> {
+    let added = actions.add_title(subscription, route, item, search).await?;
+    Ok(if added.created {
+        ActOutcome {
+            title_id: Some(added.title_id),
+            added_by_list: true,
+            ..ActOutcome::state(ListMembershipState::Added)
+        }
+    } else {
+        ActOutcome {
+            title_id: Some(added.title_id),
+            ..ActOutcome::state(ListMembershipState::InLibrary)
+        }
+    })
+}
 
 /// A short, stable reason for a failed action. The error text is not copied:
 /// it can name the title, and the membership row is shown to the list's

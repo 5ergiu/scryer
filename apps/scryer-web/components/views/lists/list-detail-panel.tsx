@@ -288,11 +288,6 @@ export function ListDetailPanel({
                                 <span className="text-[var(--scry-muted)]"> ({membership.year})</span>
                               ) : null}
                             </span>
-                            {membership.leftAt ? (
-                              <span className="block text-[11.5px] text-[var(--scry-muted)]">
-                                {t("lists.detail.leftAt", { time: formatDate(membership.leftAt) })}
-                              </span>
-                            ) : null}
                           </TableCell>
                           <TableCell>
                             <Badge tone={listMembershipStateTone(membership.state)}>

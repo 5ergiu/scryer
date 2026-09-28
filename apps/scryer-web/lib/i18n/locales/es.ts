@@ -3004,7 +3004,6 @@ const es: LocaleDictionary = {
   "lists.detail.titles": "Títulos ({{count}})",
   "lists.detail.title": "Título",
   "lists.detail.state": "Estado",
-  "lists.detail.leftAt": "Salió de la lista {{time}}",
   "lists.detail.noTitles": "Aún no hay títulos registrados.",
   "lists.detail.pageRange": "{{from}}–{{to}} de {{total}}",
   "lists.detail.previousPage": "Anterior",

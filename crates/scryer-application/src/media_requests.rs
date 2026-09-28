@@ -112,7 +112,9 @@ pub enum MediaRequestAdmission {
     #[default]
     Evaluate,
     /// The request waits for a person even when grants or rules would approve
-    /// it. A denial still stands.
+    /// it. A denial still stands. A requester who manages titles in the
+    /// library may file one too: Manage Titles shadows Request, and the hold
+    /// keeps their grants from approving it.
     HoldForReview,
 }
 
@@ -232,7 +234,7 @@ impl AppUseCase {
             ));
         }
 
-        self.require_library_permission(actor, &library.id, LibraryPermission::Request)
+        self.require_request_submission_permission(actor, &library.id, input.admission)
             .await?;
         let metadata_enrichment = self.enrich_request_draft(&input.facet, external_ids).await;
         external_ids = metadata_enrichment.external_ids;
@@ -354,6 +356,26 @@ impl AppUseCase {
             .await?;
 
         Ok(SubmitMediaRequestOutcome { request_id })
+    }
+
+    /// The grant a submission needs. Every request needs Request, except a
+    /// held one, which a title manager may also file: it waits for review
+    /// whatever their grants allow, so Manage Titles cannot approve it.
+    async fn require_request_submission_permission(
+        &self,
+        actor: &User,
+        library_id: &str,
+        admission: MediaRequestAdmission,
+    ) -> AppResult<()> {
+        if admission == MediaRequestAdmission::HoldForReview
+            && self
+                .has_library_permission(actor, library_id, LibraryPermission::ManageTitles)
+                .await?
+        {
+            return Ok(());
+        }
+        self.require_library_permission(actor, library_id, LibraryPermission::Request)
+            .await
     }
 
     /// Write the verdict's provenance onto a request row that is still pending.

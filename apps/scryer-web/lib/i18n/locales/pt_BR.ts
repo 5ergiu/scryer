@@ -2986,7 +2986,6 @@ const pt_BR: LocaleDictionary = {
   "lists.detail.titles": "Títulos ({{count}})",
   "lists.detail.title": "Título",
   "lists.detail.state": "Estado",
-  "lists.detail.leftAt": "Saiu da lista {{time}}",
   "lists.detail.noTitles": "Nenhum título registrado ainda.",
   "lists.detail.pageRange": "{{from}}–{{to}} de {{total}}",
   "lists.detail.previousPage": "Anterior",

@@ -547,7 +547,7 @@ pub(crate) enum RecordedAction {
 /// Records every call. `fail_departures` makes the on-leave calls fail that
 /// many times before succeeding; `reuse_titles` makes adds report an existing
 /// title; titles in `missing_titles` are gone from the library, so acting on
-/// them fails as not found.
+/// them fails as not found; `owner_manages_titles` makes request lists add.
 #[derive(Default)]
 pub(crate) struct RecordingActions {
     pub calls: Mutex<Vec<RecordedAction>>,
@@ -557,6 +557,7 @@ pub(crate) struct RecordingActions {
     pub missing_titles: Mutex<HashSet<String>>,
     /// How many times a title's existence was looked up.
     pub title_lookups: Mutex<u32>,
+    pub owner_manages_titles: bool,
 }
 
 impl RecordingActions {
@@ -605,6 +606,14 @@ impl ListActions for RecordingActions {
             title_id: format!("title-{}", item.item.item_key),
             created: !self.reuse_titles,
         })
+    }
+
+    async fn owner_manages_titles(
+        &self,
+        _subscription: &ListSubscription,
+        _route: &ListRoute,
+    ) -> AppResult<bool> {
+        Ok(self.owner_manages_titles)
     }
 
     async fn submit_request(

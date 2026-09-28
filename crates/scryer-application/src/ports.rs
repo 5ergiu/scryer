@@ -5426,6 +5426,24 @@ pub trait DownloadSubmissionRepository: Send + Sync {
     /// not return a native item identifier.
     async fn record_ambiguous_submission(&self, submission: DownloadSubmission) -> AppResult<()>;
 
+    /// Durably record a grab's intent before its mutation is sent to a client:
+    /// title, facet, purpose, scope and release, under the grab's pre-allocated
+    /// download id, with the client item still unknown. A job the client
+    /// finishes before its answer arrives then resolves to this intent, and
+    /// acceptance completes the same row through
+    /// [`Self::record_submission_with_identity`]. Defaults to recording nothing
+    /// for stores without canonical identity rows.
+    async fn record_pending_submission(&self, _submission: DownloadSubmission) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// Remove an intent recorded by [`Self::record_pending_submission`] after
+    /// the client definitively refused the grab, so it never holds the title
+    /// or its scope. An intent a client job has already bound is kept.
+    async fn withdraw_pending_submission(&self, _download_id: &DownloadId) -> AppResult<()> {
+        Ok(())
+    }
+
     async fn record_submission_identity(
         &self,
         _identity: &ClientJobLocator,

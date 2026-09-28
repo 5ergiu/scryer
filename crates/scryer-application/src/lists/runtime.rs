@@ -3,15 +3,17 @@
 //!
 //! Library adds run as the system actor, exactly as a request approval does;
 //! requests are submitted as the subscription's owner so their grants and
-//! request rules apply. Nothing here deletes a title.
+//! request rules apply. A Request list whose owner manages titles in the
+//! routed library adds instead of requesting; a Hold list always requests.
+//! Nothing here deletes a title.
 
 use async_trait::async_trait;
 use chrono::Utc;
 use scryer_domain::{
-    DomainEventPayload, ExternalId, ListEventSubject, ListOnLeave, ListRequestSubmittedEventData,
-    ListRoute, ListSubscription, ListSyncFailedEventData, ListTitleAddedEventData,
-    ListTitleLeftEventData, MediaFacet, MediaRequest, MediaRequestOrigin, NewDomainEvent, NewTitle,
-    User,
+    DomainEventPayload, ExternalId, LibraryPermission, ListEventSubject, ListOnLeave,
+    ListRequestSubmittedEventData, ListRoute, ListSubscription, ListSyncFailedEventData,
+    ListTitleAddedEventData, ListTitleLeftEventData, MediaFacet, MediaRequest, MediaRequestOrigin,
+    NewDomainEvent, NewTitle, User,
 };
 
 use super::act::{AddedTitle, ListActions};
@@ -60,6 +62,16 @@ pub(crate) struct AppListActions<'a> {
 impl<'a> AppListActions<'a> {
     pub(crate) fn new(app: &'a AppUseCase) -> Self {
         Self { app }
+    }
+
+    async fn list_owner(&self, subscription: &ListSubscription) -> AppResult<User> {
+        self.app
+            .services
+            .identity
+            .users
+            .get_by_id(&subscription.owner_user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("list owner".to_string()))
     }
 }
 
@@ -140,6 +152,17 @@ impl ListActions for AppListActions<'_> {
         })
     }
 
+    async fn owner_manages_titles(
+        &self,
+        subscription: &ListSubscription,
+        route: &ListRoute,
+    ) -> AppResult<bool> {
+        let owner = self.list_owner(subscription).await?;
+        self.app
+            .has_library_permission(&owner, &route.library_id, LibraryPermission::ManageTitles)
+            .await
+    }
+
     async fn submit_request(
         &self,
         subscription: &ListSubscription,
@@ -147,14 +170,7 @@ impl ListActions for AppListActions<'_> {
         item: &ResolvedItem,
         hold: bool,
     ) -> AppResult<String> {
-        let owner = self
-            .app
-            .services
-            .identity
-            .users
-            .get_by_id(&subscription.owner_user_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("list owner".to_string()))?;
+        let owner = self.list_owner(subscription).await?;
         let outcome = self
             .app
             .submit_media_request(

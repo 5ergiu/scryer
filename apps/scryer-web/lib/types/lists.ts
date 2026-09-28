@@ -224,7 +224,6 @@ export type ListMembership = {
   addedByList: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
-  leftAt: string | null;
 };
 
 export type ListMembershipPage = {

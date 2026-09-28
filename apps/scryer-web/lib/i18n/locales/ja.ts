@@ -2939,7 +2939,6 @@ const ja: LocaleDictionary = {
   "lists.detail.titles": "タイトル ({{count}})",
   "lists.detail.title": "タイトル",
   "lists.detail.state": "状態",
-  "lists.detail.leftAt": "{{time}} にリストから外れました",
   "lists.detail.noTitles": "記録されたタイトルはまだありません。",
   "lists.detail.pageRange": "{{total}} 件中 {{from}}–{{to}}",
   "lists.detail.previousPage": "前へ",

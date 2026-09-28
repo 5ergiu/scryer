@@ -6343,7 +6343,6 @@ const ru: LocaleDictionary = {
   "lists.detail.titles": "Тайтлы ({{count}})",
   "lists.detail.title": "Тайтл",
   "lists.detail.state": "Состояние",
-  "lists.detail.leftAt": "Покинул список {{time}}",
   "lists.detail.noTitles": "Тайтлы ещё не записаны.",
   "lists.detail.pageRange": "{{from}}–{{to}} из {{total}}",
   "lists.detail.previousPage": "Назад",
