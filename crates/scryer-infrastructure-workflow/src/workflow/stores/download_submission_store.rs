@@ -5,8 +5,9 @@ use chrono::Utc;
 use scryer_application::{
     AppError, AppResult, CanonicalDownloadIdentityDisposition, ClientJobLocator, DownloadOrigin,
     DownloadSubmission, DownloadSubmissionActorSnapshot, DownloadSubmissionIdentity,
-    DownloadSubmissionRepository, IdentityTrackedStateTarget, PersistedSeedGoals,
-    SeedGoalResolutionSource, TerminalDownloadHistoryRow,
+    DownloadSubmissionRepository, DownloadTitleReassignment, DownloadTitleReferences,
+    IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
+    TerminalDownloadHistoryRow,
 };
 use scryer_domain::{Id, TrackedDownloadState, download_identity::DownloadId};
 
@@ -1703,6 +1704,131 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                 })
             },
         )
+        .await
+    }
+
+    async fn list_title_download_references(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<DownloadTitleReferences>> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT id, episode_id, collection_id, series_movie_link_id
+               FROM download_submissions
+              WHERE title_id = {}
+              ORDER BY id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let links = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT link.download_id, link.episode_id
+               FROM download_submission_episode_links link
+               JOIN download_submissions submission ON submission.id = link.download_id
+              WHERE submission.title_id = {}
+              ORDER BY link.download_id, link.episode_id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let mut episode_sets: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for link in &links {
+            let Some(episode_id) = opt_text_lenient(link, "episode_id")? else {
+                continue;
+            };
+            episode_sets
+                .entry(link.text("download_id")?)
+                .or_default()
+                .push(episode_id);
+        }
+        rows.iter()
+            .map(|row| {
+                let id = row.text("id")?;
+                let download_id = DownloadId::parse(&id).ok_or_else(|| {
+                    AppError::Repository(format!(
+                        "invalid canonical download id {id:?} in download submission"
+                    ))
+                })?;
+                let mut episode_set_ids = episode_sets.remove(&id).unwrap_or_default();
+                episode_set_ids.sort();
+                episode_set_ids.dedup();
+                Ok(DownloadTitleReferences {
+                    download_id,
+                    episode_id: opt_text_lenient(row, "episode_id")?,
+                    collection_id: opt_text_lenient(row, "collection_id")?,
+                    series_movie_link_id: opt_text_lenient(row, "series_movie_link_id")?,
+                    episode_set_ids,
+                })
+            })
+            .collect()
+    }
+
+    async fn reassign_download_to_title(
+        &self,
+        reassignment: &DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        let reassignment = reassignment.clone();
+        SqlRuntime::run_in_transaction(&self.datastore, "reassign_download_to_title", move |tx| {
+            let reassignment = reassignment.clone();
+            Box::pin(async move {
+                let download_id = reassignment.references.download_id.to_string();
+                let moved = SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "UPDATE download_submissions
+                            SET title_id = {}, facet = {}, episode_id = {},
+                                collection_id = {}, series_movie_link_id = {}
+                          WHERE id = {} AND title_id = {}",
+                    &[
+                        SqlArg::Text(reassignment.destination_title_id.clone()),
+                        SqlArg::Text(reassignment.destination_facet.clone()),
+                        SqlArg::OptText(reassignment.references.episode_id.clone()),
+                        SqlArg::OptText(reassignment.references.collection_id.clone()),
+                        SqlArg::OptText(reassignment.references.series_movie_link_id.clone()),
+                        SqlArg::Text(download_id.clone()),
+                        SqlArg::Text(reassignment.source_title_id.clone()),
+                    ],
+                )
+                .await?;
+                if moved == 0 {
+                    return Ok(false);
+                }
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "DELETE FROM download_submission_episode_links WHERE download_id = {}",
+                    &[SqlArg::Text(download_id.clone())],
+                )
+                .await?;
+                for episode_id in &reassignment.references.episode_set_ids {
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "INSERT INTO download_submission_episode_links (download_id, episode_id)
+                             VALUES ({}, {})",
+                        &[
+                            SqlArg::Text(download_id.clone()),
+                            SqlArg::Text(episode_id.clone()),
+                        ],
+                    )
+                    .await?;
+                }
+                // Only the row this title's download owns: a cleanup row
+                // attributed to any other title is not the merge's to move.
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "UPDATE download_cleanup
+                            SET title_id = {}, facet = {}, updated_at = {}
+                          WHERE download_id = {} AND title_id = {}",
+                    &[
+                        SqlArg::Text(reassignment.destination_title_id.clone()),
+                        SqlArg::Text(reassignment.destination_facet.clone()),
+                        SqlArg::Timestamp(Utc::now()),
+                        SqlArg::Text(download_id),
+                        SqlArg::Text(reassignment.source_title_id.clone()),
+                    ],
+                )
+                .await?;
+                Ok(true)
+            })
+        })
         .await
     }
 
@@ -3530,6 +3656,153 @@ mod seed_goal_tests {
         match store.claim_download_cleanup(&id).await.unwrap() {
             DownloadCleanupClaim::Settled { outcome } => assert_eq!(outcome, "cleanup_abandoned"),
             _ => panic!("a settled cleanup row must not be claimed again"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassigning_a_download_moves_its_submission_links_and_pending_cleanup() {
+        let store = store().await;
+        let moved = DownloadId::new();
+        let bystander = DownloadId::new();
+        let mut moved_submission = submission(moved, "job-moved", "title-source");
+        moved_submission.scope = SubmissionScope::EpisodeSet {
+            episode_ids: vec![
+                "source-episode-1".to_string(),
+                "source-episode-2".to_string(),
+            ],
+        };
+        let mut bystander_submission = submission(bystander, "job-bystander", "title-bystander");
+        bystander_submission.scope = SubmissionScope::Episode {
+            episode_id: "bystander-episode-1".to_string(),
+        };
+        for (download_id, item_id, submission) in [
+            (moved, "job-moved", moved_submission),
+            (bystander, "job-bystander", bystander_submission),
+        ] {
+            store
+                .record_submission_with_identity(submission, submission_identity(download_id), None)
+                .await
+                .unwrap();
+            store
+                .record_identity_tracked_state_for_download(
+                    Some(&download_id),
+                    &submission_identity(download_id),
+                    Some(&ClientJobLocator::new(
+                        Some("primary"),
+                        "qbittorrent",
+                        item_id,
+                    )),
+                    "imported_seeding",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .has_pending_download_cleanup(&download_id)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        let references = store
+            .list_title_download_references("title-source")
+            .await
+            .unwrap();
+        assert_eq!(
+            references,
+            vec![DownloadTitleReferences {
+                download_id: moved,
+                episode_id: None,
+                collection_id: None,
+                series_movie_link_id: None,
+                episode_set_ids: vec![
+                    "source-episode-1".to_string(),
+                    "source-episode-2".to_string(),
+                ],
+            }]
+        );
+
+        let reassignment = DownloadTitleReassignment {
+            source_title_id: "title-source".to_string(),
+            destination_title_id: "title-destination".to_string(),
+            destination_facet: "anime".to_string(),
+            references: DownloadTitleReferences {
+                episode_set_ids: vec![
+                    "destination-episode-1".to_string(),
+                    "destination-episode-2".to_string(),
+                ],
+                ..references[0].clone()
+            },
+        };
+        assert!(
+            store
+                .reassign_download_to_title(&reassignment)
+                .await
+                .unwrap()
+        );
+        // The submission now belongs to the destination, so a repeated move
+        // from the source finds nothing to change.
+        assert!(
+            !store
+                .reassign_download_to_title(&reassignment)
+                .await
+                .unwrap()
+        );
+
+        assert!(
+            store
+                .list_for_title("title-source")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let destination = store.list_for_title("title-destination").await.unwrap();
+        assert_eq!(destination.len(), 1);
+        assert_eq!(destination[0].download_id, moved);
+        assert_eq!(destination[0].facet, "anime");
+        assert_eq!(
+            destination[0].scope,
+            SubmissionScope::EpisodeSet {
+                episode_ids: vec![
+                    "destination-episode-1".to_string(),
+                    "destination-episode-2".to_string(),
+                ],
+            }
+        );
+
+        // The cleanup row is still pending, now attributed to the destination.
+        assert!(store.has_pending_download_cleanup(&moved).await.unwrap());
+        match store.claim_download_cleanup(&moved).await.unwrap() {
+            DownloadCleanupClaim::Claimed(record) => {
+                assert_eq!(record.title_id.as_deref(), Some("title-destination"));
+                assert_eq!(record.facet.as_deref(), Some("anime"));
+                assert_eq!(record.item_id, "job-moved");
+            }
+            _ => panic!("the moved download's cleanup must still be claimable"),
+        }
+
+        // Another title's download is untouched.
+        assert_eq!(
+            store
+                .list_title_download_references("title-bystander")
+                .await
+                .unwrap(),
+            vec![DownloadTitleReferences {
+                download_id: bystander,
+                episode_id: Some("bystander-episode-1".to_string()),
+                collection_id: None,
+                series_movie_link_id: None,
+                episode_set_ids: Vec::new(),
+            }]
+        );
+        match store.claim_download_cleanup(&bystander).await.unwrap() {
+            DownloadCleanupClaim::Claimed(record) => {
+                assert_eq!(record.title_id.as_deref(), Some("title-bystander"));
+                assert_eq!(record.facet.as_deref(), Some("series"));
+            }
+            _ => panic!("another title's cleanup must stay pending"),
         }
     }
 

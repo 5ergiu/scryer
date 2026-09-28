@@ -317,6 +317,12 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     /// Answer `supports_durable_download_cleanup` with `true`, so a caller
     /// that branches on durable support takes the binding-backed path.
     pub(super) durable_cleanup: Arc<std::sync::atomic::AtomicBool>,
+    /// Every `reassign_download_to_title` call that moved a submission, in
+    /// order.
+    pub(super) reassigned: Arc<Mutex<Vec<crate::DownloadTitleReassignment>>>,
+    /// Downloads whose `reassign_download_to_title` fails with an error.
+    pub(super) failing_reassignments:
+        Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
 }
 
 #[derive(Default, Clone)]
@@ -1155,6 +1161,78 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             .filter(|entry| !requires_item_id || !entry.download_client_item_id.trim().is_empty())
             .cloned()
             .collect())
+    }
+
+    async fn list_title_download_references(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<crate::DownloadTitleReferences>> {
+        let entries = self.store.lock().await;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.title_id == title_id)
+            .map(|entry| {
+                let mut references = crate::DownloadTitleReferences {
+                    download_id: entry.download_id,
+                    episode_id: None,
+                    collection_id: None,
+                    series_movie_link_id: None,
+                    episode_set_ids: Vec::new(),
+                };
+                match &entry.scope {
+                    SubmissionScope::Episode { episode_id } => {
+                        references.episode_id = Some(episode_id.clone());
+                    }
+                    SubmissionScope::EpisodeSet { episode_ids } => {
+                        references.episode_set_ids = episode_ids.clone();
+                    }
+                    SubmissionScope::SeriesMovie {
+                        series_movie_link_id,
+                    } => references.series_movie_link_id = Some(series_movie_link_id.clone()),
+                    SubmissionScope::Collection { collection_id } => {
+                        references.collection_id = Some(collection_id.clone());
+                    }
+                    SubmissionScope::Title | SubmissionScope::Orphan => {}
+                }
+                references
+            })
+            .collect())
+    }
+
+    async fn reassign_download_to_title(
+        &self,
+        reassignment: &crate::DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        let download_id = reassignment.references.download_id;
+        if self
+            .failing_reassignments
+            .lock()
+            .await
+            .contains(&download_id)
+        {
+            return Err(AppError::Repository(
+                "synthetic reassignment failure".into(),
+            ));
+        }
+        let mut entries = self.store.lock().await;
+        let Some(entry) = entries.iter_mut().find(|entry| {
+            entry.download_id == download_id && entry.title_id == reassignment.source_title_id
+        }) else {
+            return Ok(false);
+        };
+        let references = &reassignment.references;
+        entry.title_id = reassignment.destination_title_id.clone();
+        entry.facet = reassignment.destination_facet.clone();
+        entry.scope = SubmissionScope::from_persisted(
+            &entry.title_id,
+            references.episode_id.clone(),
+            references.collection_id.clone(),
+            references.series_movie_link_id.clone(),
+            Some(references.episode_set_ids.clone()),
+        );
+        drop(entries);
+        self.reassigned.lock().await.push(reassignment.clone());
+        Ok(true)
     }
 
     async fn list_active_unbound_for_title(

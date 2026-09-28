@@ -5771,6 +5771,31 @@ pub trait DownloadSubmissionRepository: Send + Sync {
 
     async fn delete_for_title(&self, title_id: &str) -> AppResult<()>;
 
+    /// Every submission recorded for `title_id`, whatever its client state,
+    /// with the catalog references it holds. A title merge reads these to
+    /// move the source title's downloads to the destination. Defaults to
+    /// empty, which leaves every download to retire with the title.
+    async fn list_title_download_references(
+        &self,
+        _title_id: &str,
+    ) -> AppResult<Vec<DownloadTitleReferences>> {
+        Ok(Vec::new())
+    }
+
+    /// Move one submission, its episode links and its cleanup row from the
+    /// source title to the destination, in one transaction. Returns `false`
+    /// when the submission no longer belongs to the source title, in which
+    /// case nothing changed. Defaults to an error: a store that cannot move a
+    /// download leaves it to retire with the source title.
+    async fn reassign_download_to_title(
+        &self,
+        _reassignment: &DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        Err(AppError::Repository(
+            "this store cannot move a download to another title".into(),
+        ))
+    }
+
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()>;
 
     async fn update_tracked_state(
@@ -9897,6 +9922,32 @@ pub struct DownloadCleanupRecord {
     pub attempts: u32,
     pub history_offset: usize,
     pub payload_checkpoint: Option<String>,
+}
+
+/// The catalog references one download submission holds, exactly as stored.
+///
+/// Blank columns read back as `None`; `episode_set_ids` is the submission's
+/// episode-link rows, deduplicated and sorted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadTitleReferences {
+    pub download_id: DownloadId,
+    pub episode_id: Option<String>,
+    pub collection_id: Option<String>,
+    pub series_movie_link_id: Option<String>,
+    pub episode_set_ids: Vec<String>,
+}
+
+/// Hand one download from a merged source title to the destination title.
+///
+/// `references` are already expressed in destination ids. The store applies
+/// it only while the submission still belongs to `source_title_id`, and
+/// rewrites the submission, its episode links and its cleanup row together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadTitleReassignment {
+    pub source_title_id: String,
+    pub destination_title_id: String,
+    pub destination_facet: String,
+    pub references: DownloadTitleReferences,
 }
 
 #[derive(Clone, Debug)]

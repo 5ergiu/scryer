@@ -1441,3 +1441,451 @@ async fn delete_title_ends_the_binding_of_a_grab_the_client_has_not_reported_yet
     assert_eq!(queued_commands.len(), 1);
     assert_eq!(queued_commands[0].download_client_item_id, "job-bound");
 }
+
+/// The tracked-download commands a title merge sends, as the tests see them.
+#[derive(Debug, PartialEq, Eq)]
+enum MergeTrackedCommand {
+    Reassign {
+        from_title_id: String,
+        to_title_id: String,
+        facet: Option<String>,
+        download_ids: Vec<scryer_domain::download_identity::DownloadId>,
+    },
+    Forget {
+        title_id: String,
+        download_ids: Vec<scryer_domain::download_identity::DownloadId>,
+    },
+}
+
+/// Answer exactly `count` tracked-download commands, returning them in order
+/// with their download ids sorted.
+fn answer_merge_tracked_commands(
+    mut tracked_rx: tokio::sync::mpsc::Receiver<crate::tracked_downloads::TrackedDownloadCommand>,
+    count: usize,
+) -> tokio::task::JoinHandle<Vec<MergeTrackedCommand>> {
+    tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            match tracked_rx.recv().await.expect("tracked-download command") {
+                crate::tracked_downloads::TrackedDownloadCommand::ReassignTitle {
+                    from_title_id,
+                    to_title_id,
+                    facet,
+                    mut download_ids,
+                    reply,
+                } => {
+                    let _ = reply.send(Ok(download_ids.clone()));
+                    download_ids.sort_unstable();
+                    seen.push(MergeTrackedCommand::Reassign {
+                        from_title_id,
+                        to_title_id,
+                        facet,
+                        download_ids,
+                    });
+                }
+                crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
+                    title_id,
+                    mut download_ids,
+                    reply,
+                } => {
+                    let _ = reply.send(Ok(download_ids.clone()));
+                    download_ids.sort_unstable();
+                    seen.push(MergeTrackedCommand::Forget {
+                        title_id,
+                        download_ids,
+                    });
+                }
+                _ => panic!("unexpected tracked-download command"),
+            }
+        }
+        seen
+    })
+}
+
+/// Record a download of `title_id` the client is still holding: its
+/// submission, tracked state, terminal marker, client binding, and a pending
+/// cleanup row.
+async fn record_held_download(
+    download_submissions: &TrackingDownloadSubmissionRepo,
+    registry: &super::downloads::RecordingDownloadRegistry,
+    title_id: &str,
+    item_id: &str,
+    scope: SubmissionScope,
+    tracked_state: &str,
+) -> scryer_domain::download_identity::DownloadId {
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let mut submission = deleted_title_submission(title_id, download_id, "qbittorrent", item_id);
+    submission.scope = scope;
+    let locator = ClientJobLocator::from_submission(&submission);
+    download_submissions
+        .record_submission(submission)
+        .await
+        .expect("record submission");
+    download_submissions
+        .update_tracked_state(&locator, tracked_state)
+        .await
+        .expect("record tracked state");
+    download_submissions
+        .record_identity_tracked_state_for_download(
+            Some(&download_id),
+            &canonical_identity(download_id),
+            Some(&locator),
+            tracked_state,
+            None,
+            None,
+        )
+        .await
+        .expect("record terminal marker");
+    registry.bind(locator, download_id).await;
+    download_submissions
+        .pending_cleanup
+        .lock()
+        .await
+        .insert(download_id);
+    download_id
+}
+
+async fn submission_of(
+    download_submissions: &TrackingDownloadSubmissionRepo,
+    download_id: scryer_domain::download_identity::DownloadId,
+) -> Option<DownloadSubmission> {
+    download_submissions
+        .store
+        .lock()
+        .await
+        .iter()
+        .find(|entry| entry.download_id == download_id)
+        .cloned()
+}
+
+#[tokio::test]
+async fn merge_hands_the_source_titles_downloads_to_the_destination() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let download_queue_commands = Arc::new(TrackingDownloadQueueCommandRepo::default());
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let (tracked_tx, tracked_rx) = tokio::sync::mpsc::channel(4);
+    let (base_app, user) = bootstrap_with_cleanup_tracking_and_queue_commands(
+        download_client.clone(),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        download_queue_commands.clone(),
+    );
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_tracked_download_handle(crate::tracked_downloads::TrackedDownloadHandle::new(
+                tracked_tx,
+            ))
+    });
+    let source = app
+        .add_title(&user, synthetic_movie("Synthetic Merge Source"))
+        .await
+        .expect("create source title");
+    let destination = app
+        .add_title(&user, synthetic_movie("Synthetic Merge Destination"))
+        .await
+        .expect("create destination title");
+    let bystander = app
+        .add_title(&user, synthetic_movie("Synthetic Merge Bystander"))
+        .await
+        .expect("create bystander title");
+
+    let title_scoped = record_held_download(
+        &download_submissions,
+        &registry,
+        &source.id,
+        "merge-title-scoped",
+        SubmissionScope::Title,
+        "imported_seeding",
+    )
+    .await;
+    let episode_scoped = record_held_download(
+        &download_submissions,
+        &registry,
+        &source.id,
+        "merge-episode-scoped",
+        SubmissionScope::Episode {
+            episode_id: "source-episode-1".to_string(),
+        },
+        "imported_seeding",
+    )
+    .await;
+    let unrelated = record_held_download(
+        &download_submissions,
+        &registry,
+        &bystander.id,
+        "merge-bystander",
+        SubmissionScope::Episode {
+            episode_id: "source-episode-1".to_string(),
+        },
+        "imported_seeding",
+    )
+    .await;
+    let map = crate::location::merge::map::MergeIdentityMap {
+        source_title_id: source.id.clone(),
+        destination_title_id: destination.id.clone(),
+        episodes: [(
+            "source-episode-1".to_string(),
+            "destination-episode-1".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+
+    let tracked_responder = answer_merge_tracked_commands(tracked_rx, 2);
+    app.purge_merged_source_dependent_records(&map)
+        .await
+        .expect("retire the merged source title");
+    let commands = within_deadline("the merge's tracked-download commands", tracked_responder)
+        .await
+        .expect("responder task");
+
+    let mut moved_ids = vec![title_scoped, episode_scoped];
+    moved_ids.sort_unstable();
+    assert_eq!(
+        commands,
+        vec![
+            MergeTrackedCommand::Reassign {
+                from_title_id: source.id.clone(),
+                to_title_id: destination.id.clone(),
+                facet: Some("movie".to_string()),
+                download_ids: moved_ids.clone(),
+            },
+            // The forget that retires the source's remaining cached rows names
+            // no download: every one of them moved.
+            MergeTrackedCommand::Forget {
+                title_id: source.id.clone(),
+                download_ids: Vec::new(),
+            },
+        ]
+    );
+
+    // The submissions belong to the destination, with their episode
+    // reference carried through the merge's map.
+    let moved_title_scoped = submission_of(&download_submissions, title_scoped)
+        .await
+        .expect("the title-scoped submission survives the merge");
+    assert_eq!(moved_title_scoped.title_id, destination.id);
+    assert_eq!(moved_title_scoped.scope, SubmissionScope::Title);
+    let moved_episode_scoped = submission_of(&download_submissions, episode_scoped)
+        .await
+        .expect("the episode-scoped submission survives the merge");
+    assert_eq!(moved_episode_scoped.title_id, destination.id);
+    assert_eq!(
+        moved_episode_scoped.scope,
+        SubmissionScope::Episode {
+            episode_id: "destination-episode-1".to_string(),
+        }
+    );
+
+    // Bindings, tracked state and pending cleanup are kept, so the seeding
+    // cleanup still removes the torrents once their goal is met.
+    for download_id in [title_scoped, episode_scoped, unrelated] {
+        assert!(!registry.is_ended(&download_id).await);
+        assert!(
+            download_submissions
+                .pending_cleanup
+                .lock()
+                .await
+                .contains(&download_id)
+        );
+        assert_eq!(
+            download_submissions
+                .get_identity_tracked_state_for_download(
+                    Some(&download_id),
+                    &canonical_identity(download_id),
+                    None,
+                )
+                .await
+                .expect("read terminal marker")
+                .as_deref(),
+            Some("imported_seeding")
+        );
+    }
+    assert!(
+        download_submissions
+            .finished_cleanup
+            .lock()
+            .await
+            .is_empty(),
+        "no cleanup row is abandoned"
+    );
+    assert!(
+        download_submissions
+            .deleted_identity_state_download_ids
+            .lock()
+            .await
+            .is_empty()
+    );
+
+    // The unrelated title's download is exactly as it was.
+    let untouched = submission_of(&download_submissions, unrelated)
+        .await
+        .expect("the bystander's submission is kept");
+    assert_eq!(untouched.title_id, bystander.id);
+    assert_eq!(
+        untouched.scope,
+        SubmissionScope::Episode {
+            episode_id: "source-episode-1".to_string(),
+        }
+    );
+    assert!(
+        download_submissions
+            .reassigned
+            .lock()
+            .await
+            .iter()
+            .all(|reassignment| reassignment.references.download_id != unrelated)
+    );
+
+    // Nothing reached the client.
+    assert!(download_queue_commands.queued.lock().await.is_empty());
+    assert!(download_client.deleted_requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn merge_retires_a_source_download_it_cannot_move_and_still_succeeds() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let download_queue_commands = Arc::new(TrackingDownloadQueueCommandRepo::default());
+    let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let (tracked_tx, tracked_rx) = tokio::sync::mpsc::channel(4);
+    let (base_app, user) = bootstrap_with_cleanup_tracking_and_queue_commands(
+        download_client.clone(),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        download_queue_commands.clone(),
+    );
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_tracked_download_handle(crate::tracked_downloads::TrackedDownloadHandle::new(
+                tracked_tx,
+            ))
+    });
+    let source = app
+        .add_title(&user, synthetic_movie("Synthetic Merge Source"))
+        .await
+        .expect("create source title");
+    let destination = app
+        .add_title(&user, synthetic_movie("Synthetic Merge Destination"))
+        .await
+        .expect("create destination title");
+
+    let movable = record_held_download(
+        &download_submissions,
+        &registry,
+        &source.id,
+        "merge-movable",
+        SubmissionScope::Title,
+        "imported_seeding",
+    )
+    .await;
+    // Its episode has no counterpart in the merge's map.
+    let unmapped = record_held_download(
+        &download_submissions,
+        &registry,
+        &source.id,
+        "merge-unmapped",
+        SubmissionScope::Episode {
+            episode_id: "source-episode-unmapped".to_string(),
+        },
+        "imported_seeding",
+    )
+    .await;
+    // Its move fails in the store. It is still active in the client, which
+    // the delete path would cancel; a merge never does.
+    let failing = record_held_download(
+        &download_submissions,
+        &registry,
+        &source.id,
+        "merge-failing",
+        SubmissionScope::Title,
+        "downloading",
+    )
+    .await;
+    download_submissions
+        .failing_reassignments
+        .lock()
+        .await
+        .insert(failing);
+    let map = crate::location::merge::map::MergeIdentityMap {
+        source_title_id: source.id.clone(),
+        destination_title_id: destination.id.clone(),
+        ..Default::default()
+    };
+
+    let tracked_responder = answer_merge_tracked_commands(tracked_rx, 2);
+    app.purge_merged_source_dependent_records(&map)
+        .await
+        .expect("a download that cannot move never fails the merge");
+    let commands = within_deadline("the merge's tracked-download commands", tracked_responder)
+        .await
+        .expect("responder task");
+
+    let mut retired_ids = vec![unmapped, failing];
+    retired_ids.sort_unstable();
+    assert_eq!(
+        commands,
+        vec![
+            MergeTrackedCommand::Reassign {
+                from_title_id: source.id.clone(),
+                to_title_id: destination.id.clone(),
+                facet: Some("movie".to_string()),
+                download_ids: vec![movable],
+            },
+            MergeTrackedCommand::Forget {
+                title_id: source.id.clone(),
+                download_ids: retired_ids.clone(),
+            },
+        ]
+    );
+
+    // The downloads that could not move retire exactly as a deleted title's:
+    // binding ended, terminal markers removed, cleanup settled as abandoned,
+    // submission gone.
+    for download_id in &retired_ids {
+        assert!(registry.is_ended(download_id).await);
+        assert!(
+            submission_of(&download_submissions, *download_id)
+                .await
+                .is_none()
+        );
+    }
+    let mut abandoned = download_submissions.finished_cleanup.lock().await.clone();
+    abandoned.sort_unstable_by_key(|(download_id, _, _)| *download_id);
+    assert_eq!(
+        abandoned,
+        retired_ids
+            .iter()
+            .map(|download_id| (*download_id, "cleanup_abandoned".to_string(), true))
+            .collect::<Vec<_>>()
+    );
+    let mut deleted_marker_ids = download_submissions
+        .deleted_identity_state_download_ids
+        .lock()
+        .await
+        .clone();
+    deleted_marker_ids.sort_unstable();
+    assert_eq!(deleted_marker_ids, retired_ids);
+
+    // The movable one still went to the destination with its cleanup pending.
+    let moved = submission_of(&download_submissions, movable)
+        .await
+        .expect("the movable submission survives the merge");
+    assert_eq!(moved.title_id, destination.id);
+    assert!(!registry.is_ended(&movable).await);
+    assert!(
+        download_submissions
+            .pending_cleanup
+            .lock()
+            .await
+            .contains(&movable)
+    );
+
+    // No failure removes anything from the client.
+    assert!(download_queue_commands.queued.lock().await.is_empty());
+    assert!(download_client.deleted_requests.lock().await.is_empty());
+}

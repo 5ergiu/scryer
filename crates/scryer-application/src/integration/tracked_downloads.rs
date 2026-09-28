@@ -1063,6 +1063,41 @@ impl TrackedDownloadService {
         removed
     }
 
+    /// Re-attribute the rows cached under `download_ids` from `from_title_id`
+    /// to `to_title_id`, returning the re-keyed ids in ascending order. A
+    /// merged source title's downloads move to the destination this way, so
+    /// the forget that retires the source afterwards leaves them tracked. A
+    /// row resolved to any other title is left alone.
+    pub fn reassign_title(
+        &mut self,
+        from_title_id: &str,
+        to_title_id: &str,
+        facet: Option<&str>,
+        download_ids: &[DownloadId],
+    ) -> Vec<DownloadId> {
+        let mut reassigned = Vec::new();
+        for download_id in download_ids {
+            let Some(tracked) = self.cache.get_mut(download_id) else {
+                continue;
+            };
+            if tracked
+                .title_id
+                .as_deref()
+                .is_some_and(|title_id| title_id != from_title_id)
+            {
+                continue;
+            }
+            tracked.title_id = Some(to_title_id.to_string());
+            if let Some(facet) = facet {
+                tracked.facet = Some(facet.to_string());
+            }
+            reassigned.push(*download_id);
+        }
+        reassigned.sort_unstable();
+        reassigned.dedup();
+        reassigned
+    }
+
     fn clear_untracked_warning_clocks(&mut self) {
         self.warning_since.retain(|id, _| {
             self.cache
@@ -1824,6 +1859,15 @@ pub enum TrackedDownloadCommand {
         download_ids: Vec<DownloadId>,
         reply: oneshot::Sender<AppResult<Vec<DownloadId>>>,
     },
+    /// Re-attribute the rows cached under `download_ids` from a merged source
+    /// title to its destination; replies with the re-keyed rows.
+    ReassignTitle {
+        from_title_id: String,
+        to_title_id: String,
+        facet: Option<String>,
+        download_ids: Vec<DownloadId>,
+        reply: oneshot::Sender<AppResult<Vec<DownloadId>>>,
+    },
     MarkFailed {
         id: String,
         skip_reacquire: bool,
@@ -2020,6 +2064,33 @@ impl TrackedDownloadHandle {
         self.tx
             .send(TrackedDownloadCommand::ForgetForTitle {
                 title_id,
+                download_ids,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                crate::AppError::Repository("tracked download service unavailable".into())
+            })?;
+        reply_rx.await.map_err(|_| {
+            crate::AppError::Repository("tracked download service dropped reply".into())
+        })?
+    }
+
+    /// Re-attribute the rows cached under `download_ids` from `from_title_id`
+    /// to `to_title_id`. Replies with the re-keyed rows.
+    pub async fn reassign_title(
+        &self,
+        from_title_id: String,
+        to_title_id: String,
+        facet: Option<String>,
+        download_ids: Vec<DownloadId>,
+    ) -> AppResult<Vec<DownloadId>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(TrackedDownloadCommand::ReassignTitle {
+                from_title_id,
+                to_title_id,
+                facet,
                 download_ids,
                 reply: reply_tx,
             })
@@ -4835,6 +4906,49 @@ mod tests {
         assert!(tracker.get_by_download_id(unrelated_untitled).is_some());
         assert!(tracker.get_by_download_id(other_title).is_some());
         assert_eq!(tracker.get_all().len(), 2);
+    }
+
+    #[test]
+    fn reassign_title_rekeys_only_the_named_rows_of_the_source_title() {
+        let mut tracker = TrackedDownloadService::new();
+        let mut row_for = |title_id: Option<&str>| {
+            let mut tracked = build_tracked_download("merged-torrent");
+            tracked.title_id = title_id.map(str::to_owned);
+            tracked.facet = Some("series".to_string());
+            let download_id = tracked.download_id;
+            tracker.cache.insert(download_id, tracked);
+            download_id
+        };
+        let moved = row_for(Some("title-source"));
+        let untitled = row_for(None);
+        let unnamed = row_for(Some("title-source"));
+        let other_title = row_for(Some("title-other"));
+
+        let mut expected = vec![moved, untitled];
+        expected.sort_unstable();
+        assert_eq!(
+            tracker.reassign_title(
+                "title-source",
+                "title-destination",
+                Some("anime"),
+                &[moved, untitled, other_title],
+            ),
+            expected
+        );
+        for download_id in [moved, untitled] {
+            let row = tracker.get_by_download_id(download_id).expect("row kept");
+            assert_eq!(row.title_id.as_deref(), Some("title-destination"));
+            assert_eq!(row.facet.as_deref(), Some("anime"));
+        }
+        let row = tracker.get_by_download_id(unnamed).expect("row kept");
+        assert_eq!(row.title_id.as_deref(), Some("title-source"));
+        let row = tracker.get_by_download_id(other_title).expect("row kept");
+        assert_eq!(row.title_id.as_deref(), Some("title-other"));
+        assert_eq!(row.facet.as_deref(), Some("series"));
+
+        // The forget that retires the source afterwards keeps the moved rows.
+        assert_eq!(tracker.forget_for_title("title-source", &[]), vec![unnamed]);
+        assert_eq!(tracker.get_all().len(), 3);
     }
 
     #[test]

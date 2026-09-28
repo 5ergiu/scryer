@@ -5357,6 +5357,10 @@ async fn delete_title_settles_the_pending_cleanup_of_its_seeding_download() {
         .expect("responder task");
 
     assert!(registry.is_ended(&download_id).await);
+    assert!(
+        repository.reassigned.lock().await.is_empty(),
+        "a deleted title's downloads are forgotten, never handed to another title"
+    );
     let finished = repository.finished_cleanup.lock().await.clone();
     assert_eq!(
         finished,
