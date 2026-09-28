@@ -1431,6 +1431,8 @@ async fn resolve_notification_media_files(
     // One batch read per notification: a title delete or move can carry
     // hundreds of paths. Results are keyed by the requested path and walked in
     // entry order, so each entry resolves exactly as a single lookup would.
+    // When the batch read fails every path is still reported, path-only, as it
+    // would be for a path with no tracked file.
     let tracked = match app
         .services
         .library
@@ -1451,7 +1453,7 @@ async fn resolve_notification_media_files(
                 error = %error,
                 "failed to load notification media files by path"
             );
-            return media_files;
+            BTreeMap::new()
         }
     };
     for path in paths {
@@ -3777,6 +3779,31 @@ mod file_delete_subscription_tests {
 
         dispatch_event(&app, &media_file_deleted_event("evt-fixture", reason)).await;
         provider.sent()
+    }
+
+    #[tokio::test]
+    async fn media_file_paths_survive_a_failed_path_lookup() {
+        let media_files = Arc::new(crate::lib_tests::MockMediaFileRepo::default());
+        media_files
+            .fail_get_media_file_by_path("path lookup unavailable")
+            .await;
+        let (app, _) = bootstrap();
+        let app = app.with_test_overrides(|services| services.with_media_files(media_files));
+        let event = media_file_deleted_event("evt-fixture", MediaFileDeletedReason::Deleted);
+        let built = build_notification(&event).expect("file deleted builds a notification");
+
+        let media_files =
+            resolve_notification_media_files(&app, &event, built.payload.file.as_ref()).await;
+
+        assert_eq!(
+            media_files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/library/Harbor Lantern (2024)/harbor-lantern.mkv"],
+            "each deleted path is still reported when the batch lookup fails"
+        );
+        assert!(media_files[0].id.is_none());
     }
 
     #[tokio::test]

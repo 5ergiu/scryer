@@ -224,7 +224,7 @@ impl FileImporter for ProgressReportingFileImporter {
 }
 
 #[derive(Default, Clone)]
-pub(super) struct MockMediaFileRepo {
+pub(crate) struct MockMediaFileRepo {
     pub(super) store: Arc<Mutex<Vec<TitleMediaFile>>>,
     pub(super) pending_analysis_ids: Arc<Mutex<Vec<String>>>,
     pub(super) analysis_attempts: Arc<Mutex<Vec<(String, MediaFileAnalysis)>>>,
@@ -233,6 +233,8 @@ pub(super) struct MockMediaFileRepo {
     pub(super) replace_file_episode_links_error: Arc<Mutex<Option<String>>>,
     /// Stands in for a store failure while listing a title's media files.
     pub(super) list_media_files_for_title_error: Arc<Mutex<Option<String>>>,
+    /// Stands in for a store failure while looking a media file up by path.
+    pub(super) get_media_file_by_path_error: Arc<Mutex<Option<String>>>,
     /// Optional bridge for the background acquisition cursor: when set, the
     /// derived missing-target sweep reads the seeded acquisition-state rows so a
     /// mock-backed store still yields targets for `run_background_acquisition_cycle_once`.
@@ -264,6 +266,10 @@ impl MockMediaFileRepo {
 
     pub(super) async fn fail_list_media_files_for_title(&self, message: &str) {
         *self.list_media_files_for_title_error.lock().await = Some(message.to_string());
+    }
+
+    pub(crate) async fn fail_get_media_file_by_path(&self, message: &str) {
+        *self.get_media_file_by_path_error.lock().await = Some(message.to_string());
     }
 
     /// Add one more episode link to a tracked file. The store keeps one row
@@ -1086,6 +1092,9 @@ impl MediaFileRepository for MockMediaFileRepo {
     }
 
     async fn get_media_file_by_path(&self, file_path: &str) -> AppResult<Option<TitleMediaFile>> {
+        if let Some(message) = self.get_media_file_by_path_error.lock().await.clone() {
+            return Err(AppError::Repository(message));
+        }
         Ok(self
             .store
             .lock()
