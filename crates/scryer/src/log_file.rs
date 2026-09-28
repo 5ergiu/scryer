@@ -76,6 +76,9 @@ struct Queue {
     // when the active file reached the rotation ceiling during compression.
     jobs: VecDeque<Job>,
     shutdown: bool,
+    // Queue length at which the head job parked after a failure that will not
+    // pass on its own; it is retried once a rollover changes the queue.
+    parked: Option<usize>,
 }
 
 struct Job {
@@ -86,6 +89,11 @@ struct Job {
 struct Faults {
     #[cfg(test)]
     fail: Mutex<Option<&'static str>>,
+    // Fails the step with a permission error on every attempt until cleared.
+    #[cfg(test)]
+    deny: Mutex<Option<&'static str>>,
+    #[cfg(test)]
+    denied: std::sync::atomic::AtomicUsize,
 }
 
 impl Faults {
@@ -97,9 +105,43 @@ impl Faults {
                 *fail = None;
                 return Err(io::Error::other(format!("injected {_step} failure")));
             }
+            if self.deny.lock().unwrap().is_some_and(|step| step == _step) {
+                self.denied
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
         }
         Ok(())
     }
+}
+
+// A module-detected condition that retrying on a timer cannot resolve. The
+// io::Error wrapping it keeps its original kind and message.
+#[derive(Debug)]
+struct Unrecoverable(&'static str);
+
+impl std::fmt::Display for Unrecoverable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Unrecoverable {}
+
+fn unrecoverable(message: &'static str) -> io::Error {
+    io::Error::other(Unrecoverable(message))
+}
+
+// Failures that will not pass on their own park the job until the queue
+// changes or the process restarts instead of retrying on the backoff timer.
+fn waits_for_queue_change(error: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        error.kind(),
+        PermissionDenied | NotFound | InvalidData | UnexpectedEof | ReadOnlyFilesystem
+    ) || error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<Unrecoverable>())
 }
 
 struct Work {
@@ -188,6 +230,7 @@ fn open_with_clock(
         queue: Mutex::new(Queue {
             jobs,
             shutdown: false,
+            parked: None,
         }),
         changed: Condvar::new(),
         active_path: path.clone(),
@@ -222,7 +265,7 @@ fn report(operation: &str, error: &io::Error) {
 
 fn regular(path: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::other("log segment is not a regular file"));
+        return Err(unrecoverable("log segment is not a regular file"));
     }
     Ok(())
 }
@@ -247,7 +290,7 @@ fn open_regular(path: &Path) -> io::Result<File> {
     no_follow(&mut options);
     let file = options.open(path)?;
     if !file.metadata()?.file_type().is_file() {
-        return Err(io::Error::other("not a regular log file"));
+        return Err(unrecoverable("not a regular log file"));
     }
     Ok(file)
 }
@@ -513,9 +556,7 @@ fn publish(source: &Path, faults: &Faults) -> io::Result<()> {
             // verifies its entire contents, including the checksum, before unlinking.
             return sync_directory(source.parent().unwrap());
         }
-        return Err(io::Error::other(
-            "archive collision; existing file preserved",
-        ));
+        return Err(unrecoverable("archive collision; existing file preserved"));
     }
     let temporary = source.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let mut input = open_regular(source)?;
@@ -604,6 +645,17 @@ fn run_worker(work: Arc<Work>) {
                 report("compression/retention", &error);
                 if queue.shutdown {
                     return;
+                }
+                if waits_for_queue_change(&error) {
+                    // No timer: only a rollover pushing a job or shutdown wakes it.
+                    queue.parked = Some(queue.jobs.len());
+                    work.changed.notify_all();
+                    let mut queue = work
+                        .changed
+                        .wait_while(queue, |q| !q.shutdown && q.parked == Some(q.jobs.len()))
+                        .unwrap();
+                    queue.parked = None;
+                    continue;
                 }
                 let _ = work
                     .changed
