@@ -1237,6 +1237,81 @@ fn import_and_library_rename_render_identical_series_tokens() {
 }
 
 #[test]
+fn import_and_library_rename_keep_the_year_in_series_file_titles() {
+    let episode = test_series_episode();
+    let release = "Lantern.Harbor.2018.S01E01.1080p.WEB-DL.AAC2.0.H.264-Glimmerwick";
+    let parsed = parse_release_metadata(release);
+    let analysis = probed_series_analysis(2, "stereo");
+    let media_file = media_file_recorded_from_analysis(
+        &format!("/library/Lantern Harbor (2018)/{release}.mkv"),
+        &episode.id,
+        &analysis,
+    );
+
+    for (facet, template) in [
+        (MediaFacet::Series, crate::DEFAULT_RENAME_TEMPLATE_SERIES),
+        (MediaFacet::Anime, crate::DEFAULT_RENAME_TEMPLATE_ANIME),
+    ] {
+        let mut title = test_movie_title("Lantern Harbor (2018)");
+        title.facet = facet.clone();
+        title.year = Some(2018);
+
+        let import_tokens = crate::import_workflow::episode_import_rename_tokens(
+            &title,
+            &parsed,
+            Some(&analysis),
+            "mkv",
+            1,
+            "1",
+            episode.absolute_number.as_deref(),
+            episode.title.as_deref(),
+            None,
+        );
+        let library_tokens = library_series_tokens(&title, &media_file, &episode, &parsed);
+
+        assert_eq!(import_tokens, library_tokens, "{facet:?}");
+        assert_eq!(
+            import_tokens.get("title").map(String::as_str),
+            Some("Lantern Harbor (2018)"),
+            "{facet:?}"
+        );
+        assert_eq!(
+            import_tokens.get("year").map(String::as_str),
+            Some("2018"),
+            "{facet:?}"
+        );
+
+        let rendered = render_rename_template(template, &import_tokens);
+        assert!(
+            rendered.starts_with("Lantern Harbor (2018) - S01E01"),
+            "{facet:?}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("(2018)").count(),
+            1,
+            "{facet:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn series_folder_keeps_a_single_year_when_the_title_name_carries_one() {
+    for facet in [MediaFacet::Series, MediaFacet::Anime] {
+        let mut title = test_movie_title("Lantern Harbor (2018)");
+        title.facet = facet.clone();
+        title.year = Some(2018);
+
+        let tokens = build_title_folder_tokens(&title, title.year);
+
+        assert_eq!(
+            render_title_folder_template(DEFAULT_FOLDER_TEMPLATE_SERIES, &tokens),
+            "Lantern Harbor (2018)",
+            "{facet:?}"
+        );
+    }
+}
+
+#[test]
 fn library_rename_never_renders_a_layout_word_as_audio_channels() {
     let mut title = test_movie_title("Lantern Harbor");
     title.facet = MediaFacet::Series;

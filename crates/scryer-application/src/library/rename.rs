@@ -3226,13 +3226,23 @@ fn resolve_rename_common_metadata_from_evidence(
 /// media labels, extension, and the title's external ids.
 ///
 /// The second value is the file's edition, which only movie templates render.
+///
+/// A series or anime file's `title` keeps the title name as the catalog spells
+/// it, including a disambiguating year such as "Name (2018)"; movie templates
+/// render `{year}` themselves, so a movie's `title` drops that year hint.
+/// `year` is populated either way.
 pub(crate) fn title_rename_tokens(
     title: &Title,
     evidence: Option<RenameMediaEvidence>,
     parsed_current: &ParsedReleaseMetadata,
     extension: &str,
 ) -> (BTreeMap<String, String>, String) {
-    let (title_token, year_token) = split_title_and_year_hint(&title.name);
+    let (split_title, year_token) = split_title_and_year_hint(&title.name);
+    let title_token = if title.facet == MediaFacet::Movie {
+        split_title
+    } else {
+        title.name.trim().to_string()
+    };
     let fallback_year = title.year.map(|value| value.to_string());
     let common = resolve_rename_common_metadata_from_evidence(
         evidence.unwrap_or_default(),
@@ -3514,7 +3524,6 @@ fn build_series_media_file_rename_plan_item(
         &source,
         &parsed,
     );
-    let (title_token, _) = split_title_and_year_hint(&title.name);
     let tokens = series_media_file_rename_tokens(
         title,
         &source.file,
@@ -3522,6 +3531,7 @@ fn build_series_media_file_rename_plan_item(
         &source_file.extension,
         &rename_metadata,
     );
+    let title_token = tokens.get("title").cloned().unwrap_or_default();
 
     let item_ids = RenamePlanItemIds {
         collection_id: rename_metadata.collection_id.clone(),
