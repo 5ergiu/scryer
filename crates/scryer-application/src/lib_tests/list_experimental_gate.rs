@@ -539,3 +539,27 @@ async fn adding_an_exclusion_clears_the_fingerprints_it_could_apply_to() {
     assert_eq!(harness.lists.exclusions.lock().unwrap().len(), 2);
     assert_eq!(list_sync_starts(&harness).await, 0, "no sync is started");
 }
+
+#[tokio::test]
+async fn a_list_manager_can_read_quality_profiles_for_list_routes() {
+    let harness = bootstrap_media_request_app();
+
+    harness
+        .app
+        .get_quality_profile_settings(&list_manager())
+        .await
+        .expect("a list manager reads quality profiles");
+
+    let mut outsider = User::new_admin("outsider");
+    outsider.authorization = scryer_domain::UserAuthorization {
+        app: AppPermissionMask::default(),
+        loaded: true,
+        ..Default::default()
+    };
+    let error = harness
+        .app
+        .get_quality_profile_settings(&outsider)
+        .await
+        .expect_err("a user without any of the permissions is refused");
+    assert!(matches!(error, AppError::Unauthorized(_)), "{error:?}");
+}
