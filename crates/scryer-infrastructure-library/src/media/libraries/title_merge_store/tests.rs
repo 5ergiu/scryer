@@ -1005,6 +1005,50 @@ async fn a_queued_download_on_the_source_blocks_the_merge() {
     assert!(!plan_for(&store).await.is_blocked());
 }
 
+/// The source title's settled downloads outlive the transaction: the
+/// retirement step that runs after it hands them to the destination (or
+/// retires the ones it cannot), so the transaction neither deletes nor counts
+/// them as dropped records.
+#[tokio::test]
+async fn the_merge_transaction_leaves_the_source_titles_downloads_for_retirement() {
+    let (store, datastore) = test_store().await;
+    seed_two_season_series(&datastore).await;
+    run(
+        &datastore,
+        "INSERT INTO downloads (id, origin, created_at)
+         VALUES ('submission-1', 'scryer_submission', '2026-01-01T00:00:00Z')",
+        vec![],
+    )
+    .await;
+    run(
+        &datastore,
+        "INSERT INTO download_submissions (id, title_id, facet, download_client_type,
+                                           download_client_item_id, tracked_state, submitted_at)
+         VALUES ('submission-1', {}, 'series', 'qbittorrent', 'item-1', 'imported',
+                 '2026-01-01T00:00:00Z')",
+        vec![SqlArg::Text(SOURCE.to_string())],
+    )
+    .await;
+
+    let plan = plan_for(&store).await;
+    assert!(!plan.is_blocked(), "blocked: {:?}", plan.blocked());
+    assert_eq!(plan.summary.source_records_dropped, 0);
+
+    let outcome = store
+        .execute_title_merge(&plan)
+        .await
+        .expect("the merge should commit");
+    assert_eq!(outcome.rows_affected.get("retire:titles"), Some(&1));
+    assert_eq!(
+        outcome.rows_affected.get("retire:download_submissions"),
+        None
+    );
+    assert_eq!(
+        rows_referencing_source(&datastore, "download_submissions", "title_id").await,
+        1
+    );
+}
+
 /// A failure after the repoint and before the delete leaves the source title
 /// whole: one transaction, all or nothing.
 #[tokio::test]

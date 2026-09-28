@@ -3347,9 +3347,11 @@ impl RootMoveCatalog for AppUseCaseRootMoveCatalog {
 /// left is the *logical* cleanup the ordinary title delete performs — the rows
 /// no foreign key reaches.
 ///
-/// It is the same call `delete_title` makes, with the recycle-bin purge off:
-/// a merge repoints the source's files, it never removes them, so nothing the
-/// source title recycled is the merge's to purge.
+/// It is the cleanup `delete_title` runs, with the recycle-bin purge off — a
+/// merge repoints the source's files, it never removes them, so nothing the
+/// source title recycled is the merge's to purge — and with one difference for
+/// downloads: the source title's downloads are handed to the destination
+/// rather than forgotten, so their seeding cleanup still runs.
 ///
 /// Best effort. A failure here leaves rows referencing a title that no longer
 /// exists — exactly what an interrupted title delete leaves — and failing the
@@ -3366,10 +3368,7 @@ impl MergedSourceRetirer for AppUseCaseMergedSourceRetirer {
         // learns that identity is gone.
         self.app.invalidate_monitored_title_matcher().await;
         self.app
-            .purge_title_dependent_records(
-                &request.source_title_id,
-                crate::domain_events::DomainEventActor::system(),
-            )
+            .purge_merged_source_dependent_records(&request.identity_map)
             .await
     }
 }

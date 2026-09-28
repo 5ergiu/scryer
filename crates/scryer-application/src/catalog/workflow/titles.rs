@@ -1648,61 +1648,17 @@ impl AppUseCase {
     /// but the title's id: the rows no foreign key reaches, and the downloads
     /// that would otherwise keep running for a title that is gone.
     ///
-    /// Split out so a merged source title — whose `titles` row the merge
-    /// transaction already removed, and whose files were repointed rather than
-    /// deleted — retires through exactly the same cleanup.
+    /// A merged source title — whose `titles` row the merge transaction
+    /// already removed, and whose files were repointed rather than deleted —
+    /// retires through [`Self::purge_merged_source_dependent_records`], which
+    /// shares everything here except the downloads.
     pub(crate) async fn purge_title_dependent_records(
         &self,
         title_id: &str,
         actor: DomainEventActor,
     ) -> AppResult<()> {
-        let download_submissions = match self
-            .services
-            .workflow
-            .download_submissions
-            .list_for_title(title_id)
-            .await
-        {
-            Ok(submissions) => submissions,
-            Err(err) => {
-                warn!(
-                    title_id = %title_id,
-                    error = %err,
-                    "failed to list download submissions while deleting title; skipping download cancellation"
-                );
-                Vec::new()
-            }
-        };
-
-        // `list_for_title` only returns submissions a client item is known
-        // for. A grab the client has not reported yet still holds an active
-        // binding, and must retire with the title too: otherwise the client's
-        // later report attaches to the dead download. It has no item id to
-        // cancel, so it joins the retire list only.
-        let unbound_submissions = match self
-            .services
-            .workflow
-            .download_submissions
-            .list_active_unbound_for_title(title_id)
-            .await
-        {
-            Ok(submissions) => submissions,
-            Err(err) => {
-                warn!(
-                    title_id = %title_id,
-                    error = %err,
-                    "failed to list unbound download submissions while deleting title"
-                );
-                Vec::new()
-            }
-        };
-
-        let mut submitted_download_ids = Vec::new();
-        for submission in download_submissions.iter().chain(&unbound_submissions) {
-            if !submitted_download_ids.contains(&submission.download_id) {
-                submitted_download_ids.push(submission.download_id);
-            }
-        }
+        let (download_submissions, submitted_download_ids) =
+            self.title_submissions_to_retire(title_id).await;
 
         let mut seen_downloads = HashSet::new();
         for submission in download_submissions {
@@ -1762,6 +1718,31 @@ impl AppUseCase {
         self.retire_title_downloads(title_id, submitted_download_ids)
             .await;
 
+        self.purge_title_records_after_downloads(title_id).await
+    }
+
+    /// The merge counterpart of [`Self::purge_title_dependent_records`] for a
+    /// source title the merge transaction has already retired.
+    ///
+    /// The source title's downloads are handed to the destination instead of
+    /// being forgotten: their submissions, client bindings, tracked state and
+    /// pending cleanup now belong to the title that owns the merged files, so
+    /// the seeding cleanup still removes them from the client once their goal
+    /// is met. Nothing is cancelled in the client. A download that cannot be
+    /// handed over retires exactly as a deleted title's does, and never fails
+    /// the merge. Everything else is the delete path's cleanup.
+    pub(crate) async fn purge_merged_source_dependent_records(
+        &self,
+        map: &crate::location::merge::map::MergeIdentityMap,
+    ) -> AppResult<()> {
+        self.hand_merged_source_downloads_to_destination(map).await;
+        self.purge_title_records_after_downloads(&map.source_title_id)
+            .await
+    }
+
+    /// The rows no foreign key reaches, once the title's downloads have been
+    /// dealt with. Shared by title delete and title merge.
+    async fn purge_title_records_after_downloads(&self, title_id: &str) -> AppResult<()> {
         self.services
             .workflow
             .pending_releases
@@ -1777,8 +1758,8 @@ impl AppUseCase {
             .download_submissions
             .delete_for_title(title_id)
             .await?;
-        // The bindings were ended above; drop the resolutions cached for the
-        // deleted submissions too.
+        // The retired downloads' bindings were ended before this; drop the
+        // resolutions cached for the deleted submissions too.
         self.runtime
             .acquisition
             .invalidate_download_registry_observations();
@@ -1801,6 +1782,212 @@ impl AppUseCase {
             .await?;
 
         Ok(())
+    }
+
+    /// The title's submissions a client item is known for, and the canonical
+    /// id of every download the title submitted that must retire with it.
+    async fn title_submissions_to_retire(
+        &self,
+        title_id: &str,
+    ) -> (
+        Vec<DownloadSubmission>,
+        Vec<scryer_domain::download_identity::DownloadId>,
+    ) {
+        let download_submissions = match self
+            .services
+            .workflow
+            .download_submissions
+            .list_for_title(title_id)
+            .await
+        {
+            Ok(submissions) => submissions,
+            Err(err) => {
+                warn!(
+                    title_id = %title_id,
+                    error = %err,
+                    "failed to list download submissions while deleting title; skipping download cancellation"
+                );
+                Vec::new()
+            }
+        };
+
+        // `list_for_title` only returns submissions a client item is known
+        // for. A grab the client has not reported yet still holds an active
+        // binding, and must retire with the title too: otherwise the client's
+        // later report attaches to the dead download. It has no item id to
+        // cancel, so it joins the retire list only.
+        let unbound_submissions = match self
+            .services
+            .workflow
+            .download_submissions
+            .list_active_unbound_for_title(title_id)
+            .await
+        {
+            Ok(submissions) => submissions,
+            Err(err) => {
+                warn!(
+                    title_id = %title_id,
+                    error = %err,
+                    "failed to list unbound download submissions while deleting title"
+                );
+                Vec::new()
+            }
+        };
+
+        let mut submitted_download_ids = Vec::new();
+        for submission in download_submissions.iter().chain(&unbound_submissions) {
+            if !submitted_download_ids.contains(&submission.download_id) {
+                submitted_download_ids.push(submission.download_id);
+            }
+        }
+        (download_submissions, submitted_download_ids)
+    }
+
+    /// Move a merged source title's downloads to the destination title.
+    ///
+    /// Each submission's episode, collection and series-movie references are
+    /// rewritten through the merge's identity map, and the submission, its
+    /// episode links and its cleanup row move together. Its client binding and
+    /// tracked state are keyed by the download, not the title, so they are
+    /// kept as they are; the cached tracked row is re-attributed. A download
+    /// whose references the map cannot carry, or whose move fails, retires as
+    /// a deleted title's does: its binding ends and its pending cleanup is
+    /// settled, with nothing sent to the client. A submission that no longer
+    /// belongs to the source title is someone else's and is left alone.
+    async fn hand_merged_source_downloads_to_destination(
+        &self,
+        map: &crate::location::merge::map::MergeIdentityMap,
+    ) {
+        let source_title_id = map.source_title_id.as_str();
+        let destination_title_id = map.destination_title_id.as_str();
+        let submissions = &self.services.workflow.download_submissions;
+
+        let references = match submissions
+            .list_title_download_references(source_title_id)
+            .await
+        {
+            Ok(references) => references,
+            Err(err) => {
+                warn!(
+                    title_id = %source_title_id,
+                    destination_title_id = %destination_title_id,
+                    error = %err,
+                    "failed to list the merged title's downloads; they retire with the title"
+                );
+                let (_, download_ids) = self.title_submissions_to_retire(source_title_id).await;
+                self.retire_title_downloads(source_title_id, download_ids)
+                    .await;
+                return;
+            }
+        };
+
+        let destination_facet = match self
+            .services
+            .catalog
+            .titles
+            .get_by_id(destination_title_id)
+            .await
+        {
+            Ok(Some(title)) => Some(title.facet.as_str().to_string()),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    title_id = %source_title_id,
+                    destination_title_id = %destination_title_id,
+                    error = %err,
+                    "failed to read the merge destination title"
+                );
+                None
+            }
+        };
+
+        let mut moved = Vec::new();
+        let mut unmoved = Vec::new();
+        for source_references in references {
+            let download_id = source_references.download_id;
+            let Some(destination_facet) = destination_facet.clone() else {
+                unmoved.push(download_id);
+                continue;
+            };
+            let Some(destination_references) = merged_download_references(&source_references, map)
+            else {
+                warn!(
+                    title_id = %source_title_id,
+                    destination_title_id = %destination_title_id,
+                    download_id = %download_id,
+                    "the merged title's download references a record the merge did not carry; it retires with the title"
+                );
+                unmoved.push(download_id);
+                continue;
+            };
+            let reassignment = crate::DownloadTitleReassignment {
+                source_title_id: source_title_id.to_string(),
+                destination_title_id: destination_title_id.to_string(),
+                destination_facet,
+                references: destination_references,
+            };
+            match submissions.reassign_download_to_title(&reassignment).await {
+                Ok(true) => moved.push(download_id),
+                Ok(false) => debug!(
+                    title_id = %source_title_id,
+                    download_id = %download_id,
+                    "download no longer belongs to the merged title; left as it is"
+                ),
+                Err(err) => {
+                    warn!(
+                        title_id = %source_title_id,
+                        destination_title_id = %destination_title_id,
+                        download_id = %download_id,
+                        error = %err,
+                        "failed to move the merged title's download; it retires with the title"
+                    );
+                    unmoved.push(download_id);
+                }
+            }
+        }
+
+        if !moved.is_empty() {
+            // Resolutions memoized against the source title must not outlive
+            // the move.
+            self.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            if let Some(handle) = self.runtime.acquisition.tracked_download_handle.as_ref() {
+                match handle
+                    .reassign_title(
+                        source_title_id.to_string(),
+                        destination_title_id.to_string(),
+                        destination_facet.clone(),
+                        moved.clone(),
+                    )
+                    .await
+                {
+                    Ok(reassigned) => debug!(
+                        title_id = %source_title_id,
+                        destination_title_id = %destination_title_id,
+                        reassigned = reassigned.len(),
+                        "tracked downloads of merged title now belong to the destination"
+                    ),
+                    Err(err) => warn!(
+                        title_id = %source_title_id,
+                        destination_title_id = %destination_title_id,
+                        error = %err,
+                        "failed to re-attribute tracked downloads of merged title"
+                    ),
+                }
+            }
+            info!(
+                title_id = %source_title_id,
+                destination_title_id = %destination_title_id,
+                moved = moved.len(),
+                retired = unmoved.len(),
+                "handed the merged title's downloads to the destination title"
+            );
+        }
+
+        // Always run, like the delete path: it also drops the source title's
+        // remaining cached rows, which the moved ones no longer are.
+        self.retire_title_downloads(source_title_id, unmoved).await;
     }
 
     /// Forget a deleted title's downloads, the way Sonarr drops a series'
@@ -1930,6 +2117,49 @@ impl AppUseCase {
         }
     }
 }
+
+/// A merged source download's references rewritten into destination ids, or
+/// `None` when any of them names a record the merge's identity map does not
+/// carry. A blank reference stays unset.
+fn merged_download_references(
+    source: &crate::DownloadTitleReferences,
+    map: &crate::location::merge::map::MergeIdentityMap,
+) -> Option<crate::DownloadTitleReferences> {
+    fn carried<'m>(
+        value: Option<&String>,
+        lookup: impl Fn(&str) -> Option<&'m str>,
+    ) -> Option<Option<String>> {
+        match value
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => Some(None),
+            Some(value) => lookup(value).map(|mapped| Some(mapped.to_string())),
+        }
+    }
+
+    let episode_id = carried(source.episode_id.as_ref(), |id| map.episode(id))?;
+    let collection_id = carried(source.collection_id.as_ref(), |id| map.collection(id))?;
+    let series_movie_link_id = carried(source.series_movie_link_id.as_ref(), |id| {
+        map.series_movie_link(id)
+    })?;
+    let mut episode_set_ids = Vec::with_capacity(source.episode_set_ids.len());
+    for episode_id in &source.episode_set_ids {
+        if let Some(mapped) = carried(Some(episode_id), |id| map.episode(id))? {
+            episode_set_ids.push(mapped);
+        }
+    }
+    episode_set_ids.sort();
+    episode_set_ids.dedup();
+    Some(crate::DownloadTitleReferences {
+        download_id: source.download_id,
+        episode_id,
+        collection_id,
+        series_movie_link_id,
+        episode_set_ids,
+    })
+}
+
 impl AppUseCase {
     pub async fn get_title(&self, actor: &User, id: &str) -> AppResult<Option<Title>> {
         let title = self.services.catalog.titles.get_by_id(id).await?;

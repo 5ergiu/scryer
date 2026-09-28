@@ -2341,6 +2341,22 @@ async fn handle_tracked_download_command(
             publish_runtime_tracked_download_snapshot_cache(app, tracker).await;
             let _ = reply.send(Ok(removed));
         }
+        TrackedDownloadCommand::ReassignTitle {
+            from_title_id,
+            to_title_id,
+            facet,
+            download_ids,
+            reply,
+        } => {
+            let reassigned = tracker.reassign_title(
+                &from_title_id,
+                &to_title_id,
+                facet.as_deref(),
+                &download_ids,
+            );
+            publish_runtime_tracked_download_snapshot_cache(app, tracker).await;
+            let _ = reply.send(Ok(reassigned));
+        }
         TrackedDownloadCommand::MarkFailed {
             id,
             skip_reacquire,

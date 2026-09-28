@@ -98,6 +98,7 @@ pub use ports::{
     IndexerSearchNumberingContext, TitleOptionsPatch,
 };
 pub use ports::{DownloadCleanupClaim, DownloadCleanupRecord, DownloadClientObservation};
+pub use ports::{DownloadTitleReassignment, DownloadTitleReferences};
 mod quality;
 mod rate_limit_signal;
 pub mod request_rules;
