@@ -15,6 +15,11 @@ const BACKGROUND_COLD_TARGET_VALUE: f64 = 0.25;
 /// evaluated concurrently. Indexer strategy admission is bounded separately.
 const BACKGROUND_ACQUISITION_TITLE_LIMIT: usize = 4;
 
+/// How many scopes one cycle may walk, as a multiple of its batch. Scopes whose
+/// walk spent nothing are replaced from further along the rotation; this bounds
+/// how far one cycle follows them.
+const BACKGROUND_ACQUISITION_TOP_UP_FACTOR: usize = 4;
+
 /// How far apart two instances' maintenance evaluation passes can drift. Much
 /// smaller than the eight-hour cadence on purpose: the jitter is there to keep
 /// a fleet from sweeping in lockstep, not to postpone the first pass.
@@ -219,34 +224,7 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     let hot_resume = app.background_acquisition_hot_resume_position().await;
     let resume = app.background_acquisition_resume_position().await;
     let max_scopes = settings.max_scopes_per_cycle.max(1);
-    let selection = crate::acquisition::targets::select_background_acquisition_batch(
-        &targets,
-        hot_resume.as_deref(),
-        resume.as_deref(),
-        max_scopes,
-    );
-    app.store_background_acquisition_hot_resume_position(
-        hot_resume.as_deref(),
-        selection.hot_resume_after.as_deref(),
-    )
-    .await;
-    app.store_background_acquisition_resume_position(
-        resume.as_deref(),
-        selection.resume_after.as_deref(),
-    )
-    .await;
-    if selection.indices.is_empty() {
-        return BackgroundAcquisitionCycleOutcome {
-            targets_derived: targets.len(),
-            ..BackgroundAcquisitionCycleOutcome::default()
-        };
-    }
-
-    debug!(
-        target_count = targets.len(),
-        selected_count = selection.indices.len(),
-        "background acquisition cycle: evaluating missing scopes"
-    );
+    let scan_limit = max_scopes.saturating_mul(BACKGROUND_ACQUISITION_TOP_UP_FACTOR);
 
     // Scheduler availability, resolved once per cycle for the pre-skip.
     let availability = app.scheduler_availability().await;
@@ -254,13 +232,129 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
 
     let cycle = Arc::new(BackgroundAcquisitionCycleCoordinator::default());
 
+    // The batch is what the cycle may *spend*. A title whose walk spent
+    // nothing gives its scopes back, and the cycle selects that many more from
+    // where the cursors stopped, so scopes with nothing to do cannot use up the
+    // batch ahead of scopes that have. The walk is the only judge of whether a
+    // scope had anything to do.
+    let mut walked = HashSet::new();
+    let mut hot_cursor = hot_resume;
+    let mut cursor = resume;
+    let mut budget = max_scopes;
+    let mut titles_walked = 0usize;
+    let mut skipped_locked_titles = 0usize;
+    while budget > 0 {
+        let selection = crate::acquisition::targets::select_background_acquisition_batch(
+            &targets,
+            hot_cursor.as_deref(),
+            cursor.as_deref(),
+            budget.min(scan_limit.saturating_sub(walked.len())),
+            &walked,
+        );
+        app.store_background_acquisition_hot_resume_position(
+            hot_cursor.as_deref(),
+            selection.hot_resume_after.as_deref(),
+        )
+        .await;
+        app.store_background_acquisition_resume_position(
+            cursor.as_deref(),
+            selection.resume_after.as_deref(),
+        )
+        .await;
+        hot_cursor = selection.hot_resume_after;
+        cursor = selection.resume_after;
+        if selection.indices.is_empty() {
+            break;
+        }
+        walked.extend(selection.indices.iter().copied());
+
+        debug!(
+            target_count = targets.len(),
+            selected_count = selection.indices.len(),
+            walked_count = walked.len(),
+            "background acquisition cycle: evaluating missing scopes"
+        );
+        let Some(round) = walk_selected_scopes(
+            app,
+            &targets,
+            &selection.indices,
+            &now,
+            &availability,
+            &indexer_hosts,
+            &cycle,
+            &dl_snapshot,
+        )
+        .await
+        else {
+            break;
+        };
+        titles_walked += round.titles_walked;
+        skipped_locked_titles += round.skipped_locked_titles;
+        // Indexers that are cooling down or out of quota defer every scope
+        // that needs them; selecting more scopes would only defer those too.
+        if cycle.deferred_scopes() > 0 {
+            break;
+        }
+        budget = round.unspent_scopes;
+    }
+
+    let deferred_scopes = cycle.deferred_scopes();
+    let outcome = BackgroundAcquisitionCycleOutcome {
+        titles_walked,
+        targets_derived: targets.len(),
+        deferred_scopes,
+        skipped_locked_titles,
+        retry_after: (deferred_scopes > 0)
+            .then(|| availability.earliest_recovery_in(&now))
+            .flatten(),
+    };
+    // One line per cycle, above the per-title summaries.
+    tracing::debug!(
+        titles_walked = outcome.titles_walked,
+        targets_derived = outcome.targets_derived,
+        selected_scopes = walked.len(),
+        deferred_scopes = outcome.deferred_scopes,
+        skipped_locked_titles = outcome.skipped_locked_titles,
+        elapsed_ms = cycle_started.elapsed().as_millis() as u64,
+        "background acquisition cycle complete"
+    );
+    outcome
+}
+
+/// What walking one selection of scopes did.
+#[derive(Default)]
+struct SelectedScopesWalk {
+    titles_walked: usize,
+    skipped_locked_titles: usize,
+    /// Selected scopes whose title's walk spent nothing (see
+    /// [`TitleWalkStats::spent_nothing`]). A title the walk could not run for
+    /// — held by an interactive walk, or failed — gives none back.
+    unspent_scopes: usize,
+}
+
+/// Walk the selected scopes, at most [`BACKGROUND_ACQUISITION_TITLE_LIMIT`]
+/// titles at a time. `None` when the selected titles could not be loaded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch carries the cycle-wide acquisition inputs"
+)]
+async fn walk_selected_scopes(
+    app: &AppUseCase,
+    targets: &[crate::acquisition::targets::AcquisitionTarget],
+    indices: &[usize],
+    now: &DateTime<Utc>,
+    availability: &crate::acquisition::convergence::SchedulerAvailability,
+    indexer_hosts: &HashMap<String, String>,
+    cycle: &Arc<BackgroundAcquisitionCycleCoordinator>,
+    dl_snapshot: &DownloadClientSnapshot,
+) -> Option<SelectedScopesWalk> {
     // Count selected episode scopes per (title_id, season_num). Season pack
     // search is only worthwhile when >= 2 episodes from the same season are in
     // this cycle — mirroring Sonarr's "count > 1 missing" rule before issuing a
     // SeasonSearchCriteria.
     let mut season_due_counts: std::collections::HashMap<(String, u32), usize> =
         std::collections::HashMap::new();
-    for index in &selection.indices {
+    for index in indices {
         let target = &targets[*index];
         if target.media_type == "episode"
             && let Some(sn) = target.season_number.as_deref()
@@ -274,7 +368,7 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     }
 
     let mut ready_titles =
-        build_background_acquisition_title_work(&targets, &selection.indices, None);
+        build_background_acquisition_title_work(targets, indices, None);
     let title_ids = ready_titles
         .iter()
         .map(|work| work.title_id.clone())
@@ -286,24 +380,15 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
             .collect::<HashMap<_, _>>(),
         Err(error) => {
             warn!(error = %error, "background acquisition: failed to load selected titles");
-            return BackgroundAcquisitionCycleOutcome {
-                targets_derived: targets.len(),
-                ..BackgroundAcquisitionCycleOutcome::default()
-            };
+            return None;
         }
     };
     let mut in_flight = FuturesUnordered::new();
-    let mut titles_walked = 0usize;
-    let mut skipped_locked_titles = 0usize;
-    let availability = &availability;
-    let indexer_hosts = &indexer_hosts;
+    let mut round = SelectedScopesWalk::default();
     let season_due_counts = &season_due_counts;
-    let dl_snapshot = &dl_snapshot;
-    let now = &now;
-    let targets = &targets;
 
     debug!(
-        selected_count = selection.indices.len(),
+        selected_count = indices.len(),
         title_count = ready_titles.len(),
         title_limit = BACKGROUND_ACQUISITION_TITLE_LIMIT,
         "background acquisition cycle: dispatching title work"
@@ -334,14 +419,19 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
                 .try_acquire(&title_work.title_id)
                 .await
             else {
-                skipped_locked_titles += 1;
+                round.skipped_locked_titles += 1;
                 debug!(
                     title_id = title_work.title_id.as_str(),
                     "background acquisition: an interactive walk holds this title, skipping"
                 );
                 continue;
             };
-            let cycle = Arc::clone(&cycle);
+            let cycle = Arc::clone(cycle);
+            let scope_count = title_work
+                .ready
+                .iter()
+                .filter(|work| matches!(work.kind, BackgroundAcquisitionWorkKind::Scope))
+                .count();
             debug!(
                 title_id = title_work.title_id.as_str(),
                 queued_titles = ready_titles.len(),
@@ -366,14 +456,17 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
                     |_, _| {},
                 )
                 .await;
-                (title_id, result)
+                (title_id, scope_count, result)
             });
         }
 
-        let Some((title_id, result)) = in_flight.next().await else {
+        let Some((title_id, scope_count, result)) = in_flight.next().await else {
             break;
         };
-        titles_walked += 1;
+        round.titles_walked += 1;
+        if result.as_ref().is_ok_and(TitleWalkStats::spent_nothing) {
+            round.unspent_scopes += scope_count;
+        }
         if let Err(err) = result {
             warn!(
                 title_id = title_id.as_str(),
@@ -388,27 +481,7 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
         }
     }
 
-    let deferred_scopes = cycle.deferred_scopes();
-    let outcome = BackgroundAcquisitionCycleOutcome {
-        titles_walked,
-        targets_derived: targets.len(),
-        deferred_scopes,
-        skipped_locked_titles,
-        retry_after: (deferred_scopes > 0)
-            .then(|| availability.earliest_recovery_in(now))
-            .flatten(),
-    };
-    // One line per cycle, above the per-title summaries.
-    tracing::debug!(
-        titles_walked = outcome.titles_walked,
-        targets_derived = outcome.targets_derived,
-        selected_scopes = selection.indices.len(),
-        deferred_scopes = outcome.deferred_scopes,
-        skipped_locked_titles = outcome.skipped_locked_titles,
-        elapsed_ms = cycle_started.elapsed().as_millis() as u64,
-        "background acquisition cycle complete"
-    );
-    outcome
+    Some(round)
 }
 /// Whether an in-flight submission should stop this scope being searched again.
 ///
@@ -1178,6 +1251,16 @@ impl GrabFailureTally {
 }
 
 impl TitleWalkStats {
+    /// Whether the walk ended without an indexer query, a grab, a proposal or
+    /// a failed submission: every stage stopped at a gate.
+    fn spent_nothing(&self) -> bool {
+        self.queries == 0
+            && self.inline_grabs == 0
+            && self.proposals == 0
+            && self.committed == 0
+            && self.failed == 0
+    }
+
     /// Fold one work item's submission attempts into the walk's counters.
     fn record_grab_failures(&mut self, tally: GrabFailureTally) {
         if tally.failed {
