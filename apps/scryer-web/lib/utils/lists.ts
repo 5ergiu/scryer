@@ -335,8 +335,8 @@ export function subscriptionToDraft(subscription: ListSubscription): ListSubscri
     name: subscription.name,
     kinds: [...subscription.kinds],
     mode: subscription.mode,
-    routes: subscription.routes.map((route) => ({ ...route, tags: [...route.tags] })),
-    filters: subscription.filters.map((filter) => ({ ...filter, values: [...filter.values] })),
+    routes: subscription.routes.map(listRouteInput),
+    filters: subscription.filters.map(listFilterInput),
     maxPerSync: subscription.maxPerSync,
     onLeave: subscription.onLeave,
   };
@@ -361,6 +361,41 @@ export function listDraftProblems(draft: ListSubscriptionDraft): string[] {
 
 type ListRouteInput = ListRoute;
 type ListFilterInput = ListFilter;
+
+/*
+ * Query results carry `__typename` and whatever else the selection asked for,
+ * and GraphQL input types reject unknown fields. Inputs are therefore built
+ * field by field from the declared input shape, never by spreading a result.
+ */
+
+export function listParamInput(param: ListParam): ListParam {
+  return { key: param.key, value: param.value };
+}
+
+export function listRouteInput(route: ListRoute): ListRouteInput {
+  return {
+    kind: route.kind,
+    libraryId: route.libraryId,
+    qualityProfileId: route.qualityProfileId,
+    rootFolderId: route.rootFolderId,
+    monitorType: route.monitorType,
+    minAvailability: route.minAvailability,
+    useSeasonFolders: route.useSeasonFolders,
+    releaseNumbering: route.releaseNumbering,
+    tags: [...route.tags],
+  };
+}
+
+export function listFilterInput(filter: ListFilter): ListFilterInput {
+  return {
+    kind: filter.kind,
+    scale: filter.scale,
+    value: filter.value,
+    from: filter.from,
+    to: filter.to,
+    values: [...filter.values],
+  };
+}
 
 export type UpdateListSubscriptionInput = {
   name: string;
@@ -388,8 +423,8 @@ export function draftToUpdateInput(draft: ListSubscriptionDraft): UpdateListSubs
     mode: draft.mode,
     routes: draft.routes
       .filter((route) => draft.kinds.includes(route.kind))
-      .map((route) => ({ ...route, tags: [...route.tags] })),
-    filters: draft.filters.map((filter) => ({ ...filter, values: [...filter.values] })),
+      .map(listRouteInput),
+    filters: draft.filters.map(listFilterInput),
     maxPerSync: draft.maxPerSync,
     onLeave: draft.onLeave,
   };
@@ -400,7 +435,7 @@ export function draftToSubscribeInput(source: ListSourceDraft, draft: ListSubscr
     scope: "PUBLIC",
     provider: source.provider,
     sourceType: source.sourceType,
-    params: source.params.filter((param) => param.value.trim()).map((param) => ({ ...param })),
+    params: source.params.filter((param) => param.value.trim()).map(listParamInput),
     url: source.url,
     ...draftToUpdateInput(draft),
   };

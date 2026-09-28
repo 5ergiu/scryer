@@ -4,12 +4,15 @@ import test from "node:test";
 import type {
   ListProviderManifest,
   ListProviderSettingField,
+  ListSourceDraft,
+  ListSubscription,
   ListSubscriptionDraft,
   TitleListMembership,
 } from "../types/lists.ts";
 import {
   defaultListRoute,
   draftToSubscribeInput,
+  draftToUpdateInput,
   EMPTY_LIST_FILTER,
   findListFilter,
   splitListValues,
@@ -36,6 +39,7 @@ import {
   PUBLIC_LIST_MODES,
   publicProviders,
   recognizeListUrl,
+  subscriptionToDraft,
 } from "./lists.ts";
 
 function manifest(overrides: Partial<ListProviderManifest> = {}): ListProviderManifest {
@@ -450,4 +454,128 @@ test("once every adding list dropped the title it shows the one it left last", (
     ]),
     { kind: "left", name: "Fixture list B" },
   );
+});
+
+function typenamePaths(value: unknown, path = "$"): string[] {
+  if (Array.isArray(value)) return value.flatMap((entry, index) => typenamePaths(entry, `${path}[${index}]`));
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, entry]) =>
+    key === "__typename" ? [`${path}.${key}`] : typenamePaths(entry, `${path}.${key}`),
+  );
+}
+
+test("inputs built from query results carry no __typename at any depth", () => {
+  const subscription = {
+    __typename: "ListSubscriptionPayload",
+    id: "sub-1",
+    scope: "PUBLIC",
+    name: "Fixture list",
+    providerUrl: null,
+    source: {
+      __typename: "ListSourcePayload",
+      provider: "sample",
+      sourceType: "user_list",
+      params: [{ __typename: "ListParamPayload", key: "owner", value: "sample-owner" }],
+    },
+    kinds: ["MOVIE", "SERIES"],
+    enabled: true,
+    mode: "HOLD",
+    routes: [
+      {
+        __typename: "ListRoutePayload",
+        kind: "MOVIE",
+        libraryId: "lib-movies",
+        qualityProfileId: "qp-1",
+        rootFolderId: "root-a",
+        monitorType: "MONITORED",
+        minAvailability: "announced",
+        useSeasonFolders: null,
+        releaseNumbering: null,
+        tags: ["from-list"],
+      },
+      {
+        __typename: "ListRoutePayload",
+        kind: "SERIES",
+        libraryId: "lib-shows",
+        qualityProfileId: null,
+        rootFolderId: null,
+        monitorType: "ALL_EPISODES",
+        minAvailability: null,
+        useSeasonFolders: true,
+        releaseNumbering: "AUTO",
+        tags: [],
+      },
+    ],
+    filters: [
+      {
+        __typename: "ListFilterPayload",
+        kind: "RATING_AT_LEAST",
+        scale: "tmdb",
+        value: 7.5,
+        from: null,
+        to: null,
+        values: [],
+      },
+    ],
+    maxPerSync: 3,
+    onLeave: "LOG",
+    intervalSeconds: 3600,
+    sync: { __typename: "ListSyncStatusPayload" },
+    counts: { __typename: "ListCountsPayload", total: 0 },
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  } as unknown as ListSubscription;
+
+  const draft = subscriptionToDraft(subscription);
+  assert.deepEqual(typenamePaths(draft), []);
+
+  const update = draftToUpdateInput(draft);
+  assert.deepEqual(typenamePaths(update), []);
+  assert.deepEqual(update.routes, [
+    {
+      kind: "MOVIE",
+      libraryId: "lib-movies",
+      qualityProfileId: "qp-1",
+      rootFolderId: "root-a",
+      monitorType: "MONITORED",
+      minAvailability: "announced",
+      useSeasonFolders: null,
+      releaseNumbering: null,
+      tags: ["from-list"],
+    },
+    {
+      kind: "SERIES",
+      libraryId: "lib-shows",
+      qualityProfileId: null,
+      rootFolderId: null,
+      monitorType: "ALL_EPISODES",
+      minAvailability: null,
+      useSeasonFolders: true,
+      releaseNumbering: "AUTO",
+      tags: [],
+    },
+  ]);
+  assert.deepEqual(update.filters, [
+    { kind: "RATING_AT_LEAST", scale: "tmdb", value: 7.5, from: null, to: null, values: [] },
+  ]);
+
+  const source = {
+    provider: subscription.source.provider,
+    sourceType: subscription.source.sourceType,
+    params: subscription.source.params,
+    url: null,
+  } satisfies ListSourceDraft;
+  const input = draftToSubscribeInput(source, {
+    ...draft,
+    routes: subscription.routes,
+    filters: subscription.filters,
+  });
+  assert.deepEqual(typenamePaths(input), []);
+  assert.deepEqual(input.params, [{ key: "owner", value: "sample-owner" }]);
+  assert.equal(input.routes.length, 2);
+  assert.equal(input.routes[0]?.qualityProfileId, "qp-1");
+  assert.deepEqual(input.filters[0]?.kind, "RATING_AT_LEAST");
+  assert.equal(input.mode, "HOLD");
+  assert.equal(input.onLeave, "LOG");
+  assert.equal(input.maxPerSync, 3);
 });
