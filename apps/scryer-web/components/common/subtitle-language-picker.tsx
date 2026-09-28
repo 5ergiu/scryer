@@ -19,6 +19,7 @@ export type SubtitleLanguagePickerProps = {
   compact?: boolean;
   disabled?: boolean;
   singleSelect?: boolean;
+  modal?: boolean;
   triggerId?: string;
   panelId?: string;
   searchInputId?: string;
@@ -43,6 +44,7 @@ export const SubtitleLanguagePicker = React.memo(function SubtitleLanguagePicker
   compact = false,
   disabled = false,
   singleSelect = false,
+  modal = false,
   triggerId,
   panelId,
   searchInputId,
@@ -204,7 +206,7 @@ export const SubtitleLanguagePicker = React.memo(function SubtitleLanguagePicker
 
   return (
     <div className={cn("inline-block w-full", className)}>
-      <Popover open={isOpen} onOpenChange={setIsOpen}>
+      <Popover open={isOpen} onOpenChange={setIsOpen} modal={modal}>
         <PopoverTrigger asChild>
         <div
           id={triggerId}
