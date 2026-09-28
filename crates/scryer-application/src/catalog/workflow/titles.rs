@@ -1595,7 +1595,9 @@ impl AppUseCase {
                     Vec::new()
                 }
             };
-            let configs = self.recycle_bin_configs_for_media_roots(media_roots).await;
+            // A custom bin inside any library root is refused, and a refused
+            // bin lists no entries, so they are left in place.
+            let configs = self.recycle_bin_configs_for_recycling(media_roots).await;
             let mut purged = 0u32;
             for (media_root, config) in configs {
                 match crate::recycle_bin::list_committed_entries(&config).await {
