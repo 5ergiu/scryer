@@ -1742,9 +1742,12 @@ pub(crate) fn translate_parsed_episode_numbering(
 /// its contiguous one: matching reads the title's `AbsoluteScale`, but every
 /// renderer (import, rename, manual-import labels) writes the raw number, so
 /// the parse path of an import must hand them the same value the catalog path
-/// and a later rename would. Downstream matching is unaffected because a
-/// resolved parse always carries the catalog season and episode numbers, which
-/// coverage and the numbering veto read before any absolute.
+/// and a later rename would. Coverage and the numbering veto read the catalog
+/// season and episode numbers a resolved parse always carries before any
+/// absolute. The pack planner's season/episode-versus-absolute companion check
+/// reads a companion on the raw scale only when this stamp produced it, so a
+/// contiguous-scaled title does not see its own stamp as a different episode;
+/// a literal parsed companion is still read on the title's scale.
 fn apply_resolved_catalog_coordinates(
     parsed: &mut ParsedEpisodeMetadata,
     candidate: &NumberingCandidate,

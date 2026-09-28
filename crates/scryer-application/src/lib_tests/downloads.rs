@@ -19,6 +19,10 @@ pub(super) struct RecordingDownloadRegistry {
     pub(super) resolutions: Arc<std::sync::atomic::AtomicUsize>,
     /// Batched freshness writes, one entry per `touch_observations` call.
     pub(super) touch_batches: Arc<Mutex<Vec<Vec<crate::ports::ObservationTouch>>>>,
+    /// A registry generation the next resolution bumps while it runs, standing
+    /// in for another writer committing mid-resolution.
+    concurrent_write_during_next_resolution:
+        Arc<std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicU64>>>>,
 }
 
 fn fixed_time(value: &str) -> chrono::DateTime<Utc> {
@@ -85,6 +89,14 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
     ) -> AppResult<ObservationResolution> {
         self.resolutions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(generation) = self
+            .concurrent_write_during_next_resolution
+            .lock()
+            .expect("concurrent write hook lock")
+            .take()
+        {
+            generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         let mut rows = self.rows.lock().await;
         let ended = self.ended.lock().await;
         let known = rows
@@ -17411,6 +17423,73 @@ async fn tracking_memoizes_a_conflicting_row_until_the_registry_moves() {
         resolutions.load(std::sync::atomic::Ordering::SeqCst),
         after_first + 1,
         "a generation bump must make the conflict re-resolve"
+    );
+}
+
+/// A resolution computed while another writer moved the registry was decided
+/// against the older view, so it is answered but never memoized under the new
+/// generation; the next call resolves the row again.
+#[tokio::test]
+async fn a_resolution_that_raced_a_registry_write_is_not_memoized() {
+    let (base_app, _user) = bootstrap();
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    let resolutions = registry.resolutions.clone();
+    let locator = ClientJobLocator::new(Some("client-1"), "weaver", "raced-row");
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    registry.bind(locator.clone(), download_id).await;
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    *registry
+        .concurrent_write_during_next_resolution
+        .lock()
+        .expect("concurrent write hook lock") =
+        Some(app.runtime.acquisition.download_registry_generation.clone());
+    let observation = ObservedClientJob {
+        locator,
+        wire_token: Some(download_id.to_wire()),
+        observed_name: Some("raced-row".to_string()),
+        observed_at: Utc::now(),
+    };
+
+    let raced = crate::download_identity::resolve_observed_client_job_memoized(
+        &app,
+        observation.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(
+        raced.resolution,
+        crate::download_identity::ObservedClientJobResolution::Resolved(download_id)
+    );
+    assert_eq!(resolutions.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let retried = crate::download_identity::resolve_observed_client_job_memoized(
+        &app,
+        observation.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(
+        retried.resolution,
+        crate::download_identity::ObservedClientJobResolution::Resolved(download_id)
+    );
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a resolution from before the registry moved must not be served from the memo"
+    );
+
+    let settled =
+        crate::download_identity::resolve_observed_client_job_memoized(&app, observation, None)
+            .await;
+    assert_eq!(
+        settled.resolution,
+        crate::download_identity::ObservedClientJobResolution::Resolved(download_id)
+    );
+    assert_eq!(
+        resolutions.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a resolution taken against an unchanged generation is memoized"
     );
 }
 
