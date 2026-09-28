@@ -410,3 +410,68 @@ fn fixture_exclusion(
         created_at: crate::lists::test_support::at(0),
     }
 }
+
+#[tokio::test]
+async fn removing_an_exclusion_clears_the_fingerprints_it_could_apply_to() {
+    use crate::lists::test_support::subscription;
+    use scryer_domain::ListExclusionScope;
+
+    let harness = bootstrap_media_request_app();
+    set_experimental_features(&harness, true).await;
+    let followed = |id: &str, kind: MediaFacet, enabled: bool| {
+        let mut row = subscription(id);
+        row.kinds = vec![kind];
+        row.enabled = enabled;
+        row.sync.fetch_fingerprint = Some(format!("fingerprint-{id}"));
+        row
+    };
+    *harness.lists.subscriptions.lock().unwrap() = vec![
+        followed("movies-on", MediaFacet::Movie, true),
+        followed("movies-other", MediaFacet::Movie, true),
+        followed("movies-off", MediaFacet::Movie, false),
+        followed("series-on", MediaFacet::Series, true),
+    ];
+    harness.lists.exclusions.lock().unwrap().extend([
+        fixture_exclusion(
+            "scoped",
+            MediaFacet::Movie,
+            ListExclusionScope::List {
+                subscription_id: "movies-on".to_string(),
+            },
+        ),
+        fixture_exclusion(
+            "everywhere",
+            MediaFacet::Movie,
+            ListExclusionScope::AllLists,
+        ),
+    ]);
+    let fingerprint = |id: &str| harness.lists.subscription(id).sync.fetch_fingerprint;
+
+    harness
+        .app
+        .remove_list_exclusion(&list_manager(), "scoped")
+        .await
+        .expect("scoped exclusion removed");
+    assert_eq!(fingerprint("movies-on"), None);
+    assert!(
+        fingerprint("movies-other").is_some(),
+        "another list keeps its fingerprint"
+    );
+
+    harness
+        .app
+        .remove_list_exclusion(&list_manager(), "everywhere")
+        .await
+        .expect("exclusion removed");
+    assert_eq!(fingerprint("movies-other"), None);
+    assert!(
+        fingerprint("movies-off").is_some(),
+        "a list that is off is left alone"
+    );
+    assert!(
+        fingerprint("series-on").is_some(),
+        "a list of another kind is left alone"
+    );
+    assert!(harness.lists.exclusions.lock().unwrap().is_empty());
+    assert_eq!(list_sync_starts(&harness).await, 0, "no sync is started");
+}
