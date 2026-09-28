@@ -964,15 +964,26 @@ impl AppUseCase {
                 .await?;
             queued.push(subscription.id);
         }
-        if !queued.is_empty() {
-            match self.start_manual_job_run(actor, JobKey::ListSync).await {
-                Ok(_) => {}
-                // A sync already running picks due lists up on its next pass.
-                Err(AppError::Validation(message)) => {
-                    tracing::debug!(reason = %message, "list sync not started now");
-                }
-                Err(error) => return Err(error),
+        if queued.is_empty() {
+            return Ok(queued);
+        }
+        // A sync already running read its due set before these lists were
+        // made due, so it may pass them by; it runs once more when it ends.
+        let tracker = &self.runtime.jobs.job_run_tracker;
+        if tracker
+            .request_rerun_if_active(JobKey::ListSync, actor)
+            .await
+        {
+            return Ok(queued);
+        }
+        match self.start_manual_job_run(actor, JobKey::ListSync).await {
+            Ok(_) => {}
+            // No sync was running when the lists were made due, so the one
+            // that got in first started after that and takes them.
+            Err(AppError::Validation(message)) => {
+                tracing::debug!(reason = %message, "list sync not started now");
             }
+            Err(error) => return Err(error),
         }
         Ok(queued)
     }
