@@ -1734,10 +1734,21 @@ fn insert_scoped_external_ids(
     }
 }
 
+/// The episode's own provider id: its TVDB id, or for an episode of a
+/// TMDB-primary series (which has none) its TMDB id.
 fn episode_external_ids(episode: &scryer_domain::Episode) -> BTreeMap<String, Vec<String>> {
     let mut ids = BTreeMap::new();
-    if let Some(tvdb_id) = episode.tvdb_id.as_deref() {
-        insert_external_id(&mut ids, "tvdb", tvdb_id);
+    let non_empty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(tvdb_id) = non_empty(&episode.tvdb_id) {
+        insert_external_id(&mut ids, "tvdb", &tvdb_id);
+    } else if let Some(tmdb_id) = non_empty(&episode.tmdb_id) {
+        insert_external_id(&mut ids, "tmdb", &tmdb_id);
     }
     ids
 }
@@ -2741,6 +2752,47 @@ mod tests {
         ));
         let community = split_cour_bridge(NumberingBridgeSource::AnimeCommunity);
         assert_eq!(subtitle_community_entry(&official, &community, 1, 13), None);
+    }
+
+    #[test]
+    fn episode_external_ids_fall_back_to_the_tmdb_episode_id_without_a_tvdb_id() {
+        let mut episode = scryer_domain::Episode {
+            id: "episode-1".into(),
+            title_id: "title-1".into(),
+            collection_id: None,
+            episode_type: scryer_domain::EpisodeType::Standard,
+            episode_number: Some("1".into()),
+            season_number: Some("1".into()),
+            episode_label: None,
+            title: None,
+            air_date: None,
+            duration_seconds: None,
+            has_multi_audio: false,
+            has_subtitle: false,
+            is_filler: false,
+            is_recap: false,
+            absolute_number: None,
+            contiguous_absolute_number: None,
+            overview: None,
+            tvdb_id: None,
+            tmdb_id: Some("4101".into()),
+            image_url: None,
+            monitored: true,
+            created_at: chrono::Utc::now(),
+        };
+
+        let ids = episode_external_ids(&episode);
+        assert_eq!(ids.get("tmdb"), Some(&vec!["4101".to_string()]));
+        assert_eq!(ids.get("tvdb"), None);
+
+        episode.tvdb_id = Some("9001".into());
+        let ids = episode_external_ids(&episode);
+        assert_eq!(ids.get("tvdb"), Some(&vec!["9001".to_string()]));
+        assert_eq!(
+            ids.get("tmdb"),
+            None,
+            "a TVDB episode keeps its ids unchanged"
+        );
     }
 
     #[test]

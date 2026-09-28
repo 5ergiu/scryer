@@ -499,14 +499,21 @@ pub(crate) fn render_episodes_nfo(
 
         // Episode-level identity only. The series TVDB id is *not* an episode
         // id: writing it here tells the media server this file is the show,
-        // which mislabels every episode of the series identically. When the
-        // episode has no id of its own, nothing is written.
+        // which mislabels every episode of the series identically. An episode
+        // of a TMDB-primary series has no TVDB id; its own TMDB id stands in.
+        // When the episode has no id of its own, nothing is written.
         if let Some(tvdb_id) = episode
             .tvdb_id
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
             write_uniqueid(&mut w, "tvdb", tvdb_id, true);
+        } else if let Some(tmdb_id) = episode
+            .tmdb_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            write_uniqueid(&mut w, "tmdb", tmdb_id, true);
         }
 
         if let Some(image_url) = episode
@@ -3129,6 +3136,33 @@ Pattern: Bonus/Bonus {sp,1-3,+4}.mp4
         // drops their ids, and the renderer never writes the series' own.
         let meta = parse_nfo(&xml);
         assert!(!meta.has_external_ids(), "{meta:?}");
+    }
+
+    #[test]
+    fn episode_nfo_of_a_tmdb_primary_series_writes_the_tmdb_episode_id() {
+        let title = populated_series_title();
+        let mut episode = make_episode();
+        episode.tvdb_id = None;
+        episode.tmdb_id = Some("4101".to_string());
+
+        let xml = render_episode_nfo(&title, &episode, &NfoContext::default());
+
+        assert!(
+            xml.contains(r#"<uniqueid type="tmdb" default="true">4101</uniqueid>"#),
+            "{xml}"
+        );
+        assert!(!xml.contains(r#"type="tvdb""#), "{xml}");
+
+        episode.tvdb_id = Some("9001".to_string());
+        let xml = render_episode_nfo(&title, &episode, &NfoContext::default());
+        assert!(
+            xml.contains(r#"<uniqueid type="tvdb" default="true">9001</uniqueid>"#),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains(r#"type="tmdb""#),
+            "a TVDB episode writes only its TVDB id: {xml}"
+        );
     }
 
     // -----------------------------------------------------------------------
