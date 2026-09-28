@@ -178,6 +178,23 @@ test("a recognised URL yields the provider source with captured parameters", () 
   assert.equal(recognizeListUrl("   ", [manifest()]), null);
 });
 
+test("a malformed percent sequence in a pasted URL keeps the raw capture instead of throwing", () => {
+  for (const [slug, expected] of [
+    ["weekend%", "weekend%"],
+    ["weekend%2", "weekend%2"],
+    ["weekend%zz", "weekend%zz"],
+    ["%E0%A4%A", "%E0%A4%A"],
+  ] as const) {
+    const recognition = recognizeListUrl(`https://lists.example.test/u/sample%20owner/l/${slug}`, [manifest()]);
+    assert.ok(recognition, slug);
+    assert.equal(recognition.source.sourceType, "user_list");
+    assert.deepEqual(recognition.source.params, [
+      { key: "owner", value: "sample owner" },
+      { key: "list", value: expected },
+    ]);
+  }
+});
+
 test("the public catalog drops member-account groups and personal items", () => {
   const [provider] = publicProviders([manifest()]);
   assert.deepEqual(

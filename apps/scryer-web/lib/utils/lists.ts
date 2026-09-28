@@ -233,6 +233,20 @@ export type ListUrlRecognition = {
 };
 
 /**
+ * A captured URL segment, percent-decoded when it decodes cleanly. A malformed
+ * sequence (a lone `%`) keeps the raw text: recognition runs while the user
+ * types, the server preview re-reads the URL itself, and a throw here would
+ * take down the page.
+ */
+function decodeListUrlCapture(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Instant client-side recognition for the add-by-URL box. The server preview
  * stays authoritative; this only drives the recognition strip.
  */
@@ -250,7 +264,7 @@ export function recognizeListUrl(
       const params: ListParam[] = [];
       for (const capture of urlPattern.captures) {
         const value = match.groups?.[capture.group];
-        if (value) params.push({ key: capture.param, value: decodeURIComponent(value) });
+        if (value) params.push({ key: capture.param, value: decodeListUrlCapture(value) });
       }
       return {
         manifest,
