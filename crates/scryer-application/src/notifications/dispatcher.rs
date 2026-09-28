@@ -203,6 +203,20 @@ async fn dispatch_event(app: &AppUseCase, event: &DomainEvent) {
     let _ = try_dispatch_event(app, event).await;
 }
 
+/// Whether this event travels the durable, retrying delivery path.
+///
+/// Durability is a property of the event, not a gap waiting to be filled. An event belongs here only
+/// when it describes a state that is still true when the retry lands: "imports are blocked for disk
+/// space" stays true until it is not, so re-sending it after a channel outage is correct. A one-shot
+/// event — a grab, a subtitle search failure — is a moment whose value decays, so retrying it either
+/// announces stale news or multiplies a high-volume family into a storm. Everything else stays
+/// fire-and-forget: the failure is logged and the offset moves on.
+///
+/// Widening this predicate also widens its head-of-line behaviour. `dispatch_pending_space_events`
+/// returns on the first failure without advancing its offset, so a single broken channel holds back
+/// every event behind it until the attempt ceiling abandons it. That is tolerable while the blast
+/// radius is one family; applied to every event it would let one misconfigured webhook stall the
+/// whole notification pipeline.
 fn is_import_space_event(event_type: DomainEventType) -> bool {
     matches!(
         event_type,
