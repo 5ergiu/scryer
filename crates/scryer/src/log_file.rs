@@ -54,6 +54,9 @@ impl LogFilePolicy {
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+// Multiple of max_bytes at which rollover proceeds despite a pending segment.
+const ROTATION_CEILING_FACTOR: u64 = 4;
+
 struct Active {
     path: PathBuf,
     file: Option<File>,
@@ -69,7 +72,8 @@ struct Active {
 
 #[derive(Default)]
 struct Queue {
-    // More than one entry is possible only when recovering previous runs.
+    // More than one entry is possible only when recovering previous runs or
+    // when the active file reached the rotation ceiling during compression.
     jobs: VecDeque<Job>,
     shutdown: bool,
 }
@@ -227,11 +231,7 @@ fn no_follow(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // O_NOFOLLOW on the supported Unix targets.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        options.custom_flags(0x20000);
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        options.custom_flags(0x100);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     #[cfg(windows)]
     {
@@ -337,7 +337,13 @@ impl Active {
     fn rotate(&mut self, now: DateTime<Utc>) -> io::Result<()> {
         let work = self.work.clone();
         let mut queue = work.queue.lock().unwrap();
-        if !queue.jobs.is_empty() || queue.shutdown {
+        // A pending segment defers rollover, but only up to a hard ceiling so a
+        // slow or failing worker cannot let the active file grow without bound.
+        let ceiling = self
+            .policy
+            .max_bytes
+            .saturating_mul(ROTATION_CEILING_FACTOR);
+        if queue.shutdown || (!queue.jobs.is_empty() && self.bytes < ceiling) {
             return Ok(());
         }
         if let Some(file) = &self.file {
@@ -580,7 +586,7 @@ fn run_worker(work: Arc<Work>) {
         if queue.jobs.is_empty() {
             return;
         }
-        // Leave a placeholder queued to prevent another rollover during compression.
+        // Leave a placeholder queued to defer another rollover during compression.
         let mut job = Job {
             source: queue.jobs.front_mut().unwrap().source.take(),
         };

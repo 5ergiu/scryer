@@ -320,26 +320,56 @@ fn rename_and_reopen_failures_preserve_event_contents() {
     }
 }
 
+// Stops the worker, then installs a pending job under explicit test control.
+fn hold_pending_segment(path: &Path, writer: &LogFileWriter, guard: LogFileGuard) -> Arc<Work> {
+    drop(guard);
+    let work = writer.0.lock().unwrap().work.clone();
+    let mut queue = work.queue.lock().unwrap();
+    queue.shutdown = false;
+    queue.jobs.push_back(Job {
+        source: Some(segment(path, 0)),
+    });
+    drop(queue);
+    work
+}
+
 #[test]
 fn one_pending_segment_defers_rollover_but_not_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scryer.log");
-    let (writer, guard) = open_log_file(&path, policy(1, 20)).unwrap();
-    // Stop the worker, then install a pending job under explicit test control.
-    drop(guard);
-    let work = writer.0.lock().unwrap().work.clone();
-    {
-        let mut queue = work.queue.lock().unwrap();
-        queue.shutdown = false;
-        queue.jobs.push_back(Job {
-            source: Some(segment(&path, 0)),
-        });
-    }
+    // The active file stays below the rotation ceiling of four times the limit.
+    let (writer, guard) = open_log_file(&path, policy(2, 20)).unwrap();
+    let work = hold_pending_segment(&path, &writer, guard);
     event(&writer, "a\n");
     event(&writer, "b\n");
     event(&writer, "c\n");
     assert_eq!(work.queue.lock().unwrap().jobs.len(), 1);
+    assert!(managed_files(&path, "sealed").unwrap().is_empty());
     assert_eq!(fs::read_to_string(path).unwrap(), "a\nb\nc\n");
+}
+
+#[test]
+fn pending_segment_cannot_defer_rollover_past_the_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scryer.log");
+    let (writer, guard) = open_log_file(&path, policy(2, 20)).unwrap();
+    let work = hold_pending_segment(&path, &writer, guard);
+    for record in ["a\n", "b\n", "c\n", "d\n"] {
+        event(&writer, record);
+    }
+    // Six bytes preceded the last event: still below the eight byte ceiling.
+    assert!(managed_files(&path, "sealed").unwrap().is_empty());
+    assert_eq!(work.queue.lock().unwrap().jobs.len(), 1);
+    event(&writer, "e\n");
+    let sealed = managed_files(&path, "sealed").unwrap();
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(fs::read_to_string(&sealed[0]).unwrap(), "a\nb\nc\nd\n");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "e\n");
+    assert_eq!(work.queue.lock().unwrap().jobs.len(), 2);
+    // The fresh active file is deferred again until it reaches the ceiling.
+    event(&writer, "f\n");
+    assert_eq!(managed_files(&path, "sealed").unwrap().len(), 1);
+    assert_eq!(fs::read_to_string(path).unwrap(), "e\nf\n");
 }
 
 #[cfg(unix)]
