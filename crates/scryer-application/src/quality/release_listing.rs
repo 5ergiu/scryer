@@ -264,6 +264,16 @@ pub struct ReleaseListingView {
 
 /// Read a persisted listing snapshot for display. Anything
 /// [`ReleaseListingSnapshot::from_json_str`] cannot read yields `None`.
+/// The listing facts of a search result in their stored form, for a store that
+/// replays the result later in place of a new indexer query. Secret-bearing
+/// extras are already dropped, as in every snapshot.
+pub fn search_result_listing_json(
+    result: &crate::IndexerSearchResult,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    ReleaseListingSnapshot::json_for_candidate(result, now)
+}
+
 pub fn release_listing_view(raw: &str) -> Option<ReleaseListingView> {
     let snapshot = ReleaseListingSnapshot::from_json_str(raw)?;
     Some(ReleaseListingView {

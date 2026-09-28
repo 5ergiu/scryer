@@ -5046,6 +5046,9 @@ pub struct NormalizedIndexerSearchCandidate {
     pub protected: Option<bool>,
     pub tags: Vec<String>,
     pub provider_categories: Vec<String>,
+    /// The result's listing facts as rules read them, so a replayed result
+    /// scores as the live one did.
+    pub release_listing_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
