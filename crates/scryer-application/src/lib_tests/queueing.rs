@@ -5435,6 +5435,159 @@ async fn background_cycle_writes_the_rotation_cursor_only_when_it_moves() {
     );
 }
 
+/// A library of covered movies and one open movie, with the rotation set so
+/// the open movie is the last scope a cycle reaches, and a batch of one.
+async fn covered_movies_ahead_of_an_open_movie(
+    covered_count: usize,
+) -> (AppUseCase, Arc<FixedReleaseIndexerClient>) {
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client = Arc::new(
+        FixedReleaseIndexerClient::new("Top Up Open Fixture.2024.1080p.WEB-DL")
+            .with_fired_indexers(["indexer-a"])
+            .with_empty_response(),
+    );
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        indexer_client.clone(),
+    );
+    app.services
+        .integrations
+        .indexer_configs
+        .delete("acquisition-indexer")
+        .await
+        .expect("remove bootstrap indexer");
+    app.services
+        .integrations
+        .indexer_configs
+        .create(synthetic_direct_nab_indexer_config("indexer-a", "newznab"))
+        .await
+        .expect("create routed indexer");
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let coverage = Arc::new(RecordingScopeIndexerCoverageRepo::new());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_scope_indexer_coverage_store(coverage.clone())
+            .with_settings(settings.clone())
+    });
+
+    for number in 0..covered_count {
+        let (title, wanted_id) = seed_movie_wanted_for_acquisition(
+            &app,
+            &user,
+            &wanted_items,
+            &format!("Top Up Covered Fixture {number}"),
+            2024,
+        )
+        .await;
+        let wanted = wanted_items
+            .get_acquisition_scope_state_by_id(&wanted_id)
+            .await
+            .expect("load wanted scope")
+            .expect("wanted scope exists");
+        let search_title = app
+            .release_search_title_for_wanted_item(&title, &wanted, None, None)
+            .await;
+        let subject = app
+            .resolve_release_search_subject_for_wanted_item(&title, &search_title, &wanted, None)
+            .await
+            .expect("subject should resolve");
+        let convergence = app
+            .resolve_scope_convergence(&search_title, &subject)
+            .await
+            .expect("resolve live convergence coordinates");
+        app.record_search_coverage(
+            &search_title,
+            &subject,
+            &convergence.routed_indexer_ids,
+            &[],
+        )
+        .await;
+        assert!(
+            scope_is_converged(&app, &search_title, &subject).await,
+            "fixture: the movie is covered"
+        );
+    }
+    let (open_title, _) =
+        seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Top Up Open Fixture", 2024)
+            .await;
+
+    // A rotation resumes after its cursor, so a cursor on the open movie puts
+    // it last, in whichever lane it sits.
+    let targets = app
+        .derive_acquisition_targets(&Utc::now())
+        .await
+        .expect("derive targets");
+    assert_eq!(
+        targets.len(),
+        covered_count + 1,
+        "fixture: every movie is due"
+    );
+    let open_scope_key = targets
+        .iter()
+        .find(|target| target.title_id == open_title.id)
+        .expect("the open movie is a target")
+        .scope_key
+        .clone();
+    let cursor = serde_json::to_string(&open_scope_key).expect("encode cursor");
+    for key in [
+        crate::acquisition::convergence::BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY,
+        crate::acquisition::convergence::BACKGROUND_ACQUISITION_RESUME_AFTER_KEY,
+    ] {
+        settings
+            .set_value(SETTINGS_SCOPE_SYSTEM, key, &cursor)
+            .await;
+    }
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            crate::acquisition::convergence::ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY,
+            "1",
+        )
+        .await;
+    (app, indexer_client)
+}
+
+/// A scope whose walk had nothing to do does not use up the batch: the cycle
+/// carries on along the rotation until it has spent the batch on a scope that
+/// needed it.
+#[tokio::test]
+async fn covered_scopes_do_not_use_up_the_batch() {
+    let (app, indexer_client) = covered_movies_ahead_of_an_open_movie(2).await;
+
+    let outcome = app.run_background_acquisition_cycle_once().await;
+
+    assert_eq!(
+        outcome.titles_walked, 3,
+        "two covered movies, then the open one"
+    );
+    assert_eq!(
+        indexer_client.requested_indexer_id_sets().await.len(),
+        1,
+        "the open movie is searched in the same cycle"
+    );
+}
+
+/// The cycle follows idle scopes only so far: a run of them longer than the
+/// bound ends the cycle, and the rotation carries on from there next time.
+#[tokio::test]
+async fn a_cycle_stops_following_covered_scopes_at_its_bound() {
+    let (app, indexer_client) = covered_movies_ahead_of_an_open_movie(5).await;
+
+    let first = app.run_background_acquisition_cycle_once().await;
+    assert_eq!(first.titles_walked, 4, "a batch of one follows four scopes");
+    assert!(indexer_client.requested_indexer_id_sets().await.is_empty());
+
+    let second = app.run_background_acquisition_cycle_once().await;
+    assert_eq!(
+        second.titles_walked, 2,
+        "the last covered movie, then the open one"
+    );
+    assert_eq!(indexer_client.requested_indexer_id_sets().await.len(), 1);
+}
+
 /// The failure loop never costs an indexer query. A grab that fails is
 /// blocklisted and its scope re-opened under its existing coverage; the cursor
 /// then walks the scope's saved search results in order, and once they are
