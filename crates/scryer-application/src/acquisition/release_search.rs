@@ -2048,8 +2048,8 @@ impl AppUseCase {
     ///
     /// `official` is the episode's TVDB (season, episode) when the caller has
     /// it without a catalog row; otherwise it is read off `episode`. `reads`,
-    /// when supplied, answers repeated collection lookups within one title
-    /// walk.
+    /// when supplied, answers repeated episode and collection lookups within
+    /// one title walk.
     pub(crate) async fn local_scoped_anidb_id_for_episode(
         &self,
         title: &Title,
@@ -2059,12 +2059,7 @@ impl AppUseCase {
     ) -> Option<String> {
         if title.facet == MediaFacet::Anime {
             if let Some(episode) = episode
-                && let Ok(episode_ids) = self
-                    .services
-                    .catalog
-                    .shows
-                    .list_episode_external_ids(&episode.id)
-                    .await
+                && let Ok(episode_ids) = self.episode_external_ids(episode, reads).await
                 && let Some(anidb_id) = preferred_scoped_external_id(&episode_ids, "anidb")
             {
                 return Some(anidb_id);
@@ -2094,6 +2089,25 @@ impl AppUseCase {
         let collection_id = episode?.collection_id.as_deref()?;
         self.local_scoped_anidb_id_for_collection(collection_id, reads)
             .await
+    }
+
+    /// An episode's scoped external ids, from the walk's memo when it holds
+    /// the episode's title and from the store otherwise.
+    async fn episode_external_ids(
+        &self,
+        episode: &Episode,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        match reads.filter(|reads| reads.covers(&episode.title_id)) {
+            Some(reads) => reads.episode_external_ids(self, &episode.id).await,
+            None => {
+                self.services
+                    .catalog
+                    .shows
+                    .list_episode_external_ids(&episode.id)
+                    .await
+            }
+        }
     }
 
     async fn local_scoped_anidb_id_for_collection(
@@ -2695,7 +2709,7 @@ impl AppUseCase {
         // Every absolute number this search carries is on the title's one
         // absolute scale; see `AbsoluteScale`.
         let absolute_scale = self
-            .release_search_absolute_scale(title, episode_record.as_ref())
+            .release_search_absolute_scale(title, episode_record.as_ref(), None)
             .await?;
         let absolute_episode = episode_record
             .as_ref()
@@ -3001,6 +3015,7 @@ impl AppUseCase {
             search_title,
             item,
             episode,
+            None,
         )
         .await?
         .resolve(self)
@@ -3009,13 +3024,15 @@ impl AppUseCase {
 
     /// [`Self::resolve_release_search_subject_for_wanted_item`] with the title
     /// evidence's identity ambiguity left for
-    /// [`PendingReleaseSearchSubject::resolve`].
+    /// [`PendingReleaseSearchSubject::resolve`]. `reads`, when supplied, is
+    /// the title walk's catalog memo.
     pub(crate) async fn resolve_pending_release_search_subject_for_wanted_item(
         &self,
         owner_title: &Title,
         search_title: &Title,
         item: &AcquisitionScopeState,
         episode: Option<&Episode>,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
     ) -> AppResult<PendingReleaseSearchSubject> {
         // Anime whose community numbering differs from TVDB's needs the extra
         // community-numbered query forms; every other title reads `None` here
@@ -3032,7 +3049,7 @@ impl AppUseCase {
         // rather than guessing the raw scale: a contiguous title searched on
         // raw numbers vetoes its own correct absolute-numbered releases.
         let absolute_scale = self
-            .release_search_absolute_scale(search_title, episode)
+            .release_search_absolute_scale(search_title, episode, reads)
             .await?;
         let query_result = build_search_queries(
             search_title,
@@ -3096,13 +3113,21 @@ impl AppUseCase {
     /// rule as [`AbsoluteScale::for_catalog`](scryer_domain::AbsoluteScale::for_catalog).
     /// The catalog is only asked when the answer is not already known; see
     /// [`absolute_scale_known_without_lookup`].
+    /// A title walk already holds the title's episodes, so it reads the scale
+    /// off them rather than asking the catalog again.
     async fn release_search_absolute_scale(
         &self,
         title: &Title,
         episode: Option<&Episode>,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
     ) -> AppResult<scryer_domain::AbsoluteScale> {
-        match absolute_scale_known_without_lookup(title, episode) {
-            Some(scale) => Ok(scale),
+        if let Some(scale) = absolute_scale_known_without_lookup(title, episode) {
+            return Ok(scale);
+        }
+        match reads.filter(|reads| reads.covers(&title.id)) {
+            Some(reads) => Ok(scryer_domain::AbsoluteScale::for_catalog(
+                reads.episodes(self).await?.iter(),
+            )),
             None => {
                 self.services
                     .catalog

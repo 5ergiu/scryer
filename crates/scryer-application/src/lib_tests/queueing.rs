@@ -7061,6 +7061,32 @@ impl AnidbSelectionFixture {
         }
     }
 
+    /// The subject a title walk resolves for one episode, with or without the
+    /// walk's catalog memo.
+    async fn walk_subject(
+        &self,
+        episode: &Episode,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> crate::acquisition_release_search::ResolvedReleaseSearchSubject {
+        let wanted = self.wanted(episode);
+        let search_title = self
+            .app
+            .release_search_title_for_wanted_item(&self.title, &wanted, Some(episode), reads)
+            .await;
+        self.app
+            .resolve_pending_release_search_subject_for_wanted_item(
+                &self.title,
+                &search_title,
+                &wanted,
+                Some(episode),
+                reads,
+            )
+            .await
+            .expect("subject resolves")
+            .for_convergence()
+            .clone()
+    }
+
     /// The AniDB id the automatic and the interactive lane each send for one
     /// episode.
     async fn anidb_ids(&self, episode: &Episode) -> (Option<String>, Option<String>) {
@@ -7101,6 +7127,97 @@ fn scoped_anidb_id(scope_id: &str, anidb_id: &str, source_scope: Option<&str>) -
         external_id: anidb_id.to_string(),
         provenance: "anibridge".to_string(),
         source_scope: source_scope.map(str::to_string),
+    }
+}
+
+/// A title walk resolves every anime episode subject from what it already
+/// holds: the title's episode ids are read once for the whole walk, and the
+/// absolute scale comes from the walk's episode list rather than a catalog
+/// query per stage. Each subject is the one the unshared path resolves.
+#[tokio::test]
+async fn a_title_walk_resolves_anime_subjects_from_its_own_catalog_reads() {
+    use std::sync::atomic::Ordering;
+
+    for contiguous_title in [false, true] {
+        let fixture = AnidbSelectionFixture::new(MediaFacet::Anime, None).await;
+        let mut episodes = Vec::new();
+        for number in 1..=3_u32 {
+            let mut episode = fixture.episode(number).await;
+            episode.absolute_number = Some(number.to_string());
+            // On the contiguous title only the last episode carries a
+            // contiguous number, so the first two need the title's scale.
+            if contiguous_title && number == 3 {
+                episode.contiguous_absolute_number = Some(3);
+            }
+            episodes.push(episode);
+        }
+        *fixture.shows.episodes.lock().await = episodes.clone();
+        *fixture.shows.episode_external_ids.lock().await =
+            vec![scoped_anidb_id(&episodes[0].id, "7101", None)];
+        *fixture.shows.collection_external_ids.lock().await =
+            vec![scoped_anidb_id("season-1", "7100", None)];
+
+        let mut unshared = Vec::new();
+        for episode in &episodes {
+            unshared.push(fixture.walk_subject(episode, None).await);
+        }
+
+        let counts = || {
+            [
+                fixture
+                    .shows
+                    .episode_external_id_reads
+                    .load(Ordering::SeqCst),
+                fixture
+                    .shows
+                    .title_episode_external_id_reads
+                    .load(Ordering::SeqCst),
+                fixture.shows.absolute_scale_reads.load(Ordering::SeqCst),
+            ]
+        };
+        let before = counts();
+        let reads = crate::acquisition::title_reads::TitleCatalogReads::with_episodes(
+            &fixture.title.id,
+            episodes.clone(),
+        );
+        let mut shared = Vec::new();
+        for episode in &episodes {
+            shared.push(fixture.walk_subject(episode, Some(&reads)).await);
+        }
+        let after = counts();
+
+        assert_eq!(
+            format!("{shared:?}"),
+            format!("{unshared:?}"),
+            "the walk resolves exactly what the unshared path does (contiguous title: {contiguous_title})"
+        );
+        assert_eq!(after[0] - before[0], 0, "no per-episode external id read");
+        assert_eq!(
+            after[1] - before[1],
+            1,
+            "the title's episode ids are read once per walk"
+        );
+        assert_eq!(
+            after[2] - before[2],
+            0,
+            "the absolute scale needs no catalog query"
+        );
+
+        assert_eq!(shared[0].anidb_id.as_deref(), Some("7101"));
+        assert_eq!(shared[1].anidb_id.as_deref(), Some("7100"));
+        let expected_absolute = if contiguous_title {
+            [None, None, Some(3)]
+        } else {
+            [Some(1), Some(2), Some(3)]
+        };
+        assert_eq!(
+            shared
+                .iter()
+                .map(|subject| subject.absolute_episode)
+                .collect::<Vec<_>>(),
+            expected_absolute,
+            "the scale is the title's (contiguous title: {contiguous_title})"
+        );
     }
 }
 

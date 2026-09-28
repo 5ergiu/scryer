@@ -3034,7 +3034,13 @@ async fn prune_stale_standby_coverage(
         .release_search_title_for_wanted_item(title, item, episode, Some(&context.reads))
         .await;
     let pending_subject = match app
-        .resolve_pending_release_search_subject_for_wanted_item(title, &search_title, item, episode)
+        .resolve_pending_release_search_subject_for_wanted_item(
+            title,
+            &search_title,
+            item,
+            episode,
+            Some(&context.reads),
+        )
         .await
     {
         Ok(pending_subject) => pending_subject,
@@ -3366,6 +3372,7 @@ async fn process_single_target(
             &search_title,
             item,
             episode.as_ref(),
+            Some(&context.reads),
         )
         .await?;
     // Season-pack shaping only, so season 0 is excluded: the specials season is
