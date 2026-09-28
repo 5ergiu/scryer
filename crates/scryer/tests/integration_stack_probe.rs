@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::time::sleep;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 use common::TestContext;
@@ -279,6 +279,24 @@ async fn install_iron_vale_metadata_fixture(ctx: &TestContext) {
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
+        .mount(&ctx.smg_server)
+        .await;
+    // Series hydration asks SMG's title surface first; model a TVDB-backed
+    // series it has not seeded, so hydration falls back to the legacy
+    // document above.
+    let unresolved = json!({ "data": { "resolveTitles": [] } });
+    Mock::given(method("GET"))
+        .and(path("/graphql"))
+        .and(query_param("operationName", "ResolveTitles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved.clone()))
+        .with_priority(1)
+        .mount(&ctx.smg_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("ResolveTitles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(unresolved))
+        .with_priority(1)
         .mount(&ctx.smg_server)
         .await;
 }
