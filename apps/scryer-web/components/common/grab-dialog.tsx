@@ -61,7 +61,10 @@ import {
   indexerSearchRowKey,
   totalReleaseBytes,
 } from "@/lib/utils/indexer-search";
-import { releaseQueueScopeInput } from "@/lib/utils/release-queue-scope";
+import {
+  queueScopeAcceptsAdditionalFile,
+  releaseQueueScopeInput,
+} from "@/lib/utils/release-queue-scope";
 
 /** Titles fetched per keystroke; the picker shows the first few of them. */
 const TITLE_CANDIDATE_LIMIT = 25;
@@ -278,12 +281,19 @@ export function GrabDialog({
         throw new Error(t("status.releaseMissingCandidateToken"));
       }
 
+      // The scope is only known once the server has read the release against
+      // the title: a season subject still binds a single-episode release to
+      // that episode, while a pack stays a season.
+      const scope = releaseQueueScopeInput(tokenized, { title: true });
+      if (purpose === "ADDITIONAL_FILE" && !queueScopeAcceptsAdditionalFile(scope, title.facet)) {
+        throw new Error(t("grabDialog.error.additionalScope", { name: release.title }));
+      }
       const conflictMessage = t("grabDialog.conflict", { name: release.title });
       const routing = selectionFor(release);
       const payload = await retryWithReplaceOnConflict(
         {
           titleId: title.id,
-          scope: releaseQueueScopeInput(tokenized, { title: true }),
+          scope,
           purpose,
           candidateToken: tokenized.candidateToken,
           sizeBytes: tokenized.sizeBytes ?? release.sizeBytes ?? null,

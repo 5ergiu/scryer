@@ -3764,6 +3764,8 @@ const nl: LocaleDictionary = {
   "lists.providerSettings.saved": "Providerinstellingen opgeslagen.",
   "title.listProvenance.added": "Toegevoegd door lijst {{name}}",
   "title.listProvenance.left": "Van de lijst {{name}} verdwenen",
+  "grabDialog.error.additionalScope":
+    "{{name}} omvat meer dan één aflevering en kan daarom niet als extra bestand in de wachtrij worden gezet. Dat kan alleen met een film of één aflevering.",
 };
 
 export default nl;

@@ -2433,6 +2433,8 @@ const zh_CN: LocaleDictionary = {
   "grabDialog.status.unlinked": "已将 {{name}} 发送到 {{client}}",
   "grabDialog.status.failed": "{{name}}：{{reason}}",
   "grabDialog.error.expired": "该发布已不在进行中的搜索里，请重新搜索。",
+  "grabDialog.error.additionalScope":
+    "{{name}} 包含不止一集，因此不能作为附加文件加入队列。只有电影或单集可以。",
 
   // ── 请求规则 ──────────────────────────────────────────────────────
   "settings.requestRules": "请求规则",

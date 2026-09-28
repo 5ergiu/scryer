@@ -2558,6 +2558,8 @@ const ja: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}}: {{reason}}",
   "grabDialog.error.expired":
     "このリリースは実行中の検索に含まれていません。検索をやり直してください。",
+  "grabDialog.error.additionalScope":
+    "{{name}} は複数のエピソードを含むため、追加ファイルとしてキューに入れられません。追加ファイルにできるのは映画か単一のエピソードだけです。",
 
   // ── リクエストルール ──────────────────────────────────────────────
   "settings.requestRules": "リクエストルール",

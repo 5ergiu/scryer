@@ -6056,6 +6056,8 @@ const ru: LocaleDictionary = {
   "grabDialog.status.failed": "{{name}}: {{reason}}",
   "grabDialog.error.expired":
     "Этого релиза больше нет в активном поиске. Запустите поиск снова.",
+  "grabDialog.error.additionalScope":
+    "{{name}} охватывает больше одного эпизода, поэтому его нельзя поставить в очередь как дополнительный файл. Это возможно только для фильма или одного эпизода.",
   // Title tags: the administrator-defined registry in Settings, the per-title
   // picker, the bulk pickers, and the catalog filter.
   "settings.titleTags": "Теги",
