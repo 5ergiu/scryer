@@ -4468,7 +4468,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         config.name.as_str(),
                         IndexerSkipReason::RoutingDisabled,
                     );
-                    info!(
+                    debug!(
                         indexer = config.name.as_str(),
                         "skipping indexer: disabled for scope via routing config"
                     );
