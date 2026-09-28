@@ -348,9 +348,11 @@ impl MetadataQueries {
                 .map(|s| MetadataSeasonPayload {
                     // A TMDB-primary series' seasons have no TVDB id; like the
                     // series and its episodes, that reads as an empty string.
-                    tvdb_id: (s.tvdb_id > 0)
-                        .then(|| s.tvdb_id.to_string())
-                        .unwrap_or_default(),
+                    tvdb_id: if s.tvdb_id > 0 {
+                        s.tvdb_id.to_string()
+                    } else {
+                        String::new()
+                    },
                     tmdb_id: s.tmdb_id,
                     number: s.number,
                     label: s.label,
