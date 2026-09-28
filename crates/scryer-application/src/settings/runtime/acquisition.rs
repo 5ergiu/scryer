@@ -6,12 +6,21 @@ use crate::acquisition::convergence::{
 const ACQUISITION_ENABLED_KEY: &str = "acquisition.enabled";
 const ACQUISITION_SAME_TIER_MIN_DELTA_KEY: &str = "acquisition.same_tier_min_delta";
 const ACQUISITION_POLL_INTERVAL_SECONDS_KEY: &str = "acquisition.poll_interval_seconds";
+const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk_interval_seconds";
+/// Download-client failure check cadence when nothing is stored.
+pub(crate) const DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS: i32 = 60;
+/// Catalog walk cadence when nothing is stored.
+pub(crate) const DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS: i32 = 300;
 
 #[derive(Debug, Clone)]
 pub struct AcquisitionSettings {
     pub enabled: bool,
     pub same_tier_min_delta: i32,
+    /// How often the download clients are read and failed grabs are handled.
     pub poll_interval_seconds: i32,
+    /// How often the catalog is scanned for missing and upgradable scopes and
+    /// a batch of titles is walked. Wakes still walk at once.
+    pub walk_interval_seconds: i32,
     /// Per-cycle evaluation cost ceiling for the convergence cursor — how many scopes may be evaluated per tick, not a rate limiter.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Dormant slow re-converge backstop: coverage older than
@@ -46,7 +55,13 @@ impl AppUseCase {
             poll_interval_seconds: self
                 .read_setting_i64_value(ACQUISITION_POLL_INTERVAL_SECONDS_KEY, None)
                 .await?
-                .unwrap_or(60) as i32,
+                .unwrap_or(DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS as i64)
+                as i32,
+            walk_interval_seconds: self
+                .read_setting_i64_value(ACQUISITION_WALK_INTERVAL_SECONDS_KEY, None)
+                .await?
+                .unwrap_or(DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS as i64)
+                as i32,
             long_tail_backfill_max_scopes_per_cycle: self
                 .read_setting_i64_value(
                     ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY,
@@ -93,6 +108,11 @@ impl AppUseCase {
                 "acquisition poll interval must be at least 1 second".to_string(),
             ));
         }
+        if settings.walk_interval_seconds < 1 {
+            return Err(AppError::Validation(
+                "acquisition walk interval must be at least 1 second".to_string(),
+            ));
+        }
         if settings.long_tail_backfill_max_scopes_per_cycle < 1 {
             return Err(AppError::Validation(
                 "convergence per-cycle scope ceiling must be at least 1".to_string(),
@@ -123,6 +143,12 @@ impl AppUseCase {
         )
         .await?;
         self.upsert_system_setting_json(
+            ACQUISITION_WALK_INTERVAL_SECONDS_KEY,
+            &settings.walk_interval_seconds,
+            Some(actor.id.clone()),
+        )
+        .await?;
+        self.upsert_system_setting_json(
             ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY,
             &settings.long_tail_backfill_max_scopes_per_cycle,
             Some(actor.id.clone()),
@@ -146,6 +172,7 @@ impl AppUseCase {
             ACQUISITION_ENABLED_KEY.to_string(),
             ACQUISITION_SAME_TIER_MIN_DELTA_KEY.to_string(),
             ACQUISITION_POLL_INTERVAL_SECONDS_KEY.to_string(),
+            ACQUISITION_WALK_INTERVAL_SECONDS_KEY.to_string(),
             ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY.to_string(),
             ACQUISITION_LONG_TAIL_RECONVERGE_DAYS_KEY.to_string(),
         ]);

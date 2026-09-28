@@ -1080,6 +1080,21 @@ pub(crate) async fn process_download_failure_for_download(
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
 ) -> FailureHandlingOutcome {
+    let outcome = handle_download_failure_for_download(app, canonical_download_id, context).await;
+    if outcome == FailureHandlingOutcome::Reopened {
+        app.runtime
+            .acquisition
+            .scope_reopened_since_walk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    outcome
+}
+
+async fn handle_download_failure_for_download(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    context: DownloadFailureContext,
+) -> FailureHandlingOutcome {
     let failed_submission =
         find_failed_submission_for_download(app, canonical_download_id, &context).await;
     if context.wanted_item.is_none() && failed_submission.is_none() {
@@ -2186,9 +2201,7 @@ where
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
-            release_listing_json: ReleaseListingSnapshot::json_for_candidate(
-                candidate, *now,
-            ),
+            release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
         };
 
         if app

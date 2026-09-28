@@ -6208,6 +6208,7 @@ async fn graphql_introspection_exposes_typed_settings_fields() {
         .filter_map(|field| field["name"].as_str())
         .collect();
     assert!(acquisition_names.contains(&"pollIntervalSeconds"));
+    assert!(acquisition_names.contains(&"walkIntervalSeconds"));
     // The wanted-scheduler cadence knobs (syncIntervalSeconds/batchSize)
     // were replaced by the convergence-cursor knobs.
     assert!(acquisition_names.contains(&"longTailBackfillMaxScopesPerCycle"));

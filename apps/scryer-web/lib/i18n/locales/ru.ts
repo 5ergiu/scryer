@@ -673,7 +673,10 @@ const ru: LocaleDictionary = {
     "settings.acquisitionConvergence": "Сходимость и распределение нагрузки",
     "settings.acquisitionPollIntervalSeconds": "Интервал опроса (секунды)",
     "settings.acquisitionPollIntervalSecondsHelp":
-        "Как часто активируется фоновый цикл получения контента.",
+        "Как часто клиенты загрузки проверяются на наличие неудачных загрузок.",
+    "settings.acquisitionWalkIntervalSeconds": "Интервал поискового обхода (секунды)",
+    "settings.acquisitionWalkIntervalSecondsHelp":
+        "Как часто библиотека проверяется на отсутствующие и улучшаемые медиафайлы и выполняется поиск для группы тайтлов. Добавление тайтла, изменение профиля качества и подобные изменения запускают обход сразу. Обход никогда не выполняется чаще интервала опроса.",
     "settings.acquisitionMaxScopesPerCycle": "Максимум элементов за цикл",
     "settings.acquisitionMaxScopesPerCycleHelp":
         "Максимальное количество элементов, проверяемых за один цикл. Фактическая частота запросов определяется ограничениями индексаторов, а не этим параметром.",

@@ -953,6 +953,14 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
             scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "acquisition.walk_interval_seconds",
+            data_type: "number",
+            default_value_json: "300",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_ACQUISITION,
+            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "acquisition.long_tail_backfill_max_scopes_per_cycle",
             data_type: "number",
             default_value_json: "500",

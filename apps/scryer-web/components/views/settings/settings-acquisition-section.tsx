@@ -10,6 +10,7 @@ export type AcquisitionSettings = {
   enabled: boolean;
   sameTierMinDelta: number;
   pollIntervalSeconds: number;
+  walkIntervalSeconds: number;
   longTailBackfillMaxScopesPerCycle: number;
   longTailReconvergeDays: number;
 };
@@ -132,6 +133,14 @@ export function SettingsAcquisitionSection({
           value={draft.pollIntervalSeconds}
           disabled={disabled}
           onChange={(pollIntervalSeconds) => update({ pollIntervalSeconds })}
+        />
+        <NumberField
+          id="settings-acquisition-walk-interval"
+          label={t("settings.acquisitionWalkIntervalSeconds")}
+          help={t("settings.acquisitionWalkIntervalSecondsHelp")}
+          value={draft.walkIntervalSeconds}
+          disabled={disabled}
+          onChange={(walkIntervalSeconds) => update({ walkIntervalSeconds })}
         />
         <NumberField
           id="settings-acquisition-max-scopes"

@@ -2819,6 +2819,7 @@ export const acquisitionSettingsQuery = `query AcquisitionSettings {
     enabled
     sameTierMinDelta
     pollIntervalSeconds
+    walkIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays
   }
