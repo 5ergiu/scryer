@@ -3273,18 +3273,37 @@ fn apply_title_metadata_update(title: &mut Title, metadata: TitleMetadataUpdate)
     Ok(())
 }
 
+/// Whether a title write should queue background hydration. This must accept
+/// every title `MovieTitleRef::from_title` / `SeriesTitleRef::from_title`
+/// accepts, or the worker never sees a title it could hydrate. Accepting a
+/// few it then rejects is harmless: the worker clears their retry state.
 fn title_has_supported_hydration_identity(title: &Title) -> bool {
     external_ids_support_title_hydration(&title.facet, &title.external_ids)
+        // Both title refs fall back to the stored IMDb id.
+        || title
+            .imdb_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn external_ids_support_title_hydration(facet: &MediaFacet, external_ids: &[ExternalId]) -> bool {
     external_ids.iter().any(|external_id| {
-        let source = external_id.source.trim().to_ascii_lowercase();
-        let has_value = !external_id.value.trim().is_empty();
-        has_value
-            && (source == "tvdb"
-                || (facet == &MediaFacet::Movie
-                    && matches!(source.as_str(), "smg" | "tmdb" | "imdb")))
+        if external_id.value.trim().is_empty() {
+            return false;
+        }
+        match external_id.source.trim().to_ascii_lowercase().as_str() {
+            "tvdb" | "smg" => true,
+            // A series or anime title also carries its mapped movies' TMDB and
+            // IMDb ids, so only ids not kinded as something else name it.
+            "tmdb" | "imdb" => {
+                facet == &MediaFacet::Movie
+                    || external_id.kind.as_deref().is_none_or(|kind| {
+                        let kind = kind.trim();
+                        kind.is_empty() || kind.eq_ignore_ascii_case("series")
+                    })
+            }
+            _ => false,
+        }
     })
 }
 
@@ -6051,10 +6070,6 @@ mod tests {
             &hydration_identity(" TVDB ", "123")
         ));
         assert!(!external_ids_support_title_hydration(
-            &MediaFacet::Series,
-            &hydration_identity("tmdb", "123")
-        ));
-        assert!(!external_ids_support_title_hydration(
             &MediaFacet::Movie,
             &hydration_identity("tmdb", "   ")
         ));
@@ -6062,6 +6077,83 @@ mod tests {
             &MediaFacet::Movie,
             &hydration_identity("wikidata", "Q123")
         ));
+        assert!(!external_ids_support_title_hydration(
+            &MediaFacet::Series,
+            &hydration_identity("wikidata", "Q123")
+        ));
+    }
+
+    /// A series without a TVDB id is hydrated by SMG from its SMG, TMDB or
+    /// IMDb id, so the store must queue it on the same ids.
+    #[test]
+    fn hydration_identity_support_accepts_series_ids_the_series_ref_accepts() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            assert!(external_ids_support_title_hydration(
+                &facet,
+                &hydration_identity("smg", "123")
+            ));
+            assert!(external_ids_support_title_hydration(
+                &facet,
+                &hydration_identity("tmdb", "123")
+            ));
+            assert!(external_ids_support_title_hydration(
+                &facet,
+                &hydration_identity("imdb", "tt0000123")
+            ));
+            assert!(external_ids_support_title_hydration(
+                &facet,
+                &[ExternalId::with_kind("tmdb", " Series ", "123")]
+            ));
+            assert!(external_ids_support_title_hydration(
+                &facet,
+                &[ExternalId::with_kind("imdb", "  ", "tt0000123")]
+            ));
+            for source in ["smg", "tvdb", "tmdb", "imdb"] {
+                assert!(!external_ids_support_title_hydration(
+                    &facet,
+                    &hydration_identity(source, "  ")
+                ));
+            }
+        }
+
+        // An anime row carries its mapped movies' ids; those alone do not
+        // name the series.
+        assert!(!external_ids_support_title_hydration(
+            &MediaFacet::Anime,
+            &[
+                ExternalId::with_kind("tmdb", "movie", "123"),
+                ExternalId::with_kind("imdb", "movie", "tt0000123"),
+            ]
+        ));
+        assert!(external_ids_support_title_hydration(
+            &MediaFacet::Anime,
+            &[
+                ExternalId::with_kind("tmdb", "movie", "123"),
+                ExternalId::with_kind("tmdb", "series", "456"),
+            ]
+        ));
+        // A movie keeps accepting its own kinded ids.
+        assert!(external_ids_support_title_hydration(
+            &MediaFacet::Movie,
+            &[ExternalId::with_kind("tmdb", "movie", "123")]
+        ));
+    }
+
+    #[test]
+    fn hydration_identity_support_falls_back_to_the_stored_imdb_id() {
+        let mut title = conflict_test_title(
+            "synthetic-series",
+            "Synthetic Series",
+            "series_default_library",
+            "root",
+            vec![],
+        );
+        assert!(!title_has_supported_hydration_identity(&title));
+        title.imdb_id = Some("  ".to_string());
+        assert!(!title_has_supported_hydration_identity(&title));
+        title.imdb_id = Some("tt0000123".to_string());
+        assert!(title_has_supported_hydration_identity(&title));
+        assert!(scryer_application::SeriesTitleRef::from_title(&title).is_some());
     }
 
     async fn delete_test_store() -> (TitleStore, sqlx::SqlitePool) {
@@ -6453,6 +6545,53 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    #[tokio::test]
+    async fn created_series_without_a_tvdb_id_is_due_for_hydration() {
+        let (store, pool) = migrated_test_store().await;
+        let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+        let root_folder_id = default_root_folder_id(&pool, &library_id).await;
+
+        TitleRepository::create(
+            &store,
+            conflict_test_title(
+                "synthetic-series",
+                "Synthetic Series",
+                &library_id,
+                &root_folder_id,
+                vec![
+                    external_id("smg", "4242"),
+                    kinded_external_id("tmdb", "series", "4243"),
+                ],
+            ),
+        )
+        .await
+        .expect("series title should create");
+
+        // Mapped movie ids alone do not name a series, so this one is not queued.
+        let anime_library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Anime);
+        let anime_root_folder_id = default_root_folder_id(&pool, &anime_library_id).await;
+        let mut movie_ids_only = conflict_test_title(
+            "synthetic-anime",
+            "Synthetic Anime",
+            &anime_library_id,
+            &anime_root_folder_id,
+            vec![kinded_external_id("tmdb", "movie", "4244")],
+        );
+        movie_ids_only.facet = MediaFacet::Anime;
+        TitleRepository::create(&store, movie_ids_only)
+            .await
+            .expect("anime title should create");
+
+        let due = TitleRepository::list_titles_due_for_hydration(&store, 10, &[])
+            .await
+            .expect("due titles should load");
+        let due_ids = due
+            .iter()
+            .map(|pending| pending.title.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(due_ids, vec!["synthetic-series"]);
     }
 
     #[tokio::test]
