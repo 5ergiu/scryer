@@ -10,8 +10,10 @@ import type {
   TitleListMembership,
 } from "../types/lists.ts";
 import {
+  DEFAULT_LIST_MAX_PER_SYNC,
   defaultListRoute,
   draftToSubscribeInput,
+  emptyListDraft,
   draftToUpdateInput,
   EMPTY_LIST_FILTER,
   findListFilter,
@@ -578,4 +580,12 @@ test("inputs built from query results carry no __typename at any depth", () => {
   assert.equal(input.mode, "HOLD");
   assert.equal(input.onLeave, "LOG");
   assert.equal(input.maxPerSync, 3);
+});
+
+test("a new follow starts with a per-sync cap that can be cleared", () => {
+  const draft = emptyListDraft("Fixture list", ["MOVIE"]);
+  assert.equal(draft.maxPerSync, DEFAULT_LIST_MAX_PER_SYNC);
+  assert.equal(DEFAULT_LIST_MAX_PER_SYNC, 25);
+  const cleared = listDraftProblems({ ...draft, maxPerSync: null });
+  assert.equal(cleared.includes("lists.follow.problem.maxPerSync"), false);
 });

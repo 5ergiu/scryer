@@ -318,6 +318,12 @@ export function defaultListRoute(
   };
 }
 
+/**
+ * The per-sync cap a new follow starts with, so a large list fills the library
+ * over several syncs instead of all at once. The form lets it be cleared.
+ */
+export const DEFAULT_LIST_MAX_PER_SYNC = 25;
+
 export function emptyListDraft(name: string, kinds: readonly Facet[]): ListSubscriptionDraft {
   return {
     name,
@@ -325,7 +331,7 @@ export function emptyListDraft(name: string, kinds: readonly Facet[]): ListSubsc
     mode: "ADD",
     routes: [],
     filters: [],
-    maxPerSync: null,
+    maxPerSync: DEFAULT_LIST_MAX_PER_SYNC,
     onLeave: "KEEP",
   };
 }
