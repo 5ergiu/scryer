@@ -614,6 +614,37 @@ impl AppUseCase {
         let _prepared_artifact = self
             .prepare_indexer_artifact_for_submission(&mut request, Some(title_id.clone()))
             .await?;
+        // Nothing reaches a client until the grab's intent is durable. A
+        // client can finish a job before it answers the submit, and that job
+        // must already resolve to this title, purpose and scope rather than
+        // reading as a download nobody asked for.
+        self.services
+            .workflow
+            .download_submissions
+            .record_pending_submission(DownloadSubmission {
+                download_id,
+                title_id: title_id.clone(),
+                facet: request.title.facet.as_str().to_string(),
+                download_client_id: request.pinned_download_client_id.clone(),
+                download_client_type: String::new(),
+                download_client_item_id: String::new(),
+                source_hint: source_hint.clone(),
+                source_provider_id: request.indexer_id.clone(),
+                source_provider_name: intent.source_provider_name.clone(),
+                source_kind,
+                source_title: request.source_title.clone(),
+                info_hash: request.info_hash_hint.clone(),
+                release_size_bytes: intent.release_size_bytes,
+                release_listing_json: intent.release_listing_json.clone(),
+                request_signature: intent.request_signature.clone(),
+                purpose: request.purpose,
+                scope: intent.scope.clone(),
+            })
+            .await?;
+        // The intent's unbound binding retires memoized resolutions of its id.
+        self.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
         let grab_result = self
             .services
             .integrations
@@ -678,6 +709,11 @@ impl AppUseCase {
                                 UncertainDownloadSubmissionClaim::ambiguous(download_id, ambiguous),
                             );
                     }
+                } else {
+                    // Every client refused it, so no job will ever bind the
+                    // intent; it must not hold the title or a retry.
+                    self.withdraw_pending_submission(&title_id, download_id)
+                        .await;
                 }
                 return Err(error);
             }
@@ -823,6 +859,32 @@ impl AppUseCase {
                 newly_submitted: true,
             },
         ))
+    }
+
+    /// Withdraw the intent a refused grab recorded before submitting.
+    async fn withdraw_pending_submission(
+        &self,
+        title_id: &str,
+        download_id: scryer_domain::download_identity::DownloadId,
+    ) {
+        match self
+            .services
+            .workflow
+            .download_submissions
+            .withdraw_pending_submission(&download_id)
+            .await
+        {
+            Ok(()) => self
+                .runtime
+                .acquisition
+                .invalidate_download_registry_observations(),
+            Err(error) => tracing::warn!(
+                error = %error,
+                title_id = %title_id,
+                download_id = %download_id,
+                "refused download submission intent could not be withdrawn"
+            ),
+        }
     }
 
     /// Resolve an indexer-hosted source into the artifact the download-client

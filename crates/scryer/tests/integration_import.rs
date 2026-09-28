@@ -5,6 +5,9 @@ mod common;
 #[path = "import/persistence_tests.rs"]
 mod persistence_tests;
 
+#[path = "import/submission_race_tests.rs"]
+mod submission_race_tests;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;

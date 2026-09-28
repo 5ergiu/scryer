@@ -233,6 +233,32 @@ pub(super) async fn claim_or_create_binding_download_id_tx(
         .await?;
     }
     let client_name_snapshot = client_name_snapshot_tx(tx, locator).await?;
+    // A grab records its intent under its pre-allocated id before submitting,
+    // leaving an active binding with no client job yet. Acceptance binds that
+    // row to the job instead of inserting a second binding for the id.
+    if claim.claims_scryer_provenance() {
+        let bound = SqlRuntime::execute(
+            SqlExec::Tx(tx),
+            "UPDATE download_client_bindings
+             SET client_config_id = {}, client_type_snapshot = {},
+                 client_name_snapshot = {}, native_item_id = {}, last_seen_at = {}
+             WHERE download_id = {}
+               AND native_item_id IS NULL
+               AND ended_at IS NULL",
+            &[
+                SqlArg::OptText(locator.client_id.clone()),
+                SqlArg::Text(locator.client_type.clone()),
+                SqlArg::OptText(client_name_snapshot.clone()),
+                SqlArg::Text(locator.item_id.clone()),
+                SqlArg::Timestamp(now),
+                SqlArg::Text(download_id.to_string()),
+            ],
+        )
+        .await?;
+        if bound == 1 {
+            return Ok(download_id);
+        }
+    }
     SqlRuntime::execute(
         SqlExec::Tx(tx),
         "INSERT INTO download_client_bindings (
@@ -772,6 +798,34 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn record_pending_submission(&self, submission: DownloadSubmission) -> AppResult<()> {
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "record_pending_download_submission",
+            move |tx| {
+                let submission = submission.clone();
+                Box::pin(
+                    async move { record_pending_download_submission_tx(tx, &submission).await },
+                )
+            },
+        )
+        .await
+    }
+
+    async fn withdraw_pending_submission(&self, download_id: &DownloadId) -> AppResult<()> {
+        let download_id = *download_id;
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "withdraw_pending_download_submission",
+            move |tx| {
+                Box::pin(
+                    async move { withdraw_pending_download_submission_tx(tx, &download_id).await },
+                )
+            },
+        )
+        .await
+    }
+
     async fn record_submission_with_identity(
         &self,
         submission: DownloadSubmission,
@@ -794,6 +848,9 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                         && download_id != requested_download_id
                         && !bound_download_is_terminal_tx(tx, &download_id).await?
                     {
+                        // The grab resolved to another download, so the intent
+                        // it recorded under its own id describes nothing.
+                        withdraw_pending_download_submission_tx(tx, &requested_download_id).await?;
                         return Ok(CanonicalDownloadIdentityDisposition::AdoptedExisting {
                             download_id,
                         });
@@ -843,6 +900,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                     Ok(if effective_download_id == requested_download_id {
                         CanonicalDownloadIdentityDisposition::Requested
                     } else {
+                        withdraw_pending_download_submission_tx(tx, &requested_download_id).await?;
                         CanonicalDownloadIdentityDisposition::AdoptedExisting {
                             download_id: effective_download_id,
                         }
@@ -2247,6 +2305,18 @@ mod seed_goal_tests {
                  detail TEXT,
                  created_at TEXT NOT NULL,
                  updated_at TEXT NOT NULL
+             );
+             CREATE TABLE download_import_artifacts (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
+             );
+             CREATE TABLE download_queue_commands (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
+             );
+             CREATE TABLE imports (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
              )",
         )
         .execute(&pool)
@@ -2645,6 +2715,220 @@ mod seed_goal_tests {
                 .await
                 .expect("requested identity lookup should succeed")
                 .is_none()
+        );
+    }
+
+    /// The intent a grab records before submitting: no client is known yet.
+    fn pending_intent(download_id: DownloadId) -> DownloadSubmission {
+        DownloadSubmission {
+            download_client_id: None,
+            download_client_type: String::new(),
+            purpose: DownloadSubmissionPurpose::AdditionalFile,
+            ..submission(download_id, "", "title-1")
+        }
+    }
+
+    fn accepted(download_id: DownloadId) -> DownloadSubmission {
+        DownloadSubmission {
+            purpose: DownloadSubmissionPurpose::AdditionalFile,
+            ..submission(download_id, "job-1", "title-1")
+        }
+    }
+
+    async fn row_count(
+        store: &DownloadSubmissionStore,
+        table: &str,
+        column: &str,
+        id: DownloadId,
+    ) -> usize {
+        SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            &format!("SELECT 1 AS present FROM {table} WHERE {column} = {{}}"),
+            &[SqlArg::Text(id.to_string())],
+        )
+        .await
+        .expect("fixture rows should be readable")
+        .len()
+    }
+
+    #[tokio::test]
+    async fn an_accepted_grab_binds_the_intent_it_recorded_before_submitting() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+        let intents = store
+            .list_active_unbound_for_title("title-1")
+            .await
+            .expect("unbound intents should list");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(
+            intents[0].purpose,
+            DownloadSubmissionPurpose::AdditionalFile
+        );
+
+        let disposition = store
+            .record_submission_with_identity(
+                accepted(download_id),
+                submission_identity(download_id),
+                None,
+            )
+            .await
+            .expect("acceptance should complete the intent");
+
+        assert_eq!(disposition, CanonicalDownloadIdentityDisposition::Requested);
+        assert_eq!(
+            row_count(
+                &store,
+                "download_client_bindings",
+                "download_id",
+                download_id
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .expect("active binding should load"),
+            Some(download_id)
+        );
+        let recorded = store
+            .find_by_canonical_download_id(&download_id)
+            .await
+            .expect("submission should load")
+            .expect("the intent becomes the submission");
+        assert_eq!(recorded.download_client_item_id, "job-1");
+        assert_eq!(recorded.download_client_id.as_deref(), Some("primary"));
+        assert_eq!(recorded.download_client_type, "qbittorrent");
+        assert_eq!(recorded.purpose, DownloadSubmissionPurpose::AdditionalFile);
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grab_that_resolves_to_another_download_withdraws_its_own_intent() {
+        let store = store().await;
+        let existing_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(existing_id, "job-1", "title-1"),
+                submission_identity(existing_id),
+                None,
+            )
+            .await
+            .expect("the existing download should persist");
+        let requested_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(requested_id))
+            .await
+            .expect("the intent should persist");
+
+        let disposition = store
+            .record_submission_with_identity(
+                accepted(requested_id),
+                submission_identity(requested_id),
+                None,
+            )
+            .await
+            .expect("acceptance should resolve to the existing job");
+
+        assert_eq!(
+            disposition,
+            CanonicalDownloadIdentityDisposition::AdoptedExisting {
+                download_id: existing_id,
+            }
+        );
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty()
+        );
+        for (table, column) in [
+            ("download_submissions", "id"),
+            ("download_client_bindings", "download_id"),
+            ("downloads", "id"),
+        ] {
+            assert_eq!(
+                row_count(&store, table, column, requested_id).await,
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            row_count(
+                &store,
+                "download_client_bindings",
+                "download_id",
+                existing_id
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawing_removes_only_an_intent_no_client_job_has_bound() {
+        let store = store().await;
+        let refused_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(refused_id))
+            .await
+            .expect("the intent should persist");
+        store
+            .withdraw_pending_submission(&refused_id)
+            .await
+            .expect("a refused intent should withdraw");
+        for (table, column) in [
+            ("download_submissions", "id"),
+            ("download_client_bindings", "download_id"),
+            ("downloads", "id"),
+        ] {
+            assert_eq!(
+                row_count(&store, table, column, refused_id).await,
+                0,
+                "{table}"
+            );
+        }
+
+        let accepted_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(accepted_id))
+            .await
+            .expect("the intent should persist");
+        store
+            .record_submission_with_identity(
+                accepted(accepted_id),
+                submission_identity(accepted_id),
+                None,
+            )
+            .await
+            .expect("acceptance should complete the intent");
+        store
+            .withdraw_pending_submission(&accepted_id)
+            .await
+            .expect("withdrawing a bound intent is a no-op");
+        assert!(
+            store
+                .find_by_canonical_download_id(&accepted_id)
+                .await
+                .expect("submission should load")
+                .is_some()
+        );
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .expect("active binding should load"),
+            Some(accepted_id)
         );
     }
 

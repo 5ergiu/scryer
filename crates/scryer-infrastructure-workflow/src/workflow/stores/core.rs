@@ -300,7 +300,8 @@ async fn ensure_submission_download_tx(
 /// Persist a submit whose HTTP request may have reached the client but whose
 /// response never supplied a native client item identifier. The row remains
 /// deliberately unbound so legacy tuple readers cannot mistake it for a
-/// tracked client job.
+/// tracked client job. Over a grab's pending intent it only fills in the
+/// client the error named, which the intent could not know.
 pub async fn record_ambiguous_download_submission_tx(
     tx: &mut SqlTx<'_>,
     submission: &DownloadSubmission,
@@ -346,7 +347,18 @@ pub async fn record_ambiguous_download_submission_tx(
           release_size_bytes, release_listing_json, request_signature, purpose,
           episode_id, collection_id, series_movie_link_id, download_id)
          VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
-         ON CONFLICT(id) DO NOTHING",
+         ON CONFLICT(id) DO UPDATE
+         SET download_client_id = CASE
+                 WHEN TRIM(COALESCE(download_submissions.download_client_id, '')) = ''
+                 THEN excluded.download_client_id
+                 ELSE download_submissions.download_client_id
+             END,
+             download_client_type = CASE
+                 WHEN TRIM(COALESCE(download_submissions.download_client_type, '')) = ''
+                 THEN excluded.download_client_type
+                 ELSE download_submissions.download_client_type
+             END
+         WHERE download_submissions.download_client_item_id IS NULL",
         &[
             SqlArg::Text(canonical_id.clone()),
             SqlArg::Text(submission.title_id.clone()),
@@ -382,7 +394,24 @@ pub async fn record_ambiguous_download_submission_tx(
          (download_id, client_config_id, client_type_snapshot, client_name_snapshot,
           native_item_id, created_at, ended_at)
          VALUES ({}, {}, {}, {}, {}, {}, {})
-         ON CONFLICT(download_id) DO NOTHING",
+         ON CONFLICT(download_id) DO UPDATE
+         SET client_config_id = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_config_id, '')) = ''
+                 THEN excluded.client_config_id
+                 ELSE download_client_bindings.client_config_id
+             END,
+             client_type_snapshot = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_type_snapshot, '')) = ''
+                 THEN excluded.client_type_snapshot
+                 ELSE download_client_bindings.client_type_snapshot
+             END,
+             client_name_snapshot = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_name_snapshot, '')) = ''
+                 THEN excluded.client_name_snapshot
+                 ELSE download_client_bindings.client_name_snapshot
+             END
+         WHERE download_client_bindings.native_item_id IS NULL
+           AND download_client_bindings.ended_at IS NULL",
         &[
             SqlArg::Text(canonical_id),
             SqlArg::OptText(client_config_id),
@@ -392,6 +421,102 @@ pub async fn record_ambiguous_download_submission_tx(
             SqlArg::Timestamp(now),
             SqlArg::OptTimestamp(None),
         ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Persist a grab's intent before its mutation reaches any client: the same
+/// unbound row an ambiguous submit leaves, plus the grab's scope, so a client
+/// job that finishes before the client answers already resolves to its title,
+/// purpose and scope. Acceptance binds and completes this row; a definitive
+/// refusal withdraws it through [`withdraw_pending_download_submission_tx`].
+pub async fn record_pending_download_submission_tx(
+    tx: &mut SqlTx<'_>,
+    submission: &DownloadSubmission,
+) -> AppResult<()> {
+    record_ambiguous_download_submission_tx(tx, submission).await?;
+    let (episode_id, collection_id, series_movie_link_id) =
+        persisted_submission_scope(&submission.scope);
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "UPDATE download_submissions
+         SET episode_id = {}, collection_id = {}, series_movie_link_id = {}
+         WHERE id = {}
+           AND download_client_item_id IS NULL",
+        &[
+            SqlArg::OptText(episode_id.map(str::to_string)),
+            SqlArg::OptText(collection_id.map(str::to_string)),
+            SqlArg::OptText(series_movie_link_id.map(str::to_string)),
+            SqlArg::Text(submission.download_id.to_string()),
+        ],
+    )
+    .await?;
+    replace_download_submission_episode_links_tx(
+        tx,
+        &submission.download_id,
+        persisted_episode_set_ids(&submission.scope),
+    )
+    .await
+}
+
+/// Remove a pending intent no client job ever bound: its submission row (and
+/// with it the episode links), its unbound binding, and the canonical row when
+/// nothing else refers to it. An intent whose binding a client job already
+/// claimed is left alone — the client holds that download after all.
+pub async fn withdraw_pending_download_submission_tx(
+    tx: &mut SqlTx<'_>,
+    download_id: &DownloadId,
+) -> AppResult<()> {
+    let id = download_id.to_string();
+    let unbound = SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        "SELECT download_id
+         FROM download_client_bindings
+         WHERE download_id = {}
+           AND native_item_id IS NULL
+           AND ended_at IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?
+    .is_some();
+    if !unbound {
+        return Ok(());
+    }
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM download_submissions
+         WHERE id = {}
+           AND download_client_item_id IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?;
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM download_client_bindings
+         WHERE download_id = {}
+           AND native_item_id IS NULL
+           AND ended_at IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?;
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM downloads
+         WHERE id = {}
+           AND NOT EXISTS (SELECT 1 FROM download_submissions WHERE id = {})
+           AND NOT EXISTS (SELECT 1 FROM download_client_bindings WHERE download_id = {})
+           AND NOT EXISTS (
+               SELECT 1 FROM download_identity_states WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM download_import_artifacts WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM download_queue_commands WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (SELECT 1 FROM imports WHERE canonical_download_id = {})",
+        &std::array::from_fn::<_, 7, _>(|_| SqlArg::Text(id.clone())),
     )
     .await?;
     Ok(())
@@ -436,8 +561,28 @@ async fn record_download_submission_tx_inner(
     let conflict_clause = if is_orphan {
         "ON CONFLICT(id) DO NOTHING"
     } else {
+        // A pending intent carries no client item yet: acceptance supplies it.
+        // A row that already names its client job keeps it.
         "ON CONFLICT(id) DO UPDATE
-         SET title_id = excluded.title_id,
+         SET download_client_id = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_id
+                 ELSE download_submissions.download_client_id
+             END,
+             download_client_type = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_type
+                 ELSE download_submissions.download_client_type
+             END,
+             download_client_item_id = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_item_id
+                 ELSE download_submissions.download_client_item_id
+             END,
+             title_id = excluded.title_id,
              facet = excluded.facet,
              source_hint = excluded.source_hint,
              source_provider_id = excluded.source_provider_id,
