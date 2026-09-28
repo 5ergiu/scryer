@@ -690,6 +690,38 @@ async fn without_a_custom_bin_any_root_is_accepted() {
 }
 
 #[tokio::test]
+async fn with_the_recycle_bin_turned_off_a_root_inside_the_custom_bin_is_accepted() {
+    let fixture = Fixture::new();
+    let (app, user) = movie_app(&fixture.root_a()).await;
+    let bin = fixture.temp.path().join("disk").join("bin");
+    std::fs::create_dir_all(&bin).expect("create custom bin");
+    let settings = settings_with_bin(Some(&bin));
+    settings
+        .values
+        .try_lock()
+        .expect("fresh settings store")
+        .insert(
+            (
+                SETTINGS_SCOPE_MEDIA.to_string(),
+                RECYCLE_BIN_ENABLED_KEY.to_string(),
+                None,
+            ),
+            "false".to_string(),
+        );
+    let app = app.with_test_overrides(|services| services.with_settings(settings));
+
+    app.create_library(
+        &user,
+        MediaFacet::Movie,
+        "Synthetic Library B".to_string(),
+        vec![root_draft(&bin.join("inside"))],
+        None,
+    )
+    .await
+    .expect("a disabled bin refuses no root");
+}
+
+#[tokio::test]
 async fn updating_a_library_refuses_only_new_roots_that_conflict_with_the_custom_bin() {
     let fixture = Fixture::new();
     let (app, user, bin) = app_with_custom_bin(&fixture).await;

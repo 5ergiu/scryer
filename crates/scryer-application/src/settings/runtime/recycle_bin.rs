@@ -131,14 +131,18 @@ impl AppUseCase {
     ///
     /// Only roots being added or changed are checked, so a root in
     /// `existing_roots` that already conflicts never blocks an edit. Without a
-    /// custom bin there is nothing to check; one that is refused whatever the
-    /// roots are is not a conflict of any root either.
+    /// custom bin, or with the recycle bin turned off, there is nothing to
+    /// check; a bin that is refused whatever the roots are is not a conflict
+    /// of any root either.
     pub(crate) async fn recycle_bin_conflict_for_library_roots<'a>(
         &self,
         existing_roots: impl IntoIterator<Item = &'a str>,
         roots: impl IntoIterator<Item = &'a str>,
     ) -> Option<(String, String)> {
-        let (_, custom_path, _) = self.recycle_bin_config_values().await;
+        let (enabled, custom_path, _) = self.recycle_bin_config_values().await;
+        if !enabled {
+            return None;
+        }
         let bin = PathBuf::from(custom_path?);
         if Self::recycle_bin_validation_error(&bin, true, &[]).is_some() {
             return None;
