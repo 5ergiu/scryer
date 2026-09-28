@@ -5620,7 +5620,6 @@ const en: LocaleDictionary = {
   "lists.detail.titles": "Titles ({{count}})",
   "lists.detail.title": "Title",
   "lists.detail.state": "State",
-  "lists.detail.leftAt": "Left the list {{time}}",
   "lists.detail.noTitles": "No titles recorded yet.",
   "lists.detail.pageRange": "{{from}}–{{to}} of {{total}}",
   "lists.detail.previousPage": "Previous",

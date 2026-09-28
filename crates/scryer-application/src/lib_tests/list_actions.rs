@@ -305,3 +305,41 @@ async fn a_title_page_names_only_the_public_lists_that_hold_it() {
     assert!(alpha[0].added_by_list);
     assert_eq!(alpha[0].left_at, None);
 }
+
+#[tokio::test]
+async fn a_list_page_shows_only_titles_still_on_the_list() {
+    use crate::lists::test_support::membership;
+
+    let harness = bootstrap_media_request_app();
+    super::list_experimental_gate::set_experimental_features(&harness, true).await;
+    let mut list = subscription("public-list-one");
+    // Without a route or a title, a row is visible to every reader.
+    list.routes.clear();
+    *harness.lists.subscriptions.lock().unwrap() = vec![list];
+    let current = membership(
+        "public-list-one",
+        "item-current",
+        scryer_domain::ListMembershipState::Added,
+    );
+    let mut departed = membership(
+        "public-list-one",
+        "item-departed",
+        scryer_domain::ListMembershipState::Added,
+    );
+    departed.left_at = Some(Utc::now());
+    harness.lists.insert_rows(vec![current, departed]);
+
+    let page = harness
+        .app
+        .public_list_memberships(&harness.manager, "public-list-one", 100, 0)
+        .await
+        .expect("memberships load");
+
+    assert_eq!(page.total_count, 1);
+    let keys = page
+        .items
+        .iter()
+        .map(|row| row.item_key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["item-current"], "a departed title just leaves");
+}

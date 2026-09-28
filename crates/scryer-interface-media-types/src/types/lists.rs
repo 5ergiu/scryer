@@ -754,8 +754,6 @@ pub struct ListMembershipPayload {
     pub first_seen_at: DateTime<Utc>,
     /// When a sync last saw the title on the list.
     pub last_seen_at: DateTime<Utc>,
-    /// When the title left the list, or null while it is on it.
-    pub left_at: Option<DateTime<Utc>>,
 }
 
 /// A page of a list's titles, in list order.

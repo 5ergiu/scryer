@@ -5523,7 +5523,6 @@ export const listSubscriptionDetailQuery = `query ListSubscriptionDetail($id: ID
       addedByList
       firstSeenAt
       lastSeenAt
-      leftAt
     }
   }
   listSyncRuns(subscriptionId: $id, limit: $runLimit) {

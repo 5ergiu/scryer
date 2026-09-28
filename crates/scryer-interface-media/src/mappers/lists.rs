@@ -419,7 +419,6 @@ fn from_membership(row: ListMembership) -> ListMembershipPayload {
         added_by_list: row.added_by_list,
         first_seen_at: row.first_seen_at,
         last_seen_at: row.last_seen_at,
-        left_at: row.left_at,
     }
 }
 

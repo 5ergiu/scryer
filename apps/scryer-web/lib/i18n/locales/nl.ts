@@ -3691,7 +3691,6 @@ const nl: LocaleDictionary = {
   "lists.detail.titles": "Titels ({{count}})",
   "lists.detail.title": "Titel",
   "lists.detail.state": "Status",
-  "lists.detail.leftAt": "Van de lijst verdwenen {{time}}",
   "lists.detail.noTitles": "Nog geen titels vastgelegd.",
   "lists.detail.pageRange": "{{from}}–{{to}} van {{total}}",
   "lists.detail.previousPage": "Vorige",
