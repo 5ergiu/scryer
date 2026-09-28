@@ -566,7 +566,7 @@ fn plan_episode_pack_member(
     // them that has to be translated. Once translated, the season the member
     // lands in is the one the translation validated against the catalog, so the
     // original folder season is no longer the thing to compare against.
-    let (identity, folder_season) = match translate_pack_member_numbering(
+    let (identity, folder_season, absolute_source) = match translate_pack_member_numbering(
         title,
         catalog,
         anime_numbering_bridge,
@@ -575,9 +575,9 @@ fn plan_episode_pack_member(
     ) {
         Ok(Some(translated)) => {
             let season = translated.season;
-            (translated, season)
+            (translated, season, MemberAbsoluteSource::Stamped)
         }
-        Ok(None) => (identity, folder_season),
+        Ok(None) => (identity, folder_season, MemberAbsoluteSource::Literal),
         Err(resolution) => {
             let ambiguous = resolution.is_ambiguous();
             let summary = resolution
@@ -600,6 +600,7 @@ fn plan_episode_pack_member(
     plan_parsed_pack_identity(
         title.facet == scryer_domain::MediaFacet::Anime,
         &identity,
+        absolute_source,
         folder_season,
         catalog,
     )
@@ -643,9 +644,21 @@ fn translate_pack_member_numbering(
     }
 }
 
+/// Where a pack member's absolute numbers came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberAbsoluteSource {
+    /// Stamped by a resolved numbering translation: the catalog episode's raw
+    /// `absolute_number`.
+    Stamped,
+    /// The parser's literal numbers, read on the title's absolute scale like
+    /// every other literal absolute.
+    Literal,
+}
+
 fn plan_parsed_pack_identity(
     is_anime: bool,
     identity: &crate::ParsedEpisodeMetadata,
+    absolute_source: MemberAbsoluteSource,
     folder_season: Option<u32>,
     catalog: &[scryer_domain::Episode],
 ) -> PlannedMemberDraft {
@@ -670,9 +683,15 @@ fn plan_parsed_pack_identity(
         };
         let absolute_numbers = parsed_absolute_numbers(identity);
         if !absolute_numbers.is_empty() {
-            let Some(absolute) =
-                catalog_episodes_for_raw_absolute_numbers(catalog, &absolute_numbers)
-            else {
+            let absolute = match absolute_source {
+                MemberAbsoluteSource::Stamped => {
+                    catalog_episodes_for_raw_absolute_numbers(catalog, &absolute_numbers)
+                }
+                MemberAbsoluteSource::Literal => {
+                    catalog_episodes_for_absolute_numbers(catalog, &absolute_numbers)
+                }
+            };
+            let Some(absolute) = absolute else {
                 return missing_catalog_member("absolute episode companion");
             };
             if episode_id_set(&standard) != episode_id_set(&absolute) {
@@ -843,10 +862,10 @@ fn catalog_episodes_for_absolute_numbers(
     catalog_episodes_for_absolute_numbers_on_scale(catalog, numbers, scale)
 }
 
-/// Catalog episodes for absolutes read on the raw scale, whatever scale the
-/// title matches on. A resolved numbering translation stamps the catalog
-/// episode's raw `absolute_number`, so a stamped companion is only comparable
-/// on that scale.
+/// Catalog episodes for stamped absolutes, read on the raw scale whatever
+/// scale the title matches on. A resolved numbering translation stamps the
+/// catalog episode's raw `absolute_number`, so a stamped companion is only
+/// comparable on that scale; a literal parsed absolute is not read here.
 fn catalog_episodes_for_raw_absolute_numbers(
     catalog: &[scryer_domain::Episode],
     numbers: &[u32],
@@ -1332,7 +1351,7 @@ mod series_plan_tests {
     fn agreeing_hybrid_identity_resolves_one_catalog_episode() {
         let catalog = vec![catalog_episode("ep-1", 1, 1), catalog_episode("ep-2", 2, 2)];
         assert!(matches!(
-            plan_parsed_pack_identity(false, &hybrid_identity(1), None, &catalog),
+            plan_parsed_pack_identity(false, &hybrid_identity(1), MemberAbsoluteSource::Literal, None, &catalog),
             PlannedMemberDraft::Resolved(ref episodes) if episodes.len() == 1 && episodes[0].id == "ep-1"
         ));
     }
@@ -1341,7 +1360,7 @@ mod series_plan_tests {
     fn conflicting_hybrid_identity_is_held() {
         let catalog = vec![catalog_episode("ep-1", 1, 1), catalog_episode("ep-2", 2, 2)];
         assert!(matches!(
-            plan_parsed_pack_identity(false, &hybrid_identity(2), None, &catalog),
+            plan_parsed_pack_identity(false, &hybrid_identity(2), MemberAbsoluteSource::Literal, None, &catalog),
             PlannedMemberDraft::Hold {
                 reason_code: "member_identity_conflict",
                 ..
@@ -1398,12 +1417,12 @@ mod series_plan_tests {
         );
 
         assert!(matches!(
-            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[53]), None, &catalog),
+            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[53]), MemberAbsoluteSource::Stamped, None, &catalog),
             PlannedMemberDraft::Resolved(ref episodes)
                 if episodes.len() == 1 && episodes[0].id == "ep-51"
         ));
         assert!(matches!(
-            plan_parsed_pack_identity(true, &stamped_identity(&[51, 52], &[53, 54]), None, &catalog),
+            plan_parsed_pack_identity(true, &stamped_identity(&[51, 52], &[53, 54]), MemberAbsoluteSource::Stamped, None, &catalog),
             PlannedMemberDraft::Resolved(ref episodes)
                 if episodes.iter().map(|episode| episode.id.as_str()).collect::<Vec<_>>()
                     == ["ep-51", "ep-52"]
@@ -1416,7 +1435,38 @@ mod series_plan_tests {
 
         // 55 is S01E53's raw absolute, not S01E51's.
         assert!(matches!(
-            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[55]), None, &catalog),
+            plan_parsed_pack_identity(true, &stamped_identity(&[51], &[55]), MemberAbsoluteSource::Stamped, None, &catalog),
+            PlannedMemberDraft::Hold {
+                reason_code: "member_identity_conflict",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_literal_companion_absolute_reads_on_the_titles_contiguous_scale() {
+        let catalog = contiguous_scaled_catalog();
+
+        assert!(matches!(
+            plan_parsed_pack_identity(
+                true,
+                &stamped_identity(&[51], &[51]),
+                MemberAbsoluteSource::Literal,
+                None,
+                &catalog
+            ),
+            PlannedMemberDraft::Resolved(ref episodes)
+                if episodes.len() == 1 && episodes[0].id == "ep-51"
+        ));
+        // 53 is S01E53 on the contiguous scale, not S01E51.
+        assert!(matches!(
+            plan_parsed_pack_identity(
+                true,
+                &stamped_identity(&[51], &[53]),
+                MemberAbsoluteSource::Literal,
+                None,
+                &catalog
+            ),
             PlannedMemberDraft::Hold {
                 reason_code: "member_identity_conflict",
                 ..
@@ -1480,14 +1530,14 @@ mod series_plan_tests {
         };
 
         assert!(matches!(
-            plan_parsed_pack_identity(false, &date_only, None, &catalog),
+            plan_parsed_pack_identity(false, &date_only, MemberAbsoluteSource::Literal, None, &catalog),
             PlannedMemberDraft::Hold {
                 reason_code: "episode_not_found_for_title",
                 ..
             }
         ));
         assert!(matches!(
-            plan_parsed_pack_identity(false, &part_two, None, &catalog),
+            plan_parsed_pack_identity(false, &part_two, MemberAbsoluteSource::Literal, None, &catalog),
             PlannedMemberDraft::Resolved(ref episodes) if episodes[0].id == "ep-2"
         ));
     }
