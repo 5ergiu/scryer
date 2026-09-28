@@ -380,14 +380,25 @@ impl AppUseCase {
         // setting is already written, so recycling from here on lands in the
         // new location and cannot race entries into the old one.
         let relocation = match bins_before_path_change {
-            Some(before) => {
-                let after = self.recycle_bin_bases_by_media_root().await?;
-                let report = crate::recycle_bin::relocate_recycle_entries(
-                    Self::recycle_bin_relocation_plans(&before, &after),
-                )
-                .await;
-                (!report.is_empty()).then_some(report)
-            }
+            // The save itself has succeeded by now. Failing to read the new
+            // locations leaves every entry where it is rather than failing
+            // the save.
+            Some(before) => match self.recycle_bin_bases_by_media_root().await {
+                Ok(after) => {
+                    let report = crate::recycle_bin::relocate_recycle_entries(
+                        Self::recycle_bin_relocation_plans(&before, &after),
+                    )
+                    .await;
+                    (!report.is_empty()).then_some(report)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "recycle bin location saved, entries left in place: new locations could not be read"
+                    );
+                    None
+                }
+            },
             None => None,
         };
 
