@@ -50,6 +50,7 @@ impl AppUseCase {
             retention_days,
             effective_paths,
             validation_error,
+            relocation: None,
         })
     }
 }
@@ -313,6 +314,11 @@ impl AppUseCase {
                 .filter(|path| !path.is_empty())
                 .map(str::to_string)
         });
+        // Sending the stored path back is not a change. It is neither
+        // revalidated, so a bin a later library root invalidated never blocks
+        // saving other fields, nor rewritten, so no entries move.
+        let (_, stored_path, _) = self.recycle_bin_config_values().await;
+        let path = path.filter(|path| *path != stored_path);
         if let Some(Some(path)) = path.as_ref() {
             let configured_roots = self
                 .all_library_root_folders()
@@ -327,6 +333,10 @@ impl AppUseCase {
                 return Err(AppError::Validation(error));
             }
         }
+        let bins_before_path_change = match path {
+            Some(_) => Some(self.recycle_bin_bases_by_media_root().await?),
+            None => None,
+        };
 
         let updated_by = Some(actor.id.clone());
         let mut changed_keys = Vec::new();
@@ -366,6 +376,139 @@ impl AppUseCase {
             .settings_changed_broadcast
             .send(changed_keys);
 
-        self.load_recycle_bin_settings(None).await
+        // Entries follow the location only on a save that changed it. The
+        // setting is already written, so recycling from here on lands in the
+        // new location and cannot race entries into the old one.
+        let relocation = match bins_before_path_change {
+            Some(before) => {
+                let after = self.recycle_bin_bases_by_media_root().await?;
+                let report = crate::recycle_bin::relocate_recycle_entries(
+                    Self::recycle_bin_relocation_plans(&before, &after),
+                )
+                .await;
+                (!report.is_empty()).then_some(report)
+            }
+            None => None,
+        };
+
+        let mut settings = self.load_recycle_bin_settings(None).await?;
+        settings.relocation = relocation;
+        Ok(settings)
+    }
+}
+impl AppUseCase {
+    /// Each library root with the bin its deleted media goes to under the
+    /// current settings. With no roots, only a custom bin is listed: the
+    /// rootless fallback is never a place to move entries to.
+    async fn recycle_bin_bases_by_media_root(
+        &self,
+    ) -> AppResult<Vec<(Option<PathBuf>, crate::recycle_bin::RecycleBinConfig)>> {
+        let (enabled, custom_path, retention_days) = self.recycle_bin_config_values().await;
+        let roots = self
+            .all_library_root_folders()
+            .await?
+            .into_iter()
+            .map(|root| root.path.trim().to_string())
+            .filter(|root| !root.is_empty())
+            .collect::<Vec<_>>();
+        let configured_roots = roots
+            .iter()
+            .map(|root| Self::normalize_recycle_config_path(Path::new(root)))
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Ok(custom_path
+                .as_deref()
+                .map(|path| {
+                    (
+                        None,
+                        Self::recycle_bin_config_from_values(
+                            enabled,
+                            Some(path),
+                            retention_days,
+                            None,
+                            &configured_roots,
+                        ),
+                    )
+                })
+                .into_iter()
+                .collect());
+        }
+        Ok(roots
+            .iter()
+            .zip(configured_roots.iter())
+            .map(|(root, normalized_root)| {
+                (
+                    Some(normalized_root.clone()),
+                    Self::recycle_bin_config_from_values(
+                        enabled,
+                        custom_path.as_deref(),
+                        retention_days,
+                        Some(root.as_str()),
+                        &configured_roots,
+                    ),
+                )
+            })
+            .collect())
+    }
+
+    /// Pair each previous bin with the bins its entries now belong in. A root
+    /// whose bin did not change contributes nothing, and a new bin that fails
+    /// validation is never a destination.
+    fn recycle_bin_relocation_plans(
+        before: &[(Option<PathBuf>, crate::recycle_bin::RecycleBinConfig)],
+        after: &[(Option<PathBuf>, crate::recycle_bin::RecycleBinConfig)],
+    ) -> Vec<crate::recycle_bin::RecycleRelocationPlan> {
+        let mut plans: Vec<crate::recycle_bin::RecycleRelocationPlan> = Vec::new();
+        for (root, old_config) in before {
+            let old_base = Self::normalize_recycle_config_path(&old_config.base_path);
+            let new_bins = after
+                .iter()
+                .filter(|(after_root, _)| root.is_none() || after_root == root)
+                .filter(|(_, config)| config.validation_error.is_none())
+                .map(|(after_root, config)| {
+                    (
+                        after_root.clone(),
+                        Self::normalize_recycle_config_path(&config.base_path),
+                    )
+                })
+                .filter(|(_, new_base)| *new_base != old_base)
+                .collect::<Vec<_>>();
+            if new_bins.is_empty() {
+                continue;
+            }
+            let plan = match plans.iter_mut().find(|plan| plan.from == old_base) {
+                Some(plan) => plan,
+                None => {
+                    plans.push(crate::recycle_bin::RecycleRelocationPlan {
+                        from: old_base.clone(),
+                        targets: Vec::new(),
+                    });
+                    plans.last_mut().expect("plan was just pushed")
+                }
+            };
+            for (after_root, new_base) in new_bins {
+                let target = match plan
+                    .targets
+                    .iter_mut()
+                    .find(|target| target.base_path == new_base)
+                {
+                    Some(target) => target,
+                    None => {
+                        plan.targets
+                            .push(crate::recycle_bin::RecycleRelocationTarget {
+                                base_path: new_base,
+                                media_roots: Vec::new(),
+                            });
+                        plan.targets.last_mut().expect("target was just pushed")
+                    }
+                };
+                if let Some(after_root) = after_root
+                    && !target.media_roots.contains(&after_root)
+                {
+                    target.media_roots.push(after_root);
+                }
+            }
+        }
+        plans
     }
 }

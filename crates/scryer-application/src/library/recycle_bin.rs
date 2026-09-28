@@ -1,6 +1,7 @@
 use crate::{AppError, AppResult};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
@@ -87,6 +88,10 @@ pub struct RecycledMediaRowSnapshot {
     pub edition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_hash: Option<String>,
+    /// The frozen indexer listing the grab read, as the opaque JSON the row
+    /// stored. Manifests written before this was recorded have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_listing_json: Option<String>,
 }
 
 impl RecycledMediaRowSnapshot {
@@ -102,6 +107,7 @@ impl RecycledMediaRowSnapshot {
             grabbed_at: file.grabbed_at.clone(),
             edition: file.edition.clone(),
             release_hash: file.release_hash.clone(),
+            release_listing_json: file.release_listing_json.clone(),
         }
     }
 
@@ -1589,6 +1595,580 @@ pub fn config_from_file_path(file_path: &Path) -> RecycleBinConfig {
     }
 }
 
+// ── Moving entries to a new recycle location ─────────────────────────────────
+//
+// The bin lists, restores and purges only entries under the currently
+// configured location. When that location changes, committed entries in the
+// previous location are moved so they stay managed. The previous copy of an
+// entry is removed only after the new copy has been proven complete, and any
+// failure leaves the entry exactly where it was.
+
+/// One entry a location change could not move. It stays at `from_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecycleEntryRelocationFailure {
+    pub entry_id: String,
+    pub from_path: String,
+    pub reason: String,
+}
+
+/// What a location change did with the entries of the previous location.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecycleBinRelocationReport {
+    pub moved_count: u32,
+    pub failures: Vec<RecycleEntryRelocationFailure>,
+}
+
+impl RecycleBinRelocationReport {
+    pub fn is_empty(&self) -> bool {
+        self.moved_count == 0 && self.failures.is_empty()
+    }
+
+    pub(crate) fn merge(&mut self, other: RecycleBinRelocationReport) {
+        self.moved_count += other.moved_count;
+        self.failures.extend(other.failures);
+    }
+}
+
+/// A destination bin and the media roots whose entries belong in it.
+#[derive(Debug, Clone)]
+pub(crate) struct RecycleRelocationTarget {
+    pub base_path: PathBuf,
+    pub media_roots: Vec<PathBuf>,
+}
+
+/// Entries of one previous bin and where they go. With a single target every
+/// entry goes there; with several, each entry follows the media root its
+/// original path lives under.
+#[derive(Debug, Clone)]
+pub(crate) struct RecycleRelocationPlan {
+    pub from: PathBuf,
+    pub targets: Vec<RecycleRelocationTarget>,
+}
+
+/// Size and full-content BLAKE3 digest of one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelocationFileDigest {
+    size: u64,
+    blake3: blake3::Hash,
+}
+
+/// The file operations a relocation uses, replaceable so tests can force the
+/// copy path and inject copy or verification failures.
+#[derive(Clone, Copy)]
+struct RelocationOps {
+    /// Try an atomic no-replace rename before copying.
+    allow_rename: bool,
+    /// Copy `source` onto a `dest` that does not exist yet, returning the
+    /// digest of the bytes read from `source`.
+    copy_file: fn(&Path, &Path) -> std::io::Result<RelocationFileDigest>,
+    /// Digest of a file as it is on disk.
+    digest_file: fn(&Path) -> std::io::Result<RelocationFileDigest>,
+}
+
+impl Default for RelocationOps {
+    fn default() -> Self {
+        Self {
+            allow_rename: true,
+            copy_file: copy_file_with_digest,
+            digest_file,
+        }
+    }
+}
+
+const RELOCATION_COPY_BUFFER_BYTES: usize = 1024 * 1024;
+
+fn copy_file_with_digest(source: &Path, dest: &Path) -> std::io::Result<RelocationFileDigest> {
+    use std::io::{Read, Write};
+
+    let mut source_file = std::fs::File::open(source)?;
+    let mut dest_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; RELOCATION_COPY_BUFFER_BYTES];
+    let mut size = 0u64;
+    loop {
+        let read = source_file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        dest_file.write_all(&buffer[..read])?;
+        size += read as u64;
+    }
+    dest_file.flush()?;
+    dest_file.sync_all()?;
+    if let Ok(metadata) = source_file.metadata() {
+        let _ = dest_file.set_permissions(metadata.permissions());
+    }
+    Ok(RelocationFileDigest {
+        size,
+        blake3: hasher.finalize(),
+    })
+}
+
+fn digest_file(path: &Path) -> std::io::Result<RelocationFileDigest> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; RELOCATION_COPY_BUFFER_BYTES];
+    let mut size = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok(RelocationFileDigest {
+        size,
+        blake3: hasher.finalize(),
+    })
+}
+
+/// Move every committed entry of each plan's previous bin to its new bin.
+///
+/// Only directories that carry a valid manifest for their own entry id are
+/// touched; anything else in the previous bin, and the previous bin itself,
+/// is left as it is. An entry is never written over an existing entry.
+pub(crate) async fn relocate_recycle_entries(
+    plans: Vec<RecycleRelocationPlan>,
+) -> RecycleBinRelocationReport {
+    let mut report = RecycleBinRelocationReport::default();
+    for plan in plans {
+        report.merge(relocate_plan(&plan, RelocationOps::default()).await);
+    }
+    report
+}
+
+async fn relocate_plan(
+    plan: &RecycleRelocationPlan,
+    ops: RelocationOps,
+) -> RecycleBinRelocationReport {
+    let mut report = RecycleBinRelocationReport::default();
+    let from = &plan.from;
+    let from_display = from.to_string_lossy().into_owned();
+
+    match tokio::fs::metadata(from).await {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return report,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(error) => {
+            report.failures.push(RecycleEntryRelocationFailure {
+                entry_id: String::new(),
+                from_path: from_display,
+                reason: format!("the previous recycle folder could not be read: {error}"),
+            });
+            return report;
+        }
+    }
+    // Without the root sentinel the bin never managed this folder, so it holds
+    // nothing that is ours to move.
+    if !matches!(
+        tokio::fs::symlink_metadata(from.join(RECYCLE_ROOT_SENTINEL)).await,
+        Ok(metadata) if metadata.is_file()
+    ) {
+        return report;
+    }
+
+    let mut entry_dirs = Vec::new();
+    match tokio::fs::read_dir(from).await {
+        Ok(mut entries) => loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => entry_dirs.push(entry.path()),
+                Ok(None) => break,
+                Err(error) => {
+                    report.failures.push(RecycleEntryRelocationFailure {
+                        entry_id: String::new(),
+                        from_path: from_display.clone(),
+                        reason: format!("the previous recycle folder could not be listed: {error}"),
+                    });
+                    break;
+                }
+            }
+        },
+        Err(error) => {
+            report.failures.push(RecycleEntryRelocationFailure {
+                entry_id: String::new(),
+                from_path: from_display,
+                reason: format!("the previous recycle folder could not be listed: {error}"),
+            });
+            return report;
+        }
+    }
+    entry_dirs.sort();
+
+    let mut prepared_targets: Vec<(PathBuf, Result<(), String>)> = Vec::new();
+    for entry_dir in entry_dirs {
+        let Some((entry_id, manifest)) = recognized_entry(&entry_dir).await else {
+            continue;
+        };
+        let fail = |reason: String| RecycleEntryRelocationFailure {
+            entry_id: entry_id.clone(),
+            from_path: entry_dir.to_string_lossy().into_owned(),
+            reason,
+        };
+        if !manifest.is_committed() {
+            let status = manifest.status.as_deref().unwrap_or("unknown");
+            report.failures.push(fail(format!(
+                "the entry is not committed (status {status}), so it was left in place"
+            )));
+            continue;
+        }
+        let Some(target) = relocation_target_for(plan, &manifest) else {
+            report.failures.push(fail(
+                "no new recycle folder matches the library this entry came from".to_string(),
+            ));
+            continue;
+        };
+        if normalize_path(target) == normalize_path(from) {
+            continue;
+        }
+
+        let prepared = match prepared_targets
+            .iter()
+            .find(|(base, _)| base == target)
+            .map(|(_, result)| result.clone())
+        {
+            Some(result) => result,
+            None => {
+                let result = prepare_relocation_target(target).await;
+                prepared_targets.push((target.clone(), result.clone()));
+                result
+            }
+        };
+        if let Err(reason) = prepared {
+            report.failures.push(fail(reason));
+            continue;
+        }
+
+        match relocate_entry(&entry_dir, &target.join(&entry_id), &manifest, ops).await {
+            Ok(RelocatedEntry::Moved) => report.moved_count += 1,
+            Ok(RelocatedEntry::MovedWithLeftovers(reason)) => {
+                report.moved_count += 1;
+                report.failures.push(fail(reason));
+            }
+            Err(reason) => report.failures.push(fail(reason)),
+        }
+    }
+
+    if report.moved_count > 0 || !report.failures.is_empty() {
+        info!(
+            from = %from.display(),
+            moved = report.moved_count,
+            failed = report.failures.len(),
+            "moved recycle bin entries to the new recycle location"
+        );
+    }
+    report
+}
+
+/// The entry id and manifest of a directory the bin created, or `None` for
+/// anything else, which relocation must leave alone.
+async fn recognized_entry(entry_dir: &Path) -> Option<(String, RecycleManifest)> {
+    let entry_id = entry_dir.file_name()?.to_str()?.to_string();
+    if validate_recycle_entry_id(&entry_id).is_err() || !generated_entry_id(&entry_id) {
+        return None;
+    }
+    let metadata = tokio::fs::symlink_metadata(entry_dir).await.ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let manifest_metadata = tokio::fs::symlink_metadata(manifest_path(entry_dir))
+        .await
+        .ok()?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return None;
+    }
+    let manifest = read_manifest(entry_dir).await.ok()??;
+    if !manifest.is_schema_current() || manifest.entry_id.as_deref() != Some(entry_id.as_str()) {
+        return None;
+    }
+    Some((entry_id, manifest))
+}
+
+fn relocation_target_for<'a>(
+    plan: &'a RecycleRelocationPlan,
+    manifest: &RecycleManifest,
+) -> Option<&'a PathBuf> {
+    if let [target] = plan.targets.as_slice() {
+        return Some(&target.base_path);
+    }
+    let original_path = manifest.original_path_buf();
+    plan.targets
+        .iter()
+        .flat_map(|target| {
+            target
+                .media_roots
+                .iter()
+                .map(move |root| (root, &target.base_path))
+        })
+        .filter(|(root, _)| source_file_is_under_configured_root(&original_path, root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, base)| base)
+        .or_else(|| {
+            let media_root = manifest.media_root.as_deref()?.trim();
+            plan.targets
+                .iter()
+                .find(|target| {
+                    target
+                        .media_roots
+                        .iter()
+                        .any(|root| normalize_path(root) == normalize_path(Path::new(media_root)))
+                })
+                .map(|target| &target.base_path)
+        })
+}
+
+async fn prepare_relocation_target(base_path: &Path) -> Result<(), String> {
+    let config = RecycleBinConfig {
+        enabled: true,
+        base_path: base_path.to_path_buf(),
+        retention_days: DEFAULT_RETENTION_DAYS,
+        cleanup_enabled: true,
+        validation_error: None,
+        source_roots: Vec::new(),
+    };
+    ensure_recycle_root(&config)
+        .await
+        .map_err(|error| format!("the new recycle folder could not be prepared: {error}"))
+}
+
+enum RelocatedEntry {
+    Moved,
+    /// The entry is complete at its new location, but part of the previous
+    /// copy could not be removed.
+    MovedWithLeftovers(String),
+}
+
+async fn relocate_entry(
+    entry_dir: &Path,
+    dest: &Path,
+    manifest: &RecycleManifest,
+    ops: RelocationOps,
+) -> Result<RelocatedEntry, String> {
+    match tokio::fs::symlink_metadata(dest).await {
+        Ok(_) => return Err(relocation_collision(dest)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "could not check the destination {}: {error}",
+                dest.display()
+            ));
+        }
+    }
+
+    if ops.allow_rename {
+        // A same-filesystem rename moves the entry in one step, so the entry
+        // is only ever in one place and there is no copy to verify. Only the
+        // no-replace rename is used: a plain rename would replace an empty
+        // directory that appeared at the destination.
+        match crate::fs_safety::exclusive_rename(entry_dir, dest).await {
+            Some(Ok(())) => return Ok(RelocatedEntry::Moved),
+            Some(Err(error))
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || error.kind() == std::io::ErrorKind::DirectoryNotEmpty =>
+            {
+                return Err(relocation_collision(dest));
+            }
+            Some(Err(error)) if crate::fs_safety::is_cross_device_error(&error) => {}
+            Some(Err(error)) => {
+                return Err(format!(
+                    "could not move the entry to {}: {error}",
+                    dest.display()
+                ));
+            }
+            None => {}
+        }
+    }
+
+    let source = entry_dir.to_path_buf();
+    let destination = dest.to_path_buf();
+    let expected_manifest = manifest.clone();
+    tokio::task::spawn_blocking(move || {
+        copy_and_verify_entry(&source, &destination, &expected_manifest, ops)
+    })
+    .await
+    .map_err(|error| format!("the copy task failed: {error}"))??;
+
+    // The new copy is proven complete; only now does the previous one go.
+    match crate::fs_safety::remove_dir_all_safely(entry_dir).await {
+        Ok(()) => Ok(RelocatedEntry::Moved),
+        Err(error) => Ok(RelocatedEntry::MovedWithLeftovers(format!(
+            "the entry was copied to {} and verified, but the previous copy could not be fully removed: {error}",
+            dest.display()
+        ))),
+    }
+}
+
+fn relocation_collision(dest: &Path) -> String {
+    format!(
+        "an entry with the same id already exists at {}; nothing was overwritten",
+        dest.display()
+    )
+}
+
+/// Copy `entry_dir` to a new `dest` and prove every file arrived intact. On
+/// failure the partial copy this call created is removed; the source is never
+/// touched.
+fn copy_and_verify_entry(
+    entry_dir: &Path,
+    dest: &Path,
+    manifest: &RecycleManifest,
+    ops: RelocationOps,
+) -> Result<(), String> {
+    let (dirs, files) = collect_entry_tree(entry_dir)?;
+
+    // Creating the directory itself is the claim: it fails when anything
+    // already holds the name, so the copy never lands in someone else's entry.
+    match std::fs::create_dir(dest) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(relocation_collision(dest));
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not create {} for the copy: {error}",
+                dest.display()
+            ));
+        }
+    }
+
+    let outcome = copy_entry_tree(entry_dir, dest, &dirs, &files, ops)
+        .and_then(|copied| verify_entry_copy(entry_dir, dest, &copied, manifest, ops));
+    if let Err(reason) = outcome {
+        return Err(match std::fs::remove_dir_all(dest) {
+            Ok(()) => reason,
+            Err(error) => format!(
+                "{reason}; the partial copy at {} could not be removed: {error}",
+                dest.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Relative directories and files of an entry. Anything other than plain
+/// directories and regular files makes the entry unsafe to copy.
+fn collect_entry_tree(entry_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let absolute = entry_dir.join(&relative);
+        let entries = std::fs::read_dir(&absolute)
+            .map_err(|error| format!("could not read {}: {error}", absolute.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("could not read {}: {error}", absolute.display()))?;
+            let child = relative.join(entry.file_name());
+            let file_type = entry.file_type().map_err(|error| {
+                format!("could not inspect {}: {error}", entry.path().display())
+            })?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "the entry contains a symbolic link at {}",
+                    entry.path().display()
+                ));
+            } else if file_type.is_dir() {
+                dirs.push(child.clone());
+                pending.push(child);
+            } else if file_type.is_file() {
+                files.push(child);
+            } else {
+                return Err(format!(
+                    "the entry contains something that is not a regular file at {}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    dirs.sort();
+    files.sort();
+    Ok((dirs, files))
+}
+
+fn copy_entry_tree(
+    entry_dir: &Path,
+    dest: &Path,
+    dirs: &[PathBuf],
+    files: &[PathBuf],
+    ops: RelocationOps,
+) -> Result<BTreeMap<PathBuf, RelocationFileDigest>, String> {
+    for dir in dirs {
+        let target = dest.join(dir);
+        std::fs::create_dir(&target)
+            .map_err(|error| format!("could not create {}: {error}", target.display()))?;
+    }
+    let mut copied = BTreeMap::new();
+    for file in files {
+        let source = entry_dir.join(file);
+        let target = dest.join(file);
+        let digest = (ops.copy_file)(&source, &target).map_err(|error| {
+            format!(
+                "could not copy {} to {}: {error}",
+                source.display(),
+                target.display()
+            )
+        })?;
+        copied.insert(file.clone(), digest);
+    }
+    Ok(copied)
+}
+
+fn verify_entry_copy(
+    entry_dir: &Path,
+    dest: &Path,
+    copied: &BTreeMap<PathBuf, RelocationFileDigest>,
+    manifest: &RecycleManifest,
+    ops: RelocationOps,
+) -> Result<(), String> {
+    let (_, dest_files) = collect_entry_tree(dest)?;
+    if dest_files.iter().collect::<Vec<_>>() != copied.keys().collect::<Vec<_>>() {
+        return Err(format!(
+            "the copy at {} does not hold the same files as the entry",
+            dest.display()
+        ));
+    }
+    for (file, source_digest) in copied {
+        // The source must still be the file that was copied, and the copy
+        // must match it byte for byte.
+        let source_size = std::fs::metadata(entry_dir.join(file))
+            .map_err(|error| format!("could not re-check {}: {error}", file.display()))?
+            .len();
+        if source_size != source_digest.size {
+            return Err(format!(
+                "{} changed while it was being copied",
+                entry_dir.join(file).display()
+            ));
+        }
+        let target = dest.join(file);
+        let dest_digest = (ops.digest_file)(&target)
+            .map_err(|error| format!("could not verify {}: {error}", target.display()))?;
+        if dest_digest != *source_digest {
+            return Err(format!(
+                "verification failed: {} does not match the entry's copy",
+                target.display()
+            ));
+        }
+    }
+
+    let manifest_bytes = std::fs::read(manifest_path(dest))
+        .map_err(|error| format!("could not read the copied manifest: {error}"))?;
+    let copied_manifest: RecycleManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("the copied manifest could not be parsed: {error}"))?;
+    if !copied_manifest.is_schema_current()
+        || copied_manifest.entry_id != manifest.entry_id
+        || copied_manifest.recycled_at != manifest.recycled_at
+    {
+        return Err("the copied manifest does not match the entry".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1923,6 +2503,39 @@ mod tests {
         let parsed: RecycleManifest = serde_json::from_value(legacy).unwrap();
         assert_eq!(parsed.media_row, None);
         assert_eq!(parsed.schema.as_deref(), Some(RECYCLE_MANIFEST_SCHEMA));
+    }
+
+    #[test]
+    fn recycle_manifest_release_listing_round_trips_and_older_snapshots_parse() {
+        let mut manifest = test_manifest();
+        manifest.media_row = Some(RecycledMediaRowSnapshot {
+            acquisition_score: Some(64),
+            release_listing_json: Some(r#"{"votes":{"up":2},"password":false}"#.to_string()),
+            ..Default::default()
+        });
+        let encoded = serde_json::to_string(&manifest).unwrap();
+        let decoded: RecycleManifest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .media_row
+                .as_ref()
+                .and_then(|row| row.release_listing_json.as_deref()),
+            Some(r#"{"votes":{"up":2},"password":false}"#)
+        );
+
+        let older = serde_json::json!({
+            "schema": RECYCLE_MANIFEST_SCHEMA,
+            "recycled_at": "2031-01-02T03:04:05Z",
+            "original_path": "/data/movies/Invented Film (2031)/Invented Film.mkv",
+            "size_bytes": 10,
+            "reason": "upgrade_replaced",
+            "media_row": { "acquisition_score": 12, "release_hash": "abc123" }
+        });
+        let parsed: RecycleManifest = serde_json::from_value(older).unwrap();
+        let row = parsed.media_row.expect("older snapshot still parses");
+        assert_eq!(row.acquisition_score, Some(12));
+        assert_eq!(row.release_hash.as_deref(), Some("abc123"));
+        assert_eq!(row.release_listing_json, None);
     }
 
     #[tokio::test]
@@ -2967,5 +3580,393 @@ mod tests {
         assert_eq!(purged, 1);
         assert!(!match_dir.exists(), "matching title entry should be purged");
         assert!(other_dir.exists(), "different title entry should survive");
+    }
+
+    const RELOCATION_RECYCLED_AT: &str = "2031-01-02T03:04:05+00:00";
+
+    fn copy_only_ops() -> RelocationOps {
+        RelocationOps {
+            allow_rename: false,
+            ..RelocationOps::default()
+        }
+    }
+
+    fn payload_copy_fails(source: &Path, dest: &Path) -> std::io::Result<RelocationFileDigest> {
+        if dest.file_name().is_some_and(|name| name == "media.mkv") {
+            return Err(std::io::Error::other("injected copy failure"));
+        }
+        copy_file_with_digest(source, dest)
+    }
+
+    fn payload_digest_mismatches(path: &Path) -> std::io::Result<RelocationFileDigest> {
+        let mut digest = digest_file(path)?;
+        if path.file_name().is_some_and(|name| name == "media.mkv") {
+            digest.blake3 = blake3::hash(b"not the recycled payload");
+        }
+        Ok(digest)
+    }
+
+    fn single_target_plan(from: &Path, to: &Path) -> RecycleRelocationPlan {
+        RecycleRelocationPlan {
+            from: from.to_path_buf(),
+            targets: vec![RecycleRelocationTarget {
+                base_path: to.to_path_buf(),
+                media_roots: Vec::new(),
+            }],
+        }
+    }
+
+    async fn seed_relocation_bin(bin: &Path, entry_id: &str) -> PathBuf {
+        tokio::fs::create_dir_all(bin).await.unwrap();
+        write_test_sentinel(bin).await;
+        let manifest = committed_manifest(
+            entry_id,
+            RELOCATION_RECYCLED_AT.to_string(),
+            "/data/movies/Invented Film (2031)/Invented Film.mkv",
+            Some("title-relocate"),
+            "file_deleted",
+        );
+        write_test_entry(bin, entry_id, &manifest).await
+    }
+
+    fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut snapshot = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let relative = path.strip_prefix(dir).unwrap().to_path_buf();
+                if entry.file_type().unwrap().is_dir() {
+                    snapshot.push((relative, Vec::new()));
+                    pending.push(path);
+                } else {
+                    snapshot.push((relative, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        snapshot.sort();
+        snapshot
+    }
+
+    async fn assert_moved_entry(new_bin: &Path, entry_id: &str) {
+        let entries = list_committed_entries(&test_config(new_bin)).await.unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the moved entry is listed at the new location"
+        );
+        assert_eq!(entries[0].manifest.entry_id.as_deref(), Some(entry_id));
+        assert_eq!(
+            entries[0].manifest.recycled_at, RELOCATION_RECYCLED_AT,
+            "the entry keeps its original recycled-at time"
+        );
+        assert_eq!(
+            std::fs::read(new_bin.join(entry_id).join("media.mkv")).unwrap(),
+            b"media"
+        );
+    }
+
+    #[tokio::test]
+    async fn relocation_renames_entry_into_new_location() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        let entry_id = "20310102_030405000_mov111";
+        let old_entry = seed_relocation_bin(&old_bin, entry_id).await;
+
+        let report = relocate_plan(
+            &single_target_plan(&old_bin, &new_bin),
+            RelocationOps::default(),
+        )
+        .await;
+
+        assert_eq!(report.moved_count, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!old_entry.exists(), "the previous copy is gone");
+        assert!(old_bin.is_dir(), "the previous folder itself is kept");
+        assert_moved_entry(&new_bin, entry_id).await;
+    }
+
+    #[tokio::test]
+    async fn relocation_copies_verifies_then_removes_previous_copy() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        let entry_id = "20310102_030405000_cpy111";
+        let old_entry = seed_relocation_bin(&old_bin, entry_id).await;
+        tokio::fs::create_dir(old_entry.join("extras"))
+            .await
+            .unwrap();
+        tokio::fs::write(old_entry.join("extras").join("sidecar.srt"), b"subtitle")
+            .await
+            .unwrap();
+
+        let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), copy_only_ops()).await;
+
+        assert_eq!(report.moved_count, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(
+            !old_entry.exists(),
+            "the verified copy replaces the previous one"
+        );
+        assert_moved_entry(&new_bin, entry_id).await;
+        assert_eq!(
+            std::fs::read(new_bin.join(entry_id).join("extras").join("sidecar.srt")).unwrap(),
+            b"subtitle"
+        );
+    }
+
+    #[tokio::test]
+    async fn relocation_copy_failure_keeps_entry_and_removes_partial_copy() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        let entry_id = "20310102_030405000_cfl111";
+        let old_entry = seed_relocation_bin(&old_bin, entry_id).await;
+        let before = tree_snapshot(&old_bin);
+
+        let ops = RelocationOps {
+            copy_file: payload_copy_fails,
+            ..copy_only_ops()
+        };
+        let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), ops).await;
+
+        assert_eq!(report.moved_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].entry_id, entry_id);
+        assert_eq!(
+            report.failures[0].from_path,
+            old_entry.to_string_lossy().into_owned()
+        );
+        assert!(
+            report.failures[0].reason.contains("injected copy failure"),
+            "{}",
+            report.failures[0].reason
+        );
+        assert_eq!(tree_snapshot(&old_bin), before, "the entry is left intact");
+        assert!(
+            !new_bin.join(entry_id).exists(),
+            "the partial copy is cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn relocation_verification_failure_keeps_entry_and_removes_copy() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        let entry_id = "20310102_030405000_vfy111";
+        seed_relocation_bin(&old_bin, entry_id).await;
+        let before = tree_snapshot(&old_bin);
+
+        let ops = RelocationOps {
+            digest_file: payload_digest_mismatches,
+            ..copy_only_ops()
+        };
+        let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), ops).await;
+
+        assert_eq!(report.moved_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0].reason.contains("verification failed"),
+            "{}",
+            report.failures[0].reason
+        );
+        assert_eq!(tree_snapshot(&old_bin), before, "the entry is left intact");
+        assert!(
+            !new_bin.join(entry_id).exists(),
+            "the unverified copy is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn relocation_leaves_everything_without_a_valid_manifest_untouched() {
+        for ops in [RelocationOps::default(), copy_only_ops()] {
+            let tmp = TempDir::new().unwrap();
+            let old_bin = tmp.path().join("old-bin");
+            let new_bin = tmp.path().join("new-bin");
+            let entry_id = "20310102_030405000_val111";
+            seed_relocation_bin(&old_bin, entry_id).await;
+
+            tokio::fs::write(old_bin.join("notes.txt"), b"operator notes")
+                .await
+                .unwrap();
+            let no_manifest = old_bin.join("20310102_030405000_nom111");
+            tokio::fs::create_dir(&no_manifest).await.unwrap();
+            tokio::fs::write(no_manifest.join("media.mkv"), b"unmanaged")
+                .await
+                .unwrap();
+            let unparsable = old_bin.join("20310102_030405000_bad111");
+            tokio::fs::create_dir(&unparsable).await.unwrap();
+            tokio::fs::write(unparsable.join("manifest.json"), b"{ not json")
+                .await
+                .unwrap();
+            let mismatched_id = committed_manifest(
+                "20310102_030405000_zzz999",
+                RELOCATION_RECYCLED_AT.to_string(),
+                "/data/movies/Other/Other.mkv",
+                None,
+                "file_deleted",
+            );
+            write_test_entry(&old_bin, "20310102_030405000_mis111", &mismatched_id).await;
+            let plain_dir = old_bin.join("keep-me");
+            tokio::fs::create_dir(&plain_dir).await.unwrap();
+            tokio::fs::write(plain_dir.join("file.bin"), b"keep")
+                .await
+                .unwrap();
+
+            let mut expected = tree_snapshot(&old_bin);
+            expected.retain(|(path, _)| !path.starts_with(entry_id));
+
+            let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), ops).await;
+
+            assert_eq!(report.moved_count, 1, "only the valid entry moves");
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(
+                tree_snapshot(&old_bin),
+                expected,
+                "everything else in the previous folder is left exactly as it was"
+            );
+            let moved = std::fs::read_dir(&new_bin)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name != RECYCLE_ROOT_SENTINEL)
+                .collect::<Vec<_>>();
+            assert_eq!(moved, vec![entry_id.to_string()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn relocation_without_root_sentinel_moves_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        let entry_id = "20310102_030405000_sen111";
+        seed_relocation_bin(&old_bin, entry_id).await;
+        tokio::fs::remove_file(old_bin.join(RECYCLE_ROOT_SENTINEL))
+            .await
+            .unwrap();
+        let before = tree_snapshot(&old_bin);
+
+        let report = relocate_plan(
+            &single_target_plan(&old_bin, &new_bin),
+            RelocationOps::default(),
+        )
+        .await;
+
+        assert!(report.is_empty());
+        assert_eq!(tree_snapshot(&old_bin), before);
+        assert!(!new_bin.exists());
+    }
+
+    #[tokio::test]
+    async fn relocation_never_overwrites_an_entry_at_the_destination() {
+        for ops in [RelocationOps::default(), copy_only_ops()] {
+            let tmp = TempDir::new().unwrap();
+            let old_bin = tmp.path().join("old-bin");
+            let new_bin = tmp.path().join("new-bin");
+            let entry_id = "20310102_030405000_col111";
+            seed_relocation_bin(&old_bin, entry_id).await;
+            let occupant = new_bin.join(entry_id);
+            tokio::fs::create_dir_all(&occupant).await.unwrap();
+            tokio::fs::write(occupant.join("occupant.bin"), b"already here")
+                .await
+                .unwrap();
+            let old_before = tree_snapshot(&old_bin);
+            let new_before = tree_snapshot(&occupant);
+
+            let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), ops).await;
+
+            assert_eq!(report.moved_count, 0);
+            assert_eq!(report.failures.len(), 1);
+            assert!(
+                report.failures[0].reason.contains("already exists"),
+                "{}",
+                report.failures[0].reason
+            );
+            assert_eq!(tree_snapshot(&old_bin), old_before);
+            assert_eq!(tree_snapshot(&occupant), new_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn relocation_reports_and_keeps_uncommitted_entries() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("old-bin");
+        let new_bin = tmp.path().join("new-bin");
+        tokio::fs::create_dir_all(&old_bin).await.unwrap();
+        write_test_sentinel(&old_bin).await;
+        let entry_id = "20310102_030405000_pen111";
+        let pending = write_test_entry(
+            &old_bin,
+            entry_id,
+            &pending_manifest(entry_id, RELOCATION_RECYCLED_AT.to_string()),
+        )
+        .await;
+
+        let report = relocate_plan(
+            &single_target_plan(&old_bin, &new_bin),
+            RelocationOps::default(),
+        )
+        .await;
+
+        assert_eq!(report.moved_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].entry_id, entry_id);
+        assert!(pending.join("media.mkv").exists());
+        assert!(!new_bin.join(entry_id).exists());
+    }
+
+    #[tokio::test]
+    async fn relocation_routes_entries_to_the_bin_of_their_library_root() {
+        let tmp = TempDir::new().unwrap();
+        let old_bin = tmp.path().join("shared-bin");
+        let root_a = tmp.path().join("library-a");
+        let root_b = tmp.path().join("library-b");
+        tokio::fs::create_dir_all(&old_bin).await.unwrap();
+        write_test_sentinel(&old_bin).await;
+        let entry_a = "20310102_030405000_aaa111";
+        let entry_b = "20310102_030405000_bbb111";
+        let entry_lost = "20310102_030405000_lst111";
+        for (entry_id, original_path) in [
+            (entry_a, root_a.join("Film A/Film A.mkv")),
+            (entry_b, root_b.join("Film B/Film B.mkv")),
+            (entry_lost, tmp.path().join("elsewhere/Film C.mkv")),
+        ] {
+            let manifest = committed_manifest(
+                entry_id,
+                RELOCATION_RECYCLED_AT.to_string(),
+                &original_path.to_string_lossy(),
+                None,
+                "file_deleted",
+            );
+            write_test_entry(&old_bin, entry_id, &manifest).await;
+        }
+        let plan = RecycleRelocationPlan {
+            from: old_bin.clone(),
+            targets: vec![
+                RecycleRelocationTarget {
+                    base_path: root_a.join(RECYCLE_DIR_NAME),
+                    media_roots: vec![root_a.clone()],
+                },
+                RecycleRelocationTarget {
+                    base_path: root_b.join(RECYCLE_DIR_NAME),
+                    media_roots: vec![root_b.clone()],
+                },
+            ],
+        };
+
+        let report = relocate_plan(&plan, RelocationOps::default()).await;
+
+        assert_eq!(report.moved_count, 2);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].entry_id, entry_lost);
+        assert!(root_a.join(RECYCLE_DIR_NAME).join(entry_a).is_dir());
+        assert!(root_b.join(RECYCLE_DIR_NAME).join(entry_b).is_dir());
+        assert!(
+            old_bin.join(entry_lost).is_dir(),
+            "an unroutable entry stays put"
+        );
     }
 }

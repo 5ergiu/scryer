@@ -4817,6 +4817,12 @@ const ru: LocaleDictionary = {
 
     "status.recycleBinSettingsSaved":
         "Настройки корзины сохранены.",
+    "settings.recycleBinPathExistingItems": "При смене папки элементы, уже находящиеся в корзине, перемещаются в новую папку. Элемент, который не удалось переместить, остаётся в прежней папке и будет показан здесь после сохранения.",
+    "settings.recycleBinRelocatedOne": "Элементов корзины перемещено в новую папку: {{count}}.",
+    "settings.recycleBinRelocatedOther": "Элементов корзины перемещено в новую папку: {{count}}.",
+    "settings.recycleBinRelocationFailedOne": "Не удалось переместить элементы корзины ({{count}}):",
+    "settings.recycleBinRelocationFailedOther": "Не удалось переместить элементы корзины ({{count}}):",
+    "status.recycleBinSettingsSavedWithRelocationFailures": "Настройки корзины сохранены, но некоторые элементы не удалось переместить.",
   "form.apiKeyStoredPlaceholder": "Ключ API сохранён",
   "appUpgrade.title": "Обновление приложения",
   "appUpgrade.subtitle": "Версия и управление обновлениями",

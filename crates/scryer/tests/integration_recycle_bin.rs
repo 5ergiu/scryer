@@ -547,9 +547,18 @@ async fn recycle_bin_settings_reject_invalid_path_and_retention_without_writing(
         .expect("root has a parent")
         .to_string_lossy()
         .into_owned();
+    let inside_root_via_parent = Path::new(&root_path)
+        .join("sub")
+        .join("..")
+        .join("bin")
+        .to_string_lossy()
+        .into_owned();
+    let root_with_trailing_separator = format!("{root_path}{}", std::path::MAIN_SEPARATOR);
     for (path, expected) in [
         ("relative/bin".to_string(), "must be absolute"),
         (inside_root, root_path.as_str()),
+        (inside_root_via_parent, root_path.as_str()),
+        (root_with_trailing_separator, root_path.as_str()),
         (root_path.clone(), root_path.as_str()),
         (containing_root, root_path.as_str()),
     ] {
@@ -585,6 +594,148 @@ async fn recycle_bin_settings_reject_invalid_path_and_retention_without_writing(
             .expect("read after rejections"),
         before,
         "rejected updates must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn recycle_bin_location_change_moves_existing_entries() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let old_bin = tempfile::tempdir().expect("previous bin");
+    let new_parent = tempfile::tempdir().expect("new bin parent");
+    let new_bin = new_parent.path().join("bin");
+    let library = seed_library(&ctx, "Movies A", root.path()).await;
+    let config_actor = config_actor();
+    ctx.app
+        .update_recycle_bin_settings(
+            &config_actor,
+            bin_settings(Some(&old_bin.path().to_string_lossy()), 7),
+        )
+        .await
+        .expect("save previous bin");
+    let entry_id =
+        seed_recycled_file_in_bin(root.path(), old_bin.path(), "title-moves", "Invented Film")
+            .await;
+    let recycled_at = scryer_application::recycle_bin::find_entry(
+        &ctx.app
+            .recycle_bin_config_for_media_root(Some(&library.roots[0].path))
+            .await,
+        &entry_id,
+    )
+    .await
+    .expect("find entry")
+    .expect("entry is listed in the previous bin")
+    .1
+    .recycled_at;
+    std::fs::write(old_bin.path().join("operator-notes.txt"), b"keep")
+        .expect("write unrelated file");
+
+    let saved = ctx
+        .app
+        .update_recycle_bin_settings(
+            &config_actor,
+            UpdateRecycleBinSettings {
+                path: Some(Some(new_bin.to_string_lossy().into_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("save new bin");
+
+    let relocation = saved.relocation.expect("the move is reported");
+    assert_eq!(relocation.moved_count, 1);
+    assert!(relocation.failures.is_empty(), "{:?}", relocation.failures);
+    assert!(!old_bin.path().join(&entry_id).exists());
+    assert_eq!(
+        std::fs::read(old_bin.path().join("operator-notes.txt")).expect("unrelated file"),
+        b"keep"
+    );
+    let (_, manifest) = scryer_application::recycle_bin::find_entry(
+        &ctx.app
+            .recycle_bin_config_for_media_root(Some(&library.roots[0].path))
+            .await,
+        &entry_id,
+    )
+    .await
+    .expect("find moved entry")
+    .expect("entry is listed in the new bin");
+    assert_eq!(manifest.recycled_at, recycled_at);
+}
+
+#[tokio::test]
+async fn recycle_bin_saves_that_keep_the_location_move_nothing() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let bin = tempfile::tempdir().expect("bin");
+    let bin_path = bin.path().to_string_lossy().into_owned();
+    seed_library(&ctx, "Movies A", root.path()).await;
+    let config_actor = config_actor();
+    ctx.app
+        .update_recycle_bin_settings(&config_actor, bin_settings(Some(&bin_path), 7))
+        .await
+        .expect("save bin");
+    let entry_id =
+        seed_recycled_file_in_bin(root.path(), bin.path(), "title-stays", "Invented Film").await;
+
+    for update in [
+        UpdateRecycleBinSettings {
+            retention_days: Some(30),
+            ..Default::default()
+        },
+        disabled_settings(),
+        UpdateRecycleBinSettings {
+            enabled: Some(true),
+            ..Default::default()
+        },
+        bin_settings(Some(&format!(" {bin_path} ")), 14),
+    ] {
+        let saved = ctx
+            .app
+            .update_recycle_bin_settings(&config_actor, update)
+            .await
+            .expect("save without a location change");
+        assert_eq!(saved.relocation, None);
+        assert!(bin.path().join(&entry_id).join("manifest.json").is_file());
+    }
+}
+
+#[tokio::test]
+async fn recycle_bin_retention_saves_with_an_invalid_stored_path_sent_back() {
+    let ctx = TestContext::new().await;
+    seed_recycle_bin_setting_definition(&ctx).await;
+    let root = tempfile::tempdir().expect("library root");
+    let bin = tempfile::tempdir().expect("bin");
+    let bin_path = bin.path().to_string_lossy().into_owned();
+    seed_library(&ctx, "Movies A", root.path()).await;
+    let config_actor = config_actor();
+    ctx.app
+        .update_recycle_bin_settings(&config_actor, bin_settings(Some(&bin_path), 7))
+        .await
+        .expect("save bin");
+    let nested_root = bin.path().join("nested-library");
+    std::fs::create_dir(&nested_root).expect("nested root");
+    seed_library(&ctx, "Movies Nested", &nested_root).await;
+
+    let saved = ctx
+        .app
+        .update_recycle_bin_settings(&config_actor, bin_settings(Some(&bin_path), 21))
+        .await
+        .expect("an unchanged stored path does not block a retention change");
+    assert_eq!(saved.retention_days, 21);
+    assert_eq!(saved.path.as_deref(), Some(bin_path.as_str()));
+    assert!(saved.validation_error.is_some());
+
+    let inside_nested = nested_root.join("bin").to_string_lossy().into_owned();
+    assert!(
+        matches!(
+            ctx.app
+                .update_recycle_bin_settings(&config_actor, bin_settings(Some(&inside_nested), 21))
+                .await,
+            Err(AppError::Validation(_))
+        ),
+        "a changed path is still validated"
     );
 }
 
@@ -1396,6 +1547,7 @@ async fn restoring_recreates_row_with_snapshotted_score_and_emits_one_restore_ev
                 acquisition_score: Some(4321),
                 scoring_log: Some("invented scoring log".to_string()),
                 release_group: Some("NOPE".to_string()),
+                release_listing_json: Some(r#"{"votes":{"up":3}}"#.to_string()),
                 ..Default::default()
             }),
         },
@@ -1440,6 +1592,11 @@ async fn restoring_recreates_row_with_snapshotted_score_and_emits_one_restore_ev
         Some("invented scoring log")
     );
     assert_eq!(restored.release_group.as_deref(), Some("NOPE"));
+    assert_eq!(
+        restored.release_listing_json.as_deref(),
+        Some(r#"{"votes":{"up":3}}"#),
+        "restore should bring back the saved release listing"
+    );
 
     let events = ctx
         .app

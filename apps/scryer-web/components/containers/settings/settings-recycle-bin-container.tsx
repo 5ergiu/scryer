@@ -36,6 +36,7 @@ import {
 } from "@/lib/utils/library-filter";
 import {
   buildRecycleBinSettingsInput,
+  type RecycleBinRelocation,
   type RecycleBinSettingsChanges,
 } from "@/lib/utils/recycle-bin";
 import { LoadingMark } from "@/components/common/loading-mark";
@@ -62,6 +63,9 @@ type RecycleBinSettings = {
   validationError: string | null;
 };
 
+type SavedRecycleBinSettings = RecycleBinSettings & {
+  relocation?: RecycleBinRelocation | null;
+};
 
 type RecycleBinSettingsQueryResult = {
   recycleBinSettings?: RecycleBinSettings | null;
@@ -86,7 +90,7 @@ type LibrariesQueryResult = {
 };
 
 type UpdateRecycleBinSettingsResult = {
-  updateRecycleBinSettings?: RecycleBinSettings | null;
+  updateRecycleBinSettings?: SavedRecycleBinSettings | null;
 };
 
 function uniqueItems(items: RecycledItem[]): RecycledItem[] {
@@ -110,6 +114,7 @@ export function SettingsRecycleBinContainer() {
   const [totalCount, setTotalCount] = useState(0);
   const [itemsRefreshRevision, setItemsRefreshRevision] = useState(0);
   const [settings, setSettings] = useState<RecycleBinSettings | null>(null);
+  const [relocation, setRelocation] = useState<RecycleBinRelocation | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(false);
@@ -230,13 +235,21 @@ export function SettingsRecycleBinContainer() {
       if (error) throw error;
       const saved = data?.updateRecycleBinSettings;
       if (!saved) throw new Error(t("status.apiError"));
-      setSettings(saved);
+      const { relocation: savedRelocation, ...savedSettings } = saved;
+      setSettings(savedSettings);
+      setRelocation(savedRelocation ?? null);
       if (!saved.enabled) {
         setItems([]);
         setTotalCount(0);
         setSelectedItemIds(new Set());
+      } else if (savedRelocation && savedRelocation.movedCount > 0) {
+        setItemsRefreshRevision((current) => current + 1);
       }
-      setGlobalStatus(t("status.recycleBinSettingsSaved"));
+      setGlobalStatus(
+        savedRelocation && savedRelocation.failures.length > 0
+          ? t("status.recycleBinSettingsSavedWithRelocationFailures")
+          : t("status.recycleBinSettingsSaved"),
+      );
     } catch (error) {
       setGlobalStatus(error instanceof Error ? error.message : t("status.failedToUpdate"));
     } finally {
@@ -471,6 +484,7 @@ export function SettingsRecycleBinContainer() {
         retentionDays={settings.retentionDays}
         effectivePaths={settings.effectivePaths}
         validationError={settings.validationError}
+        relocation={relocation}
         settingsLoading={settingsLoading}
         settingsSaving={settingsSaving}
         canManageConfig={canManageConfig}
@@ -485,7 +499,7 @@ export function SettingsRecycleBinContainer() {
         pendingItemIds={pendingItemIds}
         selectedItemIds={selectedItemIds}
         onEnabledChange={(enabled) => void saveSettings({ enabled })}
-        onLocationSave={(path, retentionDays) => void saveSettings({ path, retentionDays })}
+        onLocationSave={(changes) => void saveSettings(changes)}
         onSelectedLibraryIdsChange={setSelectedLibraryIds}
         onSelectedItemIdsChange={(ids) => setSelectedItemIds(new Set(ids))}
         onRestoreItems={requestRestore}

@@ -24084,6 +24084,38 @@ enum RecencyLaneValue {
 }
 
 """
+One recycle-bin entry a location change could not move.
+"""
+type RecycleBinRelocationFailurePayload {
+	"""
+	Entry directory name; empty when the previous location itself could not be read.
+	"""
+	entryId: String!
+	"""
+	Where the entry is now.
+	"""
+	fromPath: String!
+	"""
+	Why it was not moved.
+	"""
+	reason: String!
+}
+
+"""
+Entries moved from the previous recycle-bin location after a location change.
+"""
+type RecycleBinRelocationPayload {
+	"""
+	Entries now in the new location.
+	"""
+	movedCount: Int!
+	"""
+	Entries that were not moved, or not fully cleaned up, with the reason. An entry that did not move stays in the previous location.
+	"""
+	failures: [RecycleBinRelocationFailurePayload!]!
+}
+
+"""
 Recycle-bin settings and the bin locations they resolve to.
 """
 type RecycleBinSettingsPayload {
@@ -24107,6 +24139,10 @@ type RecycleBinSettingsPayload {
 	Why the configured bin is never purged, when the path is invalid for the current library roots.
 	"""
 	validationError: String
+	"""
+	On the result of a save that changed the location: what happened to entries found in the previous location. Null when nothing was there to move.
+	"""
+	relocation: RecycleBinRelocationPayload
 }
 
 """

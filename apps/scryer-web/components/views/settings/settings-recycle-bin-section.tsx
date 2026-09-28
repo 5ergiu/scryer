@@ -29,6 +29,9 @@ import {
   RECYCLE_BIN_MIN_RETENTION_DAYS,
   groupRecycleBinItems,
   parseRecycleBinRetentionDays,
+  recycleBinLocationChanges,
+  type RecycleBinRelocation,
+  type RecycleBinSettingsChanges,
 } from "@/lib/utils/recycle-bin";
 import { LoadingMark } from "@/components/common/loading-mark";
 
@@ -53,6 +56,7 @@ type Props = {
   retentionDays: number;
   effectivePaths: string[];
   validationError: string | null;
+  relocation: RecycleBinRelocation | null;
   settingsLoading: boolean;
   settingsSaving: boolean;
   canManageConfig: boolean;
@@ -67,7 +71,7 @@ type Props = {
   pendingItemIds: ReadonlySet<string>;
   selectedItemIds: ReadonlySet<string>;
   onEnabledChange: (enabled: boolean) => void;
-  onLocationSave: (path: string | null, retentionDays: number) => void;
+  onLocationSave: (changes: RecycleBinSettingsChanges) => void;
   onSelectedLibraryIdsChange: (libraryIds: string[]) => void;
   onSelectedItemIdsChange: (itemIds: string[]) => void;
   onRestoreItems: (items: RecycledItem[]) => void;
@@ -108,7 +112,7 @@ type LocationFormProps = {
   validationError: string | null;
   canManageConfig: boolean;
   saving: boolean;
-  onSave: (path: string | null, retentionDays: number) => void;
+  onSave: (changes: RecycleBinSettingsChanges) => void;
 };
 
 function RecycleBinLocationForm({
@@ -135,7 +139,14 @@ function RecycleBinLocationForm({
       className="space-y-3 border-b border-border pb-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (parsedRetention !== null && dirty) onSave(pathDraft, parsedRetention);
+        if (parsedRetention !== null && dirty) {
+          onSave(
+            recycleBinLocationChanges(
+              { path, retentionDays },
+              { path: pathDraft, retentionDays: parsedRetention },
+            ),
+          );
+        }
       }}
     >
       <details className="space-y-3">
@@ -249,12 +260,51 @@ function RecycleBinLocationForm({
   );
 }
 
+function RecycleBinRelocationNotice({ relocation }: { relocation: RecycleBinRelocation }) {
+  const t = useTranslate();
+  const failureCount = relocation.failures.length;
+  return (
+    <div id="settings-recycle-bin-relocation" className="space-y-1 text-xs">
+      {relocation.movedCount > 0 ? (
+        <p className="text-muted-foreground">
+          {t(
+            relocation.movedCount === 1
+              ? "settings.recycleBinRelocatedOne"
+              : "settings.recycleBinRelocatedOther",
+            { count: relocation.movedCount },
+          )}
+        </p>
+      ) : null}
+      {failureCount > 0 ? (
+        <div role="alert" className="space-y-1 text-[var(--scry-danger-text)]">
+          <p>
+            {t(
+              failureCount === 1
+                ? "settings.recycleBinRelocationFailedOne"
+                : "settings.recycleBinRelocationFailedOther",
+              { count: failureCount },
+            )}
+          </p>
+          <ul className="space-y-0.5">
+            {relocation.failures.map((failure) => (
+              <li key={`${failure.fromPath}:${failure.reason}`} className="break-all">
+                <span className="font-mono">{failure.fromPath}</span>: {failure.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsRecycleBinSection({
   enabled,
   path,
   retentionDays,
   effectivePaths,
   validationError,
+  relocation,
   settingsLoading,
   settingsSaving,
   canManageConfig,
@@ -355,6 +405,8 @@ export function SettingsRecycleBinSection({
         saving={settingsSaving}
         onSave={onLocationSave}
       />
+
+      {relocation ? <RecycleBinRelocationNotice relocation={relocation} /> : null}
 
       {!enabled ? null : !canManageItems ? (
         <p className="py-2 text-sm text-muted-foreground">{t("settings.recycleBinNoManageableLibraries")}</p>

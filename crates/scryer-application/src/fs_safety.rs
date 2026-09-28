@@ -625,7 +625,7 @@ fn renameat2_no_replace(source: *const libc::c_char, dest: *const libc::c_char) 
 /// `Some` when the platform answered with an exclusive rename, `None` when the
 /// caller should claim the destination instead.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn exclusive_rename(source: &Path, dest: &Path) -> Option<std::io::Result<()>> {
+pub(crate) async fn exclusive_rename(source: &Path, dest: &Path) -> Option<std::io::Result<()>> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -667,7 +667,7 @@ async fn exclusive_rename(source: &Path, dest: &Path) -> Option<std::io::Result<
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-async fn exclusive_rename(_source: &Path, _dest: &Path) -> Option<std::io::Result<()>> {
+pub(crate) async fn exclusive_rename(_source: &Path, _dest: &Path) -> Option<std::io::Result<()>> {
     None
 }
 

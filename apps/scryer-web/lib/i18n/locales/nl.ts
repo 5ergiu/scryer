@@ -3385,6 +3385,12 @@ const nl: LocaleDictionary = {
     "Verplaats elk huidig bestand naar de prullenbak en herstel daarna het geselecteerde bestand op dezelfde plek.",
   "status.recycleBinEmptied": "Prullenbak geleegd ({{count}} items verwijderd).",
   "status.recycleBinSettingsSaved": "Prullenbakinstellingen opgeslagen.",
+  "settings.recycleBinPathExistingItems": "Als je de map wijzigt, worden items die al in de prullenbak staan naar de nieuwe map verplaatst. Een item dat niet kan worden verplaatst, blijft in de vorige map en wordt hier na het opslaan vermeld.",
+  "settings.recycleBinRelocatedOne": "{{count}} item uit de prullenbak naar de nieuwe map verplaatst.",
+  "settings.recycleBinRelocatedOther": "{{count}} items uit de prullenbak naar de nieuwe map verplaatst.",
+  "settings.recycleBinRelocationFailedOne": "{{count}} item uit de prullenbak kon niet worden verplaatst:",
+  "settings.recycleBinRelocationFailedOther": "{{count}} items uit de prullenbak konden niet worden verplaatst:",
+  "status.recycleBinSettingsSavedWithRelocationFailures": "Prullenbakinstellingen opgeslagen, maar sommige items konden niet worden verplaatst.",
 
   "appUpgrade.title": "Applicatie-upgrade",
   "appUpgrade.subtitle": "Versie- en upgradebeheer",

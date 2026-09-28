@@ -66,6 +66,20 @@ fn from_recycle_bin_settings(
         retention_days: i32::try_from(settings.retention_days).unwrap_or(i32::MAX),
         effective_paths: settings.effective_paths,
         validation_error: settings.validation_error,
+        relocation: settings
+            .relocation
+            .map(|report| RecycleBinRelocationPayload {
+                moved_count: i32::try_from(report.moved_count).unwrap_or(i32::MAX),
+                failures: report
+                    .failures
+                    .into_iter()
+                    .map(|failure| RecycleBinRelocationFailurePayload {
+                        entry_id: failure.entry_id,
+                        from_path: failure.from_path,
+                        reason: failure.reason,
+                    })
+                    .collect(),
+            }),
     }
 }
 
