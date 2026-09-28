@@ -1124,6 +1124,118 @@ async fn a_deleted_download_stops_conflicting_new_submissions_for_its_scope() {
 }
 
 #[tokio::test]
+async fn an_operator_delete_stops_conflicting_new_submissions_for_its_scope() {
+    // The remove-and-reacquire gate: the operator deletes a queued download,
+    // the delete worker completes it locally, and the very next queue for the
+    // same scope was refused as a conflict on a download the client no longer
+    // had. The delete worker never takes the tracked terminal transition that
+    // calls `forget_settled_download`, so the guard's 30s accepted-submission
+    // state and its client snapshots kept describing the deleted item.
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let (app, user) = bootstrap_with_cleanup_tracking(
+        download_client.clone(),
+        download_submissions.clone(),
+        pending_releases,
+    );
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Reacquired Lantern".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let first = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/original.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Reacquired.Lantern.2026.720p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("first queue");
+    assert!(matches!(first, QueueDownloadOutcome::Queued(_)));
+
+    // The control: an accepted submission that nothing has ended still holds
+    // its scope for the rest of the cache window.
+    let blocked = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/second.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Reacquired.Lantern.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("second queue outcome");
+    let QueueDownloadOutcome::Conflict(conflict) = blocked else {
+        panic!("an accepted in-flight download should still conflict its scope");
+    };
+    assert_eq!(conflict.state, Some(DownloadQueueState::Queued));
+    assert!(!conflict.replaceable);
+
+    // The operator delete, as the delete worker performs it: the submission is
+    // finalized as ignored for its client item. The client no longer lists it.
+    let submission = download_submissions
+        .store
+        .lock()
+        .await
+        .first()
+        .cloned()
+        .expect("the accepted submission should exist");
+    download_client.queue_items.lock().await.clear();
+    let outcome = crate::integration::workflow::finalize_scryer_download_ignored(
+        &app,
+        crate::domain_events::DomainEventActor::system(),
+        ClientJobLocator::from_submission(&submission),
+    )
+    .await
+    .expect("the delete should finalize the submission");
+    assert!(matches!(
+        outcome,
+        crate::integration::workflow::FinalizeIgnoredOutcome::Finalized
+    ));
+
+    let reacquired = app
+        .queue_existing_title_download(
+            &user,
+            &title.id,
+            QueuedReleaseSelection {
+                source_hint: Some("https://example.invalid/releases/second.nzb".to_string()),
+                source_kind: Some(DownloadSourceKind::NzbUrl),
+                source_title: Some("Reacquired.Lantern.2026.1080p.WEB-DL".to_string()),
+                ..Default::default()
+            },
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("reacquire queue");
+    assert!(
+        matches!(reacquired, QueueDownloadOutcome::Queued(_)),
+        "a deleted download must not block the reacquire that follows it"
+    );
+}
+
+#[tokio::test]
 async fn queue_existing_title_download_submits_source_password_hint() {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());

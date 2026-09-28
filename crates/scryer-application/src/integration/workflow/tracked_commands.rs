@@ -617,6 +617,21 @@ pub(crate) async fn finalize_scryer_download_ignored_for_download(
         return Ok(FinalizeIgnoredOutcome::Finalized);
     }
 
+    // This submission just settled, and only a tracked terminal *transition*
+    // tells the submission guard so. An operator delete (the delete poller), an
+    // operator ignore, and a download that vanished from its client all end a
+    // submission through here without ever taking that path, leaving the
+    // guard's accepted-submission state and the two client snapshots
+    // describing a download the client no longer has — which refused the next
+    // queue for the same scope as a phantom, non-replaceable conflict for the
+    // rest of the 30s window. Placed after the already-ignored return above, so
+    // it fires on the transition only and a re-ignoring tick still leaves the
+    // caches alone.
+    app.runtime
+        .acquisition
+        .download_submission_guards
+        .forget_settled_download(&submission.title_id);
+
     reopen_scopes_released_by_ignored_submission(app, &submission).await;
 
     let title = app
