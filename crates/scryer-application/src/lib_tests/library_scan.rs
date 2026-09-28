@@ -10042,20 +10042,49 @@ impl EpisodeRelinkFixture {
 }
 
 #[tokio::test]
-async fn title_rescan_relinks_a_scanned_file_whose_stored_episode_contradicts_its_filename() {
+async fn title_rescan_keeps_the_stored_link_of_a_known_file_whose_filename_contradicts_it() {
     let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
     fixture.assert_rescan_takes_the_stored_record_path().await;
 
     let summary = fixture.rescan().await;
 
-    assert_eq!(summary.relinked, 1);
-    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[2]));
-
-    // Once the link agrees with the filename a rescan writes nothing more.
-    let summary = fixture.rescan().await;
     assert_eq!(summary.relinked, 0);
     assert_eq!(summary.matched, 1);
-    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[2]));
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+
+    // Repeated rescans do not drift towards the filename either.
+    let summary = fixture.rescan().await;
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn a_file_bound_by_hand_without_an_original_path_keeps_its_episodes_through_a_rescan() {
+    // Bindings made by hand before binds recorded an original path look
+    // exactly like links a scan placed: no original path, no movie link.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    // The person chose the third episode although the filename names the
+    // second.
+    let bind = fixture
+        .media_files
+        .replace_file_episode_links(
+            fixture.file_id(),
+            &fixture.episodes(&[1]),
+            &fixture.episodes(&[3]),
+        )
+        .await
+        .expect("bind by hand");
+    assert!(matches!(bind, crate::EpisodeLinkReplacement::Replaced));
+    let row = fixture.tracked_row().await;
+    assert!(row.original_file_path.is_none());
+    assert!(row.series_movie_link_ids.is_empty());
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
 }
 
 #[tokio::test]
@@ -10185,7 +10214,7 @@ async fn anime_title_rescan_without_a_bridge_keeps_links_a_later_season_filename
 }
 
 #[tokio::test]
-async fn anime_title_rescan_without_a_bridge_still_relinks_an_absolute_named_file() {
+async fn anime_title_rescan_without_a_bridge_keeps_links_an_absolute_named_file_contradicts() {
     let fixture = episode_relink_fixture_in(
         RelinkCatalog::AnimeTwoSeasonsWithoutBridge,
         "Season 02",
@@ -10197,21 +10226,16 @@ async fn anime_title_rescan_without_a_bridge_still_relinks_an_absolute_named_fil
 
     let summary = fixture.rescan().await;
 
-    assert_eq!(summary.relinked, 1);
-    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[5]));
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
 }
 
 #[tokio::test]
 async fn title_rescan_keeps_the_stored_links_when_replacing_them_fails() {
-    // A stale signature makes the rescan parse and analyse the file afresh,
-    // so the additive path would link the filename's episode if a failed
-    // replacement fell through to it.
-    let fixture = episode_relink_fixture_with(
-        "Relink Harbor - S01E02 - Tide 2.mkv",
-        None,
-        RelinkRow::StaleSignature,
-    )
-    .await;
+    // The filename names another episode, so if relinking were attempted
+    // and its failure fell through to the additive path, the filename's
+    // episode would be linked.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
     fixture
         .media_files
         .fail_replace_file_episode_links("episode link table is locked")
@@ -10227,7 +10251,8 @@ async fn title_rescan_keeps_the_stored_links_when_replacing_them_fails() {
 }
 
 #[tokio::test]
-async fn title_rescan_trims_a_multi_episode_file_to_the_episodes_its_filename_names() {
+async fn title_rescan_keeps_every_stored_link_of_a_multi_episode_file_its_filename_names_fewer_of()
+{
     let fixture =
         episode_relink_fixture("Relink Harbor - S01E01E02 - Tide 1 and 2.mkv", None).await;
     for number in [2, 3] {
@@ -10243,17 +10268,10 @@ async fn title_rescan_trims_a_multi_episode_file_to_the_episodes_its_filename_na
 
     let summary = fixture.rescan().await;
 
-    assert_eq!(summary.relinked, 1);
-    assert_eq!(
-        fixture.linked_episode_ids().await,
-        fixture.episodes(&[1, 2])
-    );
-
-    let summary = fixture.rescan().await;
     assert_eq!(summary.relinked, 0);
     assert_eq!(
         fixture.linked_episode_ids().await,
-        fixture.episodes(&[1, 2])
+        fixture.episodes(&[1, 2, 3])
     );
 }
 

@@ -3239,7 +3239,22 @@ fn fresh_numbering_is_trustworthy(
         && identity.season_numbers.iter().all(|season| *season == 1)
 }
 
+/// Whether a scan may replace the stored episode links of a file it already
+/// tracks when the filename names a different episode set.
+///
+/// Relinking is switched off: files bound by hand before bindings recorded an
+/// `original_file_path` are indistinguishable from links the scan placed, so
+/// relinking would overwrite a person's choice. Flip this once hand-made
+/// bindings carry a marker the scan can see.
+const SCAN_RELINK_ENABLED: bool = false;
+
 fn episode_links_may_be_reconciled(existing: &TitleMediaFile) -> bool {
+    SCAN_RELINK_ENABLED && episode_links_look_scan_placed(existing)
+}
+
+/// An import or pending bind carries its original path and a series movie
+/// file carries its movie link; anything else looks like a scan placed it.
+fn episode_links_look_scan_placed(existing: &TitleMediaFile) -> bool {
     existing.original_file_path.is_none() && existing.series_movie_link_ids.is_empty()
 }
 
@@ -3549,28 +3564,31 @@ mod tests {
         assert_eq!(elect(vec![ranked("smaller", 1, 400), bigger]), "bigger");
     }
 
-    /// Only a file the scan itself placed may have its links replaced: an
-    /// import or a hand-bound file carries its original path, and a series
-    /// movie file carries its movie link.
+    /// An import or a pending bind carries its original path and a series
+    /// movie file carries its movie link, so only the rest look scan-placed.
+    /// Relinking stays off for every file, including those.
     #[test]
-    fn only_files_the_scan_placed_may_have_their_links_reconciled() {
+    fn no_tracked_file_may_have_its_links_reconciled_while_relink_is_off() {
         let scanned = TitleMediaFile {
             id: "file-scanned".into(),
             file_path: "/library/Relay Show/Season 01/Relay Show - S01E01.mkv".into(),
             ..TitleMediaFile::default()
         };
-        assert!(episode_links_may_be_reconciled(&scanned));
+        assert!(episode_links_look_scan_placed(&scanned));
+        assert!(!episode_links_may_be_reconciled(&scanned));
 
         let imported = TitleMediaFile {
             original_file_path: Some("/downloads/Relay Show - S01E01.mkv".into()),
             ..scanned.clone()
         };
+        assert!(!episode_links_look_scan_placed(&imported));
         assert!(!episode_links_may_be_reconciled(&imported));
 
         let series_movie = TitleMediaFile {
             series_movie_link_ids: vec!["link-relay".into()],
             ..scanned.clone()
         };
+        assert!(!episode_links_look_scan_placed(&series_movie));
         assert!(!episode_links_may_be_reconciled(&series_movie));
     }
 }
