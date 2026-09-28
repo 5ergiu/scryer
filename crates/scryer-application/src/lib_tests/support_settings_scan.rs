@@ -61,6 +61,9 @@ pub(super) struct StoredSettingsRepo {
     pub(super) read_error_key: Arc<Mutex<Option<String>>>,
     /// Every key read, in order, across every scope id. Shared by clones.
     read_log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every key written through `upsert_setting_json`, in order. Shared by
+    /// clones.
+    write_log: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 pub(super) type StoredSettingValues = Arc<Mutex<HashMap<(String, String, Option<String>), String>>>;
@@ -76,6 +79,21 @@ impl StoredSettingsRepo {
 
     pub(super) fn reset_read_log(&self) {
         self.read_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// The keys written since the last reset, in write order.
+    pub(super) fn write_log(&self) -> Vec<String> {
+        self.write_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn reset_write_log(&self) {
+        self.write_log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -163,6 +181,10 @@ impl SettingsRepository for StoredSettingsRepo {
         _source: &str,
         _updated_by_user_id: Option<String>,
     ) -> AppResult<()> {
+        self.write_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(key_name.to_string());
         self.values.lock().await.insert(
             (scope.to_string(), key_name.to_string(), scope_id),
             value_json,

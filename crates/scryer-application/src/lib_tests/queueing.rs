@@ -5342,6 +5342,99 @@ async fn covered_background_walk_reads_no_persona_or_acquisition_thresholds() {
     }
 }
 
+/// The rotation cursors are written only when they move. A cycle that ends
+/// where the stored cursor already points leaves the settings row alone; a
+/// cycle that moves it writes the new position.
+#[tokio::test]
+async fn background_cycle_writes_the_rotation_cursor_only_when_it_moves() {
+    let download_client = Arc::new(StubDownloadClient::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client = Arc::new(
+        FixedReleaseIndexerClient::new("Cursor Write Fixture.2024.1080p.WEB-DL")
+            .with_fired_indexers(["indexer-a"])
+            .with_empty_response(),
+    );
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        download_client,
+        download_submissions,
+        pending_releases,
+        wanted_items.clone(),
+        indexer_client,
+    );
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let coverage = Arc::new(RecordingScopeIndexerCoverageRepo::new());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_scope_indexer_coverage_store(coverage.clone())
+            .with_settings(settings.clone())
+    });
+    seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Cursor Write Fixture", 2024)
+        .await;
+
+    // A freshly added title is hot, so it rotates through the hot lane.
+    let cursor_key = crate::acquisition::convergence::BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY;
+    settings
+        .set_value(
+            SETTINGS_SCOPE_SYSTEM,
+            cursor_key,
+            "\"scope-that-no-longer-exists\"",
+        )
+        .await;
+
+    settings.reset_write_log();
+    let outcome = app.run_background_acquisition_cycle_once().await;
+    assert_eq!(
+        outcome.targets_derived, 1,
+        "fixture: one missing movie scope"
+    );
+    assert_eq!(
+        settings
+            .write_log()
+            .iter()
+            .filter(|key| key.as_str() == cursor_key)
+            .count(),
+        1,
+        "a cursor that moved is written: {:?}",
+        settings.write_log()
+    );
+    let moved_to = app
+        .background_acquisition_hot_resume_position()
+        .await
+        .expect("the moved cursor reads back");
+    assert_ne!(moved_to, "scope-that-no-longer-exists");
+
+    settings.reset_write_log();
+    app.run_background_acquisition_cycle_once().await;
+    assert!(
+        settings.write_log().is_empty(),
+        "an unchanged cursor is not written again: {:?}",
+        settings.write_log()
+    );
+    assert_eq!(
+        app.background_acquisition_hot_resume_position()
+            .await
+            .as_deref(),
+        Some(moved_to.as_str())
+    );
+
+    // The store call compares against the position the cycle read, in the
+    // trimmed form reads return.
+    settings.reset_write_log();
+    app.store_background_acquisition_resume_position(Some(&moved_to), Some(&moved_to))
+        .await;
+    app.store_background_acquisition_hot_resume_position(None, None)
+        .await;
+    assert!(settings.write_log().is_empty());
+    app.store_background_acquisition_hot_resume_position(None, Some("hot-scope"))
+        .await;
+    assert_eq!(
+        settings.write_log(),
+        vec![crate::acquisition::convergence::BACKGROUND_ACQUISITION_HOT_RESUME_AFTER_KEY]
+    );
+}
+
 /// The failure loop never costs an indexer query. A grab that fails is
 /// blocklisted and its scope re-opened under its existing coverage; the cursor
 /// then walks the scope's saved search results in order, and once they are
