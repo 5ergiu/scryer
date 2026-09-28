@@ -3292,10 +3292,8 @@ fn insert_title_year_variant_tokens(tokens: &mut BTreeMap<String, String>, title
 fn trailing_title_year_hint(name: &str) -> Option<&str> {
     let (open, inner) = if let Some(inner) = name.strip_suffix(')') {
         ('(', inner)
-    } else if let Some(inner) = name.strip_suffix(']') {
-        ('[', inner)
     } else {
-        return None;
+        ('[', name.strip_suffix(']')?)
     };
     let open_pos = inner.rfind(open)?;
     let candidate = inner[open_pos + 1..].trim();

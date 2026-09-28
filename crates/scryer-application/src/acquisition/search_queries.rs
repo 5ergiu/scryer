@@ -483,7 +483,8 @@ mod tests {
             kind: None,
             value: value.to_string(),
         };
-        let helpers: [(&str, fn(&[ExternalId]) -> Option<String>); 4] = [
+        type IdHelper = fn(&[ExternalId]) -> Option<String>;
+        let helpers: [(&str, IdHelper); 4] = [
             ("tvdb", tvdb_id_from_external_ids),
             ("anidb", anidb_id_from_external_ids),
             ("tmdb", tmdb_id_from_external_ids),
