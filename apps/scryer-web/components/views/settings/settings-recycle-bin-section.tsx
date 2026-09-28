@@ -180,38 +180,38 @@ function RecycleBinLocationForm({
               : t("settings.recycleBinRetentionDaysHelp")}
           </p>
         </div>
+        {enabled ? (
+          <div id="settings-recycle-bin-effective-paths" className="space-y-1 text-xs">
+            <p className="text-muted-foreground">{t("settings.recycleBinEffectivePaths")}</p>
+            {effectivePaths.length === 0 ? (
+              <p className="text-muted-foreground">{t("settings.recycleBinNoEffectivePaths")}</p>
+            ) : (
+              <ul className="space-y-0.5">
+                {effectivePaths.map((effectivePath) => (
+                  <li key={effectivePath} className="break-all font-mono">
+                    {effectivePath}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {validationError ? (
+              <p role="alert" className="text-[var(--scry-danger-text)]">
+                {t("settings.recycleBinValidationError", { error: validationError })}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        {canManageConfig ? (
+          <Button
+            id="settings-recycle-bin-location-save"
+            type="submit"
+            size="sm"
+            disabled={disabled || !dirty || parsedRetention === null}
+          >
+            {saving ? t("label.saving") : t("label.save")}
+          </Button>
+        ) : null}
       </details>
-      {enabled ? (
-        <div id="settings-recycle-bin-effective-paths" className="space-y-1 text-xs">
-          <p className="text-muted-foreground">{t("settings.recycleBinEffectivePaths")}</p>
-          {effectivePaths.length === 0 ? (
-            <p className="text-muted-foreground">{t("settings.recycleBinNoEffectivePaths")}</p>
-          ) : (
-            <ul className="space-y-0.5">
-              {effectivePaths.map((effectivePath) => (
-                <li key={effectivePath} className="break-all font-mono">
-                  {effectivePath}
-                </li>
-              ))}
-            </ul>
-          )}
-          {validationError ? (
-            <p role="alert" className="text-[var(--scry-danger-text)]">
-              {t("settings.recycleBinValidationError", { error: validationError })}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-      {canManageConfig ? (
-        <Button
-          id="settings-recycle-bin-location-save"
-          type="submit"
-          size="sm"
-          disabled={disabled || !dirty || parsedRetention === null}
-        >
-          {saving ? t("label.saving") : t("label.save")}
-        </Button>
-      ) : null}
     </form>
   );
 }
