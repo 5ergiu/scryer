@@ -1058,6 +1058,8 @@ const en: LocaleDictionary = {
   "settings.renameFilterChainLabel": "Run filters from left to right.",
   "settings.renameTokenTitle": "Title name",
   "settings.renameTokenYear": "Release year",
+  "settings.renameTokenTitleWithYear": "Title name followed by the year, added only when the name does not already end with it",
+  "settings.renameTokenTitleWithoutYear": "Title name with any year at the end removed",
   "settings.renameTokenQuality": "Quality (e.g. 1080p)",
   "settings.renameTokenEdition": "Edition (e.g. Director's Cut)",
   "settings.renameTokenImdbId": "IMDb ID",

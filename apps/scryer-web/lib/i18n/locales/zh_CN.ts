@@ -604,6 +604,8 @@ const zh_CN: LocaleDictionary = {
   "settings.renameSectionTitle": "文件重命名",
   "settings.renameTokenTitle": "标题名称",
   "settings.renameTokenYear": "发行年份",
+  "settings.renameTokenTitleWithYear": "标题名称加年份（仅当名称末尾尚无年份时添加）",
+  "settings.renameTokenTitleWithoutYear": "去掉末尾年份的标题名称",
   "settings.renameTokenQuality": "质量（例如 1080p）",
   "settings.renameTokenEdition": "版本（例如 导演剪辑版）",
   "settings.renameTokenImdbId": "IMDb ID",

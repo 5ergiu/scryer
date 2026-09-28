@@ -1311,6 +1311,225 @@ fn series_folder_keeps_a_single_year_when_the_title_name_carries_one() {
     }
 }
 
+/// A catalog name with a year hint, one without but with a known year, and one
+/// with no year at all: (name, year, title_with_year, title_without_year).
+const TITLE_YEAR_CASES: [(&str, Option<i32>, &str, &str); 3] = [
+    (
+        "Lantern Harbor (2018)",
+        Some(2018),
+        "Lantern Harbor (2018)",
+        "Lantern Harbor",
+    ),
+    (
+        "Lantern Harbor",
+        Some(2018),
+        "Lantern Harbor (2018)",
+        "Lantern Harbor",
+    ),
+    ("Lantern Harbor", None, "Lantern Harbor", "Lantern Harbor"),
+];
+
+/// The file tokens each facet builds: import-time episode tokens for series and
+/// anime (checked against the library rename tokens), title tokens for movies.
+fn file_rename_tokens_for(title: &Title) -> BTreeMap<String, String> {
+    let parsed = parse_release_metadata("Lantern.Harbor.S01E01.1080p.WEB-DL-Glimmerwick");
+    if title.facet == MediaFacet::Movie {
+        return title_rename_tokens(title, None, &parsed, "mkv").0;
+    }
+    let episode = test_series_episode();
+    let analysis = probed_series_analysis(2, "stereo");
+    let media_file = media_file_recorded_from_analysis(
+        "/library/Lantern Harbor/Lantern.Harbor.S01E01.mkv",
+        &episode.id,
+        &analysis,
+    );
+    let import_tokens = crate::import_workflow::episode_import_rename_tokens(
+        title,
+        &parsed,
+        Some(&analysis),
+        "mkv",
+        1,
+        "1",
+        episode.absolute_number.as_deref(),
+        episode.title.as_deref(),
+        None,
+    );
+    let library_tokens = library_series_tokens(title, &media_file, &episode, &parsed);
+    assert_eq!(import_tokens, library_tokens, "{:?}", title.facet);
+    import_tokens
+}
+
+#[test]
+fn title_year_tokens_render_the_year_at_most_once_for_every_facet() {
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        for (name, year, with_year, without_year) in TITLE_YEAR_CASES {
+            let mut title = test_movie_title(name);
+            title.facet = facet.clone();
+            title.year = year;
+            let case = format!("{facet:?} {name:?} {year:?}");
+
+            let tokens = file_rename_tokens_for(&title);
+            assert_eq!(
+                tokens.get("title_with_year").map(String::as_str),
+                Some(with_year),
+                "{case}"
+            );
+            assert_eq!(
+                tokens.get("title_without_year").map(String::as_str),
+                Some(without_year),
+                "{case}"
+            );
+            let expected_title = if facet == MediaFacet::Movie {
+                without_year
+            } else {
+                name
+            };
+            assert_eq!(
+                tokens.get("title").map(String::as_str),
+                Some(expected_title),
+                "{case}"
+            );
+            assert_eq!(
+                tokens.get("year").map(String::as_str),
+                Some(
+                    year.map(|value| value.to_string())
+                        .unwrap_or_default()
+                        .as_str()
+                ),
+                "{case}"
+            );
+
+            let template = if facet == MediaFacet::Movie {
+                "{title_with_year} - {quality}.{ext}"
+            } else {
+                "{title_with_year} - S{season:2}E{episode:2} - {quality}.{ext}"
+            };
+            validate_rename_template_for_facet(template, &facet).expect("token is supported");
+            let rendered = render_rename_template(template, &tokens);
+            assert!(rendered.starts_with(with_year), "{case}: {rendered}");
+            assert!(rendered.matches("2018").count() <= 1, "{case}: {rendered}");
+
+            let without_template = "{title_without_year}{?year: ({year})}.{ext}";
+            validate_rename_template_for_facet(without_template, &facet)
+                .expect("token is supported");
+            let rendered = render_rename_template(without_template, &tokens);
+            let expected = match year {
+                Some(_) => "Lantern Harbor (2018).mkv",
+                None => "Lantern Harbor.mkv",
+            };
+            assert_eq!(rendered, expected, "{case}");
+        }
+    }
+}
+
+#[test]
+fn title_year_tokens_work_with_optional_groups_and_filters() {
+    let mut title = test_movie_title("Lantern Harbor (2018)");
+    title.facet = MediaFacet::Series;
+    let tokens = file_rename_tokens_for(&title);
+
+    let template =
+        "{?title_with_year:{title_with_year|space:.}} - {title_without_year|truncate:7}.{ext}";
+    validate_rename_template_for_facet(template, &MediaFacet::Series).expect("valid template");
+    assert_eq!(
+        render_rename_template(template, &tokens),
+        "Lantern.Harbor.(2018) - Lantern.mkv"
+    );
+}
+
+#[test]
+fn folder_templates_accept_title_year_tokens() {
+    for template in [
+        "{title_with_year}",
+        "{title_without_year} ({year})",
+        "{title_with_year|space:_} [{tmdb_id}]",
+    ] {
+        validate_title_folder_template(template).expect("title folder template");
+    }
+    validate_season_folder_template("{title_without_year} S{season:2}")
+        .expect("season folder template");
+    validate_specials_folder_template("{title_with_year} Specials")
+        .expect("specials folder template");
+
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        for (name, year, with_year, without_year) in TITLE_YEAR_CASES {
+            let mut title = test_movie_title(name);
+            title.facet = facet.clone();
+            title.year = year;
+            let case = format!("{facet:?} {name:?} {year:?}");
+            let tokens = build_title_folder_tokens(&title, year);
+
+            assert_eq!(
+                render_title_folder_template("{title_with_year}", &tokens),
+                with_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_title_folder_template("{title_without_year}", &tokens),
+                without_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_title_folder_template("{title}", &tokens),
+                without_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_episode_folder_name(&title, 2, "{title_with_year} S{season:2}", "Specials"),
+                format!("{with_year} S02"),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn title_with_year_keeps_a_bracketed_year_and_ignores_a_year_inside_the_name() {
+    let mut bracketed = test_movie_title("Lantern Harbor [2018]");
+    bracketed.year = Some(2018);
+    let tokens = build_title_folder_tokens(&bracketed, bracketed.year);
+    assert_eq!(tokens["title_with_year"], "Lantern Harbor [2018]");
+    assert_eq!(tokens["title_without_year"], "Lantern Harbor");
+
+    let mut numbered = test_movie_title("Harbor 2049");
+    numbered.year = Some(2017);
+    let tokens = build_title_folder_tokens(&numbered, numbered.year);
+    assert_eq!(tokens["title_with_year"], "Harbor 2049 (2017)");
+    assert_eq!(tokens["title_without_year"], "Harbor 2049");
+}
+
+#[test]
+fn movie_rename_items_render_title_year_tokens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let current_path = dir
+        .path()
+        .join("Lantern.Harbor.2018.1080p.BluRay.x264-GROUP.mkv");
+    std::fs::write(&current_path, b"movie").expect("seed movie file");
+    let current_path = current_path.to_string_lossy().to_string();
+
+    let mut title = test_movie_title("Lantern Harbor (2018)");
+    title.year = Some(2018);
+    let collection = test_movie_collection(&current_path);
+    let media_file = test_media_file(&current_path);
+    let mut planning = RenamePlanningState::default();
+    let mut options = MovieRenamePlanOptions {
+        media_root: dir.path().to_str().expect("tempdir path"),
+        folder_template: "{title_with_year}",
+        template: "{title_with_year} - {title_without_year}.{ext}",
+        missing_metadata_policy: &RenameMissingMetadataPolicy::FallbackTitle,
+        planning: &mut planning,
+    };
+
+    let items =
+        build_movie_rename_plan_items(&title, vec![collection], vec![media_file], &mut options);
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].normalized_filename.as_deref(),
+        Some("Lantern Harbor (2018) - Lantern Harbor.mkv")
+    );
+}
+
 #[test]
 fn library_rename_never_renders_a_layout_word_as_audio_channels() {
     let mut title = test_movie_title("Lantern Harbor");

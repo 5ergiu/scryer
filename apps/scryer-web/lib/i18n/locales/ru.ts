@@ -951,6 +951,8 @@ const ru: LocaleDictionary = {
     "settings.renameFilterChainLabel": "Применять фильтры слева направо.",
     "settings.renameTokenTitle": "Название",
     "settings.renameTokenYear": "Год выпуска",
+    "settings.renameTokenTitleWithYear": "Название с годом; год добавляется, только если название ещё не заканчивается им",
+    "settings.renameTokenTitleWithoutYear": "Название без года в конце",
     "settings.renameTokenQuality": "Качество (например, 1080p)",
     "settings.renameTokenEdition": "Издание (например, режиссёрская версия)",
     "settings.renameTokenImdbId": "Идентификатор IMDb",

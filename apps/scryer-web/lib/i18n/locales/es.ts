@@ -638,6 +638,8 @@ const es: LocaleDictionary = {
   "settings.renameSectionTitle": "Renombrado de archivos",
   "settings.renameTokenTitle": "Nombre del título",
   "settings.renameTokenYear": "Año de lanzamiento",
+  "settings.renameTokenTitleWithYear": "Nombre del título seguido del año, que solo se añade si el nombre no termina ya con él",
+  "settings.renameTokenTitleWithoutYear": "Nombre del título sin el año que pueda tener al final",
   "settings.renameTokenQuality": "Calidad (ej. 1080p)",
   "settings.renameTokenEdition": "Edición (ej. Director's Cut)",
   "settings.renameTokenImdbId": "ID de IMDb",
