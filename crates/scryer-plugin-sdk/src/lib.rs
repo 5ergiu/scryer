@@ -2328,6 +2328,10 @@ pub struct PluginNotificationExternalIds {
     pub kitsu_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub by_source: BTreeMap<String, Vec<String>>,
+    /// The same ids as `by_source`, in `source:kind:value` form, because a provider's number alone
+    /// is ambiguous across entity kinds. Prefer these when matching a title against a provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_source_key: BTreeMap<String, Vec<String>>,
 }
 
 impl PluginNotificationExternalIds {
@@ -2341,6 +2345,7 @@ impl PluginNotificationExternalIds {
             && self.mal_ids.is_empty()
             && self.kitsu_ids.is_empty()
             && self.by_source.is_empty()
+            && self.by_source_key.is_empty()
     }
 }
 

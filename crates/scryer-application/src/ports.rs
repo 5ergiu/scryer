@@ -9240,6 +9240,10 @@ pub struct NotificationExternalIdsPayload {
     pub mal_ids: Vec<String>,
     pub kitsu_ids: Vec<String>,
     pub by_source: BTreeMap<String, Vec<String>>,
+    /// The same ids in `ExternalId::key()` form — `source:kind:value` — because a provider's number
+    /// alone is ambiguous across entity kinds (tvdb movie 7373 and tvdb series 307111 are unrelated).
+    /// Empty for the events that only carry a title snapshot, which has no kind to report.
+    pub by_source_key: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -1023,6 +1023,8 @@ fn title_payload_from_context(title: &TitleContextSnapshot) -> NotificationTitle
             mal_ids: Vec::new(),
             kitsu_ids: Vec::new(),
             by_source: external_ids_by_source_from_snapshot(title),
+            // The snapshot has no kind to build one from; see the helper above.
+            by_source_key: BTreeMap::new(),
         },
     }
 }
@@ -1536,6 +1538,12 @@ fn external_ids_payload_from_title(title: &Title) -> NotificationExternalIdsPayl
             .entry("imdb".to_string())
             .or_default()
             .push(imdb_id.clone());
+        // A bare `imdb_id` column has no kind of its own, so the key omits that segment.
+        payload
+            .by_source_key
+            .entry("imdb".to_string())
+            .or_default()
+            .push(ExternalId::new("imdb", imdb_id.clone()).key());
     }
 
     for external_id in &title.external_ids {
@@ -1556,6 +1564,13 @@ fn push_external_id(payload: &mut NotificationExternalIdsPayload, external_id: &
         .entry(source.clone())
         .or_default()
         .push(external_id.value.clone());
+    // `key()` normalises the kind and omits the segment when it is unknown, so this stays a valid
+    // unambiguous identifier even for ids that predate the kind field.
+    payload
+        .by_source_key
+        .entry(source.clone())
+        .or_default()
+        .push(external_id.key());
 
     match source.as_str() {
         "tmdb" if payload.tmdb_id.is_none() => payload.tmdb_id = Some(external_id.value.clone()),
@@ -1572,6 +1587,10 @@ fn push_external_id(payload: &mut NotificationExternalIdsPayload, external_id: &
     }
 }
 
+/// The event snapshot carries no entity kind, so `by_source_key` cannot be built from this path.
+/// Events that only have the snapshot — media requests, and the fallback title context — therefore
+/// still report the ambiguous `(source, value)` pair, and nothing here can change that without
+/// widening `DomainExternalIds`, which is persisted inside every domain event.
 fn external_ids_by_source_from_snapshot(
     title: &TitleContextSnapshot,
 ) -> BTreeMap<String, Vec<String>> {
@@ -2516,6 +2535,47 @@ mod tests {
 
         assert!(!payload.by_source.contains_key("smg"));
         assert_eq!(payload.tmdb_id.as_deref(), Some("603"));
+    }
+
+    /// `by_source` keeps the ambiguous pair on purpose: it is the shape plugins already receive, so it
+    /// is not worth breaking. `by_source_key` is the form that survives the ambiguity the domain
+    /// documents for `ExternalId`.
+    #[test]
+    fn external_id_keys_carry_the_entity_kind() {
+        let mut payload = NotificationExternalIdsPayload::default();
+        push_external_id(
+            &mut payload,
+            &ExternalId::with_kind("tvdb", "series", "307111"),
+        );
+        push_external_id(
+            &mut payload,
+            &ExternalId::with_kind("tvdb", "movie", "7373"),
+        );
+
+        assert_eq!(
+            payload.by_source.get("tvdb"),
+            Some(&vec!["307111".to_string(), "7373".to_string()])
+        );
+        assert_eq!(
+            payload.by_source_key.get("tvdb"),
+            Some(&vec![
+                "tvdb:series:307111".to_string(),
+                "tvdb:movie:7373".to_string()
+            ])
+        );
+        assert_eq!(payload.tvdb_id.as_deref(), Some("307111"));
+    }
+
+    /// Ids written before the kind field existed must still produce a usable key.
+    #[test]
+    fn an_external_id_without_a_kind_still_gets_a_key() {
+        let mut payload = NotificationExternalIdsPayload::default();
+        push_external_id(&mut payload, &ExternalId::new("imdb", "tt0111161"));
+
+        assert_eq!(
+            payload.by_source_key.get("imdb"),
+            Some(&vec!["imdb:tt0111161".to_string()])
+        );
     }
 
     #[tokio::test]

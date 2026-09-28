@@ -174,6 +174,7 @@ impl NotificationClient for WasmNotificationClient {
                     mal_ids: title.external_ids.mal_ids.clone(),
                     kitsu_ids: title.external_ids.kitsu_ids.clone(),
                     by_source: title.external_ids.by_source.clone(),
+                    by_source_key: title.external_ids.by_source_key.clone(),
                 },
             }),
             episode: payload.episode.as_ref().map(map_episode),
