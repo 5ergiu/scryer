@@ -1696,6 +1696,7 @@ const it: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "Titolo cancellato",
   "settings.notificationEvent.titleMoved": "Titolo spostato",
   "settings.notificationEvent.fileDeleted": "File eliminato",
+  "settings.notificationEvent.fileRestored": "File ripristinato",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "File eliminato per l'aggiornamento",
   "settings.notificationEvent.postProcessingCompleted":
@@ -1863,6 +1864,7 @@ const it: LocaleDictionary = {
   "history.importSkipped": "Importazione saltata",
   "history.downloadCompleted": "Scaricato",
   "history.fileDeleted": "Eliminato",
+  "history.fileRestored": "Ripristinato",
   "history.fileRenamed": "Rinominato",
   "history.rematched": "Riassegnato",
   "history.seedingStarted": "In seeding",

@@ -36,6 +36,7 @@ import {
   LIBRARY_PERMISSIONS,
 } from "@/lib/utils/permissions";
 import { normalizeLibraryFilterSelection } from "@/lib/utils/library-filter";
+import { createTrailingThrottle, type TrailingThrottle } from "@/lib/utils/trailing-throttle";
 
 type RequestsContainerProps = {
   facet?: Facet | null;
@@ -168,6 +169,7 @@ function collapseMediaRequestsPerStatus(requests: MediaRequestRecord[]): MediaRe
 }
 
 const RECENT_ACTION_EVENT_WINDOW_MS = 10_000;
+const LIVE_REFRESH_MIN_INTERVAL_MS = 1_000;
 
 export function RequestsContainer({ facet }: RequestsContainerProps) {
   const client = useClient();
@@ -392,11 +394,30 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
     void refresh();
   }, [refresh]);
 
+  // A burst of request events (a bulk approval, several requesters at once)
+  // reloads the list at most once a second; the trailing reload still picks up
+  // the burst's final state.
+  const refreshRef = React.useRef(refresh);
+  React.useEffect(() => {
+    refreshRef.current = refresh;
+  });
+  const liveRefreshThrottleRef = React.useRef<TrailingThrottle | null>(null);
+  React.useEffect(() => {
+    const throttle = createTrailingThrottle(() => {
+      void refreshRef.current();
+    }, LIVE_REFRESH_MIN_INTERVAL_MS);
+    liveRefreshThrottleRef.current = throttle;
+    return () => {
+      throttle.cancel();
+      liveRefreshThrottleRef.current = null;
+    };
+  }, []);
+
   useMediaRequestsSubscription((event) => {
     if (event?.requestId && wasRecentlyActed(event.requestId)) {
       return;
     }
-    void refresh();
+    liveRefreshThrottleRef.current?.request();
   });
 
   React.useEffect(() => {

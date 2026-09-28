@@ -1688,6 +1688,7 @@ const de: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "Titel gelöscht",
   "settings.notificationEvent.titleMoved": "Titel verschoben",
   "settings.notificationEvent.fileDeleted": "Datei gelöscht",
+  "settings.notificationEvent.fileRestored": "Datei wiederhergestellt",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "Datei für Upgrade gelöscht",
   "settings.notificationEvent.postProcessingCompleted":
@@ -1854,6 +1855,7 @@ const de: LocaleDictionary = {
   "history.importSkipped": "Import übersprungen",
   "history.downloadCompleted": "Heruntergeladen",
   "history.fileDeleted": "Gelöscht",
+  "history.fileRestored": "Wiederhergestellt",
   "history.fileRenamed": "Umbenannt",
   "history.rematched": "Neu zugeordnet",
   "history.seedingStarted": "Seedet",

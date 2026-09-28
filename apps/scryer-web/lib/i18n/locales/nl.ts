@@ -2817,6 +2817,7 @@ const nl: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "Titel verwijderd",
   "settings.notificationEvent.titleMoved": "Titel verplaatst",
   "settings.notificationEvent.fileDeleted": "Bestand verwijderd",
+  "settings.notificationEvent.fileRestored": "Bestand hersteld",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "Bestand verwijderd voor upgrade",
   "settings.notificationEvent.postProcessingCompleted":
@@ -3188,6 +3189,7 @@ const nl: LocaleDictionary = {
   "history.fileUpgraded": "Bijgewerkt",
   "history.fileRecycled": "Naar de prullenbak",
   "history.fileDeleted": "Verwijderd",
+  "history.fileRestored": "Hersteld",
   "history.fileRenamed": "Hernoemd",
   "history.rematched": "Opnieuw gematcht",
   "history.seedingStarted": "Seeden",

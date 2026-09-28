@@ -1713,6 +1713,7 @@ const es: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "Título eliminado",
   "settings.notificationEvent.titleMoved": "Título movido",
   "settings.notificationEvent.fileDeleted": "Archivo eliminado",
+  "settings.notificationEvent.fileRestored": "Archivo restaurado",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "Archivo eliminado para actualización",
   "settings.notificationEvent.postProcessingCompleted":
@@ -1880,6 +1881,7 @@ const es: LocaleDictionary = {
   "history.importSkipped": "Importación omitida",
   "history.downloadCompleted": "Descargado",
   "history.fileDeleted": "Eliminado",
+  "history.fileRestored": "Restaurado",
   "history.fileRenamed": "Renombrado",
   "history.rematched": "Reasignado",
   "history.seedingStarted": "Compartiendo",
