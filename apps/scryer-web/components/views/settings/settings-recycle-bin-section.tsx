@@ -136,22 +136,27 @@ function RecycleBinLocationForm({
         if (parsedRetention !== null && dirty) onSave(pathDraft, parsedRetention);
       }}
     >
-      <div className="space-y-1">
-        <Label htmlFor="settings-recycle-bin-path">{t("settings.recycleBinPath")}</Label>
-        <Input
-          id="settings-recycle-bin-path"
-          value={pathDraft}
-          onChange={(event) => setPathDraft(event.target.value)}
-          placeholder={t("settings.recycleBinPathPlaceholder")}
-          disabled={disabled}
-          className="max-w-xl font-mono"
-        />
-        <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathHelp")}</p>
-        <p className="text-xs text-[var(--scry-warning-text)]">
-          {t("settings.recycleBinPathFilesystemWarning")}
-        </p>
-        <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathExistingItems")}</p>
-      </div>
+      <details className="space-y-3">
+        <summary className="cursor-pointer text-sm font-medium">
+          {t("indexerSearch.advanced")}
+        </summary>
+        <div className="space-y-1">
+          <Label htmlFor="settings-recycle-bin-path">{t("settings.recycleBinPath")}</Label>
+          <Input
+            id="settings-recycle-bin-path"
+            value={pathDraft}
+            onChange={(event) => setPathDraft(event.target.value)}
+            placeholder={t("settings.recycleBinPathPlaceholder")}
+            disabled={disabled}
+            className="max-w-xl font-mono"
+          />
+          <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathHelp")}</p>
+          <p className="text-xs text-[var(--scry-warning-text)]">
+            {t("settings.recycleBinPathFilesystemWarning")}
+          </p>
+          <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathExistingItems")}</p>
+        </div>
+      </details>
       <div className="space-y-1">
         <Label htmlFor="settings-recycle-bin-retention-days">{t("settings.recycleBinRetentionDays")}</Label>
         <Input
