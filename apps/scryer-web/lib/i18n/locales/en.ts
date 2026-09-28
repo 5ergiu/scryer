@@ -3842,8 +3842,7 @@ const en: LocaleDictionary = {
     "Leave blank to use a .scryer-recycle folder inside each library root. A custom folder must be an absolute path outside every library root.",
   "settings.recycleBinPathFilesystemWarning":
     "Keep the folder on the same filesystem as your media. On a different filesystem, recycling copies each file and then deletes the original, which is slower and breaks hardlinks shared with your download client.",
-  "settings.recycleBinPathExistingItems":
-    "Changing the folder does not move items that are already recycled. They stay in the previous folder and are no longer listed or cleaned up here.",
+  "settings.recycleBinPathExistingItems": "Changing the folder moves items that are already recycled into the new folder. An item that cannot be moved stays in the previous folder and is listed here after saving.",
   "settings.recycleBinRetentionDays": "Keep recycled files for (days)",
   "settings.recycleBinRetentionDaysHelp":
     "Recycled files are permanently deleted after this many days.",
@@ -3906,6 +3905,11 @@ const en: LocaleDictionary = {
     "Move each current file to the Recycle Bin, then restore the selected file in place.",
   "status.recycleBinEmptied": "Recycle bin emptied ({{count}} items removed).",
   "status.recycleBinSettingsSaved": "Recycle bin settings saved.",
+  "settings.recycleBinRelocatedOne": "Moved {{count}} recycled item to the new folder.",
+  "settings.recycleBinRelocatedOther": "Moved {{count}} recycled items to the new folder.",
+  "settings.recycleBinRelocationFailedOne": "{{count}} recycled item could not be moved:",
+  "settings.recycleBinRelocationFailedOther": "{{count}} recycled items could not be moved:",
+  "status.recycleBinSettingsSavedWithRelocationFailures": "Recycle bin settings saved, but some recycled items could not be moved.",
 
   "appUpgrade.title": "Application upgrade",
   "appUpgrade.subtitle": "Version and upgrade management",

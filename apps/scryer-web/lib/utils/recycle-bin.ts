@@ -59,6 +59,12 @@ export function groupRecycleBinItems<TItem extends RecycleBinFilterItem>(
 export const RECYCLE_BIN_MIN_RETENTION_DAYS = 1;
 export const RECYCLE_BIN_MAX_RETENTION_DAYS = 3650;
 
+/** What a save did with entries in the previous recycle-bin location. */
+export type RecycleBinRelocation = {
+  movedCount: number;
+  failures: Array<{ entryId: string; fromPath: string; reason: string }>;
+};
+
 /** Fields to change; an omitted field keeps the stored value on the server. */
 export type RecycleBinSettingsChanges = {
   enabled?: boolean;
@@ -83,6 +89,22 @@ export function parseRecycleBinRetentionDays(value: string): number | null {
   return days >= RECYCLE_BIN_MIN_RETENTION_DAYS && days <= RECYCLE_BIN_MAX_RETENTION_DAYS
     ? days
     : null;
+}
+
+/**
+ * The changes a location-form save carries: only the fields that differ from
+ * the stored settings. Resending an unchanged path would revalidate it, so a
+ * stored path a later library root invalidated would block a retention change.
+ */
+export function recycleBinLocationChanges(
+  stored: { path: string | null; retentionDays: number },
+  draft: { path: string; retentionDays: number },
+): RecycleBinSettingsChanges {
+  const changes: RecycleBinSettingsChanges = {};
+  const draftPath = draft.path.trim();
+  if (draftPath !== (stored.path ?? "")) changes.path = draftPath === "" ? null : draftPath;
+  if (draft.retentionDays !== stored.retentionDays) changes.retentionDays = draft.retentionDays;
+  return changes;
 }
 
 /**

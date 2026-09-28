@@ -1914,6 +1914,12 @@ const es: LocaleDictionary = {
   "status.recycleBinEmptied":
     "Papelera de reciclaje vaciada ({{count}} elementos eliminados).",
   "status.recycleBinSettingsSaved": "Configuración de papelera guardada.",
+  "settings.recycleBinPathExistingItems": "Al cambiar la carpeta, los elementos ya reciclados se mueven a la nueva carpeta. Un elemento que no se pueda mover permanece en la carpeta anterior y se muestra aquí después de guardar.",
+  "settings.recycleBinRelocatedOne": "Se movió {{count}} elemento reciclado a la nueva carpeta.",
+  "settings.recycleBinRelocatedOther": "Se movieron {{count}} elementos reciclados a la nueva carpeta.",
+  "settings.recycleBinRelocationFailedOne": "No se pudo mover {{count}} elemento reciclado:",
+  "settings.recycleBinRelocationFailedOther": "No se pudieron mover {{count}} elementos reciclados:",
+  "status.recycleBinSettingsSavedWithRelocationFailures": "Configuración de papelera guardada, pero algunos elementos reciclados no se pudieron mover.",
   "appUpgrade.title": "Actualización de la aplicación",
   "appUpgrade.subtitle": "Versión y gestión de actualizaciones",
   "appUpgrade.upgradeNow": "Actualizar ahora",

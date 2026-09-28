@@ -60,6 +60,28 @@ pub struct RecycleBinSettingsPayload {
     pub effective_paths: Vec<String>,
     /// Why the configured bin is never purged, when the path is invalid for the current library roots.
     pub validation_error: Option<String>,
+    /// On the result of a save that changed the location: what happened to entries found in the previous location. Null when nothing was there to move.
+    pub relocation: Option<RecycleBinRelocationPayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Entries moved from the previous recycle-bin location after a location change.
+pub struct RecycleBinRelocationPayload {
+    /// Entries now in the new location.
+    pub moved_count: i32,
+    /// Entries that were not moved, or not fully cleaned up, with the reason. An entry that did not move stays in the previous location.
+    pub failures: Vec<RecycleBinRelocationFailurePayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// One recycle-bin entry a location change could not move.
+pub struct RecycleBinRelocationFailurePayload {
+    /// Entry directory name; empty when the previous location itself could not be read.
+    pub entry_id: String,
+    /// Where the entry is now.
+    pub from_path: String,
+    /// Why it was not moved.
+    pub reason: String,
 }
 
 #[derive(SimpleObject, Clone)]

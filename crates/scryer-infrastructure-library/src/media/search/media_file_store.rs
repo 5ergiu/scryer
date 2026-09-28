@@ -2090,7 +2090,8 @@ impl MediaFileRepository for MediaFileStore {
                 grabbed_release_title = COALESCE(grabbed_release_title, {}),
                 grabbed_at = COALESCE(grabbed_at, {}),
                 edition = COALESCE(edition, {}),
-                release_hash = COALESCE(release_hash, {})
+                release_hash = COALESCE(release_hash, {}),
+                release_listing_json = COALESCE(release_listing_json, {})
              WHERE id = {}",
             vec![
                 SqlArg::OptI32(snapshot.acquisition_score),
@@ -2103,6 +2104,7 @@ impl MediaFileRepository for MediaFileStore {
                 opt_timestamp_arg_for_datastore(&self.datastore, snapshot.grabbed_at.as_deref())?,
                 SqlArg::OptText(snapshot.edition.clone()),
                 SqlArg::OptText(snapshot.release_hash.clone()),
+                SqlArg::OptText(snapshot.release_listing_json.clone()),
                 SqlArg::Text(file_id.to_string()),
             ],
         )
@@ -4755,6 +4757,7 @@ mod tests {
             scoring_log: Some("invented scoring log".to_string()),
             release_group: Some("SNAPSHOT".to_string()),
             grabbed_at: Some("2031-02-03T04:05:06Z".to_string()),
+            release_listing_json: Some(r#"{"votes":{"up":5}}"#.to_string()),
             ..Default::default()
         };
         assert!(
@@ -4786,6 +4789,10 @@ mod tests {
             "a value the rescan established wins over the snapshot"
         );
         assert!(restored.grabbed_at.is_some());
+        assert_eq!(
+            restored.release_listing_json.as_deref(),
+            Some(r#"{"votes":{"up":5}}"#)
+        );
 
         let sibling = media_files
             .get_media_file_by_id(&sibling_id)
@@ -4795,6 +4802,7 @@ mod tests {
         assert_eq!(sibling.acquisition_score, None);
         assert_eq!(sibling.scoring_log, None);
         assert_eq!(sibling.release_group, None);
+        assert_eq!(sibling.release_listing_json, None);
     }
 
     #[tokio::test]

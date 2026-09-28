@@ -1859,6 +1859,12 @@ const ja: LocaleDictionary = {
   "status.recycleBinEmptied":
     "ごみ箱が空になりました ({{count}} 項目が削除されました)。",
   "status.recycleBinSettingsSaved": "ごみ箱設定を保存しました。",
+  "settings.recycleBinPathExistingItems": "フォルダーを変更すると、すでにごみ箱にある項目は新しいフォルダーへ移動されます。移動できなかった項目は以前のフォルダーに残り、保存後にここに表示されます。",
+  "settings.recycleBinRelocatedOne": "ごみ箱の項目 {{count}} 件を新しいフォルダーへ移動しました。",
+  "settings.recycleBinRelocatedOther": "ごみ箱の項目 {{count}} 件を新しいフォルダーへ移動しました。",
+  "settings.recycleBinRelocationFailedOne": "ごみ箱の項目 {{count}} 件を移動できませんでした:",
+  "settings.recycleBinRelocationFailedOther": "ごみ箱の項目 {{count}} 件を移動できませんでした:",
+  "status.recycleBinSettingsSavedWithRelocationFailures": "ごみ箱設定を保存しましたが、一部の項目を移動できませんでした。",
   "appUpgrade.title": "アプリケーションのアップグレード",
   "appUpgrade.subtitle": "バージョンとアップグレードの管理",
   "appUpgrade.upgradeNow": "今すぐアップグレード",

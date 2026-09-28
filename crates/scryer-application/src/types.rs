@@ -189,6 +189,9 @@ pub struct RecycleBinSettings {
     pub effective_paths: Vec<String>,
     /// Why the configured bin cannot be purged, when it cannot.
     pub validation_error: Option<String>,
+    /// Set only on the result of a save that changed the location and found
+    /// entries in the previous location: how many moved and which did not.
+    pub relocation: Option<crate::recycle_bin::RecycleBinRelocationReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

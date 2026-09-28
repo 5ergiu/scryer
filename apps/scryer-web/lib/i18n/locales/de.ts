@@ -1888,6 +1888,12 @@ const de: LocaleDictionary = {
   "status.recycleBinEmptied":
     "Papierkorb geleert ({{count}} Elemente entfernt).",
   "status.recycleBinSettingsSaved": "Papierkorbeinstellungen gespeichert.",
+  "settings.recycleBinPathExistingItems": "Beim Ändern des Ordners werden bereits recycelte Elemente in den neuen Ordner verschoben. Ein Element, das nicht verschoben werden kann, bleibt im bisherigen Ordner und wird nach dem Speichern hier aufgeführt.",
+  "settings.recycleBinRelocatedOne": "{{count}} recyceltes Element in den neuen Ordner verschoben.",
+  "settings.recycleBinRelocatedOther": "{{count}} recycelte Elemente in den neuen Ordner verschoben.",
+  "settings.recycleBinRelocationFailedOne": "{{count}} recyceltes Element konnte nicht verschoben werden:",
+  "settings.recycleBinRelocationFailedOther": "{{count}} recycelte Elemente konnten nicht verschoben werden:",
+  "status.recycleBinSettingsSavedWithRelocationFailures": "Papierkorbeinstellungen gespeichert, aber einige recycelte Elemente konnten nicht verschoben werden.",
   "appUpgrade.title": "Anwendungsaktualisierung",
   "appUpgrade.subtitle": "Version und Aktualisierungsverwaltung",
   "appUpgrade.upgradeNow": "Jetzt aktualisieren",

@@ -2217,6 +2217,14 @@ export const updateRecycleBinSettingsMutation = `mutation UpdateRecycleBinSettin
     retentionDays
     effectivePaths
     validationError
+    relocation {
+      movedCount
+      failures {
+        entryId
+        fromPath
+        reason
+      }
+    }
   }
 }`;
 

@@ -5,6 +5,7 @@ import {
   buildRecycleBinSettingsInput,
   groupRecycleBinItems,
   parseRecycleBinRetentionDays,
+  recycleBinLocationChanges,
 } from "./recycle-bin.ts";
 
 const items = [
@@ -88,4 +89,20 @@ test("recycle bin retention accepts only whole days in the server range", () => 
   for (const rejected of ["", "0", "3651", "-1", "1.5", "7 days"]) {
     assert.equal(parseRecycleBinRetentionDays(rejected), null, rejected);
   }
+});
+
+test("recycle bin location save sends the path only when it changed", () => {
+  const stored = { path: "/srv/bin", retentionDays: 7 };
+  assert.deepEqual(recycleBinLocationChanges(stored, { path: " /srv/bin ", retentionDays: 30 }), {
+    retentionDays: 30,
+  });
+  assert.deepEqual(recycleBinLocationChanges(stored, { path: "/srv/other", retentionDays: 7 }), {
+    path: "/srv/other",
+  });
+  assert.deepEqual(recycleBinLocationChanges(stored, { path: "  ", retentionDays: 7 }), { path: null });
+  assert.deepEqual(
+    recycleBinLocationChanges({ path: null, retentionDays: 7 }, { path: "", retentionDays: 14 }),
+    { retentionDays: 14 },
+  );
+  assert.deepEqual(recycleBinLocationChanges(stored, { path: "/srv/bin", retentionDays: 7 }), {});
 });
