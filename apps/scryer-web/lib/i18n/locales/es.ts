@@ -2474,6 +2474,7 @@ const es: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "La ruta nueva ya tiene contenido. Elige un directorio vacío o nuevo.",
   "rootChange.refusal.root_change_destination_parent_missing": "El directorio padre de la ruta nueva no existe.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Esa ruta ya está configurada como raíz de otra biblioteca.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Esa ruta se superpone con la papelera de reciclaje personalizada: no puede contener la papelera ni estar dentro de ella.",
   "rootChange.refusal.root_change_mode_not_supported": "Un cambio de raíz siempre mueve los archivos; «los archivos ya están ahí» no se ofrece aquí.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Indica una ruta absoluta.",
   "rootChange.refusal.root_consolidation_same_root": "Una raíz no puede integrarse en sí misma.",

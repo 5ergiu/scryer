@@ -2414,6 +2414,7 @@ const ja: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "新しいパスにはすでにコンテンツがあります。空のディレクトリか新規のディレクトリを選んでください。",
   "rootChange.refusal.root_change_destination_parent_missing": "新しいパスの親ディレクトリが存在しません。",
   "rootChange.refusal.root_change_destination_is_configured_root": "そのパスは既に別のライブラリのルートとして設定されています。",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "そのパスはカスタムのごみ箱と重なっています。ごみ箱を含むパスや、ごみ箱の内側にあるパスは使用できません。",
   "rootChange.refusal.root_change_mode_not_supported": "ルートの変更では常にファイルを移動します。「ファイルはすでにそこにある」はここでは選べません。",
   "rootChange.refusal.root_consolidation_path_not_absolute": "絶対パスを指定してください。",
   "rootChange.refusal.root_consolidation_same_root": "ルートを自分自身に統合することはできません。",

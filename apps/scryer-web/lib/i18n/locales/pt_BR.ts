@@ -2457,6 +2457,7 @@ const pt_BR: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "O novo caminho já tem conteúdo. Escolha um diretório vazio ou novo.",
   "rootChange.refusal.root_change_destination_parent_missing": "O diretório pai do novo caminho não existe.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Esse caminho já está configurado como raiz de outra biblioteca.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Esse caminho se sobrepõe à lixeira personalizada: ele não pode conter a lixeira nem ficar dentro dela.",
   "rootChange.refusal.root_change_mode_not_supported": "Uma mudança de raiz sempre move os arquivos; \"os arquivos já estão lá\" não é oferecido aqui.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Informe um caminho absoluto.",
   "rootChange.refusal.root_consolidation_same_root": "Uma raiz não pode ser incorporada a si mesma.",

@@ -5164,6 +5164,7 @@ const en: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "The new path already holds content. Choose an empty or a new directory.",
   "rootChange.refusal.root_change_destination_parent_missing": "The new path's parent directory does not exist.",
   "rootChange.refusal.root_change_destination_is_configured_root": "That path is already configured as a root of another library.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "That path overlaps the custom recycle bin: it must neither contain the recycle bin nor sit inside it.",
   "rootChange.refusal.root_change_mode_not_supported": "A root change always moves the files; \"files are already there\" is not offered here.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Give an absolute path.",
   "rootChange.refusal.root_consolidation_same_root": "A root cannot be folded into itself.",

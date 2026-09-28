@@ -11,10 +11,10 @@ use scryer_application::recycle_bin::{
     RecycleBinConfig, RecycleManifest, RecycledMediaRowSnapshot, recycle_file,
 };
 use scryer_application::{
-    AppError, InsertMediaFileInput, JobKey, JobRunStatus, LibraryRootDraft, MediaFileRepository,
-    MediaFileRole, RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY, RECYCLE_BIN_RETENTION_DAYS_KEY,
-    SETTINGS_SCOPE_MEDIA, SETTINGS_SOURCE_TYPED_GRAPHQL, ShowRepository, TitleRepository,
-    UpdateRecycleBinSettings,
+    AppError, InsertMediaFileInput, JobKey, JobRunStatus, LibraryRepository, LibraryRootDraft,
+    MediaFileRepository, MediaFileRole, RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY,
+    RECYCLE_BIN_RETENTION_DAYS_KEY, SETTINGS_SCOPE_MEDIA, SETTINGS_SOURCE_TYPED_GRAPHQL,
+    ShowRepository, TitleRepository, UpdateRecycleBinSettings,
 };
 use scryer_domain::{
     AppPermission, AppPermissionMask, Collection, CollectionType, DomainEventFilter,
@@ -198,6 +198,32 @@ async fn seed_library(ctx: &TestContext, name: &str, root: &Path) -> Library {
         )
         .await
         .expect("create library")
+}
+
+/// A library written straight to the store, skipping the checks
+/// `create_library` makes. Stands in for a root that conflicts with the custom
+/// recycle bin and was configured before those checks refused it.
+async fn seed_library_in_store(ctx: &TestContext, name: &str, root: &Path) -> Library {
+    let now = Utc::now();
+    LibraryRepository::create(
+        &ctx.libraries,
+        Library {
+            id: Id::new().0,
+            facet: MediaFacet::Movie,
+            name: name.to_string(),
+            slug: name.to_lowercase().replace(' ', "-"),
+            is_default: false,
+            roots: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        },
+        vec![LibraryRootDraft {
+            path: root.to_string_lossy().to_string(),
+            is_default: true,
+        }],
+    )
+    .await
+    .expect("store library")
 }
 
 async fn seed_title(ctx: &TestContext, id: &str, library: &Library) {
@@ -488,7 +514,7 @@ async fn recycle_bin_settings_partial_updates_keep_omitted_values() {
     // that does not touch the path still succeeds.
     let nested_root = bin.path().join("nested-library");
     std::fs::create_dir(&nested_root).expect("nested root");
-    seed_library(&ctx, "Movies Nested", &nested_root).await;
+    seed_library_in_store(&ctx, "Movies Nested", &nested_root).await;
     let admin_view = ctx
         .app
         .get_recycle_bin_settings(&config_actor)
@@ -716,7 +742,7 @@ async fn recycle_bin_retention_saves_with_an_invalid_stored_path_sent_back() {
         .expect("save bin");
     let nested_root = bin.path().join("nested-library");
     std::fs::create_dir(&nested_root).expect("nested root");
-    seed_library(&ctx, "Movies Nested", &nested_root).await;
+    seed_library_in_store(&ctx, "Movies Nested", &nested_root).await;
 
     let saved = ctx
         .app

@@ -3766,6 +3766,8 @@ const nl: LocaleDictionary = {
   "title.listProvenance.left": "Van de lijst {{name}} verdwenen",
   "grabDialog.error.additionalScope":
     "{{name}} omvat meer dan één aflevering en kan daarom niet als extra bestand in de wachtrij worden gezet. Dat kan alleen met een film of één aflevering.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin":
+    "Dat pad overlapt met de aangepaste prullenbak: het mag de prullenbak niet bevatten en er ook niet in liggen.",
 };
 
 export default nl;

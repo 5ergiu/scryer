@@ -2476,6 +2476,7 @@ const fr: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "Le nouveau chemin contient déjà du contenu. Choisissez un répertoire vide ou nouveau.",
   "rootChange.refusal.root_change_destination_parent_missing": "Le répertoire parent du nouveau chemin n'existe pas.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Ce chemin est déjà configuré comme racine d'une autre bibliothèque.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Ce chemin chevauche la corbeille personnalisée : il ne doit ni contenir la corbeille ni se trouver à l'intérieur.",
   "rootChange.refusal.root_change_mode_not_supported": "Un changement de racine déplace toujours les fichiers ; « les fichiers sont déjà là » n'est pas proposé ici.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Indiquez un chemin absolu.",
   "rootChange.refusal.root_consolidation_same_root": "Une racine ne peut pas être fusionnée dans elle-même.",

@@ -2449,6 +2449,7 @@ const de: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "Der neue Pfad enthält bereits Inhalte. Wählen Sie ein leeres oder ein neues Verzeichnis.",
   "rootChange.refusal.root_change_destination_parent_missing": "Das übergeordnete Verzeichnis des neuen Pfads existiert nicht.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Dieser Pfad ist bereits als Stammordner einer anderen Bibliothek konfiguriert.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Dieser Pfad überschneidet sich mit dem benutzerdefinierten Papierkorb: Er darf den Papierkorb weder enthalten noch darin liegen.",
   "rootChange.refusal.root_change_mode_not_supported": "Bei einem Stammordnerwechsel werden die Dateien immer verschoben; „Dateien sind bereits dort“ wird hier nicht angeboten.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Geben Sie einen absoluten Pfad an.",
   "rootChange.refusal.root_consolidation_same_root": "Ein Stammordner kann nicht in sich selbst überführt werden.",

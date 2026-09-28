@@ -5910,6 +5910,7 @@ const ru: LocaleDictionary = {
   "rootChange.refusal.root_change_destination_not_empty": "По новому пути уже есть содержимое. Выберите пустой или новый каталог.",
   "rootChange.refusal.root_change_destination_parent_missing": "Родительский каталог нового пути не существует.",
   "rootChange.refusal.root_change_destination_is_configured_root": "Этот путь уже настроен как корень другой библиотеки.",
+  "rootChange.refusal.root_change_destination_conflicts_with_recycle_bin": "Этот путь пересекается с пользовательской корзиной: он не должен содержать корзину или находиться внутри неё.",
   "rootChange.refusal.root_change_mode_not_supported": "Смена корня всегда перемещает файлы; вариант «файлы уже на месте» здесь не предлагается.",
   "rootChange.refusal.root_consolidation_path_not_absolute": "Укажите абсолютный путь.",
   "rootChange.refusal.root_consolidation_same_root": "Корень нельзя влить в самого себя.",
