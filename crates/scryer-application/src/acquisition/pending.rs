@@ -49,6 +49,25 @@ pub(crate) enum PendingGrabOutcome {
     SubmitRefused(RefusedSubmission),
 }
 
+/// The read-only half of promoting a pending release: every check up to and
+/// including admission, none of which writes. A caller that has to claim the
+/// row before acting can judge first and claim only when the answer calls for
+/// a write.
+pub(crate) enum PendingJudgement {
+    /// Settled without submitting anything.
+    Decided(PendingGrabOutcome),
+    /// Admitted: grabbing it is the next step.
+    Admitted(AdmittedPendingRelease),
+}
+
+/// What the grab half needs from a judgement that admitted the release.
+pub(crate) struct AdmittedPendingRelease {
+    title: Title,
+    pending_scope: SubmissionScope,
+    candidate_score: i32,
+    incumbent_best_score: Option<i32>,
+}
+
 /// A submission refused without burning its release, reduced to what failure
 /// accounting and refusal logging read (the error itself is not `Clone`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -874,6 +893,25 @@ impl AppUseCase {
         now: &chrono::DateTime<Utc>,
         trigger: PendingGrabTrigger,
     ) -> AppResult<PendingGrabOutcome> {
+        match self.judge_pending_release(wanted, pr, now, trigger).await? {
+            PendingJudgement::Decided(outcome) => Ok(outcome),
+            PendingJudgement::Admitted(admitted) => {
+                self.grab_admitted_pending_release(wanted, pr, now, trigger, admitted)
+                    .await
+            }
+        }
+    }
+
+    /// Judge a pending release against current policy without writing
+    /// anything: ownership, blocklist, the client queue, swarm health,
+    /// coverage, the cutoff gate and admission.
+    pub(crate) async fn judge_pending_release(
+        &self,
+        wanted: &AcquisitionScopeState,
+        pr: &PendingRelease,
+        now: &chrono::DateTime<Utc>,
+        trigger: PendingGrabTrigger,
+    ) -> AppResult<PendingJudgement> {
         if let Some(denial) = self
             .location_ownership_denial_for_title(
                 &crate::location::ownership_guard::TITLE_DOWNLOAD_ENTRY,
@@ -884,11 +922,11 @@ impl AppUseCase {
             if trigger == PendingGrabTrigger::Operator {
                 return Err(denial.into_app_error());
             }
-            return Ok(PendingGrabOutcome::Deferred);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Deferred));
         }
         // Load title
         let Some(title) = self.services.catalog.titles.get_by_id(&pr.title_id).await? else {
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         };
 
         // Check the per-title blocklist (the single, removable exclusion source).
@@ -902,7 +940,7 @@ impl AppUseCase {
             pr.info_hash.as_deref(),
             &db_blocklist,
         ) {
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
 
         // Check if this release is already active in the download client.
@@ -921,7 +959,7 @@ impl AppUseCase {
                 release = pr.release_title.as_str(),
                 "pending release: skipping, already active in download client"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
 
         // Swarm health, re-judged against the threshold in force *now*. The row
@@ -952,7 +990,7 @@ impl AppUseCase {
                             .as_str(),
                     "pending release: rejecting, too few seeders for this indexer's seeding profile"
                 );
-                return Ok(PendingGrabOutcome::Rejected);
+                return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
             }
         }
 
@@ -1016,7 +1054,7 @@ impl AppUseCase {
                     .as_str(),
                 "pending release: rejecting, anime numbering has several equally-good readings"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
         if pending_parsed
             .parse_hints
@@ -1027,7 +1065,7 @@ impl AppUseCase {
                 release = pr.release_title.as_str(),
                 "pending release: rejecting unresolved pack coverage"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
         let pending_coverage = crate::acquisition_coverage::resolve_release_coverage(
             &pending_parsed,
@@ -1061,7 +1099,7 @@ impl AppUseCase {
                         .as_str(),
                 "pending release: rejecting, parsed numbering contradicts the wanted episode"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
 
         let is_series_pack = pending_parsed
@@ -1080,7 +1118,7 @@ impl AppUseCase {
                     error = %error,
                     "pending series pack: media ownership is unavailable; deferring retry"
                 );
-                return Ok(PendingGrabOutcome::Deferred);
+                return Ok(PendingJudgement::Decided(PendingGrabOutcome::Deferred));
             }
             Err(_) => Vec::new(),
         };
@@ -1103,7 +1141,7 @@ impl AppUseCase {
                         error = %error,
                         "pending series pack: submission ownership is unavailable; deferring retry"
                     );
-                    return Ok(PendingGrabOutcome::Deferred);
+                    return Ok(PendingJudgement::Decided(PendingGrabOutcome::Deferred));
                 }
             };
             let identities = submissions
@@ -1130,7 +1168,7 @@ impl AppUseCase {
                         error = %error,
                         "pending series pack: tracked submission ownership is unavailable; deferring retry"
                     );
-                    return Ok(PendingGrabOutcome::Deferred);
+                    return Ok(PendingJudgement::Decided(PendingGrabOutcome::Deferred));
                 }
             };
             owned_episode_ids.extend(
@@ -1146,7 +1184,7 @@ impl AppUseCase {
                 &catalog_episodes,
                 &owned_episode_ids,
             ) {
-                return Ok(PendingGrabOutcome::Rejected);
+                return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
             }
         }
         let cutoff_scope = self.cutoff_scope_for(&pending_scope).await;
@@ -1173,7 +1211,7 @@ impl AppUseCase {
                     title_id = title.id.as_str(),
                     "pending release: failed to resolve quality profile; keeping release pending"
                 );
-                return Ok(PendingGrabOutcome::Deferred);
+                return Ok(PendingJudgement::Decided(PendingGrabOutcome::Deferred));
             }
         };
 
@@ -1210,7 +1248,7 @@ impl AppUseCase {
                 codes = ?facts.block_codes,
                 "pending release: rejected by the current profile on re-scoring"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
         let candidate_runtime_minutes = facts.size_basis.total_runtime_minutes;
         let candidate_score = facts.score;
@@ -1331,12 +1369,12 @@ impl AppUseCase {
                 decision = code.as_str(),
                 "pending release: refused by the cutoff gate"
             );
-            return Ok(PendingGrabOutcome::Rejected);
+            return Ok(PendingJudgement::Decided(PendingGrabOutcome::Rejected));
         }
 
         let verdict = crate::admission::evaluate_admission(&admission, candidate_facts, &policy);
         if let Some(rejection) = verdict.rejection() {
-            return Ok(match &rejection.reason {
+            return Ok(PendingJudgement::Decided(match &rejection.reason {
                 crate::admission::AdmissionRejectionReason::QueuedEqualOrBetter {
                     queued_title,
                     ..
@@ -1349,8 +1387,33 @@ impl AppUseCase {
                     }
                 }
                 _ => PendingGrabOutcome::Rejected,
-            });
+            }));
         }
+        Ok(PendingJudgement::Admitted(AdmittedPendingRelease {
+            title,
+            pending_scope,
+            candidate_score,
+            incumbent_best_score: admission.best_score(),
+        }))
+    }
+
+    /// The grab half of [`Self::try_grab_pending_release`]: the delay hold and
+    /// the submission for a release its judgement admitted. A caller that
+    /// judged before claiming the row calls this once the claim is held.
+    pub(crate) async fn grab_admitted_pending_release(
+        &self,
+        wanted: &AcquisitionScopeState,
+        pr: &PendingRelease,
+        now: &chrono::DateTime<Utc>,
+        trigger: PendingGrabTrigger,
+        admitted: AdmittedPendingRelease,
+    ) -> AppResult<PendingGrabOutcome> {
+        let AdmittedPendingRelease {
+            title,
+            pending_scope,
+            candidate_score,
+            incumbent_best_score,
+        } = admitted;
         let source_hint = pr.release_url.clone();
         let source_kind = pr
             .source_kind
@@ -1412,7 +1475,7 @@ impl AppUseCase {
                     pr,
                     candidate_score,
                     crate::acquisition_release_search::ReleaseAutoDecisionCode::PendingDelay,
-                    admission.best_score(),
+                    incumbent_best_score,
                     now,
                 )
                 .await;

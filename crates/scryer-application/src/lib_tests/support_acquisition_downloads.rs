@@ -1412,9 +1412,33 @@ pub(super) struct TrackingPendingReleaseRepo {
     /// write that fails partway, which is the only way to reach the retention
     /// recovery branch.
     pub(super) standby_inserts_before_failure: Arc<Mutex<Option<usize>>>,
+    /// Status writes attempted, claims included, in order: `(row id, new
+    /// status)`. Shared by clones.
+    status_writes: Arc<std::sync::Mutex<Vec<(String, PendingReleaseStatus)>>>,
 }
 
 impl TrackingPendingReleaseRepo {
+    pub(super) fn status_writes(&self) -> Vec<(String, PendingReleaseStatus)> {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn reset_status_writes(&self) {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    fn record_status_write(&self, id: &str, status: PendingReleaseStatus) {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((id.to_string(), status));
+    }
+
     pub(super) async fn fail_delete_for_title(&self, message: &str) {
         *self.delete_error.lock().await = Some(message.to_string());
     }
@@ -1670,6 +1694,7 @@ impl PendingReleaseRepository for TrackingPendingReleaseRepo {
         status: PendingReleaseStatus,
         grabbed_at: Option<&str>,
     ) -> AppResult<()> {
+        self.record_status_write(id, status);
         if let Some(release) = self
             .store
             .lock()
@@ -1806,6 +1831,7 @@ impl PendingReleaseRepository for TrackingPendingReleaseRepo {
         next_status: PendingReleaseStatus,
         grabbed_at: Option<&str>,
     ) -> AppResult<bool> {
+        self.record_status_write(id, next_status);
         let mut store = self.store.lock().await;
         let Some(release) = store.iter_mut().find(|release| release.id == id) else {
             return Ok(false);
