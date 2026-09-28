@@ -42,10 +42,19 @@ export function TitleHistoryContainer({
     [activeFilters],
   );
   const offset = page * PAGE_SIZE;
+  // Only the newest request may write the page: a slower answer for earlier
+  // filters, or for a live-event refetch that was overtaken, is dropped.
+  const requestSequenceRef = React.useRef(0);
 
-  const fetchHistory = React.useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  // A background load (a live-event refetch) keeps the current rows on screen
+  // instead of flashing the loading state; loads the user caused show it.
+  const fetchHistory = React.useCallback(async (options?: { background?: boolean }) => {
+    const requestId = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestId;
+    if (!options?.background) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const result = await client
         .query<{ titleHistory: TitleHistoryPage }>(titleHistoryQuery, {
@@ -62,20 +71,25 @@ export function TitleHistoryContainer({
         })
         .toPromise();
 
+      if (requestSequenceRef.current !== requestId) return;
       if (result.error) {
         throw result.error;
       }
 
       setEvents(result.data?.titleHistory.items ?? []);
       setTotalCount(result.data?.titleHistory.totalCount ?? 0);
+      setError(null);
     } catch (fetchError) {
+      if (requestSequenceRef.current !== requestId) return;
       setError(
         fetchError instanceof Error ? fetchError.message : t("status.failedToLoad"),
       );
       setEvents([]);
       setTotalCount(0);
     } finally {
-      setLoading(false);
+      if (requestSequenceRef.current === requestId) {
+        setLoading(false);
+      }
     }
   }, [client, offset, selectedEventTypes, selectedLibraryIds, selectedTitle, t]);
 
@@ -124,6 +138,13 @@ export function TitleHistoryContainer({
     void fetchHistory();
   }, [fetchHistory]);
 
+  React.useEffect(
+    () => () => {
+      requestSequenceRef.current += 1;
+    },
+    [],
+  );
+
   // The page only reloads on its own inputs, so a new event would otherwise
   // stay hidden until a manual refresh. Refetch the page as it is currently
   // filtered whenever an event that could add one of its rows arrives.
@@ -143,7 +164,7 @@ export function TitleHistoryContainer({
         aliasKey: `title-history:${refreshAliasId}`,
         predicate: forEventTypes(...refreshDomainEventTypes),
         run: () => {
-          void fetchHistoryRef.current();
+          void fetchHistoryRef.current({ background: true });
         },
       }),
     [refreshAliasId, refreshDomainEventTypes, registerReactiveRefresh],
