@@ -3275,8 +3275,8 @@ fn apply_title_metadata_update(title: &mut Title, metadata: TitleMetadataUpdate)
 
 /// Whether a title write should queue background hydration. This must accept
 /// every title `MovieTitleRef::from_title` / `SeriesTitleRef::from_title`
-/// accepts, or the worker never sees a title it could hydrate. Accepting a
-/// few it then rejects is harmless: the worker clears their retry state.
+/// accepts, or the worker never sees a title it could hydrate. Accepting one
+/// it then rejects costs a warning: the worker logs it and clears retry state.
 fn title_has_supported_hydration_identity(title: &Title) -> bool {
     external_ids_support_title_hydration(&title.facet, &title.external_ids)
         // Both title refs fall back to the stored IMDb id.
