@@ -1761,14 +1761,26 @@ const ANIME_ABSOLUTE_TEXT_LABEL: &str = "freetext_anime_abs";
 /// own season and episode numbering.
 const ANIME_COUR_TEXT_LABEL: &str = "freetext_anime_cour";
 
-/// The numbering form a text strategy asks under. Automatic search keeps one
-/// strategy per form so the community and absolute query forms survive the
-/// tier split next to the plain one.
-fn auto_text_numbering_form(label: &str) -> &'static str {
+/// The episode numbering a strategy asks under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoNumberingForm {
+    /// The official season and episode coordinates, or no episode numbering.
+    Official,
+    /// An absolute (or cour-relative) episode number.
+    Absolute,
+    /// The community cour's own season and episode numbering.
+    Community,
+}
+
+/// The numbering form a strategy asks under. Automatic anime search keeps one
+/// strategy per form in each tier, so the absolute ID query runs next to the
+/// season/episode one, and the community and absolute text query forms
+/// survive the tier split next to the plain one.
+fn auto_numbering_form(label: &str) -> AutoNumberingForm {
     match label {
-        ANIME_ABSOLUTE_TEXT_LABEL => ANIME_ABSOLUTE_TEXT_LABEL,
-        ANIME_COUR_TEXT_LABEL => ANIME_COUR_TEXT_LABEL,
-        _ => "",
+        "ids_abs" | ANIME_ABSOLUTE_TEXT_LABEL => AutoNumberingForm::Absolute,
+        ANIME_COUR_TEXT_LABEL => AutoNumberingForm::Community,
+        _ => AutoNumberingForm::Official,
     }
 }
 
@@ -1939,9 +1951,12 @@ fn split_auto_strategy_tiers(
     }
 
     // One anime episode is posted under several numberings, and each numbering
-    // is a different question to the indexer. Keeping a single text strategy
-    // there would throw away the community and absolute query forms, so
-    // automatic anime search keeps the best strategy of every numbering form.
+    // is a different question to the indexer. An indexer can index a release
+    // under its season/episode numbering only, so the absolute ID query alone
+    // misses it, and a usable absolute result keeps the text fallback from
+    // running. Keeping a single strategy per tier would throw those query
+    // forms away, so automatic anime search keeps the best strategy of every
+    // numbering form in both tiers.
     let keep_every_numbering_form = facet == "anime";
 
     let mut primary_candidates = Vec::new();
@@ -1955,7 +1970,7 @@ fn split_auto_strategy_tiers(
         }
     }
 
-    let take_text = |candidates: &mut Vec<SearchStrategy>| -> Vec<SearchStrategy> {
+    let take_tier = |candidates: &mut Vec<SearchStrategy>| -> Vec<SearchStrategy> {
         if keep_every_numbering_form {
             take_best_auto_strategy_per_numbering_form(candidates)
         } else {
@@ -1964,25 +1979,24 @@ fn split_auto_strategy_tiers(
     };
 
     if primary_candidates.is_empty() {
-        return (take_text(&mut fallback_candidates), Vec::new());
+        return (take_tier(&mut fallback_candidates), Vec::new());
     }
 
-    let primary = take_best_auto_strategy(&mut primary_candidates)
-        .into_iter()
-        .collect();
-    let fallback = take_text(&mut fallback_candidates);
+    let primary = take_tier(&mut primary_candidates);
+    let fallback = take_tier(&mut fallback_candidates);
 
     (primary, fallback)
 }
 
 /// The best strategy of each distinct numbering form, ordered by rank so the
-/// plain title query still leads.
+/// best-ranked query (the absolute ID query, or the plain title query) still
+/// leads.
 fn take_best_auto_strategy_per_numbering_form(
     strategies: &mut Vec<SearchStrategy>,
 ) -> Vec<SearchStrategy> {
-    let mut forms: Vec<&'static str> = Vec::new();
+    let mut forms: Vec<AutoNumberingForm> = Vec::new();
     for strategy in strategies.iter() {
-        let form = auto_text_numbering_form(&strategy.label);
+        let form = auto_numbering_form(&strategy.label);
         if !forms.contains(&form) {
             forms.push(form);
         }
@@ -1994,7 +2008,7 @@ fn take_best_auto_strategy_per_numbering_form(
             let index = strategies
                 .iter()
                 .enumerate()
-                .filter(|(_, strategy)| auto_text_numbering_form(&strategy.label) == form)
+                .filter(|(_, strategy)| auto_numbering_form(&strategy.label) == form)
                 .min_by_key(|(_, strategy)| auto_strategy_rank(strategy))
                 .map(|(index, _)| index)?;
             Some(strategies.remove(index))
@@ -13427,10 +13441,54 @@ mod tests {
     }
 
     #[test]
-    fn auto_strategy_tier_prefers_absolute_id_and_reserves_freetext() {
+    fn auto_anime_strategy_tier_keeps_both_id_numbering_forms_and_reserves_freetext() {
         let (primary, fallback) = split_strategy_tiers(
             SearchMode::Auto,
             "anime",
+            vec![
+                strategy_with_label("ids_sxex"),
+                strategy_with_label("freetext"),
+                strategy_with_label("ids_abs"),
+            ],
+        );
+
+        assert_eq!(
+            primary
+                .iter()
+                .map(|strategy| strategy.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ids_abs", "ids_sxex"]
+        );
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].label, "freetext");
+    }
+
+    #[test]
+    fn auto_anime_strategy_tier_keeps_the_single_id_form_it_has() {
+        for label in ["ids_abs", "ids_sxex", "ids"] {
+            let (primary, fallback) = split_strategy_tiers(
+                SearchMode::Auto,
+                "anime",
+                vec![strategy_with_label(label), strategy_with_label("freetext")],
+            );
+
+            assert_eq!(
+                primary
+                    .iter()
+                    .map(|strategy| strategy.label.as_str())
+                    .collect::<Vec<_>>(),
+                vec![label],
+                "label {label}"
+            );
+            assert_eq!(fallback.len(), 1, "label {label}");
+        }
+    }
+
+    #[test]
+    fn auto_non_anime_strategy_tier_keeps_one_id_strategy() {
+        let (primary, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "series",
             vec![
                 strategy_with_label("ids_sxex"),
                 strategy_with_label("freetext"),
