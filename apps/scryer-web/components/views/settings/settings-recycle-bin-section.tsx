@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Trash2, Undo2 } from "lucide-react";
+import { FolderOpen, Trash2, Undo2 } from "lucide-react";
+import { FolderBrowserDialog } from "@/components/setup/folder-browser-dialog";
 import { LibraryMultiSelect } from "@/components/common/library-multi-select";
 import { SettingsToggleSwitch } from "@/components/common/settings-toggle-switch";
 import { Button } from "@/components/ui/button";
@@ -122,6 +123,7 @@ function RecycleBinLocationForm({
 }: LocationFormProps) {
   const t = useTranslate();
   const [pathDraft, setPathDraft] = useState(path ?? "");
+  const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
   const [retentionDraft, setRetentionDraft] = useState(String(retentionDays));
   const parsedRetention = parseRecycleBinRetentionDays(retentionDraft);
   const dirty = pathDraft.trim() !== (path ?? "") || parsedRetention !== retentionDays;
@@ -142,14 +144,45 @@ function RecycleBinLocationForm({
         </summary>
         <div className="space-y-1">
           <Label htmlFor="settings-recycle-bin-path">{t("settings.recycleBinPath")}</Label>
-          <Input
-            id="settings-recycle-bin-path"
-            value={pathDraft}
-            onChange={(event) => setPathDraft(event.target.value)}
-            placeholder={t("settings.recycleBinPathPlaceholder")}
-            disabled={disabled}
-            className="max-w-xl font-mono"
-          />
+          <div className="flex max-w-xl items-center gap-2">
+            <Button
+              id="settings-recycle-bin-path"
+              type="button"
+              variant="outline"
+              disabled={disabled}
+              aria-haspopup="dialog"
+              onClick={() => setFolderBrowserOpen(true)}
+              className="min-w-0 flex-1 justify-start font-mono"
+              title={pathDraft || t("settings.recycleBinPathPlaceholder")}
+            >
+              <FolderOpen className="mr-2 h-4 w-4 shrink-0" />
+              <span className="truncate">
+                {pathDraft || t("settings.recycleBinPathPlaceholder")}
+              </span>
+            </Button>
+            {pathDraft ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={disabled}
+                onClick={() => setPathDraft("")}
+              >
+                {t("label.clear")}
+              </Button>
+            ) : null}
+          </div>
+          {folderBrowserOpen ? (
+            <FolderBrowserDialog
+              open={folderBrowserOpen}
+              onOpenChange={setFolderBrowserOpen}
+              onSelect={(selectedPath) => {
+                if (!disabled) setPathDraft(selectedPath);
+              }}
+              selectionTypes={["folder"]}
+              initialPath={pathDraft || "/"}
+              title={t("settings.recycleBinPath")}
+            />
+          ) : null}
           <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathHelp")}</p>
           <p className="text-xs text-[var(--scry-warning-text)]">
             {t("settings.recycleBinPathFilesystemWarning")}
