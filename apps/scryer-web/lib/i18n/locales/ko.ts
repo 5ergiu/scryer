@@ -1624,6 +1624,7 @@ const ko: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "제목이 삭제되었습니다.",
   "settings.notificationEvent.titleMoved": "제목이 이동되었습니다.",
   "settings.notificationEvent.fileDeleted": "파일이 삭제되었습니다",
+  "settings.notificationEvent.fileRestored": "파일이 복원되었습니다",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "업그레이드를 위해 파일이 삭제되었습니다.",
   "settings.notificationEvent.postProcessingCompleted": "후처리 완료",
@@ -1779,6 +1780,7 @@ const ko: LocaleDictionary = {
   "history.importSkipped": "가져오기 건너뜀",
   "history.downloadCompleted": "다운로드 완료",
   "history.fileDeleted": "삭제됨",
+  "history.fileRestored": "복원됨",
   "history.fileRenamed": "이름 변경됨",
   "history.rematched": "재매칭",
   "history.seedingStarted": "시딩 중",

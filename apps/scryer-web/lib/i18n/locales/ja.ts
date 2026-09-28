@@ -1658,6 +1658,7 @@ const ja: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "タイトルを削除しました",
   "settings.notificationEvent.titleMoved": "タイトルを移動しました",
   "settings.notificationEvent.fileDeleted": "ファイルが削除されました",
+  "settings.notificationEvent.fileRestored": "ファイルが復元されました",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "アップグレードのためにファイルが削除されました",
   "settings.notificationEvent.postProcessingCompleted": "後処理が完了しました",
@@ -1822,6 +1823,7 @@ const ja: LocaleDictionary = {
   "history.importSkipped": "インポートスキップ",
   "history.downloadCompleted": "ダウンロード完了",
   "history.fileDeleted": "削除済み",
+  "history.fileRestored": "復元済み",
   "history.fileRenamed": "名前変更済み",
   "history.rematched": "再マッチ",
   "history.seedingStarted": "シード中",

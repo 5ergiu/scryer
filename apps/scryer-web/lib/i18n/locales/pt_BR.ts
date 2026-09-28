@@ -1695,6 +1695,7 @@ const pt_BR: LocaleDictionary = {
   "settings.notificationEvent.titleDeleted": "Título excluído",
   "settings.notificationEvent.titleMoved": "Título movido",
   "settings.notificationEvent.fileDeleted": "Arquivo excluído",
+  "settings.notificationEvent.fileRestored": "Arquivo restaurado",
   "settings.notificationEvent.fileDeletedForUpgrade":
     "Arquivo excluído para atualização",
   "settings.notificationEvent.postProcessingCompleted":
@@ -1861,6 +1862,7 @@ const pt_BR: LocaleDictionary = {
   "history.importSkipped": "Importação ignorada",
   "history.downloadCompleted": "Baixado",
   "history.fileDeleted": "Excluído",
+  "history.fileRestored": "Restaurado",
   "history.fileRenamed": "Renomeado",
   "history.rematched": "Remapeado",
   "history.seedingStarted": "Semeando",

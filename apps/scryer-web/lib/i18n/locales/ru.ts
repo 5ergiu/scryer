@@ -3732,6 +3732,7 @@ const ru: LocaleDictionary = {
     "settings.notificationEvent.titleDeleted": "Название удалено",
     "settings.notificationEvent.titleMoved": "Название перемещено",
     "settings.notificationEvent.fileDeleted": "Файл удалён",
+    "settings.notificationEvent.fileRestored": "Файл восстановлен",
 
     "settings.notificationEvent.fileDeletedForUpgrade":
         "Файл удалён для обновления",
@@ -4438,6 +4439,7 @@ const ru: LocaleDictionary = {
     "history.fileRecycled": "Перемещено в корзину",
 
     "history.fileDeleted": "Удалено",
+    "history.fileRestored": "Восстановлено",
 
     "history.fileRenamed": "Переименовано",
 
