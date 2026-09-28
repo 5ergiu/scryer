@@ -645,6 +645,7 @@ impl SearchDiagnosticsContext {
                     candidate,
                     response.grab_current,
                     response.grab_max,
+                    now,
                 ),
                 created_at: now,
                 reusable_until: now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS),
@@ -899,6 +900,7 @@ fn normalized_candidate(
     candidate: &IndexerSearchResult,
     grab_current: Option<u32>,
     grab_max: Option<u32>,
+    now: DateTime<Utc>,
 ) -> NormalizedIndexerSearchCandidate {
     NormalizedIndexerSearchCandidate {
         provider_ref: candidate.guid.clone(),
@@ -937,6 +939,7 @@ fn normalized_candidate(
         protected: candidate_extra_bool(candidate, "protected"),
         tags: candidate_extra_strings(candidate, "tags"),
         provider_categories: candidate_extra_strings(candidate, "provider_categories"),
+        release_listing_json: scryer_application::search_result_listing_json(candidate, now),
     }
 }
 
@@ -1040,7 +1043,9 @@ fn reusable_candidate_from_record(
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
-        release_listing_json: None,
+        // The columns above rebuild only part of `extra`; rules read the
+        // listing facts from the snapshot stored with the result.
+        release_listing_json: normalized.release_listing_json,
     })
 }
 
@@ -8917,6 +8922,46 @@ mod tests {
             auto_decision_summary: None,
             release_listing_json: None,
         }
+    }
+
+    #[test]
+    fn a_replayed_result_keeps_the_listing_facts_rules_read() {
+        let mut live = search_result("Synthetic.Release.2024.1080p.WEB-DL-GRP");
+        live.published_at = Some("2024-01-01T00:00:00Z".into());
+        live.thumbs_down = Some(3);
+        for (key, value) in [
+            ("protocol", serde_json::json!("torrent")),
+            ("freeleech", serde_json::json!(true)),
+            ("downloadvolumefactor", serde_json::json!(0.5)),
+            ("newznab_profile_id", serde_json::json!("synthetic-profile")),
+            ("password_protected", serde_json::json!(true)),
+            ("magnet_url", serde_json::json!("magnet:?xt=urn:btih:0000")),
+        ] {
+            live.extra.insert(key.to_string(), value);
+        }
+
+        let stored = ReusableIndexerSearchCandidate {
+            normalized: normalized_candidate(&live, None, None, Utc::now()),
+        };
+        let replayed = reusable_candidate_from_record(stored, &mock_indexer_config())
+            .expect("the stored result rehydrates");
+
+        let listing: serde_json::Value = serde_json::from_str(
+            replayed
+                .release_listing_json
+                .as_deref()
+                .expect("the replayed result carries its listing"),
+        )
+        .expect("the listing is JSON");
+        assert_eq!(listing["published_at"], "2024-01-01T00:00:00Z");
+        assert_eq!(listing["thumbs_down"], 3);
+        assert_eq!(listing["is_password_protected"], true);
+        let extra = &listing["extra"];
+        assert_eq!(extra["protocol"], "torrent");
+        assert_eq!(extra["freeleech"], true);
+        assert_eq!(extra["downloadvolumefactor"], 0.5);
+        assert_eq!(extra["newznab_profile_id"], "synthetic-profile");
+        assert!(extra.get("magnet_url").is_none(), "listing: {listing}");
     }
 
     fn prepared_strategy(strategy_id: &str) -> PreparedSearchStrategy {
