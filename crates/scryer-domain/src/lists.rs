@@ -336,7 +336,10 @@ pub enum ListMembershipState {
     Requested,
     Held,
     /// A held or requested personal-list item whose request was rejected.
-    /// Not re-requested until the item leaves the list and returns.
+    /// Not re-requested until the item leaves the list and returns. Also an
+    /// item whose add or request was refused as invalid or naming something
+    /// missing; that one is tried again once the item's ids or the list's
+    /// settings change.
     Rejected,
     Filtered,
     Excluded,

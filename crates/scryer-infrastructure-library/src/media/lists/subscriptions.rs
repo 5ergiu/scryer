@@ -200,9 +200,11 @@ impl ListSubscriptionRepository for ListStore {
             count_arg(counts.filtered),
             count_arg(counts.excluded),
             count_arg(counts.unresolved),
-            SqlArg::Timestamp(Utc::now()),
             SqlArg::Text(id.to_string()),
         ];
+        // `updated_at` is the last settings edit. The sync engine compares it
+        // with `last_sync_at` to spot an edit it has not processed yet, so a
+        // sync must not move it.
         let changed = SqlRuntime::execute_write(
             &self.datastore,
             "record_list_sync",
@@ -211,7 +213,7 @@ impl ListSubscriptionRepository for ListStore {
                     error_at = {}, paused_until = {}, fetch_fingerprint = {},
                     count_total = {}, count_in_library = {}, count_added = {},
                     count_requested = {}, count_held = {}, count_filtered = {},
-                    count_excluded = {}, count_unresolved = {}, updated_at = {}
+                    count_excluded = {}, count_unresolved = {}
               WHERE id = {}",
             args,
         )

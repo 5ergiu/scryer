@@ -59,6 +59,9 @@ pub trait ListSubscriptionRepository: Send + Sync {
     async fn list_due(&self, now: DateTime<Utc>, limit: usize) -> AppResult<Vec<ListSubscription>>;
 
     /// Writes the outcome of one sync: state, timestamps, fingerprint, counts.
+    /// It leaves `updated_at` alone: that stamp marks the last settings edit,
+    /// and a sync that moved it would make every list look edited since its
+    /// last sync.
     async fn record_sync(
         &self,
         id: &str,

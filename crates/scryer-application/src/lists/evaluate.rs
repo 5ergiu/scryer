@@ -11,7 +11,9 @@
 //!    through next time);
 //! 3. the title is already in a library of its kind → `InLibrary`;
 //! 4. an earlier sync already settled it (added, requested, held, rejected,
-//!    recorded for Discover) → keep that state;
+//!    recorded for Discover) → keep that state. An add or request that was
+//!    refused is kept only until the item's ids or the list's settings
+//!    change, and then it is a candidate again;
 //! 5. the gateway could not resolve it → `Unresolved`, retried next sync;
 //! 6. otherwise it is a candidate.
 //!
@@ -100,9 +102,11 @@ fn decide(
         return ItemDecision::Filtered { reason };
     }
 
-    let existing = memberships
-        .get(&item.item.item_key)
-        .filter(|existing| existing.left_at.is_none() && existing.state.is_settled());
+    let existing = memberships.get(&item.item.item_key).filter(|existing| {
+        existing.left_at.is_none()
+            && existing.state.is_settled()
+            && !refusal_may_have_lifted(subscription, item, existing)
+    });
 
     if let Some(title_id) = &item.library_title_id {
         // A title this list added is in the library because the list put it
@@ -131,6 +135,35 @@ fn decide(
     }
 
     ItemDecision::Candidate
+}
+
+/// Whether the list's settings were edited after its last sync, so that sync
+/// has not seen them yet. A list that never synced counts as edited.
+pub(super) fn edited_since_last_sync(subscription: &ListSubscription) -> bool {
+    subscription
+        .sync
+        .last_at
+        .is_none_or(|last_at| subscription.updated_at > last_at)
+}
+
+/// Whether an item whose add or request was refused should be tried again.
+/// Retrying the same item against the same settings would only be refused
+/// again, so it waits for something that could change the answer: the
+/// list's settings were edited (a route, library or profile the refusal
+/// named), or the item now resolves to different ids.
+fn refusal_may_have_lifted(
+    subscription: &ListSubscription,
+    item: &ResolvedItem,
+    row: &ListMembership,
+) -> bool {
+    row.state == ListMembershipState::Rejected
+        && row
+            .state_reason
+            .as_deref()
+            .is_some_and(super::act::is_refused_action_reason)
+        && (edited_since_last_sync(subscription)
+            || row.external_ids != item.external_ids
+            || row.smg_title_id != item.smg_title_id)
 }
 
 /// The first filter the item fails, if any. A kind without a routing card is

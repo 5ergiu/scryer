@@ -467,6 +467,126 @@ async fn a_refused_add_stays_pending_or_blocked() {
     assert!(!row.added_by_list);
 }
 
+fn add_calls(actions: &RecordingActions) -> usize {
+    count_calls(actions, |call| matches!(call, RecordedAction::Add { .. }))
+}
+
+fn fetch_count(harness: &Harness) -> usize {
+    harness.lists.fetched.lock().unwrap().len()
+}
+
+fn hourly_list() -> ListSubscription {
+    let mut list = subscription("list-a");
+    list.interval_seconds = 60;
+    list
+}
+
+#[tokio::test]
+async fn a_refused_add_settles_and_is_not_retried_while_nothing_changes() {
+    let refusals: [(fn() -> AppError, &str); 2] = [
+        (
+            || AppError::NotFound("fixture root folder".into()),
+            "not_found",
+        ),
+        (
+            || AppError::Validation("fixture profile".into()),
+            "rejected",
+        ),
+    ];
+    for (refusal, reason) in refusals {
+        let mut harness = Harness::new(vec![hourly_list()]);
+        harness.actions.refuse_adds = Some(refusal);
+        harness.lists.serve("list-a", &["alpha"]);
+
+        harness.sync_at(at(0)).await;
+        let row = harness.store.row("list-a", "alpha");
+        assert_eq!(row.state, ListMembershipState::Rejected, "{reason}");
+        assert_eq!(row.state_reason.as_deref(), Some(reason));
+
+        let repeat = harness.sync_at(at(10)).await;
+        assert_eq!(repeat.unchanged, 1, "{reason}: nothing forces a full read");
+        assert_eq!(add_calls(&harness.actions), 1, "{reason}: tried once");
+        assert_eq!(fetch_count(&harness), 2, "one read per pass, no re-read");
+        let row = harness.store.row("list-a", "alpha");
+        assert_eq!(row.state, ListMembershipState::Rejected);
+        assert_eq!(row.state_reason.as_deref(), Some(reason));
+    }
+}
+
+#[tokio::test]
+async fn a_refused_add_keeps_its_reason_through_a_full_read() {
+    let mut harness = Harness::new(vec![hourly_list()]);
+    harness.actions.refuse_adds = Some(|| AppError::NotFound("fixture root folder".into()));
+    harness.lists.serve("list-a", &["alpha"]);
+    harness.sync_at(at(0)).await;
+
+    // A changed fingerprint makes the provider return the full list again;
+    // the refused item is kept as it was rather than tried again.
+    harness.lists.serve("list-a", &["alpha", "beta"]);
+    harness.actions.refuse_adds = None;
+    harness.sync_at(at(10)).await;
+
+    let alpha = harness.store.row("list-a", "alpha");
+    assert_eq!(alpha.state, ListMembershipState::Rejected);
+    assert_eq!(alpha.state_reason.as_deref(), Some("not_found"));
+    assert_eq!(
+        harness.store.row("list-a", "beta").state,
+        ListMembershipState::Added
+    );
+    assert_eq!(add_calls(&harness.actions), 2, "alpha once, beta once");
+}
+
+#[tokio::test]
+async fn a_passing_add_failure_stays_pending_and_is_retried() {
+    let mut harness = Harness::new(vec![hourly_list()]);
+    harness.actions.refuse_adds = Some(|| AppError::Repository("fixture timeout".into()));
+    harness.lists.serve("list-a", &["alpha"]);
+
+    harness.sync_at(at(0)).await;
+    let row = harness.store.row("list-a", "alpha");
+    assert_eq!(row.state, ListMembershipState::Pending);
+    assert_eq!(row.state_reason.as_deref(), Some("action_failed"));
+
+    harness.actions.refuse_adds = None;
+    let retry = harness.sync_at(at(10)).await;
+    assert_eq!(retry.synced, 1, "a pending item forces a full read");
+    assert_eq!(
+        harness.store.row("list-a", "alpha").state,
+        ListMembershipState::Added
+    );
+    assert_eq!(add_calls(&harness.actions), 2);
+}
+
+#[tokio::test]
+async fn an_edit_after_the_last_sync_tries_a_refused_add_again() {
+    let mut harness = Harness::new(vec![hourly_list()]);
+    harness.actions.refuse_adds = Some(|| AppError::NotFound("fixture root folder".into()));
+    harness.lists.serve("list-a", &["alpha"]);
+    harness.sync_at(at(0)).await;
+
+    // The operator fixes the route the add named.
+    harness.actions.refuse_adds = None;
+    harness
+        .store
+        .subscriptions
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row.id == "list-a")
+        .unwrap()
+        .updated_at = at(5);
+
+    let report = harness.sync_at(at(10)).await;
+    assert_eq!(report.synced, 1);
+    let row = harness.store.row("list-a", "alpha");
+    assert_eq!(row.state, ListMembershipState::Added);
+    assert_eq!(row.state_reason, None);
+    assert_eq!(add_calls(&harness.actions), 2);
+
+    let later = harness.sync_at(at(20)).await;
+    assert_eq!(later.unchanged, 1, "the edit is processed once");
+}
+
 #[tokio::test]
 async fn an_item_listed_twice_is_acted_on_once() {
     let harness = Harness::new(vec![subscription("list-a")]);

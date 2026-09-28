@@ -334,6 +334,55 @@ async fn record_sync_persists_counts_and_runs_are_newest_first() {
 }
 
 #[tokio::test]
+async fn recording_a_sync_does_not_make_the_list_look_edited() {
+    let store = test_store(None).await;
+    let created_at = Utc::now() - Duration::hours(2);
+    let mut created = subscription("sub-1", ListScope::Public, OWNER);
+    created.created_at = created_at;
+    created.updated_at = created_at;
+    ListSubscriptionRepository::create(&store, created)
+        .await
+        .expect("create");
+    let before = ListSubscriptionRepository::get_by_id(&store, "sub-1")
+        .await
+        .expect("get")
+        .expect("present");
+
+    let synced_at = created_at + Duration::hours(1);
+    store
+        .record_sync(
+            "sub-1",
+            &ListSyncStatus {
+                state: ListSyncState::Ok,
+                last_at: Some(synced_at),
+                next_at: Some(synced_at + Duration::hours(12)),
+                ..ListSyncStatus::default()
+            },
+            &ListCounts::default(),
+        )
+        .await
+        .expect("record sync");
+    let synced = ListSubscriptionRepository::get_by_id(&store, "sub-1")
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        synced.updated_at, before.updated_at,
+        "a sync is not a settings edit"
+    );
+    assert!(synced.updated_at <= synced.sync.last_at.expect("synced"));
+
+    // A real edit after that sync still stands out.
+    let mut edited = synced.clone();
+    edited.name = "Renamed Fixture".into();
+    edited.updated_at = synced_at + Duration::minutes(5);
+    let updated = ListSubscriptionRepository::update(&store, edited)
+        .await
+        .expect("update");
+    assert!(updated.updated_at > updated.sync.last_at.expect("synced"));
+}
+
+#[tokio::test]
 async fn deleting_a_subscription_cascades_to_memberships_routes_and_runs() {
     let store = test_store(None).await;
     ListSubscriptionRepository::create(&store, subscription("sub-1", ListScope::Public, OWNER))
