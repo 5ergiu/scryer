@@ -22,6 +22,7 @@ import type {
   TitleListMembership,
 } from "../types/lists.ts";
 import type { ExternalId, Facet } from "../types/titles.ts";
+import { allOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
 import { selectorToken } from "./dom-ids.ts";
 
 export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "outline";
@@ -681,6 +682,14 @@ export function listProviderSettingsMissing(
       return edit.value.trim() === "";
     })
     .map((field) => field.key);
+}
+
+/**
+ * Live events after which a title's list memberships may read differently: a
+ * public list adding the title, or a list dropping it.
+ */
+export function titleListMembershipChanged(titleId: string | null | undefined): DomainEventPredicate {
+  return allOf(forTitle(titleId), forEventTypes("LIST_TITLE_ADDED", "LIST_TITLE_LEFT"));
 }
 
 export type TitleListProvenance = { kind: "added" | "left"; name: string };

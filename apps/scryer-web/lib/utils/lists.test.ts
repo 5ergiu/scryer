@@ -42,6 +42,7 @@ import {
   PUBLIC_LIST_MODES,
   publicProviders,
   recognizeListUrl,
+  titleListMembershipChanged,
   followListOfferedKinds,
   subscriptionToDraft,
 } from "./lists.ts";
@@ -655,4 +656,23 @@ test("the follow form offers the kinds the source declares, keeping kinds alread
     followListOfferedKinds({ requestedKinds: ["ANIME"], sourceKinds: ["MOVIE"], providerCoverage: ["MOVIE"] }),
     ["ANIME"],
   );
+});
+
+test("a title's list line refreshes when a list adds or drops that title", () => {
+  const event = (eventType: string, titleId: string | null) => ({
+    sequence: 1,
+    eventId: "event-1",
+    eventType,
+    titleId,
+    facet: null,
+    streamKind: null,
+    streamId: null,
+  });
+  const changed = titleListMembershipChanged("title-7");
+  assert.equal(changed(event("LIST_TITLE_ADDED", "title-7")), true);
+  assert.equal(changed(event("LIST_TITLE_LEFT", "title-7")), true);
+  assert.equal(changed(event("LIST_TITLE_ADDED", "title-8")), false);
+  assert.equal(changed(event("TITLE_UPDATED", "title-7")), false);
+  assert.equal(changed(event("LIST_TITLE_LEFT", null)), false);
+  assert.equal(titleListMembershipChanged(null)(event("LIST_TITLE_ADDED", "title-7")), false);
 });

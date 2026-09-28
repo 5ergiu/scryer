@@ -3,11 +3,12 @@ import { ListPlus } from "lucide-react";
 import { useClient } from "urql";
 
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
+import { useReactiveRefresh } from "@/lib/context/reactive-refresh-context";
 import { useTranslate } from "@/lib/context/translate-context";
 import { titleListMembershipsQuery } from "@/lib/graphql/queries";
 import type { TitleListMembership } from "@/lib/types/lists";
 import { cn } from "@/lib/utils";
-import { titleListProvenance } from "@/lib/utils/lists";
+import { titleListMembershipChanged, titleListProvenance } from "@/lib/utils/lists";
 
 type TitleListProvenanceProps = {
   titleId: string;
@@ -24,24 +25,39 @@ export function TitleListProvenance({ titleId, variant = "default", className }:
   const client = useClient();
   const t = useTranslate();
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
+  const { registerReactiveRefresh } = useReactiveRefresh();
+  const refreshAliasId = React.useId();
   const [memberships, setMemberships] = React.useState<TitleListMembership[]>([]);
+  // Only the newest read may land: a refresh started by a live event can race
+  // the first read or an earlier refresh.
+  const latestRequestRef = React.useRef(0);
 
   React.useEffect(() => {
-    let cancelled = false;
     setMemberships([]);
     // Lists are experimental: nothing is asked for while the switch is off.
     if (!experimentalFeaturesEnabled) return;
-    void client
-      .query(titleListMembershipsQuery, { id: titleId })
-      .toPromise()
-      .then((result) => {
-        if (cancelled || result.error) return;
-        setMemberships((result.data?.title?.listMemberships ?? []) as TitleListMembership[]);
-      });
-    return () => {
-      cancelled = true;
+    const load = (requestPolicy: "cache-first" | "network-only") => {
+      const request = ++latestRequestRef.current;
+      void client
+        .query(titleListMembershipsQuery, { id: titleId }, { requestPolicy })
+        .toPromise()
+        .then((result) => {
+          if (request !== latestRequestRef.current || result.error) return;
+          setMemberships((result.data?.title?.listMemberships ?? []) as TitleListMembership[]);
+        });
     };
-  }, [client, experimentalFeaturesEnabled, titleId]);
+    load("cache-first");
+    // A list adding or dropping this title changes the line; read it again.
+    const unregister = registerReactiveRefresh({
+      aliasKey: `title-list-provenance:${refreshAliasId}`,
+      predicate: titleListMembershipChanged(titleId),
+      run: () => load("network-only"),
+    });
+    return () => {
+      latestRequestRef.current += 1;
+      unregister();
+    };
+  }, [client, experimentalFeaturesEnabled, refreshAliasId, registerReactiveRefresh, titleId]);
 
   const provenance = titleListProvenance(memberships);
   if (!provenance) return null;
