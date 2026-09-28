@@ -182,12 +182,19 @@ fn post_download_rule_error_rejection(message: String) -> ImportedFileRejection 
     }
 }
 
-/// The rule entries to score, or the review hold when any rule failed to run.
+/// The rule entries to score, or the review hold when a user rule failed to
+/// run.
 ///
-/// Fails closed: a rule that errored might have been the one refusing this
-/// file, so none of the other rules' entries are scored when any rule errored.
-/// The message names each failing rule with the engine's error text, because
-/// it is what the operator sees on the blocked import.
+/// Fails closed on user-written rules: a user rule that errored might have been
+/// the one refusing this file, so none of the other rules' entries are scored
+/// when any user rule errored. The message names each failing user rule with
+/// the engine's error text, because it is what the operator sees on the blocked
+/// import.
+///
+/// A managed (built-in or pack-provided) rule that errors is logged and
+/// skipped instead: the operator cannot edit it, so holding every import on it
+/// would leave nothing to act on. An errored rule contributes no entries, so the
+/// remaining rules' entries are scored without it.
 #[cfg(any(feature = "runtime-media-analysis", test))]
 pub(crate) fn post_download_rule_entries(
     outcome: Result<scryer_rules::EvalResult, scryer_rules::RulesError>,
@@ -201,11 +208,22 @@ pub(crate) fn post_download_rule_entries(
             )));
         }
     };
-    if result.errors.is_empty() {
+    let (managed_errors, user_errors): (Vec<_>, Vec<_>) = result
+        .errors
+        .into_iter()
+        .partition(|error| error.origin == scryer_rules::PolicyOrigin::System);
+    for error in &managed_errors {
+        warn!(
+            rule_set_id = %error.rule_set_id,
+            rule_set_name = %error.rule_set_name,
+            error = %truncate_rule_error_detail(&error.message),
+            "managed post-download rule failed to evaluate; skipping it"
+        );
+    }
+    if user_errors.is_empty() {
         return Ok(result.entries);
     }
-    let mut failures = result
-        .errors
+    let mut failures = user_errors
         .iter()
         .take(RULE_ERROR_MAX_LISTED)
         .map(|error| {
@@ -217,7 +235,7 @@ pub(crate) fn post_download_rule_entries(
             )
         })
         .collect::<Vec<_>>();
-    let unlisted = result.errors.len().saturating_sub(RULE_ERROR_MAX_LISTED);
+    let unlisted = user_errors.len().saturating_sub(RULE_ERROR_MAX_LISTED);
     if unlisted > 0 {
         failures.push(format!("{unlisted} more rule(s) failed"));
     }
@@ -2653,6 +2671,12 @@ mod tests {
     fn evaluate_post_download_rules(
         policies: &[scryer_rules::UserPolicy],
     ) -> Result<Vec<scryer_rules::UserRuleEntry>, ImportedFileRejection> {
+        post_download_rule_entries(evaluate_post_download_rules_raw(policies))
+    }
+
+    fn evaluate_post_download_rules_raw(
+        policies: &[scryer_rules::UserPolicy],
+    ) -> Result<scryer_rules::EvalResult, scryer_rules::RulesError> {
         let profile = crate::QualityProfile::default();
         let parsed = crate::parse_release_metadata("Example.Film.2024.1080p.WEB-DL.H.264-GROUP");
         let decision = crate::quality_profile::evaluate_profile_requirements(
@@ -2695,7 +2719,7 @@ mod tests {
         let mut evaluator = scryer_rules::UserRulesEngine::build(policies)
             .expect("rule fixture should compile")
             .evaluator();
-        post_download_rule_entries(evaluator.evaluate(&input, "movie"))
+        evaluator.evaluate(&input, "movie")
     }
 
     #[test]
@@ -2819,6 +2843,83 @@ mod tests {
         );
         assert!(!rejection.message.contains("blocked_downgrade"));
         assert!(rejection.message.contains("Erroring Rule"));
+    }
+
+    /// Managed rules are test-evaluated when the engine is built, so the
+    /// runtime error only fires on this gate fixture's title.
+    const MANAGED_RULE_ERRORING_ON_GATE_INPUT: &str = r#"score_entry["managed_erroring"] := lower(input.release.year) if input.context.title_id == "title-rule-gate""#;
+
+    fn managed_post_download_rule(id: &str, name: &str, body: &str) -> scryer_rules::UserPolicy {
+        scryer_rules::UserPolicy {
+            origin: scryer_rules::PolicyOrigin::System,
+            ..post_download_rule(id, name, body)
+        }
+    }
+
+    #[test]
+    fn managed_post_download_rule_error_is_skipped_and_the_rest_are_scored() {
+        let outcome = evaluate_post_download_rules_raw(&[
+            managed_post_download_rule(
+                "managed_erroring_rule",
+                "Managed Erroring Rule",
+                MANAGED_RULE_ERRORING_ON_GATE_INPUT,
+            ),
+            post_download_rule(
+                "working_rule",
+                "Working Rule",
+                r#"score_entry["working"] := 25"#,
+            ),
+        ]);
+        let errors = &outcome.as_ref().expect("engine evaluates").errors;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].rule_set_id, "managed_erroring_rule");
+        assert_eq!(errors[0].origin, scryer_rules::PolicyOrigin::System);
+
+        let entries = post_download_rule_entries(outcome)
+            .expect("a managed rule error must not hold the import");
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].code, "working");
+        assert_eq!(
+            crate::quality_profile::sum_score_deltas(entries.iter().map(|entry| entry.delta)),
+            25
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.rule_set_id != "managed_erroring_rule"),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn user_and_managed_rule_errors_together_still_hold_on_the_user_rule() {
+        let rejection = evaluate_post_download_rules(&[
+            managed_post_download_rule(
+                "managed_erroring_rule",
+                "Managed Erroring Rule",
+                MANAGED_RULE_ERRORING_ON_GATE_INPUT,
+            ),
+            post_download_rule(
+                "erroring_rule",
+                "Erroring Rule",
+                r#"score_entry["erroring"] := lower(input.release.year)"#,
+            ),
+        ])
+        .expect_err("a user rule error must hold the import even beside a managed one");
+
+        assert_eq!(rejection.recycle_reason, POST_DOWNLOAD_RULE_ERROR_CODE);
+        assert!(rejection.requires_review());
+        assert!(
+            rejection.message.contains("Erroring Rule (erroring_rule)"),
+            "{}",
+            rejection.message
+        );
+        assert!(
+            !rejection.message.contains("Managed Erroring Rule"),
+            "{}",
+            rejection.message
+        );
     }
 
     #[test]

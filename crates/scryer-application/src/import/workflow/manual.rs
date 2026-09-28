@@ -3095,6 +3095,9 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
     let mut upgrade_imported = false;
     let mut upgrade_deleted_paths: Vec<String> = Vec::new();
     let mut upgrade_in_place_paths: HashSet<String> = HashSet::new();
+    // Indexes into `results` of files whose importer already emitted Import
+    // Complete for them; the manual-level event covers only the rest.
+    let mut self_notified_results: HashSet<usize> = HashSet::new();
 
     for (mapping_index, mapping) in files.iter().enumerate() {
         let source = stored_path_to_path_buf(&mapping.file_path);
@@ -3219,16 +3222,11 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     Ok(import_result) => {
                         let success = import_result.dest_path.is_some()
                             && import_result.error_message.is_none();
-                        if success && import_result.upgrade {
-                            upgrade_imported = true;
-                            match import_result.upgrade_previous_path {
-                                Some(previous_path) => upgrade_deleted_paths.push(previous_path),
-                                None => {
-                                    if let Some(dest_path) = import_result.dest_path.clone() {
-                                        upgrade_in_place_paths.insert(dest_path);
-                                    }
-                                }
-                            }
+                        // The movie import already sent its own Import Complete,
+                        // upgrade flag and all, so this file stays out of the
+                        // manual-level one below.
+                        if success {
+                            self_notified_results.insert(results.len());
                         }
                         manual_import_file_result(
                             mapping,
@@ -3573,13 +3571,19 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         }
     }
 
+    // Successful files the manual-level Import Complete still has to report.
+    let manually_notified = || {
+        results
+            .iter()
+            .enumerate()
+            .filter(|(index, result)| result.success && !self_notified_results.contains(index))
+            .map(|(_, result)| result)
+    };
     let imported_updates: Vec<scryer_domain::MediaPathUpdate> = upgrade_deleted_paths
         .into_iter()
         .map(deleted_media_update)
         .chain(
-            results
-                .iter()
-                .filter(|result| result.success)
+            manually_notified()
                 .filter_map(|result| result.dest_path.clone())
                 .map(|path| {
                     if upgrade_in_place_paths.contains(&path) {
@@ -3615,9 +3619,10 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         write_series_sidecars(app, &title, &full_folder_path, nfo_enabled).await;
     }
     let (terminal_status, _, _) = manual_import_terminal_status_and_error(&results);
-    if success_count > 0 && terminal_status == ImportStatus::Completed {
+    let manually_notified_count = manually_notified().count();
+    if manually_notified_count > 0 && terminal_status == ImportStatus::Completed {
         let mut episode_ids = Vec::new();
-        for result in results.iter().filter(|result| result.success) {
+        for result in manually_notified() {
             for episode_id in &result.episode_ids {
                 if !episode_ids.contains(episode_id) {
                     episode_ids.push(episode_id.clone());
@@ -3630,7 +3635,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             DomainEventPayload::ImportCompleted(ImportCompletedEventData {
                 title: title_context_snapshot(&title),
                 media_updates: imported_updates,
-                imported_count: success_count as i32,
+                imported_count: manually_notified_count as i32,
                 import_id: None,
                 source_system: completed.map(|download| download.client_type.clone()),
                 source_ref: completed.map(|download| download.download_client_item_id.clone()),
@@ -3640,9 +3645,8 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                         .map(|mapping| Path::new(mapping.file_path.as_str())),
                 ),
                 source_path: (files.len() == 1).then(|| files[0].file_path.clone()),
-                dest_path: results
-                    .iter()
-                    .find(|result| result.success)
+                dest_path: manually_notified()
+                    .next()
                     .and_then(|result| result.dest_path.clone()),
                 quality: None,
                 episode_ids,

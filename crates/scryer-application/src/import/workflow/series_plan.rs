@@ -691,6 +691,17 @@ fn plan_parsed_pack_identity(
                     catalog_episodes_for_absolute_numbers(catalog, &absolute_numbers)
                 }
             };
+            // The member's season/episode already identified it; the literal
+            // absolute is only a consistency check on that identity, so it may
+            // agree on either scale. Release groups stamp TVDB raw absolutes as
+            // often as contiguous ones. This never identifies an episode by
+            // absolute number alone, so it is not the per-episode scale
+            // fallback `AbsoluteScale` rules out.
+            if absolute_source == MemberAbsoluteSource::Literal
+                && literal_companion_agrees_on_either_scale(catalog, &absolute_numbers, &standard)
+            {
+                return PlannedMemberDraft::Resolved(standard);
+            }
             let Some(absolute) = absolute else {
                 return missing_catalog_member("absolute episode companion");
             };
@@ -875,6 +886,24 @@ fn catalog_episodes_for_raw_absolute_numbers(
         numbers,
         scryer_domain::AbsoluteScale::Raw,
     )
+}
+
+/// Whether a literal companion absolute names exactly the episodes the
+/// member's season/episode already resolved to, on the raw or the contiguous
+/// scale.
+fn literal_companion_agrees_on_either_scale(
+    catalog: &[scryer_domain::Episode],
+    numbers: &[u32],
+    standard: &[scryer_domain::Episode],
+) -> bool {
+    let expected = episode_id_set(standard);
+    [
+        scryer_domain::AbsoluteScale::Raw,
+        scryer_domain::AbsoluteScale::Contiguous,
+    ]
+    .into_iter()
+    .filter_map(|scale| catalog_episodes_for_absolute_numbers_on_scale(catalog, numbers, scale))
+    .any(|episodes| episode_id_set(&episodes) == expected)
 }
 
 fn catalog_episodes_for_absolute_numbers_on_scale(
@@ -1444,9 +1473,10 @@ mod series_plan_tests {
     }
 
     #[test]
-    fn a_literal_companion_absolute_reads_on_the_titles_contiguous_scale() {
+    fn a_literal_companion_absolute_agreeing_on_the_contiguous_scale_resolves() {
         let catalog = contiguous_scaled_catalog();
 
+        // 51 is S01E51's contiguous absolute; its raw one is 53.
         assert!(matches!(
             plan_parsed_pack_identity(
                 true,
@@ -1458,11 +1488,47 @@ mod series_plan_tests {
             PlannedMemberDraft::Resolved(ref episodes)
                 if episodes.len() == 1 && episodes[0].id == "ep-51"
         ));
-        // 53 is S01E53 on the contiguous scale, not S01E51.
+    }
+
+    #[test]
+    fn a_literal_companion_absolute_agreeing_on_the_raw_scale_resolves() {
+        let catalog = contiguous_scaled_catalog();
+
+        // 53 is S01E51's raw absolute; on the contiguous scale it is S01E53.
         assert!(matches!(
             plan_parsed_pack_identity(
                 true,
                 &stamped_identity(&[51], &[53]),
+                MemberAbsoluteSource::Literal,
+                None,
+                &catalog
+            ),
+            PlannedMemberDraft::Resolved(ref episodes)
+                if episodes.len() == 1 && episodes[0].id == "ep-51"
+        ));
+        assert!(matches!(
+            plan_parsed_pack_identity(
+                true,
+                &stamped_identity(&[51, 52], &[53, 54]),
+                MemberAbsoluteSource::Literal,
+                None,
+                &catalog
+            ),
+            PlannedMemberDraft::Resolved(ref episodes)
+                if episodes.iter().map(|episode| episode.id.as_str()).collect::<Vec<_>>()
+                    == ["ep-51", "ep-52"]
+        ));
+    }
+
+    #[test]
+    fn a_literal_companion_absolute_agreeing_on_neither_scale_is_held() {
+        let catalog = contiguous_scaled_catalog();
+
+        // 52 is S01E50 raw and S01E52 contiguous; neither is S01E51.
+        assert!(matches!(
+            plan_parsed_pack_identity(
+                true,
+                &stamped_identity(&[51], &[52]),
                 MemberAbsoluteSource::Literal,
                 None,
                 &catalog
