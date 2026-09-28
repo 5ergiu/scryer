@@ -13522,6 +13522,86 @@ mod tests {
         assert!(!text_record.suppressed, "text forms are never suppressed");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn automatic_anime_search_learns_both_id_forms_and_suppresses_the_empty_one() {
+        let repo: StdArc<dyn IndexerSearchLearningRepository> =
+            StdArc::new(InMemorySearchLearningRepository::default());
+        let (client, calls) = scripted_search_client(anime_caps(), |call| {
+            if call.ids.contains_key("anidb_id") && call.season == Some(2) {
+                response_with_titles(&["Blade.Summit.S02E03.720p.WEB-DL"])
+            } else {
+                response_with_titles(&[])
+            }
+        });
+        let client = client.with_search_learning_repository(repo.clone());
+
+        let run = |session: usize| {
+            let client = &client;
+            async move {
+                let context = IndexerSearchLearningContext {
+                    title_id: "title-1".into(),
+                    facet: "anime".into(),
+                    subject_kind: ReleaseSearchSubjectKind::Episode,
+                    search_session_id: format!("session-{session}"),
+                    background_value: None,
+                    candidate_reuse_allowed: false,
+                };
+                <MultiIndexerSearchClient as IndexerClient>::search(
+                    client,
+                    "Blade Summit S02E03".into(),
+                    HashMap::from([("anidb_id".to_string(), "1535".to_string())]),
+                    Some("anime".into()),
+                    Some("anime".into()),
+                    None,
+                    None,
+                    None,
+                    SearchMode::Auto,
+                    IndexerErrorOperation::AutomaticSearch,
+                    Some(2),
+                    Some(3),
+                    Some(21),
+                    None,
+                    vec![],
+                    Some(context),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("automatic search should succeed")
+            }
+        };
+
+        for session in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize {
+            let response = run(session).await;
+            assert_eq!(response.results.len(), 1, "session {session}");
+        }
+
+        let records = repo
+            .list_for_title("idx-1", "title-1", "anime")
+            .await
+            .expect("learning records");
+        let record = |key: &str| records.iter().find(|record| record.key.strategy_key == key);
+        let sxex = record("v2:ids_sxex").expect("ids_sxex is learned next to ids_abs");
+        assert_eq!(sxex.usable_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert!(!sxex.suppressed);
+        let abs = record("v2:ids_abs").expect("ids_abs record");
+        assert_eq!(abs.empty_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert_eq!(abs.usable_successes, 0);
+        assert!(abs.suppressed);
+        assert!(
+            record("v2:freetext").is_none_or(|text| text.usable_successes == 0),
+            "no text query succeeded"
+        );
+
+        calls.lock().expect("call log mutex").clear();
+        run(LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize).await;
+        let calls = calls.lock().expect("call log mutex");
+        assert!(
+            calls.iter().all(|call| call.absolute_episode.is_none()),
+            "the suppressed absolute ID query is skipped"
+        );
+        assert!(calls.iter().any(|call| call.ids.contains_key("anidb_id")));
+    }
+
     #[tokio::test]
     async fn learned_stale_reprobe_usable_outcome_clears_suppression() {
         let repo_impl = InMemorySearchLearningRepository::default();
