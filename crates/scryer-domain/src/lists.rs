@@ -54,9 +54,12 @@ pub enum ListMode {
     Search,
     /// Create the title monitored and let the normal wanted cycle find it.
     Add,
-    /// Submit a request held for review, whatever the request rules say.
+    /// Submit a request held for review, whatever the owner's grants and the
+    /// request rules say.
     Hold,
-    /// Submit a request as the member, subject to their list policy.
+    /// Submit a request as the member, subject to their list policy. An owner
+    /// who manages titles in the routed library has the title added and
+    /// searched instead.
     Request,
     /// Record the item for the Discover rail only.
     Discover,

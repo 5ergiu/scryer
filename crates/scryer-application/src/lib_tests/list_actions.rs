@@ -7,7 +7,10 @@ use crate::lists::act::ListActions;
 use crate::lists::fetch::{ListFailure, ListFailureClass};
 use crate::lists::leave::LEFT_LIST_TAG;
 use crate::lists::test_support::{resolved_item, subscription};
-use scryer_domain::{DomainEventPayload, DomainEventStream, ListOnLeave, ListScope};
+use scryer_domain::{
+    DomainEventPayload, DomainEventStream, LibraryPermission, ListMembershipState, ListMode,
+    ListOnLeave, ListScope, MediaRequestStatus,
+};
 
 async fn list_events(harness: &MediaRequestTestHarness) -> Vec<DomainEvent> {
     harness
@@ -342,4 +345,210 @@ async fn a_list_page_shows_only_titles_still_on_the_list() {
         .map(|row| row.item_key.as_str())
         .collect::<Vec<_>>();
     assert_eq!(keys, vec!["item-current"], "a departed title just leaves");
+}
+
+/// Act on one candidate from a public list in `mode` whose owner holds
+/// `permissions` on the routed movie library.
+async fn act_for_owner(
+    mode: scryer_domain::ListMode,
+    permissions: &[scryer_domain::LibraryPermission],
+    tvdb_id: u32,
+) -> (MediaRequestTestHarness, crate::lists::act::ActOutcome) {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let owner = library_permission_user("list-owner", &library_id, permissions);
+    harness.users.store.lock().await.push(owner.clone());
+    let mut list = subscription("public-list-one");
+    list.owner_user_id = owner.id.clone();
+    list.mode = mode;
+    list.routes = vec![crate::lists::test_support::route(
+        MediaFacet::Movie,
+        &library_id,
+    )];
+    let mut item = resolved_item("alpha");
+    item.external_ids = vec![ExternalId::new("tvdb", tvdb_id.to_string())];
+
+    let outcome =
+        crate::lists::act::act_on_candidate(&AppListActions::new(&harness.app), &list, &item).await;
+    (harness, outcome)
+}
+
+#[tokio::test]
+async fn a_request_list_owner_who_manages_titles_adds_the_title() {
+    let (harness, outcome) =
+        act_for_owner(ListMode::Request, &[LibraryPermission::ManageTitles], 9060).await;
+
+    assert_eq!(
+        outcome.state,
+        ListMembershipState::Added,
+        "{:?}",
+        outcome.reason
+    );
+    assert!(outcome.added_by_list);
+    assert_eq!(outcome.request_id, None);
+    let title_id = outcome.title_id.expect("the add names its title");
+    assert!(
+        harness
+            .titles
+            .store
+            .lock()
+            .await
+            .iter()
+            .any(|title| title.id == title_id),
+        "the title is in the library"
+    );
+    assert!(
+        harness.media_requests.requests.lock().await.is_empty(),
+        "no request is filed"
+    );
+}
+
+#[tokio::test]
+async fn a_request_list_owner_who_may_only_request_files_a_request() {
+    let (harness, outcome) =
+        act_for_owner(ListMode::Request, &[LibraryPermission::Request], 9061).await;
+
+    assert_eq!(
+        outcome.state,
+        ListMembershipState::Requested,
+        "{:?}",
+        outcome.reason
+    );
+    assert!(outcome.request_id.is_some());
+    assert_eq!(outcome.title_id, None);
+    assert_eq!(harness.media_requests.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_hold_list_parks_its_items_for_review_whoever_owns_it() {
+    let owners: [(&[LibraryPermission], u32); 3] = [
+        (&[LibraryPermission::ManageTitles], 9062),
+        (&[LibraryPermission::Request], 9063),
+        // An owner whose grant would approve the request still waits.
+        (&[LibraryPermission::AutoApproveRequests], 9069),
+    ];
+    for (permissions, tvdb_id) in owners {
+        let (harness, outcome) = act_for_owner(ListMode::Hold, permissions, tvdb_id).await;
+
+        assert_eq!(
+            outcome.state,
+            ListMembershipState::Held,
+            "{permissions:?}: {:?}",
+            outcome.reason
+        );
+        assert_eq!(outcome.title_id, None, "{permissions:?}");
+        assert!(!outcome.added_by_list, "{permissions:?}");
+        let requests = harness.media_requests.requests.lock().await;
+        assert_eq!(requests.len(), 1, "{permissions:?}");
+        assert_eq!(Some(&requests[0].id), outcome.request_id.as_ref());
+        assert_eq!(
+            requests[0].status,
+            MediaRequestStatus::Pending,
+            "{permissions:?}: a held item waits for a reviewer"
+        );
+        assert!(
+            harness.titles.store.lock().await.is_empty(),
+            "{permissions:?}: nothing is added before review"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_owner_who_may_neither_add_nor_request_is_blocked() {
+    for (mode, tvdb_id) in [(ListMode::Request, 9064), (ListMode::Hold, 9065)] {
+        let (harness, outcome) = act_for_owner(mode, &[LibraryPermission::View], tvdb_id).await;
+
+        assert_eq!(
+            outcome.state,
+            ListMembershipState::BlockedPermission,
+            "{mode:?}"
+        );
+        assert_eq!(outcome.reason.as_deref(), Some("not_permitted"), "{mode:?}");
+        assert_eq!(outcome.title_id, None, "{mode:?}");
+        assert_eq!(outcome.request_id, None, "{mode:?}");
+        assert!(harness.titles.store.lock().await.is_empty(), "{mode:?}");
+        assert!(
+            harness.media_requests.requests.lock().await.is_empty(),
+            "{mode:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_held_request_from_a_title_manager_goes_through_ordinary_review() {
+    for (approve, tvdb_id) in [(true, 9066), (false, 9067)] {
+        let (harness, outcome) =
+            act_for_owner(ListMode::Hold, &[LibraryPermission::ManageTitles], tvdb_id).await;
+        let request_id = outcome.request_id.expect("the hold files a request");
+
+        if approve {
+            let approved = harness
+                .app
+                .approve_media_request(
+                    &harness.manager,
+                    &request_id,
+                    "1080p",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("a reviewer approves the held request");
+            assert!(
+                harness
+                    .titles
+                    .store
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|title| title.id == approved.title_id),
+                "approval adds the title"
+            );
+        } else {
+            let dismissed = harness
+                .app
+                .dismiss_media_request(&harness.manager, &request_id)
+                .await
+                .expect("a reviewer dismisses the held request");
+            assert_eq!(dismissed, 1);
+            assert!(harness.titles.store.lock().await.is_empty());
+        }
+        let requests = harness.media_requests.requests.lock().await;
+        let request = requests
+            .iter()
+            .find(|request| request.id == request_id)
+            .expect("request");
+        let expected = if approve {
+            MediaRequestStatus::Approved
+        } else {
+            MediaRequestStatus::Rejected
+        };
+        assert_eq!(request.status, expected);
+        assert_eq!(
+            request.resolved_by_user_id.as_deref(),
+            Some(harness.manager.id.as_str()),
+            "the reviewer, not the list owner, resolved it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_title_manager_still_cannot_file_an_ordinary_request() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let manager = library_permission_user(
+        "title-manager",
+        &library_id,
+        &[LibraryPermission::ManageTitles],
+    );
+
+    let error = harness
+        .app
+        .submit_media_request(&manager, media_request_input(library_id, 9068))
+        .await
+        .expect_err("Manage Titles alone does not make a title requestable");
+
+    assert!(matches!(error, AppError::Unauthorized(_)), "{error:?}");
+    assert!(harness.media_requests.requests.lock().await.is_empty());
 }
