@@ -13459,6 +13459,12 @@ async fn a_grabbed_series_movie_link_import_keeps_the_listing_snapshot() {
         files[0].release_listing_json.as_deref(),
         Some(GRAB_LISTING_SNAPSHOT)
     );
+
+    // A fresh link import sends exactly one Import Complete, not an upgrade.
+    let events = import_completed_events_for_title(&app, &title.id).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(!events[0].upgrade, "{events:?}");
+    assert!(!result.upgrade, "{result:?}");
 }
 
 /// **A1 through the link path, end to end.** The clone of
@@ -13695,6 +13701,28 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
     assert!(
         blocklist_repo.entries.lock().await.is_empty(),
         "an honest upgrade burns nothing"
+    );
+
+    // The upgrade sends exactly one Import Complete, marked as an upgrade and
+    // naming the file it replaced.
+    assert!(result.upgrade, "{result:?}");
+    let incumbent_path = incumbent_path.to_string_lossy().into_owned();
+    assert_eq!(
+        result.upgrade_previous_path.as_deref(),
+        Some(incumbent_path.as_str())
+    );
+    let events = import_completed_events_for_title(&app, &title.id).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(events[0].upgrade, "{events:?}");
+    assert_eq!(events[0].episode_ids, vec![linked_episode.id.clone()]);
+    assert!(
+        events[0]
+            .media_updates
+            .contains(&scryer_domain::MediaPathUpdate {
+                path: incumbent_path,
+                update_type: scryer_domain::MediaUpdateType::Deleted,
+            }),
+        "the replaced file must be reported as deleted: {events:?}"
     );
 }
 
