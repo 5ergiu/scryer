@@ -301,7 +301,14 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
         }
 
         nextAdminLibraries = (adminLibrariesResult.data?.libraries ?? []) as LibraryRecord[];
-        nextRequesterLibraries = (requesterLibrariesResult.data?.libraries ?? []) as LibraryRecord[];
+        // A title manager files held requests without the Request grant, so
+        // their own requests live in the libraries they manage too.
+        const requestLibraries = (requesterLibrariesResult.data?.libraries ?? []) as LibraryRecord[];
+        const requestLibraryIds = new Set(requestLibraries.map((library) => library.id));
+        nextRequesterLibraries = [
+          ...requestLibraries,
+          ...nextAdminLibraries.filter((library) => !requestLibraryIds.has(library.id)),
+        ];
         adminLibrariesRef.current = nextAdminLibraries;
         requesterLibrariesRef.current = nextRequesterLibraries;
         loadedLibrariesKeyRef.current = librariesKey;

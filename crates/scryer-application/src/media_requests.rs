@@ -367,10 +367,24 @@ impl AppUseCase {
         library_id: &str,
         admission: MediaRequestAdmission,
     ) -> AppResult<()> {
-        if admission == MediaRequestAdmission::HoldForReview
-            && self
-                .has_library_permission(actor, library_id, LibraryPermission::ManageTitles)
-                .await?
+        if admission == MediaRequestAdmission::HoldForReview {
+            return self.require_own_request_permission(actor, library_id).await;
+        }
+        self.require_library_permission(actor, library_id, LibraryPermission::Request)
+            .await
+    }
+
+    /// The grant a requester needs to see, change and withdraw a request of
+    /// their own: either one that let them file it. A title manager files held
+    /// requests without Request, and must not be left unable to take one back.
+    async fn require_own_request_permission(
+        &self,
+        actor: &User,
+        library_id: &str,
+    ) -> AppResult<()> {
+        if self
+            .has_library_permission(actor, library_id, LibraryPermission::ManageTitles)
+            .await?
         {
             return Ok(());
         }
@@ -469,10 +483,14 @@ impl AppUseCase {
         actor: &User,
         input: ListMediaRequestsInput,
     ) -> AppResult<Vec<MediaRequest>> {
-        let allowed_ids = self
-            .authorized_library_ids(actor, input.facet.clone(), LibraryPermission::Request)
-            .await?;
-        let allowed_ids = allowed_ids.into_iter().collect::<HashSet<_>>();
+        // Either grant that can file a request shows the requester their own.
+        let mut allowed_ids = HashSet::new();
+        for permission in [LibraryPermission::Request, LibraryPermission::ManageTitles] {
+            allowed_ids.extend(
+                self.authorized_library_ids(actor, input.facet.clone(), permission)
+                    .await?,
+            );
+        }
 
         let library_ids = match input.library_ids {
             Some(requested_ids) => requested_ids
@@ -1563,7 +1581,7 @@ impl AppUseCase {
             .await?
             .ok_or_else(|| AppError::NotFound("media request not found".into()))?;
 
-        self.require_library_permission(actor, &request.library_id, LibraryPermission::Request)
+        self.require_own_request_permission(actor, &request.library_id)
             .await?;
 
         if !request

@@ -2580,6 +2580,65 @@ async fn a_held_list_request_waits_for_review_despite_auto_approve() {
 }
 
 #[tokio::test]
+async fn a_title_manager_sees_and_cancels_their_own_held_request() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let owner = library_permission_user(
+        "managing-list-owner",
+        &library_id,
+        &[scryer_domain::LibraryPermission::ManageTitles],
+    );
+    let other_manager = library_permission_user(
+        "another-manager",
+        &library_id,
+        &[scryer_domain::LibraryPermission::ManageTitles],
+    );
+    let mut input = media_request_input(library_id, 9035);
+    input.origin = scryer_domain::MediaRequestOrigin::PublicList {
+        subscription_id: "public-list-one".to_string(),
+    };
+    input.admission = crate::MediaRequestAdmission::HoldForReview;
+    let outcome = harness
+        .app
+        .submit_media_request(&owner, input)
+        .await
+        .expect("held request should be admitted");
+
+    let mine = harness
+        .app
+        .list_my_media_requests(
+            &owner,
+            ListMediaRequestsInput {
+                facet: Some(MediaFacet::Movie),
+                library_ids: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("owner should list their requests");
+    assert_eq!(
+        mine.iter().map(|request| &request.id).collect::<Vec<_>>(),
+        vec![&outcome.request_id]
+    );
+
+    let refused = harness
+        .app
+        .cancel_my_media_request(&other_manager, &outcome.request_id)
+        .await
+        .expect_err("a manager who did not file the request cannot withdraw it");
+    assert!(matches!(refused, AppError::Unauthorized(_)));
+
+    let canceled = harness
+        .app
+        .cancel_my_media_request(&owner, &outcome.request_id)
+        .await
+        .expect("owner should cancel their held request");
+    assert_eq!(canceled, 1);
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].status, MediaRequestStatus::Canceled);
+}
+
+#[tokio::test]
 async fn dismissing_a_public_list_request_excludes_the_title_from_that_list() {
     use crate::lists::test_support::{membership, subscription};
 
