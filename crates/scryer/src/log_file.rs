@@ -231,11 +231,7 @@ fn no_follow(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // O_NOFOLLOW on the supported Unix targets.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        options.custom_flags(0x20000);
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        options.custom_flags(0x100);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     #[cfg(windows)]
     {
