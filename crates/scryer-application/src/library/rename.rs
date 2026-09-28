@@ -2461,6 +2461,7 @@ pub(crate) fn build_title_folder_tokens(
         ("title".to_string(), title_token),
         ("year".to_string(), resolved_year),
     ]);
+    insert_title_year_variant_tokens(&mut tokens, title);
     insert_title_external_id_tokens(&mut tokens, title);
     tokens
 }
@@ -2985,6 +2986,8 @@ fn is_supported_rename_template_token(token: &str) -> bool {
     matches!(
         token,
         "title"
+            | "title_with_year"
+            | "title_without_year"
             | "year"
             | "quality"
             | "edition"
@@ -3008,6 +3011,8 @@ fn is_supported_rename_template_token_for_facet(token: &str, facet: &MediaFacet)
     let common = matches!(
         token,
         "title"
+            | "title_with_year"
+            | "title_without_year"
             | "year"
             | "quality"
             | "source"
@@ -3031,10 +3036,12 @@ fn is_supported_rename_template_token_for_facet(token: &str, facet: &MediaFacet)
 }
 
 fn is_supported_title_folder_token(token: &str) -> bool {
-    matches!(token, "title" | "year")
-        || TITLE_EXTERNAL_ID_TOKENS
-            .iter()
-            .any(|(token_name, _)| *token_name == token)
+    matches!(
+        token,
+        "title" | "title_with_year" | "title_without_year" | "year"
+    ) || TITLE_EXTERNAL_ID_TOKENS
+        .iter()
+        .any(|(token_name, _)| *token_name == token)
 }
 
 fn is_supported_season_folder_token(token: &str) -> bool {
@@ -3253,8 +3260,49 @@ pub(crate) fn title_rename_tokens(
     );
     let mut tokens = BTreeMap::new();
     insert_common_rename_tokens(&mut tokens, common.common);
+    insert_title_year_variant_tokens(&mut tokens, title);
     insert_title_external_id_tokens(&mut tokens, title);
     (tokens, common.edition)
+}
+
+/// `title_with_year` and `title_without_year` read the same way for every
+/// facet and for folders, whatever `title` itself renders.
+///
+/// `title_with_year` is the title name followed by ` (year)`, unless the name
+/// already ends with a year hint such as "Name (2018)", so the year is never
+/// written twice. `title_without_year` drops such a trailing year hint.
+fn insert_title_year_variant_tokens(tokens: &mut BTreeMap<String, String>, title: &Title) {
+    let name = title.name.trim();
+    let (with_year, without_year) = match trailing_title_year_hint(name) {
+        Some(base) => (name.to_string(), base.to_string()),
+        None => (
+            match title.year {
+                Some(year) => format!("{name} ({year})"),
+                None => name.to_string(),
+            },
+            name.to_string(),
+        ),
+    };
+    tokens.insert("title_with_year".to_string(), with_year);
+    tokens.insert("title_without_year".to_string(), without_year);
+}
+
+/// The name before a four-digit year hint in parentheses or brackets that
+/// ends `name`, when there is one.
+fn trailing_title_year_hint(name: &str) -> Option<&str> {
+    let (open, inner) = if let Some(inner) = name.strip_suffix(')') {
+        ('(', inner)
+    } else if let Some(inner) = name.strip_suffix(']') {
+        ('[', inner)
+    } else {
+        return None;
+    };
+    let open_pos = inner.rfind(open)?;
+    let candidate = inner[open_pos + 1..].trim();
+    if candidate.len() != 4 || !candidate.chars().all(|value| value.is_ascii_digit()) {
+        return None;
+    }
+    Some(inner[..open_pos].trim()).filter(|base| !base.is_empty())
 }
 
 /// The episode-numbering tokens of a series file.

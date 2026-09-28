@@ -894,6 +894,8 @@ const nl: LocaleDictionary = {
   "settings.renameFilterChainLabel": "Voer filters van links naar rechts uit.",
   "settings.renameTokenTitle": "Titelnaam",
   "settings.renameTokenYear": "Jaar van uitgave",
+  "settings.renameTokenTitleWithYear": "Titelnaam gevolgd door het jaar, alleen toegevoegd als de naam er nog niet mee eindigt",
+  "settings.renameTokenTitleWithoutYear": "Titelnaam zonder een jaartal aan het einde",
   "settings.renameTokenQuality": "Kwaliteit (bijv. 1080p)",
   "settings.renameTokenEdition": "Editie (bijv. Director's Cut)",
   "settings.renameTokenImdbId": "IMDb ID",

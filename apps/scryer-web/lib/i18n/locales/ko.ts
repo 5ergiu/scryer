@@ -617,6 +617,8 @@ const ko: LocaleDictionary = {
   "settings.renameSectionTitle": "파일 이름 변경",
   "settings.renameTokenTitle": "제목",
   "settings.renameTokenYear": "출시 연도",
+  "settings.renameTokenTitleWithYear": "제목 뒤에 연도 추가 (제목이 이미 연도로 끝나지 않을 때만)",
+  "settings.renameTokenTitleWithoutYear": "끝에 붙은 연도를 뺀 제목",
   "settings.renameTokenQuality": "품질 (예: 1080p)",
   "settings.renameTokenEdition": "에디션 (예: 감독판)",
   "settings.renameTokenImdbId": "IMDb ID",

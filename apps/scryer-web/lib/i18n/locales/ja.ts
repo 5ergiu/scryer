@@ -626,6 +626,8 @@ const ja: LocaleDictionary = {
   "settings.renameSectionTitle": "ファイルリネーム",
   "settings.renameTokenTitle": "タイトル名",
   "settings.renameTokenYear": "公開年",
+  "settings.renameTokenTitleWithYear": "タイトル名と年（名前の末尾に年がない場合のみ追加）",
+  "settings.renameTokenTitleWithoutYear": "末尾の年を除いたタイトル名",
   "settings.renameTokenQuality": "品質（例: 1080p）",
   "settings.renameTokenEdition": "エディション（例: ディレクターズカット）",
   "settings.renameTokenImdbId": "IMDb ID",
