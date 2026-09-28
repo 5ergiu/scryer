@@ -585,6 +585,27 @@ export function listSyncPollDelayMs(attempt: number, elapsedMs: number): number 
   return delay;
 }
 
+/**
+ * The next refresh of the one poll that follows every queued sync, however
+ * many lists were queued. Each watched list keeps its own budget, counted from
+ * when its sync was queued; lists past it are dropped. Null once none is left.
+ */
+export function listSyncWatchSchedule(
+  attempt: number,
+  startedAtById: ReadonlyMap<string, number>,
+  now: number,
+): { delay: number; keep: string[] } | null {
+  let delay: number | null = null;
+  const keep: string[] = [];
+  for (const [id, startedAt] of startedAtById) {
+    const next = listSyncPollDelayMs(attempt, now - startedAt);
+    if (next === null) continue;
+    delay = next;
+    keep.push(id);
+  }
+  return delay === null ? null : { delay, keep };
+}
+
 /** What the settings form holds for one field the user touched. */
 export type ListProviderSettingEdit = { value: string; clear: boolean };
 

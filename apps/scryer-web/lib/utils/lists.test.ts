@@ -33,6 +33,7 @@ import {
   listSyncStateTone,
   listMembershipRowId,
   listSyncPollDelayMs,
+  listSyncWatchSchedule,
   listSyncWatchSettled,
   LIST_SYNC_POLL_BUDGET_MS,
   listUrlPatternToRegExp,
@@ -376,6 +377,29 @@ test("sync polling backs off to a ceiling and stops at its budget", () => {
   );
   assert.equal(listSyncPollDelayMs(6, LIST_SYNC_POLL_BUDGET_MS - 10_000), 10_000);
   assert.equal(listSyncPollDelayMs(6, LIST_SYNC_POLL_BUDGET_MS - 9_999), null);
+});
+
+test("one sync poll follows every queued list and drops each at its own budget", () => {
+  const now = 1_000_000;
+  const many = new Map(Array.from({ length: 40 }, (_, index) => [`list-${index}`, now] as const));
+  const first = listSyncWatchSchedule(0, many, now);
+  assert.deepEqual(first && { delay: first.delay, kept: first.keep.length }, { delay: 1_000, kept: 40 });
+
+  const mixed = new Map([
+    ["queued-long-ago", now - (LIST_SYNC_POLL_BUDGET_MS - 5_000)],
+    ["queued-just-now", now],
+  ]);
+  assert.deepEqual(listSyncWatchSchedule(5, mixed, now), { delay: 10_000, keep: ["queued-just-now"] });
+  assert.deepEqual(listSyncWatchSchedule(0, mixed, now), {
+    delay: 1_000,
+    keep: ["queued-long-ago", "queued-just-now"],
+  });
+
+  assert.equal(listSyncWatchSchedule(0, new Map(), now), null);
+  assert.equal(
+    listSyncWatchSchedule(6, new Map([["spent", now - LIST_SYNC_POLL_BUDGET_MS]]), now),
+    null,
+  );
 });
 
 function settingField(overrides: Partial<ListProviderSettingField> = {}): ListProviderSettingField {
