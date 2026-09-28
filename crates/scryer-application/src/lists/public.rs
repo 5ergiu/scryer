@@ -1063,21 +1063,22 @@ impl AppUseCase {
                 Some(self.public_subscription(subscription_id).await?.name)
             }
         };
-        let exclusion = self
-            .services
-            .lists
-            .exclusions
-            .create(ListExclusion {
-                id: Id::new().0,
-                kind: input.kind,
-                external_ids,
-                display_title,
-                year: input.year,
-                scope: input.scope,
-                created_by_user_id: Some(actor.id.clone()),
-                created_at: Utc::now(),
-            })
-            .await?;
+        let exclusion = ListExclusion {
+            id: Id::new().0,
+            kind: input.kind,
+            external_ids,
+            display_title,
+            year: input.year,
+            scope: input.scope,
+            created_by_user_id: Some(actor.id.clone()),
+            created_at: Utc::now(),
+        };
+        // As with a removal, the lists the exclusion applies to are read in
+        // full at their next sync, so the items it covers show as excluded
+        // then rather than whenever the list next changes. Clearing a
+        // fingerprint only costs a full read, so it goes first.
+        self.forget_fingerprints_for_exclusion(&exclusion).await?;
+        let exclusion = self.services.lists.exclusions.create(exclusion).await?;
         Ok(ListExclusionView {
             exclusion,
             subscription_name,
@@ -1100,10 +1101,11 @@ impl AppUseCase {
         Ok(exclusion.id)
     }
 
-    /// A list the exclusion held items back from would otherwise answer
-    /// "unchanged" to its next sync and never reconsider them. Clear the
-    /// stored fingerprint of every enabled list the exclusion could apply to,
-    /// so its next scheduled sync reads and processes the whole list.
+    /// A list would otherwise answer "unchanged" to its next sync and never
+    /// reconsider its items against an exclusion that was added or removed.
+    /// Clear the stored fingerprint of every enabled list the exclusion could
+    /// apply to, so its next scheduled sync reads and processes the whole
+    /// list.
     async fn forget_fingerprints_for_exclusion(&self, exclusion: &ListExclusion) -> AppResult<()> {
         let subscriptions = &self.services.lists.subscriptions;
         let candidates = match exclusion.scope.subscription_id() {
