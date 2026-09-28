@@ -40,9 +40,60 @@ pub(crate) fn normalize_numeric_id(raw: &str) -> Option<String> {
     }
 }
 
+/// Whether an external id's kind lets it name a title of `facet`. Only TMDB
+/// ids are judged: TMDB numbers movies and series separately, so one number
+/// can name both, and an anime title also carries its mapped films' ids as
+/// `tmdb:movie:N`. A TMDB id counts for a movie when it is kinded as a movie
+/// or not kinded at all, and for a series or anime when it is kinded as a
+/// series or not kinded at all. Every other source counts whatever its kind.
+pub(crate) fn external_id_kind_fits_facet(
+    external_id: &scryer_domain::ExternalId,
+    facet: &scryer_domain::MediaFacet,
+) -> bool {
+    if !external_id.source.trim().eq_ignore_ascii_case("tmdb") {
+        return true;
+    }
+    let wanted = match facet {
+        scryer_domain::MediaFacet::Movie => "movie",
+        scryer_domain::MediaFacet::Series | scryer_domain::MediaFacet::Anime => "series",
+    };
+    external_id
+        .normalized_kind()
+        .is_none_or(|kind| kind == wanted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scryer_domain::{ExternalId, MediaFacet};
+
+    #[test]
+    fn a_tmdb_id_fits_only_its_own_kind_or_no_kind() {
+        let series = ExternalId::with_kind("tmdb", "series", "5150");
+        let movie = ExternalId::with_kind("tmdb", "movie", "5150");
+        let unkinded = ExternalId::new("tmdb", "5150");
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            assert!(external_id_kind_fits_facet(&series, &facet));
+            assert!(!external_id_kind_fits_facet(&movie, &facet));
+            assert!(external_id_kind_fits_facet(&unkinded, &facet));
+        }
+        assert!(external_id_kind_fits_facet(&movie, &MediaFacet::Movie));
+        assert!(!external_id_kind_fits_facet(&series, &MediaFacet::Movie));
+        assert!(external_id_kind_fits_facet(&unkinded, &MediaFacet::Movie));
+        assert!(external_id_kind_fits_facet(
+            &ExternalId::with_kind("TMDB", " Series ", "5150"),
+            &MediaFacet::Series
+        ));
+    }
+
+    #[test]
+    fn other_sources_fit_whatever_their_kind() {
+        let tvdb_movie = ExternalId::with_kind("tvdb", "movie", "77001");
+        assert!(external_id_kind_fits_facet(
+            &tvdb_movie,
+            &MediaFacet::Series
+        ));
+    }
 
     #[test]
     fn imdb_id_with_prefix() {
