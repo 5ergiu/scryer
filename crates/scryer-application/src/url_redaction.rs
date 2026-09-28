@@ -1,8 +1,9 @@
 //! Credential redaction for indexer and tracker URLs.
 //!
 //! Torznab/Newznab download links carry the operator's indexer key in the
-//! query string (`...&apikey=...`), and private trackers do the same with
-//! `passkey`, `rss_key`, `token` or `auth`. The live URL is needed to fetch the
+//! query string (`...&apikey=...` or Jackett's `jackett_apikey`), and private
+//! trackers do the same with `passkey`, `rss_key`, `token`, `auth`, `authkey`
+//! or `torrent_pass`. The live URL is needed to fetch the
 //! release, but every copy that is persisted for display, sent in a
 //! notification, or written to a log must lose the credential first.
 
@@ -21,7 +22,7 @@ fn credential_query_param_regex() -> &'static Regex {
         // An already-redacted value is matched first so redaction is
         // idempotent instead of growing a stray `]` on each pass.
         Regex::new(
-            r#"(?i)(?P<prefix>\b(?:api[_-]?key|pass[_-]?key|rss[_-]?key|token|auth)=)(?P<value>\[redacted\]|[^&#;\s"'<>),\]}]+)"#,
+            r#"(?i)(?P<prefix>\b(?:api[_-]?key|pass[_-]?key|rss[_-]?key|token|auth|authkey|jackett_apikey|torrent_pass)=)(?P<value>\[redacted\]|[^&#;\s"'<>),\]}]+)"#,
         )
         .expect("credential query parameter regex should compile")
     })
@@ -68,8 +69,19 @@ mod tests {
     #[test]
     fn redacts_every_credential_parameter_name() {
         for name in [
-            "apikey", "api_key", "api-key", "passkey", "pass_key", "token", "rss_key", "rsskey",
-            "rss-key", "auth",
+            "apikey",
+            "api_key",
+            "api-key",
+            "passkey",
+            "pass_key",
+            "token",
+            "rss_key",
+            "rsskey",
+            "rss-key",
+            "auth",
+            "authkey",
+            "jackett_apikey",
+            "torrent_pass",
         ] {
             let url = format!("https://indexer.invalid/api?t=get&{name}=s3cret&id=42");
             assert_eq!(
@@ -87,6 +99,16 @@ mod tests {
                 "https://indexer.invalid/api?ApiKey=abc&PASSKEY=def&Rss_Key=ghi"
             ),
             "https://indexer.invalid/api?ApiKey=[redacted]&PASSKEY=[redacted]&Rss_Key=[redacted]"
+        );
+    }
+
+    #[test]
+    fn redacts_tracker_and_jackett_keys_and_keeps_unrelated_parameters() {
+        assert_eq!(
+            redact_url_credentials(
+                "https://tracker.invalid/dl?Jackett_ApiKey=aaa&AUTHKEY=bbb&Torrent_Pass=ccc&torrent_id=7&file=Paper+Lantern"
+            ),
+            "https://tracker.invalid/dl?Jackett_ApiKey=[redacted]&AUTHKEY=[redacted]&Torrent_Pass=[redacted]&torrent_id=7&file=Paper+Lantern"
         );
     }
 
@@ -115,6 +137,7 @@ mod tests {
             "https://indexer.invalid/get/harbor-lights.nzb",
             "magnet:?xt=urn:btih:abcdef&dn=Harbor+Lights",
             "https://indexer.invalid/api?oauth=keep&x_token=keep",
+            "https://tracker.invalid/dl?torrent_passes=keep&x_authkey=keep",
             "weaver://job/job-1",
         ] {
             assert_eq!(redact_url_credentials(raw), raw);
