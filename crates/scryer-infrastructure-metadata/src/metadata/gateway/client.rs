@@ -4944,6 +4944,35 @@ mod tests {
         assert!(graphql_docs::SEARCH_TITLES_BATCH_QUERY.contains("searchTitlesBatch"));
     }
 
+    /// SMG serves TMDB-primary series only to documents that declare the
+    /// capability (smg plan 163), so every title-surface document Scryer sends
+    /// must carry it on its root field.
+    #[test]
+    fn every_title_surface_document_declares_tmdb_primary_series() {
+        for (field, document) in [
+            ("titles(", graphql_docs::TITLES_QUERY),
+            ("resolveTitles(", graphql_docs::RESOLVE_TITLES_QUERY),
+            ("searchTitles(", graphql_docs::SEARCH_TITLES_QUERY),
+            (
+                "searchTitlesMulti(",
+                graphql_docs::SEARCH_TITLES_MULTI_QUERY,
+            ),
+            (
+                "searchTitlesBatch(",
+                graphql_docs::SEARCH_TITLES_BATCH_QUERY,
+            ),
+        ] {
+            let root_call = document
+                .lines()
+                .find(|line| line.trim_start().starts_with(field))
+                .unwrap_or_else(|| panic!("{field} root field missing"));
+            assert!(
+                root_call.contains("clientCapabilities: [TMDB_PRIMARY_SERIES]"),
+                "{field} must declare TMDB_PRIMARY_SERIES: {root_call}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn get_movie_titles_chunks_below_the_gateway_id_limit() {
         // The gateway rejects `titles(ids:)` above fifty ids per request, so a

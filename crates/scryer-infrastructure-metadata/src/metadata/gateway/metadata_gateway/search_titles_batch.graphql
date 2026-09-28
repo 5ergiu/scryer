@@ -1,5 +1,5 @@
 query SearchTitlesBatch($requests: [TvdbSearchBatchRequestInput!]!, $kind: String!, $language: String!, $createMissing: Boolean!) {
-  searchTitlesBatch(requests: $requests, kind: $kind, language: $language, createMissing: $createMissing) {
+  searchTitlesBatch(requests: $requests, kind: $kind, language: $language, createMissing: $createMissing, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     query
     type
     year

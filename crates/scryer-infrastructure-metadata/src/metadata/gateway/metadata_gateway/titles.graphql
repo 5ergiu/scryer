@@ -1,5 +1,5 @@
 query Titles($ids: [Int!]!, $language: String!, $includeEpisodes: Boolean! = false, $includeEpisodeOrders: Boolean! = false) {
-  titles(ids: $ids, language: $language, includeEpisodes: $includeEpisodes, includeEpisodeOrders: $includeEpisodeOrders) {
+  titles(ids: $ids, language: $language, includeEpisodes: $includeEpisodes, includeEpisodeOrders: $includeEpisodeOrders, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     movies {
       id
       kind

@@ -1,5 +1,5 @@
 query SearchTitlesMulti($query: String!, $limit: Int!, $language: String!) {
-  searchTitlesMulti(query: $query, limit: $limit, language: $language) {
+  searchTitlesMulti(query: $query, limit: $limit, language: $language, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     movies {
       title_id
       primary_source
