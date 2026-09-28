@@ -5,6 +5,7 @@ import type { Translate } from "@/components/root/types";
 import {
   buildFixTitleMatchSearchVariables,
   fixTitleMatchDialogIdentity,
+  fixTitleMatchTarget,
   handleFixTitleMatchComplete,
 } from "./fix-title-match.ts";
 
@@ -39,6 +40,23 @@ test("Fix Match dialog identity is stable across equivalent title objects", () =
     fixTitleMatchDialogIdentity({ id: "movie-1", facet: "MOVIE" }),
     fixTitleMatchDialogIdentity({ id: "movie-2", facet: "MOVIE" }),
   );
+});
+
+test("Fix Match applies a result that has an SMG id, a TVDB id or both", () => {
+  assert.deepEqual(fixTitleMatchTarget({ smgId: 4101, tvdbId: "" }), { smgId: 4101 });
+  assert.deepEqual(fixTitleMatchTarget({ smgId: null, tvdbId: " 72001 " }), { tvdbId: "72001" });
+  assert.deepEqual(fixTitleMatchTarget({ smgId: 4101, tvdbId: "72001" }), {
+    smgId: 4101,
+    tvdbId: "72001",
+  });
+});
+
+test("Fix Match cannot apply a result without a usable identity", () => {
+  assert.equal(fixTitleMatchTarget(null), null);
+  assert.equal(fixTitleMatchTarget(undefined), null);
+  assert.equal(fixTitleMatchTarget({ smgId: null, tvdbId: "  " }), null);
+  assert.equal(fixTitleMatchTarget({ smgId: 0, tvdbId: "" }), null);
+  assert.deepEqual(fixTitleMatchTarget({ smgId: -3, tvdbId: "72001" }), { tvdbId: "72001" });
 });
 
 test("Fix Match completion refreshes before reporting success", async () => {
