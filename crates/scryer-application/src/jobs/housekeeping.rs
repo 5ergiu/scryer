@@ -452,7 +452,7 @@ impl AppUseCase {
                     title: title_context_snapshot(&title),
                     media_updates: vec![deleted_media_update(manifest.original_path.clone())],
                     file_id: manifest.original_file_id.clone(),
-                    reason: scryer_domain::MediaFileDeletedReason::RecycleBinPurged,
+                    reason: Self::purged_recycle_reason(manifest),
                     episode_ids: Vec::new(),
                 },
             ),
@@ -463,6 +463,28 @@ impl AppUseCase {
                 error = %error,
                 "recycle entry purged but audit event could not be recorded"
             );
+        }
+    }
+
+    /// Why a recycled entry was purged, preserving the reason it was recycled.
+    ///
+    /// A copy recycled because an upgrade replaced it is still an upgrade
+    /// cleanup as far as subscribers are concerned: "File Deleted for Upgrade"
+    /// is the toggle that describes it, and a subscriber to plain deletions did
+    /// not ask about it. Discarding that origin here is what made every purge
+    /// arrive as an ordinary deletion.
+    ///
+    /// Quarantined entries carry their original reason with a `; quarantine: …`
+    /// suffix, so compare against the reason itself rather than the whole
+    /// string.
+    fn purged_recycle_reason(
+        manifest: &crate::recycle_bin::RecycleManifest,
+    ) -> scryer_domain::MediaFileDeletedReason {
+        let reason = manifest.reason.split(';').next().unwrap_or_default().trim();
+        if reason == "upgrade_replaced" {
+            scryer_domain::MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade
+        } else {
+            scryer_domain::MediaFileDeletedReason::RecycleBinPurged
         }
     }
 

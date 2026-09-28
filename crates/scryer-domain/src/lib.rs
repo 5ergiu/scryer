@@ -4137,6 +4137,11 @@ pub enum MediaFileDeletedReason {
     Deleted,
     UpgradeCleanup,
     RecycleBinPurged,
+    /// The recycled copy of a file an upgrade had already replaced. It is a
+    /// purge, but its origin is an upgrade cleanup, and that origin is what
+    /// subscribers key on: the file went away because a better release landed,
+    /// not because someone deleted it.
+    RecycleBinPurgedAfterUpgrade,
     MissingOnDisk,
 }
 
@@ -4146,8 +4151,23 @@ impl MediaFileDeletedReason {
             Self::Deleted => "deleted",
             Self::UpgradeCleanup => "upgrade_cleanup",
             Self::RecycleBinPurged => "recycle_bin_purged",
+            Self::RecycleBinPurgedAfterUpgrade => "recycle_bin_purged_after_upgrade",
             Self::MissingOnDisk => "missing_on_disk",
         }
+    }
+
+    /// True for both purge origins: the file had already been moved to the
+    /// recycle bin and has now been permanently removed.
+    pub fn is_recycle_bin_purge(self) -> bool {
+        matches!(
+            self,
+            Self::RecycleBinPurged | Self::RecycleBinPurgedAfterUpgrade
+        )
+    }
+
+    /// True when the recycled file got there because an upgrade replaced it.
+    pub fn is_upgrade_origin_purge(self) -> bool {
+        matches!(self, Self::RecycleBinPurgedAfterUpgrade)
     }
 }
 

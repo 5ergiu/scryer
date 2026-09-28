@@ -38,7 +38,7 @@ macro_rules! notification_event_mappings {
             import_rejected => DomainEventPayload::ImportRejected(_) => DomainEventPayload::ImportRejected(data) => DomainEventType::ImportRejected => NotificationEventType::ImportRejected => build_import_rejected_notification(data),
             media_file_upgraded => DomainEventPayload::MediaFileUpgraded(_) => DomainEventPayload::MediaFileUpgraded(data) => DomainEventType::MediaFileUpgraded => NotificationEventType::Upgrade => build_media_file_upgraded_notification(data),
             media_file_renamed => DomainEventPayload::MediaFileRenamed(_) => DomainEventPayload::MediaFileRenamed(data) => DomainEventType::MediaFileRenamed => NotificationEventType::Rename => build_media_file_renamed_notification(data),
-            media_file_deleted_upgrade => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeletedForUpgrade => build_media_file_deleted_notification(data, NotificationEventType::FileDeletedForUpgrade),
+            media_file_deleted_upgrade => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup | MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::UpgradeCleanup | MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeletedForUpgrade => build_media_file_deleted_notification(data, NotificationEventType::FileDeletedForUpgrade),
             media_file_deleted => DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk | MediaFileDeletedReason::RecycleBinPurged, .. }) => DomainEventPayload::MediaFileDeleted(data @ MediaFileDeletedEventData { reason: MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk | MediaFileDeletedReason::RecycleBinPurged, .. }) => DomainEventType::MediaFileDeleted => NotificationEventType::FileDeleted => build_media_file_deleted_notification(data, NotificationEventType::FileDeleted),
             post_processing_completed => DomainEventPayload::PostProcessingCompleted(_) => DomainEventPayload::PostProcessingCompleted(data) => DomainEventType::PostProcessingCompleted => NotificationEventType::PostProcessingCompleted => build_post_processing_completed_notification(data),
             subtitle_downloaded => DomainEventPayload::SubtitleDownloaded(_) => DomainEventPayload::SubtitleDownloaded(data) => DomainEventType::SubtitleDownloaded => NotificationEventType::SubtitleDownloaded => build_subtitle_downloaded_notification(data),
@@ -328,6 +328,18 @@ async fn try_dispatch_event(app: &AppUseCase, event: &DomainEvent) -> crate::App
     subscriptions.dedup_by(|left, right| left.id == right.id);
     let mut dispatched_targets = BTreeSet::new();
 
+    // A recycle-bin purge removes a copy that an upgrade had already replaced,
+    // not the file currently at the original path: by the time the recycled
+    // copy expires that path can hold the replacement. Forwarding the deletion
+    // as a media-server refresh would tell Jellyfin/Plex/Emby to drop a path
+    // that is still in use, so purge notifications stay off media-server
+    // targets. Channel subscribers keep the file payload and are told about the
+    // purge itself.
+    let media_file_purge = matches!(
+        &event.payload,
+        DomainEventPayload::MediaFileDeleted(data) if data.reason.is_recycle_bin_purge()
+    );
+
     for subscription in subscriptions {
         if !subscription.is_enabled {
             continue;
@@ -339,6 +351,17 @@ async fn try_dispatch_event(app: &AppUseCase, event: &DomainEvent) -> crate::App
             scope_title_id,
             scope_facet,
         ) {
+            continue;
+        }
+
+        if media_file_purge
+            && subscription.target_kind == NotificationTargetKind::MediaServerConnection
+        {
+            debug!(
+                subscription_id = subscription.id.as_str(),
+                target_id = subscription.target_id.as_str(),
+                "skipping media-server refresh for a recycle-bin purge"
+            );
             continue;
         }
 
@@ -763,7 +786,8 @@ fn build_media_file_deleted_notification(
         .first()
         .map(|update| update.path.as_str());
     let title = match data.reason {
-        MediaFileDeletedReason::UpgradeCleanup => {
+        MediaFileDeletedReason::UpgradeCleanup
+        | MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade => {
             format!("Deleted for upgrade: {}", data.title.title_name)
         }
         MediaFileDeletedReason::RecycleBinPurged => {
@@ -780,6 +804,10 @@ fn build_media_file_deleted_notification(
         ),
         MediaFileDeletedReason::RecycleBinPurged => format!(
             "Permanently deleted recycled media file: {}",
+            first_path.unwrap_or("(path unavailable)")
+        ),
+        MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade => format!(
+            "Permanently deleted the recycled copy an upgrade had replaced: {}",
             first_path.unwrap_or("(path unavailable)")
         ),
         MediaFileDeletedReason::Deleted | MediaFileDeletedReason::MissingOnDisk => {
@@ -3389,7 +3417,9 @@ mod file_delete_subscription_tests {
         );
     }
 
-    /// A file destroyed for good is still a file deletion, so it must reach File Deleted subscribers.
+    /// A file destroyed for good is still a file deletion, so it must reach File Deleted subscribers —
+    /// unless it was recycled because an upgrade replaced it, which is what that subscriber did not
+    /// ask about.
     #[tokio::test]
     async fn recycle_bin_purge_is_delivered_to_file_deleted_subscribers() {
         assert_eq!(
@@ -3409,6 +3439,28 @@ mod file_delete_subscription_tests {
             .await
             .is_empty(),
             "a permanent purge is not an upgrade cleanup"
+        );
+
+        // A purge that removes the copy an upgrade replaced keeps that origin:
+        // someone subscribed to upgrade deletions wants to hear about it, and
+        // someone subscribed to plain deletions did not ask.
+        assert_eq!(
+            dispatched_event_types(
+                NotificationEventType::FileDeletedForUpgrade,
+                MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade
+            )
+            .await,
+            vec![NotificationEventType::FileDeletedForUpgrade]
+        );
+
+        assert!(
+            dispatched_event_types(
+                NotificationEventType::FileDeleted,
+                MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade
+            )
+            .await
+            .is_empty(),
+            "an upgrade-origin purge must not reach a plain File Deleted subscriber"
         );
     }
 
@@ -3434,6 +3486,12 @@ mod file_delete_subscription_tests {
                 NotificationEventType::FileDeleted,
                 "Recycle bin purged: Harbor Lantern",
                 "Permanently deleted recycled media file: ",
+            ),
+            (
+                MediaFileDeletedReason::RecycleBinPurgedAfterUpgrade,
+                NotificationEventType::FileDeletedForUpgrade,
+                "Deleted for upgrade: Harbor Lantern",
+                "Permanently deleted the recycled copy an upgrade had replaced: ",
             ),
             (
                 MediaFileDeletedReason::UpgradeCleanup,

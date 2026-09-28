@@ -2188,15 +2188,30 @@ async fn notification_dispatcher_delivers_title_deleted() {
 }
 
 /// A post-processing script reports through its own section, and the outcome has to survive the trip
-/// unchanged. Severity is asserted only for the succeeded case: the dispatcher derives it from the
-/// event type today, so the other two outcomes are not a property of this path yet.
+/// unchanged — including the severity, which is derived from the result rather than the event type.
+/// A script that failed or timed out is not routine news.
 #[tokio::test]
 async fn notification_dispatcher_delivers_every_post_processing_result() {
-    for (result, status, outcome) in [
+    for (result, status, outcome, severity) in [
         // The status token and the sentence differ only for the timeout, which reads "timed out".
-        (PostProcessingResult::Succeeded, "succeeded", "succeeded"),
-        (PostProcessingResult::TimedOut, "timed_out", "timed out"),
-        (PostProcessingResult::Failed, "failed", "failed"),
+        (
+            PostProcessingResult::Succeeded,
+            "succeeded",
+            "succeeded",
+            NotificationSeverityPayload::Info,
+        ),
+        (
+            PostProcessingResult::TimedOut,
+            "timed_out",
+            "timed out",
+            NotificationSeverityPayload::Warning,
+        ),
+        (
+            PostProcessingResult::Failed,
+            "failed",
+            "failed",
+            NotificationSeverityPayload::Error,
+        ),
     ] {
         let ctx = TestContext::new().await;
         let provider = Arc::new(FakeNotificationProvider::webhook());
@@ -2235,13 +2250,95 @@ async fn notification_dispatcher_delivers_every_post_processing_result() {
                 .and_then(|import| import.status.as_deref()),
             Some(status)
         );
-        if result == PostProcessingResult::Succeeded {
-            assert_eq!(payload.severity, Some(NotificationSeverityPayload::Info));
-        }
+        assert_eq!(payload.severity, Some(severity));
 
         cancel.cancel();
         dispatcher.await.expect("dispatcher should stop");
     }
+}
+
+/// A recycled copy is purged where it sits, but the event names the path it was recycled *from* —
+/// and by then that path can hold the replacement file. A media server told to refresh it would be
+/// acting on a deletion that never happened, so purges never reach media-server targets.
+#[tokio::test]
+async fn notification_dispatcher_withholds_recycle_bin_purges_from_media_server_targets() {
+    let ctx = TestContext::new().await;
+    let provider = Arc::new(FakeNotificationProvider::jellyfin());
+    let app = app_with_notification_provider(&ctx, provider.clone());
+    let user = default_user(&app).await;
+
+    let connection = insert_jellyfin_media_server_connection(
+        &ctx,
+        "jellyfin-purge-target",
+        &ctx.nzbgeek_server.uri(),
+        jellyfin_path_mappings(),
+    )
+    .await;
+    create_media_server_subscription(
+        &app,
+        &user,
+        &connection,
+        NotificationEventType::FileDeleted.as_str(),
+    )
+    .await;
+
+    let cancel = CancellationToken::new();
+    let dispatcher = tokio::spawn(start_notification_dispatcher(app.clone(), cancel.clone()));
+
+    // The purge first, then a plain deletion that must arrive. The dispatcher walks events in
+    // sequence order and finishes one before starting the next, so the capture proves the purge was
+    // already considered and dropped rather than merely not yet seen.
+    app.append_domain_event(new_event(
+        "evt-purge-media-server",
+        "title-1",
+        "movie",
+        DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData {
+            title: title_context("Purged Movie", "movie", DomainExternalIds::default()),
+            media_updates: vec![MediaPathUpdate {
+                path: "/data/movies/Purged Movie/Purged Movie.mkv".to_string(),
+                update_type: MediaUpdateType::Deleted,
+            }],
+            file_id: Some("file-1".to_string()),
+            reason: MediaFileDeletedReason::RecycleBinPurged,
+            episode_ids: Vec::new(),
+        }),
+    ))
+    .await
+    .expect("append purge event");
+
+    app.append_domain_event(new_event(
+        "evt-plain-delete-media-server",
+        "title-1",
+        "movie",
+        DomainEventPayload::MediaFileDeleted(MediaFileDeletedEventData {
+            title: title_context("Deleted Movie", "movie", DomainExternalIds::default()),
+            media_updates: vec![MediaPathUpdate {
+                path: "/data/movies/Deleted Movie/Deleted Movie.mkv".to_string(),
+                update_type: MediaUpdateType::Deleted,
+            }],
+            file_id: Some("file-2".to_string()),
+            reason: MediaFileDeletedReason::Deleted,
+            episode_ids: Vec::new(),
+        }),
+    ))
+    .await
+    .expect("append plain deletion event");
+
+    wait_for_captured(&provider, 1).await;
+    cancel.cancel();
+    dispatcher.await.expect("dispatcher task");
+
+    let payloads = provider.payloads();
+    assert_eq!(
+        payloads.len(),
+        1,
+        "only the plain deletion may reach a media-server target, saw {:?}",
+        payloads
+            .iter()
+            .map(|payload| payload.summary_title.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(payloads[0].summary_title, "File deleted: Deleted Movie");
 }
 
 #[tokio::test]
