@@ -5140,15 +5140,25 @@ struct AcquisitionWalkCadence {
 
 impl AcquisitionWalkCadence {
     fn new(poll_period: std::time::Duration, walk_period: std::time::Duration) -> Self {
-        let poll_secs = poll_period.as_secs().max(1);
-        let walk_secs = walk_period.as_secs().max(1);
-        Self {
+        let mut cadence = Self {
             poll_period,
             walk_period,
-            ticks_per_walk: walk_secs.div_ceil(poll_secs).max(1),
+            ticks_per_walk: 1,
             ticks_since_walk: 0,
             walk_retry_at: None,
-        }
+        };
+        cadence.set_walk_period(walk_period);
+        cadence
+    }
+
+    /// Apply a changed walk interval without a restart. Ticks already counted
+    /// since the last walk still count, so shortening the interval past them
+    /// walks on the next tick.
+    fn set_walk_period(&mut self, walk_period: std::time::Duration) {
+        let poll_secs = self.poll_period.as_secs().max(1);
+        let walk_secs = walk_period.as_secs().max(1);
+        self.walk_period = walk_period;
+        self.ticks_per_walk = walk_secs.div_ceil(poll_secs).max(1);
     }
 
     fn pass_for(
@@ -5187,6 +5197,18 @@ impl AcquisitionWalkCadence {
             .deferred_retry_delay(self.walk_period)
             .filter(|delay| *delay >= self.poll_period)
             .map(|delay| now + delay);
+    }
+}
+
+fn acquisition_walk_interval_may_have_changed(
+    changed: Result<Vec<String>, tokio::sync::broadcast::error::RecvError>,
+) -> bool {
+    match changed {
+        Ok(keys) => keys
+            .iter()
+            .any(|key| key == crate::settings::runtime::ACQUISITION_WALK_INTERVAL_SECONDS_KEY),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
     }
 }
 
@@ -5497,6 +5519,9 @@ pub async fn start_background_acquisition_poller(
     }
 
     let wake = app.runtime.acquisition.acquisition_wake.clone();
+    // The walk interval applies without a restart. The poll interval, and so
+    // the failure check's cadence, is still read once at startup.
+    let mut settings_changed = app.runtime.events.settings_changed_broadcast.subscribe();
 
     /// Run a scheduled task inside a spawned task to isolate panics.
     /// If the task panics, the error is logged and the scheduler loop continues.
@@ -5621,6 +5646,18 @@ pub async fn start_background_acquisition_poller(
                 .await;
                 deferred_retry_at =
                     arm_deferred_acquisition_retry(outcome, None, acquisition_poll_period);
+            }
+            changed = settings_changed.recv() => {
+                if acquisition_walk_interval_may_have_changed(changed) {
+                    match app.acquisition_settings().await {
+                        Ok(settings) => walk_cadence.set_walk_period(std::time::Duration::from_secs(
+                            settings.walk_interval_seconds.max(1) as u64,
+                        )),
+                        Err(error) => {
+                            warn!(error = %error, "failed to reload the acquisition walk interval");
+                        }
+                    }
+                }
             }
             _ = registry_refresh_interval.tick() => {
                 let app = app.clone();
@@ -6048,6 +6085,41 @@ mod task_runner_tests {
             );
             assert_eq!(cadence.walk_retry_at, None, "retry_after = {retry_after:?}");
         }
+    }
+
+    #[test]
+    fn a_changed_walk_interval_applies_to_the_running_cadence() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly as Check, Full};
+        let start = tokio::time::Instant::now();
+        let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start, secs(60), 2),
+            vec![Check, Check]
+        );
+
+        // Two ticks already counted: a one-minute walk walks on the next tick.
+        cadence.set_walk_period(secs(60));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(120), secs(60), 3),
+            vec![Full, Full, Full]
+        );
+
+        cadence.set_walk_period(secs(180));
+        assert_eq!(
+            drive_poll_ticks(&mut cadence, start + secs(300), secs(60), 3),
+            vec![Check, Check, Full]
+        );
+
+        let key = crate::settings::runtime::ACQUISITION_WALK_INTERVAL_SECONDS_KEY;
+        assert!(acquisition_walk_interval_may_have_changed(Ok(vec![
+            key.to_string()
+        ])));
+        assert!(!acquisition_walk_interval_may_have_changed(Ok(vec![
+            "acquisition.poll_interval_seconds".to_string()
+        ])));
+        assert!(acquisition_walk_interval_may_have_changed(Err(
+            tokio::sync::broadcast::error::RecvError::Lagged(1)
+        )));
     }
 
     #[test]

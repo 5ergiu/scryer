@@ -6,7 +6,7 @@ use crate::acquisition::convergence::{
 const ACQUISITION_ENABLED_KEY: &str = "acquisition.enabled";
 const ACQUISITION_SAME_TIER_MIN_DELTA_KEY: &str = "acquisition.same_tier_min_delta";
 const ACQUISITION_POLL_INTERVAL_SECONDS_KEY: &str = "acquisition.poll_interval_seconds";
-const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk_interval_seconds";
+pub(crate) const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk_interval_seconds";
 /// Download-client failure check cadence when nothing is stored.
 pub(crate) const DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS: i32 = 60;
 /// Catalog walk cadence when nothing is stored.
