@@ -156,31 +156,31 @@ function RecycleBinLocationForm({
           </p>
           <p className="text-xs text-muted-foreground">{t("settings.recycleBinPathExistingItems")}</p>
         </div>
+        <div className="space-y-1">
+          <Label htmlFor="settings-recycle-bin-retention-days">{t("settings.recycleBinRetentionDays")}</Label>
+          <Input
+            id="settings-recycle-bin-retention-days"
+            type="number"
+            inputMode="numeric"
+            min={RECYCLE_BIN_MIN_RETENTION_DAYS}
+            max={RECYCLE_BIN_MAX_RETENTION_DAYS}
+            step={1}
+            value={retentionDraft}
+            onChange={(event) => setRetentionDraft(event.target.value)}
+            disabled={disabled}
+            aria-invalid={parsedRetention === null}
+            className="w-32"
+          />
+          <p className="text-xs text-muted-foreground">
+            {parsedRetention === null
+              ? t("settings.recycleBinRetentionDaysInvalid", {
+                  min: RECYCLE_BIN_MIN_RETENTION_DAYS,
+                  max: RECYCLE_BIN_MAX_RETENTION_DAYS,
+                })
+              : t("settings.recycleBinRetentionDaysHelp")}
+          </p>
+        </div>
       </details>
-      <div className="space-y-1">
-        <Label htmlFor="settings-recycle-bin-retention-days">{t("settings.recycleBinRetentionDays")}</Label>
-        <Input
-          id="settings-recycle-bin-retention-days"
-          type="number"
-          inputMode="numeric"
-          min={RECYCLE_BIN_MIN_RETENTION_DAYS}
-          max={RECYCLE_BIN_MAX_RETENTION_DAYS}
-          step={1}
-          value={retentionDraft}
-          onChange={(event) => setRetentionDraft(event.target.value)}
-          disabled={disabled}
-          aria-invalid={parsedRetention === null}
-          className="w-32"
-        />
-        <p className="text-xs text-muted-foreground">
-          {parsedRetention === null
-            ? t("settings.recycleBinRetentionDaysInvalid", {
-                min: RECYCLE_BIN_MIN_RETENTION_DAYS,
-                max: RECYCLE_BIN_MAX_RETENTION_DAYS,
-              })
-            : t("settings.recycleBinRetentionDaysHelp")}
-        </p>
-      </div>
       {enabled ? (
         <div id="settings-recycle-bin-effective-paths" className="space-y-1 text-xs">
           <p className="text-muted-foreground">{t("settings.recycleBinEffectivePaths")}</p>
