@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useClient } from "urql";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import type { ExternalId, Facet, TitleRecord } from "@/lib/types";
+import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import type { ViewCategoryId } from "@/lib/types/quality-profiles";
 import type { LocaleCode } from "@/lib/i18n";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -390,7 +391,7 @@ export function submitMediaRequestInput(
     libraryId: options.libraryId.trim(),
     facet,
     title: result.name.trim(),
-    externalIds: metadataResultExternalIds(result),
+    externalIds: metadataResultExternalIds(result, facet),
     year: result.year ?? undefined,
     overview: result.overview || undefined,
     sortTitle: result.sortTitle || undefined,
@@ -425,32 +426,6 @@ function mediaRequestExternalRatingInput(
     votes: rating.votes,
     url: rating.url,
   };
-}
-
-function metadataResultExternalIds(result: MetadataTvdbSearchItem): ExternalId[] {
-  const smgId = metadataResultSmgId(result);
-  const tvdbId = String(result.tvdbId).trim();
-  const tmdbId = result.tmdbId == null ? "" : String(result.tmdbId).trim();
-  const imdbId = result.imdbId?.trim();
-  const seen = new Set<string>();
-  const ids: ExternalId[] = [];
-  for (const externalId of [
-    ...(result.externalIds ?? []),
-    ...(smgId ? [{ source: "smg", value: smgId }] : []),
-    ...(tvdbId ? [{ source: "tvdb", value: tvdbId }] : []),
-    ...(tmdbId ? [{ source: "tmdb", value: tmdbId }] : []),
-    ...(imdbId ? [{ source: "imdb", value: imdbId }] : []),
-  ]) {
-    const source = externalId.source.trim().toLowerCase();
-    const value = externalId.value.trim();
-    const key = `${source}:${value}`;
-    if (!source || !value || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    ids.push({ source, value });
-  }
-  return ids;
 }
 
 function librariesByFacetFromList(libraries: LibraryRecord[]): Record<Facet, LibraryRecord[]> {
@@ -939,7 +914,7 @@ export function useGlobalSearch({
       if (title.facet === "MOVIE" && !smgId && !tvdbId) {
         return title;
       }
-      if (title.facet !== "MOVIE" && !tvdbId) {
+      if (title.facet !== "MOVIE" && !smgId && !tvdbId) {
         return title;
       }
 
@@ -958,7 +933,8 @@ export function useGlobalSearch({
 
         const { data, error } = await client.query(metadataSeriesQuery, {
           input: {
-            tvdbId,
+            smgId: smgId ? Number(smgId) : undefined,
+            tvdbId: smgId ? undefined : tvdbId || undefined,
             includeEpisodes: false,
             language: uiLanguage,
           },
@@ -1504,7 +1480,7 @@ export function useGlobalSearch({
 
       const monitored = monitorTypeToMonitored(options.monitorType);
 
-      const externalIds = metadataResultExternalIds(result);
+      const externalIds = metadataResultExternalIds(result, facet);
       const requestKey = normalizeCatalogAddRequestKey(facet, externalIds);
       if (pendingCatalogAddKeysRef.current.has(requestKey)) {
         return null;
@@ -1612,7 +1588,7 @@ export function useGlobalSearch({
         return false;
       }
 
-      const externalIds = metadataResultExternalIds(result);
+      const externalIds = metadataResultExternalIds(result, facet);
       const requestKey = normalizeCatalogAddRequestKey(facet, externalIds);
       if (pendingRequestKeysRef.current.has(requestKey)) {
         return false;

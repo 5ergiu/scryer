@@ -155,6 +155,8 @@ function defaultSelection(choices: SeriesMonitorChoices): MonitorSelectionDraft 
 
 type MonitorSelectionPickerProps = {
   facet: Facet;
+  /** The series' SMG title id; preferred over the TVDB id when present. */
+  smgId?: number | null;
   tvdbId: string;
   value: MonitorSelectionDraft;
   onChange: (value: MonitorSelectionDraft) => void;
@@ -166,6 +168,7 @@ type MonitorSelectionPickerProps = {
 
 export function MonitorSelectionPicker({
   facet,
+  smgId,
   tvdbId,
   value,
   onChange,
@@ -177,6 +180,13 @@ export function MonitorSelectionPicker({
   const t = useTranslate();
   const client = useClient();
   const normalizedTvdbId = tvdbId.trim();
+  const normalizedSmgId = smgId != null && smgId > 0 ? smgId : null;
+  // A TMDB-primary series has no TVDB id: its SMG title id identifies it.
+  const seriesIdentityKey = normalizedSmgId
+    ? `smg:${normalizedSmgId}`
+    : normalizedTvdbId
+      ? `tvdb:${normalizedTvdbId}`
+      : "";
   const [choices, setChoices] = React.useState<SeriesMonitorChoices | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -199,7 +209,7 @@ export function MonitorSelectionPicker({
   });
 
   React.useEffect(() => {
-    if (!normalizedTvdbId) {
+    if (!seriesIdentityKey) {
       setChoices(null);
       setLoadError(null);
       setLoading(false);
@@ -209,7 +219,7 @@ export function MonitorSelectionPicker({
 
     let active = true;
     const language = getGraphqlLanguage();
-    const cacheKey = `${normalizedTvdbId}|${language}`;
+    const cacheKey = `${seriesIdentityKey}|${language}`;
     setLoading(true);
     setLoadError(null);
     onLoadingChangeRef.current?.(true);
@@ -218,7 +228,8 @@ export function MonitorSelectionPicker({
       const { data, error } = await client
         .query(metadataSeriesQuery, {
           input: {
-            tvdbId: normalizedTvdbId,
+            smgId: normalizedSmgId ?? undefined,
+            tvdbId: normalizedSmgId ? undefined : normalizedTvdbId || undefined,
             includeEpisodes: false,
             language,
           },
@@ -265,7 +276,7 @@ export function MonitorSelectionPicker({
     return () => {
       active = false;
     };
-  }, [client, normalizedTvdbId, retryCount, t]);
+  }, [client, normalizedSmgId, normalizedTvdbId, retryCount, seriesIdentityKey, t]);
 
   const selectedSeasons = React.useMemo(
     () => new Set(value.seasonNumbers),
@@ -326,7 +337,7 @@ export function MonitorSelectionPicker({
   const movieLabel = (movie: SeriesMovieChoice): string =>
     movie.year ? `${movie.name} (${movie.year})` : movie.name;
 
-  if (!normalizedTvdbId) {
+  if (!seriesIdentityKey) {
     return (
       <div
         id={`${idPrefix}-monitor-selection-unavailable`}

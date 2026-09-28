@@ -4324,6 +4324,8 @@ export const metadataMovieQuery = `query MetadataMovie($input: MetadataMovieInpu
 export const metadataSeriesQuery = `query MetadataSeries($input: MetadataSeriesInput!) {
   metadataSeries(input: $input) {
     tvdbId
+    smgId
+    tmdbId
     name
     sortName
     slug
@@ -4355,6 +4357,7 @@ export const metadataSeriesQuery = `query MetadataSeries($input: MetadataSeriesI
     }
     episodes {
       tvdbId
+      tmdbId
       episodeNumber
       seasonNumber
       name

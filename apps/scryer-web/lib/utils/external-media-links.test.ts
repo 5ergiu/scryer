@@ -34,3 +34,8 @@ test("TVDB series fallback uses dereferrer series URLs", () => {
     "https://thetvdb.com/dereferrer/series/353546",
   );
 });
+
+test("a series without a TVDB id gets no TVDB link, even with a slug", () => {
+  assert.equal(buildTvdbSeriesUrl("tmdb-primary-series", null), null);
+  assert.equal(buildTvdbSeriesUrl("tmdb-primary-series", " "), null);
+});

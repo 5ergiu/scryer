@@ -224,6 +224,12 @@ function requestExternalIdValue(
   )?.value;
 }
 
+/** The SMG title id a request names, when it holds a positive one. */
+function requestSmgId(request: MediaRequestRecord): number | null {
+  const value = Number(requestExternalIdValue(request, "smg")?.trim());
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function RequesterAvatarStack({ request }: { request: MediaRequestRecord }) {
   const avatarRequesters = request.requesters.filter((requester) =>
     requester.avatarUrl?.trim(),
@@ -861,6 +867,7 @@ export function RequestsView({
   const approvalTvdbId = approvalRequest
     ? requestExternalIdValue(approvalRequest, "tvdb")?.trim() ?? ""
     : "";
+  const approvalSmgId = approvalRequest ? requestSmgId(approvalRequest) : null;
   // The tag vocabulary is only needed while the approve dialog is open, and
   // this view is mounted for every visit to the requests page.
   const {
@@ -869,7 +876,7 @@ export function RequestsView({
   } = useTitleTagDefinitions({ enabled: approvalRequest !== null });
   const approvalBlocksConfirm =
     approvalAdvancedSelected &&
-    (!approvalTvdbId ||
+    ((!approvalTvdbId && !approvalSmgId) ||
       approvalSelectionLoading ||
       isMonitorSelectionEmpty(approvalMonitorSelection));
   const editAdvancedSelected =
@@ -879,9 +886,10 @@ export function RequestsView({
   const editTvdbId = editRequest
     ? requestExternalIdValue(editRequest, "tvdb")?.trim() ?? ""
     : "";
+  const editSmgId = editRequest ? requestSmgId(editRequest) : null;
   const editBlocksConfirm =
     editAdvancedSelected &&
-    (!editTvdbId ||
+    ((!editTvdbId && !editSmgId) ||
       editSelectionLoading ||
       isMonitorSelectionEmpty(editMonitorSelection));
 
@@ -1518,6 +1526,7 @@ export function RequestsView({
           {approvalRequest && approvalAdvancedSelected ? (
             <MonitorSelectionPicker
               facet={approvalRequest.facet}
+              smgId={approvalSmgId}
               tvdbId={approvalTvdbId}
               value={approvalMonitorSelection}
               onChange={setApprovalMonitorSelection}
@@ -1705,6 +1714,7 @@ export function RequestsView({
           {editRequest && editAdvancedSelected ? (
             <MonitorSelectionPicker
               facet={editRequest.facet}
+              smgId={editSmgId}
               tvdbId={editTvdbId}
               value={editMonitorSelection}
               onChange={setEditMonitorSelection}
