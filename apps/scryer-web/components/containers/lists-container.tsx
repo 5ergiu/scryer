@@ -120,7 +120,15 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
       setProviders((providersResult.data?.listProviders ?? []) as ListProviderManifest[]);
       if (canManageLists) {
         const optionsResult = await client.query(listRouteOptionsQuery, {}).toPromise();
-        if (optionsResult.error) throw optionsResult.error;
+        // Libraries and profiles only feed the follow form's routing choices;
+        // failing to read them must not take the lists themselves down.
+        if (optionsResult.error) {
+          setRouteOptions({ libraries: [], qualityProfiles: [] });
+          setGlobalStatus(
+            userFacingGraphQlErrorMessage(optionsResult.error, t("status.failedToLoad")),
+          );
+          return;
+        }
         setRouteOptions({
           libraries: (optionsResult.data?.libraries ?? []) as LibraryRecord[],
           qualityProfiles: (optionsResult.data?.qualityProfileSettings?.profiles ?? []) as Array<{
@@ -134,7 +142,7 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
     } finally {
       setLoading(false);
     }
-  }, [canManageLists, client, loadSubscriptions, t]);
+  }, [canManageLists, client, loadSubscriptions, setGlobalStatus, t]);
 
   const loadExclusions = React.useCallback(async () => {
     if (!canManageLists) return;
