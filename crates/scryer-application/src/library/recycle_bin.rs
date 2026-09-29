@@ -2644,6 +2644,7 @@ mod tests {
             size_bytes: 9,
             title_id: "title",
             media_root: Some(tmp.path().to_str().unwrap()),
+            media_row: None,
         };
         let result = recycle_replaced_media_file(&config, &source, metadata, false)
             .await

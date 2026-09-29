@@ -1948,7 +1948,7 @@ pub(crate) async fn try_saved_candidates(
                     &standby,
                     now,
                     super::pending::PendingGrabTrigger::Automatic,
-                    admitted,
+                    *admitted,
                 )
                 .await
             }

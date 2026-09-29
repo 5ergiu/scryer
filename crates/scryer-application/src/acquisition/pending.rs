@@ -56,8 +56,9 @@ pub(crate) enum PendingGrabOutcome {
 pub(crate) enum PendingJudgement {
     /// Settled without submitting anything.
     Decided(PendingGrabOutcome),
-    /// Admitted: grabbing it is the next step.
-    Admitted(AdmittedPendingRelease),
+    /// Admitted: grabbing it is the next step. Boxed: the admitted title
+    /// dwarfs a decided outcome.
+    Admitted(Box<AdmittedPendingRelease>),
 }
 
 /// What the grab half needs from a judgement that admitted the release.
@@ -896,7 +897,7 @@ impl AppUseCase {
         match self.judge_pending_release(wanted, pr, now, trigger).await? {
             PendingJudgement::Decided(outcome) => Ok(outcome),
             PendingJudgement::Admitted(admitted) => {
-                self.grab_admitted_pending_release(wanted, pr, now, trigger, admitted)
+                self.grab_admitted_pending_release(wanted, pr, now, trigger, *admitted)
                     .await
             }
         }
@@ -1389,12 +1390,12 @@ impl AppUseCase {
                 _ => PendingGrabOutcome::Rejected,
             }));
         }
-        Ok(PendingJudgement::Admitted(AdmittedPendingRelease {
+        Ok(PendingJudgement::Admitted(Box::new(AdmittedPendingRelease {
             title,
             pending_scope,
             candidate_score,
             incumbent_best_score: admission.best_score(),
-        }))
+        })))
     }
 
     /// The grab half of [`Self::try_grab_pending_release`]: the delay hold and
