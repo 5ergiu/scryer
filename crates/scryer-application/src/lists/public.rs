@@ -1015,7 +1015,9 @@ impl AppUseCase {
     }
 
     /// Every exclusion, with the public list a scoped one belongs to.
-    pub async fn list_exclusions(&self, _actor: &User) -> AppResult<Vec<ListExclusionView>> {
+    pub async fn list_exclusions(&self, actor: &User) -> AppResult<Vec<ListExclusionView>> {
+        self.require_app_permission(actor, AppPermission::ManageLists)
+            .await?;
         self.require_lists_enabled().await?;
         let lists = &self.services.lists;
         let names = lists

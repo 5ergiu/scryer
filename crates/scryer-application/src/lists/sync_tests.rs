@@ -483,7 +483,8 @@ fn hourly_list() -> ListSubscription {
 
 #[tokio::test]
 async fn a_refused_add_settles_and_is_not_retried_while_nothing_changes() {
-    let refusals: [(fn() -> AppError, &str); 2] = [
+    type Refusal = (fn() -> AppError, &'static str);
+    let refusals: [Refusal; 2] = [
         (
             || AppError::NotFound("fixture root folder".into()),
             "not_found",
