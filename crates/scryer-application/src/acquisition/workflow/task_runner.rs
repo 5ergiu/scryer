@@ -429,12 +429,15 @@ async fn walk_selected_scopes(
             // cursor comes back to this one. The skip is counted for telemetry
             // but does not re-arm the retry timer — the job notifies the wake
             // when it releases the lock, so one cycle follows it instead of one
-            // cycle per retry interval for the length of the walk.
-            let Some(walk_guard) = app
+            // cycle per retry interval for the length of the walk. The reverse
+            // holds too: an operator's walk that arrives while this cycle holds
+            // the title cancels `yield_token`, and the walk hands the title over
+            // at its next stage.
+            let Some((walk_guard, yield_token)) = app
                 .runtime
                 .acquisition
                 .title_walk_locks
-                .try_acquire(&title_work.title_id)
+                .try_acquire_background(&title_work.title_id)
                 .await
             else {
                 round.skipped_locked_titles += 1;
@@ -470,18 +473,31 @@ async fn walk_selected_scopes(
                     &cycle,
                     season_due_counts,
                     dl_snapshot,
-                    TitleWalkOptions::background(),
+                    TitleWalkOptions::background(yield_token.clone()),
                     |_, _| {},
                 )
                 .await;
-                (title_id, scope_count, result)
+                (title_id, scope_count, result, yield_token.is_cancelled())
             });
         }
 
-        let Some((title_id, scope_count, result)) = in_flight.next().await else {
+        let Some((title_id, scope_count, result, yielded)) = in_flight.next().await else {
             break;
         };
         round.titles_walked += 1;
+        if yielded {
+            // The operator's walk now owns the title; whatever this walk left
+            // undone is neither a failure nor unspent work to top the batch up
+            // with. The job wakes the poller when it lets go, and the cursor
+            // finds the title again.
+            debug!(
+                title_id = title_id.as_str(),
+                "background acquisition: yielded the title to an interactive walk"
+            );
+            metrics::counter!("scryer_background_acquisition_title_work_total", "outcome" => "yielded")
+                .increment(1);
+            continue;
+        }
         if result.as_ref().is_ok_and(TitleWalkStats::spent_nothing) {
             round.unspent_scopes += scope_count;
         }
@@ -1194,17 +1210,18 @@ pub(crate) struct TitleWalkOptions {
     intent: AcquisitionWalkIntent,
     /// Restrict the walk to one season. `None` walks the whole title.
     season_filter: Option<u32>,
-    /// Cancelled by the operator's job; the background cycle passes a token it
-    /// never cancels, so the two paths use one code path.
+    /// Cancelled by the operator's job, or — for the background cycle — by an
+    /// operator's walk that wants this title (see `AcquisitionTitleWalkLocks`),
+    /// so the two paths use one code path.
     cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl TitleWalkOptions {
-    fn background() -> Self {
+    fn background(yield_token: tokio_util::sync::CancellationToken) -> Self {
         Self {
             intent: AcquisitionWalkIntent::Background,
             season_filter: None,
-            cancellation: tokio_util::sync::CancellationToken::new(),
+            cancellation: yield_token,
         }
     }
 
@@ -2773,6 +2790,16 @@ where
         )
         .await
         {
+            if error.is_canceled() && session.options.cancellation.is_cancelled() {
+                // The query this stage was waiting on was cut short by the
+                // walk's own cancellation; the loop stops at the top.
+                debug!(
+                    scope_key = target.scope_key.as_str(),
+                    title_id = target.title_id.as_str(),
+                    "acquisition title walk cancelled during a stage"
+                );
+                continue;
+            }
             warn!(
                 scope_key = target.scope_key.as_str(),
                 title_id = target.title_id.as_str(),
@@ -2899,7 +2926,7 @@ fn acquisition_walk_stage_label(
 /// of it. This is the other half of that decision: one wake when the title is
 /// free again, on every exit path including cancellation and error.
 struct InteractiveWalkLease {
-    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    guard: Option<crate::services::TitleWalkGuard>,
     wake: Arc<tokio::sync::Notify>,
 }
 
@@ -3040,9 +3067,10 @@ where
         stage_label: title.name.clone(),
     });
 
-    // Wait for any cycle pass over this title to finish before starting. That
-    // pass is bounded but not necessarily quick, so a job that is going to wait
-    // says so instead of showing an idle bar.
+    // Take the title from a cycle pass that holds it: `acquire` tells the
+    // background walk to yield, and it stops at its next stage. That is still
+    // a wait — an in-flight query has to be cut short first — so a job that is
+    // going to wait says so instead of showing an idle bar.
     let walk_guard = match app
         .runtime
         .acquisition
@@ -3056,7 +3084,7 @@ where
                 total,
                 processed: 0,
                 stage_label: format!(
-                    "{} — waiting for the background acquisition walk of this title to finish",
+                    "{} — waiting for the background acquisition walk of this title to hand it over",
                     title.name
                 ),
             });
