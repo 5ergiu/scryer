@@ -1,17 +1,68 @@
 import type { RuleSetDraft } from "@/lib/types/rule-sets";
 
+export type RuleSetTestMode = "release" | "storedFile";
+
+/** Listing-fact form fields, as typed. Empty strings mean "unknown". */
+export type RuleSetTestListingDraft = {
+  publishedAt: string;
+  thumbsUp: string;
+  thumbsDown: string;
+  /** "", "true" or "false". */
+  isPasswordProtected: string;
+  /** Comma-separated language codes. */
+  indexerLanguages: string;
+  /** A JSON object. */
+  extra: string;
+};
+
+export const EMPTY_RULE_SET_TEST_LISTING: RuleSetTestListingDraft = {
+  publishedAt: "",
+  thumbsUp: "",
+  thumbsDown: "",
+  isPasswordProtected: "",
+  indexerLanguages: "",
+  extra: "",
+};
+
 export type RuleSetTestSelection = {
   titleId: string | null;
   episodeId: string | null;
   releaseName: string;
   sizeGib: string;
+  mode?: RuleSetTestMode;
+  mediaFileId?: string | null;
+  listing?: RuleSetTestListingDraft;
+};
+
+/** `TestRuleSetInput.listing`. Omitted facts are unknown to rules. */
+export type RuleSetTestListingInput = {
+  publishedAt?: string;
+  thumbsUp?: number;
+  thumbsDown?: number;
+  isPasswordProtected?: boolean;
+  indexerLanguages?: string[];
+  extra?: Record<string, unknown>;
+};
+
+/** `TestRuleSetPayload.listing`: the listing facts the rules read. */
+export type RuleSetTestListingFacts = {
+  publishedAt?: string | null;
+  ageDays?: number | null;
+  thumbsUp?: number | null;
+  thumbsDown?: number | null;
+  isPasswordProtected?: boolean | null;
+  indexerLanguages?: string[];
+  extra?: Record<string, unknown> | null;
+  capturedAt?: string;
 };
 
 export type RuleSetTestMutationInput = {
   titleId: string;
   episodeId?: string;
-  releaseName: string;
+  releaseName?: string;
   sizeBytes?: number;
+  listing?: RuleSetTestListingInput;
+  mediaFileId?: string;
   draft?: RuleSetDraft;
   editRuleSetId?: string;
   copySourceRuleSetId?: string;
@@ -28,6 +79,8 @@ export function buildRuleSetTestInput({
   episodeId,
   releaseName,
   sizeBytes,
+  listing,
+  mediaFileId,
 }: {
   draft: RuleSetDraft | null;
   editRuleSetId: string | null;
@@ -35,10 +88,15 @@ export function buildRuleSetTestInput({
   testRuleSetId: string | null;
   titleId: string;
   episodeId?: string;
-  releaseName: string;
+  releaseName?: string;
   sizeBytes?: number;
+  listing?: RuleSetTestListingInput;
+  mediaFileId?: string;
 }): RuleSetTestMutationInput {
-  const selection = { titleId, episodeId, releaseName, sizeBytes };
+  // A stored file is scored from its own size and frozen listing facts.
+  const selection = mediaFileId
+    ? { titleId, episodeId, mediaFileId }
+    : { titleId, episodeId, releaseName, sizeBytes, ...(listing ? { listing } : {}) };
   return testRuleSetId
     ? { ...selection, testRuleSetId }
     : {
@@ -48,6 +106,113 @@ export function buildRuleSetTestInput({
         copySourceRuleSetId: copySourceRuleSetId || undefined,
         copyDisablesSource: Boolean(copySourceRuleSetId),
       };
+}
+
+// RFC 3339 with seconds and a zone, as the server's parser requires.
+const RFC3339 =
+  /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+// RFC 2822, the form a newznab `pubDate` takes.
+const RFC2822 =
+  /^(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}(?::\d{2})?\s+(?:[+-]\d{4}|[A-Za-z]{1,5})$/;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Turn the listing-fact form into mutation input. Errors are i18n keys.
+ * The publish time is kept as written, like a live listing's; only a date
+ * without a time is completed, to midnight UTC.
+ */
+export function listingInputFromDraft(
+  draft: RuleSetTestListingDraft,
+): { value: RuleSetTestListingInput | undefined } | { error: string } {
+  const value: RuleSetTestListingInput = {};
+  const publishedAt = draft.publishedAt.trim();
+  if (publishedAt) {
+    const normalized = DATE_ONLY.test(publishedAt)
+      ? `${publishedAt}T00:00:00Z`
+      : publishedAt;
+    if (
+      !(RFC3339.test(normalized) || RFC2822.test(normalized)) ||
+      !Number.isFinite(Date.parse(normalized))
+    ) {
+      return { error: "settings.ruleTestListingPublishedAtInvalid" };
+    }
+    value.publishedAt = normalized;
+  }
+  for (const key of ["thumbsUp", "thumbsDown"] as const) {
+    const raw = draft[key].trim();
+    if (!raw) continue;
+    const count = Number(raw);
+    if (!Number.isInteger(count) || count < 0 || count > 2_147_483_647) {
+      return { error: "settings.ruleTestListingVotesInvalid" };
+    }
+    value[key] = count;
+  }
+  if (draft.isPasswordProtected === "true") value.isPasswordProtected = true;
+  if (draft.isPasswordProtected === "false") value.isPasswordProtected = false;
+  const languages = draft.indexerLanguages
+    .split(",")
+    .map((language) => language.trim())
+    .filter(Boolean);
+  if (languages.length) value.indexerLanguages = languages;
+  const extra = draft.extra.trim();
+  if (extra) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(extra);
+    } catch {
+      return { error: "settings.ruleTestListingExtraInvalid" };
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: "settings.ruleTestListingExtraInvalid" };
+    }
+    value.extra = parsed as Record<string, unknown>;
+  }
+  return { value: Object.keys(value).length ? value : undefined };
+}
+
+/** One row of the title's file list; a multi-episode file has one per episode. */
+export type RuleSetTestStoredFileRow = {
+  id: string;
+  episodeId?: string | null;
+  filePath?: string | null;
+  grabbedReleaseTitle?: string | null;
+};
+
+export type RuleSetTestStoredFileOption = {
+  id: string;
+  label: string;
+  episodeIds: string[];
+};
+
+/**
+ * The stored files a tester can pick: one per file, labelled by the release
+ * it was grabbed as (else its file name). With an episode selected, only the
+ * files that cover it.
+ */
+export function storedFileOptions(
+  rows: readonly RuleSetTestStoredFileRow[],
+  episodeId: string | null,
+): RuleSetTestStoredFileOption[] {
+  const byId = new Map<string, RuleSetTestStoredFileOption>();
+  for (const row of rows) {
+    let option = byId.get(row.id);
+    if (!option) {
+      const fileName = (row.filePath ?? "").split(/[\\/]/).pop();
+      option = {
+        id: row.id,
+        label: row.grabbedReleaseTitle || fileName || row.id,
+        episodeIds: [],
+      };
+      byId.set(row.id, option);
+    }
+    if (row.episodeId && !option.episodeIds.includes(row.episodeId)) {
+      option.episodeIds.push(row.episodeId);
+    }
+  }
+  const options = [...byId.values()];
+  return episodeId
+    ? options.filter((option) => option.episodeIds.includes(episodeId))
+    : options;
 }
 
 export function ruleSetTestFingerprint(
@@ -64,10 +229,11 @@ export function canTestRuleSet(
   selection: RuleSetTestSelection,
   requiresEpisode: boolean,
 ): boolean {
+  if (!selection.titleId) return false;
+  // A stored file brings its own episode when none is picked.
+  if (selection.mode === "storedFile") return Boolean(selection.mediaFileId);
   return Boolean(
-    selection.titleId &&
-      selection.releaseName.trim() &&
-      (!requiresEpisode || selection.episodeId),
+    selection.releaseName.trim() && (!requiresEpisode || selection.episodeId),
   );
 }
 

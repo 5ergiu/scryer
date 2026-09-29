@@ -296,9 +296,19 @@ pub(super) struct MediaRequestTestHarness {
     pub(super) request_rule_decisions: Arc<InMemoryRequestRuleDecisionRepo>,
     #[allow(dead_code)]
     pub(super) lifecycle_claims: Arc<InMemoryLifecycleClaimRepo>,
+    /// The list store, so list-originated requests can be followed back to
+    /// their subscription.
+    pub(super) lists: Arc<crate::lists::test_support::MemoryListStore>,
 }
 
 pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
+    bootstrap_media_request_app_with_list_plugins(Arc::new(crate::lists::NullListPluginProvider))
+}
+
+/// The same harness with `list_plugins` as the installed list providers.
+pub(super) fn bootstrap_media_request_app_with_list_plugins(
+    list_plugins: Arc<dyn crate::lists::ListPluginProvider>,
+) -> MediaRequestTestHarness {
     let titles = Arc::new(MockTitleRepo::default());
     let shows = Arc::new(MockShowRepo {
         titles: Some(titles.clone()),
@@ -331,6 +341,7 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let lists = Arc::new(crate::lists::test_support::MemoryListStore::default());
     let metadata_gateway = Arc::new(MockMetadataGateway {
         movies: (9000..9100)
             .map(|tvdb_id| (tvdb_id, make_movie_metadata(tvdb_id, "Glass Harbor")))
@@ -356,6 +367,8 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
     .with_request_rule_set_store(request_rules.clone())
     .with_request_rule_decision_store(request_rule_decisions.clone())
     .with_lifecycle_claim_store(lifecycle_claims.clone())
+    .with_list_store(lists.clone())
+    .with_list_plugin_provider(list_plugins)
     .with_metadata_gateway(metadata_gateway)
     .with_acquisition_scope_states(wanted_items.clone())
     .with_pending_releases(pending_releases.clone())
@@ -406,6 +419,7 @@ pub(super) fn bootstrap_media_request_app() -> MediaRequestTestHarness {
         request_rules,
         request_rule_decisions,
         lifecycle_claims,
+        lists,
     }
 }
 
@@ -433,6 +447,8 @@ pub(super) fn media_request_input(
             ExternalId::new("TVDB".to_string(), tvdb_id.to_string()),
             ExternalId::new("imdb".to_string(), "tt1234567".to_string()),
         ],
+        origin: Default::default(),
+        admission: Default::default(),
     }
 }
 
@@ -1018,6 +1034,7 @@ pub(super) fn synthetic_direct_nab_indexer_config(id: &str, provider_type: &str)
         api_key_encrypted: None,
         rate_limit_seconds: None,
         rate_limit_burst: None,
+        max_queries_per_minute: None,
         disabled_until: None,
         is_enabled: true,
         enable_interactive_search: true,
@@ -1446,6 +1463,29 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
     unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
     metadata_gateway: Arc<dyn MetadataGateway>,
 ) -> (AppUseCase, User, Arc<MockTitleRepo>) {
+    let (app, user, titles, _, _) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+        settings,
+        library_scanner,
+        unmatched_items,
+        metadata_gateway,
+    );
+    (app, user, titles)
+}
+
+/// The same wiring, also handing back the show and media file fakes so a test
+/// can inject store failures or seed multi-episode files.
+pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+    settings: Arc<StoredSettingsRepo>,
+    library_scanner: Arc<MutableLibraryScanner>,
+    unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
+    metadata_gateway: Arc<dyn MetadataGateway>,
+) -> (
+    AppUseCase,
+    User,
+    Arc<MockTitleRepo>,
+    Arc<MockShowRepo>,
+    Arc<MockMediaFileRepo>,
+) {
     let titles = Arc::new(MockTitleRepo {
         pending_import_items: Some(unmatched_items.items.clone()),
         ..Default::default()
@@ -1465,7 +1505,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
 
     let services = AppServices::builder(
         titles.clone(),
-        shows,
+        shows.clone(),
         users.clone(),
         indexer_configs,
         indexer_client,
@@ -1479,7 +1519,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
     .with_domain_events(Arc::new(MockDomainEventRepo::default()))
     .with_metadata_gateway(metadata_gateway)
     .with_library_scanner(library_scanner)
-    .with_media_files(media_files)
+    .with_media_files(media_files.clone())
     .with_library_scan_unmatched_items(unmatched_items)
     .with_libraries(Arc::new(MockLibraryRepo::default()))
     .build_partial_for_tests();
@@ -1502,7 +1542,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
         Arc::new(registry),
     );
 
-    (app, test_admin_user(), titles)
+    (app, test_admin_user(), titles, shows, media_files)
 }
 
 pub(super) struct FixedBatchSearchMetadataGateway {
@@ -1511,6 +1551,24 @@ pub(super) struct FixedBatchSearchMetadataGateway {
 
 #[async_trait]
 impl MetadataGateway for FixedBatchSearchMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -1555,12 +1613,6 @@ impl MetadataGateway for FixedBatchSearchMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -2151,6 +2203,7 @@ pub(super) fn pending_movie_release(
         },
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     }
 }
 
@@ -2282,8 +2335,10 @@ pub(super) async fn seed_anime_season_wanted_for_acquisition(
                 is_filler: false,
                 is_recap: false,
                 absolute_number: None,
+                contiguous_absolute_number: None,
                 overview: None,
                 tvdb_id: None,
+                tmdb_id: None,
                 image_url: None,
                 monitored: true,
                 created_at: Utc::now(),

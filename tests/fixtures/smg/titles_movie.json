@@ -70,6 +70,64 @@
           "artworks": []
         }
       ],
+      "series": [
+        {
+          "id": 303,
+          "kind": "series",
+          "primary_source": "tmdb",
+          "tvdb_id": null,
+          "tmdb_id": 3030,
+          "name": "TMDB Primary Series",
+          "sort_name": "TMDB Primary Series",
+          "slug": "tmdb-primary-series",
+          "status": "Continuing",
+          "year": 2024,
+          "first_aired": "2024-01-01",
+          "overview": "A series whose primary identifier is TMDB.",
+          "network": "Test Network",
+          "runtime_minutes": 42,
+          "poster_url": "https://image.tmdb.org/t/p/original/tmdb-primary-series.jpg",
+          "original_language": "eng",
+          "country": "usa",
+          "genres": [],
+          "canonical_tags": [],
+          "rating": null,
+          "rating_sources": [],
+          "external_ratings": [],
+          "credits": [],
+          "aliases": [],
+          "tagged_aliases": [],
+          "artworks": [],
+          "external_ids": [
+            { "source": "smg", "kind": "series", "id": "303", "key": "smg:title:303" },
+            { "source": "tmdb", "kind": "series", "id": "3030", "key": "tmdb:series:3030" }
+          ],
+          "seasons": [
+            { "tvdb_id": null, "tmdb_id": 30301, "number": 1, "label": "Season 1", "episode_type": "official" }
+          ],
+          "episodes": [
+            {
+              "tvdb_id": null,
+              "tmdb_id": 3030101,
+              "episode_number": 1,
+              "season_number": 1,
+              "name": "Pilot",
+              "aired": "2024-01-01",
+              "runtime_minutes": 42,
+              "is_filler": false,
+              "is_recap": false,
+              "overview": "",
+              "absolute_number": "",
+              "contiguous_absolute_number": null,
+              "image_url": ""
+            }
+          ],
+          "episode_orders": [],
+          "anime_mappings": [],
+          "anime_numbering_bridge": null,
+          "anime_movies": []
+        }
+      ],
       "missing_ids": [999],
       "redirects": [{ "from_id": 100, "to_id": 101 }]
     }

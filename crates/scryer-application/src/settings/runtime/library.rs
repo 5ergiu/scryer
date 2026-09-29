@@ -293,12 +293,17 @@ impl AppUseCase {
     }
 }
 impl AppUseCase {
+    /// `refuse_recycle_bin_conflicts` is set for an operator's save, which
+    /// must not add a root that conflicts with the custom recycle bin; startup
+    /// reconciliation leaves it unset so a stored configuration never stops
+    /// the server from starting.
     async fn update_default_library_roots_from_entries(
         &self,
         facet: &MediaFacet,
         root_folders: &[RootFolderEntry],
         source: &str,
         actor_id: Option<String>,
+        refuse_recycle_bin_conflicts: bool,
     ) -> AppResult<Vec<String>> {
         let Some(library) = self
             .services
@@ -316,6 +321,10 @@ impl AppUseCase {
         let roots = root_folder_entries_to_library_root_drafts(root_folders)?;
         self.validate_library_root_conflicts(Some(&library.id), &roots)
             .await?;
+        if refuse_recycle_bin_conflicts {
+            self.validate_library_roots_against_recycle_bin(&library.roots, &roots)
+                .await?;
+        }
 
         let library = self
             .services
@@ -412,6 +421,7 @@ impl AppUseCase {
                     &legacy_roots,
                     "startup_reconciliation",
                     None,
+                    false,
                 )
                 .await?;
                 info!(
@@ -434,6 +444,7 @@ impl AppUseCase {
                     &roots_to_mirror,
                     "startup_reconciliation",
                     None,
+                    false,
                 )
                 .await?;
                 info!(
@@ -1910,6 +1921,7 @@ impl AppUseCase {
                     &root_folders,
                     SETTINGS_SOURCE_TYPED_GRAPHQL,
                     Some(actor.id.clone()),
+                    true,
                 )
                 .await?,
             );
@@ -1926,6 +1938,7 @@ impl AppUseCase {
                     &root_folders,
                     SETTINGS_SOURCE_TYPED_GRAPHQL,
                     Some(actor.id.clone()),
+                    true,
                 )
                 .await?,
             );
@@ -1942,6 +1955,7 @@ impl AppUseCase {
                     &root_folders,
                     SETTINGS_SOURCE_TYPED_GRAPHQL,
                     Some(actor.id.clone()),
+                    true,
                 )
                 .await?,
             );

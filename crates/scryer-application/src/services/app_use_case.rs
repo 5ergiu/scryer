@@ -537,6 +537,74 @@ impl AppUseCase {
         }
     }
 
+    /// The release facts a grab event carries to history and notifications.
+    ///
+    /// `parsed` is the parse the grab was scored on when the caller has one;
+    /// otherwise the release title is parsed here. `indexer` should be the name
+    /// resolved through [`Self::grab_indexer_name`]. A download-client lookup
+    /// failure only leaves the client name out: describing a grab must never
+    /// fail it.
+    pub(crate) async fn grabbed_release_facts(
+        &self,
+        release_title: &str,
+        parsed: Option<&ParsedReleaseMetadata>,
+        size_bytes: Option<i64>,
+        source_kind: Option<DownloadSourceKind>,
+        indexer: Option<String>,
+        download_client_id: Option<&str>,
+    ) -> scryer_domain::GrabbedReleaseFacts {
+        let parsed_here;
+        let parsed = match parsed {
+            Some(parsed) => parsed,
+            None => {
+                parsed_here = parse_release_metadata(release_title);
+                &parsed_here
+            }
+        };
+        let protocol = source_kind.map(|kind| {
+            if crate::delay_profile::is_usenet_source(Some(kind)) {
+                "usenet".to_string()
+            } else {
+                "torrent".to_string()
+            }
+        });
+        let download_client_name = match download_client_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(client_id) => match self
+                .services
+                .integrations
+                .download_client_configs
+                .get_by_id(client_id)
+                .await
+            {
+                Ok(Some(config)) => Some(config.name).filter(|name| !name.trim().is_empty()),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(
+                        client_id,
+                        error = %error,
+                        "download client lookup failed while describing a grab"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        scryer_domain::GrabbedReleaseFacts {
+            quality: parsed.quality.clone(),
+            release_group: parsed.release_group.clone(),
+            audio_languages: parsed.languages_audio.clone(),
+            dual_audio: Some(parsed.is_dual_audio),
+            size_bytes,
+            protocol,
+            indexer: indexer.filter(|name| !name.trim().is_empty()),
+            download_client_name,
+        }
+    }
+
     /// Count one release grabbed through `indexer_id` toward that indexer's
     /// trailing-24h grab total.
     ///
@@ -741,27 +809,14 @@ impl AppUseCase {
             scryer_domain::LibraryPermission::View,
         )
         .await?;
-        let gateway = &self.services.library.metadata_gateway;
-        if type_hint.eq_ignore_ascii_case("movie") {
-            match gateway
-                .search_titles(query, "movie", limit, language, year)
-                .await
-            {
-                Ok(results) => Ok(results),
-                Err(error)
-                    if crate::catalog_workflow::movie_title_queries_not_supported(&error) =>
-                {
-                    gateway
-                        .search_tvdb_rich(query, type_hint, limit, language, year)
-                        .await
-                }
-                Err(error) => Err(error),
-            }
-        } else {
-            gateway
-                .search_tvdb_rich(query, type_hint, limit, language, year)
-                .await
-        }
+        // Every kind goes through the title surface: a series SMG knows only
+        // from TMDB has no TVDB id and is reachable nowhere else.
+        let kind = type_hint.trim().to_ascii_lowercase();
+        self.services
+            .library
+            .metadata_gateway
+            .search_titles(query, &kind, limit, language, year)
+            .await
     }
 
     pub async fn search_metadata_tvdb(
@@ -860,48 +915,61 @@ impl AppUseCase {
             return Err(AppError::Validation("a title identity is required".into()));
         }
 
-        match self
+        let result = self
             .services
             .library
             .metadata_gateway
             .get_movie_titles(std::slice::from_ref(movie_ref), language)
-            .await
-        {
-            Ok(result) => {
-                result.by_ref_index.get(&0).cloned().ok_or_else(|| {
-                    AppError::NotFound("movie metadata response missing title".into())
-                })
-            }
-            Err(error) if crate::catalog_workflow::movie_title_queries_not_supported(&error) => {
-                let tvdb_id = movie_ref.tvdb_id.ok_or_else(|| {
-                    AppError::Repository("legacy metadata gateway requires a tvdb id".into())
-                })?;
-                self.services
-                    .library
-                    .metadata_gateway
-                    .get_movie(tvdb_id, language)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
+            .await?;
+        result
+            .by_ref_index
+            .get(&0)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound("movie metadata response missing title".into()))
     }
 
-    pub async fn get_metadata_series(
+    /// Fetch one series by whichever identity the caller holds, in the order
+    /// SMG title id, TVDB id, TMDB id, IMDb id. SMG's title surface answers
+    /// every series, including a TMDB-primary one with no TVDB id; provider ids
+    /// are resolved to an SMG title id first. There is no legacy fallback.
+    pub async fn get_metadata_series_by_ref(
         &self,
         actor: &User,
-        tvdb_id: i64,
+        series_ref: &SeriesTitleRef,
         language: &str,
+        include_episodes: bool,
     ) -> AppResult<SeriesMetadata> {
         self.require_any_library_permission_for_service(
             actor,
             scryer_domain::LibraryPermission::View,
         )
         .await?;
-        self.services
-            .library
-            .metadata_gateway
-            .get_series(tvdb_id, language)
-            .await
+        if series_ref.smg_id.is_none()
+            && series_ref.tvdb_id.is_none()
+            && series_ref.tmdb_id.is_none()
+            && series_ref
+                .imdb_id
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(AppError::Validation("a title identity is required".into()));
+        }
+        if [series_ref.smg_id, series_ref.tvdb_id, series_ref.tmdb_id]
+            .into_iter()
+            .flatten()
+            .any(|id| id <= 0)
+        {
+            return Err(AppError::Validation("title ids must be positive".into()));
+        }
+        crate::catalog_workflow::fetch_series_by_ref(
+            self.services.library.metadata_gateway.as_ref(),
+            series_ref,
+            language,
+            include_episodes,
+            false,
+        )
+        .await
+        .map(|(series, _)| series)
     }
 
     pub async fn list_title_media_files(
@@ -1304,6 +1372,7 @@ fn should_invalidate_wanted_projection(payload: &scryer_domain::DomainEventPaylo
         | DomainEventPayload::MediaFileAnalyzed(_)
         | DomainEventPayload::MediaFileRenamed(_)
         | DomainEventPayload::MediaFileDeleted(_)
+        | DomainEventPayload::MediaFileRestored(_)
         | DomainEventPayload::MediaFileUpgraded(_)
         | DomainEventPayload::LibraryScanTitleDiscovered(_)
         | DomainEventPayload::LibraryScanDeltaRecorded(_)

@@ -19,6 +19,8 @@
     "fsevents@2.3.3": true
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/lint": "6.9.7",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/legacy-modes": "^6.5.4",

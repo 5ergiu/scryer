@@ -24,7 +24,7 @@ use scryer_domain::{ActorCapabilityMask, AppPermissionMask, Id};
 use scryer_interface::RequestLoaders;
 use scryer_interface::context::{
     ApiKeyManagementSession, AuthRuntimeStateHandle, AuthlessDefaultSession, ConnectionAuthEpoch,
-    InteractiveSession, LoginAttemptLimiter, MfaVerification, OAuthActorSession,
+    InteractiveSession, LoginAttemptLimiter, MfaVerification, OAuthActorSession, RequestClientIp,
     RequestSessionPersistence,
 };
 use scryer_logging::{ActorContext, LogContext, RequestContext, context_span, update_context};
@@ -1719,13 +1719,16 @@ pub(crate) async fn graphql_handler(
 
     let batch = match batch {
         async_graphql::BatchRequest::Single(req) => async_graphql::BatchRequest::Single(
-            req.data(session_persistence).data(login_attempt_limiter),
+            req.data(session_persistence)
+                .data(login_attempt_limiter)
+                .data(RequestClientIp(client_ip)),
         ),
         async_graphql::BatchRequest::Batch(reqs) => async_graphql::BatchRequest::Batch(
             reqs.into_iter()
                 .map(|req| {
                     req.data(session_persistence)
                         .data(login_attempt_limiter.clone())
+                        .data(RequestClientIp(client_ip))
                 })
                 .collect(),
         ),
@@ -3031,6 +3034,11 @@ pub(crate) fn map_app_error(error: AppError) -> Response {
         AppError::PluginInstallInProgress(message) | AppError::LocationOperationBusy(message) => {
             (StatusCode::CONFLICT, Json(ErrorResponse::new(message))).into_response()
         }
+        error @ AppError::DiscoveryPresentationSuperseded { .. } => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(error.to_string())),
+        )
+            .into_response(),
         AppError::NotFound(message) => {
             (StatusCode::NOT_FOUND, Json(ErrorResponse::new(message))).into_response()
         }

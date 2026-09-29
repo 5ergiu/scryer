@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 pub(crate) const BUILTIN_TRASH_PACK_ID: &str = "trash-guides-scoring-pack";
 const BUILTIN_TRASH_SHA256: &str =
-    "b2e923658339bd599f7f7c0cd4af6cab9729239ab2cf51bdc1076e17fe7221e9";
+    "75c0c8f49651d75c496d44b551c36ab752a74f5ba82bb4092c3d40f7b1d29e51";
 
 #[derive(Deserialize)]
 struct BuiltinPackManifest {
@@ -71,43 +71,62 @@ pub(crate) fn default_template_ids(pack: &VerifiedRulePack) -> Vec<String> {
         .collect()
 }
 
-/// A narrow correction for existing installations, independent of pack updates.
+/// Shipped template sources that later bundled revisions supersede, keyed by
+/// template id. Each historical source is an immutable matcher.
+const SUPERSEDED_TEMPLATE_SOURCES: &[(&str, &str)] = &[
+    (
+        "trash-guides-size",
+        include_str!("legacy_size_scoring.rego"),
+    ),
+    (
+        "trash-guides-source-video",
+        include_str!("legacy_source_video_scoring.rego"),
+    ),
+];
+
+/// Narrow corrections for existing installations, independent of pack updates.
 /// Match both tracked membership and the original source, preserving settings,
-/// copies and customizations. The historical source is an immutable matcher.
-pub(super) fn size_ranking_updates(
+/// copies and customizations.
+pub(super) fn superseded_template_updates(
     pack: &VerifiedRulePack,
     installation: &scryer_domain::RulePackInstallation,
     rules: &[scryer_domain::RuleSet],
 ) -> Vec<scryer_domain::RuleSet> {
-    let Some(member) = installation
+    SUPERSEDED_TEMPLATE_SOURCES
+        .iter()
+        .filter_map(|(template_id, superseded)| {
+            superseded_template_update(pack, installation, rules, template_id, superseded)
+        })
+        .collect()
+}
+
+fn superseded_template_update(
+    pack: &VerifiedRulePack,
+    installation: &scryer_domain::RulePackInstallation,
+    rules: &[scryer_domain::RuleSet],
+    template_id: &str,
+    superseded: &str,
+) -> Option<scryer_domain::RuleSet> {
+    let member = installation
         .members
         .iter()
-        .find(|member| member.template_id == "trash-guides-size" && !member.removed)
-    else {
-        return Vec::new();
-    };
-    let Some(rule) = rules.iter().find(|rule| rule.id == member.rule_set_id) else {
-        return Vec::new();
-    };
-    let original = scryer_rules::rewrite_package_declaration(
-        include_str!("legacy_size_scoring.rego"),
-        &rule.id,
-    );
-    if rule.rego_source != original {
-        return Vec::new();
+        .find(|member| member.template_id == template_id && !member.removed)?;
+    let rule = rules.iter().find(|rule| rule.id == member.rule_set_id)?;
+    if rule.rego_source != scryer_rules::rewrite_package_declaration(superseded, &rule.id) {
+        return None;
     }
-    let Some(template) = pack
+    let template = pack
         .templates
         .iter()
-        .find(|template| template.id == member.template_id)
-    else {
-        return Vec::new();
-    };
+        .find(|template| template.id == member.template_id)?;
     let mut updated = rule.clone();
     updated.rego_source =
         scryer_rules::rewrite_package_declaration(&template.rego_source, &rule.id);
+    if updated.rego_source == rule.rego_source {
+        return None;
+    }
     updated.updated_at = chrono::Utc::now();
-    vec![updated]
+    Some(updated)
 }
 
 /// Fresh-install baseline policies materialized from the bundled manifest.
@@ -231,7 +250,7 @@ mod tests {
                 removed: false,
             }],
         };
-        let changes = size_ranking_updates(&pack, &installation, &[original.clone()]);
+        let changes = superseded_template_updates(&pack, &installation, &[original.clone()]);
         assert_eq!(changes.len(), 1);
         let changed = &changes[0];
         assert!(!changed.enabled);
@@ -239,13 +258,60 @@ mod tests {
         assert_eq!(changed.applied_facets, original.applied_facets);
         assert_eq!(changed.created_at, original.created_at);
         assert_ne!(changed.rego_source, original.rego_source);
-        assert!(size_ranking_updates(&pack, &installation, &changes).is_empty());
+        assert!(superseded_template_updates(&pack, &installation, &changes).is_empty());
 
         let mut custom = original.clone();
         custom.rego_source.push_str("\n# Local customization\n");
-        assert!(size_ranking_updates(&pack, &installation, &[custom]).is_empty());
+        assert!(superseded_template_updates(&pack, &installation, &[custom]).is_empty());
         installation.members[0].removed = true;
-        assert!(size_ranking_updates(&pack, &installation, &[original]).is_empty());
+        assert!(superseded_template_updates(&pack, &installation, &[original]).is_empty());
+    }
+
+    #[test]
+    fn source_video_correction_replaces_only_the_shipped_source() {
+        let pack = verified_pack().unwrap();
+        let bundled = baseline_rule_sets()
+            .into_iter()
+            .find(|r| r.id == "trash_guides_source_video")
+            .unwrap();
+        let mut original = bundled.clone();
+        original.rego_source = scryer_rules::rewrite_package_declaration(
+            include_str!("legacy_source_video_scoring.rego"),
+            &original.id,
+        );
+        assert_ne!(original.rego_source, bundled.rego_source);
+        original.priority = 12;
+        let installation = scryer_domain::RulePackInstallation {
+            pack_id: BUILTIN_TRASH_PACK_ID.into(),
+            name: pack.registry.name.clone(),
+            version: pack.registry.version.clone(),
+            digest: pack.registry.digest.clone(),
+            customizable: true,
+            auto_update: false,
+            revision: 1,
+            last_updated: Utc::now(),
+            last_error: None,
+            members: vec![scryer_domain::RulePackMember {
+                template_id: "trash-guides-source-video".into(),
+                rule_set_id: original.id.clone(),
+                removed: false,
+            }],
+        };
+
+        let changes = superseded_template_updates(&pack, &installation, &[original.clone()]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].rego_source, bundled.rego_source);
+        assert!(changes[0].rego_source.contains("video_codec_hevc_below_4k"));
+        assert_eq!(changes[0].priority, 12);
+        assert!(superseded_template_updates(&pack, &installation, &changes).is_empty());
+
+        let mut edited = original.clone();
+        edited.rego_source = edited.rego_source.replace(
+            "native_sv_high_codec_weight := 60",
+            "native_sv_high_codec_weight := 75",
+        );
+        assert_ne!(edited.rego_source, original.rego_source);
+        assert!(superseded_template_updates(&pack, &installation, &[edited]).is_empty());
     }
 
     #[cfg(feature = "runtime-plugin-trust")]

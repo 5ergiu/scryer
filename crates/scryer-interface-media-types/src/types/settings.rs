@@ -48,10 +48,40 @@ pub struct SubtitleSettingsPayload {
 }
 
 #[derive(SimpleObject, Clone)]
-/// Recycle-bin enablement setting.
+/// Recycle-bin settings and the bin locations they resolve to.
 pub struct RecycleBinSettingsPayload {
     /// Whether deleted media is moved to the recycle bin.
     pub enabled: bool,
+    /// Custom recycle-bin directory; null means `.scryer-recycle` under each library root.
+    pub path: Option<String>,
+    /// Days a recycled item is kept before it is purged.
+    pub retention_days: i32,
+    /// Directories deleted media is currently moved to, one per distinct bin.
+    pub effective_paths: Vec<String>,
+    /// Why the configured bin is never purged, when the path is invalid for the current library roots.
+    pub validation_error: Option<String>,
+    /// On the result of a save that changed the location: what happened to entries found in the previous location. Null when nothing was there to move.
+    pub relocation: Option<RecycleBinRelocationPayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Entries moved from the previous recycle-bin location after a location change.
+pub struct RecycleBinRelocationPayload {
+    /// Entries now in the new location.
+    pub moved_count: i32,
+    /// Entries that were not moved, or not fully cleaned up, with the reason. An entry that did not move stays in the previous location.
+    pub failures: Vec<RecycleBinRelocationFailurePayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// One recycle-bin entry a location change could not move.
+pub struct RecycleBinRelocationFailurePayload {
+    /// Entry directory name; empty when the previous location itself could not be read.
+    pub entry_id: String,
+    /// Where the entry is now.
+    pub from_path: String,
+    /// Why it was not moved.
+    pub reason: String,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -76,22 +106,32 @@ pub struct PluginAutoUpdateSettingsPayload {
 pub struct AcquisitionSettingsPayload {
     /// Whether automatic acquisition is enabled.
     pub enabled: bool,
-    /// Upgrade cooldown in hours.
+    /// Deprecated and inert. There is no upgrade cooldown; this always
+    /// returns 0 and the value carries no meaning.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
     pub upgrade_cooldown_hours: i32,
     /// Minimum score delta for same-tier upgrades.
     pub same_tier_min_delta: i32,
     /// Deprecated and inert. Quality tier is compared before score, so no
-    /// score delta ever sees a cross-tier comparison; the stored value is
-    /// returned unchanged and ignored by acquisition. Scheduled for removal in
-    /// a later minor.
+    /// cross-tier delta is consulted; this always returns 0 and the value
+    /// carries no meaning.
     #[graphql(
-        deprecation = "Inert since 0.18.17: quality tier is compared before score, so no cross-tier delta is consulted. The value is stored and ignored; the field will be removed in a later minor."
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
     )]
     pub cross_tier_min_delta: i32,
-    /// Score delta that bypasses normal forced-upgrade thresholds.
+    /// Deprecated and inert. There is no upgrade cooldown to bypass; this
+    /// always returns 0 and the value carries no meaning.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
     pub forced_upgrade_delta_bypass: i32,
-    /// Acquisition polling interval in seconds.
+    /// How often, in seconds, download clients are checked for failed grabs.
     pub poll_interval_seconds: i32,
+    /// How often, in seconds, the catalog is walked for missing and
+    /// upgradable media. Changes that wake acquisition still walk at once.
+    pub walk_interval_seconds: i32,
     /// Maximum long-tail scopes processed per cycle.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Number of days before long-tail scopes are reconverged.
@@ -1052,10 +1092,14 @@ pub struct UpdateSubtitleSettingsInput {
 }
 
 #[derive(InputObject, Clone)]
-/// Recycle-bin enablement setting.
+/// Recycle-bin settings to save. Omitted fields keep their stored value.
 pub struct UpdateRecycleBinSettingsInput {
-    /// Whether deleted media is retained in the recycle bin.
-    pub enabled: bool,
+    /// Whether deleted media is retained in the recycle bin; omit to keep the current value.
+    pub enabled: Option<bool>,
+    /// Absolute recycle-bin directory outside every library root; null or blank restores `.scryer-recycle` under each library root, omit to keep the current value.
+    pub path: MaybeUndefined<String>,
+    /// Days a recycled item is kept before it is purged, from 1 to 3650; omit to keep the current value.
+    pub retention_days: Option<i32>,
 }
 
 #[derive(InputObject, Clone)]
@@ -1080,18 +1124,32 @@ pub struct UpdatePluginAutoUpdateSettingsInput {
 pub struct UpdateAcquisitionSettingsInput {
     /// Whether acquisition scheduling is enabled.
     pub enabled: bool,
-    /// Upgrade cooldown in hours.
-    pub upgrade_cooldown_hours: i32,
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub upgrade_cooldown_hours: Option<i32>,
     /// Minimum score improvement for a same-tier upgrade.
     pub same_tier_min_delta: i32,
-    /// Deprecated and inert: accepted and stored for compatibility, ignored by
-    /// acquisition (quality tier is compared before score, so no cross-tier
-    /// delta is ever consulted). Will be removed in a later minor.
-    pub cross_tier_min_delta: i32,
-    /// Score delta that bypasses the forced-upgrade guard.
-    pub forced_upgrade_delta_bypass: i32,
-    /// Scheduler poll interval in seconds.
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub cross_tier_min_delta: Option<i32>,
+    /// Deprecated and inert: accepted and ignored; nothing is read or stored.
+    /// Removed in the next minor.
+    #[graphql(
+        deprecation = "Inert: the stored value is no longer read; removed in the next minor."
+    )]
+    pub forced_upgrade_delta_bypass: Option<i32>,
+    /// How often, in seconds, download clients are checked for failed grabs.
     pub poll_interval_seconds: i32,
+    /// How often, in seconds, the catalog is walked for missing and
+    /// upgradable media. Omitted by older clients, which keeps the stored
+    /// value.
+    pub walk_interval_seconds: Option<i32>,
     /// Maximum long-tail scopes processed per cycle.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Days between long-tail reconvergence passes.

@@ -36,14 +36,15 @@ export function releaseQueueScopeInput(
   return candidateScope ?? fallback;
 }
 
-export function releaseSupportsAdditionalFileQueue(
-  release: Pick<Release, "queueScope">,
+/**
+ * Whether the server queues an additional file under this scope: a movie
+ * title, a single episode, or a series movie. A season, an episode set, a
+ * whole series and a title-less grab are refused.
+ */
+export function queueScopeAcceptsAdditionalFile(
+  scope: QueueDownloadScopeInput,
   titleFacet: string | null | undefined,
 ): boolean {
-  const scope = release.queueScope ? queueScopeToInput(release.queueScope) : null;
-  if (!scope) {
-    return false;
-  }
   if ("episode" in scope) {
     return true;
   }
@@ -51,9 +52,17 @@ export function releaseSupportsAdditionalFileQueue(
     return true;
   }
   if ("title" in scope) {
-    return titleFacet?.toUpperCase() === "MOVIE";
+    return titleFacet?.trim().toUpperCase() === "MOVIE";
   }
   return false;
+}
+
+export function releaseSupportsAdditionalFileQueue(
+  release: Pick<Release, "queueScope">,
+  titleFacet: string | null | undefined,
+): boolean {
+  const scope = release.queueScope ? queueScopeToInput(release.queueScope) : null;
+  return scope !== null && queueScopeAcceptsAdditionalFile(scope, titleFacet);
 }
 
 /// Whether the release's resolved scope brings down more than the one episode a
@@ -84,4 +93,38 @@ export function hasPrimaryMediaFile(
   files: readonly { role?: string | null }[] | null | undefined,
 ): boolean {
   return files?.some((file) => file.role?.toLowerCase() === "primary") ?? false;
+}
+
+type PrimaryFileRoles = readonly { role?: string | null }[] | null | undefined;
+
+/// Whether queueing a release under `scope` replaces an existing primary file,
+/// judged only from the episodes that scope covers. A whole-season or
+/// whole-title grab replaces nothing when every primary file on the title sits
+/// outside its scope, so it queues as a plain addition. A series-movie scope is
+/// not decided here; callers holding its files check it with
+/// `hasPrimaryMediaFile` directly.
+export function queueScopeReplacesPrimary(
+  scope: QueueDownloadScopeInput,
+  episodesByCollection: Readonly<Record<string, readonly { id: string }[] | undefined>>,
+  mediaFilesByEpisode: Readonly<Record<string, PrimaryFileRoles>>,
+): boolean {
+  const episodeHasPrimary = (episodeId: string) =>
+    hasPrimaryMediaFile(mediaFilesByEpisode[episodeId]);
+  if ("episode" in scope) {
+    return episodeHasPrimary(scope.episode);
+  }
+  if ("episodeSet" in scope) {
+    return scope.episodeSet.some(episodeHasPrimary);
+  }
+  if ("collection" in scope) {
+    return (episodesByCollection[scope.collection] ?? []).some((episode) =>
+      episodeHasPrimary(episode.id),
+    );
+  }
+  if ("title" in scope) {
+    return Object.values(episodesByCollection).some((episodes) =>
+      (episodes ?? []).some((episode) => episodeHasPrimary(episode.id)),
+    );
+  }
+  return false;
 }

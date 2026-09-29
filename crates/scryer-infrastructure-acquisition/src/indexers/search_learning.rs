@@ -117,6 +117,7 @@ impl IndexerSearchLearningStore {
                     protected: row.opt_bool("protected")?,
                     tags: Vec::new(),
                     provider_categories: Vec::new(),
+                    release_listing_json: None,
                 },
             );
         }
@@ -153,6 +154,7 @@ impl IndexerSearchLearningStore {
                 "series_name" => candidate.series_names.push(value),
                 "tag" => candidate.tags.push(value),
                 "provider_category" => candidate.provider_categories.push(value),
+                "release_listing" => candidate.release_listing_json = Some(value),
                 _ => {}
             }
         }
@@ -516,7 +518,21 @@ impl IndexerSearchLearningRepository for IndexerSearchLearningStore {
                                 .await?;
                             }
                         }
-
+                        if let Some(listing) = normalized.release_listing_json.as_ref() {
+                            SqlRuntime::execute(
+                                SqlExec::Tx(tx),
+                                "INSERT INTO indexer_search_candidate_source_values (
+                                    source_id, value_kind, ordinal, value
+                                 ) VALUES ({}, {}, {}, {})",
+                                &[
+                                    SqlArg::Text(source_id.clone()),
+                                    SqlArg::Text("release_listing".to_string()),
+                                    SqlArg::I64(0),
+                                    SqlArg::Text(listing.clone()),
+                                ],
+                            )
+                            .await?;
+                        }
                     }
                     Ok(())
                 })
@@ -701,6 +717,7 @@ impl IndexerSearchLearningRepository for IndexerSearchLearningStore {
                     protected: row.opt_bool("protected")?,
                     tags: Vec::new(),
                     provider_categories: Vec::new(),
+                    release_listing_json: None,
                 },
             );
         }
@@ -736,6 +753,7 @@ impl IndexerSearchLearningRepository for IndexerSearchLearningStore {
                 "series_name" => candidate.series_names.push(value),
                 "tag" => candidate.tags.push(value),
                 "provider_category" => candidate.provider_categories.push(value),
+                "release_listing" => candidate.release_listing_json = Some(value),
                 _ => {}
             }
         }
@@ -1367,6 +1385,7 @@ mod tests {
                 protected: None,
                 tags: vec!["anime".into()],
                 provider_categories: vec!["Anime".into()],
+                release_listing_json: Some(r#"{"v":1,"extra":{"protocol":"usenet"}}"#.into()),
             },
             created_at: now,
             reusable_until: now + chrono::Duration::hours(24),
@@ -1413,14 +1432,19 @@ mod tests {
                 .len(),
             1
         );
+        let rehydrated = store
+            .list_search_run_candidates(&duplicate_run.id)
+            .await
+            .expect("duplicate page candidates should rehydrate");
         assert_eq!(
-            store
-                .list_search_run_candidates(&duplicate_run.id)
-                .await
-                .expect("duplicate page candidates should rehydrate")
-                .len(),
+            rehydrated.len(),
             1,
             "each run observes the shared canonical source"
+        );
+        assert_eq!(
+            rehydrated[0].normalized.release_listing_json.as_deref(),
+            Some(r#"{"v":1,"extra":{"protocol":"usenet"}}"#),
+            "a replayed result keeps its listing facts"
         );
         let encrypted_url: String = sqlx::query_scalar(
             "SELECT encrypted_download_url FROM indexer_search_candidate_sources LIMIT 1",

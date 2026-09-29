@@ -1482,8 +1482,10 @@ async fn graphql_traverses_core_graph_relationships() {
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: Some("Episode overview".to_string()),
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: chrono::Utc::now(),
@@ -1592,6 +1594,7 @@ async fn graphql_traverses_core_graph_relationships() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: Some("pending_delay".to_string()),
         release_age_unknown: false,
+        release_listing_json: None,
     };
     scryer_infrastructure_library::media::libraries::state_store::PendingReleaseStore::new(
         ctx.db.datastore(),
@@ -3443,6 +3446,7 @@ async fn drive_unlinked_completed_grab(with_identity: bool, staged: u8) -> Optio
         request_signature: None,
         purpose: DownloadSubmissionPurpose::OperatorQueued,
         scope: SubmissionScope::Orphan,
+        release_listing_json: None,
     };
     if with_identity {
         submissions

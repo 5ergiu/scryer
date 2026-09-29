@@ -21,11 +21,9 @@ export type SubtitleSettings = {
 
 export type AcquisitionSettings = {
   enabled: boolean;
-  upgradeCooldownHours: number;
   sameTierMinDelta: number;
-  crossTierMinDelta: number;
-  forcedUpgradeDeltaBypass: number;
   pollIntervalSeconds: number;
+  walkIntervalSeconds: number;
   syncIntervalSeconds: number;
   batchSize: number;
 };

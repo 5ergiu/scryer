@@ -169,11 +169,17 @@ pub(crate) fn scope_walk_order_key(target: &AcquisitionTarget) -> (u32, u32) {
 /// Host availability is checked during evaluation (after routing resolves),
 /// not here — the enumeration stays cheap. Returns the new resume positions:
 /// the last scope_key each lane *considered*, so both cursors always advance.
+///
+/// `already_walked` holds the scopes this cycle has selected before. A cycle
+/// that tops its batch up selects again from where the cursors stopped; a
+/// scope it already walked is considered, so the cursor passes it, but is not
+/// selected twice.
 pub(crate) fn select_background_acquisition_batch(
     targets: &[AcquisitionTarget],
     hot_resume_after: Option<&str>,
     resume_after: Option<&str>,
     max_scopes: usize,
+    already_walked: &HashSet<usize>,
 ) -> CursorSelection {
     let mut selection = CursorSelection {
         indices: Vec::new(),
@@ -207,7 +213,9 @@ pub(crate) fn select_background_acquisition_batch(
             }
             let index = hot[(start + offset) % hot.len()];
             selection.hot_resume_after = Some(targets[index].scope_key.clone());
-            selected_hot.push(index);
+            if !already_walked.contains(&index) {
+                selected_hot.push(index);
+            }
         }
         // Air-date heat leads, then recently-added heat, each in derived order.
         // `sort_by_key` is stable, and the index tie-break makes the order total
@@ -242,7 +250,9 @@ pub(crate) fn select_background_acquisition_batch(
         }
         let index = cold[(start + offset) % cold.len()];
         selection.resume_after = Some(targets[index].scope_key.clone());
-        selection.indices.push(index);
+        if !already_walked.contains(&index) {
+            selection.indices.push(index);
+        }
     }
     selection
 }
@@ -838,6 +848,70 @@ mod tests {
         }
     }
 
+    /// A cycle's first selection: nothing walked yet.
+    fn select(
+        targets: &[AcquisitionTarget],
+        hot_resume_after: Option<&str>,
+        resume_after: Option<&str>,
+        max_scopes: usize,
+    ) -> CursorSelection {
+        select_background_acquisition_batch(
+            targets,
+            hot_resume_after,
+            resume_after,
+            max_scopes,
+            &HashSet::new(),
+        )
+    }
+
+    #[test]
+    fn a_top_up_carries_on_from_the_cursors_and_selects_no_scope_twice() {
+        let targets = vec![
+            cursor_target("hot-1", true),
+            cursor_target("hot-2", true),
+            cursor_target("a", false),
+            cursor_target("b", false),
+            cursor_target("c", false),
+        ];
+        let first = select(&targets, None, None, 3);
+        assert_eq!(selected_keys(&targets, &first), vec!["hot-1", "hot-2", "a"]);
+        let walked = first.indices.iter().copied().collect::<HashSet<_>>();
+
+        let top_up = select_background_acquisition_batch(
+            &targets,
+            first.hot_resume_after.as_deref(),
+            first.resume_after.as_deref(),
+            3,
+            &walked,
+        );
+        assert_eq!(
+            selected_keys(&targets, &top_up),
+            vec!["b", "c"],
+            "the hot lane and `a` were walked already"
+        );
+        assert_eq!(
+            top_up.hot_resume_after.as_deref(),
+            Some("hot-2"),
+            "a lane passed over in full ends where it started"
+        );
+        assert_eq!(
+            top_up.resume_after.as_deref(),
+            Some("a"),
+            "the cold lane wrapped round to the scope it started after"
+        );
+    }
+
+    #[test]
+    fn a_top_up_over_a_fully_walked_library_selects_nothing() {
+        let targets = vec![cursor_target("hot-1", true), cursor_target("a", false)];
+        let walked = HashSet::from([0, 1]);
+        let top_up =
+            select_background_acquisition_batch(&targets, Some("hot-1"), Some("a"), 4, &walked);
+        assert!(top_up.indices.is_empty());
+        assert_eq!(top_up.hot_resume_after.as_deref(), Some("hot-1"));
+        assert_eq!(top_up.resume_after.as_deref(), Some("a"));
+    }
+
     fn selected_keys(targets: &[AcquisitionTarget], selection: &CursorSelection) -> Vec<String> {
         selection
             .indices
@@ -854,7 +928,7 @@ mod tests {
             cursor_target("cold-2", false),
             cursor_target("hot-2", true),
         ];
-        let selection = select_background_acquisition_batch(&targets, None, None, 10);
+        let selection = select(&targets, None, None, 10);
         assert_eq!(
             selected_keys(&targets, &selection),
             vec!["hot-1", "hot-2", "cold-1", "cold-2"],
@@ -869,7 +943,7 @@ mod tests {
             cursor_target("b", false),
             cursor_target("c", false),
         ];
-        let selection = select_background_acquisition_batch(&targets, None, None, 2);
+        let selection = select(&targets, None, None, 2);
         assert_eq!(selected_keys(&targets, &selection), vec!["a", "b"]);
         assert_eq!(
             selection.resume_after.as_deref(),
@@ -885,11 +959,10 @@ mod tests {
             cursor_target("b", false),
             cursor_target("c", false),
         ];
-        let first = select_background_acquisition_batch(&targets, None, None, 2);
+        let first = select(&targets, None, None, 2);
         assert_eq!(selected_keys(&targets, &first), vec!["a", "b"]);
         // Next cycle resumes after "b" → c, then wraps to a.
-        let second =
-            select_background_acquisition_batch(&targets, None, first.resume_after.as_deref(), 2);
+        let second = select(&targets, None, first.resume_after.as_deref(), 2);
         assert_eq!(selected_keys(&targets, &second), vec!["c", "a"]);
     }
 
@@ -902,7 +975,7 @@ mod tests {
         ];
         // The cap is filled by hot targets, so the cold lane is not reached and
         // its rotation cursor is carried forward unchanged.
-        let selection = select_background_acquisition_batch(&targets, None, Some("cold-1"), 2);
+        let selection = select(&targets, None, Some("cold-1"), 2);
         assert_eq!(selected_keys(&targets, &selection), vec!["hot-1", "hot-2"]);
         assert_eq!(selection.resume_after.as_deref(), Some("cold-1"));
     }
@@ -918,7 +991,7 @@ mod tests {
             cursor_target("aired-2", true),
             cursor_target("cold-1", false),
         ];
-        let selection = select_background_acquisition_batch(&targets, None, None, 10);
+        let selection = select(&targets, None, None, 10);
         assert_eq!(
             selected_keys(&targets, &selection),
             vec!["aired-1", "aired-2", "added-1", "added-2", "cold-1"],
@@ -933,7 +1006,7 @@ mod tests {
             cursor_target("hot-b", true),
             cursor_target("hot-c", true),
         ];
-        let first = select_background_acquisition_batch(&targets, None, None, 2);
+        let first = select(&targets, None, None, 2);
         assert_eq!(selected_keys(&targets, &first), vec!["hot-a", "hot-b"]);
         assert_eq!(
             first.hot_resume_after.as_deref(),
@@ -942,12 +1015,7 @@ mod tests {
         );
         // Without rotation "hot-c" would never be reached: the cap is filled by
         // the head of the hot lane on every cycle.
-        let second = select_background_acquisition_batch(
-            &targets,
-            first.hot_resume_after.as_deref(),
-            None,
-            2,
-        );
+        let second = select(&targets, first.hot_resume_after.as_deref(), None, 2);
         assert_eq!(selected_keys(&targets, &second), vec!["hot-a", "hot-c"]);
         assert_eq!(second.hot_resume_after.as_deref(), Some("hot-a"));
     }
@@ -961,7 +1029,7 @@ mod tests {
         ];
         // Resuming after "added-1" takes "added-2" and "aired-1"; the batch is
         // still ordered by heat rather than by where the cursor sat.
-        let selection = select_background_acquisition_batch(&targets, Some("added-1"), None, 2);
+        let selection = select(&targets, Some("added-1"), None, 2);
         assert_eq!(
             selected_keys(&targets, &selection),
             vec!["aired-1", "added-2"]
@@ -971,7 +1039,7 @@ mod tests {
     #[test]
     fn cursor_hot_lane_carries_its_position_when_it_did_not_advance() {
         let targets = vec![cursor_target("cold-1", false)];
-        let selection = select_background_acquisition_batch(&targets, Some("hot-1"), None, 4);
+        let selection = select(&targets, Some("hot-1"), None, 4);
         assert_eq!(selected_keys(&targets, &selection), vec!["cold-1"]);
         assert_eq!(selection.hot_resume_after.as_deref(), Some("hot-1"));
     }

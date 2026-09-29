@@ -41,6 +41,7 @@ async fn pending_release_tracker_minimums_round_trip_and_legacy_rows_read_back_a
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     parked.seed_minimums = scryer_application::ReleaseSeedMinimums {
         min_seed_ratio: Some(1.5),
@@ -107,6 +108,10 @@ async fn pending_release_tracker_minimums_round_trip_and_legacy_rows_read_back_a
     assert_eq!(
         legacy.seeders, None,
         "a row parked before 0169 reads as unknown, which stays eligible"
+    );
+    assert_eq!(
+        legacy.release_listing_json, None,
+        "a row parked before the listing snapshot column reads back without one"
     );
 
     let _ = std::fs::remove_file(db);
@@ -344,8 +349,10 @@ async fn scoped_anibridge_external_ids_round_trip_for_collections_and_episodes()
         is_filler: false,
         is_recap: false,
         absolute_number: Some("47".to_string()),
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: Some("1234567".to_string()),
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),
@@ -1063,6 +1070,407 @@ async fn review_regression_subtitle_provider_update_sets_and_clears_disabled_unt
     .await
     .expect("subtitle provider disabled_until should clear");
     assert_eq!(updated.disabled_until, None);
+
+    let _ = std::fs::remove_file(db);
+}
+
+const SAMPLE_LISTING_JSON: &str = r#"{"published_at":"2026-01-02T03:04:05Z","votes":{"up":7,"down":1},"password_protected":false,"languages":["en"],"extra":{"sample":"value"}}"#;
+
+/// The listing snapshot a grab froze must come back byte-for-byte from the
+/// submission row that import-time scoring later reads.
+#[tokio::test]
+async fn download_submission_release_listing_snapshot_round_trips() {
+    let (services, db) = temp_services("scryer_submission_release_listing").await;
+    let submissions = DownloadSubmissionStore::new(services.datastore());
+
+    submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: "title-listing".to_string(),
+            facet: "movie".to_string(),
+            download_client_id: Some("client-listing".to_string()),
+            download_client_type: "sabnzbd".to_string(),
+            download_client_item_id: "job-listing".to_string(),
+            source_hint: None,
+            source_provider_id: Some("indexer-listing".to_string()),
+            source_provider_name: None,
+            source_kind: None,
+            source_title: Some("Sample.Listing.2026.1080p-GRP".to_string()),
+            info_hash: None,
+            release_size_bytes: Some(4_096),
+            release_listing_json: Some(SAMPLE_LISTING_JSON.to_string()),
+            request_signature: None,
+            purpose: scryer_application::DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("submission with a listing snapshot should persist");
+    submissions
+        .record_submission(DownloadSubmission {
+            download_id: scryer_domain::download_identity::DownloadId::new(),
+            title_id: "title-listing".to_string(),
+            facet: "movie".to_string(),
+            download_client_id: Some("client-listing".to_string()),
+            download_client_type: "sabnzbd".to_string(),
+            download_client_item_id: "job-without-listing".to_string(),
+            source_hint: None,
+            source_provider_id: None,
+            source_provider_name: None,
+            source_kind: None,
+            source_title: Some("Sample.Unlisted.2026.1080p-GRP".to_string()),
+            info_hash: None,
+            release_size_bytes: None,
+            release_listing_json: None,
+            request_signature: None,
+            purpose: scryer_application::DownloadSubmissionPurpose::Standard,
+            scope: SubmissionScope::Title,
+        })
+        .await
+        .expect("submission without a listing snapshot should persist");
+
+    let with_listing = submissions
+        .find_by_client_item_id(&ClientJobLocator::new(
+            Some("client-listing"),
+            "sabnzbd",
+            "job-listing",
+        ))
+        .await
+        .expect("lookup should succeed")
+        .expect("submission should exist");
+    assert_eq!(
+        with_listing.release_listing_json.as_deref(),
+        Some(SAMPLE_LISTING_JSON)
+    );
+    let without_listing = submissions
+        .find_by_client_item_id(&ClientJobLocator::new(
+            Some("client-listing"),
+            "sabnzbd",
+            "job-without-listing",
+        ))
+        .await
+        .expect("lookup should succeed")
+        .expect("submission should exist");
+    assert_eq!(without_listing.release_listing_json, None);
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// A parked release keeps its listing snapshot through standby, a
+/// re-observation of the same release, promotion, and the grab.
+#[tokio::test]
+async fn pending_release_listing_snapshot_survives_park_standby_and_promotion() {
+    let (services, db) = temp_services("scryer_pending_release_listing").await;
+    let pending_store =
+        PendingReleaseStore::new(services.datastore(), services.encryption_key_state());
+    let now = Utc::now().to_rfc3339();
+    let parked = scryer_application::PendingRelease {
+        id: "pending-listing".to_string(),
+        wanted_item_id: "wanted-listing".to_string(),
+        title_id: "title-listing".to_string(),
+        release_title: "Sample.Listing.2026.1080p-GRP".to_string(),
+        release_url: Some("https://indexer.invalid/listing.nzb".to_string()),
+        source_kind: None,
+        release_size_bytes: Some(4_096),
+        release_score: 800,
+        scoring_log_json: None,
+        indexer_source: Some("indexer-listing".to_string()),
+        indexer_id: None,
+        release_guid: Some("guid-listing".to_string()),
+        added_at: now.clone(),
+        last_observed_at: now.clone(),
+        delay_until: now.clone(),
+        status: scryer_application::PendingReleaseStatus::Waiting,
+        grabbed_at: None,
+        source_password: None,
+        published_at: Some("2026-01-02T03:04:05Z".to_string()),
+        info_hash: None,
+        seed_minimums: Default::default(),
+        seeders: None,
+        release_identity: "guid:indexer-listing:guid-listing".to_string(),
+        coverage_identity: "scope:wanted-listing".to_string(),
+        role: scryer_application::PendingReleaseRole::Primary,
+        last_decision_code: None,
+        release_age_unknown: false,
+        release_listing_json: Some(SAMPLE_LISTING_JSON.to_string()),
+    };
+    let id = PendingReleaseRepository::insert_pending_release(&pending_store, &parked)
+        .await
+        .expect("parked release should insert");
+
+    let read_listing = |id: String| {
+        let pending_store = &pending_store;
+        async move {
+            PendingReleaseRepository::get_pending_release(pending_store, &id)
+                .await
+                .expect("pending release should load")
+                .expect("pending release should exist")
+                .release_listing_json
+        }
+    };
+    assert_eq!(
+        read_listing(id.clone()).await.as_deref(),
+        Some(SAMPLE_LISTING_JSON)
+    );
+
+    use scryer_application::PendingReleaseStatus;
+    assert!(
+        PendingReleaseRepository::compare_and_set_pending_release_status(
+            &pending_store,
+            &id,
+            PendingReleaseStatus::Waiting,
+            PendingReleaseStatus::Standby,
+            None,
+        )
+        .await
+        .expect("standby transition should succeed")
+    );
+    PendingReleaseRepository::update_pending_release_delay_until(&pending_store, &id, &now)
+        .await
+        .expect("delay should update");
+    // A later sighting of the same release rewrites the row in place.
+    let reobserved_id = PendingReleaseRepository::insert_pending_release(
+        &pending_store,
+        &scryer_application::PendingRelease {
+            id: "pending-listing-reobserved".to_string(),
+            release_score: 810,
+            ..parked.clone()
+        },
+    )
+    .await
+    .expect("re-observation should upsert");
+    assert_eq!(
+        reobserved_id, id,
+        "the re-observation reuses the parked row"
+    );
+    assert_eq!(
+        read_listing(id.clone()).await.as_deref(),
+        Some(SAMPLE_LISTING_JSON)
+    );
+
+    assert!(
+        PendingReleaseRepository::compare_and_set_pending_release_status(
+            &pending_store,
+            &id,
+            PendingReleaseStatus::Standby,
+            PendingReleaseStatus::Processing,
+            None,
+        )
+        .await
+        .expect("promotion claim should succeed")
+    );
+    PendingReleaseRepository::update_pending_release_status(
+        &pending_store,
+        &id,
+        PendingReleaseStatus::Grabbed,
+        Some(&now),
+    )
+    .await
+    .expect("grab should record");
+    assert_eq!(
+        read_listing(id.clone()).await.as_deref(),
+        Some(SAMPLE_LISTING_JSON),
+        "status transitions never clear the frozen listing"
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// The imported file carries the listing snapshot through the updates that
+/// rewrite its other columns; a row written before the column reads `None`.
+#[tokio::test]
+async fn media_file_release_listing_snapshot_survives_analysis_and_signature_updates() {
+    let (services, db) = temp_services("scryer_media_file_release_listing").await;
+    let catalog = title_store(&services);
+    let media_files = media_file_store(&services);
+
+    let title = make_test_title("title-media-listing", None);
+    TitleRepository::create(&catalog, title.clone())
+        .await
+        .expect("title should insert");
+
+    let file_id = media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: "/library/Sample.Listing.2026.mkv".to_string(),
+            size_bytes: 4_096,
+            scoring_log: Some("[]".to_string()),
+            release_listing_json: Some(SAMPLE_LISTING_JSON.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("media file should insert");
+
+    media_files
+        .update_media_file_analysis(
+            &file_id,
+            scryer_application::MediaFileAnalysis {
+                video_width: Some(1920),
+                video_height: Some(1080),
+                audio_codec: Some("aac".to_string()),
+                duration_seconds: Some(60),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("analysis should write");
+    media_files
+        .update_media_file_source_signature(
+            &file_id,
+            8_192,
+            Some("unix_mtime_nsec_v1".to_string()),
+            Some("3:4".to_string()),
+        )
+        .await
+        .expect("source signature should refresh");
+
+    let media_file = media_files
+        .get_media_file_by_id(&file_id)
+        .await
+        .expect("lookup should succeed")
+        .expect("media file should exist");
+    assert_eq!(media_file.video_width, Some(1920));
+    assert_eq!(media_file.size_bytes, 8_192);
+    assert_eq!(
+        media_file.release_listing_json.as_deref(),
+        Some(SAMPLE_LISTING_JSON)
+    );
+    let listed = media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("listing should succeed");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|file| file.id == file_id)
+            .and_then(|file| file.release_listing_json.as_deref()),
+        Some(SAMPLE_LISTING_JSON)
+    );
+
+    // Written the way every row imported before the column was.
+    sqlx::query(
+        "INSERT INTO media_files (id, title_id, file_path, size_bytes, role, created_at)
+         VALUES (?, ?, ?, ?, 'primary', ?)",
+    )
+    .bind("media-file-before-listing")
+    .bind(&title.id)
+    .bind("/library/Sample.Earlier.2025.mkv")
+    .bind(1_024_i64)
+    .bind(Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("pre-column media file should insert");
+    let earlier = media_files
+        .get_media_file_by_id("media-file-before-listing")
+        .await
+        .expect("lookup should succeed")
+        .expect("pre-column media file should exist");
+    assert_eq!(earlier.release_listing_json, None);
+
+    let _ = std::fs::remove_file(db);
+}
+
+/// Migration 0263 gave `episodes` a `tmdb_id` column: the provider identity of
+/// a TMDB-primary series' episodes, which have no TVDB id. Proves it round
+/// trips through insert, lookup and a targeted update, that an update naming
+/// only other fields leaves it alone, and that a row written without it (the
+/// shape of every pre-0263 row) reads back as `None`.
+#[tokio::test]
+async fn episode_tmdb_id_round_trips_and_legacy_rows_read_back_as_none() {
+    let (services, db) = temp_services("scryer_episode_tmdb_id").await;
+    let catalog = title_store(&services);
+    let shows = show_store(&services);
+
+    let mut title = make_test_title("title-tmdb-series", None);
+    title.facet = MediaFacet::Series;
+    title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+    title.external_ids = vec![ExternalId::with_kind("tmdb", "series", "1399")];
+    TitleRepository::create(&catalog, title.clone())
+        .await
+        .expect("title should insert");
+
+    let episode = Episode {
+        id: "episode-tmdb-s01e01".to_string(),
+        title_id: title.id.clone(),
+        collection_id: None,
+        episode_type: scryer_domain::EpisodeType::Standard,
+        episode_number: Some("1".to_string()),
+        season_number: Some("1".to_string()),
+        episode_label: Some("S01E01".to_string()),
+        title: Some("Pilot".to_string()),
+        air_date: Some("2026-01-01".to_string()),
+        duration_seconds: Some(3_600),
+        has_multi_audio: false,
+        has_subtitle: false,
+        is_filler: false,
+        is_recap: false,
+        absolute_number: None,
+        contiguous_absolute_number: None,
+        overview: None,
+        tvdb_id: None,
+        tmdb_id: Some("63056".to_string()),
+        image_url: None,
+        monitored: true,
+        created_at: Utc::now(),
+    };
+    ShowRepository::create_episode(&shows, episode.clone())
+        .await
+        .expect("episode should insert");
+
+    let loaded = ShowRepository::get_episode_by_id(&shows, &episode.id)
+        .await
+        .expect("episode should load")
+        .expect("episode should exist");
+    assert_eq!(loaded.tvdb_id, None);
+    assert_eq!(loaded.tmdb_id.as_deref(), Some("63056"));
+
+    let renamed = ShowRepository::update_episode(
+        &shows,
+        &episode.id,
+        EpisodeUpdate {
+            title: Some("Winter Is Coming".to_string()),
+            ..EpisodeUpdate::default()
+        },
+    )
+    .await
+    .expect("an update naming other fields should succeed");
+    assert_eq!(renamed.tmdb_id.as_deref(), Some("63056"));
+
+    let refreshed = ShowRepository::update_episode(
+        &shows,
+        &episode.id,
+        EpisodeUpdate {
+            tmdb_id: Some("63057".to_string()),
+            ..EpisodeUpdate::default()
+        },
+    )
+    .await
+    .expect("a tmdb id update should succeed");
+    assert_eq!(refreshed.tmdb_id.as_deref(), Some("63057"));
+    let listed = ShowRepository::list_episodes_for_title(&shows, &title.id)
+        .await
+        .expect("episodes should list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tmdb_id.as_deref(), Some("63057"));
+
+    // Written the way every row inserted before 0263 was: no tmdb_id column.
+    sqlx::query(
+        "INSERT INTO episodes
+         (id, title_id, episode_type, episode_number, season_number, tvdb_id,
+          has_multi_audio, has_subtitle, monitored, created_at)
+         VALUES (?, ?, 'standard', '2', '1', '1234568', 0, 0, 1, ?)",
+    )
+    .bind("episode-legacy-s01e02")
+    .bind(&title.id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(services.pool())
+    .await
+    .expect("legacy episode should insert");
+    let legacy = ShowRepository::get_episode_by_id(&shows, "episode-legacy-s01e02")
+        .await
+        .expect("legacy episode should load")
+        .expect("legacy episode should exist");
+    assert_eq!(legacy.tvdb_id.as_deref(), Some("1234568"));
+    assert_eq!(legacy.tmdb_id, None);
 
     let _ = std::fs::remove_file(db);
 }

@@ -1224,6 +1224,88 @@ fn enrichment_extracts_named_language_before_release_group_suffix() {
     assert_eq!(projected.release_group.as_deref(), Some("GRP"));
 }
 
+fn projected_languages(raw: &str, target: &ReleaseParseContext) -> (Vec<String>, Vec<String>) {
+    let analysis = analyze_release_for_target(raw, target);
+    let candidate = analysis.best_candidate().expect("best candidate");
+    let enrichment = enrich_candidate(&analysis.tokens, candidate, &analysis.raw_input);
+    let projected = project_final_metadata(candidate.projected.clone(), &enrichment);
+    (projected.languages_audio, projected.languages_subtitles)
+}
+
+/// Shapes copied from Ukrainian-dubbed anime and film releases: a trailing
+/// `Ukr DVO SUB` voice-over tag, a parenthesised `Ukrainian MVO + SUB`, a fused
+/// `UkrDub` in either position, and `Ukrainian_Sub` for a subbed-only copy.
+#[test]
+fn enrichment_reads_ukrainian_release_language_tags() {
+    let ukr = vec!["ukr".to_string()];
+    for (raw, title, facet) in [
+        (
+            "Vyhadana Rika / Invented River (2023) [WEB-DL 1080p H.265] Ukr DVO SUB",
+            "Invented River",
+            ContextFacetHint::Movie,
+        ),
+        (
+            "Vyhadana Rika / Invented River (2023) [BDRip 720p] UKR MVO SUB",
+            "Invented River",
+            ContextFacetHint::Movie,
+        ),
+        (
+            "[Groupa] Lantern Orchard - 01 [1080p] (Ukrainian MVO + SUB)",
+            "Lantern Orchard",
+            ContextFacetHint::Anime,
+        ),
+        (
+            "Lantern.Orchard.S01E02.1080p.WEB-DL.UkrDub.x264-GRP",
+            "Lantern Orchard",
+            ContextFacetHint::Series,
+        ),
+        (
+            "Lantern.Orchard.S01E02.1080p.WEB-DL.DubUkr.x264-GRP",
+            "Lantern Orchard",
+            ContextFacetHint::Series,
+        ),
+        (
+            "Lantern Orchard - 12 (WEBDL x265 1080p AAC) Ukrainian voiceover",
+            "Lantern Orchard",
+            ContextFacetHint::Anime,
+        ),
+    ] {
+        let (audio, _) = projected_languages(raw, &context(facet, title));
+        assert_eq!(audio, ukr, "{raw}");
+    }
+
+    let (audio, subtitles) = projected_languages(
+        "[Groupa] Lantern Orchard Ep. 04 (1280x720_x264_AAC) Ukrainian_Sub [556e3829]",
+        &context(ContextFacetHint::Anime, "Lantern Orchard"),
+    );
+    assert_eq!(subtitles, ukr);
+    assert!(
+        audio.is_empty(),
+        "a Ukrainian-subbed copy claims no audio: {audio:?}"
+    );
+}
+
+/// `UK` in a release name is the United Kingdom (`UK.BluRay`), and a Cyrillic
+/// title word that merely starts with the same letters is a title word.
+#[test]
+fn enrichment_does_not_read_uk_or_cyrillic_title_words_as_ukrainian() {
+    let mut target = context(ContextFacetHint::Movie, "Invented River");
+    target.known_years.push(2019);
+    let (audio, subtitles) =
+        projected_languages("Invented.River.2019.UK.BluRay.1080p.x264-GRP", &target);
+    assert!(
+        audio.is_empty() && subtitles.is_empty(),
+        "{audio:?} {subtitles:?}"
+    );
+
+    let (audio, subtitles) = projected_languages(
+        "Invented River | Укротитель рік [2022] [WEBRip] [1080p] [RUS + JAP]",
+        &context(ContextFacetHint::Anime, "Invented River"),
+    );
+    assert!(!audio.contains(&"ukr".to_string()), "{audio:?}");
+    assert!(!subtitles.contains(&"ukr".to_string()), "{subtitles:?}");
+}
+
 #[test]
 fn enrichment_extracts_english_dub_gap_group_after_episode_identity() {
     let analysis = analyze_release_for_target(
@@ -4148,4 +4230,82 @@ fn a_parenthesized_series_year_is_never_an_absolute_episode_number() {
             || (episode.season == Some(6) && episode.episode_numbers == vec![28]),
         "the file lost its coordinates: {episode:?}"
     );
+}
+
+fn catalog_with_absolutes(facet: ContextFacetHint, title: &str) -> ReleaseParseContext {
+    let mut target = context(facet, title);
+    for absolute in 1..=36u32 {
+        target.episodes.push(ContextEpisode {
+            season: Some(absolute.div_ceil(12)),
+            episode: Some((absolute - 1) % 12 + 1),
+            absolute_number: Some(absolute),
+            ..Default::default()
+        });
+    }
+    target
+}
+
+/// A channel layout next to an audio codec (`[EAC3 2.0]`) describes the audio
+/// track. Its leading digit is never an episode number, even when the catalog
+/// happens to hold an episode with that absolute number.
+#[test]
+fn an_audio_channel_layout_is_never_an_absolute_episode_number() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        for audio in [
+            "EAC3 2.0",
+            "EAC3 5.1",
+            "AAC 7.1",
+            "AAC2.0",
+            "DDP5.1",
+            "DTS-HD MA 5.1",
+            "TrueHD Atmos 7.1",
+            "AAC LC 2.0",
+        ] {
+            let raw = format!(
+                "Lantern Verge (2024) - S02E06 - 018 - Ember Tide [WEBDL-1080p][{audio}][JA][x265 10bit]-Cindergroup"
+            );
+            let target = catalog_with_absolutes(facet, "Lantern Verge");
+            let analysis = analyze_release_for_target(&raw, &target);
+            let candidate = analysis.best_candidate().expect("candidate");
+            let episode = candidate.projected.episode.as_ref().expect("episode");
+
+            assert_eq!(episode.season, Some(2), "{facet:?} {raw}: {episode:?}");
+            assert_eq!(episode.episode_numbers, vec![6], "{facet:?} {raw}");
+            assert_eq!(episode.absolute_episode, Some(18), "{facet:?} {raw}");
+        }
+    }
+}
+
+/// The channel guard must not cost a genuine absolute-numbered release its
+/// number: the episode token sits outside the audio bracket.
+#[test]
+fn an_absolute_release_with_an_audio_bracket_keeps_its_number() {
+    let target = catalog_with_absolutes(ContextFacetHint::Anime, "Lantern Verge");
+    let analysis = analyze_release_for_target(
+        "[Cindergroup] Lantern Verge - 018 [1080p][AAC 2.0].mkv",
+        &target,
+    );
+    let candidate = analysis.best_candidate().expect("candidate");
+    let episode = candidate.projected.episode.as_ref().expect("episode");
+
+    assert_eq!(candidate.family, ParseFamily::AnimeAbsolute);
+    assert_eq!(episode.absolute_episode, Some(18), "{episode:?}");
+}
+
+/// Scene-style dotted names carry the layout between dots, several tokens
+/// after the codec it belongs to. Its digits are still the audio track.
+#[test]
+fn a_dotted_channel_layout_after_a_multi_part_codec_is_not_an_episode() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        for audio in ["DTS-HD.MA.5.1", "TrueHD.Atmos.7.1", "DDP5.1", "AAC2.0"] {
+            let raw = format!("Lantern.Verge.2024.S02E06.1080p.BluRay.{audio}.x264-Cindergroup");
+            let target = catalog_with_absolutes(facet, "Lantern Verge");
+            let analysis = analyze_release_for_target(&raw, &target);
+            let candidate = analysis.best_candidate().expect("candidate");
+            let episode = candidate.projected.episode.as_ref().expect("episode");
+
+            assert_eq!(episode.season, Some(2), "{facet:?} {raw}: {episode:?}");
+            assert_eq!(episode.episode_numbers, vec![6], "{facet:?} {raw}");
+        }
+    }
 }

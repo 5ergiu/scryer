@@ -754,13 +754,166 @@ async fn graphql_typed_acquisition_settings_round_trip() {
         mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
           updateAcquisitionSettings(input: $input) {
             enabled
+            sameTierMinDelta
+            pollIntervalSeconds
+            walkIntervalSeconds
+            longTailBackfillMaxScopesPerCycle
+            longTailReconvergeDays
+          }
+        }
+        "#,
+        json!({
+          "input": {
+            "enabled": true,
+            "sameTierMinDelta": 140,
+            "pollIntervalSeconds": 45,
+            "walkIntervalSeconds": 240,
+            "longTailBackfillMaxScopesPerCycle": 750,
+            "longTailReconvergeDays": 30
+          }
+        }),
+    )
+    .await;
+    assert_no_errors(&update);
+
+    let read = gql(
+        &ctx,
+        r#"
+        query AcquisitionSettings {
+          acquisitionSettings {
+            enabled
+            sameTierMinDelta
+            pollIntervalSeconds
+            walkIntervalSeconds
+            longTailBackfillMaxScopesPerCycle
+            longTailReconvergeDays
+          }
+        }
+        "#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&read);
+
+    let settings = &read["data"]["acquisitionSettings"];
+    assert_eq!(settings["enabled"], true);
+    assert_eq!(settings["sameTierMinDelta"], 140);
+    assert_eq!(settings["pollIntervalSeconds"], 45);
+    assert_eq!(settings["walkIntervalSeconds"], 240);
+    assert_eq!(settings["longTailBackfillMaxScopesPerCycle"], 750);
+    assert_eq!(settings["longTailReconvergeDays"], 30);
+}
+
+/// The walk interval defaults to five minutes, and a client that predates it
+/// (so never sends it) keeps whatever is stored instead of resetting it.
+#[tokio::test]
+async fn graphql_acquisition_walk_interval_defaults_and_survives_older_clients() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let read_query = r#"
+        query AcquisitionSettings {
+          acquisitionSettings {
+            pollIntervalSeconds
+            walkIntervalSeconds
+          }
+        }
+        "#;
+    let defaults = gql(&ctx, read_query, json!({})).await;
+    assert_no_errors(&defaults);
+    assert_eq!(
+        defaults["data"]["acquisitionSettings"]["pollIntervalSeconds"],
+        60
+    );
+    assert_eq!(
+        defaults["data"]["acquisitionSettings"]["walkIntervalSeconds"],
+        300
+    );
+
+    let mutation = r#"
+        mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
+          updateAcquisitionSettings(input: $input) {
+            walkIntervalSeconds
+          }
+        }
+        "#;
+    let set = gql(
+        &ctx,
+        mutation,
+        json!({
+          "input": {
+            "enabled": true,
+            "sameTierMinDelta": 120,
+            "pollIntervalSeconds": 30,
+            "walkIntervalSeconds": 90,
+            "longTailBackfillMaxScopesPerCycle": 500,
+            "longTailReconvergeDays": 0
+          }
+        }),
+    )
+    .await;
+    assert_no_errors(&set);
+    assert_eq!(
+        set["data"]["updateAcquisitionSettings"]["walkIntervalSeconds"],
+        90
+    );
+
+    let older_client = gql(
+        &ctx,
+        mutation,
+        json!({
+          "input": {
+            "enabled": true,
+            "sameTierMinDelta": 120,
+            "pollIntervalSeconds": 30,
+            "longTailBackfillMaxScopesPerCycle": 500,
+            "longTailReconvergeDays": 0
+          }
+        }),
+    )
+    .await;
+    assert_no_errors(&older_client);
+    assert_eq!(
+        older_client["data"]["updateAcquisitionSettings"]["walkIntervalSeconds"],
+        90
+    );
+
+    let rejected = gql(
+        &ctx,
+        mutation,
+        json!({
+          "input": {
+            "enabled": true,
+            "sameTierMinDelta": 120,
+            "pollIntervalSeconds": 30,
+            "walkIntervalSeconds": 0,
+            "longTailBackfillMaxScopesPerCycle": 500,
+            "longTailReconvergeDays": 0
+          }
+        }),
+    )
+    .await;
+    assert!(
+        rejected["errors"].is_array(),
+        "a walk interval below one second is rejected: {rejected}"
+    );
+}
+
+/// Clients built before the dead upgrade knobs were retired still send them.
+/// The fields stay in the schema as deprecated no-ops: accepted, never stored,
+/// and always reported as 0.
+#[tokio::test]
+async fn graphql_retired_acquisition_fields_are_accepted_and_ignored() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let update = gql(
+        &ctx,
+        r#"
+        mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
+          updateAcquisitionSettings(input: $input) {
             upgradeCooldownHours
             sameTierMinDelta
             crossTierMinDelta
             forcedUpgradeDeltaBypass
-            pollIntervalSeconds
-            longTailBackfillMaxScopesPerCycle
-            longTailReconvergeDays
           }
         }
         "#,
@@ -780,36 +933,11 @@ async fn graphql_typed_acquisition_settings_round_trip() {
     .await;
     assert_no_errors(&update);
 
-    let read = gql(
-        &ctx,
-        r#"
-        query AcquisitionSettings {
-          acquisitionSettings {
-            enabled
-            upgradeCooldownHours
-            sameTierMinDelta
-            crossTierMinDelta
-            forcedUpgradeDeltaBypass
-            pollIntervalSeconds
-            longTailBackfillMaxScopesPerCycle
-            longTailReconvergeDays
-          }
-        }
-        "#,
-        json!({}),
-    )
-    .await;
-    assert_no_errors(&read);
-
-    let settings = &read["data"]["acquisitionSettings"];
-    assert_eq!(settings["enabled"], true);
-    assert_eq!(settings["upgradeCooldownHours"], 18);
+    let settings = &update["data"]["updateAcquisitionSettings"];
     assert_eq!(settings["sameTierMinDelta"], 140);
-    assert_eq!(settings["crossTierMinDelta"], 35);
-    assert_eq!(settings["forcedUpgradeDeltaBypass"], 420);
-    assert_eq!(settings["pollIntervalSeconds"], 45);
-    assert_eq!(settings["longTailBackfillMaxScopesPerCycle"], 750);
-    assert_eq!(settings["longTailReconvergeDays"], 30);
+    assert_eq!(settings["upgradeCooldownHours"], 0);
+    assert_eq!(settings["crossTierMinDelta"], 0);
+    assert_eq!(settings["forcedUpgradeDeltaBypass"], 0);
 }
 
 #[tokio::test]

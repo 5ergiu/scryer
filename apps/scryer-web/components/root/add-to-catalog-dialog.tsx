@@ -263,9 +263,10 @@ export function AddToCatalogDialog({
   // picker is mounted by this condition and nothing prefetches behind it.
   const advancedSelected = facet !== "MOVIE" && draft.monitorType === "ADVANCED";
   const advancedTvdbId = resultTvdbId(result);
+  const advancedSmgId = result.smgId ?? null;
   const advancedBlocksSubmit =
     advancedSelected &&
-    (!advancedTvdbId ||
+    ((!advancedTvdbId && !advancedSmgId) ||
       monitorSelectionLoading ||
       isMonitorSelectionEmpty(draft.monitorSelection));
 
@@ -472,6 +473,7 @@ export function AddToCatalogDialog({
         {advancedSelected ? (
           <MonitorSelectionPicker
             facet={facet}
+            smgId={advancedSmgId}
             tvdbId={advancedTvdbId}
             value={draft.monitorSelection ?? EMPTY_MONITOR_SELECTION}
             onChange={(monitorSelection) => update({ monitorSelection })}

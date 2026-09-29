@@ -1,5 +1,5 @@
-query Titles($ids: [Int!]!, $language: String!) {
-  titles(ids: $ids, language: $language) {
+query Titles($ids: [Int!]!, $language: String!, $includeEpisodes: Boolean! = false, $includeEpisodeOrders: Boolean! = false) {
+  titles(ids: $ids, language: $language, includeEpisodes: $includeEpisodes, includeEpisodeOrders: $includeEpisodeOrders, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     movies {
       id
       kind
@@ -26,7 +26,26 @@ query Titles($ids: [Int!]!, $language: String!) {
       content_ratings { country certifications { value source release_type } age_rating age_rating_source }
       mdblist { mdblist_id trakt_id score score_average age_rating certification commonsense }
       awards { award_qid award_label year recipient_qid recipient_label claim_side }
-      canonical_tags { key category name confidence sources source_tag_keys is_adult is_spoiler }
+      canonical_tags {
+        affinity_signals {
+          affinity_key
+          category
+          tier
+          signal_class
+          confidence
+          sources
+          source_tag_keys
+          rail_eligible
+        }
+        key
+        category
+        name
+        confidence
+        sources
+        source_tag_keys
+        is_adult
+        is_spoiler
+      }
       external_ids { source kind id key }
       studio
       tmdb_release_date
@@ -35,6 +54,139 @@ query Titles($ids: [Int!]!, $language: String!) {
       external_ratings { source value score normalized votes url }
       credits { kind person_id person_name person_original_name person_image_url person_source person_external_id character_name language billing_order episode_count }
       artworks { kind url }
+    }
+    series {
+      id
+      kind
+      primary_source
+      tvdb_id
+      tmdb_id
+      name
+      sort_name
+      slug
+      status
+      year
+      first_aired
+      overview
+      network
+      runtime_minutes
+      poster_url
+      original_language
+      country
+      genres
+      content_ratings { country certifications { value source release_type } age_rating age_rating_source }
+      mdblist { mdblist_id trakt_id score score_average age_rating certification commonsense }
+      awards { award_qid award_label year recipient_qid recipient_label claim_side }
+      canonical_tags {
+        affinity_signals {
+          affinity_key
+          category
+          tier
+          signal_class
+          confidence
+          sources
+          source_tag_keys
+          rail_eligible
+        }
+        key
+        category
+        name
+        confidence
+        sources
+        source_tag_keys
+        is_adult
+        is_spoiler
+      }
+      rating
+      rating_sources
+      external_ratings { source value score normalized votes url }
+      credits { kind person_id person_name person_original_name person_image_url person_source person_external_id character_name language billing_order episode_count }
+      aliases
+      tagged_aliases { name language }
+      artworks { kind url }
+      external_ids { source kind id key }
+      seasons { tvdb_id tmdb_id number label episode_type }
+      episodes {
+        tvdb_id
+        tmdb_id
+        episode_number
+        season_number
+        name
+        aired
+        runtime_minutes
+        is_filler
+        is_recap
+        overview
+        absolute_number
+        contiguous_absolute_number
+        image_url
+      }
+      episode_orders {
+        season_type
+        seasons { season_number name }
+        entries { tvdb_id tmdb_id season_number episode_number absolute_number contiguous_absolute_number name aired }
+      }
+      anime_mappings {
+        mal_id
+        mal_dub_id
+        anilist_id
+        anidb_id
+        kitsu_id
+        simkl_id
+        thetvdb_id
+        themoviedb_id
+        imdb_id
+        trakt_id
+        alt_tvdb_id
+        thetvdb_season
+        thetvdb_part
+        score
+        anime_media_type
+        global_media_type
+        status
+        mapping_type
+        episode_mappings { tvdb_season episode_start episode_end }
+      }
+      anime_numbering_bridge {
+        generated_on
+        corroborating_order
+        seasons {
+          index
+          anidb_id
+          anilist_id
+          mal_id
+          titles
+          ranges { community_episode_start community_episode_end tvdb_season tvdb_episode_start tvdb_episode_end }
+          absolute_start
+          contiguous_absolute_start
+          episode_count
+        }
+      }
+      anime_movies {
+        movie_tvdb_id
+        movie_tmdb_id
+        movie_imdb_id
+        movie_mal_id
+        movie_anidb_id
+        name
+        slug
+        year
+        content_status
+        overview
+        poster_url
+        language
+        runtime_minutes
+        sort_title
+        imdb_id
+        studio
+        digital_release_date
+        association_confidence
+        continuity_status
+        movie_form
+        placement
+        confidence
+        signal_summary
+      }
     }
     missing_ids
     redirects { from_id to_id }

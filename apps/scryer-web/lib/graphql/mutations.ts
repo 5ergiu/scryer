@@ -400,6 +400,7 @@ export const createIndexerMutation = `mutation CreateIndexer($input: CreateIndex
     storedSecretKeys
     rateLimitSeconds
     rateLimitBurst
+    maxQueriesPerMinute
     disabledUntil
     isEnabled
     isManaged
@@ -429,6 +430,7 @@ export const updateIndexerMutation = `mutation UpdateIndexer($input: UpdateIndex
     storedSecretKeys
     rateLimitSeconds
     rateLimitBurst
+    maxQueriesPerMinute
     disabledUntil
     isEnabled
     isManaged
@@ -849,11 +851,9 @@ export const testSubtitleProviderConnectionMutation = `mutation TestSubtitleProv
 export const updateAcquisitionSettingsMutation = `mutation UpdateAcquisitionSettings($input: UpdateAcquisitionSettingsInput!) {
   updateAcquisitionSettings(input: $input) {
     enabled
-    upgradeCooldownHours
     sameTierMinDelta
-    crossTierMinDelta
-    forcedUpgradeDeltaBypass
     pollIntervalSeconds
+    walkIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays
   }
@@ -2214,6 +2214,18 @@ export const emptyRecycleBinMutation = `mutation EmptyRecycleBin($libraryIds: [I
 export const updateRecycleBinSettingsMutation = `mutation UpdateRecycleBinSettings($input: UpdateRecycleBinSettingsInput!) {
   updateRecycleBinSettings(input: $input) {
     enabled
+    path
+    retentionDays
+    effectivePaths
+    validationError
+    relocation {
+      movedCount
+      failures {
+        entryId
+        fromPath
+        reason
+      }
+    }
   }
 }`;
 
@@ -2390,6 +2402,18 @@ export const validateRuleSetMutation = `mutation ValidateRuleSet($input: Validat
 export const testRuleSetMutation = `mutation TestRuleSet($input: TestRuleSetInput!) {
   testRuleSet(input: $input) {
     score
+    releaseName
+    mediaFileId
+    listing {
+      publishedAt
+      ageDays
+      thumbsUp
+      thumbsDown
+      isPasswordProtected
+      indexerLanguages
+      extra
+      capturedAt
+    }
     allowed
     blocked
     minimumScoreMet
@@ -3195,5 +3219,88 @@ export const resumeLocationOperationMutation = `mutation ResumeLocationOperation
     id
     resumed
     detail
+  }
+}`;
+
+const LIST_SUBSCRIPTION_MUTATION_FIELDS = `
+    id
+    name
+    enabled
+    mode
+    onLeave
+    sync {
+      state
+      lastAt
+      nextAt
+      errorMessage
+    }`;
+
+export const subscribeListMutation = `mutation SubscribeList($input: SubscribeListInput!) {
+  subscribeList(input: $input) {${LIST_SUBSCRIPTION_MUTATION_FIELDS}
+  }
+}`;
+
+export const updateListSubscriptionMutation = `mutation UpdateListSubscription($id: ID!, $input: UpdateListSubscriptionInput!) {
+  updateListSubscription(id: $id, input: $input) {${LIST_SUBSCRIPTION_MUTATION_FIELDS}
+  }
+}`;
+
+export const setListSubscriptionEnabledMutation = `mutation SetListSubscriptionEnabled($id: ID!, $enabled: Boolean!) {
+  setListSubscriptionEnabled(id: $id, enabled: $enabled) {${LIST_SUBSCRIPTION_MUTATION_FIELDS}
+  }
+}`;
+
+export const syncListSubscriptionMutation = `mutation SyncListSubscription($id: ID!) {
+  syncListSubscription(id: $id) {
+    subscriptionIds
+  }
+}`;
+
+export const syncAllListsMutation = `mutation SyncAllLists($scope: ListScope) {
+  syncAllLists(scope: $scope) {
+    subscriptionIds
+  }
+}`;
+
+export const unsubscribeListMutation = `mutation UnsubscribeList($id: ID!) {
+  unsubscribeList(id: $id)
+}`;
+
+export const addListExclusionMutation = `mutation AddListExclusion($input: AddListExclusionInput!) {
+  addListExclusion(input: $input) {
+    id
+    displayTitle
+    scope
+  }
+}`;
+
+export const removeListExclusionMutation = `mutation RemoveListExclusion($id: ID!) {
+  removeListExclusion(id: $id)
+}`;
+
+export const updateListProviderSettingsMutation = `mutation UpdateListProviderSettings($provider: String!, $changes: [ListProviderSettingChangeInput!]!) {
+  updateListProviderSettings(provider: $provider, changes: $changes) {
+    providerType
+    fields {
+      key
+      label
+      helpText
+      type
+      required
+      secret
+      isSet
+      value
+    }
+  }
+}`;
+
+export const setMemberListPolicyMutation = `mutation SetMemberListPolicy($userId: ID!, $policy: ListPolicy!) {
+  setMemberListPolicy(userId: $userId, policy: $policy) {
+    user {
+      id
+      username
+    }
+    policy
+    listRequestsLast30d
   }
 }`;

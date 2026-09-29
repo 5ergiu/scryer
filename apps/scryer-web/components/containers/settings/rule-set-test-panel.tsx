@@ -8,13 +8,19 @@ import {
   scoringEntryText,
   type ScoringEntryKind,
 } from "@/lib/utils/release-decision-explanation";
-import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { testRuleSetMutation } from "@/lib/graphql/mutations";
 import {
   ruleSetTestTitleCollectionsQuery,
   seriesCollectionEpisodesQuery,
+  titleMediaFilesQuery,
 } from "@/lib/graphql/queries";
 import type { RuleSetDraft } from "@/lib/types/rule-sets";
 import type { TitleRecord } from "@/lib/types/titles";
@@ -22,12 +28,19 @@ import { titleIsEpisodic } from "@/lib/utils/grab-dialog";
 import {
   canTestRuleSet,
   buildRuleSetTestInput,
+  EMPTY_RULE_SET_TEST_LISTING,
+  listingInputFromDraft,
   formatSignedScore,
   RuleSetTestRequestController,
   ruleSetTestFingerprint,
   shouldApplyRuleSetTestResponse,
   sizeBytesFromGib,
+  storedFileOptions,
+  type RuleSetTestListingDraft,
+  type RuleSetTestListingFacts,
+  type RuleSetTestMode,
   type RuleSetTestSelection,
+  type RuleSetTestStoredFileRow,
 } from "@/lib/utils/rule-set-test-preview";
 
 type Collection = {
@@ -62,6 +75,9 @@ type PreviewRuleSet = {
 };
 type PreviewResult = {
   score?: number;
+  releaseName?: string;
+  mediaFileId?: string | null;
+  listing?: RuleSetTestListingFacts | null;
   allowed?: boolean;
   blocked?: boolean;
   minimumScoreMet?: boolean;
@@ -110,6 +126,61 @@ function episodeLabel(episode: Episode): string {
     : title
       ? `${prefix} - ${title}`
       : prefix;
+}
+
+const LISTING_TEXT_FIELDS = [
+  ["publishedAt", "settings.ruleTestListingPublishedAt"],
+  ["thumbsUp", "settings.ruleTestListingThumbsUp"],
+  ["thumbsDown", "settings.ruleTestListingThumbsDown"],
+  ["indexerLanguages", "settings.ruleTestListingIndexerLanguages"],
+] as const;
+
+function listingFactLines(
+  listing: RuleSetTestListingFacts,
+  storedFile: boolean,
+  t: ReturnType<typeof useTranslate>,
+): Array<readonly [string, string]> {
+  const unknown = t("settings.ruleTestListingUnknown");
+  const extra = listing.extra ?? {};
+  const age =
+    listing.ageDays == null
+      ? unknown
+      : storedFile
+        ? t("settings.ruleTestResultAgeAtGrab", { days: listing.ageDays })
+        : String(listing.ageDays);
+  return [
+    [t("settings.ruleTestListingPublishedAt"), listing.publishedAt || unknown],
+    [t("settings.ruleTestResultAgeDays"), age],
+    [
+      t("settings.ruleTestListingThumbsUp"),
+      listing.thumbsUp == null ? unknown : String(listing.thumbsUp),
+    ],
+    [
+      t("settings.ruleTestListingThumbsDown"),
+      listing.thumbsDown == null ? unknown : String(listing.thumbsDown),
+    ],
+    [
+      t("settings.ruleTestListingPasswordProtected"),
+      listing.isPasswordProtected == null
+        ? unknown
+        : t(
+            listing.isPasswordProtected
+              ? "settings.ruleTestListingYes"
+              : "settings.ruleTestListingNo",
+          ),
+    ],
+    [
+      t("settings.ruleTestListingIndexerLanguages"),
+      listing.indexerLanguages?.length
+        ? listing.indexerLanguages.join(", ")
+        : unknown,
+    ],
+    [
+      t("settings.ruleTestListingExtra"),
+      Object.keys(extra).length ? JSON.stringify(extra) : unknown,
+    ],
+    [t("settings.ruleTestResultCapturedAt"), listing.capturedAt || unknown],
+  ];
 }
 
 function previewEntryLabel(
@@ -168,6 +239,14 @@ export function RuleSetTestPanel({
   const [episodeId, setEpisodeId] = React.useState("");
   const [releaseName, setReleaseName] = React.useState("");
   const [sizeGib, setSizeGib] = React.useState("");
+  const [mode, setMode] = React.useState<RuleSetTestMode>("release");
+  const [storedFiles, setStoredFiles] = React.useState<RuleSetTestStoredFileRow[]>([]);
+  const [mediaFileId, setMediaFileId] = React.useState("");
+  const [loadingFiles, setLoadingFiles] = React.useState(false);
+  const [listingOpen, setListingOpen] = React.useState(false);
+  const [listing, setListing] = React.useState<RuleSetTestListingDraft>(
+    EMPTY_RULE_SET_TEST_LISTING,
+  );
   const [loadingEpisodes, setLoadingEpisodes] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -178,11 +257,24 @@ export function RuleSetTestPanel({
   const controllerRef = React.useRef(new RuleSetTestRequestController());
   const committedFingerprintRef = React.useRef("");
 
+  const storedFileMode = mode === "storedFile";
+  const fileOptions = React.useMemo(
+    () => storedFileOptions(storedFiles, episodeId || null),
+    [storedFiles, episodeId],
+  );
+  // A file that does not cover the selected episode is never offered, and
+  // never stays selected.
+  const selectedFileId = fileOptions.some((file) => file.id === mediaFileId)
+    ? mediaFileId
+    : "";
   const selection: RuleSetTestSelection = {
     titleId: selectedTitle?.id ?? null,
     episodeId: episodeId || null,
     releaseName,
     sizeGib,
+    mode,
+    mediaFileId: selectedFileId || null,
+    listing,
   };
   const episodic = titleIsEpisodic(selectedTitle);
   const savedRuleSetMode = testRuleSetId !== null;
@@ -259,6 +351,38 @@ export function RuleSetTestPanel({
     };
   }, [client, episodic, selectedTitle]);
 
+  React.useEffect(() => {
+    if (!selectedTitle || mode !== "storedFile") {
+      setStoredFiles([]);
+      setMediaFileId("");
+      setLoadingFiles(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      setLoadingFiles(true);
+      setMediaFileId("");
+      try {
+        const { data, error: filesError } = await client
+          .query(titleMediaFilesQuery, { id: selectedTitle.id })
+          .toPromise();
+        if (filesError) throw filesError;
+        if (!cancelled)
+          setStoredFiles((data?.title?.mediaFiles ?? []) as RuleSetTestStoredFileRow[]);
+      } catch {
+        if (!cancelled) setError(t("settings.ruleTestStoredFileLoadFailed"));
+      } finally {
+        if (!cancelled) setLoadingFiles(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, mode, selectedTitle, t]);
+
+  const updateListing = (field: keyof RuleSetTestListingDraft, value: string) =>
+    setListing((current) => ({ ...current, [field]: value }));
+
   const clearEpisodeChoices = () => {
     setEpisodes([]);
     setEpisodeId("");
@@ -272,9 +396,16 @@ export function RuleSetTestPanel({
 
   const test = async () => {
     if (!canTest || !selectedTitle) return;
-    const size = sizeBytesFromGib(sizeGib);
+    const size = storedFileMode ? { value: undefined } : sizeBytesFromGib(sizeGib);
     if ("error" in size) {
       setError(size.error);
+      return;
+    }
+    const listingInput = storedFileMode
+      ? { value: undefined }
+      : listingInputFromDraft(listing);
+    if ("error" in listingInput) {
+      setError(t(listingInput.error));
       return;
     }
     const request = controllerRef.current.begin();
@@ -289,8 +420,13 @@ export function RuleSetTestPanel({
         testRuleSetId,
         titleId: selectedTitle.id,
         episodeId: episodic ? episodeId || undefined : undefined,
-        releaseName: releaseName.trim(),
-        sizeBytes: size.value,
+        ...(storedFileMode
+          ? { mediaFileId: selectedFileId }
+          : {
+              releaseName: releaseName.trim(),
+              sizeBytes: size.value,
+              listing: listingInput.value,
+            }),
       });
       const { data, error: mutationError } = await client
         .mutation(testRuleSetMutation, { input })
@@ -348,17 +484,42 @@ export function RuleSetTestPanel({
           create history.
         </p>
         <div className="space-y-3">
-          <div>
-            <Label htmlFor="settings-rule-test-release" className="mb-1 block">
-              Release name
-            </Label>
-            <Input
-              id="settings-rule-test-release"
-              value={releaseName}
-              onChange={(event) => setReleaseName(event.target.value)}
-              placeholder="Example.Show.S01E01.1080p.WEB-DL"
-            />
-          </div>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            value={mode}
+            onValueChange={(value) => {
+              if (value === "release" || value === "storedFile") {
+                setMode(value);
+                setError(null);
+              }
+            }}
+            aria-label={t("settings.ruleTestModeLabel")}
+          >
+            <ToggleGroupItem value="release" variant="outline" size="sm">
+              {t("settings.ruleTestModeRelease")}
+            </ToggleGroupItem>
+            <ToggleGroupItem value="storedFile" variant="outline" size="sm">
+              {t("settings.ruleTestModeStoredFile")}
+            </ToggleGroupItem>
+          </ToggleGroup>
+          {storedFileMode ? null : (
+            <div>
+              <Label
+                htmlFor="settings-rule-test-release"
+                className="mb-1 block"
+              >
+                Release name
+              </Label>
+              <Input
+                id="settings-rule-test-release"
+                value={releaseName}
+                onChange={(event) => setReleaseName(event.target.value)}
+                placeholder="Example.Show.S01E01.1080p.WEB-DL"
+              />
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-2">
             <div>
               <Label className="mb-1 block">Library title</Label>
@@ -398,18 +559,164 @@ export function RuleSetTestPanel({
               </div>
             ) : null}
           </div>
-          <div className="max-w-sm">
-            <Label htmlFor="settings-rule-test-size" className="mb-1 block">
-              Size (GiB, optional)
-            </Label>
-            <Input
-              id="settings-rule-test-size"
-              inputMode="decimal"
-              value={sizeGib}
-              onChange={(event) => setSizeGib(event.target.value)}
-              placeholder="Unknown"
-            />
-          </div>
+          {storedFileMode ? (
+            <div>
+              <Label
+                htmlFor="settings-rule-test-stored-file"
+                className="mb-1 block"
+              >
+                {t("settings.ruleTestStoredFile")}
+              </Label>
+              <FilterableSelect
+                id="settings-rule-test-stored-file"
+                value={selectedFileId}
+                onValueChange={setMediaFileId}
+                options={fileOptions.map((file) => ({
+                  value: file.id,
+                  label: file.label,
+                }))}
+                placeholder={
+                  !selectedTitle
+                    ? t("settings.ruleTestStoredFileSelectTitle")
+                    : loadingFiles
+                      ? t("settings.ruleTestStoredFileLoading")
+                      : fileOptions.length
+                        ? t("settings.ruleTestStoredFilePlaceholder")
+                        : t("settings.ruleTestStoredFileNone")
+                }
+                filterPlaceholder={t("settings.ruleTestStoredFileFilter")}
+                filterByValue={false}
+                ariaLabel={t("settings.ruleTestStoredFile")}
+                optionIdPrefix="settings-rule-test-stored-file-option"
+                disabled={!selectedTitle || loadingFiles || !fileOptions.length}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("settings.ruleTestStoredFileHelp")}
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="max-w-sm">
+                <Label
+                  htmlFor="settings-rule-test-size"
+                  className="mb-1 block"
+                >
+                  Size (GiB, optional)
+                </Label>
+                <Input
+                  id="settings-rule-test-size"
+                  inputMode="decimal"
+                  value={sizeGib}
+                  onChange={(event) => setSizeGib(event.target.value)}
+                  placeholder="Unknown"
+                />
+              </div>
+              <Collapsible
+                open={listingOpen}
+                onOpenChange={setListingOpen}
+                className="rounded border border-border"
+              >
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium"
+                  >
+                    {t("settings.ruleTestListingFacts")}
+                    <span aria-hidden="true" className="text-muted-foreground">
+                      {listingOpen ? "−" : "+"}
+                    </span>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-3 border-t border-border px-3 py-3">
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.ruleTestListingFactsHelp")}
+                  </p>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {LISTING_TEXT_FIELDS.map(([field, labelKey]) => (
+                      <div key={field}>
+                        <Label
+                          htmlFor={`settings-rule-test-listing-${field}`}
+                          className="mb-1 block"
+                        >
+                          {t(labelKey)}
+                        </Label>
+                        <Input
+                          id={`settings-rule-test-listing-${field}`}
+                          inputMode={
+                            field === "thumbsUp" || field === "thumbsDown"
+                              ? "numeric"
+                              : undefined
+                          }
+                          value={listing[field]}
+                          onChange={(event) =>
+                            updateListing(field, event.target.value)
+                          }
+                          placeholder={
+                            field === "publishedAt"
+                              ? t(
+                                  "settings.ruleTestListingPublishedAtPlaceholder",
+                                )
+                              : field === "indexerLanguages"
+                                ? "en, de"
+                                : t("settings.ruleTestListingUnknown")
+                          }
+                        />
+                      </div>
+                    ))}
+                    <div>
+                      <p
+                        id="settings-rule-test-listing-password-protected"
+                        className="mb-1 block text-sm leading-none font-medium select-none"
+                      >
+                        {t("settings.ruleTestListingPasswordProtected")}
+                      </p>
+                      <ToggleGroup
+                        type="single"
+                        variant="outline"
+                        size="sm"
+                        value={listing.isPasswordProtected || "unknown"}
+                        onValueChange={(value) =>
+                          updateListing(
+                            "isPasswordProtected",
+                            value === "true" || value === "false" ? value : "",
+                          )
+                        }
+                        aria-labelledby="settings-rule-test-listing-password-protected"
+                      >
+                        <ToggleGroupItem value="unknown" variant="outline" size="sm">
+                          {t("settings.ruleTestListingUnknown")}
+                        </ToggleGroupItem>
+                        <ToggleGroupItem value="true" variant="outline" size="sm">
+                          {t("settings.ruleTestListingYes")}
+                        </ToggleGroupItem>
+                        <ToggleGroupItem value="false" variant="outline" size="sm">
+                          {t("settings.ruleTestListingNo")}
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                    </div>
+                  </div>
+                  <div>
+                    <Label
+                      htmlFor="settings-rule-test-listing-extra"
+                      className="mb-1 block"
+                    >
+                      {t("settings.ruleTestListingExtra")}
+                    </Label>
+                    <textarea
+                      id="settings-rule-test-listing-extra"
+                      className="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs"
+                      value={listing.extra}
+                      onChange={(event) =>
+                        updateListing("extra", event.target.value)
+                      }
+                      placeholder='{"freeleech": true}'
+                      spellCheck={false}
+                    />
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            </>
+          )}
         </div>
         <div className="mt-3 flex items-center gap-3">
           <Button type="button" onClick={() => void test()} disabled={!canTest}>
@@ -590,6 +897,39 @@ export function RuleSetTestPanel({
                 <p>
                   <span className="font-medium">Tags:</span>{" "}
                   {result.context.tags.join(", ")}
+                </p>
+              ) : null}
+            </div>
+            <div className="space-y-1 text-xs">
+              {result.releaseName ? (
+                <p className="break-words">
+                  <span className="font-medium">
+                    {t("settings.ruleTestResultRelease")}:
+                  </span>{" "}
+                  {result.releaseName}
+                </p>
+              ) : null}
+              {result.listing ? (
+                <div>
+                  <p className="font-medium">
+                    {t("settings.ruleTestListingFacts")}
+                  </p>
+                  <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
+                    {listingFactLines(
+                      result.listing,
+                      Boolean(result.mediaFileId),
+                      t,
+                    ).map(([label, value]) => (
+                      <React.Fragment key={label}>
+                        <dt className="text-muted-foreground">{label}</dt>
+                        <dd className="break-words">{value}</dd>
+                      </React.Fragment>
+                    ))}
+                  </dl>
+                </div>
+              ) : result.mediaFileId ? (
+                <p className="text-[var(--scry-warning-text)]">
+                  {t("settings.ruleTestResultListingUnknown")}
                 </p>
               ) : null}
             </div>

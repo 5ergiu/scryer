@@ -105,6 +105,7 @@ fn accepted_submission(
         release_size_bytes: None,
         request_signature: None,
         purpose: DownloadSubmissionPurpose::Standard,
+        release_listing_json: None,
     }
 }
 
@@ -494,6 +495,7 @@ async fn observation_stub_keeps_a_foreign_job_foreign_through_a_native_id_reuse(
             request_signature: None,
             purpose: DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Orphan,
+            release_listing_json: None,
         })
         .await
         .expect("observation stub should persist");

@@ -53,8 +53,10 @@ async fn graphql_media_rename_preview_for_anime_uses_media_file_rows() {
             is_filler: false,
             is_recap: false,
             absolute_number: Some("12".to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("9100103".to_string()),
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -208,8 +210,10 @@ async fn graphql_media_rename_preview_for_anime_uses_saved_anime_template() {
             is_filler: false,
             is_recap: false,
             absolute_number: Some("7".to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("9156701".to_string()),
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -502,8 +506,10 @@ async fn apply_media_rename_for_anime_updates_media_files_and_series_movie_speci
             is_filler: false,
             is_recap: false,
             absolute_number: Some("1".to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("9300101".to_string()),
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -1035,8 +1041,10 @@ async fn graphql_media_rename_preview_for_anime_tracked_destination_returns_erro
             is_filler: false,
             is_recap: false,
             absolute_number: Some("12".to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("9500103".to_string()),
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -1531,8 +1539,10 @@ async fn apply_media_rename_for_anime_rolls_back_when_media_file_update_fails() 
             is_filler: false,
             is_recap: false,
             absolute_number: Some("1".to_string()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: Some("9800101".to_string()),
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -1693,8 +1703,10 @@ async fn graphql_media_rename_preview_scopes_returned_items_without_changing_cou
                     is_filler: false,
                     is_recap: false,
                     absolute_number: Some(absolute_number),
+                    contiguous_absolute_number: None,
                     overview: None,
                     tvdb_id: None,
+                    tmdb_id: None,
                     image_url: None,
                     monitored: true,
                     created_at: chrono::Utc::now(),
@@ -1821,65 +1833,8 @@ async fn graphql_media_rename_preview_does_not_refresh_stale_title_metadata_lang
     let media_root = tempfile::tempdir().expect("media root tempdir");
     configure_default_library_root(&ctx, MediaFacet::Movie, media_root.path()).await;
 
-    let localized_movie_response = json!({
-        "data": {
-            "movie": {
-                "movie": {
-                    "tvdb_id": 94123,
-                    "name": "現地化された映画",
-                    "slug": "localized-rename-movie",
-                    "year": 2024,
-                    "status": "Released",
-                    "overview": "",
-                    "poster_url": "",
-                    "language": "jpn",
-                    "original_language": "jpn",
-                    "runtime_minutes": 120,
-                    "sort_title": "現地化された映画",
-                    "imdb_id": "",
-                    "tmdb_id": null,
-                    "tmdb_popularity": null,
-                    "anidb_id": null,
-                    "canonical_tags": [],
-                    "studio": "",
-                    "tmdb_release_date": null,
-                    "rating": null,
-                    "rating_sources": [],
-                    "external_ratings": [],
-                    "credits": [],
-                    "artworks": []
-                }
-            }
-        }
-    });
-    Mock::given(method("GET"))
-        .and(path("/graphql"))
-        .and(query_param("operationName", "GetMovie"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(localized_movie_response.clone()))
-        .with_priority(1)
-        .mount(&ctx.smg_server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("GetMovie"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(localized_movie_response))
-        .with_priority(1)
-        .mount(&ctx.smg_server)
-        .await;
-    // This fixture models an older gateway: title-id lookup is rejected, so a
-    // TVDB-backed movie must fall back to the legacy GetMovie operation.
-    Mock::given(method("GET"))
-        .and(path("/graphql"))
-        .and(query_param("operationName", "ResolveTitles"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "errors": [{
-                "message": "Cannot query field \"resolveTitles\" on type \"Query\"."
-            }]
-        })))
-        .with_priority(2)
-        .mount(&ctx.smg_server)
-        .await;
-
+    // No gateway route is mounted: the mock server records every request it
+    // receives, so any hydration the preview triggered shows up below.
     let title = create_catalog_title(
         &ctx,
         "Saved English Title",
@@ -2042,8 +1997,10 @@ async fn graphql_media_rename_preview_bulk_matches_per_title_previews() {
                 is_filler: false,
                 is_recap: false,
                 absolute_number: Some("12".to_string()),
+                contiguous_absolute_number: None,
                 overview: None,
                 tvdb_id: None,
+                tmdb_id: None,
                 image_url: None,
                 monitored: true,
                 created_at: chrono::Utc::now(),

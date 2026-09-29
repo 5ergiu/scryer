@@ -242,7 +242,10 @@ export function FilteredPluginList({
                           </span>
                         </div>
                         {plugin.description ? (
-                          <p className={`mt-0.5 line-clamp-2 text-[11.5px] leading-snug ${FILTERED_PLUGIN_MUTED_CLASS}`}>
+                          <p
+                            title={plugin.description}
+                            className={`mt-0.5 line-clamp-2 text-[11.5px] leading-snug ${FILTERED_PLUGIN_MUTED_CLASS}`}
+                          >
                             {plugin.description}
                           </p>
                         ) : null}

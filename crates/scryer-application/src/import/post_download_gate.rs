@@ -38,6 +38,9 @@ pub(crate) struct PreparedImportCandidate {
     pub accepted: Box<ImportedFileAcceptance>,
     pub rescore_changes: Vec<String>,
     pub source_snapshot: scryer_domain::ImportSourceSnapshot,
+    /// The listing snapshot of the Scryer grab this file came from; `None`
+    /// for scans and adopted downloads.
+    pub release_listing_json: Option<String>,
 }
 
 pub(crate) struct PostDownloadAcquisitionDecision {
@@ -68,6 +71,10 @@ pub struct ImportedFileRejection {
 
 pub(crate) const DISC_REVIEW_REQUIRED_CODE: &str = "disc_review_required";
 pub(crate) const MEDIA_ANALYSIS_REVIEW_REQUIRED_CODE: &str = "media_analysis_review_required";
+/// A post-download rule failed to evaluate. The gate cannot tell whether the
+/// failing rule would have refused the file, so the import is held for the
+/// operator instead of proceeding as though every rule had passed.
+pub(crate) const POST_DOWNLOAD_RULE_ERROR_CODE: &str = "post_download_rule_error";
 
 impl ImportedFileRejection {
     pub(crate) fn requires_review(&self) -> bool {
@@ -76,10 +83,31 @@ impl ImportedFileRejection {
             RUNTIME_OUT_OF_BAND_CODE
                 | DISC_REVIEW_REQUIRED_CODE
                 | MEDIA_ANALYSIS_REVIEW_REQUIRED_CODE
+                | POST_DOWNLOAD_RULE_ERROR_CODE
         ) || self
             .blocking_rule_codes
             .iter()
             .any(|code| code == SOURCE_CHANGED_AFTER_PROBE_CODE)
+    }
+
+    /// The skip reason a review hold reports.
+    ///
+    /// A rule-error hold keeps `PostDownloadRuleBlocked` so the result is routed
+    /// by its code: its message quotes operator-authored rule text and must never
+    /// be read as a transient failure. Every other review hold keeps reporting
+    /// `PolicyMismatch`, which a source-changed hold relies on to be retried.
+    pub(crate) fn review_hold_skip_reason(&self) -> ImportSkipReason {
+        review_hold_skip_reason_for_code(self.recycle_reason)
+    }
+}
+
+/// [`ImportedFileRejection::review_hold_skip_reason`] for a hold that only
+/// carries the rejection's code.
+pub(crate) fn review_hold_skip_reason_for_code(code: &str) -> ImportSkipReason {
+    if code == POST_DOWNLOAD_RULE_ERROR_CODE {
+        ImportSkipReason::PostDownloadRuleBlocked
+    } else {
+        ImportSkipReason::PolicyMismatch
     }
 }
 
@@ -105,6 +133,116 @@ fn import_source_changed_rejection(
         skip_reason: Some(ImportSkipReason::PolicyMismatch),
         blocking_rule_codes: vec![SOURCE_CHANGED_AFTER_PROBE_CODE.to_string()],
     }
+}
+
+/// Longest engine error text quoted per failing rule in the operator message.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+const RULE_ERROR_DETAIL_MAX_CHARS: usize = 240;
+/// Failing rules named individually before the rest are summarised as a count.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+const RULE_ERROR_MAX_LISTED: usize = 3;
+
+/// Collapse every run of whitespace, newlines included, to one space.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+fn single_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The engine's own error sentence, on one line and bounded.
+///
+/// Regorus reports a runtime error as a source excerpt (path, the offending
+/// line, a caret padded to the column) followed by a final `error: <message>`
+/// line. The excerpt is noise in an Activity status and would push the real
+/// error past the cap, so only that last line is kept.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+fn truncate_rule_error_detail(detail: &str) -> String {
+    let last_line = detail
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let last_line = last_line.strip_prefix("error:").unwrap_or(last_line);
+    let detail = single_line(last_line);
+    let mut chars = detail.chars();
+    let truncated: String = chars.by_ref().take(RULE_ERROR_DETAIL_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+#[cfg(any(feature = "runtime-media-analysis", test))]
+fn post_download_rule_error_rejection(message: String) -> ImportedFileRejection {
+    ImportedFileRejection {
+        message,
+        recycle_reason: POST_DOWNLOAD_RULE_ERROR_CODE,
+        skip_reason: Some(ImportSkipReason::PostDownloadRuleBlocked),
+        blocking_rule_codes: vec![POST_DOWNLOAD_RULE_ERROR_CODE.to_string()],
+    }
+}
+
+/// The rule entries to score, or the review hold when a user rule failed to
+/// run.
+///
+/// Fails closed on user-written rules: a user rule that errored might have been
+/// the one refusing this file, so none of the other rules' entries are scored
+/// when any user rule errored. The message names each failing user rule with
+/// the engine's error text, because it is what the operator sees on the blocked
+/// import.
+///
+/// A managed (built-in or pack-provided) rule that errors is logged and
+/// skipped instead: the operator cannot edit it, so holding every import on it
+/// would leave nothing to act on. An errored rule contributes no entries, so the
+/// remaining rules' entries are scored without it.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+pub(crate) fn post_download_rule_entries(
+    outcome: Result<scryer_rules::EvalResult, scryer_rules::RulesError>,
+) -> Result<Vec<scryer_rules::UserRuleEntry>, ImportedFileRejection> {
+    let result = match outcome {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(post_download_rule_error_rejection(format!(
+                "post-download rules could not be evaluated; import held for review: {}",
+                truncate_rule_error_detail(&error.to_string())
+            )));
+        }
+    };
+    let (managed_errors, user_errors): (Vec<_>, Vec<_>) = result
+        .errors
+        .into_iter()
+        .partition(|error| error.origin == scryer_rules::PolicyOrigin::System);
+    for error in &managed_errors {
+        warn!(
+            rule_set_id = %error.rule_set_id,
+            rule_set_name = %error.rule_set_name,
+            error = %truncate_rule_error_detail(&error.message),
+            "managed post-download rule failed to evaluate; skipping it"
+        );
+    }
+    if user_errors.is_empty() {
+        return Ok(result.entries);
+    }
+    let mut failures = user_errors
+        .iter()
+        .take(RULE_ERROR_MAX_LISTED)
+        .map(|error| {
+            format!(
+                "{} ({}): {}",
+                single_line(&error.rule_set_name),
+                single_line(&error.rule_set_id),
+                truncate_rule_error_detail(&error.message)
+            )
+        })
+        .collect::<Vec<_>>();
+    let unlisted = user_errors.len().saturating_sub(RULE_ERROR_MAX_LISTED);
+    if unlisted > 0 {
+        failures.push(format!("{unlisted} more rule(s) failed"));
+    }
+    Err(post_download_rule_error_rejection(format!(
+        "post-download rule failed to evaluate; import held for review: {}",
+        failures.join("; ")
+    )))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,6 +768,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     // Before anything touches the file, and on the calling thread (the override
     // is thread-local, and the real probe hands off to `spawn_blocking`).
@@ -904,6 +1043,9 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         };
         let resolved_profile =
             resolved_import_profile(quality_profile, &required_audio_languages, &persona);
+        // The grab's frozen listing facts, aged at the grab instant.
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
         for scoped_analysis in &scoring_analyses {
             let scoped_file_doc = crate::user_rule_input::file_doc_from_analysis(scoped_analysis);
             let (rescored_for_rules, _) =
@@ -926,15 +1068,10 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
                 &rescored_for_rules,
                 &resolved_profile,
                 &decision,
-                crate::user_rule_input::ReleaseRuntimeInfo {
-                    size_bytes: quality_size_bytes,
-                    published_at: None,
-                    thumbs_up: None,
-                    thumbs_down: None,
-                    is_password_protected: None,
-                    extra: None,
-                    indexer_languages: None,
-                },
+                crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                    quality_size_bytes,
+                    listing.as_ref(),
+                ),
                 crate::user_rule_input::RuleContextInfo {
                     title_id: Some(&title.id),
                     library_name: library_name.as_deref(),
@@ -954,42 +1091,34 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
                 Some(scoped_file_doc),
             );
             let mut evaluator = user_rules_engine.evaluator();
-            match evaluator.evaluate(&input, facet_to_category_hint(&title.facet)) {
-                Ok(result) => {
-                    if !result.errors.is_empty() {
-                        warn!(
-                            title_id = %title.id,
-                            error_count = result.errors.len(),
-                            "post-download rule evaluation had runtime errors; failing open"
-                        );
-                    }
-
-                    let blocking_rule_codes = finalize_post_download_rule_scores(
-                        &resolved_profile,
-                        &mut decision,
-                        result.entries,
-                    );
-
-                    if !blocking_rule_codes.is_empty() {
-                        return ImportedFileGateDecision::Rejected(ImportedFileRejection {
-                            message: format!(
-                                "post-download score {} rejected import: {}",
-                                decision.release_score,
-                                blocking_rule_codes.join(", ")
-                            ),
-                            recycle_reason: "post_download_rule_blocked",
-                            skip_reason: Some(ImportSkipReason::PostDownloadRuleBlocked),
-                            blocking_rule_codes,
-                        });
-                    }
-                }
-                Err(error) => {
+            let entries = match post_download_rule_entries(
+                evaluator.evaluate(&input, facet_to_category_hint(&title.facet)),
+            ) {
+                Ok(entries) => entries,
+                Err(rejection) => {
                     warn!(
-                        error = %error,
                         title_id = %title.id,
-                        "post-download rule evaluation failed; failing open"
+                        reason = %rejection.message,
+                        "post-download rule evaluation failed; holding import for review"
                     );
+                    return ImportedFileGateDecision::Rejected(rejection);
                 }
+            };
+
+            let blocking_rule_codes =
+                finalize_post_download_rule_scores(&resolved_profile, &mut decision, entries);
+
+            if !blocking_rule_codes.is_empty() {
+                return ImportedFileGateDecision::Rejected(ImportedFileRejection {
+                    message: format!(
+                        "post-download score {} rejected import: {}",
+                        decision.release_score,
+                        blocking_rule_codes.join(", ")
+                    ),
+                    recycle_reason: "post_download_rule_blocked",
+                    skip_reason: Some(ImportSkipReason::PostDownloadRuleBlocked),
+                    blocking_rule_codes,
+                });
             }
         }
     }
@@ -1019,6 +1148,7 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
     _is_filler: bool,
     _runtime_sample_validation: RuntimeSampleValidation,
     _disc_selection: Option<&scryer_media_types::DiscSelection>,
+    _release_listing_json: Option<&str>,
 ) -> ImportedFileGateDecision {
     if scryer_domain::is_disc_image(path) {
         return ImportedFileGateDecision::Rejected(disc_review_rejection(
@@ -1134,6 +1264,7 @@ pub(crate) async fn prepare_import_candidate(
     existing_score: Option<i32>,
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     prepare_import_candidate_with_disc_selection(
         app,
@@ -1147,6 +1278,7 @@ pub(crate) async fn prepare_import_candidate(
         is_filler,
         runtime_sample_validation,
         None,
+        release_listing_json,
     )
     .await
 }
@@ -1167,6 +1299,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
     is_filler: bool,
     runtime_sample_validation: RuntimeSampleValidation,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
+    release_listing_json: Option<&str>,
 ) -> Result<PreparedImportCandidate, ImportedFileRejection> {
     if disc_selection.is_some() && !scryer_domain::is_disc_image(path) {
         return Err(disc_review_rejection(
@@ -1193,6 +1326,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
         is_filler,
         runtime_sample_validation,
         disc_selection,
+        release_listing_json,
     )
     .await
     {
@@ -1238,6 +1372,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
                 accepted,
                 rescore_changes,
                 source_snapshot: source_snapshot_after,
+                release_listing_json: release_listing_json.map(str::to_string),
             })
         }
     }
@@ -1706,6 +1841,7 @@ pub(crate) fn compute_post_download_acquisition_decision(
     size_bytes: i64,
     prior_rescore_changes: &[String],
     is_filler: bool,
+    listing: Option<crate::canonical_scoring::ListingFacts>,
 ) -> PostDownloadAcquisitionDecision {
     let (rescored, changes) = rescore_from_mediainfo(parsed, acceptance);
     let mut rescore_changes = prior_rescore_changes.to_vec();
@@ -1735,8 +1871,11 @@ pub(crate) fn compute_post_download_acquisition_decision(
         None,
     );
 
+    // The grab's frozen listing snapshot, anchored at the grab: the same
+    // listing facts the grab scored, and the same ones the row will carry.
     let mut evidence =
-        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes));
+        crate::canonical_scoring::ReleaseEvidence::announced(announced_parsed, Some(size_bytes))
+            .with_listing(listing);
     if let Some(analysis) = acceptance.analysis.as_ref() {
         evidence = evidence.with_analysis(crate::canonical_scoring::AnalyzedFacts {
             analysis: analysis.clone(),
@@ -2335,7 +2474,7 @@ mod tests {
             &decision,
             crate::user_rule_input::ReleaseRuntimeInfo {
                 size_bytes: None,
-                published_at: None,
+                age_days: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -2363,6 +2502,106 @@ mod tests {
 
         assert_eq!(input.profile.required_audio_languages, vec!["jpn"]);
         assert_eq!(input.release.languages_audio, vec!["jpn"]);
+    }
+
+    /// The gate's blocking-rule pass for one file, from the persisted listing
+    /// JSON the gate is handed: grabbed listing facts, `from_listing`, rule
+    /// input, user-rule evaluation, and the post-download score finalization.
+    #[cfg(feature = "runtime-media-analysis")]
+    fn post_download_listing_rule_pass(
+        engine: &scryer_rules::UserRulesEngine,
+        release_listing_json: Option<&str>,
+    ) -> Vec<String> {
+        let profile = crate::QualityProfile::default();
+        let parsed = crate::parse_release_metadata("Listing.Gate.2024.1080p.WEB-DL.H.264-GRP");
+        let analysis = build_synthetic_media_file_analysis(&parsed, Some("mkv".to_string()));
+        let listing =
+            crate::canonical_scoring::ListingFacts::grabbed_from_json(release_listing_json);
+        let mut decision = build_import_profile_decision(
+            &profile,
+            &parsed,
+            "movie",
+            crate::quality_profile::CoverageSizeBasis::default(),
+            Some(4_000_000_000),
+            false,
+        );
+        let input = crate::user_rule_input::build_rule_input(
+            &parsed,
+            &profile,
+            &decision,
+            crate::user_rule_input::ReleaseRuntimeInfo::from_listing(
+                Some(4_000_000_000),
+                listing.as_ref(),
+            ),
+            crate::user_rule_input::RuleContextInfo {
+                title_id: Some("title-listing-gate"),
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: false,
+                existing_score: None,
+                search_mode: "post_download",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: Some(1),
+                is_filler: false,
+            },
+            Some(crate::user_rule_input::file_doc_from_analysis(&analysis)),
+        );
+        let result = engine
+            .evaluator()
+            .evaluate(&input, "movie")
+            .expect("rule evaluation succeeds");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        finalize_post_download_rule_scores(&profile, &mut decision, result.entries)
+    }
+
+    #[cfg(feature = "runtime-media-analysis")]
+    #[test]
+    fn a_listing_based_blocking_rule_blocks_the_import_only_with_a_snapshot() {
+        use chrono::TimeZone;
+
+        let engine = scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "listing_password".to_string(),
+            name: "Listing password".to_string(),
+            rego_source: r#"
+                package scryer.rules.user.listing_password
+                import rego.v1
+
+                score_entry["listing_password"] := scryer.block_score() if {
+                    input.release.is_password_protected == true
+                }
+            "#
+            .to_string(),
+            origin: scryer_rules::PolicyOrigin::User,
+            applied_facets: vec![],
+        }])
+        .expect("rule builds");
+        let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+            published_at: Some("2024-01-02T03:04:05Z".to_string()),
+            thumbs_up: None,
+            thumbs_down: None,
+            is_password_protected: Some(true),
+            indexer_languages: Vec::new(),
+            extra: Default::default(),
+            captured_at: chrono::Utc.with_ymd_and_hms(2024, 2, 1, 12, 0, 0).unwrap(),
+        }
+        .to_json_string();
+
+        let blocked = post_download_listing_rule_pass(&engine, Some(&snapshot));
+        assert!(
+            blocked.iter().any(|code| code == "listing_password"),
+            "a protected listing blocks the import: {blocked:?}"
+        );
+
+        let unblocked = post_download_listing_rule_pass(&engine, None);
+        assert!(
+            unblocked.is_empty(),
+            "without a snapshot the listing is unknown and the rule does not fire: {unblocked:?}"
+        );
     }
 
     /// The tier comparison behind a `quality_contradicted:` blocklist. It reads
@@ -2415,6 +2654,315 @@ mod tests {
     fn landed_tier_is_worse_is_never_true_without_a_tier_list() {
         let c = criteria(&[]);
         assert!(!landed_tier_is_worse(&c, "1080p", "480p"));
+    }
+
+    fn post_download_rule(id: &str, name: &str, body: &str) -> scryer_rules::UserPolicy {
+        scryer_rules::UserPolicy {
+            id: id.to_string(),
+            name: name.to_string(),
+            rego_source: scryer_rules::rewrite_package_declaration(body, id),
+            origin: scryer_rules::PolicyOrigin::User,
+            applied_facets: Vec::new(),
+        }
+    }
+
+    /// Evaluate `policies` the way the import gate does and return what the
+    /// gate would do with the outcome.
+    fn evaluate_post_download_rules(
+        policies: &[scryer_rules::UserPolicy],
+    ) -> Result<Vec<scryer_rules::UserRuleEntry>, ImportedFileRejection> {
+        post_download_rule_entries(evaluate_post_download_rules_raw(policies))
+    }
+
+    fn evaluate_post_download_rules_raw(
+        policies: &[scryer_rules::UserPolicy],
+    ) -> Result<scryer_rules::EvalResult, scryer_rules::RulesError> {
+        let profile = crate::QualityProfile::default();
+        let parsed = crate::parse_release_metadata("Example.Film.2024.1080p.WEB-DL.H.264-GROUP");
+        let decision = crate::quality_profile::evaluate_profile_requirements(
+            &profile,
+            &parsed,
+            false,
+            Some("movie"),
+        );
+        let input = crate::user_rule_input::build_rule_input(
+            &parsed,
+            &profile,
+            &decision,
+            crate::user_rule_input::ReleaseRuntimeInfo {
+                size_bytes: None,
+                age_days: None,
+                thumbs_up: None,
+                thumbs_down: None,
+                is_password_protected: None,
+                extra: None,
+                indexer_languages: None,
+            },
+            crate::user_rule_input::RuleContextInfo {
+                title_id: Some("title-rule-gate"),
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: true,
+                existing_score: Some(1_580),
+                search_mode: "post_download",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: Some(1),
+                is_filler: false,
+            },
+            None,
+        );
+        let mut evaluator = scryer_rules::UserRulesEngine::build(policies)
+            .expect("rule fixture should compile")
+            .evaluator();
+        evaluator.evaluate(&input, "movie")
+    }
+
+    #[test]
+    fn post_download_rule_runtime_error_holds_the_import_for_review() {
+        let rejection = evaluate_post_download_rules(&[post_download_rule(
+            "erroring_rule",
+            "Erroring Rule",
+            r#"score_entry["erroring"] := lower(input.release.year)"#,
+        )])
+        .expect_err("a rule that fails to evaluate must not let the import through");
+
+        assert_eq!(rejection.recycle_reason, POST_DOWNLOAD_RULE_ERROR_CODE);
+        assert!(rejection.requires_review());
+        assert_eq!(
+            rejection.skip_reason,
+            Some(ImportSkipReason::PostDownloadRuleBlocked)
+        );
+        assert_eq!(
+            rejection.blocking_rule_codes,
+            vec![POST_DOWNLOAD_RULE_ERROR_CODE.to_string()]
+        );
+        assert!(
+            rejection.message.contains("Erroring Rule (erroring_rule)"),
+            "{}",
+            rejection.message
+        );
+        assert!(
+            rejection.message.contains("held for review"),
+            "{}",
+            rejection.message
+        );
+        // The engine's own text follows the rule name.
+        let detail = rejection
+            .message
+            .split("Erroring Rule (erroring_rule): ")
+            .nth(1)
+            .expect("rule name precedes the engine error");
+        assert!(
+            detail.contains("expects string argument"),
+            "{}",
+            rejection.message
+        );
+        assert!(!rejection.message.contains('\n'), "{}", rejection.message);
+    }
+
+    #[test]
+    fn post_download_rule_error_message_keeps_the_final_engine_error_line() {
+        let error_text = format!(
+            "cannot lower a number: {}end of error text",
+            "the value came from input.file.video_width ".repeat(3)
+        );
+        assert!(error_text.chars().count() < RULE_ERROR_DETAIL_MAX_CHARS);
+        let padding = " ".repeat(400);
+        let engine_message = format!(
+            "--> user_rules.rego:3:32\n  |\n3 |{padding}score_entry[\"sample\"] := lower(input.file.video_width) if {{\n  |{padding}^\nerror: {error_text}\n"
+        );
+        let rejection = post_download_rule_entries(Ok(scryer_rules::EvalResult {
+            entries: Vec::new(),
+            errors: vec![scryer_rules::RuleEvalError {
+                rule_set_id: "sample_rule".to_string(),
+                rule_set_name: "Sample\nRule".to_string(),
+                origin: scryer_rules::PolicyOrigin::User,
+                message: engine_message,
+            }],
+        }))
+        .expect_err("rule errors must hold the import");
+
+        assert!(!rejection.message.contains('\n'), "{}", rejection.message);
+        assert!(
+            rejection
+                .message
+                .ends_with(&format!("Sample Rule (sample_rule): {}", error_text)),
+            "{}",
+            rejection.message
+        );
+        assert!(!rejection.message.contains("-->"), "{}", rejection.message);
+        assert!(
+            !rejection.message.contains("error:"),
+            "{}",
+            rejection.message
+        );
+    }
+
+    #[test]
+    fn post_download_rules_without_errors_are_scored_as_before() {
+        let entries = evaluate_post_download_rules(&[post_download_rule(
+            "working_rule",
+            "Working Rule",
+            r#"score_entry["working"] := 25"#,
+        )])
+        .expect("rules that evaluate cleanly must reach scoring");
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].code, "working");
+        assert_eq!(entries[0].delta, 25);
+    }
+
+    #[test]
+    fn post_download_rule_error_outranks_a_blocking_rule() {
+        let rejection = evaluate_post_download_rules(&[
+            post_download_rule(
+                "blocking_rule",
+                "Blocking Rule",
+                r#"score_entry["blocked_downgrade"] := -100000"#,
+            ),
+            post_download_rule(
+                "erroring_rule",
+                "Erroring Rule",
+                r#"score_entry["erroring"] := lower(input.release.year)"#,
+            ),
+        ])
+        .expect_err("an erroring rule must hold the import even when another rule blocks");
+
+        assert_eq!(rejection.recycle_reason, POST_DOWNLOAD_RULE_ERROR_CODE);
+        assert!(rejection.requires_review());
+        // Nothing was scored, so the blocking rule's code never reaches the
+        // rejection that would otherwise burn the release.
+        assert_eq!(
+            rejection.blocking_rule_codes,
+            vec![POST_DOWNLOAD_RULE_ERROR_CODE.to_string()]
+        );
+        assert!(!rejection.message.contains("blocked_downgrade"));
+        assert!(rejection.message.contains("Erroring Rule"));
+    }
+
+    /// Managed rules are test-evaluated when the engine is built, so the
+    /// runtime error only fires on this gate fixture's title.
+    const MANAGED_RULE_ERRORING_ON_GATE_INPUT: &str = r#"score_entry["managed_erroring"] := lower(input.release.year) if input.context.title_id == "title-rule-gate""#;
+
+    fn managed_post_download_rule(id: &str, name: &str, body: &str) -> scryer_rules::UserPolicy {
+        scryer_rules::UserPolicy {
+            origin: scryer_rules::PolicyOrigin::System,
+            ..post_download_rule(id, name, body)
+        }
+    }
+
+    #[test]
+    fn managed_post_download_rule_error_is_skipped_and_the_rest_are_scored() {
+        let outcome = evaluate_post_download_rules_raw(&[
+            managed_post_download_rule(
+                "managed_erroring_rule",
+                "Managed Erroring Rule",
+                MANAGED_RULE_ERRORING_ON_GATE_INPUT,
+            ),
+            post_download_rule(
+                "working_rule",
+                "Working Rule",
+                r#"score_entry["working"] := 25"#,
+            ),
+        ]);
+        let errors = &outcome.as_ref().expect("engine evaluates").errors;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].rule_set_id, "managed_erroring_rule");
+        assert_eq!(errors[0].origin, scryer_rules::PolicyOrigin::System);
+
+        let entries = post_download_rule_entries(outcome)
+            .expect("a managed rule error must not hold the import");
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].code, "working");
+        assert_eq!(
+            crate::quality_profile::sum_score_deltas(entries.iter().map(|entry| entry.delta)),
+            25
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.rule_set_id != "managed_erroring_rule"),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn user_and_managed_rule_errors_together_still_hold_on_the_user_rule() {
+        let rejection = evaluate_post_download_rules(&[
+            managed_post_download_rule(
+                "managed_erroring_rule",
+                "Managed Erroring Rule",
+                MANAGED_RULE_ERRORING_ON_GATE_INPUT,
+            ),
+            post_download_rule(
+                "erroring_rule",
+                "Erroring Rule",
+                r#"score_entry["erroring"] := lower(input.release.year)"#,
+            ),
+        ])
+        .expect_err("a user rule error must hold the import even beside a managed one");
+
+        assert_eq!(rejection.recycle_reason, POST_DOWNLOAD_RULE_ERROR_CODE);
+        assert!(rejection.requires_review());
+        assert!(
+            rejection.message.contains("Erroring Rule (erroring_rule)"),
+            "{}",
+            rejection.message
+        );
+        assert!(
+            !rejection.message.contains("Managed Erroring Rule"),
+            "{}",
+            rejection.message
+        );
+    }
+
+    #[test]
+    fn post_download_rule_engine_failure_holds_the_import_for_review() {
+        let rejection = post_download_rule_entries(Err(scryer_rules::RulesError::Evaluation(
+            "engine unavailable".into(),
+        )))
+        .expect_err("an engine failure must not let the import through");
+
+        assert_eq!(rejection.recycle_reason, POST_DOWNLOAD_RULE_ERROR_CODE);
+        assert!(rejection.requires_review());
+        assert!(
+            rejection.message.contains("engine unavailable"),
+            "{}",
+            rejection.message
+        );
+    }
+
+    #[test]
+    fn post_download_rule_error_message_stays_bounded() {
+        let errors = (0..6)
+            .map(|index| scryer_rules::RuleEvalError {
+                rule_set_id: format!("rule_{index}"),
+                rule_set_name: format!("Rule {index}"),
+                origin: scryer_rules::PolicyOrigin::User,
+                message: "x".repeat(10_000),
+            })
+            .collect();
+        let rejection = post_download_rule_entries(Ok(scryer_rules::EvalResult {
+            entries: Vec::new(),
+            errors,
+        }))
+        .expect_err("rule errors must hold the import");
+
+        assert!(
+            rejection.message.chars().count() < 1_200,
+            "message length {}",
+            rejection.message.chars().count()
+        );
+        assert!(rejection.message.contains("Rule 0 (rule_0)"));
+        assert!(rejection.message.contains("Rule 2 (rule_2)"));
+        assert!(!rejection.message.contains("Rule 3 (rule_3)"));
+        assert!(rejection.message.contains("3 more rule(s) failed"));
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub struct LibraryScanSummary {
     pub imported: usize,
     pub skipped: usize,
     pub unmatched: usize,
+    /// Tracked files whose episode links a scan replaced because a confident
+    /// fresh parse of the filename contradicted the stored links.
+    pub relinked: usize,
 }
 
 impl LibraryScanSummary {
@@ -45,6 +48,7 @@ impl LibraryScanSummary {
         self.imported = self.imported.saturating_add(delta.imported);
         self.skipped = self.skipped.saturating_add(delta.skipped);
         self.unmatched = self.unmatched.saturating_add(delta.unmatched);
+        self.relinked = self.relinked.saturating_add(delta.relinked);
     }
 }
 
@@ -116,6 +120,73 @@ impl MovieTitleRef {
             smg_id: external_id("smg").and_then(|value| value.parse().ok()),
             tvdb_id: external_id("tvdb").and_then(|value| value.parse().ok()),
             tmdb_id: external_id("tmdb").and_then(|value| value.parse().ok()),
+            imdb_id: external_id("imdb").map(str::to_string).or_else(|| {
+                title
+                    .imdb_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+            }),
+        };
+
+        (reference.smg_id.is_some()
+            || reference.tvdb_id.is_some()
+            || reference.tmdb_id.is_some()
+            || reference.imdb_id.is_some())
+        .then_some(reference)
+    }
+}
+
+/// A series named by the ids SMG's title surface accepts: its own title id,
+/// and the provider ids it can resolve when the title id is not known yet.
+///
+/// Mirrors [`MovieTitleRef`]. A TMDB-primary series has no TVDB id, so SMG's
+/// title id (`smg` external id) is the only handle hydration can rely on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeriesTitleRef {
+    pub smg_id: Option<i64>,
+    pub tvdb_id: Option<i64>,
+    pub tmdb_id: Option<i64>,
+    pub imdb_id: Option<String>,
+}
+
+impl SeriesTitleRef {
+    pub fn from_title(title: &Title) -> Option<Self> {
+        if title.facet == MediaFacet::Movie {
+            return None;
+        }
+
+        // The SMG and TVDB ids are read exactly as hydration always read them
+        // (first id of that source), so a TVDB-backed series keeps addressing
+        // the same entity. TMDB and IMDb ids are only trusted when they are
+        // not kinded as something other than a series: an anime title also
+        // carries its mapped movies' ids.
+        let external_id = |source: &str| {
+            let series_only = matches!(source, "tmdb" | "imdb");
+            title
+                .external_ids
+                .iter()
+                .find(|external_id| {
+                    external_id.source.trim().eq_ignore_ascii_case(source)
+                        && (!series_only
+                            || external_id.kind.as_deref().is_none_or(|kind| {
+                                let kind = kind.trim();
+                                kind.is_empty() || kind.eq_ignore_ascii_case("series")
+                            }))
+                })
+                .map(|external_id| external_id.value.trim())
+                .filter(|value| !value.is_empty())
+        };
+        // A stored id that is not a positive number names nothing SMG could
+        // answer, so it is read as absent rather than sent.
+        let numeric_id = |source: &str| {
+            external_id(source)
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|id| *id > 0)
+        };
+        let reference = Self {
+            smg_id: numeric_id("smg"),
+            tvdb_id: numeric_id("tvdb"),
+            tmdb_id: numeric_id("tmdb"),
             imdb_id: external_id("imdb").map(str::to_string).or_else(|| {
                 title
                     .imdb_id
@@ -447,6 +518,8 @@ pub struct DiscoveryTitle {
     #[serde(default)]
     pub canonical_tags: Vec<serde_json::Value>,
     #[serde(default)]
+    pub affinity_signals: Vec<crate::ports::DiscoveryAffinitySignalRecord>,
+    #[serde(default)]
     pub is_adult: bool,
     #[serde(default)]
     pub content_ratings: Vec<DiscoveryContentRating>,
@@ -610,6 +683,17 @@ pub struct TitleResolution {
     pub reason: String,
 }
 
+/// A title named by whatever external ids a caller holds, for any kind.
+///
+/// Unlike [`MovieTitleRef`] this carries ids verbatim, including sources the
+/// gateway maps itself (Plex GUIDs, Trakt, Simkl, Kitsu, MAL, AniList), so a
+/// list item resolves by exactly the ids its provider sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TitleExternalRef {
+    pub smg_id: Option<i64>,
+    pub external_ids: Vec<ExternalId>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MovieTitleBulkResult {
     pub by_ref_index: HashMap<usize, MovieMetadata>,
@@ -617,10 +701,26 @@ pub struct MovieTitleBulkResult {
     pub missing_ref_indexes: Vec<usize>,
 }
 
+/// SMG's answer to a `titles` request for series, keyed like
+/// [`MovieTitleBulkResult`].
+#[derive(Debug, Clone, Default)]
+pub struct SeriesTitleBulkResult {
+    pub by_ref_index: HashMap<usize, SeriesMetadata>,
+    pub redirects: Vec<(i64, i64)>,
+    pub missing_ref_indexes: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SeriesMetadata {
     pub target_key: Option<String>,
+    /// SMG's title id. Set only when the series came from the title surface.
+    pub smg_id: Option<i64>,
+    /// `tvdb` or `tmdb`; empty when a TVDB-keyed document supplied it.
+    pub primary_source: String,
+    /// The series' TVDB id, or `0` for a TMDB-primary series.
     pub tvdb_id: i64,
+    /// The series' TMDB id, when SMG knows one.
+    pub tmdb_id: Option<i64>,
     pub name: String,
     pub sort_name: String,
     pub slug: String,
@@ -642,8 +742,8 @@ pub struct SeriesMetadata {
     pub anime_mappings: Vec<AnimeMapping>,
     pub anime_movies: Vec<AnimeMovie>,
     /// Community (AniDB/AniList/MAL) season layout for this series, when SMG
-    /// could build one. `None` for non-anime, for an SMG that predates the
-    /// field, and for anime whose community numbering matches TVDB's.
+    /// could build one. `None` for non-anime and for anime whose community
+    /// numbering matches TVDB's.
     pub anime_numbering_bridge: Option<scryer_domain::AnimeNumberingBridge>,
     /// TVDB's published episode orders for this series, when the caller asked
     /// for them. Single-series hydration does; bulk hydration cannot, because
@@ -716,7 +816,10 @@ pub struct AnimeMovie {
 
 #[derive(Debug, Clone)]
 pub struct SeasonMetadata {
+    /// The season's TVDB id, or `0` when it has none (a TMDB-primary series).
     pub tvdb_id: i64,
+    /// The season's TMDB id; set for a TMDB-primary series' seasons.
+    pub tmdb_id: Option<i64>,
     pub number: i32,
     pub label: String,
     pub episode_type: String,
@@ -724,7 +827,10 @@ pub struct SeasonMetadata {
 
 #[derive(Debug, Clone)]
 pub struct EpisodeMetadata {
+    /// The episode's TVDB id, or `0` when it has none (a TMDB-primary series).
     pub tvdb_id: i64,
+    /// The episode's TMDB id; set for a TMDB-primary series' episodes.
+    pub tmdb_id: Option<i64>,
     pub episode_number: i32,
     pub name: String,
     pub aired: String,
@@ -733,6 +839,8 @@ pub struct EpisodeMetadata {
     pub is_recap: bool,
     pub overview: String,
     pub absolute_number: String,
+    /// SMG's contiguous absolute number; see [`scryer_domain::AbsoluteScale`].
+    pub contiguous_absolute_number: Option<i32>,
     pub season_number: i32,
     pub image_url: String,
 }
@@ -783,8 +891,6 @@ pub trait MetadataGateway: Send + Sync {
 
     async fn get_movie(&self, tvdb_id: i64, language: &str) -> AppResult<MovieMetadata>;
 
-    async fn get_series(&self, tvdb_id: i64, language: &str) -> AppResult<SeriesMetadata>;
-
     /// Fetch metadata for movies and series in a single GraphQL round-trip.
     /// Returns resolved results; IDs that fail to resolve are omitted from the maps.
     async fn get_metadata_bulk(
@@ -801,7 +907,23 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<MovieTitleBulkResult> {
         let _ = (refs, language);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway titles is not implemented".into(),
+        ))
+    }
+
+    /// Fetch series by SMG title id through the `titles` operation. Refs
+    /// without an SMG id are resolved from their provider ids first. The
+    /// result's `by_ref_index` is keyed by the index into `refs`.
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        language: &str,
+        include_episodes: bool,
+        include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        let _ = (refs, language, include_episodes, include_episode_orders);
+        Err(AppError::Repository(
+            "metadata gateway titles is not implemented".into(),
         ))
     }
 
@@ -812,7 +934,59 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<Vec<TitleResolution>> {
         let _ = (refs, create_missing);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway resolveTitles is not implemented".into(),
+        ))
+    }
+
+    /// Resolve refs of one `kind` (`movie`, `series`, or `anime`) to gateway
+    /// titles. Results carry `ref_index` into `refs`.
+    async fn resolve_titles(
+        &self,
+        refs: &[TitleExternalRef],
+        kind: &str,
+        create_missing: bool,
+    ) -> AppResult<Vec<TitleResolution>> {
+        let _ = (refs, kind, create_missing);
+        Err(AppError::Repository(
+            "metadata gateway resolveTitles is not implemented".into(),
+        ))
+    }
+
+    /// The public charts an import list may follow.
+    async fn list_chart_catalog(
+        &self,
+        language: &str,
+    ) -> AppResult<Vec<crate::lists::gateway::ListChartCatalogEntry>> {
+        let _ = language;
+        Err(AppError::Repository(
+            "metadata gateway listChartCatalog is not implemented".into(),
+        ))
+    }
+
+    /// One chart's resolved items in chart order.
+    async fn list_chart_items(
+        &self,
+        provider: &str,
+        chart_key: &str,
+        scope: &str,
+        limit: i32,
+        language: &str,
+    ) -> AppResult<Vec<crate::lists::gateway::ListChartItem>> {
+        let _ = (provider, chart_key, scope, limit, language);
+        Err(AppError::Repository(
+            "metadata gateway listChartItems is not implemented".into(),
+        ))
+    }
+
+    /// A public IMDb list, proxied by the gateway, in list order. Entries the
+    /// gateway has no title for come back unresolved with their IMDb id only.
+    async fn list_imdb_user_list(
+        &self,
+        list_id: &str,
+    ) -> AppResult<Vec<crate::lists::gateway::ListChartItem>> {
+        let _ = list_id;
+        Err(AppError::Repository(
+            "metadata gateway listImdbUserList is not implemented".into(),
         ))
     }
 
@@ -826,7 +1000,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<Vec<RichMetadataSearchItem>> {
         let _ = (query, kind, limit, language, year);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway searchTitles is not implemented".into(),
         ))
     }
 
@@ -839,7 +1013,7 @@ pub trait MetadataGateway: Send + Sync {
     ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
         let _ = (queries, kind, language, create_missing);
         Err(AppError::Repository(
-            "metadata gateway does not support title-id queries".into(),
+            "metadata gateway searchTitlesBatch is not implemented".into(),
         ))
     }
 
@@ -1123,12 +1297,6 @@ impl MetadataGateway for NullMetadataGateway {
     }
 
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
-        Err(AppError::Repository(
-            "metadata gateway is not configured".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
         Err(AppError::Repository(
             "metadata gateway is not configured".into(),
         ))

@@ -17,6 +17,7 @@ use super::release_search::{
 use crate::acquisition::submission::{GrabTrigger, record_direct_grab_outcome};
 use crate::acquisition_release_search::ResolvedReleaseSearchSubject;
 use crate::domain_events::{new_global_domain_event, title_context_snapshot};
+use crate::quality::release_listing::ReleaseListingSnapshot;
 use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use scryer_logging::{ActorContext, LogContext, ResourceContext, WorkflowContext, context_span};
 use std::sync::Arc;
@@ -748,6 +749,7 @@ impl AppUseCase {
                                 child_token,
                                 Some(HashSet::from([indexer_id.clone()])),
                                 None,
+                                app.runtime.environment.now(),
                             )
                             .await
                         {
@@ -1039,6 +1041,8 @@ impl AppUseCase {
         let rules = self.user_rules_engine_snapshot();
         let judge = judge.cloned();
         let indexer_id = indexer_id.to_string();
+        // Not grabbed: listing age is measured at this search's own instant.
+        let now = self.runtime.environment.now();
         let results = tokio::task::spawn_blocking(move || {
             // Reuse one evaluator for this response and keep synchronous rule
             // evaluation off the async worker handling requests/cancellation.
@@ -1081,17 +1085,26 @@ impl AppUseCase {
                     {
                         // No title or incumbent context exists yet. Still collect
                         // every applicable contribution before judging eligibility.
+                        let listing =
+                            crate::quality::release_listing::ReleaseListingSnapshot::for_scoring(
+                                &result, now,
+                            );
+                        let listing_json = listing.to_json_string();
                         result.quality_profile_decision = Some(
                             crate::canonical_scoring::score_release_in_batch(
                                 &crate::canonical_scoring::ReleaseEvidence::announced(
                                     parsed.clone(),
                                     result.size_bytes,
-                                ),
+                                )
+                                .with_listing(Some(
+                                    crate::canonical_scoring::ListingFacts::candidate(listing, now),
+                                )),
                                 context,
                                 evaluator,
                             )
                             .announced_decision,
                         );
+                        result.release_listing_json = Some(listing_json);
                     }
                     result.parsed_release_metadata = Some(parsed);
                     result
@@ -1378,6 +1391,9 @@ impl AppUseCase {
                 MediaFacet::parse(&submission.facet).unwrap_or(MediaFacet::Movie),
                 self.runtime.environment.now(),
             );
+            let release_facts = self
+                .unlinked_grab_release_facts(&result, source_kind, &client.name)
+                .await;
             self.append_domain_event(new_global_domain_event(
                 actor,
                 DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
@@ -1387,6 +1403,7 @@ impl AppUseCase {
                     source_provider: submission.source_provider_name.clone(),
                     download_id: Some(submission.download_client_item_id.clone()),
                     episode_ids: Vec::new(),
+                    release_facts: Some(release_facts),
                 }),
             ))
             .await?;
@@ -1414,8 +1431,8 @@ impl AppUseCase {
                     MediaFacet::Movie
                 }
             });
-        let stand_in_title =
-            unlinked_grab_title(&result.title, facet.clone(), self.runtime.environment.now());
+        let now = self.runtime.environment.now();
+        let stand_in_title = unlinked_grab_title(&result.title, facet.clone(), now);
         let download_id = scryer_domain::download_identity::DownloadId::new();
         let info_hash_hint = result
             .extra
@@ -1509,6 +1526,9 @@ impl AppUseCase {
             request_signature: None,
             purpose: DownloadSubmissionPurpose::OperatorQueued,
             scope: SubmissionScope::Orphan,
+            release_listing_json: ReleaseListingSnapshot::capture_json_from_search_result(
+                &result, now,
+            ),
         };
         let wire_id = download_id.to_wire();
         let identity = crate::download_identity::accepted_download_submission_identity(
@@ -1570,6 +1590,9 @@ impl AppUseCase {
             );
         }
 
+        let release_facts = self
+            .unlinked_grab_release_facts(&result, source_kind, &client.name)
+            .await;
         self.append_domain_event(new_global_domain_event(
             actor,
             DomainEventPayload::ReleaseGrabbed(ReleaseGrabbedEventData {
@@ -1581,6 +1604,7 @@ impl AppUseCase {
                 source_provider: Some(result.source.clone()),
                 download_id: Some(grab.job_id.clone()),
                 episode_ids: Vec::new(),
+                release_facts: Some(release_facts),
             }),
         ))
         .await?;
@@ -1723,6 +1747,17 @@ impl AppUseCase {
                     "selected release files exceed the 64 MiB download bundle limit".to_string(),
                 ));
             }
+            // Nothing was submitted, so there is no download client to name.
+            let release_facts = self
+                .grabbed_release_facts(
+                    &result.title,
+                    result.parsed_release_metadata.as_ref(),
+                    result.size_bytes,
+                    Some(source_kind),
+                    grab_indexer,
+                    None,
+                )
+                .await;
             artifacts.push(FetchedSearchArtifact {
                 file_name: artifact_file_name(&result.title, extension),
                 content_type: content_type.unwrap_or_else(|| default_content_type.to_string()),
@@ -1731,6 +1766,7 @@ impl AppUseCase {
                 source_title: result.title,
                 source_hint,
                 source_provider: result.source,
+                release_facts,
             });
         }
 
@@ -1771,6 +1807,7 @@ impl AppUseCase {
                         // Nothing was submitted, so there is no client item id.
                         download_id: None,
                         episode_ids: Vec::new(),
+                        release_facts: Some(artifact.release_facts),
                     }),
                 )
             })
@@ -1778,6 +1815,32 @@ impl AppUseCase {
         self.append_domain_events(events).await?;
 
         Ok(bundle)
+    }
+
+    /// Grab facts for an unlinked grab, whose download client was already
+    /// loaded to validate the request, so its name needs no second lookup.
+    async fn unlinked_grab_release_facts(
+        &self,
+        result: &IndexerSearchResult,
+        source_kind: DownloadSourceKind,
+        client_name: &str,
+    ) -> scryer_domain::GrabbedReleaseFacts {
+        let indexer = self
+            .grab_indexer_name(result.indexer_id.as_deref(), Some(result.source.as_str()))
+            .await;
+        let mut facts = self
+            .grabbed_release_facts(
+                &result.title,
+                result.parsed_release_metadata.as_ref(),
+                result.size_bytes,
+                Some(source_kind),
+                indexer,
+                None,
+            )
+            .await;
+        facts.download_client_name =
+            Some(client_name.to_string()).filter(|name| !name.trim().is_empty());
+        facts
     }
 
     /// Locate one release of the actor's own live search by the download URL
@@ -1830,6 +1893,11 @@ impl AppUseCase {
         season: Option<&str>,
         episode: Option<&str>,
     ) -> AppResult<(Title, ResolvedReleaseSearchSubject, bool)> {
+        if season.is_some() && title.facet == MediaFacet::Movie {
+            return Err(AppError::Validation(
+                "movie searches cannot include season or episode".to_string(),
+            ));
+        }
         match (series_movie_link_id, season, episode) {
             (Some(series_movie_link_id), None, None) => {
                 let link = self
@@ -1857,6 +1925,15 @@ impl AppUseCase {
                     .await?;
                 Ok((title.clone(), subject, false))
             }
+            // A whole season searches as a season pack. Each release still
+            // binds to what it parses as covering, so an episode release that
+            // answers the season query stays an episode grab.
+            (None, Some(season), None) => {
+                let subject = self
+                    .resolve_release_search_subject_for_season(title, season)
+                    .await?;
+                Ok((title.clone(), subject, false))
+            }
             _ => {
                 let subject = self.resolve_release_search_subject_for_title(title).await?;
                 Ok((title.clone(), subject, false))
@@ -1874,6 +1951,7 @@ struct FetchedSearchArtifact {
     source_title: String,
     source_hint: String,
     source_provider: String,
+    release_facts: scryer_domain::GrabbedReleaseFacts,
 }
 
 /// Restate which release an artifact fetch failed on: the operator picked
@@ -2024,20 +2102,56 @@ fn unlinked_grab_title(release_title: &str, facet: MediaFacet, now: DateTime<Utc
     }
 }
 
-/// Same input-shape validation (and messages) as the one-shot `searchReleases`
-/// resolver.
+/// Input-shape validation for a title subject. Unlike the one-shot
+/// `searchReleases` resolver, a season alone is accepted: it searches the
+/// whole season.
 fn validate_interactive_search_subject_shape(
     series_movie_link_id: Option<&str>,
     season: Option<&str>,
     episode: Option<&str>,
 ) -> AppResult<()> {
     match (series_movie_link_id, season, episode) {
-        (Some(_), None, None) | (None, Some(_), Some(_)) | (None, None, None) => Ok(()),
-        (None, Some(_), None) | (None, None, Some(_)) => Err(AppError::Validation(
-            "episode searches require both season and episode".to_string(),
+        (Some(_), None, None)
+        | (None, Some(_), Some(_))
+        | (None, Some(_), None)
+        | (None, None, None) => Ok(()),
+        (None, None, Some(_)) => Err(AppError::Validation(
+            "episode searches require a season".to_string(),
         )),
         (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(AppError::Validation(
             "series movie searches cannot include season or episode".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod subject_shape_tests {
+    use super::*;
+
+    #[test]
+    fn a_season_alone_is_a_whole_season_subject() {
+        validate_interactive_search_subject_shape(None, Some("2"), None)
+            .expect("season-only subject");
+        validate_interactive_search_subject_shape(None, Some("2"), Some("5"))
+            .expect("episode subject");
+        validate_interactive_search_subject_shape(None, None, None).expect("title subject");
+    }
+
+    #[test]
+    fn an_episode_without_a_season_is_rejected() {
+        let error = validate_interactive_search_subject_shape(None, None, Some("5"))
+            .expect_err("episode without season");
+        assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_series_movie_subject_rejects_a_season() {
+        for (season, episode) in [(Some("1"), None), (Some("1"), Some("2")), (None, Some("2"))] {
+            let error = validate_interactive_search_subject_shape(Some("link-1"), season, episode)
+                .expect_err("series movie with season or episode");
+            assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+        }
+        validate_interactive_search_subject_shape(Some("link-1"), None, None)
+            .expect("series movie subject");
     }
 }

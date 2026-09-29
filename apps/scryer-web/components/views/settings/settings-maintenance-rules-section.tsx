@@ -1,3 +1,4 @@
+import { regoDiagnostics } from "@/lib/utils/rego-diagnostics";
 import { formatBytes } from "@/lib/utils/activity-utils";
 import * as React from "react";
 import { MaintenanceSubjectPicker } from "@/components/common/maintenance-subject-picker";
@@ -1182,6 +1183,7 @@ export function SettingsMaintenanceRulesSection({
                         {t("settings.ruleRegoSource")}
                       </Label>
                       <LazyRegoEditor
+                        ruleFamily="maintenance"
                         id="settings-maintenance-rule-rego-source"
                         value={ruleSetDraft.regoSource}
                         onChange={(value) =>
@@ -1190,6 +1192,7 @@ export function SettingsMaintenanceRulesSection({
                             regoSource: value,
                           }))
                         }
+                        diagnostics={regoDiagnostics(ruleSetDraft.regoSource, validationResult)}
                         minLines={12}
                         maxLines={35}
                       />

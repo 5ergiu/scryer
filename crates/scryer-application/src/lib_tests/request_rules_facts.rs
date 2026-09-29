@@ -41,6 +41,7 @@ fn us_rating(label: &str, age: i32) -> ContentRating {
 
 fn canonical_tag(key: &str, category: &str, name: &str, is_adult: bool) -> CanonicalMediaTag {
     CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: key.to_string(),
         category: category.to_string(),
         name: name.to_string(),

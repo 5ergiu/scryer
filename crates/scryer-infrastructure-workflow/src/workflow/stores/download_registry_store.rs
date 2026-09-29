@@ -352,20 +352,7 @@ async fn resolve_observation_tx(
             });
         }
 
-        // The writer gate serializes SQLite writers, but re-check immediately
-        // before the insert for datastore implementations with concurrent writers.
-        if let Some(active_binding) =
-            active_observation_binding_by_locator_tx(tx, &observation.locator).await?
-        {
-            let binding = active_binding.binding;
-            return Ok(locator_conflict(token_id, binding.download_id));
-        }
-        create_foreign_observation_tx(tx, token_id, observation).await?;
-        return Ok(ObservationResolution::Resolved {
-            download_id: token_id,
-            newly_foreign: true,
-            attached: false,
-        });
+        return create_token_observation_tx(tx, observation, token_id).await;
     }
 
     let candidates = ambiguous_submission_candidates_tx(tx, observation).await?;
@@ -413,6 +400,33 @@ async fn resolve_observation_tx(
     create_foreign_observation_tx(tx, download_id, observation).await?;
     Ok(ObservationResolution::Resolved {
         download_id,
+        newly_foreign: true,
+        attached: false,
+    })
+}
+
+/// Record the first sighting of a token that had no `downloads` row when
+/// [`resolve_observation_tx`] looked it up.
+///
+/// The writer gate serializes SQLite writers, but a datastore with concurrent
+/// writers can commit the token's own download and binding (the grab that
+/// minted the token) between that lookup and this insert. The locator is
+/// re-checked with the same step that opens [`resolve_observation_tx`], so a
+/// binding that belongs to this token resolves to it and only a binding held
+/// by a different download is a conflict.
+async fn create_token_observation_tx(
+    tx: &mut SqlTx<'_>,
+    observation: &ObservedClientJob,
+    token_id: DownloadId,
+) -> AppResult<ObservationResolution> {
+    if let Some(resolution) =
+        resolve_against_active_locator_tx(tx, observation, Some(token_id)).await?
+    {
+        return Ok(resolution);
+    }
+    create_foreign_observation_tx(tx, token_id, observation).await?;
+    Ok(ObservationResolution::Resolved {
+        download_id: token_id,
         newly_foreign: true,
         attached: false,
     })
@@ -1701,6 +1715,100 @@ mod tests {
             }
         );
         assert_eq!(raw_identity_snapshot(&store, FIRST_ID).await, before);
+    }
+
+    /// Runs the token's first-sighting insert against whatever the store holds
+    /// now, standing in for a concurrent grab that committed after the by-token
+    /// lookup missed.
+    async fn create_token_observation(
+        store: &DownloadRegistryStore,
+        observation: &ObservedClientJob,
+    ) -> ObservationResolution {
+        let observation = observation.clone();
+        SqlRuntime::run_in_transaction(&store.datastore, "test_create_token_observation", {
+            move |tx| {
+                let observation = observation.clone();
+                Box::pin(async move {
+                    let token_id =
+                        wire_token_id(&observation).expect("observation carries a token");
+                    create_token_observation_tx(tx, &observation, token_id).await
+                })
+            }
+        })
+        .await
+        .expect("first-sighting insert should run")
+    }
+
+    #[tokio::test]
+    async fn first_sighting_resolves_to_its_own_binding_committed_after_the_lookup() {
+        let store = store().await;
+        insert_download(&store, FIRST_ID, "scryer_submission", None).await;
+        insert_binding(&store, FIRST_ID, Some("client-1"), Some("job-1"), None).await;
+
+        let resolution = create_token_observation(
+            &store,
+            &observation(
+                "job-1",
+                Some(&wire(FIRST_ID)),
+                Some("release"),
+                "2026-08-24T13:00:00Z",
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            resolution,
+            ObservationResolution::Resolved {
+                download_id: DownloadId::parse(FIRST_ID).unwrap(),
+                newly_foreign: false,
+                attached: false,
+            }
+        );
+        let download = store
+            .load_download(&DownloadId::parse(FIRST_ID).unwrap())
+            .await
+            .unwrap()
+            .expect("the grab's download row stays");
+        assert_eq!(download.origin, DownloadOrigin::ScryerSubmission);
+    }
+
+    #[tokio::test]
+    async fn first_sighting_conflicts_with_another_downloads_binding_committed_after_the_lookup() {
+        let store = store().await;
+        insert_download(&store, SECOND_ID, "foreign_observation", None).await;
+        insert_binding(&store, SECOND_ID, Some("client-1"), Some("job-1"), None).await;
+
+        let resolution = create_token_observation(
+            &store,
+            &observation(
+                "job-1",
+                Some(&wire(FIRST_ID)),
+                Some("release"),
+                "2026-08-24T13:00:00Z",
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            resolution,
+            ObservationResolution::Conflict {
+                token_id: DownloadId::parse(FIRST_ID).unwrap(),
+                binding_download_id: DownloadId::parse(SECOND_ID).unwrap(),
+            }
+        );
+        assert_eq!(
+            raw_identity_snapshot(&store, FIRST_ID).await,
+            vec![
+                (
+                    "downloads[".to_string() + FIRST_ID + "]",
+                    "<absent>".to_string()
+                ),
+                (
+                    "download_client_bindings[".to_string() + FIRST_ID + "]",
+                    "<absent>".to_string()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

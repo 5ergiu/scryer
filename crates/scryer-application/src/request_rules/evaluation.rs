@@ -24,7 +24,8 @@ use serde::Serialize;
 use crate::helpers::{HashDomain, blake3_identity_hex};
 use crate::media_requests::snapshot::MediaRequestMetadataSnapshot;
 use crate::request_rules::arbitration::{
-    Arbitration, FALLBACK_ERROR, ScopedError, ScopedVote, arbitrate, legacy_outcome,
+    Arbitration, FALLBACK_ERROR, LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
+    legacy_outcome,
 };
 use crate::request_rules::facts::{RequestDraft, build_request_input};
 use crate::{AppResult, AppUseCase};
@@ -402,7 +403,19 @@ impl AppUseCase {
         } else {
             effective.clone()
         };
-        let mut fallback_reason = arbitration.fallback_reason.map(str::to_string);
+        // An approval that no enforcing rule reached is the permission's, even
+        // when a shadow rule or a rule behind a closed gate had its own verdict.
+        // The row, the resolution event and the trace name the permission as
+        // the decider; the rules' verdict stays in `policy_outcome` and the
+        // recorded votes.
+        let approved_by_permission = effective_outcome == RequestDecisionOutcome::AutoApprove
+            && (!gate_enabled || effective.deciding_rule_set_ids == [LIBRARY_PERMISSION_DECIDER]);
+        let provenance = if approved_by_permission {
+            arbitrate(&[], &[], true)
+        } else {
+            arbitration.clone()
+        };
+        let mut fallback_reason = provenance.fallback_reason.map(str::to_string);
         let applicable_tags = if gate_enabled {
             match self.applicable_policy_tags(&purpose, &effective.tags).await {
                 Ok(tags) => tags,
@@ -422,10 +435,10 @@ impl AppUseCase {
             policy_outcome: arbitration.policy_outcome,
             effective_outcome,
             fallback_reason,
-            deciding_rule_set_ids: arbitration.deciding_rule_set_ids.clone(),
+            deciding_rule_set_ids: provenance.deciding_rule_set_ids.clone(),
             tags: applicable_tags,
             emitted_tags,
-            reasons: reason_views(&arbitration),
+            reasons: reason_views(&provenance),
             evaluation_mode: cache.strictest_mode(&library.id),
             metadata_partial,
             gate_enabled,

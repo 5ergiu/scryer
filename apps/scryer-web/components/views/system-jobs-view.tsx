@@ -16,7 +16,7 @@ import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import type { Facet, JobDefinition, JobKey, JobRun, LibraryScanStatus } from "@/lib/types";
 import type { UiDateTimeFormat } from "@/lib/types/settings";
 import { formatUiDate, formatUiDateTime, formatUiTime } from "@/lib/utils/date-format";
-import { isTerminalJobRunStatus } from "@/lib/utils/job-runs";
+import { isTerminalJobRunStatus, parseFullHashBackfillFailures } from "@/lib/utils/job-runs";
 import { defaultLibraryIdForFacet } from "@/lib/utils/library-scan-sessions";
 import { cn } from "@/lib/utils";
 
@@ -32,7 +32,8 @@ const JOBS_MUTED_TEXT_CLASS = "text-[var(--scry-muted3)]";
 type SystemJobsViewState = {
   jobs: JobDefinition[];
   activeRuns: JobRun[];
-  recentRuns: JobRun[];
+  /** The latest run of each job, loaded per job rather than from a recent-runs window. */
+  lastRunsByJob: Partial<Record<JobKey, JobRun>>;
   selectedJobKey: JobKey | null;
   selectedJobRunId: string | null;
   selectedJobHistory: JobRun[];
@@ -334,7 +335,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
   const {
     jobs,
     activeRuns,
-    recentRuns,
+    lastRunsByJob,
     selectedJobKey,
     selectedJobRunId,
     selectedJobHistory,
@@ -364,16 +365,6 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
     () => Object.fromEntries(activeRuns.map((run) => [run.jobKey, run])),
     [activeRuns],
   );
-
-  const lastRunsByJob = useMemo(() => {
-    const map = new Map<JobKey, JobRun>();
-    for (const run of recentRuns) {
-      if (!map.has(run.jobKey)) {
-        map.set(run.jobKey, run);
-      }
-    }
-    return map;
-  }, [recentRuns]);
 
   const defaultSortDirectionFor = useCallback((key: SortKey): SortDirection => {
     switch (key) {
@@ -441,7 +432,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
               defaultLibraryIdForFacet(libraryFacet),
             )
           : null;
-      const recentRun = lastRunsByJob.get(job.key) ?? null;
+      const recentRun = lastRunsByJob[job.key] ?? null;
       const activeRun = isStaleActiveRun(rawActiveRun, recentRun) ? null : (rawActiveRun ?? null);
       const lastRun = activeRun ?? recentRun;
       const status =
@@ -749,7 +740,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
                 <div className="flex gap-2">
                   {(() => {
                     const activeRun = activeRunsByJob[selectedJob.key] ?? null;
-                    const recentRun = lastRunsByJob.get(selectedJob.key) ?? null;
+                    const recentRun = lastRunsByJob[selectedJob.key] ?? null;
                     const libraryFacet = libraryFacetForJob(selectedJob.key);
                     const activeLibraryScan =
                       selectedJob.usesLibraryScanProgress && libraryFacet
@@ -799,6 +790,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
                     <div className="space-y-2">
                       {selectedJobHistory.map((run) => {
                         const healthCheckIssues = parseHealthCheckIssues(run);
+                        const hashFailures = parseFullHashBackfillFailures(run);
 
                         return (
                           <div
@@ -867,6 +859,36 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
                                     </div>
                                   ))}
                                 </div>
+                              </div>
+                            ) : null}
+
+                            {hashFailures.failures.length > 0 ? (
+                              <div className="mt-3 rounded-[10px] border border-[var(--scry-border3)] bg-[var(--scry-inset)] p-3">
+                                <p className={`text-xs uppercase tracking-wide ${JOBS_MUTED_TEXT_CLASS}`}>
+                                  {t("jobs.fullHashBackfillFailures")}
+                                </p>
+                                <div className="mt-2 space-y-2">
+                                  {hashFailures.failures.map((failure, index) => (
+                                    <div
+                                      key={`${run.id}-${failure.mediaFileId}-${index}`}
+                                      className="rounded-[9px] border border-[var(--scry-border3)] bg-[var(--scry-card2)] p-2"
+                                    >
+                                      <p className="break-all text-sm font-medium text-[var(--scry-ink2)]">
+                                        {failure.path}
+                                      </p>
+                                      <p className={`mt-1 text-sm ${JOBS_MUTED_TEXT_CLASS}`}>
+                                        {failure.reason}
+                                      </p>
+                                    </div>
+                                  ))}
+                                </div>
+                                {hashFailures.notListed > 0 ? (
+                                  <p className={`mt-2 text-xs ${JOBS_MUTED_TEXT_CLASS}`}>
+                                    {t("jobs.fullHashBackfillFailuresMore", {
+                                      count: hashFailures.notListed,
+                                    })}
+                                  </p>
+                                ) : null}
                               </div>
                             ) : null}
                           </div>

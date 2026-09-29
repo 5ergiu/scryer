@@ -20,6 +20,7 @@ export const DEFAULT_INSTANCE_FEATURES: InstanceFeatures = {
 
 type InstanceFeaturesContextValue = {
   instanceFeatures: InstanceFeatures;
+  /** A read of the switches has finished, or failed and left the defaults. */
   instanceFeaturesLoaded: boolean;
   refresh: () => Promise<void>;
 };
@@ -87,9 +88,10 @@ export function InstanceFeaturesProvider({
     } catch (error) {
       if (requestSequenceRef.current !== requestId) return;
       // Falling back to the defaults keeps unfinished surfaces hidden rather
-      // than revealing them on a transient read failure.
+      // than revealing them on a transient read failure. The defaults then
+      // stand as the answer, so pages waiting on the switches may decide.
       setInstanceFeatures(DEFAULT_INSTANCE_FEATURES);
-      setInstanceFeaturesLoaded(false);
+      setInstanceFeaturesLoaded(true);
       console.warn("Failed to load instance features", error);
     }
   }, [client]);
@@ -166,4 +168,13 @@ export function useRefreshInstanceFeatures(): () => Promise<void> {
 /** Whether surfaces that are still being finished should render. */
 export function useExperimentalFeaturesEnabled(): boolean {
   return useInstanceFeatures().experimentalFeaturesEnabled;
+}
+
+/**
+ * Whether the switches have been read. Until then the defaults stand in, so a
+ * page that exists only behind a switch should wait on this before deciding
+ * the page is unavailable. Outside the provider the defaults are the answer.
+ */
+export function useInstanceFeaturesLoaded(): boolean {
+  return React.useContext(InstanceFeaturesContext)?.instanceFeaturesLoaded ?? true;
 }

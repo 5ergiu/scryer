@@ -33,6 +33,9 @@ mod interactive_release_search;
 mod landed_bar_memo;
 mod libraries;
 mod library_scan;
+mod list_actions;
+mod list_experimental_gate;
+mod list_provider_settings;
 mod maintenance_action_sequences;
 mod maintenance_claims;
 mod maintenance_evaluation;
@@ -51,6 +54,7 @@ mod media_server_signals;
 mod metadata_search;
 mod multilingual_title_matching;
 mod queueing;
+mod recycle_bin_roots;
 mod release_anchor_prefetch;
 mod request_rules;
 mod request_rules_facts;
@@ -58,11 +62,13 @@ mod romaji_release_matching;
 mod root_change;
 mod root_move;
 mod routing_settings;
+mod rule_tester_listing;
 mod search_cutoff;
 mod security_auth;
 mod seeding_gate;
 mod seeding_profiles;
 mod series_metadata;
+mod series_title_hydration;
 mod subtitle_permissions;
 mod title_catalog_reads;
 mod title_hydration;
@@ -89,10 +95,59 @@ pub(crate) use support_bootstrap_fixtures::bootstrap_application_upgrade;
 use support_bootstrap_fixtures::*;
 use support_catalog::*;
 use support_events_requests::*;
+pub(crate) use support_imports::MockMediaFileRepo;
 use support_imports::*;
 use support_indexers_metadata::*;
 use support_library_show::*;
 use support_settings_scan::*;
+
+/// Answer a movie `titles` request the way SMG answers it for TVDB-backed
+/// movies, from a test double's TVDB-keyed bulk answer. A ref without a TVDB
+/// id, or one the double has no movie for, is reported missing.
+async fn movie_titles_from_tvdb_bulk<G: MetadataGateway + ?Sized>(
+    gateway: &G,
+    refs: &[MovieTitleRef],
+    language: &str,
+) -> AppResult<MovieTitleBulkResult> {
+    let tvdb_ids = refs
+        .iter()
+        .filter_map(|movie_ref| movie_ref.tvdb_id)
+        .collect::<Vec<_>>();
+    let bulk = if tvdb_ids.is_empty() {
+        BulkMetadataResult::default()
+    } else {
+        gateway.get_metadata_bulk(&tvdb_ids, &[], language).await?
+    };
+    let mut result = MovieTitleBulkResult::default();
+    for (index, movie_ref) in refs.iter().enumerate() {
+        match movie_ref
+            .tvdb_id
+            .and_then(|tvdb_id| bulk.movies.get(&tvdb_id))
+        {
+            Some(movie) => {
+                result.by_ref_index.insert(index, movie.clone());
+            }
+            None => result.missing_ref_indexes.push(index),
+        }
+    }
+    Ok(result)
+}
+
+/// Answer a movie `searchTitlesBatch` request with a test double's TVDB batch
+/// answers. Other kinds are not served.
+async fn movie_title_batch_from_tvdb<G: MetadataGateway + ?Sized>(
+    gateway: &G,
+    queries: &[MetadataSearchQuery],
+    kind: &str,
+    language: &str,
+) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+    if kind != "movie" {
+        return Err(AppError::Repository(
+            "metadata gateway searchTitlesBatch is not implemented".into(),
+        ));
+    }
+    gateway.search_tvdb_batch(queries, language).await
+}
 
 /// Location operations run in the background by contract (FR-030): a story
 /// test watches the operation row until it reaches a terminal state, the way

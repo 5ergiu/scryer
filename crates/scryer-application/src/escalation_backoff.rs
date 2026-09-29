@@ -159,6 +159,20 @@ pub const DOWNLOAD_CLIENT_BACKOFF_LADDER: EscalationLadder = EscalationLadder::n
     60 * 60, // 1 hour
 ]);
 
+/// Background batches sent to the metadata gateway, such as the movie SMG
+/// identity backfill. Levels are one-based like the indexer ladder: the
+/// `n`th consecutive failed batch waits out rung `n - 1`, so a gateway that
+/// keeps failing is asked about once an hour instead of every few seconds. A
+/// successful batch resets the count.
+pub const METADATA_GATEWAY_BATCH_BACKOFF_LADDER: EscalationLadder = EscalationLadder::new(&[
+    30,      // 30 seconds
+    60,      // 1 minute
+    5 * 60,  // 5 minutes
+    15 * 60, // 15 minutes
+    30 * 60, // 30 minutes
+    60 * 60, // 1 hour
+]);
+
 /// How long a download client must have been failing before a further failure
 /// escalates it. Sonarr's `ProviderStatusServiceBase` uses the same 5 minutes:
 /// a burst of failures inside one outage is one outage, not five.

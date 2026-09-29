@@ -22,6 +22,8 @@ fn base_completed_import_result(
         release_burned: false,
         started_at,
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     }
 }
 fn facet_for_completed_download(completed: &CompletedDownload) -> Option<MediaFacet> {
@@ -104,7 +106,8 @@ async fn import_series_download(
     let mut last_rejection_skip_reason: Option<ImportSkipReason> = None;
     let mut last_skipped_message: Option<String> = None;
     let mut last_skipped_skip_reason: Option<ImportSkipReason> = None;
-    let mut imported_updates: Vec<NotificationMediaUpdate> = Vec::new();
+    let mut imported_updates: Vec<scryer_domain::MediaPathUpdate> = Vec::new();
+    let mut imported_upgrade = false;
     // Total bytes across every file this import brought in. Stays `None` until
     // at least one file reports a size, so a legacy-shaped import that knows no
     // sizes reports null rather than a misleading zero.
@@ -160,6 +163,8 @@ async fn import_series_download(
                 episode_ids,
                 link_type,
                 size_bytes,
+                reason_code,
+                previous_path,
                 ..
             }) => {
                 imported_count += 1;
@@ -167,7 +172,15 @@ async fn import_series_download(
                     imported_size_bytes =
                         Some(imported_size_bytes.unwrap_or(0).saturating_add(size_bytes));
                 }
-                imported_updates.push(NotificationMediaUpdate::created(dest_path));
+                if reason_code.as_deref() == Some("upgrade") {
+                    imported_upgrade = true;
+                    imported_updates.extend(crate::upgrade::upgrade_media_updates(
+                        previous_path.as_deref(),
+                        &dest_path,
+                    ));
+                } else {
+                    imported_updates.push(created_media_update(dest_path));
+                }
                 append_unique_episode_ids(&mut imported_episode_ids, &episode_ids);
                 append_unique_episode_ids(&mut attributed_episode_ids, &episode_ids);
                 if link_type == Some(scryer_domain::ImportStrategy::Move) {
@@ -276,6 +289,8 @@ async fn import_series_download(
         release_burned,
         started_at,
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
     let result_json = serde_json::to_string(&result).ok();
     let status = completed_import_status_for_result(&result, status);
@@ -288,10 +303,7 @@ async fn import_series_download(
             title,
             DomainEventPayload::ImportCompleted(ImportCompletedEventData {
                 title: title_context_snapshot(title),
-                media_updates: imported_updates
-                    .into_iter()
-                    .map(|update| created_media_update(update.path))
-                    .collect(),
+                media_updates: imported_updates,
                 imported_count: imported_count as i32,
                 import_id: Some(import_id.to_string()),
                 source_system: Some(completed.client_type.clone()),
@@ -302,6 +314,7 @@ async fn import_series_download(
                 quality: None,
                 episode_ids: imported_episode_ids,
                 size_bytes: imported_size_bytes,
+                upgrade: imported_upgrade,
             }),
         ))
         .await?;
@@ -321,6 +334,9 @@ enum EpisodeImportOutcome {
         /// Bytes written for this file, so multi-file imports can report a
         /// total without re-stating the destination paths.
         size_bytes: Option<i64>,
+        /// Path of the file this import replaced at a different location
+        /// (upgrade only); `None` for a first import or an in-place upgrade.
+        previous_path: Option<String>,
         /// The file was imported *and* its release must be burned (D2: an
         /// honest 720p fills an empty scope, but must never come back as an
         /// "upgrade" to the 1080p it advertised).
@@ -927,6 +943,11 @@ async fn cleanup_superseded_episode_incumbents(
                 size_bytes: incumbent.media_file.size_bytes as u64,
                 title_id: &title.id,
                 media_root: Some(old_file_recycle_context.media_root.as_str()),
+                media_row: Some(
+                    crate::recycle_bin::RecycledMediaRowSnapshot::from_media_file(
+                        &incumbent.media_file,
+                    ),
+                ),
             };
 
             match crate::recycle_bin::recycle_replaced_media_file(
@@ -1695,7 +1716,7 @@ async fn import_single_episode_file(
             &episode_numbers,
             resolved_episode.and_then(|episode| episode.episode_number.as_deref()),
         );
-        let absolute_number = resolved_episode.and_then(|episode| episode.absolute_number.clone());
+        let absolute_number = import_absolute_episode_token(resolved_episode, None);
         (season, episode_number, absolute_number)
     } else {
         let (ep_meta, _) = identity_episode.expect("the parse path resolved episode metadata");
@@ -1704,10 +1725,7 @@ async fn import_single_episode_file(
             &ep_meta.episode_numbers,
             resolved_episode.and_then(|episode| episode.episode_number.as_deref()),
         );
-        let absolute_number = ep_meta
-            .absolute_episode
-            .map(|number| number.to_string())
-            .or_else(|| resolved_episode.and_then(|episode| episode.absolute_number.clone()));
+        let absolute_number = import_absolute_episode_token(resolved_episode, ep_meta.absolute_episode);
         (season, episode_number, absolute_number)
     };
     let post_processing_episode = if uses_catalog_identity {
@@ -1749,6 +1767,7 @@ async fn import_single_episode_file(
         runtime_sample_mode,
         origin,
         release_evidence.announced_size_bytes(),
+        release_evidence.release_listing_json(),
         additional_import,
         None,
     )
@@ -2070,13 +2089,33 @@ pub(crate) fn use_season_folders(title: &scryer_domain::Title) -> bool {
 }
 
 /// Compute the destination path for an episode import using the canonical
-/// token set: base tokens from parsed release metadata, overridden by the
+/// token set: the same media tokens library rename renders, overridden by the
 /// explicit episode values supplied by the caller.
 ///
+/// `analysis` is the import's probe of the file, when it has run; without it
+/// the media tokens come from the parsed release name alone.
 /// `ep_num_str` may be empty to leave `{episode}` blank (anime absolute-only
 /// files where no per-season episode number is known).
 /// `quality_override` replaces the filename-parsed quality token when the
 /// caller supplies an explicit label (e.g. manual import).
+/// The `absolute_episode` token an episode import renders.
+///
+/// Every renderer writes the catalog episode's *raw* absolute number — the one
+/// rename renders too — so an import never writes a name the next rename
+/// changes. The parsed absolute may sit on the title's contiguous matching
+/// scale, so it is only a fallback for catalog rows that carry no absolute.
+pub(crate) fn import_absolute_episode_token(
+    resolved_episode: Option<&scryer_domain::Episode>,
+    parsed_absolute: Option<u32>,
+) -> Option<String> {
+    resolved_episode
+        .and_then(|episode| episode.absolute_number.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| parsed_absolute.map(|number| number.to_string()))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "episode rename rendering uses the full canonical token set explicitly"
@@ -2085,6 +2124,7 @@ pub(crate) fn episode_import_dest_path(
     title: &scryer_domain::Title,
     use_season_folders: bool,
     parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
     ext: &str,
     source_path: &Path,
     title_folder_path: &Path,
@@ -2098,22 +2138,18 @@ pub(crate) fn episode_import_dest_path(
     episode_title: Option<&str>,
     quality_override: Option<&str>,
 ) -> PathBuf {
-    let mut tokens = build_rename_tokens(title, parsed, ext);
-    tokens.insert("season".to_string(), season_num.to_string());
-    tokens.insert("season_order".to_string(), season_num.to_string());
-    tokens.insert("episode".to_string(), ep_num_str.to_string());
-    tokens.insert(
-        "absolute_episode".to_string(),
-        absolute_number.unwrap_or("").to_string(),
-    );
-    tokens.insert(
-        "episode_title".to_string(),
-        episode_title.unwrap_or("").to_string(),
-    );
-    if let Some(q) = quality_override {
-        tokens.insert("quality".to_string(), q.to_string());
-    }
     let rendered = if rename_enabled {
+        let tokens = episode_import_rename_tokens(
+            title,
+            parsed,
+            analysis,
+            ext,
+            season_num,
+            ep_num_str,
+            absolute_number,
+            episode_title,
+            quality_override,
+        );
         render_rename_template(rename_template, &tokens)
     } else {
         preserved_import_filename(source_path)
@@ -2128,84 +2164,62 @@ pub(crate) fn episode_import_dest_path(
     )
     .join(rendered)
 }
-/// Build the common rename token map from parsed release metadata.
+
+/// The rename tokens of an episode file being imported.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "episode rename tokens combine media evidence with the resolved episode numbering"
+)]
+pub(crate) fn episode_import_rename_tokens(
+    title: &scryer_domain::Title,
+    parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
+    ext: &str,
+    season_num: u32,
+    ep_num_str: &str,
+    absolute_number: Option<&str>,
+    episode_title: Option<&str>,
+    quality_override: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut tokens = build_rename_tokens(title, parsed, analysis, ext);
+    let season = season_num.to_string();
+    let absolute_episode = crate::library::rename::normalize_absolute_episode_token(
+        absolute_number.map(str::to_string),
+    )
+    .unwrap_or_default();
+    crate::library::rename::insert_series_rename_tokens(
+        &mut tokens,
+        crate::library::rename::SeriesRenameNumbering {
+            season: &season,
+            season_order: &season,
+            episode: ep_num_str,
+            absolute_episode: &absolute_episode,
+            episode_title: episode_title.unwrap_or(""),
+        },
+    );
+    if let Some(q) = quality_override {
+        tokens.insert("quality".to_string(), q.to_string());
+    }
+    tokens
+}
+
+/// The title and media rename tokens of a file being imported, rendered by the
+/// same builder library rename uses so both passes name a file alike.
 pub(crate) fn build_rename_tokens(
     title: &scryer_domain::Title,
     parsed: &crate::ParsedReleaseMetadata,
+    analysis: Option<&crate::MediaFileAnalysis>,
     ext: &str,
 ) -> BTreeMap<String, String> {
-    let mut tokens = BTreeMap::new();
-    let fallback_title_year = title.year;
-    let resolved_year = parsed.year.or(fallback_title_year);
-    tokens.insert("title".to_string(), title.name.clone());
-    tokens.insert(
-        "year".to_string(),
-        resolved_year.map(|y| y.to_string()).unwrap_or_default(),
+    let (mut tokens, edition) = crate::library::rename::title_rename_tokens(
+        title,
+        analysis.map(crate::library::rename::RenameMediaEvidence::from_analysis),
+        parsed,
+        ext,
     );
-    tokens.insert(
-        "quality".to_string(),
-        parsed
-            .quality
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string()),
-    );
-    tokens.insert(
-        "source".to_string(),
-        parsed
-            .source
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "video_codec".to_string(),
-        parsed
-            .video_codec
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "audio".to_string(),
-        parsed
-            .audio
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "release_group".to_string(),
-        parsed.release_group.clone().unwrap_or_default(),
-    );
-    tokens.insert(
-        "season".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.season)
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "episode".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.episode_numbers.first().copied())
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert(
-        "absolute_episode".to_string(),
-        parsed
-            .episode
-            .as_ref()
-            .and_then(|e| e.absolute_episode)
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    );
-    tokens.insert("episode_title".to_string(), String::new());
-    tokens.insert("ext".to_string(), ext.to_string());
+    if title.facet == MediaFacet::Movie {
+        tokens.insert("edition".to_string(), edition);
+    }
     tokens
 }
 /// Resolve a parsed episode block against the catalog, translating community

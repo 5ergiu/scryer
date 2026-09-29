@@ -174,6 +174,7 @@ mod tests {
                 source_title: Some("Tokan.2024.S01E03.1080p.WEB-DL.DDP5.1.H.264-NTb".to_string()),
                 observed_release_name: None,
                 release_size_bytes: None,
+                release_listing_json: None,
                 purpose: DownloadSubmissionPurpose::Standard,
                 scope: SubmissionScope::Episode {
                     episode_id: "episode-3".to_string(),
@@ -293,6 +294,7 @@ mod tests {
                 request_signature: None,
                 purpose: DownloadSubmissionPurpose::Standard,
                 scope,
+                release_listing_json: None,
             },
             identity: None,
         }))
@@ -728,6 +730,7 @@ mod tests {
             source_title: Some(source_title.to_string()),
             observed_release_name: None,
             release_size_bytes: None,
+            release_listing_json: None,
             purpose: DownloadSubmissionPurpose::Standard,
             scope: SubmissionScope::Title,
         }
@@ -1150,6 +1153,8 @@ mod tests {
             release_burned: false,
             started_at: Utc::now(),
             completed_at: Utc::now(),
+            upgrade: false,
+            upgrade_previous_path: None,
         };
 
         assert_eq!(
@@ -1320,11 +1325,72 @@ mod tests {
             release_burned: false,
             started_at: Utc::now(),
             completed_at: Utc::now(),
+            upgrade: false,
+            upgrade_previous_path: None,
         };
 
         assert_eq!(
             completed_import_status_for_result(&result, ImportStatus::Skipped),
             ImportStatus::Skipped
+        );
+    }
+
+    #[test]
+    fn post_download_rule_error_hold_is_never_retried_by_message_text() {
+        // The hold message quotes operator-authored rule names and engine text.
+        // Words the transient-failure allowlist looks for must not turn the
+        // hold into an automatic retry loop or a Pending record the operator's
+        // Retry refuses.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mut result = ImportResult {
+            import_id: "import-1".to_string(),
+            decision: ImportDecision::Skipped,
+            skip_reason: Some(ImportSkipReason::PostDownloadRuleBlocked),
+            title_id: Some("title-1".to_string()),
+            source_system: Some("nzbget".to_string()),
+            source_ref: Some("item-1".to_string()),
+            source_title: Some("Release".to_string()),
+            source_path: source.path().to_string_lossy().into_owned(),
+            dest_path: None,
+            quality: None,
+            episode_ids: Vec::new(),
+            file_size_bytes: None,
+            link_type: None,
+            error_message: None,
+            release_burned: false,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            upgrade: false,
+            upgrade_previous_path: None,
+        };
+
+        for message in [
+            "post-download rule failed to evaluate; import held for review: Locked audio (rs-locked): score_entry[\"locked_audio\"] := lower(input.file.video_width)",
+            "post-download rule failed to evaluate; import held for review: Sample rule (rs-sample): destination temporarily unavailable",
+            "post-download rule failed to evaluate; import held for review: Sample rule (rs-sample): source changed during copy",
+            "post-download rules could not be evaluated; import held for review: path not found or inaccessible",
+        ] {
+            assert!(
+                completed_import_error_message_is_retryable(message),
+                "fixture must contain allowlisted text: {message}"
+            );
+            result.error_message = Some(message.to_string());
+            for fallback in [ImportStatus::Skipped, ImportStatus::Failed] {
+                assert_eq!(
+                    completed_import_status_for_result(&result, fallback),
+                    fallback,
+                    "{message}"
+                );
+            }
+        }
+
+        // The same text under the source-changed review hold keeps its
+        // automatic retry.
+        result.skip_reason = Some(ImportSkipReason::PolicyMismatch);
+        result.error_message = Some("source changed during copy".to_string());
+        assert_eq!(
+            completed_import_status_for_result(&result, ImportStatus::Skipped),
+            ImportStatus::Pending
         );
     }
 
@@ -2061,8 +2127,10 @@ mod series_movie_naming_tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),

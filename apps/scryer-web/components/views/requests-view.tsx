@@ -56,6 +56,11 @@ import {
 } from "@/components/ui/select";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
+import {
+  requestCountByFacet,
+  requestCountByStatus,
+  requestsWithStatus,
+} from "@/lib/utils/media-request-filters";
 import type { LibraryRecord, MediaRequestRecord } from "@/lib/types";
 import type {
   RequestRuleDecisionRecord,
@@ -217,6 +222,12 @@ function requestExternalIdValue(
   return request.externalIds.find(
     (externalId) => externalId.source.toLowerCase() === source,
   )?.value;
+}
+
+/** The SMG title id a request names, when it holds a positive one. */
+function requestSmgId(request: MediaRequestRecord): number | null {
+  const value = Number(requestExternalIdValue(request, "smg")?.trim());
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function RequesterAvatarStack({ request }: { request: MediaRequestRecord }) {
@@ -408,22 +419,6 @@ function statusFilterOptions(mode: RequestsMode): Array<{
   ];
 }
 
-function requestCountByFacet(
-  requests: MediaRequestRecord[],
-  facet: RequestFacetFilter,
-): number {
-  return requests.filter((request) => request.facet === facet).length;
-}
-
-function requestCountByStatus(
-  requests: MediaRequestRecord[],
-  status: RequestStatusFilter,
-): number {
-  if (status === "all") {
-    return requests.length;
-  }
-  return requests.filter((request) => request.status === status).length;
-}
 
 
 /// How long the media is held for, in one badge. "Requested" is a window nobody
@@ -747,12 +742,16 @@ export function RequestsView({
   const [adminFacetFilters, setAdminFacetFilters] = React.useState<
     Record<RequestFacetFilter, boolean>
   >({ MOVIE: true, SERIES: true, ANIME: true });
+  const statusRequests = React.useMemo(
+    () => requestsWithStatus(requests, statusFilter),
+    [requests, statusFilter],
+  );
   const displayedRequests = React.useMemo(
     () =>
       mode === "admin"
-        ? requests.filter((request) => adminFacetFilters[request.facet])
-        : requests,
-    [adminFacetFilters, mode, requests],
+        ? statusRequests.filter((request) => adminFacetFilters[request.facet])
+        : statusRequests,
+    [adminFacetFilters, mode, statusRequests],
   );
   const [approvalRequest, setApprovalRequest] =
     React.useState<MediaRequestRecord | null>(null);
@@ -868,6 +867,7 @@ export function RequestsView({
   const approvalTvdbId = approvalRequest
     ? requestExternalIdValue(approvalRequest, "tvdb")?.trim() ?? ""
     : "";
+  const approvalSmgId = approvalRequest ? requestSmgId(approvalRequest) : null;
   // The tag vocabulary is only needed while the approve dialog is open, and
   // this view is mounted for every visit to the requests page.
   const {
@@ -876,7 +876,7 @@ export function RequestsView({
   } = useTitleTagDefinitions({ enabled: approvalRequest !== null });
   const approvalBlocksConfirm =
     approvalAdvancedSelected &&
-    (!approvalTvdbId ||
+    ((!approvalTvdbId && !approvalSmgId) ||
       approvalSelectionLoading ||
       isMonitorSelectionEmpty(approvalMonitorSelection));
   const editAdvancedSelected =
@@ -886,9 +886,10 @@ export function RequestsView({
   const editTvdbId = editRequest
     ? requestExternalIdValue(editRequest, "tvdb")?.trim() ?? ""
     : "";
+  const editSmgId = editRequest ? requestSmgId(editRequest) : null;
   const editBlocksConfirm =
     editAdvancedSelected &&
-    (!editTvdbId ||
+    ((!editTvdbId && !editSmgId) ||
       editSelectionLoading ||
       isMonitorSelectionEmpty(editMonitorSelection));
 
@@ -1397,7 +1398,7 @@ export function RequestsView({
                     key={facet}
                     selected={adminFacetFilters[facet]}
                     label={label}
-                    count={requestCountByFacet(requests, facet)}
+                    count={requestCountByFacet(statusRequests, facet)}
                     aria-pressed={adminFacetFilters[facet]}
                     onClick={() =>
                       setAdminFacetFilters((current) => ({
@@ -1525,6 +1526,7 @@ export function RequestsView({
           {approvalRequest && approvalAdvancedSelected ? (
             <MonitorSelectionPicker
               facet={approvalRequest.facet}
+              smgId={approvalSmgId}
               tvdbId={approvalTvdbId}
               value={approvalMonitorSelection}
               onChange={setApprovalMonitorSelection}
@@ -1712,6 +1714,7 @@ export function RequestsView({
           {editRequest && editAdvancedSelected ? (
             <MonitorSelectionPicker
               facet={editRequest.facet}
+              smgId={editSmgId}
               tvdbId={editTvdbId}
               value={editMonitorSelection}
               onChange={setEditMonitorSelection}

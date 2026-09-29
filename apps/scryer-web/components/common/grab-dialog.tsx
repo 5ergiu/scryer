@@ -47,6 +47,8 @@ import {
 } from "@/lib/utils/download-conflicts";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
+  grabActionAllowed,
+  type GrabAction,
   episodeSubjectIncomplete,
   episodeSubjectInput,
   releaseRejectionCodes,
@@ -59,7 +61,10 @@ import {
   indexerSearchRowKey,
   totalReleaseBytes,
 } from "@/lib/utils/indexer-search";
-import { releaseQueueScopeInput } from "@/lib/utils/release-queue-scope";
+import {
+  queueScopeAcceptsAdditionalFile,
+  releaseQueueScopeInput,
+} from "@/lib/utils/release-queue-scope";
 
 /** Titles fetched per keystroke; the picker shows the first few of them. */
 const TITLE_CANDIDATE_LIMIT = 25;
@@ -101,7 +106,7 @@ export function GrabDialog({
   );
   const [groups, setGroups] = React.useState<GrabGroup[]>([]);
   const [loadingRouting, setLoadingRouting] = React.useState(false);
-  const [frozenAction, setFrozenAction] = React.useState<boolean | null>(null);
+  const [frozenAction, setFrozenAction] = React.useState<GrabAction | null>(null);
   const subjects = React.useMemo(() => grabSubjects(releases), [releases]);
   const [season, setSeason] = React.useState("");
   const [episode, setEpisode] = React.useState("");
@@ -227,12 +232,15 @@ export function GrabDialog({
   const locked = submitting || frozenAction !== null;
   const routingReady = !loadingRouting && groups.length > 0;
   const grabGate = { groups, rejectionCount: rejectionCodes.length, acknowledged };
-  const canGrab = canSubmitGrab({ ...grabGate, assign: false, ready: !submitting && routingReady && frozenAction !== true });
+  const canGrab = canSubmitGrab({ ...grabGate, assign: false, ready: !submitting && routingReady && grabActionAllowed("UNLINKED", frozenAction) });
   const canAssign = canSubmitGrab({
     ...grabGate,
     assign: true,
-    ready: !submitting && routingReady && frozenAction !== false && selectedTitle !== null && !incompleteSubject,
+    ready: !submitting && routingReady && selectedTitle !== null && !incompleteSubject,
   });
+  const canQueue = canAssign && grabActionAllowed("STANDARD", frozenAction);
+  const canQueueAdditional = canAssign && !useReplacement
+    && grabActionAllowed("ADDITIONAL_FILE", frozenAction);
 
   const chooseTitle = React.useCallback((title: TitleRecord) => {
     setSelectedTitle((current) => current?.id === title.id ? null : title);
@@ -253,6 +261,7 @@ export function GrabDialog({
       searchId: string,
       downloadUrl: string,
       title: TitleRecord,
+      purpose: "STANDARD" | "ADDITIONAL_FILE",
     ) => {
       const { data, error } = await client
         .mutation(issueInteractiveReleaseCandidateTokenMutation, {
@@ -272,12 +281,20 @@ export function GrabDialog({
         throw new Error(t("status.releaseMissingCandidateToken"));
       }
 
+      // The scope is only known once the server has read the release against
+      // the title: a season subject still binds a single-episode release to
+      // that episode, while a pack stays a season.
+      const scope = releaseQueueScopeInput(tokenized, { title: true });
+      if (purpose === "ADDITIONAL_FILE" && !queueScopeAcceptsAdditionalFile(scope, title.facet)) {
+        throw new Error(t("grabDialog.error.additionalScope", { name: release.title }));
+      }
       const conflictMessage = t("grabDialog.conflict", { name: release.title });
       const routing = selectionFor(release);
       const payload = await retryWithReplaceOnConflict(
         {
           titleId: title.id,
-          scope: releaseQueueScopeInput(tokenized, { title: true }),
+          scope,
+          purpose,
           candidateToken: tokenized.candidateToken,
           sizeBytes: tokenized.sizeBytes ?? release.sizeBytes ?? null,
         },
@@ -334,12 +351,13 @@ export function GrabDialog({
     [client, selectionFor, setGlobalStatus, t],
   );
 
-  const handleGrab = React.useCallback(async (assign: boolean) => {
-    if (submissionInFlight.current || (assign ? !canAssign : !canGrab)) return;
+  const handleGrab = React.useCallback(async (action: GrabAction) => {
+    const allowed = action === "UNLINKED" ? canGrab : action === "STANDARD" ? canQueue : canQueueAdditional;
+    if (submissionInFlight.current || !allowed) return;
     submissionInFlight.current = true;
     setErrorMessage(null);
     setSubmitting(true);
-    setFrozenAction(assign);
+    setFrozenAction(action);
     let successes = queuedRowKeys.size;
     let failures = 0;
     try {
@@ -357,10 +375,10 @@ export function GrabDialog({
           continue;
         }
         try {
-          if (!assign) {
+          if (action === "UNLINKED") {
             await grabUnlinked(release, searchId, downloadUrl);
           } else if (selectedTitle) {
-            await grabLinked(release, searchId, downloadUrl, selectedTitle);
+            await grabLinked(release, searchId, downloadUrl, selectedTitle, action);
           }
           successes += 1;
           setQueuedRowKeys((current) => new Set(current).add(rowKey));
@@ -399,7 +417,8 @@ export function GrabDialog({
     setGlobalStatus,
     t,
     canGrab,
-    canAssign,
+    canQueue,
+    canQueueAdditional,
   ]);
 
   const multiple = releases.length > 1;
@@ -560,9 +579,12 @@ export function GrabDialog({
             {queuedRowKeys.size > 0 ? <span className="text-xs text-[var(--scry-muted2)]">{t("grabDialog.footer.partial", { count: queuedRowKeys.size })}</span> : null}
             <div className="flex-1" />
             <Button id="grab-dialog-cancel" type="button" variant="outline" size="sm" disabled={submitting} onClick={() => onOpenChange(false)}>{t("label.cancel")}</Button>
-            <Button id="grab-dialog-grab" type="button" variant="outline" size="sm" disabled={!canGrab} onClick={() => { void handleGrab(false); }}>{t("grabDialog.cta.grab")}</Button>
-            <Button id="grab-dialog-submit" type="button" variant="success" size="sm" disabled={!canAssign} onClick={() => { void handleGrab(true); }}>
-              <Download className="h-3.5 w-3.5" />{t("grabDialog.cta.assign")}
+            <Button id="grab-dialog-grab" type="button" variant="outline" size="sm" disabled={!canGrab} onClick={() => { void handleGrab("UNLINKED"); }}>{t("grabDialog.cta.grab")}</Button>
+            <Button id="grab-dialog-additional" type="button" variant="outline" size="sm" disabled={!canQueueAdditional} onClick={() => { void handleGrab("ADDITIONAL_FILE"); }}>
+              {t("nzb.queueAdditionalFile")}
+            </Button>
+            <Button id="grab-dialog-submit" type="button" variant="success" size="sm" disabled={!canQueue} onClick={() => { void handleGrab("STANDARD"); }}>
+              <Download className="h-3.5 w-3.5" />{t("nzb.queue")}
             </Button>
           </div>
         </DialogContent>

@@ -263,8 +263,10 @@ async fn seed_episode(
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: chrono::Utc::now(),
@@ -578,6 +580,7 @@ async fn full_rescan_preserves_existing_match_for_loose_series_file() {
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         })
         .await
         .expect("insert media file");
@@ -880,6 +883,7 @@ async fn resolve_pending_import_rejects_stale_movie_row_already_bound_to_title()
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         })
         .await
         .expect("insert movie media file");
@@ -1088,6 +1092,7 @@ async fn seed_tracked_series_file(
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         })
         .await
         .expect("insert media file");

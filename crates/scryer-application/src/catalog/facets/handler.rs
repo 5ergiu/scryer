@@ -284,14 +284,55 @@ pub(crate) async fn hydrate_referenced_movie_metadata(
         .movies)
 }
 
+/// The identity a series fetched through SMG's title surface adds to the title.
+///
+/// SMG's title id is always kept: it is how the next hydration (and a
+/// redirect) addresses the series. A TMDB-primary series has no TVDB id, so
+/// its TMDB id is the only provider id it can be matched and searched by. A
+/// TVDB-backed series gains nothing else, so its persisted identity stays
+/// what the TVDB-keyed documents produced.
+fn series_title_extra_external_ids(
+    series: &SeriesMetadata,
+    existing: &[ExternalId],
+) -> Vec<ExternalId> {
+    let mut external_ids = Vec::new();
+    if let Some(smg_id) = series.smg_id.filter(|id| *id > 0) {
+        external_ids.push(ExternalId::with_kind("smg", "title", smg_id.to_string()));
+    }
+    if series.tvdb_id <= 0
+        && let Some(tmdb_id) = series.tmdb_id.filter(|id| *id > 0)
+    {
+        let value = tmdb_id.to_string();
+        // Only an id that can stand for the series counts: an anime mapping
+        // for a film carries `tmdb:movie:N`, which TMDB numbers apart from
+        // series `N`.
+        let already_present = existing.iter().any(|external_id| {
+            external_id.source.eq_ignore_ascii_case("tmdb")
+                && external_id.value.trim() == value
+                && crate::normalize::external_id_kind_fits_facet(external_id, &MediaFacet::Series)
+        });
+        if !already_present {
+            external_ids.push(ExternalId::with_kind("tmdb", "series", value));
+        }
+    }
+    external_ids
+}
+
 /// Build a [`HydrationResult`] from an already-fetched [`SeriesMetadata`].
 pub fn series_to_hydration_result(series: SeriesMetadata, language: &str) -> HydrationResult {
-    let extra_external_ids = primary_anime_mapping_extra_external_ids(&series.anime_mappings);
+    let mut extra_external_ids = primary_anime_mapping_extra_external_ids(&series.anime_mappings);
+    extra_external_ids.extend(series_title_extra_external_ids(
+        &series,
+        &extra_external_ids,
+    ));
     // Carry the series-level facts `TitleMetadataUpdate` has no home for. Only the cheap fields
     // are copied; see `HydrationResult::raw_series`.
     let raw_series = SeriesMetadata {
         target_key: series.target_key.clone(),
+        smg_id: series.smg_id,
+        primary_source: series.primary_source.clone(),
         tvdb_id: series.tvdb_id,
+        tmdb_id: series.tmdb_id,
         name: series.name.clone(),
         sort_name: series.sort_name.clone(),
         slug: series.slug.clone(),
@@ -395,6 +436,22 @@ pub trait FacetHandler: Send + Sync {
         tvdb_id: i64,
         language: &str,
     ) -> AppResult<HydrationResult>;
+
+    /// Hydrate a series (or anime) by whichever identity the caller holds,
+    /// so a series with no TVDB id can be hydrated by its SMG title id.
+    /// Facets without series metadata reject it.
+    async fn hydrate_series_metadata(
+        &self,
+        gateway: &dyn MetadataGateway,
+        series_ref: &crate::SeriesTitleRef,
+        language: &str,
+    ) -> AppResult<HydrationResult> {
+        let _ = (gateway, series_ref, language);
+        Err(crate::AppError::Validation(format!(
+            "{} titles have no series metadata",
+            self.facet_id()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +647,50 @@ mod tests {
         assert!(primary_anime_mapping(&[]).is_none());
     }
 
+    fn tmdb_primary_series_with_mapping(global_media_type: &str) -> SeriesMetadata {
+        let mut mapping = anime_mapping("R", Some(15_003));
+        mapping.global_media_type = global_media_type.to_string();
+        mapping.themoviedb_id = Some(515_003);
+        let mut series = test_series(vec![mapping]);
+        series.name = "Fixture Tmdb Series".to_string();
+        series.tvdb_id = 0;
+        series.tmdb_id = Some(515_003);
+        series
+    }
+
+    fn tmdb_ids(result: &HydrationResult) -> Vec<ExternalId> {
+        result
+            .metadata_update
+            .extra_external_ids
+            .iter()
+            .filter(|external_id| external_id.source == "tmdb")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_movie_kinded_tmdb_id_does_not_stand_in_for_the_series_id() {
+        let result = series_to_hydration_result(tmdb_primary_series_with_mapping("movie"), "eng");
+
+        assert_eq!(
+            tmdb_ids(&result),
+            vec![
+                ExternalId::with_kind("tmdb", "movie", "515003"),
+                ExternalId::with_kind("tmdb", "series", "515003"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_series_kinded_tmdb_id_is_not_added_twice() {
+        let result = series_to_hydration_result(tmdb_primary_series_with_mapping("show"), "eng");
+
+        assert_eq!(
+            tmdb_ids(&result),
+            vec![ExternalId::with_kind("tmdb", "series", "515003")]
+        );
+    }
+
     #[test]
     fn series_hydration_sets_original_language_independently_of_display_locale() {
         let mut series = test_series(vec![]);
@@ -749,10 +850,24 @@ mod tests {
             Ok(test_movie(test_credits()))
         }
 
-        async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-            let mut series = test_series(vec![]);
-            series.credits = test_credits();
-            Ok(series)
+        async fn get_series_titles(
+            &self,
+            refs: &[crate::SeriesTitleRef],
+            _language: &str,
+            _include_episodes: bool,
+            _include_episode_orders: bool,
+        ) -> AppResult<crate::SeriesTitleBulkResult> {
+            let by_ref_index = (0..refs.len())
+                .map(|index| {
+                    let mut series = test_series(vec![]);
+                    series.credits = test_credits();
+                    (index, series)
+                })
+                .collect();
+            Ok(crate::SeriesTitleBulkResult {
+                by_ref_index,
+                ..Default::default()
+            })
         }
 
         async fn get_metadata_bulk(

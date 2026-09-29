@@ -20,6 +20,7 @@ import { isAbortError, makeAbortableFetch } from "@/lib/graphql/urql-client";
 import {
   buildFixTitleMatchSearchVariables,
   fixTitleMatchDialogIdentity,
+  fixTitleMatchTarget,
 } from "@/lib/fix-title-match";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import { selectorId } from "@/lib/utils/dom-ids";
@@ -149,21 +150,16 @@ export function FixTitleMatchDialog({
   }, [client, open, query, t, title]);
 
   const handleApply = React.useCallback(async () => {
-    const result = results.find((item) => metadataResultKey(item) === selectedResultKey);
-    const tvdbId = result?.tvdbId.trim();
-    const isMovie = title?.facet.toLowerCase() === "movie";
-    if (!title || !result || (isMovie ? result.smgId == null && !tvdbId : !tvdbId)) return;
+    const target = fixTitleMatchTarget(
+      results.find((item) => metadataResultKey(item) === selectedResultKey),
+    );
+    if (!title || !target) return;
     setApplying(true);
     setError(null);
     try {
       const { data, error: mutationError } = await client
         .mutation(fixTitleMatchMutation, {
-          input: {
-            titleId: title.id,
-            ...(isMovie
-              ? { smgId: result.smgId ?? undefined, tvdbId: tvdbId || undefined }
-              : { tvdbId }),
-          },
+          input: { titleId: title.id, ...target },
         })
         .toPromise();
       if (mutationError) throw mutationError;
@@ -178,13 +174,8 @@ export function FixTitleMatchDialog({
   }, [client, onFixed, onOpenChange, results, selectedResultKey, t, title]);
 
   const existingTvdbId = currentTvdbId(title);
-  const selectedResult = results.find((item) => metadataResultKey(item) === selectedResultKey);
-  const canApply = Boolean(
-    selectedResult &&
-      (title?.facet.toLowerCase() === "movie"
-        ? selectedResult.smgId != null || selectedResult.tvdbId.trim()
-        : selectedResult.tvdbId.trim()),
-  );
+  const canApply =
+    fixTitleMatchTarget(results.find((item) => metadataResultKey(item) === selectedResultKey)) !== null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

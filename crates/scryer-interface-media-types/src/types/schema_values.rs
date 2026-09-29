@@ -142,6 +142,8 @@ pub enum AppPermissionValue {
     ManageSystemSettings,
     /// Allows changing catalog settings.
     ManageCatalogSettings,
+    /// Allows following public lists, managing list exclusions, and setting members' list policies.
+    ManageLists,
 }
 
 /// Account origin used for login and authorization behavior.
@@ -172,6 +174,7 @@ impl AppPermissionValue {
             Self::ManagePermissions => AppPermission::ManagePermissions,
             Self::ManageSystemSettings => AppPermission::ManageSystemSettings,
             Self::ManageCatalogSettings => AppPermission::ManageCatalogSettings,
+            Self::ManageLists => AppPermission::ManageLists,
         }
     }
 
@@ -181,6 +184,7 @@ impl AppPermissionValue {
             AppPermission::ManagePermissions => Self::ManagePermissions,
             AppPermission::ManageSystemSettings => Self::ManageSystemSettings,
             AppPermission::ManageCatalogSettings => Self::ManageCatalogSettings,
+            AppPermission::ManageLists => Self::ManageLists,
         }
     }
 }
@@ -680,6 +684,8 @@ pub enum DomainEventTypeValue {
     MediaFileRenamed,
     /// A media file was deleted.
     MediaFileDeleted,
+    /// A media file was restored from the recycle bin.
+    MediaFileRestored,
     /// A media file was upgraded.
     MediaFileUpgraded,
     /// An acquisition search completed.
@@ -728,6 +734,16 @@ pub enum DomainEventTypeValue {
     SeedingStarted,
     /// A torrent's seeding obligation was discharged.
     SeedingCompleted,
+    /// A public list added a title to a library.
+    ListTitleAdded,
+    /// A public list submitted a media request.
+    ListRequestSubmitted,
+    /// A title a public list added has left that list.
+    ListTitleLeft,
+    /// A public list could not sync.
+    ListSyncFailed,
+    /// A public list was unfollowed.
+    ListUnfollowed,
 }
 
 impl DomainEventTypeValue {
@@ -758,6 +774,7 @@ impl DomainEventTypeValue {
             DomainEventType::MediaFileAnalyzed => Self::MediaFileAnalyzed,
             DomainEventType::MediaFileRenamed => Self::MediaFileRenamed,
             DomainEventType::MediaFileDeleted => Self::MediaFileDeleted,
+            DomainEventType::MediaFileRestored => Self::MediaFileRestored,
             DomainEventType::MediaFileUpgraded => Self::MediaFileUpgraded,
             DomainEventType::AcquisitionSearchCompleted => Self::AcquisitionSearchCompleted,
             DomainEventType::AcquisitionCandidateRejected => Self::AcquisitionCandidateRejected,
@@ -782,6 +799,11 @@ impl DomainEventTypeValue {
             DomainEventType::DownloadQueueItemRemoved => Self::DownloadQueueItemRemoved,
             DomainEventType::SeedingStarted => Self::SeedingStarted,
             DomainEventType::SeedingCompleted => Self::SeedingCompleted,
+            DomainEventType::ListTitleAdded => Self::ListTitleAdded,
+            DomainEventType::ListRequestSubmitted => Self::ListRequestSubmitted,
+            DomainEventType::ListTitleLeft => Self::ListTitleLeft,
+            DomainEventType::ListSyncFailed => Self::ListSyncFailed,
+            DomainEventType::ListUnfollowed => Self::ListUnfollowed,
         }
     }
 
@@ -812,6 +834,7 @@ impl DomainEventTypeValue {
             Self::MediaFileAnalyzed => DomainEventType::MediaFileAnalyzed,
             Self::MediaFileRenamed => DomainEventType::MediaFileRenamed,
             Self::MediaFileDeleted => DomainEventType::MediaFileDeleted,
+            Self::MediaFileRestored => DomainEventType::MediaFileRestored,
             Self::MediaFileUpgraded => DomainEventType::MediaFileUpgraded,
             Self::AcquisitionSearchCompleted => DomainEventType::AcquisitionSearchCompleted,
             Self::AcquisitionCandidateRejected => DomainEventType::AcquisitionCandidateRejected,
@@ -836,6 +859,11 @@ impl DomainEventTypeValue {
             Self::DownloadQueueItemRemoved => DomainEventType::DownloadQueueItemRemoved,
             Self::SeedingStarted => DomainEventType::SeedingStarted,
             Self::SeedingCompleted => DomainEventType::SeedingCompleted,
+            Self::ListTitleAdded => DomainEventType::ListTitleAdded,
+            Self::ListRequestSubmitted => DomainEventType::ListRequestSubmitted,
+            Self::ListTitleLeft => DomainEventType::ListTitleLeft,
+            Self::ListSyncFailed => DomainEventType::ListSyncFailed,
+            Self::ListUnfollowed => DomainEventType::ListUnfollowed,
         }
     }
 }

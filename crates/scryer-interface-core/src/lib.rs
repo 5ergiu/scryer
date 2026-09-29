@@ -263,6 +263,16 @@ pub fn default_persist_session_from_ctx(ctx: &Context<'_>) -> bool {
         .is_some_and(|policy| policy.default_persist_session)
 }
 
+/// Client address of the HTTP request, resolved through the trusted-proxy
+/// rules. Absent from schema-level and WebSocket contexts.
+#[derive(Clone, Copy)]
+pub struct RequestClientIp(pub std::net::IpAddr);
+
+pub fn request_client_ip_from_ctx(ctx: &Context<'_>) -> Option<std::net::IpAddr> {
+    ctx.data_opt::<RequestClientIp>()
+        .map(|client_ip| client_ip.0)
+}
+
 pub fn persist_session_or_default(requested: Option<bool>, default: bool) -> bool {
     requested.unwrap_or(default)
 }
@@ -537,7 +547,10 @@ pub fn to_gql_error(err: AppError) -> Error {
         AppError::ImportEvidenceUnavailable(message) => repository_gql_error(message),
         error @ AppError::ImportSourceInspection { .. }
         | error @ AppError::UnsupportedImportSource { .. }
-        | error @ AppError::ImportSourceChanged { .. } => repository_gql_error(error.to_string()),
+        | error @ AppError::ImportSourceChanged { .. }
+        | error @ AppError::DiscoveryPresentationSuperseded { .. } => {
+            repository_gql_error(error.to_string())
+        }
         AppError::Repository(message) => repository_gql_error(message),
     }
 }
@@ -626,6 +639,7 @@ fn app_error_kind(err: &AppError) -> &'static str {
         AppError::ImportSourceInspection { .. } => "ImportSourceInspection",
         AppError::UnsupportedImportSource { .. } => "UnsupportedImportSource",
         AppError::ImportSourceChanged { .. } => "ImportSourceChanged",
+        AppError::DiscoveryPresentationSuperseded { .. } => "DiscoveryPresentationSuperseded",
         AppError::Repository(_) => "Repository",
     }
 }

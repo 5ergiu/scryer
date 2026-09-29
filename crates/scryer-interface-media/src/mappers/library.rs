@@ -310,6 +310,10 @@ pub fn from_media_request(
     let metadata = super::request_rules::from_media_request_metadata(
         &scryer_application::MediaRequestMetadataSnapshotExt::metadata_snapshot(&request),
     );
+    let origin = super::lists::from_media_request_origin(
+        &request.origin,
+        policy.and_then(|facts| facts.public_list_name.clone()),
+    );
     let requested_lease_days = request.requested_lease_days;
     let approved_lease_days = request.approved_lease_days;
     let policy_tags = request.policy_tags.clone();
@@ -389,6 +393,7 @@ pub fn from_media_request(
         decision: policy_projection.decision,
         policy_tags,
         metadata,
+        origin,
     }
 }
 
@@ -973,7 +978,29 @@ pub fn from_title_media_file(file: scryer_application::TitleMediaFile) -> TitleM
         edition: file.edition,
         original_file_path: file.original_file_path,
         release_hash: file.release_hash,
+        release_listing: file
+            .release_listing_json
+            .as_deref()
+            .and_then(release_listing_payload),
     }
+}
+
+/// The display payload for a persisted listing snapshot; an unreadable one is
+/// shown as absent rather than failing the file.
+fn release_listing_payload(raw: &str) -> Option<crate::types::ReleaseListingPayload> {
+    let view = scryer_application::release_listing_view(raw)?;
+    Some(crate::types::ReleaseListingPayload {
+        published_at: view.published_at,
+        age_days_at_grab: view
+            .age_days_at_grab
+            .map(|days| i32::try_from(days).unwrap_or(i32::MAX)),
+        thumbs_up: view.thumbs_up,
+        thumbs_down: view.thumbs_down,
+        is_password_protected: view.is_password_protected,
+        indexer_languages: view.indexer_languages,
+        extra: async_graphql::Json(serde_json::Value::Object(view.extra.into_iter().collect())),
+        captured_at: view.captured_at,
+    })
 }
 
 pub fn from_import_record(record: scryer_domain::ImportRecord) -> ImportRecordPayload {

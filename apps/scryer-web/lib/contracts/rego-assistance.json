@@ -1,0 +1,124 @@
+{
+  "helpers": [
+    {
+      "name": "scryer.block_score",
+      "args": [],
+      "returns": "number",
+      "descKey": "settings.regoHelper.blockScore"
+    },
+    {
+      "name": "scryer.size_gib",
+      "args": [
+        "bytes"
+      ],
+      "returns": "number",
+      "descKey": "settings.regoHelper.sizeGib"
+    },
+    {
+      "name": "scryer.lang_matches",
+      "args": [
+        "code",
+        "pattern"
+      ],
+      "returns": "bool",
+      "descKey": "settings.regoHelper.langMatches"
+    },
+    {
+      "name": "scryer.normalize_source",
+      "args": [
+        "source"
+      ],
+      "returns": "string",
+      "descKey": "settings.regoHelper.normalizeSource"
+    },
+    {
+      "name": "scryer.normalize_codec",
+      "args": [
+        "codec"
+      ],
+      "returns": "string",
+      "descKey": "settings.regoHelper.normalizeCodec"
+    },
+    {
+      "name": "lower",
+      "args": [
+        "value"
+      ],
+      "returns": "string",
+      "descKey": "settings.regoHelper.lower"
+    },
+    {
+      "name": "upper",
+      "args": [
+        "value"
+      ],
+      "returns": "string",
+      "descKey": "settings.regoHelper.upper"
+    },
+    {
+      "name": "count",
+      "args": [
+        "value"
+      ],
+      "returns": "number",
+      "descKey": "settings.regoHelper.count"
+    },
+    {
+      "name": "object.get",
+      "args": [
+        "object",
+        "key",
+        "default"
+      ],
+      "returns": "any",
+      "descKey": "settings.regoHelper.objectGet"
+    },
+    {
+      "name": "startswith",
+      "args": [
+        "value",
+        "prefix"
+      ],
+      "returns": "bool",
+      "descKey": "settings.regoHelper.startsWith"
+    }
+  ],
+  "snippets": [
+    {
+      "family": "release",
+      "label": "score-entry",
+      "descKey": "settings.regoSnippet.scoreEntry",
+      "source": "score_entry[\"${1:bonus}\"] := ${2:100} if {\n    input.release.quality == \"${3:1080p}\"\n}"
+    },
+    {
+      "family": "release",
+      "label": "tag-score",
+      "descKey": "settings.regoSnippet.tagScore",
+      "source": "score_entry[\"${1:tag_bonus}\"] := ${2:100} if {\n    \"${3:favorites}\" in input.context.tags\n}"
+    },
+    {
+      "family": "release",
+      "label": "nullable-field",
+      "descKey": "settings.regoSnippet.nullableField",
+      "source": "score_entry[\"${1:group_bonus}\"] := ${2:100} if {\n    input.release.release_group != null\n    lower(input.release.release_group) == \"${3:groupa}\"\n}"
+    },
+    {
+      "family": "request",
+      "label": "deny-request",
+      "descKey": "settings.regoSnippet.denyRequest",
+      "source": "deny if {\n    input.facts.is_adult\n}"
+    },
+    {
+      "family": "request",
+      "label": "manual-request",
+      "descKey": "settings.regoSnippet.manualRequest",
+      "source": "manual if {\n    input.facts.approved_last_30d >= ${1:5}\n}"
+    },
+    {
+      "family": "maintenance",
+      "label": "match-tag",
+      "descKey": "settings.regoSnippet.matchTag",
+      "source": "match if {\n    \"${1:keep}\" in input.facts.tags\n}"
+    }
+  ]
+}

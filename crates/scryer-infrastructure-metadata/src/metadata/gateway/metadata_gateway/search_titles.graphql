@@ -1,5 +1,5 @@
 query SearchTitles($query: String!, $kind: String!, $limit: Int!, $language: String!, $year: Int) {
-  searchTitles(query: $query, kind: $kind, limit: $limit, language: $language, year: $year) {
+  searchTitles(query: $query, kind: $kind, limit: $limit, language: $language, year: $year, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     results {
       title_id
       kind

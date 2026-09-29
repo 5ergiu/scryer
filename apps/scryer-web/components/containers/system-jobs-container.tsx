@@ -10,11 +10,13 @@ import {
   jobRunEventsSubscription,
   jobRunsQuery,
   jobsQuery,
+  latestJobRunsQuery,
   recentJobRunsQuery,
 } from "@/lib/graphql/queries";
 import { triggerJobMutation } from "@/lib/graphql/mutations";
 import { useDeferredWsSubscription } from "@/lib/hooks/use-deferred-ws-subscription";
 import {
+  mergeLatestJobRun,
   normalizeJobRun,
   preferJobRunSnapshot,
 } from "@/lib/utils/job-runs";
@@ -100,6 +102,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
   const [jobs, setJobs] = useState<JobDefinition[]>([]);
   const [activeRunsById, setActiveRunsById] = useState<Record<string, JobRun>>({});
   const [recentRuns, setRecentRuns] = useState<JobRun[]>([]);
+  const [lastRunsByJob, setLastRunsByJob] = useState<Partial<Record<JobKey, JobRun>>>({});
   const [selectedJobKey, setSelectedJobKey] = useState<JobKey | null>(null);
   const [jobHistoryByKey, setJobHistoryByKey] = useState<Partial<Record<JobKey, JobRun[]>>>({});
   const [jobHistoryLoading, setJobHistoryLoading] = useState(false);
@@ -108,15 +111,20 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [{ data: jobsData, error: jobsError }, { data: recentData, error: recentError }] = await Promise.all([
+      const [
+        { data: jobsData, error: jobsError },
+        { data: recentData, error: recentError },
+        { data: latestData, error: latestError },
+      ] = await Promise.all([
         client.query(jobsQuery, {}).toPromise(),
         client.query(recentJobRunsQuery, { limit: 50 }).toPromise(),
+        client.query(latestJobRunsQuery, {}).toPromise(),
       ]);
 
       if (cancelled) {
         return;
       }
-      const firstError = jobsError ?? recentError;
+      const firstError = jobsError ?? recentError ?? latestError;
       if (firstError) {
         setGlobalStatus(firstError.message);
         return;
@@ -131,6 +139,14 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
         ((Array.isArray(recentData?.recentJobRuns) ? recentData.recentJobRuns : []) as unknown[])
           .map(normalizeJobRun)
           .filter((run): run is JobRun => run !== null),
+      );
+      // Runs that arrived over the subscription while this loaded are kept
+      // when they are newer than what the load returned.
+      setLastRunsByJob((current) =>
+        ((Array.isArray(latestData?.latestJobRuns) ? latestData.latestJobRuns : []) as unknown[])
+          .map(normalizeJobRun)
+          .filter((run): run is JobRun => run !== null)
+          .reduce(mergeLatestJobRun, current),
       );
     })();
 
@@ -195,6 +211,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
         const deduped = current.filter((run) => run.id !== normalized.id);
         return [normalized, ...deduped].slice(0, 50);
       });
+      setLastRunsByJob((current) => mergeLatestJobRun(current, normalized));
 
       setJobHistoryByKey((current) => {
         const history = current[normalized.jobKey];
@@ -278,6 +295,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
           registerInteractiveJobRun(normalized);
           setActiveRunsById((current) => ({ ...current, [normalized.id]: normalized }));
           setRecentRuns((current) => [normalized, ...current.filter((run) => run.id !== normalized.id)].slice(0, 50));
+          setLastRunsByJob((current) => mergeLatestJobRun(current, normalized));
           setJobHistoryByKey((current) => ({
             ...current,
             [normalized.jobKey]: [
@@ -308,7 +326,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
       state={{
         jobs,
         activeRuns,
-        recentRuns,
+        lastRunsByJob,
         selectedJobKey,
         selectedJobRunId,
         selectedJobHistory: selectedJobKey ? jobHistoryByKey[selectedJobKey] ?? [] : [],

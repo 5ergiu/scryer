@@ -486,13 +486,35 @@ impl ShowRepository for TestShowRepo {
         absolute_number: &str,
     ) -> AppResult<Option<Episode>> {
         let episodes = self.episodes.lock().await;
-        Ok(episodes
+        let title_episodes = episodes
             .iter()
-            .find(|episode| {
-                episode.title_id == title_id
-                    && episode.absolute_number.as_deref() == Some(absolute_number)
+            .filter(|episode| episode.title_id == title_id)
+            .collect::<Vec<_>>();
+        let scale = scryer_domain::AbsoluteScale::for_catalog(title_episodes.iter().copied());
+        let wanted = absolute_number.trim().parse::<u32>().ok();
+        Ok(title_episodes
+            .into_iter()
+            .find(|episode| match scale {
+                scryer_domain::AbsoluteScale::Raw => {
+                    episode.absolute_number.as_deref() == Some(absolute_number)
+                }
+                scryer_domain::AbsoluteScale::Contiguous => {
+                    wanted.is_some() && scale.episode_absolute(episode) == wanted
+                }
             })
             .cloned())
+    }
+
+    async fn absolute_scale_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<scryer_domain::AbsoluteScale> {
+        let episodes = self.episodes.lock().await;
+        Ok(scryer_domain::AbsoluteScale::for_catalog(
+            episodes
+                .iter()
+                .filter(|episode| episode.title_id == title_id),
+        ))
     }
 
     async fn list_primary_collection_summaries(
@@ -1861,8 +1883,10 @@ fn build_episode_with_details(
         is_filler: false,
         is_recap: false,
         absolute_number: absolute_number.map(str::to_string),
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: Utc::now(),

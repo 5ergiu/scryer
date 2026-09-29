@@ -74,6 +74,8 @@ mod library_scan_titles;
 #[path = "library/scan/unmatched.rs"]
 mod library_scan_unmatched;
 pub mod lifecycle_claims;
+pub mod lists;
+pub use lists::{ListPluginProvider, ListProviderClient, NullListPluginProvider};
 pub mod location;
 pub mod maintenance_rules;
 mod media;
@@ -96,14 +98,15 @@ pub use ports::{
     IndexerSearchNumberingContext, TitleOptionsPatch,
 };
 pub use ports::{DownloadCleanupClaim, DownloadCleanupRecord, DownloadClientObservation};
+pub use ports::{DownloadTitleReassignment, DownloadTitleReferences};
 mod quality;
 mod rate_limit_signal;
 pub mod request_rules;
 mod rules;
 pub use rules::preview::{
     RuleSetTestContext, RuleSetTestDraft, RuleSetTestDraftContribution, RuleSetTestEntry,
-    RuleSetTestError, RuleSetTestParsed, RuleSetTestRequest, RuleSetTestResult,
-    RuleSetTestRuleSetResult,
+    RuleSetTestError, RuleSetTestListingFacts, RuleSetTestListingInput, RuleSetTestParsed,
+    RuleSetTestRequest, RuleSetTestResult, RuleSetTestRuleSetResult,
 };
 pub use rules::tracked_packs::{RulePackPreviewChange, TrackedRulePackPreview};
 mod scheduler;
@@ -115,6 +118,7 @@ pub mod subtitles;
 pub mod testing;
 mod types;
 pub mod upstream_scheduler;
+pub mod url_redaction;
 
 pub(crate) use acquisition::acquisition as acquisition_workflow;
 pub(crate) use acquisition::admission;
@@ -161,22 +165,22 @@ pub use import::completed_download as completed_download_handler;
 pub use ports::{
     CatalogDiscoveryCandidatesRecord, CatalogDiscoveryGroup, CatalogDiscoveryGroupKind,
     CatalogDiscoveryQuery, CatalogDiscoveryResult, CatalogDiscoverySectionCandidatesRecord,
-    CatalogDiscoverySurface, DISCOVERY_DEFAULT_SCOPE_KEY, DiscoveryCanonicalTagFilterOption,
-    DiscoveryContextIncrementalCommit, DiscoveryContextSnapshotCommit, DiscoveryExternalIdRecord,
-    DiscoveryFacetRecord, DiscoveryHomeCandidate, DiscoveryHomeFilterOptions, DiscoveryHomeFilters,
-    DiscoveryHomeQuery, DiscoveryHomeResult, DiscoveryHomeSectionCandidatesRecord,
-    DiscoveryItemDetailQuery, DiscoveryItemLibraryProvenanceRecord, DiscoveryItemRecord,
-    DiscoveryItemsPageRecord, DiscoveryItemsQuery, DiscoveryItemsResult,
-    DiscoveryItemsStorageQuery, DiscoveryPendingContextChangeRecord, DiscoveryPruneReport,
-    DiscoveryPublicFeedCommit, DiscoveryRankComponentRecord, DiscoveryRepository,
-    DiscoverySectionItemsRecord, DiscoverySectionRecord, DiscoverySectionResult,
-    DiscoverySourceTagRecord, DiscoverySubmittedSubjectRecord, DiscoverySyncRunRecord,
-    DiscoverySyncStateRecord, DiscoverySyncStatus, EpisodeImageUrlUpdate,
-    MediaRequestQualityProfileReferenceCounts, MediaRequestResolution,
-    MediaRequestResolutionResult, MediaRequestSubmissionResult, MediaRequestUpdateResult,
-    SeriesMovieExternalIdLookupMatch, SubtitleSyncClient, SubtitleSyncJob, TitleArtworkUrlUpdate,
-    TitleDeletePreviewInfo, TitleExternalIdLookup, TitleExternalIdLookupMatch,
-    UserUiSettingsRepository,
+    CatalogDiscoverySurface, DISCOVERY_DEFAULT_SCOPE_KEY, DiscoveryAffinitySignalRecord,
+    DiscoveryCanonicalTagFilterOption, DiscoveryContextIncrementalCommit,
+    DiscoveryContextSnapshotCommit, DiscoveryExternalIdRecord, DiscoveryFacetRecord,
+    DiscoveryHomeCandidate, DiscoveryHomeFilterOptions, DiscoveryHomeFilters, DiscoveryHomeQuery,
+    DiscoveryHomeResult, DiscoveryHomeSectionCandidatesRecord, DiscoveryItemDetailQuery,
+    DiscoveryItemLibraryProvenanceRecord, DiscoveryItemRecord, DiscoveryItemsPageRecord,
+    DiscoveryItemsQuery, DiscoveryItemsResult, DiscoveryItemsStorageQuery,
+    DiscoveryPendingContextChangeRecord, DiscoveryPruneReport, DiscoveryPublicFeedCommit,
+    DiscoveryRankComponentRecord, DiscoveryRepository, DiscoverySectionItemsRecord,
+    DiscoverySectionRecord, DiscoverySectionResult, DiscoverySourceTagRecord,
+    DiscoverySubmittedSubjectRecord, DiscoverySyncRunRecord, DiscoverySyncStateRecord,
+    DiscoverySyncStatus, EpisodeImageUrlUpdate, MediaRequestQualityProfileReferenceCounts,
+    MediaRequestResolution, MediaRequestResolutionResult, MediaRequestSubmissionResult,
+    MediaRequestUpdateResult, SeriesMovieExternalIdLookupMatch, SubtitleSyncClient,
+    SubtitleSyncJob, TitleArtworkUrlUpdate, TitleDeletePreviewInfo, TitleExternalIdLookup,
+    TitleExternalIdLookupMatch, UserUiSettingsRepository,
 };
 pub(crate) mod normalize;
 pub use acquisition::submission::describe_acquisition_metrics;
@@ -211,6 +215,9 @@ pub use plugins::plugins::RUNTIME_PLUGIN_LOAD_CONCURRENCY;
 pub use plugins::plugins::decode_persisted_plugin_wasm_payload;
 pub use plugins::plugins::load_runtime_plugin_from_persisted_installation_payload;
 pub use quality::release_dedup;
+pub use quality::release_listing::{
+    ReleaseListingView, release_listing_view, search_result_listing_json,
+};
 pub use rules::metrics::describe_rule_metrics;
 pub use services::{
     ActiveImportStream, ActiveImportStreamHandle, ActiveImportStreamPhase, ActiveImportStreamSync,
@@ -319,12 +326,13 @@ pub use contracts::{
     DownloadClientBindingRecord, DownloadClientConfigUpdate, DownloadClientMarkImportedRequest,
     DownloadClientStatus, DownloadOrigin, DownloadRecord, DownloadSubmission,
     DownloadSubmissionActorSnapshot, DownloadSubmissionIdentity, DownloadSubmissionPurpose,
-    EpisodeUpdate, ImportArtifact, IndexerArtifactLease, IndexerArtifactResolutionRequest,
-    IndexerConfigSyncResult, IndexerConfigUpdate, IndexerDownloadClientMappingCatalog,
-    IndexerDownloadClientMappingClient, IndexerDownloadClientMappingIndexer,
-    IndexerDownloadClientProviderCompatibility, IndexerRoutingEntry, IndexerRoutingPlan,
-    IndexerSearchEligibility, IndexerSyncPlan, IndexerValidationResult, InsertMediaFileInput,
-    ManagedIndexerChildPlan, ManagedIndexerRoutingScope, MediaAnalysisOutcome, MediaFileAnalysis,
+    EpisodeLinkReplacement, EpisodeUpdate, ImportArtifact, IndexerArtifactLease,
+    IndexerArtifactResolutionRequest, IndexerConfigSyncResult, IndexerConfigUpdate,
+    IndexerDownloadClientMappingCatalog, IndexerDownloadClientMappingClient,
+    IndexerDownloadClientMappingIndexer, IndexerDownloadClientProviderCompatibility,
+    IndexerRoutingEntry, IndexerRoutingPlan, IndexerSearchEligibility, IndexerSyncPlan,
+    IndexerValidationResult, InsertMediaFileInput, ManagedIndexerChildPlan,
+    ManagedIndexerRoutingScope, MediaAnalysisOutcome, MediaFileAnalysis,
     MediaFileCatalogDisposition, MediaFileRole, NewBlocklistEntry, NewProxyConfig,
     NewSeedingProfile, NotificationScopeIdUpdate, ObservationResolution, ObservedClientJob,
     PendingReleasePageSort, PendingReleasesPageQuery, PendingStagedNzb, PersistedSeedGoals,
@@ -390,8 +398,8 @@ pub use media_requests::snapshot::{
 };
 pub use media_requests::{
     ApproveMediaRequestOutcome, CLAIM_RELEASE_REQUEST_CANCELED, CLAIM_RELEASE_REQUEST_REJECTED,
-    ListMediaRequestsInput, SubmitMediaRequestInput, SubmitMediaRequestOutcome,
-    UpdateMediaRequestInput,
+    ListMediaRequestsInput, MediaRequestAdmission, SubmitMediaRequestInput,
+    SubmitMediaRequestOutcome, UpdateMediaRequestInput,
 };
 pub use media_servers::{
     EmbyConnectionMode, EmbyLocalSetupMethod, MediaServerConnectionDraft,
@@ -404,11 +412,11 @@ pub use plugins::plugins::{
 };
 pub use ports::{MediaServerCatalogItem, MediaServerCatalogItemKind, RuleSetHistoryChange};
 pub use request_rules::{
-    Arbitration, ArbitrationReason, FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_NO_RULE_MATCHED,
-    FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER, PREFLIGHT_REQUEST_ID_PREFIX,
-    REQUEST_MAX_LEASE_DAYS, RecordedVote, RequestDecisionReason, RequestDraft, RequestEvaluation,
-    RequestEvaluationPurpose, RequestPreflight, RequestRuleDraft, RequestRuleGates,
-    RequestRuleGatesUpdate, RequestRulePreviewMatcher, RequestRulePreviewRequest,
+    Arbitration, ArbitrationReason, FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_LIBRARY_PERMISSION,
+    FALLBACK_NO_RULE_MATCHED, FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER,
+    PREFLIGHT_REQUEST_ID_PREFIX, REQUEST_MAX_LEASE_DAYS, RecordedVote, RequestDecisionReason,
+    RequestDraft, RequestEvaluation, RequestEvaluationPurpose, RequestPreflight, RequestRuleDraft,
+    RequestRuleGates, RequestRuleGatesUpdate, RequestRulePreviewMatcher, RequestRulePreviewRequest,
     RequestRulePreviewResult, RequestRuleSample, RequestRuleScope, RequestRuleSetDetail,
     RequestRulesEngineCache, RequestRulesEngineHandle, ScopedError, ScopedVote, arbitrate,
     validate_lease_days, validate_tag_list,
@@ -500,7 +508,8 @@ pub use library_scan::{
     LibraryDirectoryScanResult, LibraryFile, LibraryFileBatch, LibraryFileBatchReceiver,
     LibraryScanSummary, LibraryScanner, MetadataGateway, MetadataSearchItem, MetadataSearchQuery,
     MovieMetadata, MovieTitleBulkResult, MovieTitleRef, MultiMetadataSearchResult,
-    RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls, SeriesMetadata, TitleArtworkUrls,
+    RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls, SeriesMetadata,
+    SeriesTitleBulkResult, SeriesTitleRef, TitleArtworkUrls, TitleExternalRef,
     TitleRecommendationsInput, TitleResolution,
 };
 pub use library_scan_progress::{
@@ -597,15 +606,15 @@ pub use ports::{
     NotificationManualInteractionPayload, NotificationMediaFilePayload,
     NotificationMediaUpdatePayload, NotificationMediaUpdateTypePayload, NotificationPayload,
     NotificationPluginProvider, NotificationReleasePayload, NotificationSeverityPayload,
-    NotificationSubscriptionRepository, NotificationTitlePayload, OAuthRepository,
-    PendingReleaseRepository, PlexServerDiscovery, PlexServerUser, PluginDescriptorLoader,
-    PluginHttpTrustConfigRuntime, PluginInstallationRepository, PostProcessingScriptRepository,
-    PrefetchedCompletedDownloads, ProxyConfigRepository, QualityProfileRepository,
-    ReleaseAttemptRepository, RequestRuleDecisionRepository, RequestRuleSetRepository,
-    ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy, RuleSetRepository,
-    RuntimePluginLoad, ScopeCoverageRow, ScopeIndexerCoverageRepository, SeedingProfileRepository,
-    SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage, StagedNzbStore,
-    SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
+    NotificationSubscriptionRepository, NotificationTitleMovePayload, NotificationTitlePayload,
+    OAuthRepository, PendingReleaseRepository, PlexServerDiscovery, PlexServerUser,
+    PluginDescriptorLoader, PluginHttpTrustConfigRuntime, PluginInstallationRepository,
+    PostProcessingScriptRepository, PrefetchedCompletedDownloads, ProxyConfigRepository,
+    QualityProfileRepository, ReleaseAttemptRepository, RequestRuleDecisionRepository,
+    RequestRuleSetRepository, ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy,
+    RuleSetRepository, RuntimePluginLoad, ScopeCoverageRow, ScopeIndexerCoverageRepository,
+    SeedingProfileRepository, SettingsRepository, ShowRepository, SrrdbFilenameLookup, SrrdbOutage,
+    StagedNzbStore, SubtitleDownloadRepository, SubtitlePluginProvider, SubtitleProviderClient,
     SubtitleProviderConfigRepository, SystemInfoProvider, TitleImageProcessor,
     TitleImageRepository, TitleListProjection, TitleNameBucketQuery, TitleNameCandidate,
     TitleRepository, TotpRepository, UserExternalAccountRepository, UserRepository,
@@ -937,6 +946,12 @@ pub enum AppError {
 
     #[error("import source changed while being inspected {path}: {message}")]
     ImportSourceChanged { path: String, message: String },
+
+    /// A discovery generation was built for a presentation (metadata language
+    /// and revision) that changed before it could be committed. The commit is
+    /// rolled back; the language change already scheduled a fresh run.
+    #[error("discovery run {run_id} was superseded by a presentation change")]
+    DiscoveryPresentationSuperseded { run_id: String },
 
     #[error("repository: {0}")]
     Repository(String),

@@ -123,8 +123,10 @@ const NOTIFICATION_EVENT_LABEL_KEYS: Record<string, string> = {
   rename: "settings.notificationEvent.rename",
   title_added: "settings.notificationEvent.titleAdded",
   title_deleted: "settings.notificationEvent.titleDeleted",
+  title_moved: "settings.notificationEvent.titleMoved",
   file_deleted: "settings.notificationEvent.fileDeleted",
   file_deleted_for_upgrade: "settings.notificationEvent.fileDeletedForUpgrade",
+  file_restored: "settings.notificationEvent.fileRestored",
   post_processing_completed: "settings.notificationEvent.postProcessingCompleted",
   subtitle_downloaded: "settings.notificationEvent.subtitleDownloaded",
   subtitle_search_failed: "settings.notificationEvent.subtitleSearchFailed",
@@ -136,6 +138,12 @@ const NOTIFICATION_EVENT_LABEL_KEYS: Record<string, string> = {
   health_restored: "settings.notificationEvent.healthRestored",
   application_update: "settings.notificationEvent.applicationUpdate",
   manual_interaction_required: "settings.notificationEvent.manualInteractionRequired",
+  list_title_added: "settings.notificationEvent.listTitleAdded",
+  list_request_submitted: "settings.notificationEvent.listRequestSubmitted",
+  list_item_held: "settings.notificationEvent.listItemHeld",
+  list_title_left: "settings.notificationEvent.listTitleLeft",
+  list_sync_failed: "settings.notificationEvent.listSyncFailed",
+  list_unfollowed: "settings.notificationEvent.listUnfollowed",
   test: "settings.notificationEvent.test",
 };
 

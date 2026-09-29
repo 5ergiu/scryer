@@ -257,6 +257,18 @@ impl DiscoveryRepository for NullDiscoveryRepository {
         Ok(())
     }
 
+    async fn refresh_discovery_presentation(
+        &self,
+        _language: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn discovery_run_matches_presentation(&self, _run_id: &str) -> AppResult<bool> {
+        Ok(true)
+    }
+
     async fn try_acquire_discovery_sync_lease(
         &self,
         _scope_key: &str,
@@ -986,6 +998,17 @@ impl MediaFileRepository for NullMediaFileRepository {
     }
 
     async fn link_file_to_episode(&self, _file_id: &str, _episode_id: &str) -> AppResult<()> {
+        Err(AppError::Repository(
+            "media file repository is not configured".to_string(),
+        ))
+    }
+
+    async fn replace_file_episode_links(
+        &self,
+        _file_id: &str,
+        _expected_episode_ids: &[String],
+        _episode_ids: &[String],
+    ) -> AppResult<crate::EpisodeLinkReplacement> {
         Err(AppError::Repository(
             "media file repository is not configured".to_string(),
         ))
@@ -4488,6 +4511,12 @@ pub mod test_nulls {
         ) -> AppResult<Option<Episode>> {
             Ok(None)
         }
+        async fn absolute_scale_for_title(
+            &self,
+            _: &str,
+        ) -> AppResult<scryer_domain::AbsoluteScale> {
+            Ok(scryer_domain::AbsoluteScale::Raw)
+        }
         async fn list_primary_collection_summaries(
             &self,
             _: &[String],
@@ -4655,7 +4684,7 @@ pub mod test_nulls {
 
     #[async_trait]
     impl ReleaseAttemptRepository for NullReleaseAttemptRepository {
-        async fn record_release_attempt(
+        async fn insert_release_attempt(
             &self,
             _: Option<String>,
             _: Option<String>,

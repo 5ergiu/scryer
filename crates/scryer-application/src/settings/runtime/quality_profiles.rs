@@ -422,7 +422,16 @@ impl AppUseCase {
         let can_request = self
             .has_any_library_permission(actor, scryer_domain::LibraryPermission::Request)
             .await?;
-        if !can_manage_catalog && !can_manage_titles && !can_manage_library && !can_request {
+        // A list manager picks a quality profile for each of a list's routes.
+        let can_manage_lists = self
+            .has_app_permission(actor, scryer_domain::AppPermission::ManageLists)
+            .await?;
+        if !can_manage_catalog
+            && !can_manage_titles
+            && !can_manage_library
+            && !can_request
+            && !can_manage_lists
+        {
             return Err(AppError::Unauthorized(
                 "You do not have permission to view quality profiles".to_string(),
             ));

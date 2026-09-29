@@ -525,7 +525,7 @@ export const PendingImportCard = React.memo(function PendingImportCard({
                             size="sm"
                             id={`pending-import-search-${
                               alreadyInLibrary ? "attach" : "match"
-                            }-${item.id}-${result.tvdbId}`}
+                            }-${item.id}-${result.smgId ?? result.tvdbId}`}
                             data-ui={
                               alreadyInLibrary
                                 ? "pending-import-search-attach"

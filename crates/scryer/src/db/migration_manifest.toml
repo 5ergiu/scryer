@@ -2596,6 +2596,125 @@ file = "postgres/migrations/0257_import_space_attempts_and_member_age.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 258
+description = "indexer query budget"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0258_indexer_query_budget.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0258_indexer_query_budget.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 259
+description = "list subscriptions, memberships, exclusions, member accounts and policies, request origin"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0259_list_subscriptions.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0259_list_subscriptions.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 260
+description = "episode contiguous absolute number"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0260_episode_contiguous_absolute_number.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0260_episode_contiguous_absolute_number.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 261
+description = "release listing snapshot on submissions, pending releases and media files"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0261_release_listing_snapshot.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0261_release_listing_snapshot.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 262
+description = "discovery affinity evidence"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0262_discovery_affinity_evidence.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0262_discovery_affinity_evidence.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 263
+description = "episode tmdb id"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0263_episode_tmdb_id.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0263_episode_tmdb_id.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 264
+description = "full admin manage lists"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0264_full_admin_manage_lists.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0264_full_admin_manage_lists.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

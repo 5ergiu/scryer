@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use scryer_application::url_redaction::redact_optional_url_credentials;
 use scryer_application::{
     AcquisitionScopeState, AcquisitionScopeStateRepository, AcquisitionScopeStatesQuery,
     AcquisitionScopeStatus, AppResult, BlocklistRepository, DownloadSourceKind,
@@ -414,6 +415,14 @@ struct ReleaseDecisionIdentityArgs {
     release_size_bytes: i64,
 }
 
+/// The release URL as the decision ledger stores it. Indexer download links
+/// carry the operator's indexer key; the ledger is read-only history that is
+/// shown in the UI and never fetched from, so the key is dropped on write and
+/// the dedupe identity compares the same redacted form.
+fn stored_release_decision_url(decision: &ReleaseDecision) -> Option<String> {
+    redact_optional_url_credentials(decision.release_url.clone())
+}
+
 /// Stands in for "no size recorded" in the identity comparison. Negative, so
 /// it cannot collide with a real byte count.
 const RELEASE_DECISION_UNKNOWN_SIZE: i64 = -1;
@@ -423,7 +432,7 @@ impl ReleaseDecisionIdentityArgs {
         Self {
             wanted_item_id: decision.wanted_item_id.clone(),
             decision_code: decision.decision_code.clone(),
-            release_url: decision.release_url.clone().unwrap_or_default(),
+            release_url: stored_release_decision_url(decision).unwrap_or_default(),
             release_title: decision.release_title.clone(),
             release_size_bytes: decision
                 .release_size_bytes
@@ -1087,7 +1096,7 @@ impl AcquisitionScopeStateRepository for WantedStore {
             SqlArg::Text(decision.wanted_item_id.clone()),
             SqlArg::Text(decision.title_id.clone()),
             SqlArg::Text(decision.release_title.clone()),
-            SqlArg::OptText(decision.release_url.clone()),
+            SqlArg::OptText(stored_release_decision_url(decision)),
             SqlArg::OptI64(decision.release_size_bytes),
             SqlArg::Text(decision.decision_code.clone()),
             SqlArg::I32(decision.candidate_score),
@@ -1766,7 +1775,7 @@ const PENDING_RELEASE_COLUMNS: &str =
     added_at, last_observed_at, delay_until, status, grabbed_at, source_password, published_at, info_hash,
     minimum_seed_ratio, minimum_seed_time_minutes, season_pack_seed_ratio,
     season_pack_seed_time_minutes, seeders, release_identity, coverage_identity, role,
-    last_decision_code, release_age_unknown";
+    last_decision_code, release_age_unknown, release_listing_json";
 
 /// Same columns as [`PENDING_RELEASE_COLUMNS`] but qualified with the `pr` alias
 /// so the paged read can JOIN `titles` for library scoping without ambiguous
@@ -1777,7 +1786,7 @@ const PENDING_RELEASE_COLUMNS_PR: &str =
     pr.added_at, pr.last_observed_at, pr.delay_until, pr.status, pr.grabbed_at, pr.source_password, pr.published_at, pr.info_hash,
     pr.minimum_seed_ratio, pr.minimum_seed_time_minutes, pr.season_pack_seed_ratio,
     pr.season_pack_seed_time_minutes, pr.seeders, pr.release_identity, pr.coverage_identity,
-    pr.role, pr.last_decision_code, pr.release_age_unknown";
+    pr.role, pr.last_decision_code, pr.release_age_unknown, pr.release_listing_json";
 
 fn pending_release_row_to_item(
     row: &SqlRow,
@@ -1830,6 +1839,8 @@ fn pending_release_row_to_item(
         })?,
         last_decision_code: row.opt_text("last_decision_code")?,
         release_age_unknown: row.bool("release_age_unknown")?,
+        // Rows parked before the column existed read back as `None`.
+        release_listing_json: row.opt_text("release_listing_json")?,
     })
 }
 
@@ -1886,6 +1897,7 @@ fn pending_release_insert_args(
         SqlArg::Text(observation.role.as_str().to_string()),
         SqlArg::OptText(observation.latest_decision_code.clone()),
         SqlArg::Bool(observation.release_age_unknown),
+        SqlArg::OptText(release.release_listing_json.clone()),
     ])
 }
 
@@ -1976,6 +1988,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                             release_size_bytes = {},
                             release_score = {},
                             scoring_log_json = {},
+                            release_listing_json = COALESCE({}, release_listing_json),
                             source_password = COALESCE({}, source_password),
                             indexer_source = {},
                             indexer_id = {},
@@ -2006,6 +2019,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                             &self.datastore,
                             release.scoring_log_json.as_deref(),
                         )?,
+                        SqlArg::OptText(release.release_listing_json.clone()),
                         SqlArg::OptText(encrypt_pending_release_source_password(
                             encryption_key.as_ref(),
                             release.source_password.as_ref(),
@@ -2049,9 +2063,9 @@ impl PendingReleaseRepository for PendingReleaseStore {
               added_at, last_observed_at, delay_until, status, grabbed_at, source_password, published_at, info_hash,
               minimum_seed_ratio, minimum_seed_time_minutes, season_pack_seed_ratio,
               season_pack_seed_time_minutes, seeders, release_identity, coverage_identity, role,
-              last_decision_code, release_age_unknown)
+              last_decision_code, release_age_unknown, release_listing_json)
              VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-                     {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+                     {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
              ON CONFLICT(release_identity)
              WHERE status IN ('waiting', 'standby', 'processing', 'needs_review')
              DO UPDATE SET
@@ -2060,6 +2074,7 @@ impl PendingReleaseRepository for PendingReleaseStore {
                 release_size_bytes = excluded.release_size_bytes,
                 release_score = excluded.release_score,
                 scoring_log_json = excluded.scoring_log_json,
+                release_listing_json = COALESCE(excluded.release_listing_json, pending_releases.release_listing_json),
                 indexer_source = excluded.indexer_source,
                 indexer_id = excluded.indexer_id,
                 release_guid = excluded.release_guid,

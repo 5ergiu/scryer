@@ -19,6 +19,8 @@ use scryer_interface_metadata::MetadataQueries;
 use scryer_interface_settings::SettingsQueries;
 use std::{collections::HashMap, fs, io, path::Path};
 
+mod lists;
+
 use scryer_interface_core as context;
 use scryer_interface_core::{
     actor_from_ctx, app_from_ctx, application_upgrade_assessment_from_ctx, current_user_from_ctx,
@@ -806,6 +808,7 @@ pub struct QueryRoot(
     UtilityQueries,
     AccountQueries,
     IndexerErrorQueries,
+    lists::ListQueries,
 );
 
 fn indexer_error_operation_value(
@@ -2673,6 +2676,17 @@ impl JobAndDownloadQueries {
         let actor = actor_from_ctx(ctx)?;
         let runs = app
             .list_recent_job_runs(&actor, limit.unwrap_or(50).max(1) as usize)
+            .await
+            .map_err(to_gql_error)?;
+        Ok(runs.into_iter().map(from_job_run).collect())
+    }
+
+    /// List the most recent run of each scheduled job; jobs that have never run are absent.
+    async fn latest_job_runs(&self, ctx: &Context<'_>) -> GqlResult<Vec<JobRunPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let runs = app
+            .list_latest_job_runs(&actor)
             .await
             .map_err(to_gql_error)?;
         Ok(runs.into_iter().map(from_job_run).collect())

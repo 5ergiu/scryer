@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  domainEventTypesForHistoryEvents,
   getTitleHistoryEventLabel,
   getTitleHistoryEventMeta,
   TITLE_HISTORY_FILTERS,
@@ -68,4 +69,27 @@ test("every locale can name the download-ignored event", () => {
       `missing history.downloadIgnored in ${name}`,
     );
   }
+});
+
+test("every history filter maps to the domain events that produce it", () => {
+  for (const eventType of TITLE_HISTORY_FILTERS) {
+    assert.ok(
+      domainEventTypesForHistoryEvents([eventType]).length > 0,
+      `${eventType} has no refresh trigger`,
+    );
+  }
+  assert.deepEqual(domainEventTypesForHistoryEvents(["blocklisted"]), ["RELEASE_BLOCKLISTED"]);
+  assert.deepEqual(
+    domainEventTypesForHistoryEvents(["import_failed", "import_skipped"]),
+    ["IMPORT_REJECTED"],
+  );
+  assert.deepEqual(domainEventTypesForHistoryEvents([...WANTED_HISTORY_FILTERS]), [
+    "DOWNLOAD_FAILED",
+    "DOWNLOAD_IGNORED",
+    "IMPORT_COMPLETED",
+    "IMPORT_REJECTED",
+    "RELEASE_BLOCKLISTED",
+    "RELEASE_GRABBED",
+  ]);
+  assert.deepEqual(domainEventTypesForHistoryEvents(["unknown"]), []);
 });

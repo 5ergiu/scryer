@@ -183,6 +183,8 @@ pub enum TitleHistoryEventTypeValue {
     FileRecycled,
     /// File was deleted.
     FileDeleted,
+    /// File was restored from the recycle bin.
+    FileRestored,
     /// File was renamed.
     FileRenamed,
     /// Title completed a root move or library transfer.
@@ -211,6 +213,7 @@ impl TitleHistoryEventTypeValue {
             Self::FileUpgraded => TitleHistoryEventType::FileUpgraded,
             Self::FileRecycled => TitleHistoryEventType::FileRecycled,
             Self::FileDeleted => TitleHistoryEventType::FileDeleted,
+            Self::FileRestored => TitleHistoryEventType::FileRestored,
             Self::FileRenamed => TitleHistoryEventType::FileRenamed,
             Self::TitleMoved => TitleHistoryEventType::TitleMoved,
             Self::DownloadIgnored => TitleHistoryEventType::DownloadIgnored,

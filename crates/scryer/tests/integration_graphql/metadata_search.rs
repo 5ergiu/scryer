@@ -130,6 +130,15 @@ async fn graphql_metadata_movie() {
 #[tokio::test]
 async fn graphql_metadata_series() {
     let ctx = TestContext::new().await;
+    // A TVDB-backed series is served through SMG's title surface: the TVDB id
+    // resolves to an SMG title id, which `titles` answers.
+    let legacy: Value =
+        serde_json::from_str(&load_fixture("smg/get_series.json")).expect("fixture is JSON");
+    let title_surface = json!({
+        "data": { "metadataBulk": { "movies": [], "series": [legacy["data"]["series"]["series"].clone()] } }
+    })
+    .to_string();
+    mount_series_title_surface(&ctx, 8_701, &title_surface).await;
     let fixture = load_fixture("smg/get_series.json");
     Mock::given(method("GET"))
         .and(path("/graphql"))
@@ -184,5 +193,61 @@ async fn graphql_metadata_series() {
             "episode_still".to_string(),
             "landscape".to_string(),
         )
+    );
+}
+
+#[tokio::test]
+async fn graphql_metadata_series_by_smg_id_serves_a_tmdb_primary_series() {
+    let ctx = TestContext::new().await;
+    let fixture = load_fixture("smg/titles_movie.json");
+    for http_method in ["GET", "POST"] {
+        Mock::given(method(http_method))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
+            .mount(&ctx.smg_server)
+            .await;
+    }
+
+    let body = gql(
+        &ctx,
+        r#"query($input: MetadataSeriesInput!) {
+            metadataSeries(input: $input) {
+                tvdbId smgId tmdbId name
+                seasons { number }
+                episodes { tvdbId tmdbId seasonNumber episodeNumber name }
+            }
+        }"#,
+        json!({ "input": { "smgId": 303 } }),
+    )
+    .await;
+    assert_no_errors(&body);
+    let series = &body["data"]["metadataSeries"];
+    assert_eq!(series["name"], "TMDB Primary Series");
+    assert_eq!(series["tvdbId"], "");
+    assert_eq!(series["smgId"], 303);
+    assert_eq!(series["tmdbId"], 3030);
+    assert_eq!(series["seasons"].as_array().map(Vec::len), Some(1));
+    assert_eq!(series["episodes"][0]["tvdbId"], "");
+    assert_eq!(series["episodes"][0]["tmdbId"], 3_030_101);
+    assert_eq!(series["episodes"][0]["name"], "Pilot");
+}
+
+#[tokio::test]
+async fn graphql_metadata_series_requires_an_identity() {
+    let ctx = TestContext::new().await;
+    let body = gql(
+        &ctx,
+        r#"query($input: MetadataSeriesInput!) {
+            metadataSeries(input: $input) { name }
+        }"#,
+        json!({ "input": {} }),
+    )
+    .await;
+    let errors = body["errors"].as_array().expect("an identity is required");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("a title identity is required")),
+        "{body}"
     );
 }

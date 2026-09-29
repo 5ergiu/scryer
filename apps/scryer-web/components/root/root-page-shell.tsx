@@ -16,6 +16,7 @@ import {
   Download,
   LayoutDashboard,
   ListChecks,
+  ListPlus,
   Monitor,
   Settings,
   CircleFadingArrowUp,
@@ -42,7 +43,11 @@ import { useConfigStepUp } from "@/lib/hooks/use-config-step-up";
 import { TranslateContext } from "@/lib/context/translate-context";
 import { GlobalStatusContext } from "@/lib/context/global-status-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
-import { useExperimentalFeaturesEnabled, useInstanceFeatures } from "@/lib/context/instance-features-context";
+import {
+  useExperimentalFeaturesEnabled,
+  useInstanceFeatures,
+  useInstanceFeaturesLoaded,
+} from "@/lib/context/instance-features-context";
 import { RootHeader } from "@/components/root/root-header";
 import { buildRouteCommands } from "@/components/root/route-commands";
 import { JobRunProvider } from "@/components/root/job-run-provider";
@@ -111,6 +116,7 @@ import {
   defaultSettingsSection,
   isMediaSettingsSection,
   isProtectedSettingsRoute,
+  shouldLeaveListsPage,
 } from "@/lib/utils/routes";
 import { cn } from "@/lib/utils";
 import {
@@ -184,6 +190,12 @@ const DiscoveryContainer = lazy(() =>
 const CalendarContainer = lazy(() =>
   import("@/components/containers/calendar-container").then((m) => ({
     default: m.CalendarContainer,
+  })),
+);
+
+const ListsContainer = lazy(() =>
+  import("@/components/containers/lists-container").then((m) => ({
+    default: m.ListsContainer,
   })),
 );
 
@@ -469,6 +481,8 @@ function MainContent({
   canManageCatalogSettings,
   canManageConfig,
   canManageLibrarySettings,
+  canAccessLists,
+  canManageLists,
 }: {
   view: ViewId;
   overviewTitleId: string | null;
@@ -508,10 +522,16 @@ function MainContent({
   canManageCatalogSettings: boolean;
   canManageConfig: boolean;
   canManageLibrarySettings: boolean;
+  canAccessLists: boolean;
+  canManageLists: boolean;
 }) {
   const { apiExplorerEnabled } = useInstanceFeatures();
+  const instanceFeaturesLoaded = useInstanceFeaturesLoaded();
   if (view === "api-explorer") {
     if (!canAccessApiExplorer(canManageSystemSettings, apiExplorerEnabled)) {
+      if (!instanceFeaturesLoaded) {
+        return <ViewLoadingFallback />;
+      }
       return <div role="status" className="p-8 text-muted-foreground">API explorer is unavailable.</div>;
     }
     return <ApiExplorerContainer key={userId} />;
@@ -537,6 +557,12 @@ function MainContent({
     return (
       <CalendarContainer key="calendar" onOpenOverview={handleOpenOverview} />
     );
+  }
+  if (view === "lists") {
+    if (!canAccessLists) {
+      return <ViewLoadingFallback />;
+    }
+    return <ListsContainer key="lists" canManageLists={canManageLists} />;
   }
   if (view === "discovery") {
     return (
@@ -795,6 +821,7 @@ function AuthenticatedHomePage({
   // The palette must not offer a page the sidebar is hiding, so the same
   // instance-wide switch decides both.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
+  const instanceFeaturesLoaded = useInstanceFeaturesLoaded();
   const { canPrompt, isInstalled, isIosSafari, promptInstall } =
     useInstallPrompt();
 
@@ -1352,6 +1379,7 @@ function AuthenticatedHomePage({
         label: t("nav.calendar"),
         icon: CalendarDays,
       },
+      { id: "lists" as ViewId, label: t("nav.lists"), icon: ListPlus },
       { id: "wanted" as ViewId, label: t("nav.wanted"), icon: ListChecks },
       { id: "system" as ViewId, label: t("system.title"), icon: Monitor },
       { id: "settings" as ViewId, label: t("nav.settings"), icon: Settings },
@@ -1370,6 +1398,8 @@ function AuthenticatedHomePage({
     canManageUsers,
     canManageConfig,
     canManageLibrarySettings,
+    canManageLists,
+    canAccessLists,
   } = usePermissions(authenticatedUser);
   const discoveryAuthorizationSignature = useMemo(
     () => authorizationCacheSignature(authenticatedUser),
@@ -1422,11 +1452,13 @@ function AuthenticatedHomePage({
         activityImportCount: manualImportRequiredCount,
         experimentalFeaturesEnabled,
         onNavigate: navigateTo,
+        onNavigatePath: (path: string) => navigate(path),
       }),
     [
       authenticatedUser,
       experimentalFeaturesEnabled,
       manualImportRequiredCount,
+      navigate,
       navigateTo,
       t,
     ],
@@ -1595,6 +1627,24 @@ function AuthenticatedHomePage({
     navigateToAccessibleDefault();
   }, [
     canManageSystemSettings,
+    navigateToAccessibleDefault,
+    routeIsCanonical,
+    view,
+  ]);
+
+  useEffect(() => {
+    if (
+      !routeIsCanonical ||
+      view !== "lists" ||
+      !shouldLeaveListsPage(canAccessLists, instanceFeaturesLoaded)
+    ) {
+      return;
+    }
+
+    navigateToAccessibleDefault();
+  }, [
+    canAccessLists,
+    instanceFeaturesLoaded,
     navigateToAccessibleDefault,
     routeIsCanonical,
     view,
@@ -2014,6 +2064,8 @@ function AuthenticatedHomePage({
                                     canManageCatalogSettings
                                   }
                                   canManageConfig={canManageConfig}
+                                  canAccessLists={canAccessLists}
+                                  canManageLists={canManageLists}
                                   canManageLibrarySettings={
                                     canManageLibrarySettings
                                   }

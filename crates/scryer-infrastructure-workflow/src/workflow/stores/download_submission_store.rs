@@ -5,8 +5,9 @@ use chrono::Utc;
 use scryer_application::{
     AppError, AppResult, CanonicalDownloadIdentityDisposition, ClientJobLocator, DownloadOrigin,
     DownloadSubmission, DownloadSubmissionActorSnapshot, DownloadSubmissionIdentity,
-    DownloadSubmissionRepository, IdentityTrackedStateTarget, PersistedSeedGoals,
-    SeedGoalResolutionSource, TerminalDownloadHistoryRow,
+    DownloadSubmissionRepository, DownloadTitleReassignment, DownloadTitleReferences,
+    IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
+    TerminalDownloadHistoryRow,
 };
 use scryer_domain::{Id, TrackedDownloadState, download_identity::DownloadId};
 
@@ -232,6 +233,32 @@ pub(super) async fn claim_or_create_binding_download_id_tx(
         .await?;
     }
     let client_name_snapshot = client_name_snapshot_tx(tx, locator).await?;
+    // A grab records its intent under its pre-allocated id before submitting,
+    // leaving an active binding with no client job yet. Acceptance binds that
+    // row to the job instead of inserting a second binding for the id.
+    if claim.claims_scryer_provenance() {
+        let bound = SqlRuntime::execute(
+            SqlExec::Tx(tx),
+            "UPDATE download_client_bindings
+             SET client_config_id = {}, client_type_snapshot = {},
+                 client_name_snapshot = {}, native_item_id = {}, last_seen_at = {}
+             WHERE download_id = {}
+               AND native_item_id IS NULL
+               AND ended_at IS NULL",
+            &[
+                SqlArg::OptText(locator.client_id.clone()),
+                SqlArg::Text(locator.client_type.clone()),
+                SqlArg::OptText(client_name_snapshot.clone()),
+                SqlArg::Text(locator.item_id.clone()),
+                SqlArg::Timestamp(now),
+                SqlArg::Text(download_id.to_string()),
+            ],
+        )
+        .await?;
+        if bound == 1 {
+            return Ok(download_id);
+        }
+    }
     SqlRuntime::execute(
         SqlExec::Tx(tx),
         "INSERT INTO download_client_bindings (
@@ -771,6 +798,34 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn record_pending_submission(&self, submission: DownloadSubmission) -> AppResult<()> {
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "record_pending_download_submission",
+            move |tx| {
+                let submission = submission.clone();
+                Box::pin(
+                    async move { record_pending_download_submission_tx(tx, &submission).await },
+                )
+            },
+        )
+        .await
+    }
+
+    async fn withdraw_pending_submission(&self, download_id: &DownloadId) -> AppResult<()> {
+        let download_id = *download_id;
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "withdraw_pending_download_submission",
+            move |tx| {
+                Box::pin(
+                    async move { withdraw_pending_download_submission_tx(tx, &download_id).await },
+                )
+            },
+        )
+        .await
+    }
+
     async fn record_submission_with_identity(
         &self,
         submission: DownloadSubmission,
@@ -793,6 +848,9 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                         && download_id != requested_download_id
                         && !bound_download_is_terminal_tx(tx, &download_id).await?
                     {
+                        // The grab resolved to another download, so the intent
+                        // it recorded under its own id describes nothing.
+                        withdraw_pending_download_submission_tx(tx, &requested_download_id).await?;
                         return Ok(CanonicalDownloadIdentityDisposition::AdoptedExisting {
                             download_id,
                         });
@@ -842,6 +900,7 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                     Ok(if effective_download_id == requested_download_id {
                         CanonicalDownloadIdentityDisposition::Requested
                     } else {
+                        withdraw_pending_download_submission_tx(tx, &requested_download_id).await?;
                         CanonicalDownloadIdentityDisposition::AdoptedExisting {
                             download_id: effective_download_id,
                         }
@@ -1204,6 +1263,42 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         )
         .await?;
         row.map(|row| row.text("tracked_state")).transpose()
+    }
+
+    async fn delete_identity_tracked_states_for_downloads(
+        &self,
+        download_ids: &[DownloadId],
+    ) -> AppResult<u32> {
+        let mut seen = std::collections::HashSet::with_capacity(download_ids.len());
+        let download_ids: Vec<String> = download_ids
+            .iter()
+            .filter(|download_id| seen.insert(**download_id))
+            .map(ToString::to_string)
+            .collect();
+        if download_ids.is_empty() {
+            return Ok(0);
+        }
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "delete_download_identity_states_for_downloads",
+            move |tx| {
+                let download_ids = download_ids.clone();
+                Box::pin(async move {
+                    let mut deleted = 0u64;
+                    for chunk in download_ids.chunks(DOWNLOAD_SUBMISSION_BATCH_LOOKUP_CHUNK_SIZE) {
+                        let sql = format!(
+                            "DELETE FROM download_identity_states
+                             WHERE canonical_download_id IN ({})",
+                            placeholders(chunk.len())
+                        );
+                        let args: Vec<SqlArg> = chunk.iter().cloned().map(SqlArg::Text).collect();
+                        deleted += SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await?;
+                    }
+                    Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
+                })
+            },
+        )
+        .await
     }
 
     async fn get_identity_tracked_state_reason(
@@ -1670,6 +1765,131 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn list_title_download_references(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<DownloadTitleReferences>> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT id, episode_id, collection_id, series_movie_link_id
+               FROM download_submissions
+              WHERE title_id = {}
+              ORDER BY id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let links = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT link.download_id, link.episode_id
+               FROM download_submission_episode_links link
+               JOIN download_submissions submission ON submission.id = link.download_id
+              WHERE submission.title_id = {}
+              ORDER BY link.download_id, link.episode_id",
+            &[SqlArg::Text(title_id.to_string())],
+        )
+        .await?;
+        let mut episode_sets: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for link in &links {
+            let Some(episode_id) = opt_text_lenient(link, "episode_id")? else {
+                continue;
+            };
+            episode_sets
+                .entry(link.text("download_id")?)
+                .or_default()
+                .push(episode_id);
+        }
+        rows.iter()
+            .map(|row| {
+                let id = row.text("id")?;
+                let download_id = DownloadId::parse(&id).ok_or_else(|| {
+                    AppError::Repository(format!(
+                        "invalid canonical download id {id:?} in download submission"
+                    ))
+                })?;
+                let mut episode_set_ids = episode_sets.remove(&id).unwrap_or_default();
+                episode_set_ids.sort();
+                episode_set_ids.dedup();
+                Ok(DownloadTitleReferences {
+                    download_id,
+                    episode_id: opt_text_lenient(row, "episode_id")?,
+                    collection_id: opt_text_lenient(row, "collection_id")?,
+                    series_movie_link_id: opt_text_lenient(row, "series_movie_link_id")?,
+                    episode_set_ids,
+                })
+            })
+            .collect()
+    }
+
+    async fn reassign_download_to_title(
+        &self,
+        reassignment: &DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        let reassignment = reassignment.clone();
+        SqlRuntime::run_in_transaction(&self.datastore, "reassign_download_to_title", move |tx| {
+            let reassignment = reassignment.clone();
+            Box::pin(async move {
+                let download_id = reassignment.references.download_id.to_string();
+                let moved = SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "UPDATE download_submissions
+                            SET title_id = {}, facet = {}, episode_id = {},
+                                collection_id = {}, series_movie_link_id = {}
+                          WHERE id = {} AND title_id = {}",
+                    &[
+                        SqlArg::Text(reassignment.destination_title_id.clone()),
+                        SqlArg::Text(reassignment.destination_facet.clone()),
+                        SqlArg::OptText(reassignment.references.episode_id.clone()),
+                        SqlArg::OptText(reassignment.references.collection_id.clone()),
+                        SqlArg::OptText(reassignment.references.series_movie_link_id.clone()),
+                        SqlArg::Text(download_id.clone()),
+                        SqlArg::Text(reassignment.source_title_id.clone()),
+                    ],
+                )
+                .await?;
+                if moved == 0 {
+                    return Ok(false);
+                }
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "DELETE FROM download_submission_episode_links WHERE download_id = {}",
+                    &[SqlArg::Text(download_id.clone())],
+                )
+                .await?;
+                for episode_id in &reassignment.references.episode_set_ids {
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "INSERT INTO download_submission_episode_links (download_id, episode_id)
+                             VALUES ({}, {})",
+                        &[
+                            SqlArg::Text(download_id.clone()),
+                            SqlArg::Text(episode_id.clone()),
+                        ],
+                    )
+                    .await?;
+                }
+                // Only the row this title's download owns: a cleanup row
+                // attributed to any other title is not the merge's to move.
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "UPDATE download_cleanup
+                            SET title_id = {}, facet = {}, updated_at = {}
+                          WHERE download_id = {} AND title_id = {}",
+                    &[
+                        SqlArg::Text(reassignment.destination_title_id.clone()),
+                        SqlArg::Text(reassignment.destination_facet.clone()),
+                        SqlArg::Timestamp(Utc::now()),
+                        SqlArg::Text(download_id),
+                        SqlArg::Text(reassignment.source_title_id.clone()),
+                    ],
+                )
+                .await?;
+                Ok(true)
+            })
+        })
+        .await
+    }
+
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()> {
         let identity = identity.clone();
         SqlRuntime::run_in_transaction(
@@ -2016,6 +2236,7 @@ mod seed_goal_tests {
                  source_title TEXT,
                  info_hash TEXT,
                  release_size_bytes INTEGER,
+                 release_listing_json TEXT,
                  submitted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                  collection_id TEXT,
                  tracked_state TEXT,
@@ -2084,6 +2305,18 @@ mod seed_goal_tests {
                  detail TEXT,
                  created_at TEXT NOT NULL,
                  updated_at TEXT NOT NULL
+             );
+             CREATE TABLE download_import_artifacts (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
+             );
+             CREATE TABLE download_queue_commands (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
+             );
+             CREATE TABLE imports (
+                 id TEXT PRIMARY KEY,
+                 canonical_download_id TEXT
              )",
         )
         .execute(&pool)
@@ -2158,6 +2391,7 @@ mod seed_goal_tests {
             request_signature: Some(format!("signature-{item_id}")),
             scope: SubmissionScope::Title,
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 
@@ -2421,6 +2655,7 @@ mod seed_goal_tests {
             release_size_bytes: Some(123),
             request_signature: Some("ambiguous-signature".to_string()),
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 
@@ -2480,6 +2715,220 @@ mod seed_goal_tests {
                 .await
                 .expect("requested identity lookup should succeed")
                 .is_none()
+        );
+    }
+
+    /// The intent a grab records before submitting: no client is known yet.
+    fn pending_intent(download_id: DownloadId) -> DownloadSubmission {
+        DownloadSubmission {
+            download_client_id: None,
+            download_client_type: String::new(),
+            purpose: DownloadSubmissionPurpose::AdditionalFile,
+            ..submission(download_id, "", "title-1")
+        }
+    }
+
+    fn accepted(download_id: DownloadId) -> DownloadSubmission {
+        DownloadSubmission {
+            purpose: DownloadSubmissionPurpose::AdditionalFile,
+            ..submission(download_id, "job-1", "title-1")
+        }
+    }
+
+    async fn row_count(
+        store: &DownloadSubmissionStore,
+        table: &str,
+        column: &str,
+        id: DownloadId,
+    ) -> usize {
+        SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            &format!("SELECT 1 AS present FROM {table} WHERE {column} = {{}}"),
+            &[SqlArg::Text(id.to_string())],
+        )
+        .await
+        .expect("fixture rows should be readable")
+        .len()
+    }
+
+    #[tokio::test]
+    async fn an_accepted_grab_binds_the_intent_it_recorded_before_submitting() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+        let intents = store
+            .list_active_unbound_for_title("title-1")
+            .await
+            .expect("unbound intents should list");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(
+            intents[0].purpose,
+            DownloadSubmissionPurpose::AdditionalFile
+        );
+
+        let disposition = store
+            .record_submission_with_identity(
+                accepted(download_id),
+                submission_identity(download_id),
+                None,
+            )
+            .await
+            .expect("acceptance should complete the intent");
+
+        assert_eq!(disposition, CanonicalDownloadIdentityDisposition::Requested);
+        assert_eq!(
+            row_count(
+                &store,
+                "download_client_bindings",
+                "download_id",
+                download_id
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .expect("active binding should load"),
+            Some(download_id)
+        );
+        let recorded = store
+            .find_by_canonical_download_id(&download_id)
+            .await
+            .expect("submission should load")
+            .expect("the intent becomes the submission");
+        assert_eq!(recorded.download_client_item_id, "job-1");
+        assert_eq!(recorded.download_client_id.as_deref(), Some("primary"));
+        assert_eq!(recorded.download_client_type, "qbittorrent");
+        assert_eq!(recorded.purpose, DownloadSubmissionPurpose::AdditionalFile);
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grab_that_resolves_to_another_download_withdraws_its_own_intent() {
+        let store = store().await;
+        let existing_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(existing_id, "job-1", "title-1"),
+                submission_identity(existing_id),
+                None,
+            )
+            .await
+            .expect("the existing download should persist");
+        let requested_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(requested_id))
+            .await
+            .expect("the intent should persist");
+
+        let disposition = store
+            .record_submission_with_identity(
+                accepted(requested_id),
+                submission_identity(requested_id),
+                None,
+            )
+            .await
+            .expect("acceptance should resolve to the existing job");
+
+        assert_eq!(
+            disposition,
+            CanonicalDownloadIdentityDisposition::AdoptedExisting {
+                download_id: existing_id,
+            }
+        );
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty()
+        );
+        for (table, column) in [
+            ("download_submissions", "id"),
+            ("download_client_bindings", "download_id"),
+            ("downloads", "id"),
+        ] {
+            assert_eq!(
+                row_count(&store, table, column, requested_id).await,
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            row_count(
+                &store,
+                "download_client_bindings",
+                "download_id",
+                existing_id
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawing_removes_only_an_intent_no_client_job_has_bound() {
+        let store = store().await;
+        let refused_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(refused_id))
+            .await
+            .expect("the intent should persist");
+        store
+            .withdraw_pending_submission(&refused_id)
+            .await
+            .expect("a refused intent should withdraw");
+        for (table, column) in [
+            ("download_submissions", "id"),
+            ("download_client_bindings", "download_id"),
+            ("downloads", "id"),
+        ] {
+            assert_eq!(
+                row_count(&store, table, column, refused_id).await,
+                0,
+                "{table}"
+            );
+        }
+
+        let accepted_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(accepted_id))
+            .await
+            .expect("the intent should persist");
+        store
+            .record_submission_with_identity(
+                accepted(accepted_id),
+                submission_identity(accepted_id),
+                None,
+            )
+            .await
+            .expect("acceptance should complete the intent");
+        store
+            .withdraw_pending_submission(&accepted_id)
+            .await
+            .expect("withdrawing a bound intent is a no-op");
+        assert!(
+            store
+                .find_by_canonical_download_id(&accepted_id)
+                .await
+                .expect("submission should load")
+                .is_some()
+        );
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .expect("active binding should load"),
+            Some(accepted_id)
         );
     }
 
@@ -2779,6 +3228,7 @@ mod seed_goal_tests {
             request_signature: None,
             scope: SubmissionScope::Orphan,
             purpose: DownloadSubmissionPurpose::Standard,
+            release_listing_json: None,
         }
     }
 
@@ -3014,6 +3464,61 @@ mod seed_goal_tests {
                 .await
                 .expect("token-less detail should read back"),
             Some("failure detail".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_identity_states_for_downloads_removes_only_those_downloads_rows() {
+        let store = store().await;
+        let retired = DownloadId::new();
+        let kept = DownloadId::new();
+        for (download_id, item_id) in [(retired, "retired-job"), (kept, "kept-job")] {
+            store
+                .record_identity_tracked_state_for_download(
+                    Some(&download_id),
+                    &submission_identity(download_id),
+                    Some(&ClientJobLocator::new(
+                        Some("primary"),
+                        "qbittorrent",
+                        item_id,
+                    )),
+                    "imported",
+                    None,
+                    None,
+                )
+                .await
+                .expect("identity state should persist");
+        }
+        let state_for = |download_id: DownloadId| {
+            let store = store.clone();
+            async move {
+                store
+                    .get_identity_tracked_state_for_download(
+                        Some(&download_id),
+                        &submission_identity(download_id),
+                        None,
+                    )
+                    .await
+                    .expect("identity state should read")
+            }
+        };
+        assert_eq!(state_for(retired).await.as_deref(), Some("imported"));
+
+        let deleted = store
+            .delete_identity_tracked_states_for_downloads(&[retired, retired])
+            .await
+            .expect("identity states should delete");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(state_for(retired).await, None);
+        assert_eq!(state_for(kept).await.as_deref(), Some("imported"));
+        assert_eq!(count_rows(&store, "download_identity_states").await, 1);
+        assert_eq!(
+            store
+                .delete_identity_tracked_states_for_downloads(&[])
+                .await
+                .expect("an empty set deletes nothing"),
+            0
         );
     }
 
@@ -3389,6 +3894,199 @@ mod seed_goal_tests {
                 };
                 assert_eq!(recovered.client_id, "client-0");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_seeding_cleanup_is_never_due_or_claimed_again() {
+        let store = store().await;
+        let id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(id, "seeding-job", "title-1"),
+                submission_identity(id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .record_identity_tracked_state_for_download(
+                Some(&id),
+                &submission_identity(id),
+                Some(&identity()),
+                "imported_seeding",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store.has_pending_download_cleanup(&id).await.unwrap());
+        assert_eq!(store.list_due_download_cleanup(100).await.unwrap().len(), 1);
+
+        store
+            .finish_download_cleanup(&id, "cleanup_abandoned", true, 0, 0, Some("title deleted"))
+            .await
+            .unwrap();
+
+        assert!(!store.has_pending_download_cleanup(&id).await.unwrap());
+        store.seed_download_cleanup(100).await.unwrap();
+        assert!(
+            store
+                .list_due_download_cleanup(100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        match store.claim_download_cleanup(&id).await.unwrap() {
+            DownloadCleanupClaim::Settled { outcome } => assert_eq!(outcome, "cleanup_abandoned"),
+            _ => panic!("a settled cleanup row must not be claimed again"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassigning_a_download_moves_its_submission_links_and_pending_cleanup() {
+        let store = store().await;
+        let moved = DownloadId::new();
+        let bystander = DownloadId::new();
+        let mut moved_submission = submission(moved, "job-moved", "title-source");
+        moved_submission.scope = SubmissionScope::EpisodeSet {
+            episode_ids: vec![
+                "source-episode-1".to_string(),
+                "source-episode-2".to_string(),
+            ],
+        };
+        let mut bystander_submission = submission(bystander, "job-bystander", "title-bystander");
+        bystander_submission.scope = SubmissionScope::Episode {
+            episode_id: "bystander-episode-1".to_string(),
+        };
+        for (download_id, item_id, submission) in [
+            (moved, "job-moved", moved_submission),
+            (bystander, "job-bystander", bystander_submission),
+        ] {
+            store
+                .record_submission_with_identity(submission, submission_identity(download_id), None)
+                .await
+                .unwrap();
+            store
+                .record_identity_tracked_state_for_download(
+                    Some(&download_id),
+                    &submission_identity(download_id),
+                    Some(&ClientJobLocator::new(
+                        Some("primary"),
+                        "qbittorrent",
+                        item_id,
+                    )),
+                    "imported_seeding",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .has_pending_download_cleanup(&download_id)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        let references = store
+            .list_title_download_references("title-source")
+            .await
+            .unwrap();
+        assert_eq!(
+            references,
+            vec![DownloadTitleReferences {
+                download_id: moved,
+                episode_id: None,
+                collection_id: None,
+                series_movie_link_id: None,
+                episode_set_ids: vec![
+                    "source-episode-1".to_string(),
+                    "source-episode-2".to_string(),
+                ],
+            }]
+        );
+
+        let reassignment = DownloadTitleReassignment {
+            source_title_id: "title-source".to_string(),
+            destination_title_id: "title-destination".to_string(),
+            destination_facet: "anime".to_string(),
+            references: DownloadTitleReferences {
+                episode_set_ids: vec![
+                    "destination-episode-1".to_string(),
+                    "destination-episode-2".to_string(),
+                ],
+                ..references[0].clone()
+            },
+        };
+        assert!(
+            store
+                .reassign_download_to_title(&reassignment)
+                .await
+                .unwrap()
+        );
+        // The submission now belongs to the destination, so a repeated move
+        // from the source finds nothing to change.
+        assert!(
+            !store
+                .reassign_download_to_title(&reassignment)
+                .await
+                .unwrap()
+        );
+
+        assert!(
+            store
+                .list_for_title("title-source")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let destination = store.list_for_title("title-destination").await.unwrap();
+        assert_eq!(destination.len(), 1);
+        assert_eq!(destination[0].download_id, moved);
+        assert_eq!(destination[0].facet, "anime");
+        assert_eq!(
+            destination[0].scope,
+            SubmissionScope::EpisodeSet {
+                episode_ids: vec![
+                    "destination-episode-1".to_string(),
+                    "destination-episode-2".to_string(),
+                ],
+            }
+        );
+
+        // The cleanup row is still pending, now attributed to the destination.
+        assert!(store.has_pending_download_cleanup(&moved).await.unwrap());
+        match store.claim_download_cleanup(&moved).await.unwrap() {
+            DownloadCleanupClaim::Claimed(record) => {
+                assert_eq!(record.title_id.as_deref(), Some("title-destination"));
+                assert_eq!(record.facet.as_deref(), Some("anime"));
+                assert_eq!(record.item_id, "job-moved");
+            }
+            _ => panic!("the moved download's cleanup must still be claimable"),
+        }
+
+        // Another title's download is untouched.
+        assert_eq!(
+            store
+                .list_title_download_references("title-bystander")
+                .await
+                .unwrap(),
+            vec![DownloadTitleReferences {
+                download_id: bystander,
+                episode_id: Some("bystander-episode-1".to_string()),
+                collection_id: None,
+                series_movie_link_id: None,
+                episode_set_ids: Vec::new(),
+            }]
+        );
+        match store.claim_download_cleanup(&bystander).await.unwrap() {
+            DownloadCleanupClaim::Claimed(record) => {
+                assert_eq!(record.title_id.as_deref(), Some("title-bystander"));
+                assert_eq!(record.facet.as_deref(), Some("series"));
+            }
+            _ => panic!("another title's cleanup must stay pending"),
         }
     }
 

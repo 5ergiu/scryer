@@ -24,7 +24,7 @@
 //! other title keeps exactly today's behaviour.
 
 use chrono::NaiveDate;
-use scryer_domain::{AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
+use scryer_domain::{AbsoluteScale, AnimeCommunitySeason, AnimeNumberingBridge, Episode, Title};
 
 use crate::ParsedEpisodeMetadata;
 use crate::release_parser::ParsedEpisodeReleaseType;
@@ -46,7 +46,10 @@ pub(crate) enum NumberingCandidateKind {
     /// The parsed season read as a community season index.
     Community,
     /// The release names one community season's own title, which pins the
-    /// season regardless of what season token the release carries.
+    /// season over a season token that agrees with it (`S01`, the cour's own
+    /// index, or a TVDB season the cour lands in). A season token that names
+    /// some other season contradicts the title, and no anchored reading is
+    /// offered.
     TitleAnchored,
 }
 
@@ -198,7 +201,7 @@ pub(crate) fn resolve_numbering(input: &NumberingInput<'_>) -> NumberingResoluti
             .season
             .into_iter()
             .chain(input.parsed.season_numbers.iter().copied())
-            .any(|season| season != 1 && i32::try_from(season).ok() != Some(cour.index))
+            .any(|season| !cour.admits_season_token(season))
     {
         return NumberingResolution::UnresolvedPack;
     }
@@ -667,19 +670,28 @@ fn community_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
     absolute_start_candidates(input)
 }
 
-/// An absolute-only release on a catalog with no absolute numbers of its own:
-/// the community seasons carry `absolute_start`, so the absolute number picks
-/// the season and the offset inside it.
+/// An absolute-only release the catalog cannot place by its own absolute
+/// numbers: the community seasons carry a start on the title's absolute scale,
+/// so the absolute number picks the season and the offset inside it.
+///
+/// The start is read on the same scale the catalog is matched on — the
+/// contiguous start for a contiguous catalog, the raw TVDB start otherwise —
+/// because a raw start offset by a community count lands one episode late for
+/// every special TVDB interleaved before it.
 ///
 /// Every season that could hold the number is offered. Overlapping seasons
-/// normally agree — `absolute_start` plus an offset is the same TVDB episode
+/// normally agree — the start plus an offset is the same TVDB episode
 /// whichever season you count from — and collapse into one answer; where they
 /// genuinely disagree the caller sees the disagreement.
 fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandidate> {
-    if !input.parsed.episode_numbers.is_empty() || catalog_has_absolute_numbers(input.episodes) {
+    if !input.parsed.episode_numbers.is_empty() {
         return Vec::new();
     }
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let absolutes = parsed_absolute_numbers(input.parsed);
+    if !absolute_start_applies(input.episodes, scale, &absolutes) {
+        return Vec::new();
+    }
     let Some(first) = absolutes
         .first()
         .and_then(|first| i32::try_from(*first).ok())
@@ -691,8 +703,8 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
         .seasons
         .iter()
         .filter_map(|community_season| {
-            let absolute_start = community_season
-                .absolute_start
+            let absolute_start = scale
+                .season_absolute_start(community_season)
                 .filter(|start| *start <= first)?;
             let community_numbers = absolutes
                 .iter()
@@ -708,9 +720,10 @@ fn absolute_start_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
                 &community_numbers,
                 bridge_candidate_kind(input.bridge),
                 &format!(
-                    "{} {} by absolute start {absolute_start}",
+                    "{} {} by {} absolute start {absolute_start}",
                     bridge_numbering_noun(input.bridge),
-                    community_season.index
+                    community_season.index,
+                    scale.as_str()
                 ),
             )
         })
@@ -721,6 +734,20 @@ fn title_anchored_candidates(input: &NumberingInput<'_>) -> Vec<NumberingCandida
     let Some(community_season) = anchored_community_season(input) else {
         return Vec::new();
     };
+    // An explicit season token the named cour does not answer to says
+    // something the name does not. `S02E01` under a name that happens to
+    // match a cour TVDB keeps in season 1 is season 2's first episode, not
+    // that cour's; the name loses, exactly as it does for a pack or for
+    // search admission.
+    if input
+        .parsed
+        .season
+        .into_iter()
+        .chain(input.parsed.season_numbers.iter().copied())
+        .any(|season| !community_season.admits_season_token(season))
+    {
+        return Vec::new();
+    }
     let reason = format!(
         "release names community season {} (\"{}\")",
         community_season.index,
@@ -781,18 +808,14 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
         ExactCourTitleMatch::None => {}
     }
 
-    let parsed_titles = normalized_parsed_titles(input.parsed_title_variants);
-    if parsed_titles.is_empty() {
-        return None;
-    }
-    let canonical = crate::app_usecase_rss::normalize_for_matching(&input.title.name);
-    let distinguishing = parsed_titles
-        .iter()
-        .filter(|parsed| **parsed != canonical)
-        .collect::<Vec<_>>();
+    let franchise = FranchiseNames::new(&input.title.name, input.bridge);
+    let distinguishing =
+        franchise.distinguishing_titles(&normalized_parsed_titles(input.parsed_title_variants));
     if distinguishing.is_empty() {
         return None;
     }
+    let distinguishing = distinguishing.iter().collect::<Vec<_>>();
+    let canonical = crate::app_usecase_rss::normalize_for_matching(&input.title.name);
 
     // A cour catalogued under the series' own name is the franchise, not a
     // season within it, and it is dropped before the fuzzy rule sees it.
@@ -800,7 +823,9 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
         .bridge
         .seasons
         .iter()
-        .map(|season| {
+        .enumerate()
+        .filter(|(position, _)| !franchise.cour_answers_to_series(*position))
+        .map(|(_, season)| {
             let season_titles = season
                 .titles
                 .iter()
@@ -809,10 +834,140 @@ fn anchored_community_season<'a>(input: &NumberingInput<'a>) -> Option<&'a Anime
                 .collect::<Vec<_>>();
             (season, season_titles)
         })
-        .filter(|(_, season_titles)| !season_titles.contains(&canonical))
         .collect::<Vec<_>>();
 
     fuzzy_anchored_community_season(input, &distinguishing, &canonical, &cours)
+}
+
+/// What the series' own name is, read loosely enough that punctuation,
+/// diacritics and a metadata language the bridge does not carry cannot
+/// disguise it as a cour.
+///
+/// The canonical name comes from the catalog in the operator's metadata
+/// language (`[Lantern Verge] - [Mein*Star]`), the cour titles from a
+/// different provider in several others (`Lantern Verge: Mein Star`), and a
+/// release names whichever it likes. Compared spelling for spelling, the
+/// franchise's own name slips past every guard and anchors to the first cour.
+///
+/// Every name — canonical, cour title and parsed variant alike — is read the
+/// same way: the catalog's lookup form first, exactly as the parsed variants
+/// arrive (so `Lantern, The` is `the lantern` on both sides), then
+/// [`scryer_domain::title_spelling::title_identity_loose_form`]. Nothing here
+/// is persisted or used as a lookup key.
+struct FranchiseNames {
+    /// The canonical name's loose words.
+    canonical: Vec<String>,
+    /// Each cour's titles as loose words, in bridge order.
+    cours: Vec<Vec<Vec<String>>>,
+}
+
+impl FranchiseNames {
+    fn new(canonical_title: &str, bridge: &AnimeNumberingBridge) -> Self {
+        Self {
+            canonical: loose_words(canonical_title),
+            cours: bridge
+                .seasons
+                .iter()
+                .map(|season| {
+                    season
+                        .titles
+                        .iter()
+                        .map(|title| loose_words(title))
+                        .filter(|words| !words.is_empty())
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// The parsed names that say something the franchise name does not.
+    fn distinguishing_titles(&self, parsed_titles: &[String]) -> Vec<String> {
+        parsed_titles
+            .iter()
+            .filter(|parsed| !self.names_only_the_franchise(&loose_words(parsed).concat()))
+            .cloned()
+            .collect()
+    }
+
+    /// A name is the franchise rather than one of its cours when it is the
+    /// series' canonical name or a leading run of its words (`Lantern Verge`
+    /// inside `Lantern Verge Mein Star`), or when it is the stem every cour's
+    /// title grows from. The stem rule covers a canonical name in a
+    /// language the bridge does not carry at all, where nothing else ties
+    /// the bare franchise name back to the series.
+    ///
+    /// Names are compared with their word breaks removed but only ever cut at
+    /// the longer name's word breaks, so `Lantern*Verge` (one word once the
+    /// lookup form has dropped the `*`) is still the stem of
+    /// `Lantern Verge 2nd Season`, while `Lantern Ve` is not.
+    ///
+    /// Direction matters: `Lantern Verge 2` is not inside `Lantern Verge`, so
+    /// a genuine cour name still distinguishes.
+    fn names_only_the_franchise(&self, compact: &str) -> bool {
+        if compact.is_empty() {
+            return true;
+        }
+        if leading_run_equals(&self.canonical, compact, true) {
+            return true;
+        }
+        let extends = |title: &Vec<String>| leading_run_equals(title, compact, false);
+        let equals = |title: &Vec<String>| title.concat() == compact;
+        self.cours.len() > 1
+            && self.cours.iter().any(|titles| titles.iter().any(extends))
+            && self
+                .cours
+                .iter()
+                .all(|titles| titles.iter().any(|title| extends(title) || equals(title)))
+    }
+
+    /// Whether the cour at this bridge position is catalogued under the
+    /// series' own name.
+    fn cour_answers_to_series(&self, position: usize) -> bool {
+        let canonical = self.canonical.concat();
+        !canonical.is_empty()
+            && self
+                .cours
+                .get(position)
+                .is_some_and(|titles| titles.iter().any(|title| title.concat() == canonical))
+    }
+
+    /// Whether the cour at this bridge position answers to any of these
+    /// parsed names.
+    fn cour_is_named_by(&self, position: usize, parsed: &[String]) -> bool {
+        self.cours.get(position).is_some_and(|titles| {
+            titles.iter().any(|title| {
+                let title = title.concat();
+                parsed.contains(&title)
+            })
+        })
+    }
+}
+
+/// Whether some leading run of `words` — the whole of it only when `inclusive`
+/// — joined without breaks is `compact`.
+fn leading_run_equals(words: &[String], compact: &str, inclusive: bool) -> bool {
+    let limit = if inclusive {
+        words.len()
+    } else {
+        words.len().saturating_sub(1)
+    };
+    let mut joined = String::new();
+    for word in &words[..limit] {
+        joined.push_str(word);
+        if joined.len() >= compact.len() {
+            return joined == compact;
+        }
+    }
+    false
+}
+
+fn loose_words(value: &str) -> Vec<String> {
+    scryer_domain::title_spelling::title_identity_loose_form(
+        &scryer_domain::title_spelling::title_lookup_form(value),
+    )
+    .split_whitespace()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Return the only community cour whose own title the parsed release names
@@ -855,37 +1010,30 @@ fn exact_cour_title_matches<'a>(
     bridge: &'a AnimeNumberingBridge,
     parsed_title_variants: &[String],
 ) -> Vec<&'a AnimeCommunitySeason> {
-    let parsed_titles = normalized_parsed_titles(parsed_title_variants);
-    if parsed_titles.is_empty() {
-        return Vec::new();
-    }
-    let canonical = crate::app_usecase_rss::normalize_for_matching(canonical_title);
-    let distinguishing = parsed_titles
-        .iter()
-        .filter(|parsed| **parsed != canonical)
-        .collect::<Vec<_>>();
+    let franchise = FranchiseNames::new(canonical_title, bridge);
+    let distinguishing =
+        franchise.distinguishing_titles(&normalized_parsed_titles(parsed_title_variants));
     if distinguishing.is_empty() {
         return Vec::new();
     }
 
-    let mut matched = Vec::new();
-    for season in &bridge.seasons {
-        let season_titles = season
-            .titles
-            .iter()
-            .map(|title| crate::app_usecase_rss::normalize_for_matching(title))
-            .filter(|title| !title.is_empty())
-            .collect::<Vec<_>>();
-        if season_titles.contains(&canonical)
-            || !season_titles
-                .iter()
-                .any(|season_title| distinguishing.contains(&season_title))
-        {
-            continue;
-        }
-        matched.push(season);
-    }
-    matched
+    // Names are compared loosely, so two cours whose titles differ only by
+    // punctuation both match and the name stays ambiguous.
+    let distinguishing = distinguishing
+        .iter()
+        .map(|parsed| loose_words(parsed).concat())
+        .filter(|parsed| !parsed.is_empty())
+        .collect::<Vec<_>>();
+    bridge
+        .seasons
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| {
+            !franchise.cour_answers_to_series(*position)
+                && franchise.cour_is_named_by(*position, &distinguishing)
+        })
+        .map(|(_, season)| season)
+        .collect()
 }
 
 /// The refusal an ambiguous cour name produces. The colliding cours are
@@ -1110,13 +1258,14 @@ fn absolute_candidate(input: &NumberingInput<'_>) -> Option<NumberingCandidate> 
     // A range is an all-or-nothing claim. Retaining only the endpoints found
     // in the catalog used to turn `55..56` into a valid one-episode mapping
     // when 56 was absent, which then made a partial cour look complete.
+    let scale = AbsoluteScale::for_catalog(input.episodes);
     let matches = absolutes
         .iter()
         .map(|absolute| {
             let matches = input
                 .episodes
                 .iter()
-                .filter(|episode| parse_u32(episode.absolute_number.as_deref()) == Some(*absolute))
+                .filter(|episode| scale.episode_absolute(episode) == Some(*absolute))
                 .collect::<Vec<_>>();
             match matches.as_slice() {
                 [episode] => Some(*episode),
@@ -1396,10 +1545,32 @@ fn single_season_projection(matches: &[&Episode]) -> Option<(u32, Vec<u32>, Vec<
     ))
 }
 
-fn catalog_has_absolute_numbers(episodes: &[Episode]) -> bool {
-    episodes
-        .iter()
-        .any(|episode| parse_u32(episode.absolute_number.as_deref()).is_some_and(|value| value > 0))
+/// Whether the bridge's season starts may place an absolute-only release.
+///
+/// On the raw scale only a catalog with no absolute numbers at all defers to
+/// the bridge, exactly as before the contiguous scale existed. SMG numbers the
+/// contiguous scale episode by episode and leaves a trailing episode it cannot
+/// number yet empty, so a contiguous catalog defers for the numbers it does not
+/// carry; the ones it carries are answered by the catalog itself.
+///
+/// Deferring helps only inside a community season whose anchor episode SMG
+/// *has* numbered and whose range is still open: SMG reads a season's
+/// contiguous start off its anchor's own contiguous number, so a season whose
+/// anchor is itself unplaced carries no contiguous start and the release stays
+/// unplaced rather than being filed by a raw number.
+fn absolute_start_applies(episodes: &[Episode], scale: AbsoluteScale, absolutes: &[u32]) -> bool {
+    match scale {
+        AbsoluteScale::Raw => !episodes.iter().any(|episode| {
+            scale
+                .episode_absolute(episode)
+                .is_some_and(|value| value > 0)
+        }),
+        AbsoluteScale::Contiguous => !absolutes.iter().all(|absolute| {
+            episodes
+                .iter()
+                .any(|episode| scale.episode_absolute(episode) == Some(*absolute))
+        }),
+    }
 }
 
 fn parsed_absolute_numbers(parsed: &ParsedEpisodeMetadata) -> Vec<u32> {
@@ -1566,6 +1737,17 @@ pub(crate) fn translate_parsed_episode_numbering(
 /// downstream admission check reads. Absolute coordinates are trustworthy only
 /// when every resolved catalog episode supplies one positive, distinct value;
 /// the parser's raw evidence remains untouched.
+///
+/// The stamped absolute is the catalog episode's *raw* `absolute_number`, never
+/// its contiguous one: matching reads the title's `AbsoluteScale`, but every
+/// renderer (import, rename, manual-import labels) writes the raw number, so
+/// the parse path of an import must hand them the same value the catalog path
+/// and a later rename would. Coverage and the numbering veto read the catalog
+/// season and episode numbers a resolved parse always carries before any
+/// absolute. The pack planner's season/episode-versus-absolute companion check
+/// reads a companion on the raw scale only when this stamp produced it, so a
+/// contiguous-scaled title does not see its own stamp as a different episode;
+/// a literal parsed companion is still read on the title's scale.
 fn apply_resolved_catalog_coordinates(
     parsed: &mut ParsedEpisodeMetadata,
     candidate: &NumberingCandidate,
@@ -1630,6 +1812,8 @@ pub(crate) struct CommunityCoordinates {
     pub(crate) season: i32,
     pub(crate) episode: i32,
     pub(crate) season_title: Option<String>,
+    /// The community season's own AniDB entry, when the bridge knows it.
+    pub(crate) anidb_id: Option<i64>,
 }
 
 /// Translate a wanted TVDB episode into the community numbering release groups
@@ -1649,6 +1833,7 @@ pub(crate) fn community_coordinates_for_tvdb_episode(
             .first()
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty()),
+        anidb_id: season.anidb_id.filter(|id| *id > 0),
     })
 }
 

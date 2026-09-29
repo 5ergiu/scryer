@@ -1,3 +1,4 @@
+import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
@@ -40,7 +41,6 @@ import type {
   MaintenanceRuleSetDraft,
   MaintenanceRuleSetRecord,
   MaintenanceTriggerResult,
-  MaintenanceValidationResult,
 } from "@/lib/types/maintenance-rule-sets";
 import {
   MAINTENANCE_FILTER_ALL,
@@ -86,7 +86,6 @@ import {
   setMaintenanceRuleModeMutation,
   updateMaintenanceRuleMatcherMutation,
   updateMaintenanceRuleMetadataMutation,
-  validateMaintenanceRuleMutation,
 } from "@/lib/graphql/mutations";
 
 /// How many recent runs each history table shows. The API clamps its own
@@ -164,9 +163,8 @@ export function SettingsMaintenanceRulesContainer({
   );
   const [ruleSetDraftBaseline, setRuleSetDraftBaseline] =
     useState<MaintenanceRuleSetDraft>(initialMaintenanceRuleDraft);
-  const [validating, setValidating] = useState(false);
-  const [validationResult, setValidationResult] =
-    useState<MaintenanceValidationResult | null>(null);
+  const { validating, validationResult, setValidationResult, validateDraft } =
+    useRegoValidation("maintenance", ruleSetDraft.regoSource, editingRuleSetId, isEditorOpen);
 
   const [previewSource, setPreviewSource] = useState<MaintenancePreviewSource>("stored");
   const [previewRuleSetId, setPreviewRuleSetId] = useState("");
@@ -230,7 +228,7 @@ export function SettingsMaintenanceRulesContainer({
     setRuleSetDraft(next);
     setRuleSetDraftBaseline(next);
     setValidationResult(null);
-  }, []);
+  }, [setValidationResult]);
 
   const openCreateEditor = useCallback(() => {
     const next = initialMaintenanceRuleDraft();
@@ -239,7 +237,7 @@ export function SettingsMaintenanceRulesContainer({
     setRuleSetDraftBaseline(next);
     setValidationResult(null);
     setIsEditorOpen(true);
-  }, []);
+  }, [setValidationResult]);
 
   /// Load the matcher source and action for one rule set, surfacing failure
   /// instead of silently refusing to open the editor.
@@ -277,7 +275,7 @@ export function SettingsMaintenanceRulesContainer({
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [fetchRuleSetDetail],
+    [setValidationResult, fetchRuleSetDetail],
   );
 
   const openCopyEditor = useCallback(
@@ -291,7 +289,7 @@ export function SettingsMaintenanceRulesContainer({
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [fetchRuleSetDetail],
+    [setValidationResult, fetchRuleSetDetail],
   );
 
   /// Load a starter template into the create-rule editor. A template prefills
@@ -330,7 +328,7 @@ export function SettingsMaintenanceRulesContainer({
       setValidationResult(null);
       setIsEditorOpen(true);
     },
-    [t],
+    [setValidationResult, t],
   );
 
   const requestCreateEditor = useCallback(() => {
@@ -623,31 +621,6 @@ export function SettingsMaintenanceRulesContainer({
     pendingEditorAction,
   ]);
 
-  const validateDraft = useCallback(async (): Promise<MaintenanceValidationResult | null> => {
-    if (!ruleSetDraft.regoSource.trim()) return null;
-    setValidating(true);
-    setValidationResult(null);
-    try {
-      const { data, error } = await client
-        .mutation(validateMaintenanceRuleMutation, {
-          input: { regoSource: ruleSetDraft.regoSource },
-        })
-        .toPromise();
-      if (error) throw error;
-      const result = data.validateMaintenanceRule as MaintenanceValidationResult;
-      setValidationResult(result);
-      return result;
-    } catch (error) {
-      const result = {
-        valid: false,
-        errors: [error instanceof Error ? error.message : "Validation failed"],
-      };
-      setValidationResult(result);
-      return result;
-    } finally {
-      setValidating(false);
-    }
-  }, [client, ruleSetDraft.regoSource]);
 
   const deleteRuleSet = async (record: MaintenanceRuleSetRecord) => {
     setPendingDeleteRuleSet(record);

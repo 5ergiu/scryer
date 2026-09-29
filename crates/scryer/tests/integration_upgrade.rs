@@ -172,6 +172,17 @@ impl MediaFileRepository for FailingPathUpdateMediaFileRepo {
         self.inner.link_file_to_episode(file_id, episode_id).await
     }
 
+    async fn replace_file_episode_links(
+        &self,
+        file_id: &str,
+        expected_episode_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<scryer_application::EpisodeLinkReplacement> {
+        self.inner
+            .replace_file_episode_links(file_id, expected_episode_ids, episode_ids)
+            .await
+    }
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,

@@ -137,6 +137,7 @@ fn make_search_result(
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
+        release_listing_json: None,
     }
 }
 
@@ -521,6 +522,7 @@ fn synthetic_indexer_config(
         api_key_encrypted: None,
         rate_limit_seconds: None,
         rate_limit_burst: None,
+        max_queries_per_minute: None,
         disabled_until: None,
         is_enabled,
         enable_interactive_search,
@@ -759,4 +761,17 @@ fn a_rate_limited_indexer_reads_as_a_cooldown_with_its_retry_time() {
     .expect("an upstream failure is an incomplete outcome");
     assert!(!reason_is_rate_limit(&upstream));
     assert!(!reason_is_rate_limit("timed out"));
+}
+
+#[test]
+fn an_indexer_over_its_query_budget_reads_as_a_wait_with_its_next_slot() {
+    let reason = incomplete_indexer_reason(IndexerSearchOutcome::Partial {
+        empty: true,
+        reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+        retry_after: Some(std::time::Duration::from_secs(45)),
+    })
+    .expect("a skipped over-budget indexer is an incomplete outcome");
+
+    assert_eq!(reason, "indexer is over its query budget; retry after 45s");
+    assert!(reason_is_rate_limit(&reason));
 }

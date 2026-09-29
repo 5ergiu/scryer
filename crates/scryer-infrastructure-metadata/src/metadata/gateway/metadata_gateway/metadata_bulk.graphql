@@ -44,6 +44,16 @@ fragment MovieFields on TvdbMovie {
   tmdb_id
   anidb_id
   canonical_tags {
+    affinity_signals {
+      affinity_key
+      category
+      tier
+      signal_class
+      confidence
+      sources
+      source_tag_keys
+      rail_eligible
+    }
     key
     category
     name
@@ -99,6 +109,16 @@ fragment SeriesFields on TvdbSeries {
   original_language
   country
   canonical_tags {
+    affinity_signals {
+      affinity_key
+      category
+      tier
+      signal_class
+      confidence
+      sources
+      source_tag_keys
+      rail_eligible
+    }
     key
     category
     name
@@ -157,6 +177,7 @@ fragment SeriesFields on TvdbSeries {
     is_recap
     overview
     absolute_number
+    contiguous_absolute_number
     image_url
   }
   anime_mappings {
@@ -201,6 +222,7 @@ fragment SeriesFields on TvdbSeries {
         tvdb_episode_end
       }
       absolute_start
+      contiguous_absolute_start
       episode_count
     }
   }

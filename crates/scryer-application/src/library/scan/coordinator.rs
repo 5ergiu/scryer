@@ -884,5 +884,6 @@ fn library_scan_summary_event_data(summary: &LibraryScanSummary) -> LibraryScanS
         imported: summary.imported as i64,
         skipped: summary.skipped as i64,
         unmatched: summary.unmatched as i64,
+        relinked: summary.relinked as i64,
     }
 }

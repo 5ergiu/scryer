@@ -503,7 +503,11 @@ pub fn from_pending_release(pr: PendingRelease) -> PendingReleasePayload {
         wanted_item_id: pr.wanted_item_id.into(),
         title_id: pr.title_id.into(),
         release_title: pr.release_title,
-        release_url: pr.release_url,
+        // The pending row keeps the live URL because a delayed grab fetches
+        // from it; the API only ever shows it without the indexer key.
+        release_url: scryer_application::url_redaction::redact_optional_url_credentials(
+            pr.release_url,
+        ),
         release_size_bytes: pr.release_size_bytes.map(Long::from),
         release_score: pr.release_score,
         scoring_log_json: pr.scoring_log_json.map(json_string_to_value),

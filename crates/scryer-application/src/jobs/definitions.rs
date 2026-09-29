@@ -28,6 +28,14 @@ pub const LIFECYCLE_ACTION_HANDLING_INTERVAL_SECONDS: i64 = 12 * 3600;
 /// participant's played set rather than a delta.
 pub const MEDIA_SERVER_SIGNAL_SYNC_INTERVAL_SECONDS: i64 = 6 * 3600;
 
+/// How often the list sweep looks for due subscriptions. Each subscription
+/// keeps its own interval; this is only how often the job asks which are due.
+pub const LIST_SYNC_INTERVAL_SECONDS: i64 = 15 * 60;
+
+/// How long after startup the first list sweep waits, so a restart does not
+/// stack list fetches on top of the startup scans.
+pub const LIST_SYNC_INITIAL_DELAY_SECONDS: i64 = 5 * 60;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobCategory {
     Library,
@@ -185,6 +193,7 @@ pub enum JobKey {
     MaintenanceRuleEvaluation,
     LifecycleActionHandling,
     MediaServerSignalSync,
+    ListSync,
     LocationOperation,
 }
 
@@ -220,6 +229,7 @@ impl JobKey {
             Self::MaintenanceRuleEvaluation => "maintenance_rule_evaluation",
             Self::LifecycleActionHandling => "lifecycle_action_handling",
             Self::MediaServerSignalSync => "media_server_signal_sync",
+            Self::ListSync => "list_sync",
             Self::LocationOperation => "location_operation",
         }
     }
@@ -255,6 +265,7 @@ impl JobKey {
             "maintenance_rule_evaluation" => Some(Self::MaintenanceRuleEvaluation),
             "lifecycle_action_handling" => Some(Self::LifecycleActionHandling),
             "media_server_signal_sync" => Some(Self::MediaServerSignalSync),
+            "list_sync" => Some(Self::ListSync),
             "location_operation" => Some(Self::LocationOperation),
             _ => None,
         }
@@ -291,6 +302,7 @@ impl JobKey {
             Self::MaintenanceRuleEvaluation => "Maintenance Rule Evaluation",
             Self::LifecycleActionHandling => "Maintenance Action Handling",
             Self::MediaServerSignalSync => "Media Server Signal Sync",
+            Self::ListSync => "List Sync",
             Self::LocationOperation => "Location Operation",
         }
     }
@@ -354,6 +366,9 @@ impl JobKey {
             Self::MediaServerSignalSync => {
                 "Read played state for verified linked accounts on enabled media-server connections and store it as normalized watch signals."
             }
+            Self::ListSync => {
+                "Read due list subscriptions, then add, request, or record their titles according to each list's settings."
+            }
             Self::LocationOperation => {
                 "Move title content and catalog placement between roots or libraries."
             }
@@ -391,7 +406,8 @@ impl JobKey {
             | Self::FullHashBackfill
             | Self::MaintenanceRuleEvaluation
             | Self::LifecycleActionHandling
-            | Self::MediaServerSignalSync => JobCategory::Maintenance,
+            | Self::MediaServerSignalSync
+            | Self::ListSync => JobCategory::Maintenance,
         }
     }
 
@@ -419,7 +435,8 @@ impl JobKey {
             | Self::FullHashBackfill
             | Self::MaintenanceRuleEvaluation
             | Self::LifecycleActionHandling
-            | Self::MediaServerSignalSync => JobScheduleKind::Interval,
+            | Self::MediaServerSignalSync
+            | Self::ListSync => JobScheduleKind::Interval,
             Self::DiscoverySync => JobScheduleKind::StartupAndInterval,
             Self::AutoBackup | Self::ArtworkEncoding => JobScheduleKind::DailyAtTime,
             Self::LibraryScanMovies
@@ -457,6 +474,7 @@ impl JobKey {
             Self::MaintenanceRuleEvaluation => "Every 8 hours",
             Self::LifecycleActionHandling => "Every 12 hours",
             Self::MediaServerSignalSync => "Every 6 hours",
+            Self::ListSync => "Every 15 minutes",
             Self::DiscoverySync => "Dynamic discovery evaluator with daily backstop",
             Self::LibraryScanMovies
             | Self::LibraryScanSeries
@@ -488,6 +506,7 @@ impl JobKey {
             Self::MaintenanceRuleEvaluation => Some(MAINTENANCE_RULE_EVALUATION_INTERVAL_SECONDS),
             Self::LifecycleActionHandling => Some(LIFECYCLE_ACTION_HANDLING_INTERVAL_SECONDS),
             Self::MediaServerSignalSync => Some(MEDIA_SERVER_SIGNAL_SYNC_INTERVAL_SECONDS),
+            Self::ListSync => Some(LIST_SYNC_INTERVAL_SECONDS),
             Self::DiscoverySync => Some(24 * 3600),
             _ => None,
         }
@@ -501,6 +520,7 @@ impl JobKey {
             Self::SubtitleSearch => Some(120),
             Self::HealthChecks => Some(30),
             Self::DiscoverySync => Some(30 * 60),
+            Self::ListSync => Some(LIST_SYNC_INITIAL_DELAY_SECONDS),
             Self::FullHashBackfill => None,
             _ => None,
         }
@@ -534,7 +554,7 @@ impl JobKey {
     }
 }
 
-pub const ALL_JOB_KEYS: [JobKey; 21] = [
+pub const ALL_JOB_KEYS: [JobKey; 22] = [
     JobKey::LibraryScanMovies,
     JobKey::LibraryScanSeries,
     JobKey::LibraryScanAnime,
@@ -556,6 +576,7 @@ pub const ALL_JOB_KEYS: [JobKey; 21] = [
     JobKey::MaintenanceRuleEvaluation,
     JobKey::LifecycleActionHandling,
     JobKey::MediaServerSignalSync,
+    JobKey::ListSync,
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -703,6 +724,9 @@ pub struct LibraryProbeSignature {
 struct JobRunTrackerState {
     active_runs: HashMap<String, JobRun>,
     next_run_at: HashMap<JobKey, DateTime<Utc>>,
+    /// One more run asked for while a run of the job was active, with the
+    /// user who asked. Taken when the last active run of that job ends.
+    rerun_requests: HashMap<JobKey, scryer_domain::User>,
 }
 
 #[derive(Clone)]
@@ -825,15 +849,50 @@ impl JobRunTracker {
     }
 
     pub async fn upsert_active_run(&self, run: JobRun) {
-        {
+        self.upsert_active_run_taking_rerun(run).await;
+    }
+
+    /// Record `run` like [`Self::upsert_active_run`]. When it ends the last
+    /// active run of its job, also take that job's pending rerun request, in
+    /// the same step, so a request made while the run was active is never
+    /// left behind.
+    pub async fn upsert_active_run_taking_rerun(&self, run: JobRun) -> Option<scryer_domain::User> {
+        let rerun = {
             let mut state = self.state.lock().await;
             if run.status.is_terminal() {
                 state.active_runs.remove(&run.id);
+                let still_active = state
+                    .active_runs
+                    .values()
+                    .any(|active| active.job_key == run.job_key);
+                if still_active {
+                    None
+                } else {
+                    state.rerun_requests.remove(&run.job_key)
+                }
             } else {
                 state.active_runs.insert(run.id.clone(), run.clone());
+                None
             }
-        }
+        };
         let _ = self.broadcast.send(run);
+        rerun
+    }
+
+    /// Ask for one more run of `job_key` once the active one ends. Returns
+    /// false, recording nothing, when no run of the job is active. Requests
+    /// made during one run collapse into a single rerun.
+    pub async fn request_rerun_if_active(
+        &self,
+        job_key: JobKey,
+        actor: &scryer_domain::User,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if !state.active_runs.values().any(|run| run.job_key == job_key) {
+            return false;
+        }
+        state.rerun_requests.insert(job_key, actor.clone());
+        true
     }
 
     pub async fn merge_library_scan_progress(&self, session: LibraryScanSession) {
@@ -1035,6 +1094,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn list_sync_is_registered_as_a_recurring_maintenance_job() {
+        let definition = JobDefinition::from_key(JobKey::ListSync, None);
+
+        assert_eq!(JobKey::ListSync.as_str(), "list_sync");
+        assert_eq!(JobKey::parse("list_sync"), Some(JobKey::ListSync));
+        assert!(ALL_JOB_KEYS.contains(&JobKey::ListSync));
+        assert_eq!(definition.display_name, "List Sync");
+        assert_eq!(definition.category, JobCategory::Maintenance);
+        assert_eq!(definition.schedule.kind, JobScheduleKind::Interval);
+        assert_eq!(definition.schedule.description, "Every 15 minutes");
+        assert_eq!(
+            definition.schedule.interval_seconds,
+            Some(LIST_SYNC_INTERVAL_SECONDS)
+        );
+        assert_eq!(LIST_SYNC_INTERVAL_SECONDS, 15 * 60);
+        assert_eq!(
+            JobKey::ListSync.initial_delay_seconds(),
+            Some(LIST_SYNC_INITIAL_DELAY_SECONDS)
+        );
+        assert!(
+            definition.manual_trigger_allowed,
+            "an operator must be able to sync lists on demand"
+        );
+    }
+
     #[tokio::test]
     async fn terminal_library_scan_merge_keeps_run_active_until_final_upsert() {
         let tracker = JobRunTracker::new();
@@ -1102,6 +1187,118 @@ mod tests {
             .upsert_active_run(active_after_merge[0].clone())
             .await;
         assert!(tracker.list_active().await.is_empty());
+    }
+
+    fn list_sync_run(id: &str, status: JobRunStatus) -> JobRun {
+        let now = Utc::now();
+        JobRun {
+            id: id.to_string(),
+            operation_type: JobKey::ListSync.as_str().to_string(),
+            actor_user_id: None,
+            job_key: JobKey::ListSync,
+            display_name: JobKey::ListSync.display_name().to_string(),
+            category: JobCategory::Maintenance,
+            section: JobSection::Maintenance,
+            status,
+            trigger_source: JobTriggerSource::ScheduledInterval,
+            started_at: now,
+            completed_at: status.is_terminal().then_some(now),
+            summary_json: None,
+            summary_text: None,
+            error_text: None,
+            progress_json: None,
+            library_scan_progress: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rerun_is_refused_when_no_run_of_the_job_is_active() {
+        let tracker = JobRunTracker::new();
+        let requester = scryer_domain::User::new_admin("requester");
+
+        assert!(
+            !tracker
+                .request_rerun_if_active(JobKey::ListSync, &requester)
+                .await
+        );
+
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+        let rerun = tracker
+            .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+            .await;
+        assert!(rerun.is_none(), "a refused request leaves nothing behind");
+    }
+
+    #[tokio::test]
+    async fn requests_during_a_run_collapse_into_one_rerun_taken_when_it_ends() {
+        let tracker = JobRunTracker::new();
+        let first = scryer_domain::User::new_admin("first-requester");
+        let second = scryer_domain::User::new_admin("second-requester");
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &first)
+                .await
+        );
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &second)
+                .await
+        );
+        assert!(
+            !tracker
+                .request_rerun_if_active(JobKey::RssSync, &first)
+                .await,
+            "another job's run does not count"
+        );
+
+        let rerun = tracker
+            .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Failed))
+            .await
+            .expect("the run's end takes the request");
+        assert_eq!(rerun.username, second.username);
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+                .await
+                .is_none(),
+            "the request is taken once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_waits_for_the_last_active_run_of_the_job() {
+        let tracker = JobRunTracker::new();
+        let requester = scryer_domain::User::new_admin("requester");
+        tracker
+            .upsert_active_run(list_sync_run("run-1", JobRunStatus::Running))
+            .await;
+        tracker
+            .upsert_active_run(list_sync_run("run-2", JobRunStatus::Running))
+            .await;
+        assert!(
+            tracker
+                .request_rerun_if_active(JobKey::ListSync, &requester)
+                .await
+        );
+
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-1", JobRunStatus::Completed))
+                .await
+                .is_none()
+        );
+        assert!(
+            tracker
+                .upsert_active_run_taking_rerun(list_sync_run("run-2", JobRunStatus::Completed))
+                .await
+                .is_some()
+        );
     }
 
     /// One gauge series as seen by the local recorder: `(name, labels, value)`.

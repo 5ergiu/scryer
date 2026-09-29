@@ -281,6 +281,8 @@ pub(super) struct MockShowRepo {
     pub(super) fail_monitoring: Mutex<bool>,
     /// Stands in for a transient store failure on the anime numbering bridge.
     pub(super) fail_anime_bridge: Mutex<bool>,
+    /// Stands in for a transient store failure on a title's collections read.
+    pub(super) fail_title_collections: Mutex<bool>,
     pub(super) anime_numbering_bridges: Mutex<HashMap<String, scryer_domain::AnimeNumberingBridge>>,
     pub(super) collections: Arc<Mutex<Vec<Collection>>>,
     pub(super) episodes: Arc<Mutex<Vec<Episode>>>,
@@ -297,6 +299,9 @@ pub(super) struct MockShowRepo {
     pub(super) title_collection_reads: std::sync::atomic::AtomicUsize,
     pub(super) collection_episode_reads: std::sync::atomic::AtomicUsize,
     pub(super) titles_episode_reads: std::sync::atomic::AtomicUsize,
+    pub(super) episode_external_id_reads: std::sync::atomic::AtomicUsize,
+    pub(super) title_episode_external_id_reads: std::sync::atomic::AtomicUsize,
+    pub(super) absolute_scale_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -483,6 +488,11 @@ impl ShowRepository for MockShowRepo {
     async fn list_collections_for_title(&self, title_id: &str) -> AppResult<Vec<Collection>> {
         self.title_collection_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if *self.fail_title_collections.lock().await {
+            return Err(crate::AppError::Repository(
+                "title collections are unavailable".into(),
+            ));
+        }
         let collections = self.collections.lock().await;
         Ok(collections
             .iter()
@@ -680,12 +690,42 @@ impl ShowRepository for MockShowRepo {
         &self,
         episode_id: &str,
     ) -> AppResult<Vec<ScopedExternalId>> {
+        self.episode_external_id_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let ids = self.episode_external_ids.lock().await;
         Ok(ids
             .iter()
             .filter(|item| item.scope_id == episode_id)
             .cloned()
             .collect())
+    }
+
+    async fn list_episode_external_ids_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        self.title_episode_external_id_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let episode_ids = self
+            .episodes
+            .lock()
+            .await
+            .iter()
+            .filter(|episode| episode.title_id == title_id)
+            .map(|episode| episode.id.clone())
+            .collect::<HashSet<_>>();
+        let mut ids = self
+            .episode_external_ids
+            .lock()
+            .await
+            .iter()
+            .filter(|item| episode_ids.contains(&item.scope_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Stable: rows of one episode keep the order the per-episode read
+        // returns them in.
+        ids.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+        Ok(ids)
     }
 
     async fn get_episode_by_id(&self, episode_id: &str) -> AppResult<Option<Episode>> {
@@ -747,10 +787,17 @@ impl ShowRepository for MockShowRepo {
         if let Some(value) = update.tvdb_id {
             item.tvdb_id = Some(value);
         }
+        if let Some(value) = update.tmdb_id {
+            item.tmdb_id = Some(value);
+        }
         if update.clear_image_url {
             item.image_url = None;
         } else if let Some(value) = update.image_url {
             item.image_url = Some(value);
+        }
+        // `Some(None)` clears the column, as the SQL store does.
+        if let Some(value) = update.contiguous_absolute_number {
+            item.contiguous_absolute_number = value;
         }
 
         Ok(item.clone())
@@ -810,12 +857,37 @@ impl ShowRepository for MockShowRepo {
         absolute_number: &str,
     ) -> AppResult<Option<Episode>> {
         let episodes = self.episodes.lock().await;
-        Ok(episodes
+        let title_episodes = episodes
             .iter()
-            .find(|ep| {
-                ep.title_id == title_id && ep.absolute_number.as_deref() == Some(absolute_number)
+            .filter(|episode| episode.title_id == title_id)
+            .collect::<Vec<_>>();
+        let scale = scryer_domain::AbsoluteScale::for_catalog(title_episodes.iter().copied());
+        let wanted = absolute_number.trim().parse::<u32>().ok();
+        Ok(title_episodes
+            .into_iter()
+            .find(|episode| match scale {
+                scryer_domain::AbsoluteScale::Raw => {
+                    episode.absolute_number.as_deref() == Some(absolute_number)
+                }
+                scryer_domain::AbsoluteScale::Contiguous => {
+                    wanted.is_some() && scale.episode_absolute(episode) == wanted
+                }
             })
             .cloned())
+    }
+
+    async fn absolute_scale_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<scryer_domain::AbsoluteScale> {
+        self.absolute_scale_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let episodes = self.episodes.lock().await;
+        Ok(scryer_domain::AbsoluteScale::for_catalog(
+            episodes
+                .iter()
+                .filter(|episode| episode.title_id == title_id),
+        ))
     }
 
     async fn list_primary_collection_summaries(

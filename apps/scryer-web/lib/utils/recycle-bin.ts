@@ -54,3 +54,74 @@ export function groupRecycleBinItems<TItem extends RecycleBinFilterItem>(
     .filter((group) => group.items.length > 0)
     .sort((a, b) => b.items[0].recycledAt.localeCompare(a.items[0].recycledAt));
 }
+
+/** Retention bounds the server accepts for recycled items, in days. */
+export const RECYCLE_BIN_MIN_RETENTION_DAYS = 1;
+export const RECYCLE_BIN_MAX_RETENTION_DAYS = 3650;
+
+/** What a save did with entries in the previous recycle-bin location. */
+export type RecycleBinRelocation = {
+  movedCount: number;
+  failures: Array<{ entryId: string; fromPath: string; reason: string }>;
+};
+
+/** Fields to change; an omitted field keeps the stored value on the server. */
+export type RecycleBinSettingsChanges = {
+  enabled?: boolean;
+  path?: string | null;
+  retentionDays?: number;
+};
+
+export type RecycleBinSettingsInput = {
+  enabled?: boolean;
+  path?: string | null;
+  retentionDays?: number;
+};
+
+/**
+ * Parses the retention field. Returns null for anything the server would
+ * reject, so the form can refuse to save it.
+ */
+export function parseRecycleBinRetentionDays(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const days = Number(trimmed);
+  return days >= RECYCLE_BIN_MIN_RETENTION_DAYS && days <= RECYCLE_BIN_MAX_RETENTION_DAYS
+    ? days
+    : null;
+}
+
+/**
+ * The changes a location-form save carries: only the fields that differ from
+ * the stored settings. Resending an unchanged path would revalidate it, so a
+ * stored path a later library root invalidated would block a retention change.
+ */
+export function recycleBinLocationChanges(
+  stored: { path: string | null; retentionDays: number },
+  draft: { path: string; retentionDays: number },
+): RecycleBinSettingsChanges {
+  const changes: RecycleBinSettingsChanges = {};
+  const draftPath = draft.path.trim();
+  if (draftPath !== (stored.path ?? "")) changes.path = draftPath === "" ? null : draftPath;
+  if (draft.retentionDays !== stored.retentionDays) changes.retentionDays = draft.retentionDays;
+  return changes;
+}
+
+/**
+ * Builds a partial update input carrying only the fields being changed, so a
+ * toggle never overwrites the stored path or retention. A blank path is sent
+ * as null, which restores the default `.scryer-recycle` folder under each
+ * library root.
+ */
+export function buildRecycleBinSettingsInput(
+  changes: RecycleBinSettingsChanges,
+): RecycleBinSettingsInput {
+  const input: RecycleBinSettingsInput = {};
+  if (changes.enabled !== undefined) input.enabled = changes.enabled;
+  if (changes.path !== undefined) {
+    const trimmedPath = changes.path?.trim() ?? "";
+    input.path = trimmedPath === "" ? null : trimmedPath;
+  }
+  if (changes.retentionDays !== undefined) input.retentionDays = changes.retentionDays;
+  return input;
+}

@@ -26,6 +26,11 @@ pub(crate) struct PlannedTitleScanFile {
     pub(crate) series_movie_link_id: Option<String>,
     pub(crate) snapshot: FileSourceSnapshot,
     pub(crate) record: PlannedTitleScanRecord,
+    /// Where a newly catalogued file came from when a person placed it by
+    /// hand (a bound pending import). Recorded as the row's import source
+    /// path, which keeps later scans from replacing the chosen episode links.
+    /// `None` for files the scan discovered on its own.
+    pub(crate) original_file_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +42,10 @@ pub(crate) enum PlannedTitleScanRecord {
         /// The sampled quick proof for this row actually *changed*, so any
         /// persisted full hash describes bytes that are gone (FR-046).
         should_invalidate_full_hashes: bool,
+        /// The file's stored episode links, set only when a confident fresh
+        /// parse of its filename names a different episode set. Finalization
+        /// then replaces these links with the plan's target episodes.
+        replaced_episode_ids: Option<Vec<String>>,
     },
     New,
 }
@@ -521,8 +530,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -591,6 +602,7 @@ mod tests {
             edition: None,
             original_file_path: None,
             release_hash: None,
+            release_listing_json: None,
         }
     }
 
@@ -854,8 +866,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: Some("101".into()),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -912,8 +926,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),

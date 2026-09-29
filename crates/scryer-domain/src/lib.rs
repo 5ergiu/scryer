@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 pub mod download_identity;
 pub mod import_space;
+pub mod lists;
+pub mod title_normalization;
+pub use lists::*;
 mod title_sort;
 pub mod title_spelling;
 pub use title_sort::{
@@ -397,6 +400,9 @@ pub struct MediaRequest {
     pub metadata_snapshot_json: String,
     pub external_ids: Vec<ExternalId>,
     pub requesters: Vec<MediaRequestRequester>,
+    /// Where the request came from: a person, or a list subscription.
+    #[serde(default)]
+    pub origin: MediaRequestOrigin,
     pub created_by_user_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -409,6 +415,9 @@ pub enum AppPermission {
     ManagePermissions,
     ManageSystemSettings,
     ManageCatalogSettings,
+    /// Following public lists, managing list exclusions for everyone, and
+    /// setting members' list policies.
+    ManageLists,
 }
 
 impl AppPermission {
@@ -418,6 +427,7 @@ impl AppPermission {
             Self::ManagePermissions => "manage_permissions",
             Self::ManageSystemSettings => "manage_system_settings",
             Self::ManageCatalogSettings => "manage_catalog_settings",
+            Self::ManageLists => "manage_lists",
         }
     }
 
@@ -427,6 +437,7 @@ impl AppPermission {
             "manage_permissions" => Some(Self::ManagePermissions),
             "manage_system_settings" => Some(Self::ManageSystemSettings),
             "manage_catalog_settings" => Some(Self::ManageCatalogSettings),
+            "manage_lists" => Some(Self::ManageLists),
             _ => None,
         }
     }
@@ -503,6 +514,7 @@ impl AppPermissionMask {
     pub const MANAGE_PERMISSIONS: Self = Self(1 << 1);
     pub const MANAGE_SYSTEM_SETTINGS: Self = Self(1 << 2);
     pub const MANAGE_CATALOG_SETTINGS: Self = Self(1 << 3);
+    pub const MANAGE_LISTS: Self = Self(1 << 4);
 
     pub fn bits(self) -> u64 {
         self.0
@@ -518,6 +530,7 @@ impl AppPermissionMask {
             AppPermission::ManagePermissions => Self::MANAGE_PERMISSIONS,
             AppPermission::ManageSystemSettings => Self::MANAGE_SYSTEM_SETTINGS,
             AppPermission::ManageCatalogSettings => Self::MANAGE_CATALOG_SETTINGS,
+            AppPermission::ManageLists => Self::MANAGE_LISTS,
         }
     }
 
@@ -542,6 +555,7 @@ impl AppPermissionMask {
                 Self::MANAGE_CATALOG_SETTINGS,
                 AppPermission::ManageCatalogSettings,
             ),
+            (Self::MANAGE_LISTS, AppPermission::ManageLists),
         ]
         .into_iter()
         .filter_map(|(mask, permission)| self.contains(mask).then_some(permission))
@@ -780,6 +794,7 @@ impl UserAuthorization {
                 AppPermission::ManagePermissions,
                 AppPermission::ManageSystemSettings,
                 AppPermission::ManageCatalogSettings,
+                AppPermission::ManageLists,
             ]),
             libraries: std::collections::HashMap::new(),
             default_library: LibraryPermissionMask::from_permissions([
@@ -930,7 +945,26 @@ pub fn normalize_external_id_kind(kind: &str) -> Option<String> {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CanonicalMediaAffinitySignal {
+    pub affinity_key: String,
+    pub category: String,
+    pub tier: String,
+    pub signal_class: String,
+    pub confidence: f64,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub source_tag_keys: Vec<String>,
+    /// SMG's admission decision for this signal as rail evidence. SMG owns the
+    /// thresholds, so Scryer never re-derives it from tier or confidence.
+    #[serde(default)]
+    pub rail_eligible: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct CanonicalMediaTag {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affinity_signals: Vec<CanonicalMediaAffinitySignal>,
     pub key: String,
     pub category: String,
     pub name: String,
@@ -1191,7 +1225,15 @@ pub struct AnimeCommunitySeason {
     pub titles: Vec<String>,
     pub ranges: Vec<AnimeCommunitySeasonRange>,
     /// TVDB `absolute_number` of community episode 1; `None` when unknown.
+    /// This is the raw scale; see [`AbsoluteScale`].
     pub absolute_start: Option<i32>,
+    /// Contiguous absolute number of community episode 1: the same episode on
+    /// the scale that skips specials interleaved into TVDB's absolute order.
+    /// SMG reads it off that anchor episode's own contiguous number, so it is
+    /// `None` while the anchor is unplaced, when otherwise unknown, and on
+    /// every row stored before SMG served it.
+    #[serde(default)]
+    pub contiguous_absolute_start: Option<i32>,
     /// Closed episode count; `None` when the source range is open-ended.
     pub episode_count: Option<i32>,
 }
@@ -1208,6 +1250,21 @@ pub struct AnimeCommunitySeasonRange {
 }
 
 impl AnimeCommunitySeason {
+    /// Whether a release that names this community season may also carry
+    /// `season` as its season token without contradicting that name.
+    ///
+    /// Three spellings agree with the name: `1` (groups that title a release
+    /// per cour restart their season numbering with it), the community
+    /// season's own index, and any TVDB season one of its ranges lands in (a
+    /// cour TVDB records as its own season is released under that number).
+    /// Anything else names a different season than the title does.
+    pub fn admits_season_token(&self, season: u32) -> bool {
+        season == 1
+            || i32::try_from(season).is_ok_and(|season| {
+                season == self.index || self.ranges.iter().any(|range| range.tvdb_season == season)
+            })
+    }
+
     /// The TVDB (season, episode) a community episode number lands on, or
     /// `None` when no range of this season covers it.
     pub fn tvdb_for_community_episode(&self, community_episode: i32) -> Option<(i32, i32)> {
@@ -1277,6 +1334,10 @@ pub struct EpisodeOrderEntry {
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
     pub absolute_number: Option<i32>,
+    /// SMG's contiguous renumbering; set only on entries of the `absolute`
+    /// order. See [`AbsoluteScale`].
+    #[serde(default)]
+    pub contiguous_absolute_number: Option<i32>,
     pub name: String,
 }
 
@@ -1394,6 +1455,7 @@ pub fn numbering_bridge_from_episode_orders(
             titles: Vec::new(),
             ranges,
             absolute_start: None,
+            contiguous_absolute_start: None,
             episode_count,
         });
     }
@@ -1662,12 +1724,85 @@ pub struct Episode {
     pub has_subtitle: bool,
     pub is_filler: bool,
     pub is_recap: bool,
+    /// TVDB's raw absolute number. See [`AbsoluteScale`] before matching on it.
     pub absolute_number: Option<String>,
+    /// SMG's contiguous absolute number: TVDB's absolute order renumbered
+    /// 1..n over story episodes only, so a special interleaved into the
+    /// absolute order does not shift every later episode. `None` for series
+    /// without an absolute order and where SMG could not number safely.
+    pub contiguous_absolute_number: Option<i32>,
     pub overview: Option<String>,
     pub tvdb_id: Option<String>,
+    /// TMDB's episode id. Set for a TMDB-primary series' episodes, which have
+    /// no TVDB id; `None` for TVDB-backed series and rows written before 0263.
+    pub tmdb_id: Option<String>,
     pub image_url: Option<String>,
     pub monitored: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// Which absolute numbering a title's releases are matched on.
+///
+/// TVDB's absolute order interleaves specials and shorts with story episodes,
+/// so its raw numbers drift from the count release groups (and AniDB) use: a
+/// special at raw 13 makes story episode 13 raw 14. SMG serves a contiguous
+/// renumbering beside the raw one. A title is matched on exactly one of the two
+/// — the contiguous scale whenever its catalog carries any contiguous number,
+/// the raw scale otherwise — and a catalog number, a bridge season start and a
+/// parsed release number are only ever compared on that one scale. Falling back
+/// per episode would be wrong: an interleaved special has a raw number but no
+/// contiguous one, and its raw number is a story episode's contiguous number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AbsoluteScale {
+    /// TVDB's `absolute_number`, as stored.
+    #[default]
+    Raw,
+    /// SMG's `contiguous_absolute_number`.
+    Contiguous,
+}
+
+impl AbsoluteScale {
+    /// The scale a title's catalog is matched on.
+    pub fn for_catalog<'a>(episodes: impl IntoIterator<Item = &'a Episode>) -> Self {
+        if episodes.into_iter().any(|episode| {
+            episode
+                .contiguous_absolute_number
+                .is_some_and(|number| number > 0)
+        }) {
+            Self::Contiguous
+        } else {
+            Self::Raw
+        }
+    }
+
+    /// An episode's absolute number on this scale, or `None` when it has none
+    /// there. Never falls back to the other scale.
+    pub fn episode_absolute(self, episode: &Episode) -> Option<u32> {
+        match self {
+            Self::Raw => episode
+                .absolute_number
+                .as_deref()
+                .and_then(|value| value.trim().parse::<u32>().ok()),
+            Self::Contiguous => episode
+                .contiguous_absolute_number
+                .and_then(|number| u32::try_from(number).ok()),
+        }
+    }
+
+    /// A community season's first absolute number on this scale.
+    pub fn season_absolute_start(self, season: &AnimeCommunitySeason) -> Option<i32> {
+        match self {
+            Self::Raw => season.absolute_start,
+            Self::Contiguous => season.contiguous_absolute_start,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Contiguous => "contiguous",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1698,6 +1833,10 @@ pub struct IndexerConfig {
     pub api_key_encrypted: Option<String>,
     pub rate_limit_seconds: Option<i64>,
     pub rate_limit_burst: Option<i64>,
+    /// Sustained query budget the provider allows per minute. `None` means no
+    /// budget beyond the request interval.
+    #[serde(default)]
+    pub max_queries_per_minute: Option<i64>,
     pub disabled_until: Option<DateTime<Utc>>,
     pub is_enabled: bool,
     pub enable_interactive_search: bool,
@@ -2007,6 +2146,8 @@ pub struct NewIndexerConfig {
     pub provider_type: String,
     pub rate_limit_seconds: Option<i64>,
     pub rate_limit_burst: Option<i64>,
+    #[serde(default)]
+    pub max_queries_per_minute: Option<i64>,
     pub is_enabled: bool,
     pub enable_interactive_search: bool,
     pub enable_auto_search: bool,
@@ -3060,6 +3201,16 @@ pub struct ImportResult {
     pub release_burned: bool,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
+    /// The import replaced an existing media file. Only the canonical movie
+    /// import sets this; series and series-movie results leave it `false`
+    /// even when the batch upgraded something. In-process only: never
+    /// persisted with the result, so stored result JSON is unchanged.
+    #[serde(skip)]
+    pub upgrade: bool,
+    /// For an upgrade that landed at a different path, the replaced file's
+    /// path; `None` for an in-place upgrade or a first import. In-process only.
+    #[serde(skip)]
+    pub upgrade_previous_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3369,6 +3520,8 @@ pub enum TitleHistoryEventType {
     FileUpgraded,
     FileRecycled,
     FileDeleted,
+    /// A recycled media file was put back into the library from the recycle bin.
+    FileRestored,
     FileRenamed,
     TitleMoved,
     DownloadIgnored,
@@ -3396,6 +3549,7 @@ impl TitleHistoryEventType {
             Self::FileUpgraded => "file_upgraded",
             Self::FileRecycled => "file_recycled",
             Self::FileDeleted => "file_deleted",
+            Self::FileRestored => "file_restored",
             Self::FileRenamed => "file_renamed",
             Self::TitleMoved => "title_moved",
             Self::DownloadIgnored => "download_ignored",
@@ -3419,6 +3573,7 @@ impl TitleHistoryEventType {
             "file_upgraded" => Some(Self::FileUpgraded),
             "file_recycled" => Some(Self::FileRecycled),
             "file_deleted" => Some(Self::FileDeleted),
+            "file_restored" => Some(Self::FileRestored),
             "file_renamed" => Some(Self::FileRenamed),
             "title_moved" => Some(Self::TitleMoved),
             "download_ignored" => Some(Self::DownloadIgnored),
@@ -3442,6 +3597,7 @@ impl TitleHistoryEventType {
         Self::FileUpgraded,
         Self::FileRecycled,
         Self::FileDeleted,
+        Self::FileRestored,
         Self::FileRenamed,
         Self::TitleMoved,
         Self::DownloadIgnored,
@@ -3680,6 +3836,7 @@ pub enum DomainEventType {
     MediaFileAnalyzed,
     MediaFileRenamed,
     MediaFileDeleted,
+    MediaFileRestored,
     MediaFileUpgraded,
     AcquisitionSearchCompleted,
     AcquisitionCandidateRejected,
@@ -3705,6 +3862,11 @@ pub enum DomainEventType {
     DownloadIgnored,
     SeedingStarted,
     SeedingCompleted,
+    ListTitleAdded,
+    ListRequestSubmitted,
+    ListTitleLeft,
+    ListSyncFailed,
+    ListUnfollowed,
 }
 
 impl DomainEventType {
@@ -3734,6 +3896,7 @@ impl DomainEventType {
             Self::MediaFileAnalyzed => "media_file_analyzed",
             Self::MediaFileRenamed => "media_file_renamed",
             Self::MediaFileDeleted => "media_file_deleted",
+            Self::MediaFileRestored => "media_file_restored",
             Self::MediaFileUpgraded => "media_file_upgraded",
             Self::AcquisitionSearchCompleted => "acquisition_search_completed",
             Self::AcquisitionCandidateRejected => "acquisition_candidate_rejected",
@@ -3759,6 +3922,11 @@ impl DomainEventType {
             Self::DownloadIgnored => "download_ignored",
             Self::SeedingStarted => "seeding_started",
             Self::SeedingCompleted => "seeding_completed",
+            Self::ListTitleAdded => "list_title_added",
+            Self::ListRequestSubmitted => "list_request_submitted",
+            Self::ListTitleLeft => "list_title_left",
+            Self::ListSyncFailed => "list_sync_failed",
+            Self::ListUnfollowed => "list_unfollowed",
         }
     }
 
@@ -3788,6 +3956,7 @@ impl DomainEventType {
             "media_file_analyzed" => Some(Self::MediaFileAnalyzed),
             "media_file_renamed" => Some(Self::MediaFileRenamed),
             "media_file_deleted" => Some(Self::MediaFileDeleted),
+            "media_file_restored" => Some(Self::MediaFileRestored),
             "media_file_upgraded" => Some(Self::MediaFileUpgraded),
             "acquisition_search_completed" => Some(Self::AcquisitionSearchCompleted),
             "acquisition_candidate_rejected" => Some(Self::AcquisitionCandidateRejected),
@@ -3813,6 +3982,11 @@ impl DomainEventType {
             "download_ignored" => Some(Self::DownloadIgnored),
             "seeding_started" => Some(Self::SeedingStarted),
             "seeding_completed" => Some(Self::SeedingCompleted),
+            "list_title_added" => Some(Self::ListTitleAdded),
+            "list_request_submitted" => Some(Self::ListRequestSubmitted),
+            "list_title_left" => Some(Self::ListTitleLeft),
+            "list_sync_failed" => Some(Self::ListSyncFailed),
+            "list_unfollowed" => Some(Self::ListUnfollowed),
             _ => None,
         }
     }
@@ -3935,6 +4109,10 @@ pub struct TitleMovedEventData {
     pub destination_path: Option<String>,
     pub completed_with_warnings: bool,
     pub detail: Option<String>,
+    /// Each moved media file's old path (`deleted`) and new path (`created`).
+    /// Defaulted so moves recorded before the field existed still decode.
+    #[serde(default)]
+    pub media_updates: Vec<MediaPathUpdate>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -3950,6 +4128,11 @@ pub struct TitleRematchedEventData {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TitleDeletedEventData {
     pub title: TitleContextSnapshot,
+    /// Media file paths the title tracked when its files were deleted from
+    /// disk; empty when only the catalog entry was removed. Defaulted so
+    /// deletions recorded before the field existed still decode.
+    #[serde(default)]
+    pub deleted_paths: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4000,6 +4183,33 @@ pub struct ReleaseGrabbedEventData {
     pub download_id: Option<String>,
     #[serde(default)]
     pub episode_ids: Vec<String>,
+    /// What was known about the release when it was grabbed. Absent on events
+    /// recorded before these facts were captured, and on grabs whose origin
+    /// carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_facts: Option<GrabbedReleaseFacts>,
+}
+
+/// Release facts captured at grab time, for history and notifications.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabbedReleaseFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    /// `usenet` or `torrent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_client_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4080,6 +4290,10 @@ pub struct ImportCompletedEventData {
     /// `None`.
     #[serde(default)]
     pub size_bytes: Option<i64>,
+    /// True when this import replaced an existing media file (an upgrade).
+    /// Events persisted before this field existed read back as `false`.
+    #[serde(default)]
+    pub upgrade: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4157,6 +4371,26 @@ pub struct MediaFileDeletedEventData {
     pub media_updates: Vec<MediaPathUpdate>,
     pub file_id: Option<String>,
     pub reason: MediaFileDeletedReason,
+    #[serde(default)]
+    pub episode_ids: Vec<String>,
+}
+
+/// A media file came back out of the recycle bin. `media_updates` carries the
+/// path the file was restored to, which differs from the recycled original when
+/// the restore had to divert to a sibling to avoid overwriting a live file.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaFileRestoredEventData {
+    pub title: TitleContextSnapshot,
+    pub media_updates: Vec<MediaPathUpdate>,
+    /// The media row the restored file is tracked by, once the restore scan
+    /// recreated it.
+    #[serde(default)]
+    pub file_id: Option<String>,
+    /// Path the file had when it was recycled.
+    #[serde(default)]
+    pub original_path: Option<String>,
+    #[serde(default)]
+    pub recycle_entry_id: Option<String>,
     #[serde(default)]
     pub episode_ids: Vec<String>,
 }
@@ -4347,6 +4581,8 @@ pub struct LibraryScanSummaryEventData {
     pub imported: i64,
     pub skipped: i64,
     pub unmatched: i64,
+    #[serde(default)]
+    pub relinked: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4518,6 +4754,7 @@ pub enum DomainEventPayload {
     MediaFileAnalyzed(MediaFileAnalyzedEventData),
     MediaFileRenamed(MediaFileRenamedEventData),
     MediaFileDeleted(MediaFileDeletedEventData),
+    MediaFileRestored(MediaFileRestoredEventData),
     MediaFileUpgraded(MediaFileUpgradedEventData),
     AcquisitionSearchCompleted(AcquisitionSearchCompletedEventData),
     AcquisitionCandidateRejected(AcquisitionCandidateRejectedEventData),
@@ -4545,6 +4782,11 @@ pub enum DomainEventPayload {
     DownloadIgnored(DownloadIgnoredEventData),
     SeedingStarted(SeedingStartedEventData),
     SeedingCompleted(SeedingCompletedEventData),
+    ListTitleAdded(ListTitleAddedEventData),
+    ListRequestSubmitted(ListRequestSubmittedEventData),
+    ListTitleLeft(ListTitleLeftEventData),
+    ListSyncFailed(ListSyncFailedEventData),
+    ListUnfollowed(ListUnfollowedEventData),
 }
 
 impl DomainEventPayload {
@@ -4574,6 +4816,7 @@ impl DomainEventPayload {
             Self::MediaFileAnalyzed(_) => DomainEventType::MediaFileAnalyzed,
             Self::MediaFileRenamed(_) => DomainEventType::MediaFileRenamed,
             Self::MediaFileDeleted(_) => DomainEventType::MediaFileDeleted,
+            Self::MediaFileRestored(_) => DomainEventType::MediaFileRestored,
             Self::MediaFileUpgraded(_) => DomainEventType::MediaFileUpgraded,
             Self::AcquisitionSearchCompleted(_) => DomainEventType::AcquisitionSearchCompleted,
             Self::AcquisitionCandidateRejected(_) => DomainEventType::AcquisitionCandidateRejected,
@@ -4601,6 +4844,11 @@ impl DomainEventPayload {
             Self::DownloadIgnored(_) => DomainEventType::DownloadIgnored,
             Self::SeedingStarted(_) => DomainEventType::SeedingStarted,
             Self::SeedingCompleted(_) => DomainEventType::SeedingCompleted,
+            Self::ListTitleAdded(_) => DomainEventType::ListTitleAdded,
+            Self::ListRequestSubmitted(_) => DomainEventType::ListRequestSubmitted,
+            Self::ListTitleLeft(_) => DomainEventType::ListTitleLeft,
+            Self::ListSyncFailed(_) => DomainEventType::ListSyncFailed,
+            Self::ListUnfollowed(_) => DomainEventType::ListUnfollowed,
         }
     }
 }
@@ -7152,6 +7400,7 @@ pub enum NotificationEventType {
     TitleDeleted,
     FileDeleted,
     FileDeletedForUpgrade,
+    FileRestored,
     PostProcessingCompleted,
     SubtitleDownloaded,
     SubtitleSearchFailed,
@@ -7163,6 +7412,13 @@ pub enum NotificationEventType {
     HealthRestored,
     ApplicationUpdate,
     ManualInteractionRequired,
+    TitleMoved,
+    ListTitleAdded,
+    ListRequestSubmitted,
+    ListItemHeld,
+    ListTitleLeft,
+    ListSyncFailed,
+    ListUnfollowed,
     Test,
 }
 
@@ -7179,6 +7435,7 @@ impl NotificationEventType {
             Self::TitleDeleted => "title_deleted",
             Self::FileDeleted => "file_deleted",
             Self::FileDeletedForUpgrade => "file_deleted_for_upgrade",
+            Self::FileRestored => "file_restored",
             Self::PostProcessingCompleted => "post_processing_completed",
             Self::SubtitleDownloaded => "subtitle_downloaded",
             Self::SubtitleSearchFailed => "subtitle_search_failed",
@@ -7190,6 +7447,13 @@ impl NotificationEventType {
             Self::HealthRestored => "health_restored",
             Self::ApplicationUpdate => "application_update",
             Self::ManualInteractionRequired => "manual_interaction_required",
+            Self::TitleMoved => "title_moved",
+            Self::ListTitleAdded => "list_title_added",
+            Self::ListRequestSubmitted => "list_request_submitted",
+            Self::ListItemHeld => "list_item_held",
+            Self::ListTitleLeft => "list_title_left",
+            Self::ListSyncFailed => "list_sync_failed",
+            Self::ListUnfollowed => "list_unfollowed",
             Self::Test => "test",
         }
     }
@@ -7206,6 +7470,7 @@ impl NotificationEventType {
             Self::TitleDeleted,
             Self::FileDeleted,
             Self::FileDeletedForUpgrade,
+            Self::FileRestored,
             Self::PostProcessingCompleted,
             Self::SubtitleDownloaded,
             Self::SubtitleSearchFailed,
@@ -7217,6 +7482,13 @@ impl NotificationEventType {
             Self::HealthRestored,
             Self::ApplicationUpdate,
             Self::ManualInteractionRequired,
+            Self::TitleMoved,
+            Self::ListTitleAdded,
+            Self::ListRequestSubmitted,
+            Self::ListItemHeld,
+            Self::ListTitleLeft,
+            Self::ListSyncFailed,
+            Self::ListUnfollowed,
             Self::Test,
         ]
     }
@@ -7233,6 +7505,7 @@ impl NotificationEventType {
             "title_deleted" => Some(Self::TitleDeleted),
             "file_deleted" => Some(Self::FileDeleted),
             "file_deleted_for_upgrade" => Some(Self::FileDeletedForUpgrade),
+            "file_restored" => Some(Self::FileRestored),
             "post_processing_completed" => Some(Self::PostProcessingCompleted),
             "subtitle_downloaded" => Some(Self::SubtitleDownloaded),
             "subtitle_search_failed" => Some(Self::SubtitleSearchFailed),
@@ -7244,6 +7517,13 @@ impl NotificationEventType {
             "health_restored" => Some(Self::HealthRestored),
             "application_update" => Some(Self::ApplicationUpdate),
             "manual_interaction_required" => Some(Self::ManualInteractionRequired),
+            "title_moved" => Some(Self::TitleMoved),
+            "list_title_added" => Some(Self::ListTitleAdded),
+            "list_request_submitted" => Some(Self::ListRequestSubmitted),
+            "list_item_held" => Some(Self::ListItemHeld),
+            "list_title_left" => Some(Self::ListTitleLeft),
+            "list_sync_failed" => Some(Self::ListSyncFailed),
+            "list_unfollowed" => Some(Self::ListUnfollowed),
             "test" => Some(Self::Test),
             "release_grabbed" => Some(Self::Grab),
             "download_failed" => Some(Self::Download),
@@ -7251,6 +7531,7 @@ impl NotificationEventType {
             "import_completed" => Some(Self::ImportComplete),
             "media_file_renamed" => Some(Self::Rename),
             "media_file_deleted" => Some(Self::FileDeleted),
+            "media_file_restored" => Some(Self::FileRestored),
             _ => None,
         }
     }
@@ -7404,6 +7685,148 @@ pub fn normalize_tags(tags: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_completed_event_data_without_upgrade_field_reads_as_not_upgrade() {
+        let data = ImportCompletedEventData {
+            title: TitleContextSnapshot {
+                title_name: "Synthetic Movie".to_string(),
+                facet: MediaFacet::Movie,
+                external_ids: DomainExternalIds::default(),
+                poster_url: None,
+                year: Some(2001),
+            },
+            media_updates: vec![MediaPathUpdate {
+                path: "/library/Synthetic Movie (2001)/movie.mkv".to_string(),
+                update_type: MediaUpdateType::Created,
+            }],
+            imported_count: 1,
+            import_id: None,
+            source_system: None,
+            source_ref: None,
+            source_title: None,
+            source_path: None,
+            dest_path: None,
+            quality: None,
+            episode_ids: Vec::new(),
+            size_bytes: None,
+            upgrade: true,
+        };
+        let mut legacy = serde_json::to_value(&data).expect("event data should serialize");
+        legacy
+            .as_object_mut()
+            .expect("event data serializes as an object")
+            .remove("upgrade")
+            .expect("upgrade field is serialized");
+
+        let parsed: ImportCompletedEventData =
+            serde_json::from_value(legacy).expect("legacy row should parse");
+        assert!(!parsed.upgrade);
+        assert_eq!(
+            parsed,
+            ImportCompletedEventData {
+                upgrade: false,
+                ..data
+            }
+        );
+    }
+
+    fn synthetic_title_context() -> TitleContextSnapshot {
+        TitleContextSnapshot {
+            title_name: "Synthetic Movie".to_string(),
+            facet: MediaFacet::Movie,
+            external_ids: DomainExternalIds::default(),
+            poster_url: None,
+            year: Some(2001),
+        }
+    }
+
+    #[test]
+    fn title_deleted_event_data_without_deleted_paths_reads_as_empty() {
+        let data = TitleDeletedEventData {
+            title: synthetic_title_context(),
+            deleted_paths: vec!["/library/Synthetic Movie (2001)/movie.mkv".to_string()],
+        };
+        let mut legacy = serde_json::to_value(&data).expect("event data should serialize");
+        legacy
+            .as_object_mut()
+            .expect("event data serializes as an object")
+            .remove("deleted_paths")
+            .expect("deleted_paths is serialized");
+
+        let parsed: TitleDeletedEventData =
+            serde_json::from_value(legacy).expect("legacy row should parse");
+        assert_eq!(
+            parsed,
+            TitleDeletedEventData {
+                deleted_paths: Vec::new(),
+                ..data
+            }
+        );
+    }
+
+    #[test]
+    fn title_moved_event_data_without_media_updates_reads_as_empty() {
+        let data = TitleMovedEventData {
+            title: synthetic_title_context(),
+            operation_id: "operation-1".to_string(),
+            operation_type: "root_move".to_string(),
+            mode: "user_moved_files".to_string(),
+            source_title_id: "title-1".to_string(),
+            source_title_name: "Synthetic Movie".to_string(),
+            source_library_id: "library-a".to_string(),
+            source_library_name: "Library A".to_string(),
+            destination_library_id: "library-b".to_string(),
+            destination_library_name: "Library B".to_string(),
+            source_root_id: "root-a".to_string(),
+            destination_root_id: "root-b".to_string(),
+            source_path: Some("/root-a/Synthetic Movie (2001)".to_string()),
+            destination_path: Some("/root-b/Synthetic Movie (2001)".to_string()),
+            completed_with_warnings: false,
+            detail: None,
+            media_updates: vec![
+                MediaPathUpdate {
+                    path: "/root-a/Synthetic Movie (2001)/movie.mkv".to_string(),
+                    update_type: MediaUpdateType::Deleted,
+                },
+                MediaPathUpdate {
+                    path: "/root-b/Synthetic Movie (2001)/movie.mkv".to_string(),
+                    update_type: MediaUpdateType::Created,
+                },
+            ],
+        };
+        let mut legacy = serde_json::to_value(&data).expect("event data should serialize");
+        legacy
+            .as_object_mut()
+            .expect("event data serializes as an object")
+            .remove("media_updates")
+            .expect("media_updates is serialized");
+
+        let parsed: TitleMovedEventData =
+            serde_json::from_value(legacy).expect("legacy row should parse");
+        assert_eq!(
+            parsed,
+            TitleMovedEventData {
+                media_updates: Vec::new(),
+                ..data
+            }
+        );
+    }
+
+    #[test]
+    fn title_moved_notification_event_type_round_trips() {
+        let event_type = NotificationEventType::TitleMoved;
+        assert_eq!(event_type.as_str(), "title_moved");
+        assert_eq!(
+            NotificationEventType::parse("title_moved"),
+            Some(event_type)
+        );
+        assert!(NotificationEventType::all().contains(&event_type));
+        assert_eq!(
+            serde_json::to_value(event_type).expect("serialize"),
+            serde_json::json!("title_moved")
+        );
+    }
 
     #[test]
     fn external_id_key_includes_the_kind_only_when_there_is_one() {

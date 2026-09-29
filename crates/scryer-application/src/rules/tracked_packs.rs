@@ -23,8 +23,8 @@ pub struct TrackedRulePackPreview {
 
 impl AppUseCase {
     /// Atomically installs the bundled pack and retires saved rules that still
-    /// depend on the removed release input. Applies the exact shipped size-policy
-    /// correction; other existing rules retain their explicit pack update flow.
+    /// depend on the removed release input. Applies exact shipped-source
+    /// corrections; other existing rules retain their explicit pack update flow.
     pub async fn bootstrap_builtin_trash_rule_pack(&self) -> AppResult<()> {
         let pack = super::builtin_trash::verified_pack()?;
         let _mutation = self.services.customization.rule_mutation_lock.lock().await;
@@ -42,9 +42,9 @@ impl AppUseCase {
             .await?;
         if let Some(mut installation) = existing_installation {
             let mut retired = retired_rules(&existing)?;
-            // Correct only the exact shipped size policy. A copied or edited
-            // rule remains operator-authored policy, including its size scores.
-            retired.extend(super::builtin_trash::size_ranking_updates(
+            // Correct only exact shipped sources. A copied or edited rule
+            // remains operator-authored policy, including its scores.
+            retired.extend(super::builtin_trash::superseded_template_updates(
                 &pack,
                 &installation,
                 &existing,

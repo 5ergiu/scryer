@@ -109,6 +109,24 @@ struct HydratingMovieSearchGateway {
 
 #[async_trait]
 impl MetadataGateway for HydratingMovieSearchGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -158,10 +176,6 @@ impl MetadataGateway for HydratingMovieSearchGateway {
         }
     }
 
-    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(format!("series {tvdb_id}")))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],
@@ -188,6 +202,24 @@ struct CountingRecommendationMetadataGateway {
 
 #[async_trait]
 impl MetadataGateway for CountingRecommendationMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -230,10 +262,6 @@ impl MetadataGateway for CountingRecommendationMetadataGateway {
             .get(&tvdb_id)
             .cloned()
             .ok_or_else(|| AppError::NotFound(format!("movie {tvdb_id}")))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::Repository("not implemented in tests".into()))
     }
 
     async fn get_metadata_bulk(
@@ -614,16 +642,17 @@ type MetadataSearchBatch = (Vec<MetadataSearchQuery>, String, bool);
 struct RecordingExactIdMetadataGateway {
     batch_queries: Arc<Mutex<Vec<Vec<MetadataSearchQuery>>>>,
     title_batch_queries: Arc<Mutex<Vec<MetadataSearchBatch>>>,
-    title_id_movies_enabled: bool,
+    /// Answer movie title searches with a TMDB-primary title instead of the
+    /// TVDB-backed identity match every other search gets.
+    tmdb_primary_movie_matches: bool,
     rich_external_ids: bool,
-    raw_title_id_error: bool,
     detail_calls: Arc<AtomicUsize>,
 }
 
 impl RecordingExactIdMetadataGateway {
-    fn with_title_id_movies() -> Self {
+    fn with_tmdb_primary_movie_matches() -> Self {
         Self {
-            title_id_movies_enabled: true,
+            tmdb_primary_movie_matches: true,
             ..Default::default()
         }
     }
@@ -633,14 +662,6 @@ impl RecordingExactIdMetadataGateway {
     /// movie does.
     fn with_rich_external_ids(mut self) -> Self {
         self.rich_external_ids = true;
-        self
-    }
-
-    /// An SMG that predates the title-id surface answers `searchTitlesBatch`
-    /// with a raw GraphQL validation error, not with the mapped capability
-    /// message the client produces once its probe recognises one.
-    fn with_raw_unknown_field_error(mut self) -> Self {
-        self.raw_title_id_error = true;
         self
     }
 
@@ -716,20 +737,23 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
         &self,
         queries: &[MetadataSearchQuery],
         kind: &str,
-        _language: &str,
+        language: &str,
         create_missing: bool,
     ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        if kind != "movie" {
+            // Series always search through the title surface; this fixture
+            // answers them with the same identity matches as its TVDB batch.
+            return self.search_tvdb_batch(queries, language).await;
+        }
         self.title_batch_queries.lock().await.push((
             queries.to_vec(),
             kind.to_string(),
             create_missing,
         ));
-        if !self.title_id_movies_enabled {
-            return Err(AppError::Repository(if self.raw_title_id_error {
-                "Cannot query field \"searchTitlesBatch\" on type \"Query\".".to_string()
-            } else {
-                "metadata gateway does not support title-id queries".to_string()
-            }));
+        if !self.tmdb_primary_movie_matches {
+            // Recorded as a title batch above; answered with the same identity
+            // matches as the TVDB batch.
+            return self.search_tvdb_batch(queries, language).await;
         }
 
         assert_eq!(kind, "movie");
@@ -789,13 +813,6 @@ impl MetadataGateway for RecordingExactIdMetadataGateway {
         ))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        self.detail_calls.fetch_add(1, Ordering::SeqCst);
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
-        ))
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],
@@ -844,6 +861,24 @@ impl BlockingBulkHydrationMetadataGateway {
 
 #[async_trait]
 impl MetadataGateway for BlockingBulkHydrationMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -888,12 +923,6 @@ impl MetadataGateway for BlockingBulkHydrationMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -1596,8 +1625,10 @@ async fn series_title_scan_imports_episode_file_as_primary() {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -1620,6 +1651,10 @@ async fn series_title_scan_imports_episode_file_as_primary() {
     assert_eq!(
         media_file_role_for_path(&files, episode_path.as_path()),
         MediaFileRole::Primary
+    );
+    assert_eq!(
+        files[0].release_listing_json, None,
+        "a scanned file has no grab behind it"
     );
 }
 
@@ -1720,8 +1755,10 @@ async fn series_title_scan_isolates_one_files_analysis_failure_from_the_rest_of_
                 is_filler: false,
                 is_recap: false,
                 absolute_number: None,
+                contiguous_absolute_number: None,
                 overview: None,
                 tvdb_id: None,
+                tmdb_id: None,
                 image_url: None,
                 monitored: true,
                 created_at: Utc::now(),
@@ -1853,8 +1890,10 @@ async fn series_library_scan_marks_duplicate_episode_files_as_additional() {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -1977,8 +2016,10 @@ async fn series_library_scan_does_not_promote_additional_file_but_title_scan_doe
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -3213,27 +3254,30 @@ async fn series_full_scan_keeps_hinted_batch_intact_across_unhinted_folder() {
     })
     .await;
 
-    // Hinted and unhinted candidates share one match queue: the exact-ID
-    // lookups and the fuzzy lookup travel in the same searchTvdbBatch call
-    // instead of separate hinted-only batches.
+    // Hinted and unhinted candidates share one match queue. The title
+    // surface sends the exact-ID lookups (which may create a missing series)
+    // and the fuzzy lookup (which may not) as two searchTitlesBatch requests,
+    // exactly like movies, and the 22 hinted lookups stay in one batch.
     let batches = metadata_gateway.batch_queries().await;
-    assert_eq!(batches.len(), 1);
-    let exact_queries = batches[0]
+    assert_eq!(batches.len(), 2);
+    let is_exact = |query: &MetadataSearchQuery| {
+        query.query.is_empty()
+            && query.type_hint == "series"
+            && query.tvdb_id.is_some()
+            && query.imdb_id.is_none()
+            && query.tmdb_id.is_none()
+    };
+    let exact_batch = batches
         .iter()
-        .filter(|query| {
-            query.query.is_empty()
-                && query.type_hint == "series"
-                && query.tvdb_id.is_some()
-                && query.imdb_id.is_none()
-                && query.tmdb_id.is_none()
-        })
-        .count();
-    assert_eq!(exact_queries, 22);
-    assert!(
-        batches[0]
+        .find(|batch| batch.iter().any(is_exact))
+        .expect("the hinted lookups travel together");
+    assert_eq!(exact_batch.len(), 22);
+    assert!(exact_batch.iter().all(is_exact));
+    assert!(batches.iter().any(|batch| {
+        batch
             .iter()
             .any(|query| !query.query.trim().is_empty() && query.tvdb_id.is_none())
-    );
+    }));
 }
 
 #[tokio::test]
@@ -3379,7 +3423,8 @@ async fn movie_full_scan_creates_a_tmdb_primary_title_from_a_radarr_hint() {
     });
 
     let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway = Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies());
+    let metadata_gateway =
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches());
     let library_scanner = Arc::new(MutableLibraryScanner::default());
     library_scanner
         .set_library_files(vec![build_test_library_file(&movie_path)])
@@ -3576,8 +3621,9 @@ async fn movie_full_scan_keeps_every_identity_from_a_rich_gateway_match() {
     });
 
     let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway =
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies().with_rich_external_ids());
+    let metadata_gateway = Arc::new(
+        RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches().with_rich_external_ids(),
+    );
     let library_scanner = Arc::new(MutableLibraryScanner::default());
     library_scanner
         .set_library_files(vec![build_test_library_file(&movie_path)])
@@ -3638,100 +3684,6 @@ async fn movie_full_scan_keeps_every_identity_from_a_rich_gateway_match() {
             ("tvdb".to_string(), "444444".to_string()),
         ],
         "a scan-created movie keeps every identity the gateway returned"
-    );
-}
-
-/// An SMG old enough to lack `searchTitlesBatch` rejects it with a raw GraphQL
-/// validation error naming that field. The scan must read that as a capability
-/// signal and fall back to the legacy batched search -- not fail the whole
-/// batch and leave the library unmatched.
-#[tokio::test]
-async fn movie_full_scan_falls_back_on_a_raw_unknown_field_error() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let movie_root = tempdir.path().join("movies");
-    let movie_folder = movie_root.join("Legacy Fallback Movie (1999)");
-    std::fs::create_dir_all(&movie_folder).expect("create movie folder");
-    let movie_file = movie_folder.join("Legacy.Fallback.Movie.1999.mkv");
-    std::fs::write(&movie_file, b"movie").expect("write movie file");
-    let movie_path = movie_file.to_string_lossy().to_string();
-
-    let mut scan_hints = LibraryScanHintSet::new();
-    scan_hints.push(LibraryScanHint {
-        source: LibraryScanHintSource::ExternalImportRadarr,
-        facet: LibraryScanHintFacet::Movie,
-        path_key: crate::library_scan_file_leaf_key(&movie_path).expect("file leaf path key"),
-        full_path_key: crate::library_scan_file_full_path_key(&movie_path),
-        ids: vec![
-            ExternalIdHint::normalized(ExternalIdProvider::Tmdb, "800000")
-                .expect("normalized tmdb id"),
-        ],
-    });
-
-    let settings = Arc::new(StoredSettingsRepo::default());
-    let metadata_gateway =
-        Arc::new(RecordingExactIdMetadataGateway::default().with_raw_unknown_field_error());
-    let library_scanner = Arc::new(MutableLibraryScanner::default());
-    library_scanner
-        .set_library_files(vec![build_test_library_file(&movie_path)])
-        .await;
-    let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
-        settings,
-        library_scanner,
-        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        metadata_gateway.clone(),
-    );
-
-    app.update_media_settings(
-        &user,
-        MediaFacet::Movie,
-        empty_update_media_settings_with_roots(vec![build_root_folder_entry(&movie_root, true)]),
-    )
-    .await
-    .expect("store movie root");
-
-    let session = app
-        .trigger_library_scan_by_id_with_hints(
-            &user,
-            &scryer_domain::default_library_id_for_facet(&MediaFacet::Movie),
-            Some(scan_hints),
-        )
-        .await
-        .expect("trigger hinted movie scan");
-    let projected =
-        wait_for_projected_library_scan_session_matching(&app, &session.session_id, |session| {
-            matches!(
-                session.status,
-                LibraryScanStatus::Completed | LibraryScanStatus::Warning
-            )
-        })
-        .await;
-    assert_eq!(
-        projected.summary.as_ref().map(|summary| summary.matched),
-        Some(1)
-    );
-
-    assert!(
-        !metadata_gateway.title_batch_queries().await.is_empty(),
-        "the scan tries the title-id surface first"
-    );
-    let legacy_queries = metadata_gateway.batch_queries().await;
-    assert_eq!(legacy_queries.iter().flatten().count(), 1);
-    assert_eq!(
-        legacy_queries[0][0].tmdb_id.as_deref(),
-        Some("800000"),
-        "the raw validation error falls back to the legacy batched search"
-    );
-
-    let titles = app
-        .list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
-        .await
-        .expect("list movie titles");
-    assert_eq!(titles.len(), 1);
-    assert!(
-        titles[0]
-            .external_ids
-            .iter()
-            .any(|id| id.source.eq_ignore_ascii_case("tvdb") && id.value == "800000")
     );
 }
 
@@ -4904,8 +4856,10 @@ async fn series_full_scan_marks_media_total_known_after_enumeration_before_analy
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -5073,8 +5027,10 @@ async fn series_full_scan_starts_media_analysis_while_later_enumeration_is_pendi
                 is_filler: false,
                 is_recap: false,
                 absolute_number: None,
+                contiguous_absolute_number: None,
                 overview: None,
                 tvdb_id: None,
+                tmdb_id: None,
                 image_url: None,
                 monitored: true,
                 created_at: Utc::now(),
@@ -7286,7 +7242,7 @@ fn pending_import_title_request(
 
 struct PendingImportSearchMetadataGateway {
     results: Vec<RichMetadataSearchItem>,
-    /// Series served to bulk hydration, keyed by TVDB id.
+    /// Series served to hydration through the title surface, keyed by TVDB id.
     series: HashMap<i64, SeriesMetadata>,
 }
 
@@ -7333,11 +7289,37 @@ impl MetadataGateway for PendingImportSearchMetadataGateway {
         Err(AppError::Repository("not implemented in tests".into()))
     }
 
-    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        self.series
-            .get(&tvdb_id)
-            .cloned()
-            .ok_or_else(|| AppError::Repository("not implemented in tests".into()))
+    async fn search_titles(
+        &self,
+        _query: &str,
+        _kind: &str,
+        _limit: i32,
+        _language: &str,
+        _year: Option<i32>,
+    ) -> AppResult<Vec<RichMetadataSearchItem>> {
+        Ok(self.results.clone())
+    }
+
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        _language: &str,
+        _include_episodes: bool,
+        _include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        let mut result = SeriesTitleBulkResult::default();
+        for (ref_index, series_ref) in refs.iter().enumerate() {
+            match series_ref
+                .tvdb_id
+                .and_then(|tvdb_id| self.series.get(&tvdb_id))
+            {
+                Some(series) => {
+                    result.by_ref_index.insert(ref_index, series.clone());
+                }
+                None => result.missing_ref_indexes.push(ref_index),
+            }
+        }
+        Ok(result)
     }
 
     async fn get_metadata_bulk(
@@ -8395,8 +8377,10 @@ async fn resolve_pending_import_attaches_series_folder_to_existing_title() {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -9022,7 +9006,7 @@ async fn movie_full_scan_assigns_the_root_the_candidate_was_found_under() {
         Arc::new(StoredSettingsRepo::default()),
         library_scanner,
         Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches()),
     );
 
     app.update_media_settings(
@@ -9176,7 +9160,7 @@ async fn movie_full_scan_heals_an_existing_title_onto_the_root_holding_its_files
         Arc::new(StoredSettingsRepo::default()),
         library_scanner,
         Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
-        Arc::new(RecordingExactIdMetadataGateway::with_title_id_movies()),
+        Arc::new(RecordingExactIdMetadataGateway::with_tmdb_primary_movie_matches()),
     );
 
     app.update_media_settings(
@@ -9639,6 +9623,7 @@ async fn unchanged_title_deltas_coalesce_into_few_events_without_moving_projecti
         imported: 0,
         skipped: TITLES,
         unmatched: 0,
+        relinked: 0,
     };
     coordinator.set_summary(summary.clone()).await;
     coordinator.publish_progress().await;
@@ -9689,4 +9674,814 @@ async fn recorded_library_scan_delta_events(app: &AppUseCase) -> usize {
         .await
         .expect("list delta events")
         .len()
+}
+
+/// How the fixture's tracked row describes the file on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelinkRow {
+    /// Analysed, with the file's current signature, so a rescan takes the
+    /// stored-record path and skips analysis.
+    Current,
+    /// Analysed, but with a signature the file no longer has, so a rescan
+    /// re-parses and re-analyses it.
+    StaleSignature,
+    /// No row at all: the file is not tracked yet.
+    Absent,
+}
+
+/// The catalog an [`EpisodeRelinkFixture`] title carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelinkCatalog {
+    /// A series with three season-one episodes.
+    SeriesOneSeason,
+    /// An anime with two seasons of three episodes each, absolute numbers 1-6
+    /// running across both, and no numbering bridge.
+    AnimeTwoSeasonsWithoutBridge,
+}
+
+/// A title with one file on disk; three season-one episodes unless the
+/// catalog says otherwise. When the fixture seeds a row for the file, that
+/// row is linked to the first episode only.
+struct EpisodeRelinkFixture {
+    app: AppUseCase,
+    user: User,
+    shows: Arc<MockShowRepo>,
+    media_files: Arc<MockMediaFileRepo>,
+    unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
+    title_id: String,
+    file_id: Option<String>,
+    episode_path: PathBuf,
+    library_root: PathBuf,
+    episode_ids: Vec<String>,
+    _tempdir: tempfile::TempDir,
+}
+
+async fn episode_relink_fixture(
+    file_name: &str,
+    original_file_path: Option<&str>,
+) -> EpisodeRelinkFixture {
+    episode_relink_fixture_with(file_name, original_file_path, RelinkRow::Current).await
+}
+
+async fn episode_relink_fixture_with(
+    file_name: &str,
+    original_file_path: Option<&str>,
+    row: RelinkRow,
+) -> EpisodeRelinkFixture {
+    episode_relink_fixture_in(
+        RelinkCatalog::SeriesOneSeason,
+        "Season 01",
+        file_name,
+        original_file_path,
+        row,
+    )
+    .await
+}
+
+async fn episode_relink_fixture_in(
+    catalog: RelinkCatalog,
+    season_folder: &str,
+    file_name: &str,
+    original_file_path: Option<&str>,
+    row: RelinkRow,
+) -> EpisodeRelinkFixture {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let title_dir = tempdir.path().join("Relink Harbor (2026)");
+    let season_dir = title_dir.join(season_folder);
+    std::fs::create_dir_all(&season_dir).expect("create season folder");
+    let episode_path = season_dir.join(file_name);
+    std::fs::write(&episode_path, vec![0_u8; 256]).expect("write episode file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "series.path",
+            tempdir.path().to_string_lossy().as_ref(),
+        )
+        .await;
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    library_scanner
+        .set_library_files(build_test_library_files(&[episode_path.as_path()]))
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, _, shows, media_files) =
+        bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+            settings,
+            library_scanner,
+            unmatched_items.clone(),
+            Arc::new(EmptySearchMetadataGateway),
+        );
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile series root");
+
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Relink Harbor".into(),
+                facet: if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+                    MediaFacet::Anime
+                } else {
+                    MediaFacet::Series
+                },
+                monitored: true,
+                year: Some(2026),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create series title");
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, title_dir.to_string_lossy().as_ref())
+        .await
+        .expect("set series folder path");
+    let season_count = if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+        2
+    } else {
+        1
+    };
+    let mut episode_ids = Vec::new();
+    for season_number in 1..=season_count {
+        let season = app
+            .services
+            .catalog
+            .shows
+            .create_collection(Collection {
+                id: Id::new().0,
+                title_id: title.id.clone(),
+                collection_type: CollectionType::Season,
+                collection_index: season_number.to_string(),
+                label: Some(format!("Season {season_number}")),
+                ordered_path: None,
+                narrative_order: Some(season_number.to_string()),
+                first_episode_number: Some("1".to_string()),
+                last_episode_number: Some("3".to_string()),
+                monitored: true,
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("create season");
+        for number in 1..=3 {
+            let absolute_number = (season_number - 1) * 3 + number;
+            let episode = app
+                .services
+                .catalog
+                .shows
+                .create_episode(Episode {
+                    id: Id::new().0,
+                    title_id: title.id.clone(),
+                    collection_id: Some(season.id.clone()),
+                    episode_type: scryer_domain::EpisodeType::Standard,
+                    episode_number: Some(number.to_string()),
+                    season_number: Some(season_number.to_string()),
+                    episode_label: Some(format!("S0{season_number}E0{number}")),
+                    title: Some(format!("Tide {absolute_number}")),
+                    air_date: None,
+                    duration_seconds: Some(420),
+                    has_multi_audio: false,
+                    has_subtitle: false,
+                    is_filler: false,
+                    is_recap: false,
+                    absolute_number: (catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge)
+                        .then(|| absolute_number.to_string()),
+                    contiguous_absolute_number: None,
+                    overview: None,
+                    tvdb_id: None,
+                    tmdb_id: None,
+                    image_url: None,
+                    monitored: true,
+                    created_at: Utc::now(),
+                })
+                .await
+                .expect("create episode");
+            episode_ids.push(episode.id);
+        }
+    }
+
+    // Seed the row the way an earlier scan left it: analysed, signed, and
+    // linked to the first episode.
+    let file_id = if row == RelinkRow::Absent {
+        None
+    } else {
+        let signature = crate::file_source_signature::file_source_signature_from_metadata(
+            &std::fs::metadata(&episode_path).expect("stat episode file"),
+        )
+        .expect("episode file signature");
+        let signature_value = if row == RelinkRow::StaleSignature {
+            "0:0".to_string()
+        } else {
+            signature.value
+        };
+        let file_id = media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: episode_path.to_string_lossy().to_string(),
+                size_bytes: 256,
+                role: MediaFileRole::Primary,
+                source_signature_scheme: Some(signature.scheme),
+                source_signature_value: Some(signature_value),
+                original_file_path: original_file_path.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .expect("seed episode file");
+        media_files
+            .update_media_file_analysis(&file_id, test_valid_media_analysis())
+            .await
+            .expect("seed analysis");
+        media_files
+            .link_file_to_episode(&file_id, &episode_ids[0])
+            .await
+            .expect("seed episode link");
+        Some(file_id)
+    };
+
+    EpisodeRelinkFixture {
+        app,
+        user,
+        shows,
+        media_files,
+        unmatched_items,
+        title_id: title.id,
+        file_id,
+        episode_path,
+        library_root: tempdir.path().to_path_buf(),
+        episode_ids,
+        _tempdir: tempdir,
+    }
+}
+
+impl EpisodeRelinkFixture {
+    fn file_id(&self) -> &str {
+        self.file_id.as_deref().expect("tracked file")
+    }
+
+    fn episodes(&self, numbers: &[usize]) -> Vec<String> {
+        let mut ids = numbers
+            .iter()
+            .map(|number| self.episode_ids[number - 1].clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    async fn linked_episode_ids(&self) -> Vec<String> {
+        self.media_files.linked_episode_ids(self.file_id()).await
+    }
+
+    async fn tracked_row(&self) -> TitleMediaFile {
+        self.app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&self.title_id)
+            .await
+            .expect("list media files")
+            .into_iter()
+            .find(|file| file.file_path == self.episode_path.to_string_lossy())
+            .expect("tracked file")
+    }
+
+    /// The stored row still describes the file on disk exactly, so the scan's
+    /// filename parse short-circuits to the stored link and only the fresh
+    /// re-parse can see what the filename names.
+    async fn assert_rescan_takes_the_stored_record_path(&self) {
+        let row = self.tracked_row().await;
+        let signature = crate::file_source_signature::file_source_signature_from_metadata(
+            &std::fs::metadata(&self.episode_path).expect("stat episode file"),
+        )
+        .expect("episode file signature");
+        assert_eq!(row.scan_status, "scanned");
+        assert_eq!(row.size_bytes, 256);
+        assert_eq!(row.source_signature_scheme, Some(signature.scheme));
+        assert_eq!(row.source_signature_value, Some(signature.value));
+        assert!(row.episode_id.is_some());
+    }
+
+    async fn rescan(&self) -> LibraryScanSummary {
+        self.app
+            .scan_title_library(&self.user, &self.title_id)
+            .await
+            .expect("scan title")
+    }
+
+    async fn analyzed_event_episode_ids(&self) -> Vec<Vec<String>> {
+        self.app
+            .services
+            .events
+            .domain_events
+            .list(&DomainEventFilter {
+                event_types: Some(vec![DomainEventType::MediaFileAnalyzed]),
+                limit: 0,
+                ..DomainEventFilter::default()
+            })
+            .await
+            .expect("list analyzed events")
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                scryer_domain::DomainEventPayload::MediaFileAnalyzed(data) => {
+                    let mut ids = data.episode_ids;
+                    ids.sort();
+                    Some(ids)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_the_stored_link_of_a_known_file_whose_filename_contradicts_it() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(summary.matched, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+
+    // Repeated rescans do not drift towards the filename either.
+    let summary = fixture.rescan().await;
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn a_file_bound_by_hand_without_an_original_path_keeps_its_episodes_through_a_rescan() {
+    // Bindings made by hand before binds recorded an original path look
+    // exactly like links a scan placed: no original path, no movie link.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    // The person chose the third episode although the filename names the
+    // second.
+    let bind = fixture
+        .media_files
+        .replace_file_episode_links(
+            fixture.file_id(),
+            &fixture.episodes(&[1]),
+            &fixture.episodes(&[3]),
+        )
+        .await
+        .expect("bind by hand");
+    assert!(matches!(bind, crate::EpisodeLinkReplacement::Replaced));
+    let row = fixture.tracked_row().await;
+    assert!(row.original_file_path.is_none());
+    assert!(row.series_movie_link_ids.is_empty());
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_a_correctly_linked_file_untouched() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E01 - Tide 1.mkv", None).await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(summary.matched, 1);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_an_imported_file_on_the_episode_it_was_imported_to() {
+    let fixture = episode_relink_fixture(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        Some("/downloads/complete/Relink.Harbor.S01E02.mkv"),
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_the_stored_link_when_the_filename_names_no_known_episode() {
+    for file_name in [
+        "Relink Harbor - S01E07 - Tide 7.mkv",
+        "Relink Harbor - Harbor Lights Bonus Reel.mkv",
+        "Relink Harbor - Season 01 Complete.mkv",
+    ] {
+        let fixture = episode_relink_fixture(file_name, None).await;
+
+        let summary = fixture.rescan().await;
+
+        assert_eq!(summary.relinked, 0, "{file_name}");
+        assert_eq!(
+            fixture.linked_episode_ids().await,
+            fixture.episodes(&[1]),
+            "{file_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_stored_links_when_the_catalog_context_fails_to_load() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    *fixture.shows.fail_anime_bridge.lock().await = true;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_stored_links_when_the_title_collections_fail_to_load() {
+    // Without collections the lookup still resolves `S01E02` by the
+    // episode's own season, so only the gate keeps the link in place.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    *fixture.shows.fail_title_collections.lock().await = true;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_fails_the_title_when_its_stored_files_cannot_be_read() {
+    // Without the stored rows every file would look new, and the scan would
+    // re-insert them over what it knew about them.
+    let fixture = episode_relink_fixture_with(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        Some("/downloads/Relink Harbor - S01E02 - Tide 2.mkv"),
+        RelinkRow::StaleSignature,
+    )
+    .await;
+    let rows_before = fixture.media_files.store.lock().await.clone();
+    fixture
+        .media_files
+        .fail_list_media_files_for_title("media file table is locked")
+        .await;
+
+    let result = fixture
+        .app
+        .scan_title_library(&fixture.user, &fixture.title_id)
+        .await;
+
+    assert!(result.is_err(), "the title scan fails instead of guessing");
+    let rows_after = fixture.media_files.store.lock().await.clone();
+    assert_eq!(rows_after.len(), rows_before.len(), "nothing was inserted");
+    assert_eq!(
+        rows_after
+            .iter()
+            .map(|row| (row.id.clone(), row.original_file_path.clone()))
+            .collect::<Vec<_>>(),
+        rows_before
+            .iter()
+            .map(|row| (row.id.clone(), row.original_file_path.clone()))
+            .collect::<Vec<_>>(),
+        "the import marker is untouched"
+    );
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn anime_title_rescan_without_a_bridge_keeps_links_a_later_season_filename_contradicts() {
+    // Without a bridge, `S02E02` may be community numbering for an episode
+    // the catalog files under season one, so it never moves a stored link.
+    let fixture = episode_relink_fixture_in(
+        RelinkCatalog::AnimeTwoSeasonsWithoutBridge,
+        "Season 02",
+        "Relink Harbor - S02E02 - Tide 5.mkv",
+        None,
+        RelinkRow::Current,
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn anime_title_rescan_without_a_bridge_keeps_links_an_absolute_named_file_contradicts() {
+    let fixture = episode_relink_fixture_in(
+        RelinkCatalog::AnimeTwoSeasonsWithoutBridge,
+        "Season 02",
+        "Relink Harbor - 05.mkv",
+        None,
+        RelinkRow::Current,
+    )
+    .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_the_stored_links_when_replacing_them_fails() {
+    // The filename names another episode, so if relinking were attempted
+    // and its failure fell through to the additive path, the filename's
+    // episode would be linked.
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    fixture
+        .media_files
+        .fail_replace_file_episode_links("episode link table is locked")
+        .await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+    for episode_ids in fixture.analyzed_event_episode_ids().await {
+        assert_eq!(episode_ids, fixture.episodes(&[1]));
+    }
+}
+
+#[tokio::test]
+async fn title_rescan_keeps_every_stored_link_of_a_multi_episode_file_its_filename_names_fewer_of()
+{
+    let fixture =
+        episode_relink_fixture("Relink Harbor - S01E01E02 - Tide 1 and 2.mkv", None).await;
+    for number in [2, 3] {
+        fixture
+            .media_files
+            .link_additional_episode(fixture.file_id(), &fixture.episode_ids[number - 1])
+            .await;
+    }
+    assert_eq!(
+        fixture.linked_episode_ids().await,
+        fixture.episodes(&[1, 2, 3])
+    );
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(
+        fixture.linked_episode_ids().await,
+        fixture.episodes(&[1, 2, 3])
+    );
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_disc_images_on_their_stored_links() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.iso", None).await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn title_rescan_leaves_series_movie_files_on_their_stored_links() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E02 - Tide 2.mkv", None).await;
+    fixture
+        .media_files
+        .link_file_to_series_movie(fixture.file_id(), "series-movie-link-relink")
+        .await
+        .expect("link series movie");
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
+async fn a_pending_import_bound_by_hand_keeps_its_episodes_through_a_rescan() {
+    let fixture = episode_relink_fixture_with(
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        None,
+        RelinkRow::Absent,
+    )
+    .await;
+    let item_path = fixture.episode_path.to_string_lossy().to_string();
+    let mut pending = build_test_unmatched_item(
+        "relink-pending-bind",
+        MediaFacet::Series,
+        fixture.library_root.to_string_lossy().as_ref(),
+        &item_path,
+        "Relink Harbor - S01E02 - Tide 2.mkv",
+        "Relink Harbor",
+        Some(2026),
+    );
+    pending.title_id = Some(fixture.title_id.clone());
+    fixture
+        .unmatched_items
+        .upsert_library_scan_unmatched_item(&pending)
+        .await
+        .expect("seed pending import");
+
+    // The person picks the first episode although the filename names the
+    // second.
+    fixture
+        .app
+        .bind_title_bound_pending_import(
+            &fixture.user,
+            &pending.id,
+            None,
+            &[fixture.episode_ids[0].clone()],
+        )
+        .await
+        .expect("bind pending import");
+    let row = fixture.tracked_row().await;
+    assert_eq!(row.original_file_path.as_deref(), Some(item_path.as_str()));
+    let bound = fixture.media_files.linked_episode_ids(&row.id).await;
+    assert_eq!(bound, fixture.episodes(&[1]));
+    // The fixture has no media analyser, so record the analysis a real bind
+    // would have persisted. The rescan then reads the row as current and only
+    // the fresh filename parse disagrees with the chosen episode.
+    fixture
+        .media_files
+        .update_media_file_analysis(&row.id, test_valid_media_analysis())
+        .await
+        .expect("record bind analysis");
+    fixture.assert_rescan_takes_the_stored_record_path().await;
+
+    let summary = fixture.rescan().await;
+
+    assert_eq!(summary.relinked, 0);
+    assert_eq!(fixture.media_files.linked_episode_ids(&row.id).await, bound);
+}
+
+/// A title search result known only by the given ids: no TVDB id, as a
+/// series SMG knows only from TMDB has none.
+fn pending_import_search_result_with_ids(
+    name: &str,
+    type_hint: &str,
+    external_ids: Vec<ExternalId>,
+) -> RichMetadataSearchItem {
+    RichMetadataSearchItem {
+        tvdb_id: String::new(),
+        external_ids,
+        type_hint: Some(type_hint.to_string()),
+        ..pending_import_search_result("", name)
+    }
+}
+
+/// An app whose title search answers `results`, with one title of `facet`
+/// already in the default library carrying `existing_ids`, and one pending
+/// import of that facet. Returns the app, the user and the existing title id.
+async fn pending_import_identity_fixture(
+    facet: MediaFacet,
+    results: Vec<RichMetadataSearchItem>,
+    existing_ids: Vec<ExternalId>,
+) -> (AppUseCase, User, String) {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let library_scanner = Arc::new(MutableLibraryScanner::default());
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user, titles) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
+        settings,
+        library_scanner,
+        unmatched_items.clone(),
+        Arc::new(PendingImportSearchMetadataGateway {
+            series: HashMap::new(),
+            results,
+        }),
+    );
+
+    let mut request =
+        pending_import_title_request(facet.clone(), "Fixture Owned Title", None, None);
+    request.root_folder_id = None;
+    request.min_availability = None;
+    let existing = app
+        .create_title_without_hydration(&user, request)
+        .await
+        .expect("seed existing title")
+        .title;
+    {
+        let mut store = titles.store.lock().await;
+        let stored = store
+            .iter_mut()
+            .find(|title| title.id == existing.id)
+            .expect("seeded title is stored");
+        stored.external_ids = existing_ids;
+    }
+
+    unmatched_items
+        .upsert_library_scan_unmatched_item(&build_test_unmatched_item(
+            "identity-pending-import-1",
+            facet,
+            "/fixture-root",
+            "/fixture-root/Fixture.Owned.Title.2020.mkv",
+            "Fixture Owned Title",
+            "Fixture Owned Title",
+            Some(2020),
+        ))
+        .await
+        .expect("seed pending import");
+    (app, user, existing.id)
+}
+
+async fn annotated_existing_ids(app: &AppUseCase, user: &User) -> Vec<Option<String>> {
+    app.pending_import_title_search(user, "identity-pending-import-1", "Fixture", 8, "eng", None)
+        .await
+        .expect("search pending import titles")
+        .into_iter()
+        .map(|result| result.existing_title_id)
+        .collect()
+}
+
+async fn resolve_without_attach(
+    app: &AppUseCase,
+    user: &User,
+    facet: MediaFacet,
+    external_ids: Vec<ExternalId>,
+) -> AppResult<ResolvePendingImportResult> {
+    let mut request = pending_import_title_request(facet, "Fixture Owned Title", None, Some(2020));
+    request.external_ids = external_ids;
+    app.resolve_pending_import(user, "identity-pending-import-1", request, false)
+        .await
+}
+
+#[tokio::test]
+async fn a_series_candidate_known_only_by_tmdb_is_shown_as_owned_and_resolves_that_way() {
+    let owned = ExternalId::with_kind("tmdb", "series", "515001");
+    let (app, user, existing_id) = pending_import_identity_fixture(
+        MediaFacet::Series,
+        vec![
+            pending_import_search_result_with_ids(
+                "Fixture Owned Series",
+                "series",
+                vec![owned.clone()],
+            ),
+            pending_import_search_result_with_ids(
+                "Fixture New Series",
+                "series",
+                vec![ExternalId::with_kind("tmdb", "series", "616001")],
+            ),
+        ],
+        vec![owned.clone()],
+    )
+    .await;
+
+    assert_eq!(
+        annotated_existing_ids(&app, &user).await,
+        vec![Some(existing_id), None]
+    );
+
+    let error = resolve_without_attach(&app, &user, MediaFacet::Series, vec![owned])
+        .await
+        .expect_err("the resolver finds the same title");
+    assert!(
+        error
+            .to_string()
+            .contains("title already exists in this library")
+    );
+}
+
+#[tokio::test]
+async fn a_movie_kinded_tmdb_id_does_not_mark_a_series_candidate_as_owned() {
+    // An anime title carries its mapped film's TMDB id with the movie kind;
+    // the same number as a series names a different show.
+    let (app, user, _) = pending_import_identity_fixture(
+        MediaFacet::Anime,
+        vec![pending_import_search_result_with_ids(
+            "Fixture Other Show",
+            "series",
+            vec![ExternalId::with_kind("tmdb", "series", "515002")],
+        )],
+        vec![
+            ExternalId::with_kind("tvdb", "series", "770002"),
+            ExternalId::with_kind("tmdb", "movie", "515002"),
+        ],
+    )
+    .await;
+
+    assert_eq!(annotated_existing_ids(&app, &user).await, vec![None]);
+}
+
+#[tokio::test]
+async fn a_movie_candidate_known_only_by_tmdb_is_shown_as_owned_and_resolves_that_way() {
+    let owned = ExternalId::with_kind("tmdb", "movie", "424201");
+    let (app, user, existing_id) = pending_import_identity_fixture(
+        MediaFacet::Movie,
+        vec![pending_import_search_result_with_ids(
+            "Fixture Owned Movie",
+            "movie",
+            vec![owned.clone()],
+        )],
+        vec![owned.clone()],
+    )
+    .await;
+
+    assert_eq!(
+        annotated_existing_ids(&app, &user).await,
+        vec![Some(existing_id)]
+    );
+
+    let error = resolve_without_attach(&app, &user, MediaFacet::Movie, vec![owned])
+        .await
+        .expect_err("the resolver finds the same title");
+    assert!(
+        error
+            .to_string()
+            .contains("title already exists in this library")
+    );
 }

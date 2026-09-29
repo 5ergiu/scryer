@@ -543,6 +543,12 @@ pub(super) fn discovery_item_matches_affinity_label(
     if !matches_facet {
         return false;
     }
+    if canonical_kind == "theme" {
+        return item
+            .affinity_signals
+            .iter()
+            .any(|signal| theme_affinity_signal_qualifies(signal, &label_key));
+    }
     if !require_corroboration || canonical_kind != "genre" {
         return true;
     }
@@ -648,6 +654,7 @@ pub(super) fn push_unique_discovery_label(
     }
 }
 
+#[cfg(test)]
 pub(super) fn canonical_tag_labels(tags: &[CanonicalMediaTag], category: &str) -> Vec<String> {
     tags.iter()
         .filter(|tag| tag.category.eq_ignore_ascii_case(category))
@@ -1168,4 +1175,35 @@ pub(super) fn collect_json_text_values(value: &JsonValue, values: &mut Vec<Strin
         }
         JsonValue::Null => {}
     }
+}
+
+/// SMG decides whether a signal is strong enough to back a rail
+/// (`rail_eligible`); Scryer only checks that it is a theme signal for this
+/// label, so SMG can retune admission without a Scryer release.
+pub(super) fn theme_affinity_signal_qualifies(
+    signal: &scryer_domain::CanonicalMediaAffinitySignal,
+    label_key: &str,
+) -> bool {
+    let key = signal
+        .affinity_key
+        .strip_prefix("affinity:theme:")
+        .unwrap_or("");
+    signal.category == "theme"
+        && affinity_value_matches_label(key, label_key)
+        && signal.rail_eligible
+}
+
+pub(super) fn qualified_owned_theme_labels(tags: &[CanonicalMediaTag]) -> Vec<String> {
+    tags.iter()
+        .filter(|tag| tag.category.eq_ignore_ascii_case("theme"))
+        .filter(|tag| {
+            tag.affinity_signals.iter().any(|signal| {
+                theme_affinity_signal_qualifies(
+                    signal,
+                    &normalize_discovery_affinity_key(&tag.name),
+                )
+            })
+        })
+        .map(|tag| tag.name.clone())
+        .collect()
 }

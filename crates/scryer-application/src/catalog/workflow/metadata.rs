@@ -840,30 +840,18 @@ impl AppUseCase {
                     let language = self
                         .resolve_metadata_language_for_title(&existing_title)
                         .await;
-                    let movie = match self
+                    let movie = self
                         .services
                         .library
                         .metadata_gateway
                         .get_movie_titles(std::slice::from_ref(&requested_ref), &language)
-                        .await
-                    {
-                        Ok(result) => result.by_ref_index.get(&0).cloned().ok_or_else(|| {
+                        .await?
+                        .by_ref_index
+                        .get(&0)
+                        .cloned()
+                        .ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".into())
-                        })?,
-                        Err(error) if movie_title_queries_not_supported(&error) => {
-                            let tvdb_id = requested_ref.tvdb_id.ok_or_else(|| {
-                                AppError::Repository(
-                                    "legacy metadata gateway requires a tvdb id".into(),
-                                )
-                            })?;
-                            self.services
-                                .library
-                                .metadata_gateway
-                                .get_movie(tvdb_id, &language)
-                                .await?
-                        }
-                        Err(error) => return Err(error),
-                    };
+                        })?;
                     let resolved_ref = MovieTitleRef {
                         smg_id: movie.smg_id.or(requested_ref.smg_id),
                         tvdb_id: movie.tvdb_id.or(requested_ref.tvdb_id),
@@ -904,14 +892,26 @@ impl AppUseCase {
                     (identity_ids, Some(resolved_ref))
                 }
             }
-            MediaFacet::Series | MediaFacet::Anime => {
-                let tvdb_id = target_tvdb_id
-                    .ok_or_else(|| AppError::Validation("tvdb id is required".into()))?;
-                (
+            MediaFacet::Series | MediaFacet::Anime => match (target_tvdb_id, target_smg_id) {
+                // A TVDB id keeps the rematch exactly as it always was.
+                (Some(tvdb_id), _) => (
                     vec![ExternalId::with_kind("tvdb", "series", tvdb_id.to_string())],
                     None,
-                )
-            }
+                ),
+                // A series with no TVDB id (TMDB-primary) is named by SMG's
+                // title id; hydration fetches it by that id and fills in the
+                // provider ids SMG holds for it.
+                (None, Some(smg_id)) if smg_id > 0 => (
+                    vec![ExternalId::with_kind("smg", "title", smg_id.to_string())],
+                    None,
+                ),
+                (None, Some(_)) => {
+                    return Err(AppError::Validation("smg id must be positive".into()));
+                }
+                (None, None) => {
+                    return Err(AppError::Validation("a title identity is required".into()));
+                }
+            },
         };
 
         for identity_id in &replacement_identity_ids {
@@ -1177,4 +1177,10 @@ pub(crate) fn movie_title_ref(title: &scryer_domain::Title) -> Option<crate::Mov
     let mut reference = crate::MovieTitleRef::from_title(title)?;
     reference.smg_id = extract_smg_id(title);
     Some(reference)
+}
+
+/// The ids SMG's title surface can hydrate a series (or anime) title by.
+/// `None` for movies and for a series with no usable id at all.
+pub(crate) fn series_title_ref(title: &scryer_domain::Title) -> Option<crate::SeriesTitleRef> {
+    crate::SeriesTitleRef::from_title(title)
 }

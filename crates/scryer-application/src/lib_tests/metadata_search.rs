@@ -26,11 +26,11 @@ fn search_item(name: &str) -> RichMetadataSearchItem {
 #[derive(Default)]
 struct RecordingSearchMetadataGateway {
     title_search_limits: Mutex<Vec<i32>>,
-    legacy_search_limits: Mutex<Vec<i32>>,
+    tvdb_search_limits: Mutex<Vec<i32>>,
     combined_search_limits: Mutex<Vec<i32>>,
     combined_search_empty: bool,
     combined_search_error: Option<String>,
-    /// A non-capability gateway failure for `searchTitles`, if the test wants one.
+    /// A gateway failure for `searchTitles`, if the test wants one.
     title_search_error: Option<String>,
 }
 
@@ -39,8 +39,8 @@ impl RecordingSearchMetadataGateway {
         self.title_search_limits.lock().await.clone()
     }
 
-    async fn legacy_search_limits(&self) -> Vec<i32> {
-        self.legacy_search_limits.lock().await.clone()
+    async fn tvdb_search_limits(&self) -> Vec<i32> {
+        self.tvdb_search_limits.lock().await.clone()
     }
 }
 
@@ -71,8 +71,8 @@ impl MetadataGateway for RecordingSearchMetadataGateway {
         _language: &str,
         _year: Option<i32>,
     ) -> AppResult<Vec<RichMetadataSearchItem>> {
-        self.legacy_search_limits.lock().await.push(limit);
-        Ok(vec![search_item("Legacy Movie")])
+        self.tvdb_search_limits.lock().await.push(limit);
+        Ok(vec![search_item("TVDB Movie")])
     }
 
     async fn search_tvdb_multi(
@@ -81,11 +81,11 @@ impl MetadataGateway for RecordingSearchMetadataGateway {
         limit: i32,
         _language: &str,
     ) -> AppResult<MultiMetadataSearchResult> {
-        self.legacy_search_limits.lock().await.push(limit);
+        self.tvdb_search_limits.lock().await.push(limit);
         Ok(MultiMetadataSearchResult {
-            movies: vec![search_item("Legacy Movie")],
-            series: vec![search_item("Legacy Series")],
-            anime: vec![search_item("Legacy Anime")],
+            movies: vec![search_item("TVDB Movie")],
+            series: vec![search_item("TVDB Series")],
+            anime: vec![search_item("TVDB Anime")],
         })
     }
 
@@ -137,10 +137,6 @@ impl MetadataGateway for RecordingSearchMetadataGateway {
         Err(AppError::NotFound("movie".into()))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound("series".into()))
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],
@@ -187,7 +183,7 @@ async fn multi_search_uses_only_the_combined_gateway_call() {
             &[100]
         );
         assert!(gateway.title_search_limits().await.is_empty());
-        assert!(gateway.legacy_search_limits().await.is_empty());
+        assert!(gateway.tvdb_search_limits().await.is_empty());
         if empty {
             assert!(
                 results.movies.is_empty() && results.series.is_empty() && results.anime.is_empty()
@@ -219,7 +215,7 @@ async fn multi_search_does_not_add_requests_after_a_combined_search_failure() {
         &[25]
     );
     assert!(gateway.title_search_limits().await.is_empty());
-    assert!(gateway.legacy_search_limits().await.is_empty());
+    assert!(gateway.tvdb_search_limits().await.is_empty());
 }
 
 #[tokio::test]
@@ -241,11 +237,10 @@ async fn multi_search_with_the_maximum_public_limit_succeeds() {
         &[100]
     );
     assert!(gateway.title_search_limits().await.is_empty());
-    assert!(gateway.legacy_search_limits().await.is_empty());
+    assert!(gateway.tvdb_search_limits().await.is_empty());
 }
 
-/// A validation error is not a capability error, so before the limit was clamped
-/// this path failed the entire search. Prove the whole range the public contract
+/// A limit the gateway rejects fails the entire search. Prove the whole range the public contract
 /// accepts reaches the gateway.
 #[tokio::test]
 async fn movie_search_passes_every_publicly_accepted_limit_to_the_gateway() {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_graphql::{Context, ID, Object, Result as GqlResult};
-use scryer_application::{AppError, AppUseCase, ImageProxyKind, MovieTitleRef};
+use scryer_application::{AppError, AppUseCase, ImageProxyKind, MovieTitleRef, SeriesTitleRef};
 use scryer_domain::MediaServerPlaybackEntityKind;
 use scryer_interface_core::{actor_from_ctx, app_from_ctx, to_gql_error};
 use scryer_interface_media::mappers::{from_calendar_episode, parse_iso_date};
@@ -230,23 +230,54 @@ impl MetadataQueries {
         &self,
         ctx: &Context<'_>,
         #[graphql(
-            desc = "TVDB identity, language, and whether episode metadata should be included, defaulting to true."
+            desc = "Series identity (SMG, TVDB, TMDB or IMDb), language, and whether episode metadata should be included, defaulting to true."
         )]
         input: MetadataSeriesInput,
     ) -> GqlResult<MetadataSeriesPayload> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
-        let tvdb_id: i64 = input
+        let tvdb_id = input
             .tvdb_id
-            .parse()
-            .map_err(|_| to_gql_error(AppError::Validation("invalid tvdb id".to_string())))?;
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| to_gql_error(AppError::Validation("invalid tvdb id".to_string())))
+            })
+            .transpose()?;
+        // A numeric id that is not positive names nothing; reject it rather
+        // than send it to the gateway or silently read it as absent.
+        for (name, id) in [
+            ("smg id", input.smg_id),
+            ("tvdb id", tvdb_id),
+            ("tmdb id", input.tmdb_id),
+        ] {
+            if id.is_some_and(|id| id <= 0) {
+                return Err(to_gql_error(AppError::Validation(format!(
+                    "{name} must be positive"
+                ))));
+            }
+        }
+        let series_ref = SeriesTitleRef {
+            smg_id: input.smg_id,
+            tvdb_id,
+            tmdb_id: input.tmdb_id,
+            imdb_id: input.imdb_id.filter(|value| !value.trim().is_empty()),
+        };
         let include_episodes = input.include_episodes.unwrap_or(true);
         let language = input.language.unwrap_or_else(|| "eng".to_string());
         let series = app
-            .get_metadata_series(&actor, tvdb_id, &language)
+            .get_metadata_series_by_ref(&actor, &series_ref, &language, include_episodes)
             .await
             .map_err(to_gql_error)?;
-        let series_owner_id = series.tvdb_id.to_string();
+        let series_tvdb_id = (series.tvdb_id > 0).then_some(series.tvdb_id);
+        let series_owner_id = series
+            .smg_id
+            .or(series_tvdb_id)
+            .or(series.tmdb_id)
+            .map(|id| id.to_string())
+            .unwrap_or_default();
         let poster_url = app
             .media_image_url(
                 Some(series.poster_url.as_str()),
@@ -261,7 +292,15 @@ impl MetadataQueries {
                 .episodes
                 .into_iter()
                 .map(|e| {
-                    let owner_id = e.tvdb_id.to_string();
+                    let episode_tvdb_id = (e.tvdb_id > 0).then_some(e.tvdb_id);
+                    let owner_id = match (episode_tvdb_id, e.tmdb_id) {
+                        (Some(id), _) => id.to_string(),
+                        (None, Some(id)) => format!("tmdb:{id}"),
+                        (None, None) => format!(
+                            "{series_owner_id}:s{}e{}",
+                            e.season_number, e.episode_number
+                        ),
+                    };
                     let image_url = app.media_image_url(
                         Some(e.image_url.as_str()),
                         Some("metadata_episode"),
@@ -271,7 +310,8 @@ impl MetadataQueries {
                     )
                     .expect("metadata episode image registration with an owner always returns a URL");
                     Ok(MetadataEpisodePayload {
-                        tvdb_id: e.tvdb_id.to_string(),
+                        tvdb_id: episode_tvdb_id.map(|id| id.to_string()).unwrap_or_default(),
+                        tmdb_id: e.tmdb_id,
                         episode_number: e.episode_number,
                         season_number: e.season_number,
                         name: e.name,
@@ -287,7 +327,9 @@ impl MetadataQueries {
         };
 
         Ok(MetadataSeriesPayload {
-            tvdb_id: series.tvdb_id.to_string(),
+            tvdb_id: series_tvdb_id.map(|id| id.to_string()).unwrap_or_default(),
+            smg_id: series.smg_id,
+            tmdb_id: series.tmdb_id,
             name: series.name,
             sort_name: series.sort_name,
             slug: series.slug,
@@ -304,7 +346,14 @@ impl MetadataQueries {
                 .seasons
                 .into_iter()
                 .map(|s| MetadataSeasonPayload {
-                    tvdb_id: s.tvdb_id.to_string(),
+                    // A TMDB-primary series' seasons have no TVDB id; like the
+                    // series and its episodes, that reads as an empty string.
+                    tvdb_id: if s.tvdb_id > 0 {
+                        s.tvdb_id.to_string()
+                    } else {
+                        String::new()
+                    },
+                    tmdb_id: s.tmdb_id,
                     number: s.number,
                     label: s.label,
                     episode_type: s.episode_type,

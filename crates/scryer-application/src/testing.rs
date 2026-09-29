@@ -89,6 +89,7 @@ pub async fn execute_upgrade_for_test_with_import_mode(
         }),
         rescore_changes: Vec::new(),
         source_snapshot: import_source_snapshot_for_test(source_path)?,
+        release_listing_json: None,
     };
     let old_score = existing_file.acquisition_score.unwrap_or(0);
     let old_file_media_root = crate::fs_safety::most_specific_containing_root(

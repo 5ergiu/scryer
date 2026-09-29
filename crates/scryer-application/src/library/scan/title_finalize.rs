@@ -32,6 +32,7 @@ async fn persist_or_reuse_scanned_media_file(
     parsed: &crate::ParsedReleaseMetadata,
     snapshot: &FileSourceSnapshot,
     existing: Option<ExistingScannedMediaFile<'_>>,
+    original_file_path: Option<String>,
     summary: &mut LibraryScanSummary,
     update_error_message: &'static str,
     insert_error_message: &'static str,
@@ -100,6 +101,9 @@ async fn persist_or_reuse_scanned_media_file(
         video_codec_parsed: None,
         audio_codec_parsed: None,
         audio_channels_parsed: None,
+        // A scanned file has no grab behind it, so no listing snapshot.
+        release_listing_json: None,
+        original_file_path,
         ..Default::default()
     };
 
@@ -366,6 +370,7 @@ pub(crate) async fn finalize_title_scan_file(
         series_movie_link_id,
         snapshot,
         record,
+        original_file_path,
     } = plan;
 
     let existing = match &record {
@@ -374,6 +379,7 @@ pub(crate) async fn finalize_title_scan_file(
             should_skip_analysis,
             should_refresh_source_signature,
             should_invalidate_full_hashes,
+            replaced_episode_ids: _,
         } => Some(ExistingScannedMediaFile {
             file_id,
             should_skip_analysis: *should_skip_analysis,
@@ -398,6 +404,7 @@ pub(crate) async fn finalize_title_scan_file(
         &parsed,
         &snapshot,
         existing,
+        original_file_path,
         summary,
         "failed to refresh media file source signature during title scan",
         "failed to insert media file during title scan",
@@ -424,10 +431,86 @@ pub(crate) async fn finalize_title_scan_file(
     } else {
         series_movie_link_id
     };
-    let external_subtitle_episode_id = match target_episodes.as_slice() {
-        [episode] => Some(episode.id.as_str()),
+    let replaced_episode_ids = match record {
+        PlannedTitleScanRecord::Existing {
+            replaced_episode_ids,
+            ..
+        } if !is_disc_image => replaced_episode_ids,
         _ => None,
     };
+    // When the replacement fails or is skipped the stored links stay as they
+    // were, so the file keeps describing the episodes it is still linked to.
+    let mut kept_episode_ids = None;
+    if let Some(old_episode_ids) = replaced_episode_ids
+        && !target_episodes.is_empty()
+    {
+        let new_episode_ids = target_episodes
+            .iter()
+            .map(|episode| episode.id.clone())
+            .collect::<Vec<_>>();
+        let db_started = Instant::now();
+        let replace_result = app
+            .services
+            .library
+            .media_files
+            .replace_file_episode_links(&persisted_file.file_id, &old_episode_ids, &new_episode_ids)
+            .await;
+        *db_elapsed = db_elapsed.saturating_add(db_started.elapsed());
+        match replace_result {
+            Ok(crate::EpisodeLinkReplacement::Replaced) => {
+                tracing::info!(
+                    title_id = %title.id,
+                    file_id = %persisted_file.file_id,
+                    file_path = %file.path,
+                    old_episode_ids = ?old_episode_ids,
+                    new_episode_ids = ?new_episode_ids,
+                    "title scan replaced episode links that contradicted the filename"
+                );
+                summary.relinked += 1;
+                title_updated = true;
+                for episode_id in old_episode_ids {
+                    episode_links.remove(&(persisted_file.file_id.clone(), episode_id));
+                }
+                for episode_id in new_episode_ids {
+                    episode_links.insert((persisted_file.file_id.clone(), episode_id));
+                }
+            }
+            Ok(crate::EpisodeLinkReplacement::Skipped) => {
+                tracing::info!(
+                    title_id = %title.id,
+                    file_id = %persisted_file.file_id,
+                    file_path = %file.path,
+                    old_episode_ids = ?old_episode_ids,
+                    new_episode_ids = ?new_episode_ids,
+                    "title scan left episode links alone: the file changed since the scan read it"
+                );
+                kept_episode_ids = Some(old_episode_ids);
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    title_id = %title.id,
+                    file_id = %persisted_file.file_id,
+                    old_episode_ids = ?old_episode_ids,
+                    new_episode_ids = ?new_episode_ids,
+                    "failed to replace episode links of scanned file; keeping the stored links"
+                );
+                kept_episode_ids = Some(old_episode_ids);
+            }
+        }
+    }
+    let target_episodes = if kept_episode_ids.is_some() {
+        Vec::new()
+    } else {
+        target_episodes
+    };
+    let external_subtitle_episode_id =
+        match (kept_episode_ids.as_deref(), target_episodes.as_slice()) {
+            (Some([episode_id]), _) => Some(episode_id.as_str()),
+            (Some(_), _) => None,
+            (None, [episode]) => Some(episode.id.as_str()),
+            (None, _) => None,
+        };
 
     for episode in &target_episodes {
         if episode_links.insert((persisted_file.file_id.clone(), episode.id.clone())) {
@@ -516,10 +599,12 @@ pub(crate) async fn finalize_title_scan_file(
                 &persisted_file.file_id,
                 &file.path,
                 analysis_status,
-                target_episodes
-                    .iter()
-                    .map(|episode| episode.id.clone())
-                    .collect(),
+                kept_episode_ids.clone().unwrap_or_else(|| {
+                    target_episodes
+                        .iter()
+                        .map(|episode| episode.id.clone())
+                        .collect()
+                }),
             )
             .await;
         }
@@ -693,6 +778,7 @@ pub(super) async fn finalize_movie_scan_file(
         &parsed,
         &snapshot,
         existing,
+        None,
         summary,
         "failed to refresh movie media file source signature during library scan",
         "failed to insert movie media file during library scan",

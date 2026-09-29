@@ -88,12 +88,14 @@ async fn series_hydration_persists_and_clears_episode_image_url() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 880_001,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let mut episodes = vec![EpisodeMetadata {
         tvdb_id: 880_101,
+        tmdb_id: None,
         episode_number: 1,
         name: "A Still Frame".into(),
         aired: "2026-01-01".into(),
@@ -102,6 +104,7 @@ async fn series_hydration_persists_and_clears_episode_image_url() {
         is_recap: false,
         overview: "A frame is captured.".into(),
         absolute_number: "1".into(),
+        contiguous_absolute_number: None,
         season_number: 1,
         image_url: " https://image.tmdb.org/t/p/original/still-a.jpg ".into(),
     }];
@@ -144,6 +147,135 @@ async fn series_hydration_persists_and_clears_episode_image_url() {
         .await
         .expect("list episodes after image clear");
     assert_eq!(cleared[0].image_url, None);
+}
+
+#[tokio::test]
+async fn series_hydration_clears_the_contiguous_number_of_episodes_it_no_longer_names() {
+    let (app, user) = bootstrap();
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Renumbered Cour".into(),
+                facet: MediaFacet::Anime,
+                monitored: true,
+                tags: vec![],
+                external_ids: vec![ExternalId::new("tvdb_id", "880188")],
+                min_availability: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+
+    let seasons = vec![SeasonMetadata {
+        tvdb_id: 880_002,
+        tmdb_id: None,
+        number: 1,
+        label: "Season 1".into(),
+        episode_type: "official".into(),
+    }];
+    let episode = |number: i32, contiguous: Option<i32>| EpisodeMetadata {
+        tvdb_id: 880_200 + i64::from(number),
+        tmdb_id: None,
+        episode_number: number,
+        name: format!("Episode {number}"),
+        aired: "2026-01-01".into(),
+        runtime_minutes: 24,
+        is_filler: false,
+        is_recap: false,
+        overview: String::new(),
+        absolute_number: number.to_string(),
+        contiguous_absolute_number: contiguous,
+        season_number: 1,
+        image_url: String::new(),
+    };
+    let contiguous_by_number = |episodes: &[Episode]| {
+        let mut rows = episodes
+            .iter()
+            .map(|episode| {
+                (
+                    episode.episode_number.clone().unwrap_or_default(),
+                    episode.absolute_number.clone(),
+                    episode.contiguous_absolute_number,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+
+    app.create_series_seasons_and_episodes(
+        &title,
+        &seasons,
+        &[
+            episode(1, Some(1)),
+            episode(2, Some(2)),
+            episode(3, Some(3)),
+        ],
+        &[],
+        &[],
+    )
+    .await;
+    let collection = app
+        .list_collections(&user, &title.id)
+        .await
+        .expect("list collections")
+        .into_iter()
+        .next()
+        .expect("collection created");
+
+    // TVDB renumbered E03 away and the story episode now sits at E04, which
+    // carries contiguous 3. The stale row must not keep 3 alongside it.
+    app.create_series_seasons_and_episodes(
+        &title,
+        &seasons,
+        &[
+            episode(1, Some(1)),
+            episode(2, Some(2)),
+            episode(4, Some(3)),
+        ],
+        &[],
+        &[],
+    )
+    .await;
+    let renumbered = app
+        .list_episodes(&user, &collection.id)
+        .await
+        .expect("list episodes after renumbering");
+    assert_eq!(
+        contiguous_by_number(&renumbered),
+        vec![
+            ("1".to_string(), Some("1".to_string()), Some(1)),
+            ("2".to_string(), Some("2".to_string()), Some(2)),
+            // Only the contiguous column is cleared; raw keeps its value.
+            ("3".to_string(), Some("3".to_string()), None),
+            ("4".to_string(), Some("4".to_string()), Some(3)),
+        ]
+    );
+    assert_eq!(
+        app.services
+            .catalog
+            .shows
+            .find_episode_by_title_and_absolute_number(&title.id, "3")
+            .await
+            .expect("absolute lookup")
+            .and_then(|episode| episode.episode_number),
+        Some("4".to_string()),
+        "the contiguous 3 names exactly one episode"
+    );
+
+    // A response naming no episodes says nothing about the stored ones.
+    app.create_series_seasons_and_episodes(&title, &seasons, &[], &[], &[])
+        .await;
+    let after_empty = app
+        .list_episodes(&user, &collection.id)
+        .await
+        .expect("list episodes after an empty response");
+    assert_eq!(
+        contiguous_by_number(&after_empty),
+        contiguous_by_number(&renumbered)
+    );
 }
 
 #[tokio::test]
@@ -202,12 +334,14 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -216,6 +350,7 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 1001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Cruelty".into(),
             aired: "2019-04-06".into(),
@@ -224,11 +359,13 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 1002,
+            tmdb_id: None,
             episode_number: 26,
             name: "New Mission".into(),
             aired: "2019-09-28".into(),
@@ -237,11 +374,13 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
             is_recap: false,
             overview: "Episode 26".into(),
             absolute_number: "26".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 2001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Iron Rail".into(),
             aired: "2020-10-10".into(),
@@ -250,6 +389,7 @@ async fn anime_hybrid_movie_mapping_creates_series_movie_link() {
             is_recap: false,
             overview: "Special cut".into(),
             absolute_number: String::new(),
+            contiguous_absolute_number: None,
             season_number: 0,
             image_url: String::new(),
         },
@@ -373,12 +513,14 @@ async fn series_season_zero_creates_canonical_specials_collection() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 80,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 81,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -387,6 +529,7 @@ async fn series_season_zero_creates_canonical_specials_collection() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 8001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Special Episode".into(),
             aired: "2003-11-01".into(),
@@ -395,11 +538,13 @@ async fn series_season_zero_creates_canonical_specials_collection() {
             is_recap: false,
             overview: "Special".into(),
             absolute_number: String::new(),
+            contiguous_absolute_number: None,
             season_number: 0,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 8101,
+            tmdb_id: None,
             episode_number: 1,
             name: "Pilot".into(),
             aired: "2003-11-02".into(),
@@ -408,6 +553,7 @@ async fn series_season_zero_creates_canonical_specials_collection() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
@@ -454,6 +600,7 @@ async fn new_regular_season_without_episodes_is_monitored_when_title_is_monitore
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 92,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -501,6 +648,7 @@ async fn new_regular_season_without_episodes_is_not_monitored_when_monitor_type_
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 93,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -568,6 +716,7 @@ async fn rehydrating_existing_regular_season_preserves_manual_unmonitored_state(
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 94,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -630,12 +779,14 @@ async fn series_rollout_reuses_legacy_season_zero_specials_collection() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 90,
+        tmdb_id: None,
         number: 0,
         label: "Specials".into(),
         episode_type: "special".into(),
     }];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 9001,
+        tmdb_id: None,
         episode_number: 1,
         name: "Pilot Special".into(),
         aired: "2004-01-01".into(),
@@ -644,6 +795,7 @@ async fn series_rollout_reuses_legacy_season_zero_specials_collection() {
         is_recap: false,
         overview: "Legacy special".into(),
         absolute_number: String::new(),
+        contiguous_absolute_number: None,
         season_number: 0,
         image_url: String::new(),
     }];
@@ -696,12 +848,14 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 20,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 21,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -710,6 +864,7 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 3001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Kids in the Chorus".into(),
             aired: "2019-07-12".into(),
@@ -718,11 +873,13 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 3002,
+            tmdb_id: None,
             episode_number: 1,
             name: "OVA".into(),
             aired: "2020-02-01".into(),
@@ -731,6 +888,7 @@ async fn anime_mapping_without_movie_link_does_not_create_series_movie_link() {
             is_recap: false,
             overview: "Special".into(),
             absolute_number: String::new(),
+            contiguous_absolute_number: None,
             season_number: 0,
             image_url: String::new(),
         },
@@ -800,6 +958,7 @@ async fn anime_hydration_persists_scoped_anibridge_ids_for_episode_and_full_seas
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 4_311_622,
+        tmdb_id: None,
         number: 2,
         label: "Season 2".into(),
         episode_type: "official".into(),
@@ -807,6 +966,7 @@ async fn anime_hydration_persists_scoped_anibridge_ids_for_episode_and_full_seas
     let episodes = (1..=24)
         .map(|episode_number| EpisodeMetadata {
             tvdb_id: 431_162_200 + i64::from(episode_number),
+            tmdb_id: None,
             episode_number,
             name: format!("Episode {episode_number}"),
             aired: "2025-01-10".into(),
@@ -815,6 +975,7 @@ async fn anime_hydration_persists_scoped_anibridge_ids_for_episode_and_full_seas
             is_recap: false,
             overview: String::new(),
             absolute_number: episode_number.to_string(),
+            contiguous_absolute_number: None,
             season_number: 2,
             image_url: String::new(),
         })
@@ -934,18 +1095,21 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 50,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 51,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
         },
         SeasonMetadata {
             tvdb_id: 52,
+            tmdb_id: None,
             number: 2,
             label: "Season 2".into(),
             episode_type: "official".into(),
@@ -954,6 +1118,7 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 5001,
+            tmdb_id: None,
             episode_number: 1,
             name: "To You, in 2000 Winters".into(),
             aired: "2013-04-07".into(),
@@ -962,11 +1127,13 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 6001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Iron Colossus".into(),
             aired: "2017-04-01".into(),
@@ -975,6 +1142,7 @@ async fn anime_movies_create_series_movie_links_without_collection_metadata() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "26".into(),
+            contiguous_absolute_number: None,
             season_number: 2,
             image_url: String::new(),
         },
@@ -1169,12 +1337,14 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -1183,6 +1353,7 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 1001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Episode 1".into(),
             aired: "2018-04-03".into(),
@@ -1191,11 +1362,13 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
             is_recap: false,
             overview: "Episode 1".into(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 2001,
+            tmdb_id: None,
             episode_number: 1,
             name: "Twin Sentinels".into(),
             aired: "2018-08-03".into(),
@@ -1204,6 +1377,7 @@ async fn anime_series_movie_refresh_updates_localized_movie_entity_metadata() {
             is_recap: false,
             overview: "Movie special".into(),
             absolute_number: String::new(),
+            contiguous_absolute_number: None,
             season_number: 0,
             image_url: String::new(),
         },
@@ -1324,12 +1498,14 @@ async fn anime_specials_refresh_updates_localized_series_movie_metadata() {
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 10,
+            tmdb_id: None,
             number: 0,
             label: "Specials".into(),
             episode_type: "special".into(),
         },
         SeasonMetadata {
             tvdb_id: 11,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
@@ -1337,6 +1513,7 @@ async fn anime_specials_refresh_updates_localized_series_movie_metadata() {
     ];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 1001,
+        tmdb_id: None,
         episode_number: 1,
         name: "Episode 1".into(),
         aired: "2013-04-07".into(),
@@ -1345,6 +1522,7 @@ async fn anime_specials_refresh_updates_localized_series_movie_metadata() {
         is_recap: false,
         overview: "Episode 1".into(),
         absolute_number: "1".into(),
+        contiguous_absolute_number: None,
         season_number: 1,
         image_url: String::new(),
     }];
@@ -1817,12 +1995,14 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
     let seasons = vec![
         SeasonMetadata {
             tvdb_id: 101,
+            tmdb_id: None,
             number: 1,
             label: "Season 1".into(),
             episode_type: "official".into(),
         },
         SeasonMetadata {
             tvdb_id: 102,
+            tmdb_id: None,
             number: 2,
             label: "Season 2".into(),
             episode_type: "official".into(),
@@ -1831,6 +2011,7 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
     let episodes = vec![
         EpisodeMetadata {
             tvdb_id: 10101,
+            tmdb_id: None,
             episode_number: 1,
             name: "S1E1".into(),
             // Already aired: proves advanced ignores air-date policy entirely.
@@ -1840,11 +2021,13 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
             is_recap: false,
             overview: String::new(),
             absolute_number: "1".into(),
+            contiguous_absolute_number: None,
             season_number: 1,
             image_url: String::new(),
         },
         EpisodeMetadata {
             tvdb_id: 10201,
+            tmdb_id: None,
             episode_number: 1,
             name: "S2E1".into(),
             aired: "2002-01-01".into(),
@@ -1853,6 +2036,7 @@ async fn advanced_monitoring_only_monitors_selected_seasons_and_their_episodes()
             is_recap: false,
             overview: String::new(),
             absolute_number: "2".into(),
+            contiguous_absolute_number: None,
             season_number: 2,
             image_url: String::new(),
         },
@@ -1911,12 +2095,14 @@ async fn advanced_monitoring_monitors_only_the_selected_series_movies() {
 
     let seasons = vec![SeasonMetadata {
         tvdb_id: 201,
+        tmdb_id: None,
         number: 1,
         label: "Season 1".into(),
         episode_type: "official".into(),
     }];
     let episodes = vec![EpisodeMetadata {
         tvdb_id: 20101,
+        tmdb_id: None,
         episode_number: 1,
         name: "S1E1".into(),
         aired: "2013-04-07".into(),
@@ -1925,6 +2111,7 @@ async fn advanced_monitoring_monitors_only_the_selected_series_movies() {
         is_recap: false,
         overview: String::new(),
         absolute_number: "1".into(),
+        contiguous_absolute_number: None,
         season_number: 1,
         image_url: String::new(),
     }];

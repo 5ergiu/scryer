@@ -8,6 +8,7 @@ import {
 } from "@/components/root/add-to-catalog-dialog";
 import { RequestMediaDialog } from "@/components/root/request-media-dialog";
 import {
+  addListExclusionMutation,
   addTitleMutation,
   buildSetTitleMonitoredBatchMutation,
   buildUpdateTitleBatchMutation,
@@ -28,6 +29,7 @@ import {
   browsePathQuery,
   deleteTitlePreviewQuery,
   downloadClientRoutingQuery,
+  listExclusionTitleQuery,
   jobRunEventsSubscription,
   jobRunsQuery,
   librariesQuery,
@@ -145,6 +147,7 @@ import { useDownloadConflictConfirmation } from "@/components/common/download-co
 import { DeletePreviewSummary } from "@/components/common/delete-preview-summary";
 import { BulkRenamePreviewSummary } from "@/components/common/bulk-rename-preview-summary";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
+import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
 import { reportAutomaticSearchFailure } from "@/lib/hooks/use-title-search-action";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -163,6 +166,12 @@ import { useJobRunToasts } from "@/components/root/job-run-provider";
 import type { TitleOptionUpdates } from "@/lib/types/title-options";
 import { titleMatchesOptionUpdates } from "@/lib/utils/title-edit-dialog";
 import { isTerminalJobRunStatus, normalizeJobRun } from "@/lib/utils/job-runs";
+import { useAuth } from "@/lib/hooks/use-auth";
+import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
+import {
+  exclusionInputFromTitle,
+  type AddListExclusionInput,
+} from "@/lib/utils/lists";
 import { toast } from "sonner";
 import { BulkTitleEditDialog } from "@/components/views/media-content/bulk-title-edit-dialog";
 import { MoveTitlesDialog } from "@/components/dialogs/move-titles-dialog";
@@ -691,9 +700,13 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   const t = useTranslate();
   const { startAutomaticSearch } = useAutomaticSearch();
   const client = useClient();
+  const auth = useAuth();
   // Library and root moves are still being finished, so the bulk dialog only
   // becomes a move entry point when the instance has opted in.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
+  const canManageLists =
+    experimentalFeaturesEnabled && hasAppPermission(auth.user, APP_PERMISSIONS.manageLists);
+  const [alsoExcludeFromLists, setAlsoExcludeFromLists] = React.useState(false);
   const { registerInteractiveJobRun } = useJobRunToasts();
   const { confirmReplaceConflict, replaceConflictDialog } =
     useDownloadConflictConfirmation();
@@ -3503,16 +3516,10 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
 
       const tvdbId = String(candidate.tvdbId).trim();
-      const smgId = candidate.smgId == null ? "" : String(candidate.smgId).trim();
-      const tmdbId = candidate.tmdbId == null ? "" : String(candidate.tmdbId).trim();
       const imdbId = candidate.imdbId?.trim();
-      const externalIds = [
-        ...(candidate.externalIds ?? []),
-        ...(smgId ? [{ source: "smg", value: smgId }] : []),
-        ...(tvdbId ? [{ source: "tvdb", value: tvdbId }] : []),
-        ...(tmdbId ? [{ source: "tmdb", value: tmdbId }] : []),
-        ...(imdbId ? [{ source: "imdb", value: imdbId }] : []),
-      ];
+      // Kinded like every other add flow, so a series' TMDB id is stored as
+      // `tmdb:series` and never mistaken for a movie's.
+      const externalIds = metadataResultExternalIds(candidate, queueFacet);
 
       const monitorType = monitoredForQueue ? "ALL_EPISODES" : "NONE";
       try {
@@ -4202,6 +4209,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       setTitleToDelete(title);
       setDeleteFilesOnDisk(false);
       setTitleDeleteTypedConfirmation("");
+      setAlsoExcludeFromLists(false);
     },
     [setTitleDeleteTypedConfirmation, setTitleToDelete, setDeleteFilesOnDisk],
   );
@@ -4210,6 +4218,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     setTitleToDelete(null);
     setDeleteFilesOnDisk(false);
     setTitleDeleteTypedConfirmation("");
+    setAlsoExcludeFromLists(false);
   }, [setDeleteFilesOnDisk, setTitleDeleteTypedConfirmation, setTitleToDelete]);
 
   React.useEffect(() => {
@@ -4224,12 +4233,28 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     }
 
     const titleId = titleToDelete.id;
+    const excludeFromLists = canManageLists && alsoExcludeFromLists;
     setDeleteTitleLoadingById((previous) => ({
       ...previous,
       [titleId]: true,
     }));
 
     try {
+      // Catalog rows may not carry external ids, so read them while the title
+      // still exists. The exclusion itself is only sent after the delete.
+      let exclusion: AddListExclusionInput | null = null;
+      if (excludeFromLists) {
+        exclusion = exclusionInputFromTitle(titleToDelete);
+        if (!exclusion) {
+          const lookup = await client
+            .query(listExclusionTitleQuery, { id: titleId }, { requestPolicy: "network-only" })
+            .toPromise()
+            .catch(() => null);
+          const found = lookup?.data?.title as TitleRecord | null | undefined;
+          exclusion = found ? exclusionInputFromTitle(found) : null;
+        }
+      }
+
       let previewFingerprint: string | undefined;
       if (deleteFilesOnDisk) {
         if (!titleDeletePreview) {
@@ -4284,6 +4309,23 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         handleCloseOverview();
       }
       setGlobalStatus(`Queued deletion for ${titleToDelete.name}.`);
+
+      // A separate request made only after the delete was accepted, so it can
+      // never change what the delete removes.
+      if (excludeFromLists && acceptedIds.includes(titleId)) {
+        if (!exclusion) {
+          setGlobalStatus(t("lists.exclusions.deleteNoIds", { name: titleToDelete.name }));
+        } else {
+          const exclusionFailed = await client
+            .mutation(addListExclusionMutation, { input: exclusion })
+            .toPromise()
+            .then((exclusionResult) => Boolean(exclusionResult.error))
+            .catch(() => true);
+          if (exclusionFailed) {
+            setGlobalStatus(t("lists.exclusions.deleteFailed", { name: titleToDelete.name }));
+          }
+        }
+      }
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : t("status.failedToDelete"),
@@ -4297,6 +4339,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       closeDeleteTitleDialog();
     }
   }, [
+    alsoExcludeFromLists,
+    canManageLists,
     closeDeleteTitleDialog,
     deleteFilesOnDisk,
     client,
@@ -5465,6 +5509,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
             ? !!deleteTitleLoadingById[titleToDelete.id]
             : false
         }
+        contentId="title-delete-dialog"
+        confirmButtonId="title-delete-confirm"
+        cancelButtonId="title-delete-cancel"
         confirmDisabled={deleteTitleConfirmDisabled}
         onConfirm={confirmDeleteTitle}
         onCancel={closeDeleteTitleDialog}
@@ -5472,6 +5519,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         <div className="space-y-3">
           <label className="flex items-center gap-2">
             <Checkbox
+              id="title-delete-files-on-disk"
               checked={deleteFilesOnDisk}
               onCheckedChange={(checked) =>
                 setDeleteFilesOnDisk(checked === true)
@@ -5486,6 +5534,25 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               {t("title.deleteFilesOnDisk")}
             </span>
           </label>
+          {canManageLists ? (
+            <label className="flex items-center gap-2">
+              <Checkbox
+                id="title-delete-exclude-from-lists"
+                checked={alsoExcludeFromLists}
+                onCheckedChange={(checked) =>
+                  setAlsoExcludeFromLists(checked === true)
+                }
+                disabled={
+                  titleToDelete !== null
+                    ? !!deleteTitleLoadingById[titleToDelete.id]
+                    : false
+                }
+              />
+              <span className="text-xs text-card-foreground">
+                {t("lists.exclusions.deleteCheckbox")}
+              </span>
+            </label>
+          ) : null}
           {deleteFilesOnDisk ? (
             <DeletePreviewSummary
               preview={titleDeletePreview}

@@ -635,6 +635,26 @@ mod tests {
                 EngineScope::Postgres,
                 "postgres/migrations/0257_import_space_attempts_and_member_age.sql",
             ),
+            (
+                258,
+                EngineScope::Sqlite,
+                "migrations/0258_indexer_query_budget.sql",
+            ),
+            (
+                258,
+                EngineScope::Postgres,
+                "postgres/migrations/0258_indexer_query_budget.sql",
+            ),
+            (
+                259,
+                EngineScope::Sqlite,
+                "migrations/0259_list_subscriptions.sql",
+            ),
+            (
+                259,
+                EngineScope::Postgres,
+                "postgres/migrations/0259_list_subscriptions.sql",
+            ),
         ] {
             let migration = bundle
                 .catalog
@@ -646,6 +666,33 @@ mod tests {
                     if *engine == expected_engine && file == expected_file
                 )),
                 "both fresh installs and upgrades must execute the incident schema"
+            );
+        }
+    }
+
+    #[test]
+    fn release_listing_snapshot_migration_is_registered_for_both_engines() {
+        let bundle = compile_source_bundle(&source_db_root()).expect("compile migration catalog");
+        let migration = bundle
+            .catalog
+            .find_migration(261)
+            .expect("release listing snapshot migration registered");
+        for (expected_engine, expected_file) in [
+            (
+                EngineScope::Sqlite,
+                "migrations/0261_release_listing_snapshot.sql",
+            ),
+            (
+                EngineScope::Postgres,
+                "postgres/migrations/0261_release_listing_snapshot.sql",
+            ),
+        ] {
+            assert!(
+                migration.steps.iter().any(|step| matches!(step,
+                    CompiledMigrationStep::Sql { engine, file, scope: StepScope::All, .. }
+                    if *engine == expected_engine && file == expected_file
+                )),
+                "both fresh installs and upgrades must add the listing snapshot columns"
             );
         }
     }

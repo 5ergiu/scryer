@@ -9,6 +9,7 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import {
+  Compartment,
   EditorState,
   StateEffect,
   StateField,
@@ -21,7 +22,10 @@ import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { xml } from "@codemirror/legacy-modes/mode/xml";
 import { oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
 import { StreamLanguage, syntaxHighlighting } from "@codemirror/language";
-import { defaultKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { setDiagnostics as setLintDiagnostics } from "@codemirror/lint";
+import { regoAssistance } from "./rego-editor-assistance";
+import type { RegoFamily } from "@/lib/utils/rego-assistance";
 import { useTheme } from "next-themes";
 import { Check, Copy } from "lucide-react";
 import "@fontsource-variable/jetbrains-mono";
@@ -47,6 +51,8 @@ export type CodeEditorProps = {
   maxLines?: number;
   diagnostics?: CodeEditorDiagnostic[];
   language?: CodeEditorLanguage;
+  regoFamily?: RegoFamily;
+  regoTranslate?: (key: string) => string;
   copyable?: boolean;
   copyLabel?: string;
   copiedLabel?: string;
@@ -376,12 +382,17 @@ export default function CodeEditor({
   maxLines,
   diagnostics = [],
   language = "plain",
+  regoFamily,
+  regoTranslate,
   copyable = false,
   copyLabel = "Copy code",
   copiedLabel = "Copied",
   autoFocus = false,
   onAutoFocus,
 }: CodeEditorProps) {
+  const [assistance] = useState(() => new Compartment());
+  const [appearance] = useState(() => new Compartment());
+  const [editable] = useState(() => new Compartment());
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -430,18 +441,17 @@ export default function CodeEditor({
       lineNumbers(),
       ...languageExtensions(language),
       syntaxHighlighting(oneDarkHighlightStyle),
-      keymap.of([...defaultKeymap, indentWithTab]),
+      keymap.of([...defaultKeymap, ...(language === "rego" ? historyKeymap : []), indentWithTab]),
+      ...(language === "rego" ? [history()] : []),
+      assistance.of([]),
+      appearance.of(editorTheme),
+      editable.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
       updateListener,
       diagnosticField,
       diagnosticTheme,
       EditorView.lineWrapping,
-      editorTheme,
       ...(language === "rego" ? [regoHighlightTheme, regoHighlightPlugin] : []),
     ];
-
-    if (readOnly) {
-      extensions.push(EditorState.readOnly.of(true));
-    }
 
     const state = EditorState.create({
       doc: value,
@@ -454,7 +464,7 @@ export default function CodeEditor({
     });
 
     viewRef.current = view;
-    if (diagnostics.length > 0) {
+    if (language !== "rego" && diagnostics.length > 0) {
       view.dispatch({
         effects: setDiagnosticsEffect.of(diagnostics),
       });
@@ -464,10 +474,20 @@ export default function CodeEditor({
       view.destroy();
       viewRef.current = null;
     };
-    // Recreate editor when theme, language, or read-only behavior changes.
+    // Only a language switch creates a new editor. Compartments preserve history.
     // Value and diagnostics are synchronized by dedicated effects.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedTheme, readOnly, language]);
+  }, [language]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: [
+      assistance.reconfigure(language === "rego" && regoFamily && regoTranslate ? regoAssistance(regoFamily, regoTranslate, readOnly) : []),
+      appearance.reconfigure(isDarkTheme(resolvedTheme) ? scryerDark : lightTheme),
+      editable.reconfigure([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
+    ] });
+  }, [assistance, appearance, editable, language, regoFamily, regoTranslate, readOnly, resolvedTheme]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -483,10 +503,17 @@ export default function CodeEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    view.dispatch({
-      effects: setDiagnosticsEffect.of(diagnostics),
-    });
-  }, [diagnostics]);
+    if (language === "rego") {
+      view.dispatch(setLintDiagnostics(view.state, readOnly ? [] : diagnostics.flatMap((diagnostic) => {
+        if (diagnostic.line < 1 || diagnostic.line > view.state.doc.lines) return [];
+        const line = view.state.doc.line(diagnostic.line);
+        const from = Math.min(line.to, line.from + Math.max(0, (diagnostic.column ?? 1) - 1));
+        return [{ from, to: Math.min(line.to, from + 1), severity: "error" as const, message: diagnostic.message ?? "" }];
+      })));
+    } else {
+      view.dispatch({ effects: setDiagnosticsEffect.of(diagnostics) });
+    }
+  }, [diagnostics, language, readOnly]);
 
   useEffect(() => {
     if (!autoFocus) return;

@@ -85,10 +85,6 @@ impl MetadataGateway for FolderMatchMetadataGateway {
         self.calls.fetch_add(1, Ordering::SeqCst);
         EmptySearchMetadataGateway.get_movie(id, language).await
     }
-    async fn get_series(&self, id: i64, language: &str) -> AppResult<SeriesMetadata> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        EmptySearchMetadataGateway.get_series(id, language).await
-    }
     async fn get_metadata_bulk(
         &self,
         movies: &[i64],
@@ -378,8 +374,10 @@ impl FolderMatchFixture {
                     is_filler: false,
                     is_recap: false,
                     absolute_number: None,
+                    contiguous_absolute_number: None,
                     overview: None,
                     tvdb_id: None,
+                    tmdb_id: None,
                     image_url: None,
                     monitored: true,
                     created_at: Utc::now(),

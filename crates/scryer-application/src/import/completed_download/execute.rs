@@ -212,7 +212,7 @@ async fn import_inner(
                 }
             };
             let files_imported_this_pass = success_after.saturating_sub(success_before) as usize;
-            tracing::info!(
+            tracing::debug!(
                 id = %td.id,
                 decision = ?result.decision,
                 skip_reason = ?result.skip_reason,

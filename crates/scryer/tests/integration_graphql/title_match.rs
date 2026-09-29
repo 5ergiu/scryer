@@ -169,6 +169,8 @@ fn graphql_fix_title_match_series_rebuilds_and_relinks_library() {
         || async {
             let ctx = TestContext::new().await;
             mount_smg_mocks(&ctx, "smg/metadata_bulk_series.json").await;
+            mount_series_title_surface(&ctx, 8_901, &load_fixture("smg/metadata_bulk_series.json"))
+                .await;
 
             let media_root = tempfile::tempdir().expect("media root tempdir");
             configure_default_library_root(&ctx, MediaFacet::Series, media_root.path()).await;
@@ -225,8 +227,10 @@ fn graphql_fix_title_match_series_rebuilds_and_relinks_library() {
                     is_filler: false,
                     is_recap: false,
                     absolute_number: None,
+                    contiguous_absolute_number: None,
                     overview: Some("Legacy episode".to_string()),
                     tvdb_id: Some("9999001".to_string()),
+                    tmdb_id: None,
                     image_url: None,
                     monitored: true,
                     created_at: chrono::Utc::now(),

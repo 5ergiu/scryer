@@ -582,6 +582,8 @@ pub struct DiscoveryItemLibraryProvenanceRecord {
     pub library_id: Option<String>,
 }
 
+pub type DiscoveryAffinitySignalRecord = scryer_domain::CanonicalMediaAffinitySignal;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct DiscoveryItemRecord {
     pub id: String,
@@ -604,6 +606,8 @@ pub struct DiscoveryItemRecord {
     pub overview: Option<String>,
     pub content_type: Option<String>,
     pub canonical_tags: Vec<CanonicalMediaTag>,
+    #[serde(default)]
+    pub affinity_signals: Vec<DiscoveryAffinitySignalRecord>,
     pub is_adult: bool,
     pub content_ratings: Vec<DiscoveryContentRating>,
     pub rating: Option<f64>,
@@ -696,6 +700,15 @@ pub trait DiscoveryRepository: Send + Sync {
         scope_key: &str,
     ) -> AppResult<Option<DiscoverySyncStateRecord>>;
     async fn upsert_discovery_sync_state(&self, state: &DiscoverySyncStateRecord) -> AppResult<()>;
+    /// Persist the selected presentation and invalidate both generations atomically.
+    async fn refresh_discovery_presentation(
+        &self,
+        language: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<()>;
+    /// Whether the run was built for the currently selected presentation.
+    async fn discovery_run_matches_presentation(&self, run_id: &str) -> AppResult<bool>;
+
     async fn try_acquire_discovery_sync_lease(
         &self,
         scope_key: &str,
@@ -1002,7 +1015,10 @@ pub struct TitleNameBucketQuery<'a> {
     /// locale-equal spelling can differ from the observed name by any number
     /// of characters, so they are fetched by key.
     pub match_term: &'a str,
-    pub romanization_key: Option<&'a str>,
+    /// The observed name's key under every registered romanization rule set
+    /// that reads its script; a release name carries no language tag to pick
+    /// one. Empty when none applies.
+    pub romanization_keys: &'a [String],
     pub collation_keys: &'a [(&'static str, Vec<u8>)],
     /// Guard on how many index hits are hydrated, so a pathological bucket
     /// cannot turn one release into a catalog-sized read. The equality lanes
@@ -2536,6 +2552,7 @@ pub struct NewMediaRequest {
     pub metadata_snapshot_json: String,
     pub external_ids: Vec<ExternalId>,
     pub created_by_user_id: String,
+    pub origin: scryer_domain::MediaRequestOrigin,
 }
 
 #[derive(Clone, Debug)]
@@ -3152,6 +3169,20 @@ pub trait ShowRepository: Send + Sync {
     }
     async fn list_episode_external_ids(&self, episode_id: &str)
     -> AppResult<Vec<ScopedExternalId>>;
+    /// The scoped external ids of every episode of one title: for each
+    /// episode, exactly the rows `list_episode_external_ids` returns, in the
+    /// same order, grouped by episode id. The default fans out per episode;
+    /// SQL stores override with a single query.
+    async fn list_episode_external_ids_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        let mut ids = Vec::new();
+        for episode in self.list_episodes_for_title(title_id).await? {
+            ids.extend(self.list_episode_external_ids(&episode.id).await?);
+        }
+        Ok(ids)
+    }
     async fn get_episode_by_id(&self, episode_id: &str) -> AppResult<Option<Episode>>;
     /// Batch-load episodes by id for dataloaders. Missing ids are absent from
     /// the result. The default fans out to `get_episode_by_id`; SQL stores
@@ -3186,11 +3217,19 @@ pub trait ShowRepository: Send + Sync {
         season_number: &str,
         episode_number: &str,
     ) -> AppResult<Option<Episode>>;
+    /// The episode carrying `absolute_number` on the title's own absolute
+    /// scale (see [`scryer_domain::AbsoluteScale`]).
     async fn find_episode_by_title_and_absolute_number(
         &self,
         title_id: &str,
         absolute_number: &str,
     ) -> AppResult<Option<Episode>>;
+    /// The absolute scale the title's catalog is matched on, answered without
+    /// loading the catalog: [`scryer_domain::AbsoluteScale::for_catalog`]'s rule.
+    async fn absolute_scale_for_title(
+        &self,
+        title_id: &str,
+    ) -> AppResult<scryer_domain::AbsoluteScale>;
     async fn list_primary_collection_summaries(
         &self,
         title_ids: &[String],
@@ -5007,6 +5046,9 @@ pub struct NormalizedIndexerSearchCandidate {
     pub protected: Option<bool>,
     pub tags: Vec<String>,
     pub provider_categories: Vec<String>,
+    /// The result's listing facts as rules read them, so a replayed result
+    /// scores as the live one did.
+    pub release_listing_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -5148,7 +5190,35 @@ pub trait QualityProfileRepository: Send + Sync {
 
 #[async_trait]
 pub trait ReleaseAttemptRepository: Send + Sync {
+    /// Record one download attempt.
+    ///
+    /// The source hint is usually the indexer download URL, which carries the
+    /// operator's indexer key. Callers pass the live URL they fetched from;
+    /// the attempt row is history, never a fetch source, so the credential is
+    /// dropped here before the row is written.
     async fn record_release_attempt(
+        &self,
+        title_id: Option<String>,
+        source_hint: Option<String>,
+        source_title: Option<String>,
+        outcome: ReleaseDownloadAttemptOutcome,
+        error_message: Option<String>,
+        source_password: Option<String>,
+    ) -> AppResult<()> {
+        self.insert_release_attempt(
+            title_id,
+            crate::url_redaction::redact_optional_url_credentials(source_hint),
+            source_title,
+            outcome,
+            error_message,
+            source_password,
+        )
+        .await
+    }
+
+    /// Persist an attempt exactly as given. Call
+    /// [`Self::record_release_attempt`] instead, which redacts the source hint.
+    async fn insert_release_attempt(
         &self,
         title_id: Option<String>,
         source_hint: Option<String>,
@@ -5358,6 +5428,24 @@ pub trait DownloadSubmissionRepository: Send + Sync {
     /// Persist a submit whose client may have accepted the mutation but did
     /// not return a native item identifier.
     async fn record_ambiguous_submission(&self, submission: DownloadSubmission) -> AppResult<()>;
+
+    /// Durably record a grab's intent before its mutation is sent to a client:
+    /// title, facet, purpose, scope and release, under the grab's pre-allocated
+    /// download id, with the client item still unknown. A job the client
+    /// finishes before its answer arrives then resolves to this intent, and
+    /// acceptance completes the same row through
+    /// [`Self::record_submission_with_identity`]. Defaults to recording nothing
+    /// for stores without canonical identity rows.
+    async fn record_pending_submission(&self, _submission: DownloadSubmission) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// Remove an intent recorded by [`Self::record_pending_submission`] after
+    /// the client definitively refused the grab, so it never holds the title
+    /// or its scope. An intent a client job has already bound is kept.
+    async fn withdraw_pending_submission(&self, _download_id: &DownloadId) -> AppResult<()> {
+        Ok(())
+    }
 
     async fn record_submission_identity(
         &self,
@@ -5597,6 +5685,17 @@ pub trait DownloadSubmissionRepository: Send + Sync {
             .await
     }
 
+    /// Remove every durable tracked-state row recorded against these
+    /// canonical downloads, returning how many rows went. Retiring a deleted
+    /// title's downloads uses this so a later observation of the same client
+    /// item cannot revive the dead download's terminal state.
+    async fn delete_identity_tracked_states_for_downloads(
+        &self,
+        _download_ids: &[DownloadId],
+    ) -> AppResult<u32> {
+        Ok(0)
+    }
+
     async fn get_identity_tracked_state_reason(
         &self,
         _identity: &DownloadSubmissionIdentity,
@@ -5706,6 +5805,31 @@ pub trait DownloadSubmissionRepository: Send + Sync {
     ) -> AppResult<Option<DownloadSubmission>>;
 
     async fn delete_for_title(&self, title_id: &str) -> AppResult<()>;
+
+    /// Every submission recorded for `title_id`, whatever its client state,
+    /// with the catalog references it holds. A title merge reads these to
+    /// move the source title's downloads to the destination. Defaults to
+    /// empty, which leaves every download to retire with the title.
+    async fn list_title_download_references(
+        &self,
+        _title_id: &str,
+    ) -> AppResult<Vec<DownloadTitleReferences>> {
+        Ok(Vec::new())
+    }
+
+    /// Move one submission, its episode links and its cleanup row from the
+    /// source title to the destination, in one transaction. Returns `false`
+    /// when the submission no longer belongs to the source title, in which
+    /// case nothing changed. Defaults to an error: a store that cannot move a
+    /// download leaves it to retire with the source title.
+    async fn reassign_download_to_title(
+        &self,
+        _reassignment: &DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        Err(AppError::Repository(
+            "this store cannot move a download to another title".into(),
+        ))
+    }
 
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()>;
 
@@ -6960,6 +7084,23 @@ pub trait MediaFileRepository: Send + Sync {
 
     async fn link_file_to_episode(&self, file_id: &str, episode_id: &str) -> AppResult<()>;
 
+    /// Make `episode_ids` the complete episode link set of one file, in one
+    /// transaction. Links whose episode stays in the set keep their row, role
+    /// and filler flag; links outside it are removed; missing links are
+    /// inserted with the default role. Links of every other file, and the
+    /// file on disk, are never touched. A failure leaves the old links intact.
+    ///
+    /// The write is a compare-and-set against what the caller read: it only
+    /// happens while the file still has no import source path, no series
+    /// movie link, and exactly `expected_episode_ids` as its links. Otherwise
+    /// nothing changes and the result is [`EpisodeLinkReplacement::Skipped`].
+    async fn replace_file_episode_links(
+        &self,
+        file_id: &str,
+        expected_episode_ids: &[String],
+        episode_ids: &[String],
+    ) -> AppResult<EpisodeLinkReplacement>;
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,
@@ -7202,6 +7343,19 @@ pub trait MediaFileRepository: Send + Sync {
     /// (FR-046). Returns whether a row actually changed.
     async fn clear_media_file_content_hashes(&self, file_id: &str) -> AppResult<bool> {
         let _ = file_id;
+        Ok(false)
+    }
+
+    /// Fill the acquisition-time columns of a row a recycle-bin restore
+    /// recreated from what the recycled row recorded. Only columns the row has
+    /// no value for are written, so anything the rescan did establish stands.
+    /// Returns whether the row exists.
+    async fn restore_media_file_acquisition_metadata(
+        &self,
+        file_id: &str,
+        snapshot: &crate::recycle_bin::RecycledMediaRowSnapshot,
+    ) -> AppResult<bool> {
+        let _ = (file_id, snapshot);
         Ok(false)
     }
 
@@ -9406,6 +9560,22 @@ pub struct NotificationManualInteractionPayload {
     pub link: Option<String>,
 }
 
+/// Where a moved title came from and went to; carried by `title_moved`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationTitleMovePayload {
+    pub operation_id: Option<String>,
+    pub operation_type: Option<String>,
+    pub mode: Option<String>,
+    pub source_library_id: Option<String>,
+    pub source_library_name: Option<String>,
+    pub destination_library_id: Option<String>,
+    pub destination_library_name: Option<String>,
+    pub source_path: Option<String>,
+    pub destination_path: Option<String>,
+    pub completed_with_warnings: bool,
+    pub detail: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotificationMediaRequestPayload {
     pub request_id: Option<String>,
@@ -9445,6 +9615,7 @@ pub struct NotificationPayload {
     pub application_update: Option<NotificationApplicationUpdatePayload>,
     pub manual_interaction: Option<NotificationManualInteractionPayload>,
     pub media_request: Option<NotificationMediaRequestPayload>,
+    pub title_move: Option<NotificationTitleMovePayload>,
 }
 
 #[async_trait]
@@ -9786,6 +9957,32 @@ pub struct DownloadCleanupRecord {
     pub attempts: u32,
     pub history_offset: usize,
     pub payload_checkpoint: Option<String>,
+}
+
+/// The catalog references one download submission holds, exactly as stored.
+///
+/// Blank columns read back as `None`; `episode_set_ids` is the submission's
+/// episode-link rows, deduplicated and sorted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadTitleReferences {
+    pub download_id: DownloadId,
+    pub episode_id: Option<String>,
+    pub collection_id: Option<String>,
+    pub series_movie_link_id: Option<String>,
+    pub episode_set_ids: Vec<String>,
+}
+
+/// Hand one download from a merged source title to the destination title.
+///
+/// `references` are already expressed in destination ids. The store applies
+/// it only while the submission still belongs to `source_title_id`, and
+/// rewrites the submission, its episode links and its cleanup row together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadTitleReassignment {
+    pub source_title_id: String,
+    pub destination_title_id: String,
+    pub destination_facet: String,
+    pub references: DownloadTitleReferences,
 }
 
 #[derive(Clone, Debug)]

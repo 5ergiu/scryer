@@ -428,6 +428,13 @@ pub struct IndexerConfigPayload {
     pub rate_limit_seconds: Option<i64>,
     /// Maximum burst size for rate limiting, or null when unspecified.
     pub rate_limit_burst: Option<i64>,
+    /// Sustained query budget per minute, or null when the indexer has none.
+    /// Searches draw on it in arrival order, so an interactive search waits
+    /// behind queued background searches; caps probes and NZB fetches do not
+    /// count against it. The budget bounds when a search is released to run; a
+    /// request already released can still wait for a concurrency permit or the
+    /// host limiter and go out later.
+    pub max_queries_per_minute: Option<i64>,
     /// UTC time until which the indexer is disabled, or null when not disabled.
     pub disabled_until: Option<DateTime<Utc>>,
     /// UTC time until which the indexer is cooling down after asking Scryer to
@@ -771,9 +778,11 @@ pub struct SearchReleasesInput {
     pub title_id: Option<ID>,
     /// Optional series/movie link identity for an episodic movie target.
     pub series_movie_link_id: Option<ID>,
-    /// Optional season label or number to search.
+    /// Optional season label or number to search. An interactive search given a
+    /// season alone searches the whole season; the one-shot `searchReleases`
+    /// query still requires an episode with it.
     pub season: Option<String>,
-    /// Optional episode label or number to search.
+    /// Optional episode label or number to search; requires `season`.
     pub episode: Option<String>,
     /// Optional result limit; the resolver applies its own default and cap.
     pub limit: Option<i32>,
@@ -796,9 +805,9 @@ pub struct IssueInteractiveReleaseCandidateTokenInput {
     pub download_url: String,
     /// Title identity the release is being assigned to.
     pub title_id: ID,
-    /// Optional season label or number for an episode target.
+    /// Optional season label or number; alone it targets the whole season.
     pub season: Option<String>,
-    /// Optional episode label or number for an episode target.
+    /// Optional episode label or number for an episode target; requires `season`.
     pub episode: Option<String>,
 }
 
@@ -1012,6 +1021,13 @@ pub struct CreateIndexerConfigInput {
     pub rate_limit_seconds: Option<i64>,
     /// Maximum requests allowed in one rate-limit burst.
     pub rate_limit_burst: Option<i64>,
+    /// Sustained query budget per minute; at least 1, or null for no budget.
+    /// Searches draw on it in arrival order, so an interactive search waits
+    /// behind queued background searches; caps probes and NZB fetches do not
+    /// count against it. The budget bounds when a search is released to run; a
+    /// request already released can still wait for a concurrency permit or the
+    /// host limiter and go out later.
+    pub max_queries_per_minute: Option<i64>,
     /// Whether the indexer is enabled.
     pub is_enabled: Option<bool>,
     /// Whether interactive searches use this indexer.
@@ -1039,6 +1055,14 @@ pub struct UpdateIndexerConfigInput {
     pub rate_limit_seconds: Option<i64>,
     /// Replacement rate-limit burst; omission preserves it.
     pub rate_limit_burst: Option<i64>,
+    /// Query budget per minute: omission preserves it, null clears it, and a
+    /// value of at least 1 replaces it.
+    /// Searches draw on it in arrival order, so an interactive search waits
+    /// behind queued background searches; caps probes and NZB fetches do not
+    /// count against it. The budget bounds when a search is released to run; a
+    /// request already released can still wait for a concurrency permit or the
+    /// host limiter and go out later.
+    pub max_queries_per_minute: MaybeUndefined<i64>,
     /// Replacement enabled state; omission preserves it.
     pub is_enabled: Option<bool>,
     /// Replacement interactive-search state; omission preserves it.

@@ -23,7 +23,7 @@ pub(super) struct MockBlocklistRepo {
 
 #[async_trait]
 impl ReleaseAttemptRepository for MockReleaseAttemptRepo {
-    async fn record_release_attempt(
+    async fn insert_release_attempt(
         &self,
         title_id: Option<String>,
         source_hint: Option<String>,
@@ -306,10 +306,23 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     pub(super) finished_cleanup:
         Arc<Mutex<Vec<(scryer_domain::download_identity::DownloadId, String, bool)>>>,
     pub(super) deleted_title_ids: Arc<Mutex<Vec<String>>>,
+    /// Every download id passed to `delete_identity_tracked_states_for_downloads`,
+    /// in call order.
+    pub(super) deleted_identity_state_download_ids:
+        Arc<Mutex<Vec<scryer_domain::download_identity::DownloadId>>>,
     pub(super) list_for_title_calls: Arc<Mutex<Vec<String>>>,
+    /// Make `list_for_title` skip submissions with no client item id, as the
+    /// real store does.
+    pub(super) list_for_title_requires_item_id: Arc<std::sync::atomic::AtomicBool>,
     /// Answer `supports_durable_download_cleanup` with `true`, so a caller
     /// that branches on durable support takes the binding-backed path.
     pub(super) durable_cleanup: Arc<std::sync::atomic::AtomicBool>,
+    /// Every `reassign_download_to_title` call that moved a submission, in
+    /// order.
+    pub(super) reassigned: Arc<Mutex<Vec<crate::DownloadTitleReassignment>>>,
+    /// Downloads whose `reassign_download_to_title` fails with an error.
+    pub(super) failing_reassignments:
+        Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
 }
 
 #[derive(Default, Clone)]
@@ -1046,6 +1059,29 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             .await
     }
 
+    async fn delete_identity_tracked_states_for_downloads(
+        &self,
+        download_ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<u32> {
+        self.deleted_identity_state_download_ids
+            .lock()
+            .await
+            .extend_from_slice(download_ids);
+        let mut states = self.identity_states.lock().await;
+        let mut reasons = self.identity_state_reasons.lock().await;
+        let mut details = self.identity_state_details.lock().await;
+        let mut deleted = 0;
+        for download_id in download_ids {
+            let key = format!("download:{}", download_id.to_wire());
+            if states.remove(&key).is_some() {
+                deleted += 1;
+            }
+            reasons.remove(&key);
+            details.remove(&key);
+        }
+        Ok(deleted)
+    }
+
     async fn upsert_identity_tracked_state_for_download_returning_previous(
         &self,
         target: IdentityTrackedStateTarget<'_>,
@@ -1115,12 +1151,88 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             .lock()
             .await
             .push(title_id.to_string());
+        let requires_item_id = self
+            .list_for_title_requires_item_id
+            .load(std::sync::atomic::Ordering::SeqCst);
         let entries = self.store.lock().await;
         Ok(entries
             .iter()
             .filter(|entry| entry.title_id == title_id)
+            .filter(|entry| !requires_item_id || !entry.download_client_item_id.trim().is_empty())
             .cloned()
             .collect())
+    }
+
+    async fn list_title_download_references(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<crate::DownloadTitleReferences>> {
+        let entries = self.store.lock().await;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.title_id == title_id)
+            .map(|entry| {
+                let mut references = crate::DownloadTitleReferences {
+                    download_id: entry.download_id,
+                    episode_id: None,
+                    collection_id: None,
+                    series_movie_link_id: None,
+                    episode_set_ids: Vec::new(),
+                };
+                match &entry.scope {
+                    SubmissionScope::Episode { episode_id } => {
+                        references.episode_id = Some(episode_id.clone());
+                    }
+                    SubmissionScope::EpisodeSet { episode_ids } => {
+                        references.episode_set_ids = episode_ids.clone();
+                    }
+                    SubmissionScope::SeriesMovie {
+                        series_movie_link_id,
+                    } => references.series_movie_link_id = Some(series_movie_link_id.clone()),
+                    SubmissionScope::Collection { collection_id } => {
+                        references.collection_id = Some(collection_id.clone());
+                    }
+                    SubmissionScope::Title | SubmissionScope::Orphan => {}
+                }
+                references
+            })
+            .collect())
+    }
+
+    async fn reassign_download_to_title(
+        &self,
+        reassignment: &crate::DownloadTitleReassignment,
+    ) -> AppResult<bool> {
+        let download_id = reassignment.references.download_id;
+        if self
+            .failing_reassignments
+            .lock()
+            .await
+            .contains(&download_id)
+        {
+            return Err(AppError::Repository(
+                "synthetic reassignment failure".into(),
+            ));
+        }
+        let mut entries = self.store.lock().await;
+        let Some(entry) = entries.iter_mut().find(|entry| {
+            entry.download_id == download_id && entry.title_id == reassignment.source_title_id
+        }) else {
+            return Ok(false);
+        };
+        let references = &reassignment.references;
+        entry.title_id = reassignment.destination_title_id.clone();
+        entry.facet = reassignment.destination_facet.clone();
+        entry.scope = SubmissionScope::from_persisted(
+            &entry.title_id,
+            references.episode_id.clone(),
+            references.collection_id.clone(),
+            references.series_movie_link_id.clone(),
+            Some(references.episode_set_ids.clone()),
+        );
+        drop(entries);
+        self.reassigned.lock().await.push(reassignment.clone());
+        Ok(true)
     }
 
     async fn list_active_unbound_for_title(
@@ -1232,6 +1344,7 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
                 release_size_bytes: None,
                 request_signature: None,
                 scope: SubmissionScope::Orphan,
+                release_listing_json: None,
             });
         }
         Ok(())
@@ -1299,9 +1412,33 @@ pub(super) struct TrackingPendingReleaseRepo {
     /// write that fails partway, which is the only way to reach the retention
     /// recovery branch.
     pub(super) standby_inserts_before_failure: Arc<Mutex<Option<usize>>>,
+    /// Status writes attempted, claims included, in order: `(row id, new
+    /// status)`. Shared by clones.
+    status_writes: Arc<std::sync::Mutex<Vec<(String, PendingReleaseStatus)>>>,
 }
 
 impl TrackingPendingReleaseRepo {
+    pub(super) fn status_writes(&self) -> Vec<(String, PendingReleaseStatus)> {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn reset_status_writes(&self) {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    fn record_status_write(&self, id: &str, status: PendingReleaseStatus) {
+        self.status_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((id.to_string(), status));
+    }
+
     pub(super) async fn fail_delete_for_title(&self, message: &str) {
         *self.delete_error.lock().await = Some(message.to_string());
     }
@@ -1557,6 +1694,7 @@ impl PendingReleaseRepository for TrackingPendingReleaseRepo {
         status: PendingReleaseStatus,
         grabbed_at: Option<&str>,
     ) -> AppResult<()> {
+        self.record_status_write(id, status);
         if let Some(release) = self
             .store
             .lock()
@@ -1693,6 +1831,7 @@ impl PendingReleaseRepository for TrackingPendingReleaseRepo {
         next_status: PendingReleaseStatus,
         grabbed_at: Option<&str>,
     ) -> AppResult<bool> {
+        self.record_status_write(id, next_status);
         let mut store = self.store.lock().await;
         let Some(release) = store.iter_mut().find(|release| release.id == id) else {
             return Ok(false);
@@ -1926,6 +2065,8 @@ pub(super) struct StubDownloadClient {
     pub(super) submitted_download_ids:
         Arc<Mutex<Vec<Option<scryer_domain::download_identity::DownloadId>>>>,
     pub(super) submitted_source_passwords: Arc<Mutex<Vec<Option<String>>>>,
+    /// The source hint each submission fetched from, credentials included.
+    pub(super) submitted_source_hints: Arc<Mutex<Vec<Option<String>>>>,
     pub(super) submitted_info_hash_hints: Arc<Mutex<Vec<Option<String>>>>,
     /// Tracker-declared minimums as they reached the client, so a caller-level
     /// test can prove the clamp inputs survived the path under test.
@@ -2117,6 +2258,10 @@ impl DownloadClient for StubDownloadClient {
             .lock()
             .await
             .push(request.source_password.clone());
+        self.submitted_source_hints
+            .lock()
+            .await
+            .push(request.source_hint.clone());
         self.submitted_info_hash_hints
             .lock()
             .await
