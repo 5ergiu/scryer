@@ -1,16 +1,30 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { EditorState, type Transaction } from "@codemirror/state";
 import { snippet, nextSnippetField } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 import { regoCatalog, regoContracts, regoFields, regoFieldCompletions, regoCompletionContext, normalizeRegoPath, REGO_INDEX_SOURCE, type RegoFamily } from "./rego-assistance.ts";
 import { regoDiagnostics, regoSourceLine } from "./rego-diagnostics.ts";
 
+// The test runs from the source tree in CI and from a compiled copy locally, so
+// the repository root is found by walking up rather than by a fixed depth.
+function repoRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(dir, "crates", "scryer-rules"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error("repository root with crates/scryer-rules not found");
+    dir = parent;
+  }
+  return dir;
+}
+
 for (const family of ["release", "request", "maintenance"] as RegoFamily[]) {
   test(`${family} completions use the exact backend contract`, () => {
     const file = family === "release" ? "rule" : family;
-    const backend = JSON.parse(readFileSync(new URL(`../../../../../../crates/scryer-rules/${file}-input-contract.json`, import.meta.url), "utf8"));
+    const backend = JSON.parse(readFileSync(join(repoRoot(), "crates", "scryer-rules", `${file}-input-contract.json`), "utf8"));
     assert.deepEqual(regoContracts[family], backend);
     const fields = regoFields(family);
     for (const section of backend.sections) for (const field of section.fields) {
