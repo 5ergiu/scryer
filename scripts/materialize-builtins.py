@@ -740,8 +740,11 @@ def main() -> int:
                 fail(
                     f"{plugin_id} descriptor does not match the requested catalog release"
                 )
-            descriptor["sdk_version"] = ".".join(map(str, sdk_version))
-            descriptor["sdk_constraint"] = legacy_sdk_constraint(sdk_version)
+            # Keep the descriptor exactly as the guest reports it. The host
+            # compares the initialized component against this JSON on every
+            # boot, and the release was already selected as compatible with the
+            # current SDK line above; restamping the SDK fields here made the
+            # two disagree whenever the host SDK moved past the plugin's build.
             destination = output_dir / f"{stem}.wasm.zst"
             shutil.copyfile(compressed, destination)
             descriptor_path = output_dir / f"{stem}.descriptor.json"

@@ -13,18 +13,19 @@ pub(super) fn rename_exclusive(source: &Path, destination: &Path) -> io::Result<
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in archive path"))?;
     #[cfg(target_os = "linux")]
     let result = {
-        unsafe extern "C" {
-            fn renameat2(
-                old_dir: i32,
-                old: *const std::ffi::c_char,
-                new_dir: i32,
-                new: *const std::ffi::c_char,
-                flags: u32,
-            ) -> i32;
-        }
+        // The raw syscall: musl exports no `renameat2` wrapper, and the release
+        // binaries link statically against musl.
         // SAFETY: both C strings are NUL-terminated and live for this call.
-        // AT_FDCWD = -100; RENAME_NOREPLACE = 1.
-        unsafe { renameat2(-100, source.as_ptr(), -100, destination.as_ptr(), 1) }
+        unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as i32
+        }
     };
     #[cfg(target_os = "macos")]
     let result = {
