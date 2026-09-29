@@ -13293,11 +13293,12 @@ async fn the_background_cycle_skips_a_title_an_interactive_walk_holds() {
     );
 }
 
-/// The reverse direction: an interactive walk waits for a cycle that already
-/// holds the title, rather than racing it. An operator's request is worth the
-/// short wait; two walkers arbitrating the same episodes concurrently is not.
+/// The reverse direction: an interactive walk waits for another operator's
+/// walk that already holds the title, rather than racing it. Two walkers
+/// arbitrating the same episodes concurrently is never right, and an operator's
+/// walk is never told to yield.
 #[tokio::test]
-async fn an_interactive_walk_waits_for_a_cycle_that_holds_the_title() {
+async fn an_interactive_walk_waits_for_an_operator_walk_that_holds_the_title() {
     let (app, title, indexer_client) = seed_recent_failed_season_pack_fixture().await;
 
     let held = app
@@ -13348,6 +13349,127 @@ async fn an_interactive_walk_waits_for_a_cycle_that_holds_the_title() {
         .expect("interactive title walk");
     assert!(stats.stages > 0, "the walk ran its stages after waiting");
     assert!(!indexer_client.searches.lock().await.is_empty());
+}
+
+/// A background pass that holds the title is told to hand it over: the
+/// operator's walk cancels the holder's yield token as it starts waiting, and
+/// runs as soon as the holder lets go. Adding a title wakes the cycle, so the
+/// operator's "search this season" click lands right behind a background walk
+/// that trickles for minutes; without the yield the job would sit behind all
+/// of it.
+#[tokio::test]
+async fn an_interactive_walk_makes_a_background_holder_yield_the_title() {
+    let (app, title, indexer_client) = seed_recent_failed_season_pack_fixture().await;
+
+    let (held, yield_token) = app
+        .runtime
+        .acquisition
+        .title_walk_locks
+        .try_acquire_background(&title.id)
+        .await
+        .expect("a free title is taken by the cycle");
+    let (labels_tx, mut labels) = tokio::sync::mpsc::unbounded_channel();
+    let walk = tokio::spawn({
+        let app = app.clone();
+        let title_id = title.id.clone();
+        async move {
+            crate::acquisition::workflow::run_interactive_title_acquisition_walk(
+                &app,
+                &title_id,
+                None,
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                move |progress| {
+                    let _ = labels_tx.send(progress.stage_label);
+                },
+            )
+            .await
+        }
+    });
+
+    loop {
+        let label = within_deadline("the walk's stage label", labels.recv())
+            .await
+            .expect("the walk reports it is waiting before it finishes");
+        if label.contains("waiting for") {
+            break;
+        }
+    }
+    within_deadline("the background holder to be told to yield", async {
+        yield_token.cancelled().await;
+        Some(())
+    })
+    .await
+    .expect("the operator's walk cancels the holder's token");
+    assert!(
+        indexer_client.searches.lock().await.is_empty(),
+        "the interactive walk waits for the holder to let go rather than racing it"
+    );
+    assert!(
+        app.runtime
+            .acquisition
+            .title_walk_locks
+            .try_acquire_background(&title.id)
+            .await
+            .is_none(),
+        "the title stays held while the cycle winds its walk down"
+    );
+
+    drop(held);
+    let stats = within_deadline("the walk to run once the holder lets go", walk)
+        .await
+        .expect("walk task")
+        .expect("interactive title walk");
+    assert!(
+        stats.stages > 0,
+        "the walk ran its stages after the hand-over"
+    );
+    assert!(!indexer_client.searches.lock().await.is_empty());
+}
+
+/// The lock hands a yielded title to the waiting operator, not to the next
+/// background try-lock: a cycle that comes back for the title while the
+/// operator is queued on it is skipped, exactly as it would be for a title the
+/// operator already holds.
+#[tokio::test]
+async fn a_yielded_title_goes_to_the_queued_operator_before_the_next_cycle() {
+    let (app, title, _) = seed_recent_failed_season_pack_fixture().await;
+    let locks = app.runtime.acquisition.title_walk_locks.clone();
+
+    let (held, yield_token) = locks
+        .try_acquire_background(&title.id)
+        .await
+        .expect("a free title is taken by the cycle");
+    let operator = tokio::spawn({
+        let locks = locks.clone();
+        let title_id = title.id.clone();
+        async move { locks.acquire(&title_id).await }
+    });
+    within_deadline("the holder to be told to yield", async {
+        yield_token.cancelled().await;
+        Some(())
+    })
+    .await
+    .expect("the queued operator cancels the holder's token");
+
+    drop(held);
+    let operator_guard = within_deadline("the operator to take the lock", operator)
+        .await
+        .expect("operator task");
+    assert!(
+        locks.try_acquire_background(&title.id).await.is_none(),
+        "the cycle cannot take a title the operator holds"
+    );
+
+    drop(operator_guard);
+    let (_held, next_yield_token) = locks
+        .try_acquire_background(&title.id)
+        .await
+        .expect("the cycle takes the title back once the operator is done");
+    assert!(
+        !next_yield_token.is_cancelled(),
+        "a new background holder starts with a fresh yield token"
+    );
 }
 
 /// A cancelled job stops the walk between work items instead of running the
