@@ -1,5 +1,5 @@
 query ResolveTitles($refs: [TitleRefInput!]!, $kind: String!, $createMissing: Boolean!) {
-  resolveTitles(refs: $refs, kind: $kind, createMissing: $createMissing) {
+  resolveTitles(refs: $refs, kind: $kind, createMissing: $createMissing, clientCapabilities: [TMDB_PRIMARY_SERIES]) {
     ref_index
     resolved
     title_id

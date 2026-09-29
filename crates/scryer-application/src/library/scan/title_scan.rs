@@ -3,7 +3,8 @@ use crate::domain_events::DomainEventActor;
 use crate::library::movie_scan_scope::MovieScanScope;
 use crate::library_filename_parser::{
     LibraryFilenameExistingRecord, LibraryFilenameFallbackPolicy, LibraryFilenameParseInput,
-    LibraryFilenameParseMode, parse_library_filename,
+    LibraryFilenameParseMode, LibraryFilenameParseStrategy, LibraryFilenameTitleIndex,
+    parse_library_filename_with_index,
 };
 use crate::library_scan_unmatched::{
     IgnoredLibraryScanItemArgs, LIBRARY_SCAN_SKIPPED_FILE_METADATA_UNREADABLE,
@@ -28,7 +29,7 @@ pub(super) async fn title_requires_scan_hydration(
     let hydratable = match title.facet {
         MediaFacet::Movie => crate::catalog_workflow::movie_title_ref(title).is_some(),
         MediaFacet::Series | MediaFacet::Anime => {
-            crate::catalog_workflow::extract_tvdb_id(title).is_some()
+            crate::catalog_workflow::series_title_ref(title).is_some()
         }
     };
     if !hydratable {
@@ -2499,28 +2500,35 @@ impl AppUseCase {
             .media_files
             .list_media_files_for_title(&title.id)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                // Without the stored rows every file would look new: the scan
+                // would re-insert them and lose what it knows about them, so
+                // the title fails this scan instead.
+                warn!(
+                    title_id = %title.id,
+                    error = %error,
+                    "title scan could not read the title's stored media files"
+                );
+                error
+            })?;
         let collections = self
             .services
             .catalog
             .shows
             .list_collections_for_title(&title.id)
-            .await
-            .unwrap_or_default();
+            .await;
         let series_movie_links = self
             .services
             .catalog
             .shows
             .list_series_movie_links_for_title(&title.id)
-            .await
-            .unwrap_or_default();
+            .await;
         let title_episodes = self
             .services
             .catalog
             .shows
             .list_episodes_for_title(&title.id)
-            .await
-            .unwrap_or_default();
+            .await;
         // The release numbering this title's groups use, read once per title
         // per scan. `None` for every title the catalog stores no bridge for.
         let anime_numbering_bridge = self
@@ -2528,8 +2536,28 @@ impl AppUseCase {
             .catalog
             .shows
             .get_anime_numbering_bridge(&title.id)
-            .await
-            .unwrap_or_default();
+            .await;
+        // Replacing stored links trusts the parse completely, so it needs the
+        // whole catalog context. A failed read degrades to an empty context,
+        // which the additive linking path tolerates but a replacement must
+        // not act on: a missing bridge or collection list would move every
+        // file of the title onto the wrong episode.
+        let catalog_context_complete = collections.is_ok()
+            && series_movie_links.is_ok()
+            && title_episodes.is_ok()
+            && anime_numbering_bridge.is_ok();
+        if !catalog_context_complete {
+            warn!(
+                title_id = %title.id,
+                title_name = %title.name,
+                "title scan could not load the full catalog context; \
+                 stored episode links will not be replaced this scan"
+            );
+        }
+        let collections = collections.unwrap_or_default();
+        let series_movie_links = series_movie_links.unwrap_or_default();
+        let title_episodes = title_episodes.unwrap_or_default();
+        let anime_numbering_bridge = anime_numbering_bridge.unwrap_or_default();
         db_elapsed = db_elapsed.saturating_add(db_started.elapsed());
         debug!(
             title_id = %title.id,
@@ -2549,6 +2577,10 @@ impl AppUseCase {
 
         let mut existing_records_by_path: HashMap<String, TitleMediaFile> = HashMap::new();
         let mut episode_links: HashSet<(String, String)> = HashSet::new();
+        // Every stored episode link per file. The title listing returns one
+        // row per link, so this is the complete set without another read.
+        let mut stored_episode_ids_by_file: HashMap<String, std::collections::BTreeSet<String>> =
+            HashMap::new();
         let mut role_normalization_episode_ids = HashSet::new();
 
         for file in &existing_files {
@@ -2557,6 +2589,10 @@ impl AppUseCase {
                 .or_insert_with(|| file.clone());
             if let Some(episode_id) = file.episode_id.as_ref() {
                 episode_links.insert((file.id.clone(), episode_id.clone()));
+                stored_episode_ids_by_file
+                    .entry(file.id.clone())
+                    .or_default()
+                    .insert(episode_id.clone());
             }
         }
         let mut remaining_existing_paths = existing_records_by_path
@@ -2608,6 +2644,10 @@ impl AppUseCase {
             }
         };
 
+        // Every filename parse below shares this title's catalog, so the
+        // lookups derived from it are built once, on the first parse that
+        // needs them.
+        let title_filename_index = LibraryFilenameTitleIndex::default();
         let mut summary = LibraryScanSummary::default();
         let mut layout_summary = TitleScanLayoutSummary::default();
         let mut seen_paths = HashSet::new();
@@ -2708,7 +2748,7 @@ impl AppUseCase {
                     .is_some_and(|existing| title_media_file_matches_snapshot(existing, &snapshot));
 
                 let matching_started = Instant::now();
-                let filename_parse = parse_library_filename(&LibraryFilenameParseInput {
+                let parse_input = LibraryFilenameParseInput {
                     path: &source_path,
                     display_name: Some(file.display_name.as_str()),
                     library_root: None,
@@ -2728,9 +2768,54 @@ impl AppUseCase {
                     } else {
                         LibraryFilenameFallbackPolicy::WhenNeeded
                     },
-                });
-                matching_elapsed = matching_elapsed.saturating_add(matching_started.elapsed());
+                };
+                let mut filename_parse =
+                    parse_library_filename_with_index(&parse_input, Some(&title_filename_index));
                 let is_disc_image = scryer_domain::is_disc_image(&source_path);
+                let stored_episode_ids = existing
+                    .and_then(|existing| stored_episode_ids_by_file.get(&existing.id))
+                    .filter(|_| !is_disc_image);
+                let mut replaced_episode_ids = None;
+                if catalog_context_complete
+                    && let (Some(existing), Some(stored_episode_ids)) =
+                        (existing, stored_episode_ids)
+                    && episode_links_may_be_reconciled(existing)
+                {
+                    // The stored link short-circuits the parse, so re-derive
+                    // it from the filename alone. This is in-memory work
+                    // against the title's shared index; no store read is added.
+                    let fresh_parse = if filename_parse.strategy
+                        == LibraryFilenameParseStrategy::ExistingRecord
+                    {
+                        parse_library_filename_with_index(
+                            &LibraryFilenameParseInput {
+                                existing_record: None,
+                                ..parse_input.clone()
+                            },
+                            Some(&title_filename_index),
+                        )
+                    } else {
+                        filename_parse.clone()
+                    };
+                    if let Some(fresh_episodes) = fresh_parse.confident_episode_target()
+                        && fresh_numbering_is_trustworthy(
+                            &title.facet,
+                            anime_numbering_bridge.is_some(),
+                            &fresh_parse,
+                        )
+                    {
+                        let fresh_episode_ids = fresh_episodes
+                            .iter()
+                            .map(|episode| episode.id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        if &fresh_episode_ids != stored_episode_ids {
+                            replaced_episode_ids =
+                                Some(stored_episode_ids.iter().cloned().collect::<Vec<_>>());
+                            filename_parse = fresh_parse;
+                        }
+                    }
+                }
+                matching_elapsed = matching_elapsed.saturating_add(matching_started.elapsed());
                 let target_episodes = if is_disc_image {
                     Vec::new()
                 } else {
@@ -2802,6 +2887,10 @@ impl AppUseCase {
                 for episode in &target_episodes {
                     role_normalization_episode_ids.insert(episode.id.clone());
                 }
+                // An episode losing this file may need another file promoted.
+                for episode_id in replaced_episode_ids.iter().flatten() {
+                    role_normalization_episode_ids.insert(episode_id.clone());
+                }
                 let configured_folder_name =
                     crate::library::workflow::scan_title_files::infer_target_season_number(
                         &target_episodes,
@@ -2839,6 +2928,7 @@ impl AppUseCase {
                         should_invalidate_full_hashes: title_media_file_quick_proof_changed(
                             existing, &snapshot,
                         ),
+                        replaced_episode_ids,
                     }
                 } else {
                     PlannedTitleScanRecord::New
@@ -2851,6 +2941,7 @@ impl AppUseCase {
                     series_movie_link_id,
                     snapshot,
                     record,
+                    original_file_path: None,
                 };
 
                 let should_analyze = match &plan.record {
@@ -3119,6 +3210,54 @@ impl AppUseCase {
     }
 }
 
+/// Whether a scan may replace this tracked file's episode links with the ones
+/// its filename names. Every import flow records the file's source path, and a
+/// file that arrived through an import (including a manual import with a
+/// hand-picked episode) may deliberately disagree with its filename, so only
+/// files the scan itself discovered qualify. Files linked to a series movie
+/// keep their links too.
+/// Whether a fresh parse's numbering can be trusted to move stored links.
+///
+/// Anime releases are often named in the community's per-cour seasons while
+/// the catalog follows the official order; the numbering bridge translates
+/// between them. When an anime title has no bridge (SMG stopped supplying one,
+/// or never did), a season other than the first may be community numbering
+/// that happens to name a real official episode, so only files that name no
+/// season or the first season (absolute numbering, `S01Exx`) are trusted.
+fn fresh_numbering_is_trustworthy(
+    facet: &MediaFacet,
+    has_anime_numbering_bridge: bool,
+    fresh_parse: &crate::library_filename_parser::LibraryFilenameParse,
+) -> bool {
+    if *facet != MediaFacet::Anime || has_anime_numbering_bridge {
+        return true;
+    }
+    let Some(identity) = fresh_parse.episode_identity.as_ref() else {
+        return false;
+    };
+    matches!(identity.season, None | Some(1))
+        && identity.season_numbers.iter().all(|season| *season == 1)
+}
+
+/// Whether a scan may replace the stored episode links of a file it already
+/// tracks when the filename names a different episode set.
+///
+/// Relinking is switched off: files bound by hand before bindings recorded an
+/// `original_file_path` are indistinguishable from links the scan placed, so
+/// relinking would overwrite a person's choice. Flip this once hand-made
+/// bindings carry a marker the scan can see.
+const SCAN_RELINK_ENABLED: bool = false;
+
+fn episode_links_may_be_reconciled(existing: &TitleMediaFile) -> bool {
+    SCAN_RELINK_ENABLED && episode_links_look_scan_placed(existing)
+}
+
+/// An import or pending bind carries its original path and a series movie
+/// file carries its movie link; anything else looks like a scan placed it.
+fn episode_links_look_scan_placed(existing: &TitleMediaFile) -> bool {
+    existing.original_file_path.is_none() && existing.series_movie_link_ids.is_empty()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LibraryScanTitleWalkRequest {
     pub(crate) work: LibraryScanTitleWork,
@@ -3132,6 +3271,7 @@ pub(crate) struct LibraryScanTitleWalkRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library_filename_parser::parse_library_filename;
     use chrono::Utc;
     use scryer_domain::{Episode, ExternalId, MediaFacet, Title};
     use std::path::Path;
@@ -3195,8 +3335,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             monitored: true,
             created_at: Utc::now(),
         }
@@ -3420,5 +3562,33 @@ mod tests {
         let mut bigger = ranked("bigger", 1, 400);
         bigger.size_bytes = 5_000;
         assert_eq!(elect(vec![ranked("smaller", 1, 400), bigger]), "bigger");
+    }
+
+    /// An import or a pending bind carries its original path and a series
+    /// movie file carries its movie link, so only the rest look scan-placed.
+    /// Relinking stays off for every file, including those.
+    #[test]
+    fn no_tracked_file_may_have_its_links_reconciled_while_relink_is_off() {
+        let scanned = TitleMediaFile {
+            id: "file-scanned".into(),
+            file_path: "/library/Relay Show/Season 01/Relay Show - S01E01.mkv".into(),
+            ..TitleMediaFile::default()
+        };
+        assert!(episode_links_look_scan_placed(&scanned));
+        assert!(!episode_links_may_be_reconciled(&scanned));
+
+        let imported = TitleMediaFile {
+            original_file_path: Some("/downloads/Relay Show - S01E01.mkv".into()),
+            ..scanned.clone()
+        };
+        assert!(!episode_links_look_scan_placed(&imported));
+        assert!(!episode_links_may_be_reconciled(&imported));
+
+        let series_movie = TitleMediaFile {
+            series_movie_link_ids: vec!["link-relay".into()],
+            ..scanned.clone()
+        };
+        assert!(!episode_links_look_scan_placed(&series_movie));
+        assert!(!episode_links_may_be_reconciled(&series_movie));
     }
 }

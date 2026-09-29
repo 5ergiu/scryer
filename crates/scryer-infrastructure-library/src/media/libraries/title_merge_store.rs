@@ -55,9 +55,14 @@ const LIVE_TRACKED_STATES: &str = "'downloading', 'import_pending', 'importing',
 /// Direct source-title rows that retire with the source, counted once for the
 /// preview's single "source records dropped" figure. Media files and history
 /// are not here: they are the two things the merge carries.
+///
+/// `download_submissions` is not here either. The source title's downloads
+/// are handed to the destination after this transaction commits, by the
+/// retirement step that also owns their client bindings, tracked state and
+/// pending cleanup; a download it cannot hand over retires there, exactly as
+/// a deleted title's does.
 const DROPPED_TITLE_TABLES: &[(&str, &str)] = &[
     ("wanted_items", "title_id"),
-    ("download_submissions", "title_id"),
     ("download_import_artifacts", "title_id"),
     ("subtitle_downloads", "title_id"),
     ("workflow_operations", "title_id"),

@@ -25,7 +25,6 @@ pub const SEARCH_TVDB_RICH_QUERY: &str = include_str!("metadata_gateway/search_t
 pub const SEARCH_TVDB_MULTI_QUERY: &str =
     include_str!("metadata_gateway/search_tvdb_multi.graphql");
 pub const GET_MOVIE_QUERY: &str = include_str!("metadata_gateway/get_movie.graphql");
-pub const GET_SERIES_QUERY: &str = include_str!("metadata_gateway/get_series.graphql");
 pub const METADATA_BULK_QUERY: &str = include_str!("metadata_gateway/metadata_bulk.graphql");
 pub const TITLES_QUERY: &str = include_str!("metadata_gateway/titles.graphql");
 pub const RESOLVE_TITLES_QUERY: &str = include_str!("metadata_gateway/resolve_titles.graphql");
@@ -50,3 +49,8 @@ pub const DISCOVERY_CONTEXT_CHANGES_QUERY: &str =
     include_str!("metadata_gateway/discovery_context_changes.graphql");
 pub const ACKNOWLEDGE_DISCOVERY_CONTEXT_SNAPSHOT_QUERY: &str =
     include_str!("metadata_gateway/acknowledge_discovery_context_snapshot.graphql");
+pub const LIST_CHART_CATALOG_QUERY: &str =
+    include_str!("metadata_gateway/list_chart_catalog.graphql");
+pub const LIST_CHART_ITEMS_QUERY: &str = include_str!("metadata_gateway/list_chart_items.graphql");
+pub const LIST_IMDB_USER_LIST_QUERY: &str =
+    include_str!("metadata_gateway/list_imdb_user_list.graphql");

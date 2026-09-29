@@ -12,6 +12,7 @@ import {
   startInteractiveReleaseSearchMutation,
 } from "./mutations";
 import { interactiveReleaseSearchQuery } from "./queries";
+import type { InteractiveReleaseSearchInput } from "./release-search-input";
 import { isAbortError, makeAbortableFetch } from "./urql-client";
 
 export type InteractiveSearchIndexerProgress = {
@@ -41,33 +42,23 @@ export type InteractiveSearchProgress = {
   releases: Release[];
   indexers: InteractiveSearchIndexerProgress[];
   state: "RUNNING" | "COMPLETED" | "CANCELLED";
+  startedAt?: string;
+  completedAt?: string | null;
 };
 
-/** Search kinds a title-less query subject may take (spec 0002 D2). */
-export type InteractiveSearchKind = "MOVIE" | "SERIES" | "ANIME" | "RAW";
-
-/**
- * The job accepts exactly one subject: a catalog title (`titleId`, optionally
- * narrowed to a season/episode) or a raw operator query (`query` + `kind`).
- * `indexerIds` and `categories` restrict either subject.
- */
-export type InteractiveReleaseSearchInput = {
-  titleId?: string;
-  seriesMovieLinkId?: string;
-  season?: string;
-  episode?: string;
-  query?: string;
-  kind?: InteractiveSearchKind;
-  indexerIds?: string[];
-  categories?: string[];
-  limit?: number;
-};
-
+export {
+  titleReleaseSearchInput,
+  type InteractiveReleaseSearchInput,
+  type InteractiveSearchKind,
+  type TitleReleaseSearchScope,
+} from "./release-search-input";
 type InteractiveReleaseSearchJobPayload = {
   id: string;
   state: InteractiveSearchProgress["state"];
   results: Release[] | null;
   indexers: InteractiveSearchIndexerProgress[] | null;
+  startedAt?: string;
+  completedAt?: string | null;
 };
 
 const POLL_INTERVAL_MS = 1_000;
@@ -122,6 +113,8 @@ export async function runIterativeReleaseSearch(
       releases,
       indexers: job.indexers ?? [],
       state: job.state,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
     });
   };
 

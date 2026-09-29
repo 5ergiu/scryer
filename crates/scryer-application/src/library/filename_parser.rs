@@ -125,6 +125,10 @@ pub(crate) enum LibraryFilenameTarget {
     Episodes {
         episode_identity: crate::ParsedEpisodeMetadata,
         episodes: Vec<Episode>,
+        /// Every episode key the filename names resolved, each to a single
+        /// catalog episode. A partial range or a key the catalog holds twice
+        /// still places the file, but never confidently.
+        exact: bool,
     },
     SeriesMovie(Box<LibraryFilenameSeriesMovieTarget>),
     Unmatched {
@@ -168,6 +172,92 @@ impl LibraryFilenameParse {
             _ => None,
         }
     }
+
+    /// The episodes this parse places the file on when it is confident enough
+    /// to overrule the links a scan stored earlier.
+    ///
+    /// Only a fresh filename parse qualifies: an `ExistingRecord` parse echoes
+    /// the stored link back, and title-only strategies never resolve episodes.
+    /// Every refusal stays a refusal (anime numbering that is ambiguous or an
+    /// unresolved pack, ambiguous or linked series movies, failed lookups), and
+    /// so does a parse that only names a season, part of a season, several
+    /// seasons, season extras or a whole series, because a single file
+    /// resolved from such a token is a guess. An explicit episode range
+    /// (`S01E01E02`, `- 01-02`) names its episodes and qualifies; that is how
+    /// multi-episode files are written. A special (OVA, movie, extra)
+    /// qualifies only when it resolved to
+    /// season-zero episodes; the numbering of a special named anywhere else is
+    /// not trustworthy enough to move a link. The resolution must also be
+    /// exact: a range the catalog only partly holds, a key two catalog
+    /// episodes share, or an air date several episodes share without a part
+    /// number never qualifies.
+    pub(crate) fn confident_episode_target(&self) -> Option<&[Episode]> {
+        if self.strategy != LibraryFilenameParseStrategy::ReleaseParserFallback {
+            return None;
+        }
+        let LibraryFilenameTarget::Episodes {
+            episode_identity,
+            episodes,
+            exact,
+        } = &self.target
+        else {
+            return None;
+        };
+        if !exact {
+            return None;
+        }
+        let names_concrete_episodes = !episode_identity.episode_numbers.is_empty()
+            || !episode_identity.absolute_episode_numbers.is_empty()
+            || episode_identity.absolute_episode.is_some()
+            || !episode_identity.special_absolute_episode_numbers.is_empty()
+            || episode_identity.air_date.is_some();
+        let names_a_pack = episode_identity.full_season
+            || episode_identity.is_partial_season
+            || episode_identity.is_multi_season
+            || episode_identity.is_series_pack
+            || episode_identity.is_season_extra
+            || episode_identity.release_type == crate::ParsedEpisodeReleaseType::SeasonPack;
+        let special_outside_season_zero = episode_identity.special_kind.is_some()
+            && !episodes
+                .iter()
+                .all(|episode| episode.season_number.as_deref() == Some("0"));
+        (names_concrete_episodes
+            && !names_a_pack
+            && !special_outside_season_zero
+            && !episodes.is_empty())
+        .then_some(episodes.as_slice())
+    }
+}
+
+/// Catalog lookups every filename parse of one title derives before it looks
+/// at the filename: the release parse context and the episode lookup (with the
+/// title's absolute scale). A scan hands one index to every parse of a title so
+/// they are built at most once per title instead of once per file. Built lazily
+/// on the first parse that needs them.
+///
+/// Only share an index between parses whose title, facet, collections, series
+/// movie links and episodes are the same.
+#[derive(Default)]
+pub(crate) struct LibraryFilenameTitleIndex {
+    prepared: std::sync::OnceLock<PreparedLibraryFilenameTitleIndex>,
+}
+
+struct PreparedLibraryFilenameTitleIndex {
+    release_context: Option<crate::ReleaseParseContext>,
+    episode_lookup: EpisodeLookup,
+}
+
+impl LibraryFilenameTitleIndex {
+    fn prepared(
+        &self,
+        input: &LibraryFilenameParseInput<'_>,
+    ) -> &PreparedLibraryFilenameTitleIndex {
+        self.prepared
+            .get_or_init(|| PreparedLibraryFilenameTitleIndex {
+                release_context: build_release_parse_context_for_library_filename(input),
+                episode_lookup: build_episode_lookup(input.collections, input.episodes),
+            })
+    }
 }
 
 struct QueryEvidenceBuild {
@@ -177,6 +267,15 @@ struct QueryEvidenceBuild {
 
 pub(crate) fn parse_library_filename(
     input: &LibraryFilenameParseInput<'_>,
+) -> LibraryFilenameParse {
+    parse_library_filename_with_index(input, None)
+}
+
+/// [`parse_library_filename`], reusing `title_index` for the title's catalog
+/// lookups instead of building them for this one parse.
+pub(crate) fn parse_library_filename_with_index(
+    input: &LibraryFilenameParseInput<'_>,
+    title_index: Option<&LibraryFilenameTitleIndex>,
 ) -> LibraryFilenameParse {
     let allow_title_release_fallback = input.mode == LibraryFilenameParseMode::TitleOnly
         && input.fallback_policy != LibraryFilenameFallbackPolicy::Never;
@@ -224,13 +323,14 @@ pub(crate) fn parse_library_filename(
             target: LibraryFilenameTarget::Episodes {
                 episode_identity,
                 episodes: vec![episode.clone()],
+                exact: true,
             },
             strategy: LibraryFilenameParseStrategy::ExistingRecord,
             release_fallback_used: false,
         };
     }
 
-    let mut fallback = parse_release_fallback(input, &raw_name);
+    let mut fallback = parse_release_fallback(input, &raw_name, title_index);
     release_fallback_used = true;
     // A library file may be named in the community's per-cour numbering while
     // the catalog follows TVDB's official order. Translate before resolving so
@@ -315,12 +415,16 @@ pub(crate) fn parse_library_filename(
         }
 
         let season_str = episode_identity.season.unwrap_or(1).to_string();
-        let episodes = resolve_episodes_from_identity_with_season(
-            &episode_identity,
-            &season_str,
-            input.collections,
-            input.episodes,
-        );
+        let owned_lookup;
+        let lookup = match title_index {
+            Some(title_index) => &title_index.prepared(input).episode_lookup,
+            None => {
+                owned_lookup = build_episode_lookup(input.collections, input.episodes);
+                &owned_lookup
+            }
+        };
+        let ResolvedEpisodes { episodes, exact } =
+            resolve_episodes_from_identity_with_season(&episode_identity, &season_str, lookup);
         if !episodes.is_empty() {
             return LibraryFilenameParse {
                 query_evidence: query_build.evidence,
@@ -329,6 +433,7 @@ pub(crate) fn parse_library_filename(
                 target: LibraryFilenameTarget::Episodes {
                     episode_identity,
                     episodes,
+                    exact,
                 },
                 strategy: LibraryFilenameParseStrategy::ReleaseParserFallback,
                 release_fallback_used,
@@ -603,28 +708,72 @@ fn strip_generated_restore_suffix(raw_name: &str) -> &str {
     raw_name
 }
 
+/// Episodes one filename identity resolves to, and whether that resolution is
+/// exact: every lane that contributed episodes resolved each key the filename
+/// names, and each of those keys named exactly one catalog episode.
+struct ResolvedEpisodes {
+    episodes: Vec<Episode>,
+    exact: bool,
+}
+
+/// How one resolution lane went: the distinct keys the filename named, how
+/// many of them the catalog resolved, and whether any resolved key was shared
+/// by more than one catalog episode.
+#[derive(Default)]
+struct LaneOutcome {
+    named: usize,
+    resolved: usize,
+    ambiguous: bool,
+}
+
+impl LaneOutcome {
+    /// A lane that contributed nothing leaves exactness to the lanes that
+    /// did; one that contributed must have resolved every key it named, each
+    /// to a single episode.
+    fn keeps_resolution_exact(&self) -> bool {
+        self.resolved == 0 || (self.resolved == self.named && !self.ambiguous)
+    }
+}
+
+fn distinct_numbers(numbers: &[u32]) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    numbers
+        .iter()
+        .copied()
+        .filter(|number| seen.insert(*number))
+        .collect()
+}
+
 fn resolve_episodes_from_identity_with_season(
     ep_meta: &crate::ParsedEpisodeMetadata,
     season_str: &str,
-    collections: &[Collection],
-    episodes: &[Episode],
-) -> Vec<Episode> {
-    let lookup = build_episode_lookup(collections, episodes);
+    lookup: &EpisodeLookup,
+) -> ResolvedEpisodes {
     let mut resolved = Vec::new();
     let mut seen = HashSet::new();
+    let mut lanes = Vec::new();
     let target_season = crate::parsed_episode_lookup_season(ep_meta, season_str);
 
     if let Some(air_date) = ep_meta.air_date {
+        let mut lane = LaneOutcome {
+            named: 1,
+            ..LaneOutcome::default()
+        };
         let air_date_str = air_date.format("%Y-%m-%d").to_string();
         if let Some(matches) = lookup.by_air_date.get(&air_date_str) {
             if let Some(part) = ep_meta.daily_part {
                 let part_index = part.saturating_sub(1) as usize;
-                if let Some(episode) = matches.get(part_index)
-                    && seen.insert(episode.id.clone())
-                {
-                    resolved.push(episode.clone());
+                if let Some(episode) = matches.get(part_index) {
+                    lane.resolved = 1;
+                    if seen.insert(episode.id.clone()) {
+                        resolved.push(episode.clone());
+                    }
                 }
-            } else {
+            } else if !matches.is_empty() {
+                // A date shared by several episodes, with no part to pick
+                // one, names all of them only by guess.
+                lane.resolved = 1;
+                lane.ambiguous = matches.len() > 1;
                 for episode in matches {
                     if seen.insert(episode.id.clone()) {
                         resolved.push(episode.clone());
@@ -632,16 +781,25 @@ fn resolve_episodes_from_identity_with_season(
                 }
             }
         }
+        lanes.push(lane);
     }
 
-    for episode_number in &ep_meta.episode_numbers {
+    let episode_numbers = distinct_numbers(&ep_meta.episode_numbers);
+    let mut episode_lane = LaneOutcome {
+        named: episode_numbers.len(),
+        ..LaneOutcome::default()
+    };
+    for episode_number in &episode_numbers {
         let key = (target_season.clone(), episode_number.to_string());
-        if let Some(episode) = lookup.by_collection_episode.get(&key)
-            && seen.insert(episode.id.clone())
-        {
-            resolved.push(episode.clone());
+        if let Some(episode) = lookup.by_collection_episode.get(&key) {
+            episode_lane.resolved += 1;
+            episode_lane.ambiguous |= lookup.ambiguous_collection_episodes.contains(&key);
+            if seen.insert(episode.id.clone()) {
+                resolved.push(episode.clone());
+            }
         }
     }
+    lanes.push(episode_lane);
 
     if resolved.is_empty()
         && ep_meta.season.is_some()
@@ -659,37 +817,56 @@ fn resolve_episodes_from_identity_with_season(
     }
 
     if resolved.is_empty() && !ep_meta.special_absolute_episode_numbers.is_empty() {
-        for special_number in &ep_meta.special_absolute_episode_numbers {
+        let special_numbers = distinct_numbers(&ep_meta.special_absolute_episode_numbers);
+        let mut special_lane = LaneOutcome {
+            named: special_numbers.len(),
+            ..LaneOutcome::default()
+        };
+        for special_number in &special_numbers {
             let key = ("0".to_string(), special_number.to_string());
-            if let Some(episode) = lookup.by_collection_episode.get(&key)
-                && seen.insert(episode.id.clone())
-            {
-                resolved.push(episode.clone());
+            if let Some(episode) = lookup.by_collection_episode.get(&key) {
+                special_lane.resolved += 1;
+                special_lane.ambiguous |= lookup.ambiguous_collection_episodes.contains(&key);
+                if seen.insert(episode.id.clone()) {
+                    resolved.push(episode.clone());
+                }
             }
         }
+        lanes.push(special_lane);
     }
 
     if resolved.is_empty()
         && (ep_meta.absolute_episode.is_some() || !ep_meta.absolute_episode_numbers.is_empty())
     {
         let absolute_numbers: Vec<u32> = if !ep_meta.absolute_episode_numbers.is_empty() {
-            ep_meta.absolute_episode_numbers.clone()
+            distinct_numbers(&ep_meta.absolute_episode_numbers)
         } else if ep_meta.episode_numbers.is_empty() {
             vec![ep_meta.absolute_episode.unwrap_or_default()]
         } else {
-            ep_meta.episode_numbers.clone()
+            episode_numbers.clone()
+        };
+        let mut absolute_lane = LaneOutcome {
+            named: absolute_numbers.len(),
+            ..LaneOutcome::default()
         };
 
         for absolute_number in absolute_numbers {
-            if let Some(episode) = lookup.by_absolute_number.get(&absolute_number.to_string())
-                && seen.insert(episode.id.clone())
-            {
-                resolved.push(episode.clone());
+            let key = absolute_number.to_string();
+            if let Some(episode) = lookup.by_absolute_number.get(&key) {
+                absolute_lane.resolved += 1;
+                absolute_lane.ambiguous |= lookup.ambiguous_absolute_numbers.contains(&key);
+                if seen.insert(episode.id.clone()) {
+                    resolved.push(episode.clone());
+                }
             }
         }
+        lanes.push(absolute_lane);
     }
 
-    resolved
+    ResolvedEpisodes {
+        exact: lanes.iter().all(LaneOutcome::keeps_resolution_exact),
+        episodes: resolved,
+    }
 }
 
 #[derive(Default)]
@@ -698,6 +875,41 @@ struct EpisodeLookup {
     by_collection_episode: HashMap<(String, String), Episode>,
     by_absolute_number: HashMap<String, Episode>,
     by_collection_index: HashMap<String, Vec<Episode>>,
+    /// Keys of `by_collection_episode` that more than one catalog episode
+    /// claims. The lookup still resolves them (first one wins) so matching
+    /// keeps working, but a resolution through one is never exact.
+    ambiguous_collection_episodes: HashSet<(String, String)>,
+    /// Keys of `by_absolute_number` that more than one catalog episode claims.
+    ambiguous_absolute_numbers: HashSet<String>,
+}
+
+impl EpisodeLookup {
+    fn insert_collection_episode(&mut self, key: (String, String), episode: &Episode) {
+        match self.by_collection_episode.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().id != episode.id {
+                    self.ambiguous_collection_episodes
+                        .insert(entry.key().clone());
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(episode.clone());
+            }
+        }
+    }
+
+    fn insert_absolute_number(&mut self, key: String, episode: &Episode) {
+        match self.by_absolute_number.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().id != episode.id {
+                    self.ambiguous_absolute_numbers.insert(entry.key().clone());
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(episode.clone());
+            }
+        }
+    }
 }
 
 fn build_episode_lookup(collections: &[Collection], episodes: &[Episode]) -> EpisodeLookup {
@@ -706,6 +918,8 @@ fn build_episode_lookup(collections: &[Collection], episodes: &[Episode]) -> Epi
         .map(|collection| (collection.id.clone(), collection.collection_index.clone()))
         .collect::<HashMap<_, _>>();
 
+    // One absolute scale for the whole title; see `AbsoluteScale`.
+    let scale = scryer_domain::AbsoluteScale::for_catalog(episodes);
     let mut lookup = EpisodeLookup::default();
     for episode in episodes {
         if let Some(air_date) = episode.air_date.as_ref() {
@@ -723,23 +937,20 @@ fn build_episode_lookup(collections: &[Collection], episodes: &[Episode]) -> Epi
             if let Some(collection_id) = episode.collection_id.as_ref()
                 && let Some(collection_index) = collection_indexes.get(collection_id)
             {
-                lookup
-                    .by_collection_episode
-                    .entry((collection_index.clone(), episode_number.clone()))
-                    .or_insert_with(|| episode.clone());
+                lookup.insert_collection_episode(
+                    (collection_index.clone(), episode_number.clone()),
+                    episode,
+                );
             } else {
-                lookup
-                    .by_collection_episode
-                    .entry((season_number.clone(), episode_number.clone()))
-                    .or_insert_with(|| episode.clone());
+                lookup.insert_collection_episode(
+                    (season_number.clone(), episode_number.clone()),
+                    episode,
+                );
             }
         }
 
-        if let Some(absolute_number) = episode.absolute_number.as_ref() {
-            lookup
-                .by_absolute_number
-                .entry(absolute_number.clone())
-                .or_insert_with(|| episode.clone());
+        if let Some(absolute_number) = scale.episode_absolute(episode) {
+            lookup.insert_absolute_number(absolute_number.to_string(), episode);
         }
 
         if let Some(collection_id) = episode.collection_id.as_ref()
@@ -918,8 +1129,9 @@ fn library_name_match_key(value: &str) -> String {
 fn parse_release_fallback(
     input: &LibraryFilenameParseInput<'_>,
     raw_name: &str,
+    title_index: Option<&LibraryFilenameTitleIndex>,
 ) -> crate::ParsedReleaseMetadata {
-    let mut parsed = parse_release_fallback_name(input, raw_name);
+    let mut parsed = parse_release_fallback_name(input, raw_name, title_index);
     if parsed_release_has_title_scan_episode_identity(&parsed, input.facet)
         || !input.mode.eq(&LibraryFilenameParseMode::TitleScan)
     {
@@ -936,7 +1148,7 @@ fn parse_release_fallback(
         return parsed;
     };
 
-    let parent_release = parse_release_fallback_name(input, &parent_name);
+    let parent_release = parse_release_fallback_name(input, &parent_name, title_index);
     let Some(parent_episode) = parent_release.episode.as_ref() else {
         return parsed;
     };
@@ -954,7 +1166,14 @@ fn parse_release_fallback(
 fn parse_release_fallback_name(
     input: &LibraryFilenameParseInput<'_>,
     raw_name: &str,
+    title_index: Option<&LibraryFilenameTitleIndex>,
 ) -> crate::ParsedReleaseMetadata {
+    if let Some(title_index) = title_index {
+        return match title_index.prepared(input).release_context.as_ref() {
+            Some(context) => crate::parse_release_metadata_for_target(raw_name, context),
+            None => crate::parse_release_metadata(raw_name),
+        };
+    }
     if let Some(context) = build_release_parse_context_for_library_filename(input) {
         crate::parse_release_metadata_for_target(raw_name, &context)
     } else {
@@ -1162,7 +1381,15 @@ fn synthesize_release_metadata(
     parsed
 }
 
+/// The parse a stored episode stands for. It carries the episode's *raw*
+/// absolute number, the one every renderer writes: an identity names its
+/// catalog episode by season and episode, which lookups read before any
+/// absolute, so the matching scale never needs to travel with it.
 fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpisodeMetadata {
+    let absolute = episode
+        .absolute_number
+        .as_deref()
+        .and_then(|value| value.trim().parse::<u32>().ok());
     crate::ParsedEpisodeMetadata {
         season: episode
             .season_number
@@ -1174,16 +1401,8 @@ fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpiso
             .and_then(|value| value.parse::<u32>().ok())
             .into_iter()
             .collect(),
-        absolute_episode: episode
-            .absolute_number
-            .as_deref()
-            .and_then(|value| value.parse::<u32>().ok()),
-        absolute_episode_numbers: episode
-            .absolute_number
-            .as_deref()
-            .and_then(|value| value.parse::<u32>().ok())
-            .into_iter()
-            .collect(),
+        absolute_episode: absolute,
+        absolute_episode_numbers: absolute.into_iter().collect(),
         air_date: episode
             .air_date
             .as_deref()
@@ -1447,8 +1666,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -1586,6 +1807,7 @@ mod tests {
                     tvdb_episode_end: Some(tvdb_start + length - 1),
                 }],
                 absolute_start: Some(tvdb_start),
+                contiguous_absolute_start: None,
                 episode_count: Some(*length),
             });
             tvdb_start += length;
@@ -1711,6 +1933,261 @@ mod tests {
                 .map(|episode| episode.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["ep-56"]
+        );
+    }
+
+    /// Re:ZERO-shaped bridge: TVDB keeps every cour in season 1, and the third
+    /// community season starts at story episode 51 on the contiguous scale.
+    ///
+    /// SMG reads a community season's contiguous start off its anchor
+    /// episode's own contiguous number, so a season whose anchor SMG has not
+    /// placed yet (the anchor lies past `contiguous_through`) carries no
+    /// contiguous start at all. `newest_cour_open` leaves the third season's
+    /// range without an end, as for a cour that is still airing.
+    fn re_zero_bridge(
+        contiguous_through: u32,
+        newest_cour_open: bool,
+    ) -> scryer_domain::AnimeNumberingBridge {
+        let season = |index: i32, start: i32, length: i32, raw_start: i32, open: bool| {
+            scryer_domain::AnimeCommunitySeason {
+                index,
+                anidb_id: None,
+                anilist_id: None,
+                mal_id: None,
+                titles: vec![format!("Re:ZERO Season {index}")],
+                ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                    community_episode_start: 1,
+                    community_episode_end: (!open).then_some(length),
+                    tvdb_season: 1,
+                    tvdb_episode_start: start,
+                    tvdb_episode_end: (!open).then_some(start + length - 1),
+                }],
+                absolute_start: Some(raw_start),
+                contiguous_absolute_start: u32::try_from(start)
+                    .is_ok_and(|anchor| anchor <= contiguous_through)
+                    .then_some(start),
+                episode_count: (!open).then_some(length),
+            }
+        };
+        scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
+            generated_on: "2026-09-25".to_string(),
+            corroborating_order: None,
+            seasons: vec![
+                season(1, 1, 25, 1, false),
+                season(2, 26, 25, 27, false),
+                season(3, 51, 16, 53, newest_cour_open),
+            ],
+        }
+    }
+
+    /// Official S01E01-E66 where two specials sit in TVDB's absolute order (at
+    /// raw 13 and raw 40), so from story episode 38 on the raw absolute runs
+    /// two ahead of the contiguous one. `contiguous_through` marks the last
+    /// episode SMG has placed on the contiguous scale.
+    fn re_zero_episodes(contiguous_through: u32) -> Vec<Episode> {
+        let mut episodes: Vec<Episode> = (1..=66_u32)
+            .map(|number| {
+                let raw = match number {
+                    1..=12 => number,
+                    13..=38 => number + 1,
+                    _ => number + 2,
+                };
+                let mut episode = episode(&format!("ep-{number}"), "1", &number.to_string());
+                episode.absolute_number = Some(raw.to_string());
+                episode.contiguous_absolute_number = (number <= contiguous_through)
+                    .then(|| i32::try_from(number).expect("small episode number"));
+                episode
+            })
+            .collect();
+        for (number, raw) in [(1_u32, 13_u32), (2, 40)] {
+            let mut special = episode(&format!("sp-{number}"), "0", &number.to_string());
+            special.absolute_number = Some(raw.to_string());
+            episodes.push(special);
+        }
+        episodes
+    }
+
+    fn scan_re_zero(
+        episodes: &[Episode],
+        bridge: &scryer_domain::AnimeNumberingBridge,
+        file_name: &str,
+    ) -> LibraryFilenameParse {
+        let title = title("Re:ZERO", MediaFacet::Anime);
+        let path = format!("/library/Re ZERO/Season 01/{file_name}");
+        let input = LibraryFilenameParseInput {
+            path: Path::new(&path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(&title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes,
+            existing_record: None,
+            anime_numbering_bridge: Some(bridge),
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
+        };
+        parse_library_filename(&input)
+    }
+
+    fn target_ids(parse: &LibraryFilenameParse) -> Vec<String> {
+        parse
+            .target_episodes()
+            .iter()
+            .map(|episode| episode.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn title_scan_files_an_absolute_numbered_file_on_the_contiguous_scale() {
+        // Raw absolute 51 is story episode 49; the contiguous 51 is S01E51.
+        let episodes = re_zero_episodes(66);
+        let bridge = re_zero_bridge(66, false);
+
+        assert_eq!(
+            target_ids(&scan_re_zero(
+                &episodes,
+                &bridge,
+                "[Group] Re:ZERO - 51.mkv"
+            )),
+            vec!["ep-51".to_string()]
+        );
+    }
+
+    #[test]
+    fn title_scan_leaves_an_absolute_unmatched_when_its_cour_anchor_is_unplaced() {
+        // SMG has not placed the newest cour on the contiguous scale yet. Its
+        // anchor is exactly the unplaced episode, so SMG serves no contiguous
+        // start for that cour and nothing can place `- 51`. The file stays
+        // unmatched rather than falling back to raw 51, which is S01E49.
+        let episodes = re_zero_episodes(50);
+        let bridge = re_zero_bridge(50, false);
+        assert_eq!(bridge.seasons[2].contiguous_absolute_start, None);
+
+        let parse = scan_re_zero(&episodes, &bridge, "[Group] Re:ZERO - 51.mkv");
+
+        assert!(target_ids(&parse).is_empty());
+        assert!(
+            matches!(
+                parse.target,
+                LibraryFilenameTarget::Unmatched {
+                    reason: "episode_lookup_failed"
+                }
+            ),
+            "unexpected target: {:?}",
+            parse.target
+        );
+    }
+
+    #[test]
+    fn title_scan_files_an_unplaced_absolute_inside_an_open_cour_with_a_placed_anchor() {
+        // SMG placed the airing cour's anchor (S01E51) and its first episodes
+        // but not the newest ones; the cour's range is still open. The
+        // contiguous start carries `- 60` onto S01E60.
+        let episodes = re_zero_episodes(58);
+        let bridge = re_zero_bridge(58, true);
+        assert_eq!(bridge.seasons[2].contiguous_absolute_start, Some(51));
+
+        assert_eq!(
+            target_ids(&scan_re_zero(
+                &episodes,
+                &bridge,
+                "[Group] Re:ZERO - 60.mkv"
+            )),
+            vec!["ep-60".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolved_community_numbering_renders_the_catalog_raw_absolute_on_import_and_rename() {
+        // `Season 3 - 01` is S01E51, whose raw absolute is 53 while the title
+        // matches on the contiguous 51. Matching reads the contiguous scale;
+        // every renderer writes the raw number, so the import's parse path
+        // and a later rename produce the same file name.
+        let episodes = re_zero_episodes(66);
+        let bridge = re_zero_bridge(66, false);
+        let parse = scan_re_zero(&episodes, &bridge, "[Group] Re:ZERO Season 3 - 01.mkv");
+
+        assert_eq!(target_ids(&parse), vec!["ep-51".to_string()]);
+        let resolved = parse.target_episodes()[0].clone();
+        assert_eq!(resolved.absolute_number.as_deref(), Some("53"));
+        let parsed_episode = parse
+            .parsed_release
+            .episode
+            .as_ref()
+            .expect("the scan keeps the resolved episode parse");
+        assert_eq!(parsed_episode.season, Some(1));
+        assert_eq!(parsed_episode.episode_numbers, vec![51]);
+        assert_eq!(
+            parsed_episode.absolute_episode,
+            Some(53),
+            "the resolved parse carries the raw rendering absolute"
+        );
+
+        let title = title("Re:ZERO", MediaFacet::Anime);
+        let template = "{title} - S{season_order:2}E{episode:2} ({absolute_episode:3}) - {episode_title}.{ext}";
+        let absolute = crate::import_workflow::import_absolute_episode_token(
+            Some(&resolved),
+            parsed_episode.absolute_episode,
+        );
+        assert_eq!(absolute.as_deref(), Some("53"));
+        let imported = crate::import_workflow::episode_import_dest_path(
+            &title,
+            true,
+            &parse.parsed_release,
+            None,
+            "mkv",
+            Path::new("/downloads/[Group] Re:ZERO Season 3 - 01.mkv"),
+            Path::new("/library/Re ZERO"),
+            true,
+            template,
+            "Season {season:2}",
+            "Specials",
+            1,
+            "51",
+            absolute.as_deref(),
+            resolved.title.as_deref(),
+            None,
+        );
+        let imported_name = imported
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("import renders a file name")
+            .to_string();
+        assert!(
+            imported_name.contains("(053)"),
+            "import rendered {imported_name}"
+        );
+
+        let media_file = crate::TitleMediaFile {
+            id: "file-51".to_string(),
+            title_id: title.id.clone(),
+            episode_id: Some(resolved.id.clone()),
+            file_path: imported.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut planning = crate::library_rename::RenamePlanningState::default();
+        let items = crate::library_rename::build_series_rename_plan_items_from_media_files(
+            &title,
+            true,
+            Vec::new(),
+            episodes.clone(),
+            vec![media_file],
+            "/library",
+            "{title}",
+            "Season {season:2}",
+            "Specials",
+            template,
+            &crate::library_rename::RenameMissingMetadataPolicy::default(),
+            &mut planning,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].normalized_filename.as_deref(),
+            Some(imported_name.as_str()),
+            "rename must render the imported file's own name"
         );
     }
 
@@ -2366,6 +2843,505 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![expected_episode],
                 "{display_name} resolved to the wrong episodes"
+            );
+        }
+    }
+
+    /// Three TVDB seasons of twelve, each carrying its absolute number.
+    fn seasonal_catalog_with_absolutes() -> Vec<Episode> {
+        let mut episodes = Vec::new();
+        for absolute in 1..=36_u32 {
+            let season = absolute.div_ceil(12);
+            let number = (absolute - 1) % 12 + 1;
+            let mut row = episode(
+                &format!("ep-{season}-{number}"),
+                &season.to_string(),
+                &number.to_string(),
+            );
+            row.absolute_number = Some(absolute.to_string());
+            episodes.push(row);
+        }
+        episodes
+    }
+
+    /// Community cours that coincide with the three TVDB seasons. The first
+    /// cour answers to the bare franchise name as well as its own subtitle,
+    /// which is how the anime metadata providers catalogue a first season.
+    fn seasonal_bridge(cour_titles: [&[&str]; 3]) -> scryer_domain::AnimeNumberingBridge {
+        let seasons = cour_titles
+            .iter()
+            .enumerate()
+            .map(|(offset, titles)| {
+                let index = i32::try_from(offset).expect("small index") + 1;
+                scryer_domain::AnimeCommunitySeason {
+                    index,
+                    anidb_id: None,
+                    anilist_id: None,
+                    mal_id: None,
+                    titles: titles.iter().map(|title| (*title).to_string()).collect(),
+                    ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                        community_episode_start: 1,
+                        community_episode_end: Some(12),
+                        tvdb_season: index,
+                        tvdb_episode_start: 1,
+                        tvdb_episode_end: Some(12),
+                    }],
+                    absolute_start: Some((index - 1) * 12 + 1),
+                    contiguous_absolute_start: None,
+                    episode_count: Some(12),
+                }
+            })
+            .collect();
+        scryer_domain::AnimeNumberingBridge {
+            source: Default::default(),
+            generated_on: "2026-09-26".to_string(),
+            corroborating_order: None,
+            seasons,
+        }
+    }
+
+    fn scan_one(
+        title: &Title,
+        episodes: &[Episode],
+        bridge: Option<&scryer_domain::AnimeNumberingBridge>,
+        path: &str,
+    ) -> Vec<String> {
+        let input = LibraryFilenameParseInput {
+            path: Path::new(path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes,
+            existing_record: None,
+            anime_numbering_bridge: bridge,
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::NeedReleaseMetadata,
+        };
+        parse_library_filename(&input)
+            .target_episodes()
+            .into_iter()
+            .map(|episode| episode.id)
+            .collect()
+    }
+
+    /// The catalog's name for the series differs from the first cour's title
+    /// only by punctuation (`Mein*Star` against `Mein Star`), and the files
+    /// name the bare franchise. That name is the series, not its first cour,
+    /// so each file keeps the season its own `SxxEyy` states.
+    #[test]
+    fn title_scan_keeps_the_stated_season_when_the_franchise_name_matches_the_first_cour() {
+        let title = title("[Lantern Verge] - [Mein*Star]", MediaFacet::Anime);
+        let episodes = seasonal_catalog_with_absolutes();
+        let bridge = seasonal_bridge([
+            &["Lantern Verge: Mein Star", "Lantern Verge"],
+            &["Lantern Verge 2nd Season"],
+            &["Lantern Verge 3rd Season"],
+        ]);
+
+        for (season, absolute) in [(1_u32, 1_u32), (2, 13), (3, 25)] {
+            let path = format!(
+                "/library/Lantern Verge (2023)/Season {season:02}/Lantern Verge (2023) - S{season:02}E01 - {absolute:03} - Ember Tide [WEBDL-1080p][JA][x265 10bit]-Cindergroup.mkv"
+            );
+            assert_eq!(
+                scan_one(&title, &episodes, Some(&bridge), &path),
+                vec![format!("ep-{season}-1")],
+                "{path}"
+            );
+        }
+    }
+
+    /// `[EAC3 2.0]` describes the audio track. With the catalog's absolute
+    /// numbers in the parse context its `2` used to read as absolute episode
+    /// 2 and outrank the file's own `S02E06 - 018`.
+    #[test]
+    fn title_scan_never_reads_an_audio_channel_layout_as_the_episode() {
+        let episodes = seasonal_catalog_with_absolutes();
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            let title = title("Cinder Atlas", facet.clone());
+            for audio in ["EAC3 2.0", "EAC3 5.1", "AAC 7.1"] {
+                let path = format!(
+                    "/library/Cinder Atlas (2024)/Season 02/Cinder Atlas (2024) - S02E06 - 018 - Ember Tide [WEBDL-1080p][{audio}][JA][x265 10bit]-Cindergroup.mkv"
+                );
+                assert_eq!(
+                    scan_one(&title, &episodes, None, &path),
+                    vec!["ep-2-6".to_string()],
+                    "{facet:?} {path}"
+                );
+            }
+        }
+    }
+
+    fn scan_parse_with_existing(
+        title: &Title,
+        episodes: &[Episode],
+        path: &str,
+        existing_episode_id: Option<&str>,
+    ) -> LibraryFilenameParse {
+        parse_library_filename(&LibraryFilenameParseInput {
+            path: Path::new(path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes,
+            existing_record: existing_episode_id.map(|episode_id| LibraryFilenameExistingRecord {
+                episode_id: Some(episode_id),
+                snapshot_matches: true,
+            }),
+            anime_numbering_bridge: None,
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
+        })
+    }
+
+    fn confident_ids(parse: &LibraryFilenameParse) -> Option<Vec<String>> {
+        parse
+            .confident_episode_target()
+            .map(|episodes| episodes.iter().map(|episode| episode.id.clone()).collect())
+    }
+
+    #[test]
+    fn a_fresh_single_episode_parse_is_confident_enough_to_relink() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let episodes = vec![episode("ep-1-1", "1", "1"), episode("ep-1-2", "1", "2")];
+
+        let parse = scan_parse_with_existing(
+            &title,
+            &episodes,
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E02.mkv",
+            None,
+        );
+
+        assert_eq!(confident_ids(&parse), Some(vec!["ep-1-2".to_string()]));
+    }
+
+    #[test]
+    fn a_stored_link_echoed_back_is_never_confident() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let episodes = vec![episode("ep-1-1", "1", "1"), episode("ep-1-2", "1", "2")];
+
+        let parse = scan_parse_with_existing(
+            &title,
+            &episodes,
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E02.mkv",
+            Some("ep-1-1"),
+        );
+
+        assert_eq!(parse.strategy, LibraryFilenameParseStrategy::ExistingRecord);
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn a_parse_without_an_episode_identity_is_never_confident() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let episodes = vec![episode("ep-1-1", "1", "1")];
+
+        for path in [
+            "/library/Quillmoor Heights/Quillmoor Heights - Bonus Reel.mkv",
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E09.mkv",
+        ] {
+            let parse = scan_parse_with_existing(&title, &episodes, path, None);
+            assert!(parse.unmatched_reason().is_some(), "{path}");
+            assert_eq!(confident_ids(&parse), None, "{path}");
+        }
+    }
+
+    fn scan_lantern_verge(
+        bridge: &scryer_domain::AnimeNumberingBridge,
+        file_name: &str,
+    ) -> LibraryFilenameParse {
+        let title = title("Lantern Verge", MediaFacet::Anime);
+        let episodes: Vec<Episode> = (1..=60)
+            .map(|number| episode(&format!("ep-{number}"), "1", &number.to_string()))
+            .collect();
+        let path = format!("/library/Lantern Verge/{file_name}");
+        parse_library_filename(&LibraryFilenameParseInput {
+            path: Path::new(&path),
+            display_name: None,
+            library_root: Some(Path::new("/library")),
+            title: Some(&title),
+            facet: Some(&title.facet),
+            collections: &[],
+            series_movie_links: &[],
+            episodes: &episodes,
+            existing_record: None,
+            anime_numbering_bridge: Some(bridge),
+            mode: LibraryFilenameParseMode::TitleScan,
+            fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
+        })
+    }
+
+    #[test]
+    fn an_ambiguous_community_numbering_is_never_confident() {
+        // Two community entries both answer to season 2, landing on different
+        // official episodes, so nothing ranks one reading above the other.
+        let mut bridge = anime_numbering_bridge_fixture();
+        bridge.seasons[2].index = 2;
+
+        let parse = scan_lantern_verge(&bridge, "Season 02/Lantern Verge - S02E03.mkv");
+
+        assert_eq!(parse.unmatched_reason(), Some("anime_numbering_ambiguous"));
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn an_unresolved_community_pack_is_never_confident() {
+        // The third cour's length is unknown, so a whole-cour file cannot be
+        // bounded on the official numbering.
+        let mut bridge = anime_numbering_bridge_fixture();
+        bridge.seasons[2].episode_count = None;
+
+        let parse = scan_lantern_verge(&bridge, "Season 03/Lantern Verge - S03.mkv");
+
+        assert_eq!(parse.unmatched_reason(), Some("unresolved_pack_scope"));
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn a_community_numbered_single_episode_is_confident_on_its_official_episode() {
+        let parse = scan_lantern_verge(
+            &anime_numbering_bridge_fixture(),
+            "Season 01/Lantern Verge - S04E20.mkv",
+        );
+
+        assert_eq!(confident_ids(&parse), Some(vec!["ep-56".to_string()]));
+    }
+
+    fn resolved_parse(
+        identity: crate::ParsedEpisodeMetadata,
+        episodes: Vec<Episode>,
+    ) -> LibraryFilenameParse {
+        LibraryFilenameParse {
+            query_evidence: LibraryQueryEvidence::default(),
+            parsed_release: crate::ParsedReleaseMetadata::empty("Quillmoor Heights", "test"),
+            episode_identity: Some(identity.clone()),
+            target: LibraryFilenameTarget::Episodes {
+                episode_identity: identity,
+                episodes,
+                exact: true,
+            },
+            strategy: LibraryFilenameParseStrategy::ReleaseParserFallback,
+            release_fallback_used: true,
+        }
+    }
+
+    #[test]
+    fn a_pack_or_partial_season_resolved_onto_one_file_is_never_confident() {
+        let single = || crate::ParsedEpisodeMetadata {
+            season: Some(1),
+            episode_numbers: vec![1],
+            release_type: crate::ParsedEpisodeReleaseType::SingleEpisode,
+            ..Default::default()
+        };
+        for (label, identity) in [
+            (
+                "full season",
+                crate::ParsedEpisodeMetadata {
+                    full_season: true,
+                    release_type: crate::ParsedEpisodeReleaseType::SeasonPack,
+                    ..single()
+                },
+            ),
+            (
+                "partial season",
+                crate::ParsedEpisodeMetadata {
+                    is_partial_season: true,
+                    ..single()
+                },
+            ),
+            (
+                "several seasons",
+                crate::ParsedEpisodeMetadata {
+                    is_multi_season: true,
+                    ..single()
+                },
+            ),
+        ] {
+            let parse = resolved_parse(identity, vec![episode("ep-1-1", "1", "1")]);
+            assert_eq!(confident_ids(&parse), None, "{label}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_episode_range_in_one_file_is_confident() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let episodes = vec![
+            episode("ep-1-1", "1", "1"),
+            episode("ep-1-2", "1", "2"),
+            episode("ep-1-3", "1", "3"),
+        ];
+
+        for path in [
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E01E02 - Tide.mkv",
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E01-E02.mkv",
+        ] {
+            let parse = scan_parse_with_existing(&title, &episodes, path, None);
+            assert_eq!(
+                confident_ids(&parse),
+                Some(vec!["ep-1-1".to_string(), "ep-1-2".to_string()]),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_the_catalog_only_partly_holds_is_never_confident() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let episodes = vec![episode("ep-1-11", "1", "11"), episode("ep-1-12", "1", "12")];
+
+        let parse = scan_parse_with_existing(
+            &title,
+            &episodes,
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E11-E13.mkv",
+            None,
+        );
+
+        assert_eq!(
+            parse
+                .target_episodes()
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ep-1-11", "ep-1-12"],
+            "the file still lands on the episodes the catalog holds"
+        );
+        assert_eq!(confident_ids(&parse), None);
+
+        let mut complete = episodes.clone();
+        complete.push(episode("ep-1-13", "1", "13"));
+        let parse = scan_parse_with_existing(
+            &title,
+            &complete,
+            "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E11-E13.mkv",
+            None,
+        );
+        assert_eq!(
+            confident_ids(&parse),
+            Some(vec![
+                "ep-1-11".to_string(),
+                "ep-1-12".to_string(),
+                "ep-1-13".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn an_episode_key_the_catalog_holds_twice_is_never_confident() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let path = "/library/Quillmoor Heights/Season 01/Quillmoor Heights - S01E02.mkv";
+        let episodes = vec![
+            episode("ep-1-1", "1", "1"),
+            episode("ep-1-2", "1", "2"),
+            episode("ep-1-2-renumbered", "1", "2"),
+        ];
+
+        let parse = scan_parse_with_existing(&title, &episodes, path, None);
+
+        assert!(!parse.target_episodes().is_empty());
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn an_absolute_number_the_catalog_holds_twice_is_never_confident() {
+        let title = title("Lantern Verge", MediaFacet::Anime);
+        let path = "/library/Lantern Verge/Lantern Verge - 05.mkv";
+        let with_absolute = |id: &str, season: &str, number: &str| Episode {
+            absolute_number: Some("5".to_string()),
+            ..episode(id, season, number)
+        };
+
+        let unique = vec![with_absolute("ep-2-1", "2", "1")];
+        let parse = scan_parse_with_existing(&title, &unique, path, None);
+        assert_eq!(confident_ids(&parse), Some(vec!["ep-2-1".to_string()]));
+
+        let duplicated = vec![
+            with_absolute("ep-2-1", "2", "1"),
+            with_absolute("ep-2-2", "2", "2"),
+        ];
+        let parse = scan_parse_with_existing(&title, &duplicated, path, None);
+        assert!(!parse.target_episodes().is_empty());
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn an_air_date_several_episodes_share_is_never_confident_without_a_part() {
+        let title = title("Quillmoor Heights", MediaFacet::Series);
+        let path = "/library/Quillmoor Heights/Quillmoor Heights - 2024-03-05.mkv";
+        let aired = |id: &str, number: &str| Episode {
+            air_date: Some("2024-03-05".to_string()),
+            ..episode(id, "2024", number)
+        };
+
+        let single = vec![aired("ep-daily-1", "1")];
+        let parse = scan_parse_with_existing(&title, &single, path, None);
+        assert_eq!(confident_ids(&parse), Some(vec!["ep-daily-1".to_string()]));
+
+        let shared = vec![aired("ep-daily-1", "1"), aired("ep-daily-2", "2")];
+        let parse = scan_parse_with_existing(&title, &shared, path, None);
+        assert_eq!(parse.target_episodes().len(), 2);
+        assert_eq!(confident_ids(&parse), None);
+    }
+
+    #[test]
+    fn a_special_is_confident_only_when_it_resolves_into_season_zero() {
+        let special = crate::ParsedEpisodeMetadata {
+            season: Some(0),
+            episode_numbers: vec![2],
+            special_kind: Some(crate::ParsedSpecialKind::Ova),
+            release_type: crate::ParsedEpisodeReleaseType::SingleEpisode,
+            ..Default::default()
+        };
+
+        let outside = resolved_parse(special.clone(), vec![episode("ep-1-2", "1", "2")]);
+        assert_eq!(confident_ids(&outside), None);
+
+        let inside = resolved_parse(special, vec![episode("sp-2", "0", "2")]);
+        assert_eq!(confident_ids(&inside), Some(vec!["sp-2".to_string()]));
+    }
+
+    #[test]
+    fn a_shared_title_index_parses_every_file_the_way_a_standalone_parse_does() {
+        let title = title("Lantern Verge", MediaFacet::Anime);
+        let episodes: Vec<Episode> = (1..=60)
+            .map(|number| episode(&format!("ep-{number}"), "1", &number.to_string()))
+            .collect();
+        let bridge = anime_numbering_bridge_fixture();
+        let index = LibraryFilenameTitleIndex::default();
+        for file_name in [
+            "Season 01/Lantern Verge - S04E20.mkv",
+            "Season 01/Lantern Verge - S01E03.mkv",
+            "Season 01/Lantern Verge - S01E02E03.mkv",
+            "Lantern Verge - Harbor Bonus Reel.mkv",
+        ] {
+            let path = format!("/library/Lantern Verge/{file_name}");
+            let input = LibraryFilenameParseInput {
+                path: Path::new(&path),
+                display_name: None,
+                library_root: Some(Path::new("/library")),
+                title: Some(&title),
+                facet: Some(&title.facet),
+                collections: &[],
+                series_movie_links: &[],
+                episodes: &episodes,
+                existing_record: None,
+                anime_numbering_bridge: Some(&bridge),
+                mode: LibraryFilenameParseMode::TitleScan,
+                fallback_policy: LibraryFilenameFallbackPolicy::WhenNeeded,
+            };
+
+            let standalone = parse_library_filename(&input);
+            let shared = parse_library_filename_with_index(&input, Some(&index));
+
+            assert_eq!(target_ids(&shared), target_ids(&standalone), "{file_name}");
+            assert_eq!(shared.target, standalone.target, "{file_name}");
+            assert_eq!(
+                shared.parsed_release.episode, standalone.parsed_release.episode,
+                "{file_name}"
             );
         }
     }

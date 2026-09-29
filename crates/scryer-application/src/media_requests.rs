@@ -8,7 +8,7 @@ use crate::ports::MediaRequestResolution;
 use scryer_domain::{
     DomainEvent, DomainEventFilter, DomainEventPayload, DomainEventType, LibraryPermission,
     LifecycleClaim, LifecycleClaimKind, LifecycleClaimProducer, LifecycleClaimState,
-    MONITOR_TYPE_ADVANCED, MediaRequestResolvedEventData, MediaRequestStatus,
+    MONITOR_TYPE_ADVANCED, MediaRequestOrigin, MediaRequestResolvedEventData, MediaRequestStatus,
     MediaRequestSubmittedEventData, MonitorSelection, RequestDecisionOutcome,
 };
 use snapshot::{MediaRequestMetadataSnapshot, MediaRequestMetadataSnapshotExt};
@@ -99,6 +99,23 @@ pub struct SubmitMediaRequestInput {
     /// (spec 0003 FR-040).
     pub requested_lease_days: Option<i64>,
     pub external_ids: Vec<ExternalId>,
+    /// Where the request came from. Only the list engine sets anything other
+    /// than `Manual`; GraphQL submissions are always manual.
+    pub origin: MediaRequestOrigin,
+    pub admission: MediaRequestAdmission,
+}
+
+/// How a submitted request is admitted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaRequestAdmission {
+    /// The requester's grants and the request rules decide.
+    #[default]
+    Evaluate,
+    /// The request waits for a person even when grants or rules would approve
+    /// it. A denial still stands. A requester who manages titles in the
+    /// library may file one too: Manage Titles shadows Request, and the hold
+    /// keeps their grants from approving it.
+    HoldForReview,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +181,19 @@ impl RequestDecisionProvenance {
     }
 }
 
+/// A held request never approves itself: an approval becomes a wait for
+/// review, and a denial stands.
+fn apply_admission_floor(
+    evaluation: &mut crate::request_rules::RequestEvaluation,
+    admission: MediaRequestAdmission,
+) {
+    if admission == MediaRequestAdmission::HoldForReview
+        && evaluation.effective_outcome == RequestDecisionOutcome::AutoApprove
+    {
+        evaluation.effective_outcome = RequestDecisionOutcome::ManualReview;
+    }
+}
+
 impl AppUseCase {
     pub async fn submit_media_request(
         &self,
@@ -204,7 +234,7 @@ impl AppUseCase {
             ));
         }
 
-        self.require_library_permission(actor, &library.id, LibraryPermission::Request)
+        self.require_request_submission_permission(actor, &library.id, input.admission)
             .await?;
         let metadata_enrichment = self.enrich_request_draft(&input.facet, external_ids).await;
         external_ids = metadata_enrichment.external_ids;
@@ -276,6 +306,7 @@ impl AppUseCase {
             metadata_snapshot_json,
             external_ids,
             created_by_user_id: actor.id.clone(),
+            origin: input.origin,
         };
         let submitted_event = new_global_domain_event(
             actor,
@@ -298,7 +329,7 @@ impl AppUseCase {
         // Evaluate the draft before adding its row to the repositories that
         // supply history facts. A submission must see the same prior-request
         // state that preflight saw for this draft.
-        let evaluation = self
+        let mut evaluation = self
             .evaluate_request_draft(
                 actor,
                 &library,
@@ -309,6 +340,7 @@ impl AppUseCase {
                 },
             )
             .await?;
+        apply_admission_floor(&mut evaluation, input.admission);
 
         let submission = self
             .services
@@ -324,6 +356,40 @@ impl AppUseCase {
             .await?;
 
         Ok(SubmitMediaRequestOutcome { request_id })
+    }
+
+    /// The grant a submission needs. Every request needs Request, except a
+    /// held one, which a title manager may also file: it waits for review
+    /// whatever their grants allow, so Manage Titles cannot approve it.
+    async fn require_request_submission_permission(
+        &self,
+        actor: &User,
+        library_id: &str,
+        admission: MediaRequestAdmission,
+    ) -> AppResult<()> {
+        if admission == MediaRequestAdmission::HoldForReview {
+            return self.require_own_request_permission(actor, library_id).await;
+        }
+        self.require_library_permission(actor, library_id, LibraryPermission::Request)
+            .await
+    }
+
+    /// The grant a requester needs to see, change and withdraw a request of
+    /// their own: either one that let them file it. A title manager files held
+    /// requests without Request, and must not be left unable to take one back.
+    async fn require_own_request_permission(
+        &self,
+        actor: &User,
+        library_id: &str,
+    ) -> AppResult<()> {
+        if self
+            .has_library_permission(actor, library_id, LibraryPermission::ManageTitles)
+            .await?
+        {
+            return Ok(());
+        }
+        self.require_library_permission(actor, library_id, LibraryPermission::Request)
+            .await
     }
 
     /// Write the verdict's provenance onto a request row that is still pending.
@@ -417,10 +483,14 @@ impl AppUseCase {
         actor: &User,
         input: ListMediaRequestsInput,
     ) -> AppResult<Vec<MediaRequest>> {
-        let allowed_ids = self
-            .authorized_library_ids(actor, input.facet.clone(), LibraryPermission::Request)
-            .await?;
-        let allowed_ids = allowed_ids.into_iter().collect::<HashSet<_>>();
+        // Either grant that can file a request shows the requester their own.
+        let mut allowed_ids = HashSet::new();
+        for permission in [LibraryPermission::Request, LibraryPermission::ManageTitles] {
+            allowed_ids.extend(
+                self.authorized_library_ids(actor, input.facet.clone(), permission)
+                    .await?,
+            );
+        }
 
         let library_ids = match input.library_ids {
             Some(requested_ids) => requested_ids
@@ -661,6 +731,10 @@ impl AppUseCase {
         // the repository answers zero.
         self.release_request_lifecycle_claims(&request.id, CLAIM_RELEASE_REQUEST_REJECTED)
             .await;
+        if resolution.updated > 0 {
+            // A list must not submit what a reviewer just turned down.
+            self.remember_rejected_list_request(actor, &request).await;
+        }
         Ok(resolution.updated)
     }
 
@@ -1507,7 +1581,7 @@ impl AppUseCase {
             .await?
             .ok_or_else(|| AppError::NotFound("media request not found".into()))?;
 
-        self.require_library_permission(actor, &request.library_id, LibraryPermission::Request)
+        self.require_own_request_permission(actor, &request.library_id)
             .await?;
 
         if !request
@@ -1816,6 +1890,41 @@ fn movie_title_ref_from_external_ids(external_ids: &[ExternalId]) -> Option<crat
     .then_some(movie_ref)
 }
 
+/// The identity a series (or anime) request names, read in the order SMG
+/// title id, TVDB id, TMDB id, IMDb id. TMDB and IMDb ids kinded as something
+/// other than a series (an anime request can carry its movies' ids) are not
+/// the series' own.
+fn series_title_ref_from_external_ids(
+    external_ids: &[ExternalId],
+) -> Option<crate::SeriesTitleRef> {
+    let external_id = |source: &str| {
+        let series_only = matches!(source, "tmdb" | "imdb");
+        external_ids
+            .iter()
+            .find(|external_id| {
+                external_id.source.trim().eq_ignore_ascii_case(source)
+                    && (!series_only
+                        || external_id.kind.as_deref().is_none_or(|kind| {
+                            let kind = kind.trim();
+                            kind.is_empty() || kind.eq_ignore_ascii_case("series")
+                        }))
+            })
+            .map(|external_id| external_id.value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    let series_ref = crate::SeriesTitleRef {
+        smg_id: external_id("smg").and_then(|value| value.parse().ok()),
+        tvdb_id: external_id("tvdb").and_then(|value| value.parse().ok()),
+        tmdb_id: external_id("tmdb").and_then(|value| value.parse().ok()),
+        imdb_id: external_id("imdb").map(str::to_string),
+    };
+    (series_ref.smg_id.is_some()
+        || series_ref.tvdb_id.is_some()
+        || series_ref.tmdb_id.is_some()
+        || series_ref.imdb_id.is_some())
+    .then_some(series_ref)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MediaRequestMetadataEnrichment {
     pub(crate) external_ids: Vec<ExternalId>,
@@ -1931,36 +2040,11 @@ impl AppUseCase {
                         .ok_or_else(|| {
                             AppError::NotFound("movie metadata response missing title".to_string())
                         }),
-                    Err(error)
-                        if crate::catalog_workflow::movie_title_queries_not_supported(&error) =>
-                    {
-                        let Some(tvdb_id) = movie_ref.tvdb_id else {
-                            return MediaRequestMetadataEnrichment::unavailable(
-                                external_ids,
-                                "movie_subject_unidentifiable",
-                            );
-                        };
-                        self.services
-                            .library
-                            .metadata_gateway
-                            .get_movie(tvdb_id, &language)
-                            .await
-                            .map(|movie| {
-                                raw_movie = Some((movie.clone(), "smg_movie"));
-                                crate::catalog::facets::handler::movie_to_hydration_result(
-                                    movie, &language,
-                                )
-                            })
-                    }
                     Err(error) => Err(error),
                 }
             }
             MediaFacet::Series | MediaFacet::Anime => {
-                let Some(tvdb_id) = external_ids
-                    .iter()
-                    .find(|external_id| external_id.source == "tvdb")
-                    .and_then(|external_id| external_id.value.trim().parse::<i64>().ok())
-                else {
+                let Some(mut series_ref) = series_title_ref_from_external_ids(&external_ids) else {
                     return MediaRequestMetadataEnrichment::unavailable(
                         external_ids,
                         "series_subject_unidentifiable",
@@ -1968,7 +2052,8 @@ impl AppUseCase {
                 };
                 let Some(handler) = self.facet_registry.get(facet) else {
                     tracing::warn!(
-                        tvdb_id,
+                        smg_id = ?series_ref.smg_id,
+                        tvdb_id = ?series_ref.tvdb_id,
                         facet = facet.as_str(),
                         "failed to enrich media request external IDs because facet handler is missing"
                     );
@@ -1977,12 +2062,36 @@ impl AppUseCase {
                         "facet_handler_missing",
                     );
                 };
+                let gateway = self.services.library.metadata_gateway.as_ref();
+                if series_ref.smg_id.is_none() && series_ref.tvdb_id.is_none() {
+                    // Only provider ids SMG may not hold yet (TMDB, IMDb): let
+                    // SMG resolve and, when it can, create the series, the way
+                    // list imports do, then address it by its SMG title id.
+                    match gateway
+                        .resolve_titles(
+                            &[crate::lists::gateway::title_ref(&external_ids)],
+                            crate::lists::gateway::gateway_kind(facet),
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(resolutions) => {
+                            series_ref.smg_id = resolutions
+                                .into_iter()
+                                .find(|resolution| resolution.ref_index == 0 && resolution.resolved)
+                                .and_then(|resolution| resolution.smg_id);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                facet = facet.as_str(),
+                                "media request series could not be resolved by provider id"
+                            );
+                        }
+                    }
+                }
                 handler
-                    .hydrate_metadata(
-                        self.services.library.metadata_gateway.as_ref(),
-                        tvdb_id,
-                        &language,
-                    )
+                    .hydrate_series_metadata(gateway, &series_ref, &language)
                     .await
             }
         };

@@ -308,8 +308,10 @@ async fn graphql_scan_title_library_keeps_standard_episode_titles_with_special_i
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -334,8 +336,10 @@ async fn graphql_scan_title_library_keeps_standard_episode_titles_with_special_i
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -443,8 +447,10 @@ async fn graphql_scan_title_library_matches_numbered_special_episode_on_disk() {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -525,8 +531,10 @@ async fn graphql_scan_title_library_matches_daily_episodes_by_air_date() {
         is_filler: false,
         is_recap: false,
         absolute_number: None,
+        contiguous_absolute_number: None,
         overview: None,
         tvdb_id: None,
+        tmdb_id: None,
         image_url: None,
         monitored: true,
         created_at: chrono::Utc::now(),
@@ -760,6 +768,7 @@ async fn library_series_scan_hydrates_without_creating_wanted_for_unmonitored_ti
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8801, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
@@ -910,6 +919,7 @@ async fn library_anime_scan_hydrates_and_relinks_files_from_discovered_folder_pa
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8802, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
@@ -1078,6 +1088,7 @@ async fn library_anime_scan_prefers_tvshow_nfo_identity_for_nightfall_fixture() 
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture.clone()))
         .mount(&ctx.smg_server)
         .await;
+    mount_series_title_surface(&ctx, 8803, &fixture).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_string(fixture))

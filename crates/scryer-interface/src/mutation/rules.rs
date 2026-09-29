@@ -1,6 +1,6 @@
 use crate::context::{actor_from_ctx, app_from_ctx, require_config_app_permission, to_gql_error};
 use crate::types::*;
-use async_graphql::{Context, Error, ID, Object, Result as GqlResult};
+use async_graphql::{Context, Error, ID, Json, Object, Result as GqlResult};
 use scryer_domain::{AppPermission, RulePackInstallation, RuleSet, User};
 use std::collections::HashMap;
 
@@ -288,6 +288,8 @@ impl RulesMutations {
             episode_id: input.episode_id.map(String::from),
             release_name: input.release_name,
             size_bytes: input.size_bytes.map(Into::into),
+            listing: listing_input(input.listing)?,
+            media_file_id: input.media_file_id.map(String::from),
         };
         let result = app
             .test_rule_set(&actor, request)
@@ -295,6 +297,22 @@ impl RulesMutations {
             .map_err(to_gql_error)?;
 
         Ok(TestRuleSetPayload {
+            release_name: result.release_name,
+            media_file_id: result.media_file_id.map(ID::from),
+            listing: result.listing.map(|listing| RuleSetTestListingPayload {
+                published_at: listing.published_at,
+                age_days: listing
+                    .age_days
+                    .map(|days| i32::try_from(days).unwrap_or(i32::MAX)),
+                thumbs_up: listing.thumbs_up,
+                thumbs_down: listing.thumbs_down,
+                is_password_protected: listing.is_password_protected,
+                indexer_languages: listing.indexer_languages,
+                extra: Json(serde_json::Value::Object(
+                    listing.extra.into_iter().collect(),
+                )),
+                captured_at: listing.captured_at,
+            }),
             score: result.score,
             allowed: result.allowed,
             blocked: result.blocked,
@@ -494,4 +512,31 @@ impl RulesMutations {
             .map_err(to_gql_error)?;
         Ok(DeleteTrackedRulePackPayload { pack_id })
     }
+}
+
+/// Listing facts for a tested release name. `extra` must be a JSON object;
+/// the application bounds its contents like a live listing's.
+fn listing_input(
+    input: Option<RuleSetTestListingInput>,
+) -> GqlResult<scryer_application::RuleSetTestListingInput> {
+    let Some(input) = input else {
+        return Ok(Default::default());
+    };
+    let extra = match input.extra.map(|Json(value)| value) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(map)) => Some(map),
+        Some(_) => {
+            return Err(to_gql_error(scryer_application::AppError::Validation(
+                "listing extra must be a JSON object".into(),
+            )));
+        }
+    };
+    Ok(scryer_application::RuleSetTestListingInput {
+        published_at: input.published_at,
+        thumbs_up: input.thumbs_up,
+        thumbs_down: input.thumbs_down,
+        is_password_protected: input.is_password_protected,
+        indexer_languages: input.indexer_languages,
+        extra,
+    })
 }

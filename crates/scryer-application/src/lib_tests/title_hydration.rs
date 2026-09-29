@@ -97,11 +97,12 @@ async fn consume_title_hydration_wake(app: &AppUseCase) {
 
 #[derive(Default)]
 struct MovieTitleResolutionGateway {
-    unsupported: bool,
+    /// Answer every title-surface request with a gateway error.
+    failing: bool,
+    /// While set, identity resolution fails: with a rate limit carrying this
+    /// `Retry-After` when one is given, with a plain gateway error otherwise.
+    resolve_failure: std::sync::Mutex<Option<Option<std::time::Duration>>>,
     unresolved: bool,
-    /// Answer as an SMG that predates the title-id surface does: with the raw
-    /// GraphQL validation error, before the client maps it to a capability error.
-    raw_unknown_field_error: bool,
     redirected_from: Option<i64>,
     calls: Mutex<Vec<(Vec<MovieTitleRef>, bool)>>,
     movie_title_calls: Mutex<Vec<Vec<MovieTitleRef>>>,
@@ -164,12 +165,6 @@ impl MetadataGateway for MovieTitleResolutionGateway {
             .ok_or_else(|| AppError::NotFound(format!("movie {tvdb_id}")))
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::Repository(
-            "not used by identity backfill tests".into(),
-        ))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],
@@ -197,10 +192,8 @@ impl MetadataGateway for MovieTitleResolutionGateway {
         _language: &str,
     ) -> AppResult<MovieTitleBulkResult> {
         self.movie_title_calls.lock().await.push(refs.to_vec());
-        if self.unsupported {
-            return Err(AppError::Repository(
-                "metadata gateway does not support title-id queries".into(),
-            ));
+        if self.failing {
+            return Err(AppError::Repository("fixture title surface failure".into()));
         }
 
         let mut result = MovieTitleBulkResult {
@@ -241,15 +234,18 @@ impl MetadataGateway for MovieTitleResolutionGateway {
             .lock()
             .await
             .push((refs.to_vec(), create_missing));
-        if self.raw_unknown_field_error {
-            return Err(AppError::Repository(
-                "Cannot query field \"resolveTitles\" on type \"Query\".".into(),
-            ));
+        if self.failing {
+            return Err(AppError::Repository("fixture title surface failure".into()));
         }
-        if self.unsupported {
-            return Err(AppError::Repository(
-                "metadata gateway does not support title-id queries".into(),
-            ));
+        if let Some(retry_after) = *self.resolve_failure.lock().unwrap() {
+            return Err(match retry_after {
+                Some(retry_after) => AppError::rate_limited_temporary_unavailable(
+                    "fixture gateway rate limited",
+                    Some(retry_after),
+                    crate::RateLimitCooldownAction::AlreadyRecorded,
+                ),
+                None => AppError::Repository("fixture gateway unavailable".into()),
+            });
         }
         if self.unresolved {
             return Ok(refs
@@ -431,25 +427,34 @@ async fn movie_smg_identity_backfill_excludes_a_title_after_the_attempt_cap() {
     );
 }
 
+/// A gateway error is reported as a failed tick, links nothing, and does not
+/// switch the backfill off: the next tick asks the gateway again.
 #[tokio::test]
-async fn movie_smg_identity_backfill_skips_the_default_not_supported_gateway_error() {
+async fn movie_smg_identity_backfill_reports_a_gateway_error_as_a_failed_tick() {
     let gateway = Arc::new(MovieTitleResolutionGateway {
-        unsupported: true,
+        failing: true,
         ..Default::default()
     });
-    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway);
-    app.add_title_with_outcome(&user, hydration_test_title("Unsupported", 951_003))
+    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    app.add_title_with_outcome(&user, hydration_test_title("Gateway Failure", 951_003))
         .await
         .expect("title should be created");
 
     let token = tokio_util::sync::CancellationToken::new();
-    let tick =
-        crate::catalog::title_hydration::run_movie_smg_identity_backfill_tick(&app, &token, 1)
-            .await;
-    assert!(matches!(
-        tick,
-        crate::catalog::title_hydration::MovieSmgIdentityBackfillTick::NotSupported
-    ));
+    for _ in 0..2 {
+        let tick =
+            crate::catalog::title_hydration::run_movie_smg_identity_backfill_tick(&app, &token, 1)
+                .await;
+        assert!(
+            matches!(
+                &tick,
+                crate::catalog::title_hydration::MovieSmgIdentityBackfillTick::Failed(error)
+                    if error.to_string().contains("fixture title surface failure")
+            ),
+            "a gateway error must surface as a failed tick"
+        );
+    }
+    assert_eq!(gateway.calls.lock().await.len(), 2);
     assert!(titles.store.lock().await.iter().all(|title| {
         title
             .external_ids
@@ -458,37 +463,135 @@ async fn movie_smg_identity_backfill_skips_the_default_not_supported_gateway_err
     }));
 }
 
-/// An old SMG rejects `resolveTitles` with a raw validation error naming that
-/// field. Read as anything but a capability signal, the backfill worker reports
-/// `Failed` on every tick forever instead of switching itself off once.
+fn backfill_clock(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_900_000_000 + seconds, 0).expect("fixture instant")
+}
+
+/// Run the backfill phase at `seconds` on the fixed clock and return how many
+/// identity batches the gateway has been sent so far.
+async fn backfill_phase_at(
+    app: &AppUseCase,
+    gateway: &MovieTitleResolutionGateway,
+    schedule: &mut crate::catalog::title_hydration::MovieSmgIdentityBackfillSchedule,
+    seconds: i64,
+) -> usize {
+    app.runtime
+        .environment
+        .set_fixed_now_for_tests(Some(backfill_clock(seconds)));
+    let token = tokio_util::sync::CancellationToken::new();
+    assert!(
+        crate::catalog::title_hydration::run_movie_smg_identity_backfill_phase(
+            app, &token, schedule
+        )
+        .await,
+        "the phase is not cancelled"
+    );
+    gateway.calls.lock().await.len()
+}
+
+async fn smg_linked_titles(titles: &MockTitleRepo) -> usize {
+    titles
+        .store
+        .lock()
+        .await
+        .iter()
+        .filter(|title| {
+            title
+                .external_ids
+                .iter()
+                .any(|external_id| external_id.source == "smg")
+        })
+        .count()
+}
+
 #[tokio::test]
-async fn movie_smg_identity_backfill_stops_on_a_raw_unknown_field_error() {
-    let gateway = Arc::new(MovieTitleResolutionGateway {
-        raw_unknown_field_error: true,
-        ..Default::default()
-    });
-    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway);
-    app.add_title_with_outcome(&user, hydration_test_title("Raw Unsupported", 951_004))
+async fn movie_smg_identity_backfill_backs_off_while_the_gateway_fails_and_resets_on_recovery() {
+    let gateway = Arc::new(MovieTitleResolutionGateway::default());
+    *gateway.resolve_failure.lock().unwrap() = Some(None);
+    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    app.add_title_with_outcome(&user, hydration_test_title("Backoff A", 951_101))
         .await
         .expect("title should be created");
+    let mut schedule = Default::default();
 
-    let token = tokio_util::sync::CancellationToken::new();
-    let tick =
-        crate::catalog::title_hydration::run_movie_smg_identity_backfill_tick(&app, &token, 1)
-            .await;
-    assert!(
-        matches!(
-            tick,
-            crate::catalog::title_hydration::MovieSmgIdentityBackfillTick::NotSupported
-        ),
-        "a raw unknown-field error must disable the backfill, not fail the tick"
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 0).await, 1);
+    // Each failure waits out the next rung: 30 s, then 1 minute, then 5.
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 5).await, 1);
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 29).await,
+        1
     );
-    assert!(titles.store.lock().await.iter().all(|title| {
-        title
-            .external_ids
-            .iter()
-            .all(|external_id| !external_id.source.eq_ignore_ascii_case("smg"))
-    }));
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 30).await,
+        2
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 89).await,
+        2
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 90).await,
+        3
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 389).await,
+        3
+    );
+
+    // The gateway recovers: the batch waiting out its backoff goes through.
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 390).await,
+        4
+    );
+    assert_eq!(smg_linked_titles(&titles).await, 1);
+
+    // A success resets the ladder: the next failure waits 30 s, not 15 minutes.
+    app.add_title_with_outcome(&user, hydration_test_title("Backoff B", 951_102))
+        .await
+        .expect("title should be created");
+    *gateway.resolve_failure.lock().unwrap() = Some(None);
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 395).await,
+        5
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 424).await,
+        5
+    );
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 425).await,
+        6
+    );
+    assert_eq!(smg_linked_titles(&titles).await, 2);
+}
+
+#[tokio::test]
+async fn movie_smg_identity_backfill_waits_out_a_gateway_retry_after() {
+    let gateway = Arc::new(MovieTitleResolutionGateway::default());
+    *gateway.resolve_failure.lock().unwrap() = Some(Some(std::time::Duration::from_secs(12 * 60)));
+    let (app, user, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    app.add_title_with_outcome(&user, hydration_test_title("Retry After", 951_103))
+        .await
+        .expect("title should be created");
+    let mut schedule = Default::default();
+
+    assert_eq!(backfill_phase_at(&app, &gateway, &mut schedule, 0).await, 1);
+    // Twelve minutes climbs to the first rung that covers it: fifteen.
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 12 * 60).await,
+        1
+    );
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 15 * 60 - 1).await,
+        1
+    );
+    *gateway.resolve_failure.lock().unwrap() = None;
+    assert_eq!(
+        backfill_phase_at(&app, &gateway, &mut schedule, 15 * 60).await,
+        2
+    );
 }
 
 #[tokio::test]
@@ -720,27 +823,30 @@ async fn bulk_movie_hydration_replaces_redirected_smg_id() {
     assert_eq!(smg_ids[0].value, new_smg_id.to_string());
 }
 
+/// A title-surface error fails every movie in the batch with the gateway's
+/// message, so the worker schedules its normal retry; nothing is hydrated
+/// from another document and nothing is silently parked.
 #[tokio::test]
-async fn legacy_movie_hydration_falls_back_for_tvdb_and_defers_tmdb_only() {
+async fn bulk_movie_hydration_fails_the_batch_movies_on_a_gateway_error() {
     let tvdb_id = 901_020;
     let tmdb_id = 810_020;
-    let mut movie = hydration_test_movie(tvdb_id, "Legacy TVDB Movie");
+    let mut movie = hydration_test_movie(tvdb_id, "Fixture TVDB Movie");
     movie.smg_id = Some(1_901_020);
     let gateway = Arc::new(MovieTitleResolutionGateway {
-        unsupported: true,
+        failing: true,
         hydration_movies: HashMap::from([(tvdb_id, movie)]),
         ..Default::default()
     });
     let (app, user, _) = bootstrap_with_metadata_gateway_and_titles(gateway);
     let tvdb_title = app
-        .add_title_with_outcome(&user, hydration_test_title("Legacy TVDB Movie", tvdb_id))
+        .add_title_with_outcome(&user, hydration_test_title("Fixture TVDB Movie", tvdb_id))
         .await
         .expect("TVDB title should be created")
         .title;
     let tmdb_title = app
         .add_title_with_outcome(
             &user,
-            hydration_test_tmdb_title("Legacy TMDB Movie", tmdb_id),
+            hydration_test_tmdb_title("Fixture TMDB Movie", tmdb_id),
         )
         .await
         .expect("TMDB title should be created")
@@ -764,10 +870,17 @@ async fn legacy_movie_hydration_falls_back_for_tvdb_and_defers_tmdb_only() {
             },
         ])
         .await
-        .expect("legacy fallback should not fail the batch");
-    assert!(outcome.hydrated_titles.contains_key(&tvdb_title.id));
-    assert!(outcome.deferred_titles.contains(&tmdb_title.id));
-    assert!(!outcome.failed_titles.contains_key(&tmdb_title.id));
+        .expect("a gateway error is reported per title, not as a batch error");
+    assert!(outcome.hydrated_titles.is_empty());
+    for title_id in [&tvdb_title.id, &tmdb_title.id] {
+        assert!(
+            outcome
+                .failed_titles
+                .get(title_id)
+                .is_some_and(|reason| reason.contains("fixture title surface failure")),
+            "every movie in the batch must fail with the gateway's message"
+        );
+    }
 }
 
 #[tokio::test]

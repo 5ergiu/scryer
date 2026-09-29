@@ -20,8 +20,8 @@ use scryer_application::{
 
 use super::{
     from_api_key, from_oauth_client_registration, from_plugin_auto_update_settings,
-    from_title_tag_definition, from_title_tag_rewrite_counts, from_ui_settings,
-    from_verification_settings, into_oauth_client_kind, to_verification_depth,
+    from_recycle_bin_settings, from_title_tag_definition, from_title_tag_rewrite_counts,
+    from_ui_settings, from_verification_settings, into_oauth_client_kind, to_verification_depth,
     ui_settings_update_from_input,
 };
 use scryer_interface_core::{
@@ -31,7 +31,7 @@ use scryer_interface_core::{
     interactive_session_actor_from_ctx, login_attempt_limiter_from_ctx,
     login_verification_required_gql_error, mfa_enrollment_actor_from_ctx,
     mfa_verification_from_ctx, password_change_required_actor_from_ctx, persist_session_or_default,
-    require_config_app_permission, to_gql_error, to_login_gql_error,
+    request_client_ip_from_ctx, require_config_app_permission, to_gql_error, to_login_gql_error,
     to_login_gql_error_after_timing, totp_enrollment_actor_from_ctx,
     totp_management_actor_from_ctx,
 };
@@ -89,24 +89,18 @@ fn from_subtitle_settings(
     }
 }
 
-fn from_recycle_bin_settings(
-    settings: scryer_application::RecycleBinSettings,
-) -> RecycleBinSettingsPayload {
-    RecycleBinSettingsPayload {
-        enabled: settings.enabled,
-    }
-}
-
 fn from_acquisition_settings(
     settings: scryer_application::AcquisitionSettings,
 ) -> AcquisitionSettingsPayload {
     AcquisitionSettingsPayload {
         enabled: settings.enabled,
-        upgrade_cooldown_hours: settings.upgrade_cooldown_hours,
+        // Deprecated no-op fields: nothing backs them, so they report 0.
+        upgrade_cooldown_hours: 0,
         same_tier_min_delta: settings.same_tier_min_delta,
-        cross_tier_min_delta: settings.cross_tier_min_delta,
-        forced_upgrade_delta_bypass: settings.forced_upgrade_delta_bypass,
+        cross_tier_min_delta: 0,
+        forced_upgrade_delta_bypass: 0,
         poll_interval_seconds: settings.poll_interval_seconds,
+        walk_interval_seconds: settings.walk_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,
     }
@@ -856,16 +850,25 @@ impl SettingsMutations {
             require_config_app_permission(ctx, scryer_domain::AppPermission::ManageCatalogSettings)
                 .await?;
 
+        // A client that predates the walk interval does not send it; keep
+        // what is stored rather than resetting it.
+        let walk_interval_seconds = match input.walk_interval_seconds {
+            Some(walk_interval_seconds) => walk_interval_seconds,
+            None => {
+                app.get_acquisition_settings(&actor)
+                    .await
+                    .map_err(to_gql_error)?
+                    .walk_interval_seconds
+            }
+        };
         let settings = app
             .update_acquisition_settings(
                 &actor,
                 AppAcquisitionSettings {
                     enabled: input.enabled,
-                    upgrade_cooldown_hours: input.upgrade_cooldown_hours,
                     same_tier_min_delta: input.same_tier_min_delta,
-                    cross_tier_min_delta: input.cross_tier_min_delta,
-                    forced_upgrade_delta_bypass: input.forced_upgrade_delta_bypass,
                     poll_interval_seconds: input.poll_interval_seconds,
+                    walk_interval_seconds,
                     long_tail_backfill_max_scopes_per_cycle: input
                         .long_tail_backfill_max_scopes_per_cycle,
                     long_tail_reconverge_days: input.long_tail_reconverge_days,
@@ -944,6 +947,12 @@ impl SettingsMutations {
                 &actor,
                 AppUpdateRecycleBinSettings {
                     enabled: input.enabled,
+                    path: match input.path {
+                        MaybeUndefined::Undefined => None,
+                        MaybeUndefined::Null => Some(None),
+                        MaybeUndefined::Value(path) => Some(Some(path)),
+                    },
+                    retention_days: input.retention_days.map(i64::from),
                 },
             )
             .await
@@ -2413,7 +2422,11 @@ impl SettingsMutations {
             limiter.check(principal)?;
         }
         let verified = match app
-            .authenticate_local_credentials(&input.username, &input.password)
+            .authenticate_local_credentials(
+                &input.username,
+                &input.password,
+                request_client_ip_from_ctx(ctx),
+            )
             .await
         {
             Ok(verified) => {

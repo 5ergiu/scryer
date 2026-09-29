@@ -38,7 +38,7 @@ const APPEND_DOMAIN_EVENT_INSERT_SQL: &str = "INSERT INTO domain_events (
             stream_kind, stream_id, event_type, payload_json, import_status,
             media_file_delete_reason, download_id
          ) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
-pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
+pub const DOWNLOAD_SUBMISSION_COLUMNS: &str = "id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, release_listing_json, request_signature, purpose, episode_id, collection_id, series_movie_link_id";
 pub const IMPORT_COLUMNS: &str = "id, source_client_id, source_system, source_ref, import_type, status, payload_json, result_json, download_id, import_transfer_phase, import_transfer_bytes, import_transfer_total_bytes, import_transfer_started_at, import_transfer_updated_at, started_at, finished_at, created_at, updated_at";
 pub const DOWNLOAD_QUEUE_COMMAND_COLUMNS: &str = "id, action, canonical_download_id, client_id, client_type, download_client_item_id, is_history, status, error_text, requested_by_user_id, started_at, finished_at, created_at, updated_at";
 
@@ -300,7 +300,8 @@ async fn ensure_submission_download_tx(
 /// Persist a submit whose HTTP request may have reached the client but whose
 /// response never supplied a native client item identifier. The row remains
 /// deliberately unbound so legacy tuple readers cannot mistake it for a
-/// tracked client job.
+/// tracked client job. Over a grab's pending intent it only fills in the
+/// client the error named, which the intent could not know.
 pub async fn record_ambiguous_download_submission_tx(
     tx: &mut SqlTx<'_>,
     submission: &DownloadSubmission,
@@ -343,10 +344,21 @@ pub async fn record_ambiguous_download_submission_tx(
          (id, title_id, facet, download_client_id, download_client_type,
           download_client_item_id, source_hint, source_provider_id,
           source_provider_name, source_kind, source_title, info_hash,
-          release_size_bytes, request_signature, purpose, episode_id,
-          collection_id, series_movie_link_id, download_id)
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
-         ON CONFLICT(id) DO NOTHING",
+          release_size_bytes, release_listing_json, request_signature, purpose,
+          episode_id, collection_id, series_movie_link_id, download_id)
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+         ON CONFLICT(id) DO UPDATE
+         SET download_client_id = CASE
+                 WHEN TRIM(COALESCE(download_submissions.download_client_id, '')) = ''
+                 THEN excluded.download_client_id
+                 ELSE download_submissions.download_client_id
+             END,
+             download_client_type = CASE
+                 WHEN TRIM(COALESCE(download_submissions.download_client_type, '')) = ''
+                 THEN excluded.download_client_type
+                 ELSE download_submissions.download_client_type
+             END
+         WHERE download_submissions.download_client_item_id IS NULL",
         &[
             SqlArg::Text(canonical_id.clone()),
             SqlArg::Text(submission.title_id.clone()),
@@ -365,6 +377,7 @@ pub async fn record_ambiguous_download_submission_tx(
             SqlArg::OptText(submission.source_title.clone()),
             SqlArg::OptText(submission.info_hash.clone()),
             SqlArg::OptI64(submission.release_size_bytes),
+            SqlArg::OptText(submission.release_listing_json.clone()),
             SqlArg::OptText(submission.request_signature.clone()),
             SqlArg::Text(submission.purpose.as_str().to_string()),
             SqlArg::OptText(None),
@@ -381,7 +394,24 @@ pub async fn record_ambiguous_download_submission_tx(
          (download_id, client_config_id, client_type_snapshot, client_name_snapshot,
           native_item_id, created_at, ended_at)
          VALUES ({}, {}, {}, {}, {}, {}, {})
-         ON CONFLICT(download_id) DO NOTHING",
+         ON CONFLICT(download_id) DO UPDATE
+         SET client_config_id = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_config_id, '')) = ''
+                 THEN excluded.client_config_id
+                 ELSE download_client_bindings.client_config_id
+             END,
+             client_type_snapshot = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_type_snapshot, '')) = ''
+                 THEN excluded.client_type_snapshot
+                 ELSE download_client_bindings.client_type_snapshot
+             END,
+             client_name_snapshot = CASE
+                 WHEN TRIM(COALESCE(download_client_bindings.client_name_snapshot, '')) = ''
+                 THEN excluded.client_name_snapshot
+                 ELSE download_client_bindings.client_name_snapshot
+             END
+         WHERE download_client_bindings.native_item_id IS NULL
+           AND download_client_bindings.ended_at IS NULL",
         &[
             SqlArg::Text(canonical_id),
             SqlArg::OptText(client_config_id),
@@ -391,6 +421,102 @@ pub async fn record_ambiguous_download_submission_tx(
             SqlArg::Timestamp(now),
             SqlArg::OptTimestamp(None),
         ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Persist a grab's intent before its mutation reaches any client: the same
+/// unbound row an ambiguous submit leaves, plus the grab's scope, so a client
+/// job that finishes before the client answers already resolves to its title,
+/// purpose and scope. Acceptance binds and completes this row; a definitive
+/// refusal withdraws it through [`withdraw_pending_download_submission_tx`].
+pub async fn record_pending_download_submission_tx(
+    tx: &mut SqlTx<'_>,
+    submission: &DownloadSubmission,
+) -> AppResult<()> {
+    record_ambiguous_download_submission_tx(tx, submission).await?;
+    let (episode_id, collection_id, series_movie_link_id) =
+        persisted_submission_scope(&submission.scope);
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "UPDATE download_submissions
+         SET episode_id = {}, collection_id = {}, series_movie_link_id = {}
+         WHERE id = {}
+           AND download_client_item_id IS NULL",
+        &[
+            SqlArg::OptText(episode_id.map(str::to_string)),
+            SqlArg::OptText(collection_id.map(str::to_string)),
+            SqlArg::OptText(series_movie_link_id.map(str::to_string)),
+            SqlArg::Text(submission.download_id.to_string()),
+        ],
+    )
+    .await?;
+    replace_download_submission_episode_links_tx(
+        tx,
+        &submission.download_id,
+        persisted_episode_set_ids(&submission.scope),
+    )
+    .await
+}
+
+/// Remove a pending intent no client job ever bound: its submission row (and
+/// with it the episode links), its unbound binding, and the canonical row when
+/// nothing else refers to it. An intent whose binding a client job already
+/// claimed is left alone — the client holds that download after all.
+pub async fn withdraw_pending_download_submission_tx(
+    tx: &mut SqlTx<'_>,
+    download_id: &DownloadId,
+) -> AppResult<()> {
+    let id = download_id.to_string();
+    let unbound = SqlRuntime::fetch_optional(
+        SqlExec::Tx(tx),
+        "SELECT download_id
+         FROM download_client_bindings
+         WHERE download_id = {}
+           AND native_item_id IS NULL
+           AND ended_at IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?
+    .is_some();
+    if !unbound {
+        return Ok(());
+    }
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM download_submissions
+         WHERE id = {}
+           AND download_client_item_id IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?;
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM download_client_bindings
+         WHERE download_id = {}
+           AND native_item_id IS NULL
+           AND ended_at IS NULL",
+        &[SqlArg::Text(id.clone())],
+    )
+    .await?;
+    SqlRuntime::execute(
+        SqlExec::Tx(tx),
+        "DELETE FROM downloads
+         WHERE id = {}
+           AND NOT EXISTS (SELECT 1 FROM download_submissions WHERE id = {})
+           AND NOT EXISTS (SELECT 1 FROM download_client_bindings WHERE download_id = {})
+           AND NOT EXISTS (
+               SELECT 1 FROM download_identity_states WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM download_import_artifacts WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM download_queue_commands WHERE canonical_download_id = {}
+           )
+           AND NOT EXISTS (SELECT 1 FROM imports WHERE canonical_download_id = {})",
+        &std::array::from_fn::<_, 7, _>(|_| SqlArg::Text(id.clone())),
     )
     .await?;
     Ok(())
@@ -435,8 +561,28 @@ async fn record_download_submission_tx_inner(
     let conflict_clause = if is_orphan {
         "ON CONFLICT(id) DO NOTHING"
     } else {
+        // A pending intent carries no client item yet: acceptance supplies it.
+        // A row that already names its client job keeps it.
         "ON CONFLICT(id) DO UPDATE
-         SET title_id = excluded.title_id,
+         SET download_client_id = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_id
+                 ELSE download_submissions.download_client_id
+             END,
+             download_client_type = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_type
+                 ELSE download_submissions.download_client_type
+             END,
+             download_client_item_id = CASE
+                 WHEN download_submissions.download_client_item_id IS NULL
+                  AND TRIM(excluded.download_client_item_id) <> ''
+                 THEN excluded.download_client_item_id
+                 ELSE download_submissions.download_client_item_id
+             END,
+             title_id = excluded.title_id,
              facet = excluded.facet,
              source_hint = excluded.source_hint,
              source_provider_id = excluded.source_provider_id,
@@ -445,6 +591,7 @@ async fn record_download_submission_tx_inner(
              source_title = excluded.source_title,
              info_hash = excluded.info_hash,
              release_size_bytes = excluded.release_size_bytes,
+             release_listing_json = excluded.release_listing_json,
              request_signature = excluded.request_signature,
              purpose = excluded.purpose,
              episode_id = excluded.episode_id,
@@ -453,8 +600,8 @@ async fn record_download_submission_tx_inner(
     };
     let sql = [
         "INSERT INTO download_submissions
-         (id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, request_signature, purpose, episode_id, collection_id, series_movie_link_id)
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+         (id, title_id, facet, download_client_id, download_client_type, download_client_item_id, source_hint, source_provider_id, source_provider_name, source_kind, source_title, info_hash, release_size_bytes, release_listing_json, request_signature, purpose, episode_id, collection_id, series_movie_link_id)
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         conflict_clause,
     ]
     .join(" ");
@@ -479,6 +626,7 @@ async fn record_download_submission_tx_inner(
             SqlArg::OptText(submission.source_title.clone()),
             SqlArg::OptText(submission.info_hash.clone()),
             SqlArg::OptI64(submission.release_size_bytes),
+            SqlArg::OptText(submission.release_listing_json.clone()),
             SqlArg::OptText(submission.request_signature.clone()),
             SqlArg::Text(submission.purpose.as_str().to_string()),
             SqlArg::OptText(episode_id.map(str::to_string)),
@@ -1121,6 +1269,12 @@ pub fn build_title_history_filter_sql(
                             MediaFileDeletedReason::UpgradeCleanup.as_str().into(),
                         ));
                     }
+                    TitleHistoryEventType::FileRestored => {
+                        parts.push("event_type = {}".to_string());
+                        args.push(SqlArg::Text(
+                            DomainEventType::MediaFileRestored.as_str().into(),
+                        ));
+                    }
                     TitleHistoryEventType::FileRenamed => {
                         parts.push("event_type = {}".to_string());
                         args.push(SqlArg::Text(
@@ -1275,6 +1429,7 @@ pub const TITLE_HISTORY_PAGE_DOMAIN_EVENT_TYPES: &[DomainEventType] = &[
     DomainEventType::MediaFileAnalyzed,
     DomainEventType::MediaFileUpgraded,
     DomainEventType::MediaFileDeleted,
+    DomainEventType::MediaFileRestored,
     DomainEventType::MediaFileRenamed,
     DomainEventType::SeedingStarted,
     DomainEventType::SeedingCompleted,
@@ -1523,6 +1678,7 @@ pub fn download_submission_from_row(row: &SqlRow) -> AppResult<DownloadSubmissio
         source_title: row.opt_text("source_title")?,
         info_hash: row.opt_text("info_hash")?,
         release_size_bytes: row.opt_i64("release_size_bytes")?,
+        release_listing_json: row.opt_text("release_listing_json")?,
         request_signature: row.opt_text("request_signature")?,
         purpose: row
             .opt_text("purpose")?
@@ -1807,7 +1963,7 @@ pub fn persisted_episode_set_ids(scope: &SubmissionScope) -> &[String] {
     }
 }
 
-const DOWNLOAD_SUBMISSION_BATCH_LOOKUP_CHUNK_SIZE: usize = 400;
+pub(crate) const DOWNLOAD_SUBMISSION_BATCH_LOOKUP_CHUNK_SIZE: usize = 400;
 
 pub fn chunk_download_submission_client_items(
     client_items: &[ClientJobLocator],

@@ -56,14 +56,21 @@ pub(crate) fn resolve_release_labels_from_analysis(
             )
         });
     let (best_audio_label, audio_channels) = if let Some((index, stream, label)) = best {
-        let layout = metadata
-            .get(index)
-            .and_then(|stream| stream.metadata.channel_layout.clone());
-        let channels = layout.or_else(|| {
-            (details.revision == 0)
-                .then(|| stream.channels.map(format_audio_channels_for_release))
-                .flatten()
-        });
+        // Release names and rename tokens spell channels as a count ("2.0",
+        // "5.1"). Probe layouts spell the same thing as words ("stereo") or
+        // with speaker-arrangement suffixes ("5.1(side)"), so the layout is
+        // only a fallback for a stream whose count is unknown. Object-based
+        // audio is carried by the codec label ("TrueHD Atmos"), not here.
+        let channels = stream
+            .channels
+            .filter(|count| *count > 0)
+            .map(format_audio_channels_for_release)
+            .or_else(|| {
+                metadata
+                    .get(index)
+                    .and_then(|stream| stream.metadata.channel_layout.as_deref())
+                    .and_then(audio_channels_from_layout)
+            });
         (label, channels)
     } else if audio_streams.is_empty() && details.revision == 0 {
         (
@@ -167,6 +174,23 @@ pub(crate) fn format_audio_channels_for_release(channels: i32) -> String {
     }
 }
 
+/// The count form of a probe channel layout, for a stream whose channel count
+/// is unknown. Layouts that name no count yield nothing rather than a word.
+fn audio_channels_from_layout(layout: &str) -> Option<String> {
+    let layout = layout.trim();
+    if layout.eq_ignore_ascii_case("mono") {
+        return Some(format_audio_channels_for_release(1));
+    }
+    if layout.eq_ignore_ascii_case("stereo") {
+        return Some(format_audio_channels_for_release(2));
+    }
+    let mut parts = layout.splitn(3, |ch: char| !ch.is_ascii_digit());
+    let main = parts.next().filter(|part| !part.is_empty())?;
+    let separator = layout[main.len()..].chars().next()?;
+    let lfe = parts.next().filter(|part| !part.is_empty())?;
+    (separator == '.').then(|| format!("{main}.{lfe}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +222,78 @@ mod tests {
         assert_eq!(format_audio_channels_for_release(8), "7.1");
         assert_eq!(format_audio_channels_for_release(6), "5.1");
         assert_eq!(format_audio_channels_for_release(2), "2.0");
+    }
+
+    fn probed_audio(
+        channels: Option<i32>,
+        layout: Option<&str>,
+    ) -> (
+        Vec<crate::AudioStreamDetail>,
+        scryer_media_types::AnalysisDetails,
+    ) {
+        let streams = vec![crate::AudioStreamDetail {
+            codec: Some("aac".to_string()),
+            profile: None,
+            channels,
+            language: Some("en".to_string()),
+            name: None,
+            bitrate_kbps: None,
+        }];
+        let details = scryer_media_types::AnalysisDetails {
+            revision: scryer_media_types::ANALYSIS_REVISION,
+            streams: vec![scryer_media_types::StreamDetail {
+                kind: scryer_media_types::StreamKind::Audio,
+                codec: Some("aac".to_string()),
+                channels,
+                metadata: scryer_media_types::StreamMetadata {
+                    channel_layout: layout.map(str::to_string),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        (streams, details)
+    }
+
+    fn resolved_channels(channels: Option<i32>, layout: Option<&str>) -> Option<String> {
+        let (streams, details) = probed_audio(channels, layout);
+        resolve_release_labels_from_analysis(None, None, None, None, None, None, &streams, &details)
+            .audio_channels
+    }
+
+    #[test]
+    fn audio_channels_use_the_count_even_when_the_probe_names_the_layout() {
+        assert_eq!(
+            resolved_channels(Some(2), Some("stereo")).as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(
+            resolved_channels(Some(1), Some("mono")).as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(
+            resolved_channels(Some(6), Some("5.1(side)")).as_deref(),
+            Some("5.1")
+        );
+        assert_eq!(
+            resolved_channels(Some(8), Some("7.1(wide)")).as_deref(),
+            Some("7.1")
+        );
+    }
+
+    #[test]
+    fn audio_channels_fall_back_to_the_count_form_of_the_layout() {
+        assert_eq!(
+            resolved_channels(None, Some("stereo")).as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(
+            resolved_channels(None, Some("5.1(side)")).as_deref(),
+            Some("5.1")
+        );
+        assert_eq!(resolved_channels(None, Some("quad")), None);
+        assert_eq!(resolved_channels(None, None), None);
     }
 
     #[test]

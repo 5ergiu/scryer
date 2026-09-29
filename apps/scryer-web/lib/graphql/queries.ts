@@ -441,7 +441,17 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       grabbedAt
       edition
       originalFilePath
-      releaseHash`;
+      releaseHash
+      releaseListing {
+        publishedAt
+        ageDaysAtGrab
+        thumbsUp
+        thumbsDown
+        isPasswordProtected
+        indexerLanguages
+        extra
+        capturedAt
+      }`;
 
 const WANTED_ITEM_FIELDS = `
       id
@@ -455,7 +465,6 @@ const WANTED_ITEM_FIELDS = `
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       sourceProvider
       currentScore
       convergenceState
@@ -1514,6 +1523,7 @@ export const TITLE_CATALOG_SEARCH_FIELDS = `
     createdAt
     externalIds {
       source
+      kind
       value
     }`;
 
@@ -2186,6 +2196,12 @@ ${JOB_RUN_FIELDS}
   }
 }`;
 
+export const latestJobRunsQuery = `query LatestJobRuns {
+  latestJobRuns {
+${JOB_RUN_FIELDS}
+  }
+}`;
+
 export const jobRunEventsSubscription = `subscription JobRunEvents {
   jobRunEvents {
 ${JOB_RUN_FIELDS}
@@ -2240,6 +2256,7 @@ export const indexersQuery = `query Indexers($providerType: String) {
     storedSecretKeys
     rateLimitSeconds
     rateLimitBurst
+    maxQueriesPerMinute
     disabledUntil
     rateLimitedUntil
     isEnabled
@@ -2460,6 +2477,7 @@ const indexerFieldSelection = `
     storedSecretKeys
     rateLimitSeconds
     rateLimitBurst
+    maxQueriesPerMinute
     disabledUntil
     rateLimitedUntil
     isEnabled
@@ -2799,11 +2817,9 @@ export const tlsSettingsQuery = `query TlsSettings {
 export const acquisitionSettingsQuery = `query AcquisitionSettings {
   acquisitionSettings {
     enabled
-    upgradeCooldownHours
     sameTierMinDelta
-    crossTierMinDelta
-    forcedUpgradeDeltaBypass
     pollIntervalSeconds
+    walkIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays
   }
@@ -3435,7 +3451,6 @@ export const wantedItemsQuery = `query WantedItems($wantedKind: WantedKindValue!
       mediaType
       lastSearchAt
       status
-      grabbedRelease
       currentScore
       standbyCount
       latestReleaseDecision {
@@ -3524,6 +3539,10 @@ export const backupsQuery = `query Backups {
 export const recycleBinSettingsQuery = `query RecycleBinSettings {
   recycleBinSettings {
     enabled
+    path
+    retentionDays
+    effectivePaths
+    validationError
   }
 }`;
 
@@ -4161,6 +4180,7 @@ const METADATA_SEARCH_FIELDS = `
     primarySource
     externalIds {
       source
+      kind
       value
     }
     name
@@ -4307,6 +4327,8 @@ export const metadataMovieQuery = `query MetadataMovie($input: MetadataMovieInpu
 export const metadataSeriesQuery = `query MetadataSeries($input: MetadataSeriesInput!) {
   metadataSeries(input: $input) {
     tvdbId
+    smgId
+    tmdbId
     name
     sortName
     slug
@@ -4338,6 +4360,7 @@ export const metadataSeriesQuery = `query MetadataSeries($input: MetadataSeriesI
     }
     episodes {
       tvdbId
+      tmdbId
       episodeNumber
       seasonNumber
       name
@@ -5273,6 +5296,296 @@ export const locationRootScopePreviewQuery = `query LocationRootScopePreview($in
     content {${LOCATION_ROOT_CONTENT_FIELDS}
     }
     retirement {${LOCATION_ROOT_RETIREMENT_FIELDS}
+    }
+  }
+}`;
+
+const LIST_COUNTS_FIELDS = `
+      total
+      inLibrary
+      added
+      requested
+      held
+      filtered
+      excluded
+      unresolved`;
+
+export const LIST_SUBSCRIPTION_FIELDS = `
+    id
+    scope
+    name
+    providerUrl
+    source {
+      provider
+      sourceType
+      params {
+        key
+        value
+      }
+    }
+    kinds
+    enabled
+    mode
+    routes {
+      kind
+      libraryId
+      qualityProfileId
+      rootFolderId
+      monitorType
+      minAvailability
+      useSeasonFolders
+      releaseNumbering
+      tags
+    }
+    filters {
+      kind
+      scale
+      value
+      from
+      to
+      values
+    }
+    maxPerSync
+    onLeave
+    intervalSeconds
+    sync {
+      state
+      lastAt
+      nextAt
+      errorMessage
+      errorAt
+      pausedUntil
+    }
+    counts {${LIST_COUNTS_FIELDS}
+    }
+    createdAt
+    updatedAt`;
+
+const LIST_PREVIEW_FIELDS = `
+    recognized
+    provider
+    sourceType
+    params {
+      key
+      value
+    }
+    name
+    kinds
+    total
+    inLibrary
+    filtered
+    excluded
+    unresolved
+    wouldAdd {
+      itemKey
+      displayTitle
+      year
+      kind
+      posterUrl
+    }`;
+
+export const LIST_EXCLUSION_FIELDS = `
+    id
+    kind
+    externalIds {
+      source
+      value
+    }
+    displayTitle
+    year
+    scope
+    subscriptionId
+    subscriptionName
+    createdAt`;
+
+/** What an "Also exclude from lists" delete needs to know about a title. */
+export const listExclusionTitleQuery = `query ListExclusionTitle($id: ID!) {
+  title(id: $id) {
+    id
+    name
+    facet
+    year
+    externalIds {
+      source
+      value
+    }
+  }
+}`;
+
+export const listProvidersQuery =`query ListProviders {
+  listProviders {
+    providerType
+    name
+    summary
+    blurb
+    tile {
+      bg
+      ink
+      abbr
+    }
+    coverage
+    groups {
+      label
+      authBadge
+      items {
+        id
+        name
+        description
+        kinds
+        sourceType
+        params {
+          key
+          label
+          type
+          options
+          required
+        }
+        personal
+        defaultIntervalSeconds
+      }
+    }
+    notes {
+      tone
+      textKey
+    }
+    configFields {
+      key
+      label
+      helpText
+      type
+      required
+      secret
+      isSet
+      value
+    }
+    urlPatterns {
+      pattern
+      sourceType
+      captures {
+        group
+        param
+      }
+    }
+  }
+}`;
+
+const LIST_PROVIDER_SETTINGS_FIELDS = `
+    providerType
+    fields {
+      key
+      label
+      helpText
+      type
+      required
+      secret
+      isSet
+      value
+    }`;
+
+export const listProviderSettingsQuery = `query ListProviderSettings {
+  listProviderSettings {${LIST_PROVIDER_SETTINGS_FIELDS}
+  }
+}`;
+
+export const titleListMembershipsQuery = `query TitleListMemberships($id: ID!) {
+  title(id: $id) {
+    id
+    listMemberships {
+      subscriptionId
+      name
+      state
+      addedByList
+      leftAt
+    }
+  }
+}`;
+
+export const listSubscriptionsQuery = `query ListSubscriptions {
+  listSubscriptions {${LIST_SUBSCRIPTION_FIELDS}
+  }
+}`;
+
+export const listSubscriptionDetailQuery = `query ListSubscriptionDetail($id: ID!, $membershipLimit: Int!, $membershipOffset: Int!, $runLimit: Int!) {
+  listSubscription(id: $id) {${LIST_SUBSCRIPTION_FIELDS}
+  }
+  listSubscriptionMemberships(id: $id, limit: $membershipLimit, offset: $membershipOffset) {
+    totalCount
+    items {
+      itemKey
+      rank
+      season
+      kind
+      state
+      stateReason
+      displayTitle
+      year
+      titleId
+      requestId
+      addedByList
+      firstSeenAt
+      lastSeenAt
+    }
+  }
+  listSyncRuns(subscriptionId: $id, limit: $runLimit) {
+    id
+    startedAt
+    finishedAt
+    outcome
+    counts {${LIST_COUNTS_FIELDS}
+    }
+    errorMessage
+  }
+}`;
+
+export const listSubscriptionPreviewQuery = `query ListSubscriptionPreview($id: ID!) {
+  listSubscriptionPreview(id: $id) {${LIST_PREVIEW_FIELDS}
+  }
+}`;
+
+export const listUrlPreviewQuery = `query ListUrlPreview($url: String!) {
+  listUrlPreview(url: $url) {${LIST_PREVIEW_FIELDS}
+  }
+}`;
+
+export const listSourcePreviewQuery = `query ListSourcePreview($input: ListSourceInput!) {
+  listSourcePreview(input: $input) {${LIST_PREVIEW_FIELDS}
+  }
+}`;
+
+export const listExclusionsQuery = `query ListExclusions {
+  listExclusions {${LIST_EXCLUSION_FIELDS}
+  }
+}`;
+
+export const listMemberPoliciesQuery = `query ListMemberPolicies {
+  listMemberPolicies {
+    user {
+      id
+      username
+    }
+    policy
+    listRequestsLast30d
+  }
+}`;
+
+export const listRouteOptionsQuery = `query ListRouteOptions {
+  qualityProfileSettings {
+    profiles {
+      id
+      name
+    }
+  }
+  libraries(permission: MANAGE_TITLES) {
+    id
+    facet
+    name
+    slug
+    isDefault
+    qualityProfileId
+    roots {
+      id
+      path
+      isDefault
     }
   }
 }`;

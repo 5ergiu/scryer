@@ -112,6 +112,8 @@ async fn apply_result_marks_verified_already_present_skip_imported() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(apply_import_result(&app, &mut td, result, 0).await);
@@ -175,6 +177,8 @@ async fn unavailable_artifact_evidence_keeps_already_present_import_retryable() 
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result, 0).await);
@@ -218,6 +222,8 @@ async fn apply_result_backs_off_unverified_import_until_progress() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     // First pass imported one file: pending, behind the first backoff step.
@@ -312,6 +318,8 @@ async fn verified_import_mark_retries_without_rolling_back_import() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(apply_import_result(&app, &mut td, result, 0).await);
@@ -356,6 +364,8 @@ async fn verified_import_mark_stops_after_bounded_permanent_failures() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     schedule_non_destructive_import_mark(&app, &td, &result, None);
@@ -424,6 +434,8 @@ async fn verified_import_mark_uses_completed_client_identity() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(
@@ -563,6 +575,8 @@ async fn apply_result_keeps_rejected_already_imported_result_blocked() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result, 0).await);
@@ -814,6 +828,8 @@ async fn apply_result_does_not_verify_unresolved_identity_rejection_as_imported(
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result, 0).await);
@@ -843,6 +859,8 @@ async fn apply_result_blocks_cancelled_import_for_manual_review() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result, 0).await);
@@ -853,6 +871,57 @@ async fn apply_result_blocks_cancelled_import_for_manual_review() {
         vec!["Import was cancelled. Use Manual Import to resume it.".to_string()]
     );
     assert!(td.import_execution_retry.is_none());
+}
+
+/// The result a movie import reports when a post-download rule failed to
+/// evaluate: held, not burned, and parked for the operator with the rule
+/// error as the visible reason until they fix the rule and retry.
+#[tokio::test]
+async fn apply_result_blocks_post_download_rule_error_hold_for_operator_review() {
+    let app = build_app(vec![], vec![], vec![], vec![]);
+    // Rule names and engine text are operator-authored; words the transient
+    // allowlist looks for must not schedule an automatic retry.
+    for reason in [
+        "post-download rule failed to evaluate; import held for review: \
+         Erroring Rule (erroring_rule): type mismatch",
+        "post-download rule failed to evaluate; import held for review: \
+         Locked audio (locked_audio): score_entry[\"locked_audio\"] := lower(input.file.video_width)",
+        "post-download rule failed to evaluate; import held for review: \
+         Sample rule (sample_rule): value temporarily unavailable",
+    ] {
+        let mut td = build_tracked_download("title-1", "movie", "Example.Film.2024.1080p.WEB-DL");
+        let result = ImportResult {
+            import_id: "import-rule-error".to_string(),
+            decision: ImportDecision::Skipped,
+            skip_reason: Some(ImportSkipReason::PostDownloadRuleBlocked),
+            title_id: Some("title-1".to_string()),
+            source_system: Some("nzbget".to_string()),
+            source_ref: Some("dl-1".to_string()),
+            source_title: Some("Example.Film.2024.1080p.WEB-DL".to_string()),
+            source_path: "/downloads/Example.Film.2024.1080p.WEB-DL/film.mkv".to_string(),
+            dest_path: None,
+            quality: None,
+            episode_ids: vec![],
+            file_size_bytes: None,
+            link_type: None,
+            error_message: Some(reason.to_string()),
+            release_burned: false,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            upgrade: false,
+            upgrade_previous_path: None,
+        };
+
+        assert!(
+            !apply_import_result(&app, &mut td, result, 0).await,
+            "{reason}"
+        );
+        assert_eq!(td.state, TrackedDownloadState::ImportBlocked, "{reason}");
+        assert_eq!(td.status, TrackedDownloadStatus::Warning, "{reason}");
+        assert_eq!(td.status_messages, vec![reason.to_string()]);
+        assert!(!td.burned_by_import_gate, "{reason}");
+        assert!(td.import_execution_retry.is_none(), "{reason}");
+    }
 }
 
 #[tokio::test]
@@ -880,6 +949,8 @@ async fn apply_result_keeps_ambiguous_obfuscated_episode_blocked_with_actionable
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result, 0).await);
@@ -911,6 +982,8 @@ async fn apply_result_backs_off_no_video_import_before_blocking() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result.clone(), 0).await);
@@ -954,6 +1027,8 @@ async fn apply_result_resets_no_video_retry_when_source_signature_changes() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
 
     assert!(!apply_import_result(&app, &mut td, result.clone(), 0).await);
@@ -984,6 +1059,8 @@ fn failed_execution_result(error_message: &str) -> ImportResult {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     }
 }
 

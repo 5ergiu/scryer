@@ -9,6 +9,7 @@ pub mod command;
 pub mod host;
 pub mod http;
 pub mod indexer;
+pub mod list;
 pub mod net;
 pub mod notification;
 pub mod torrent;
@@ -19,6 +20,15 @@ pub use indexer::{
     PluginSearchRequestKind, PluginSearchSubjectKind, derive_indexer_flags,
     indexer_capability_fixtures, normalize_external_id_key, normalize_external_ids,
     normalize_info_hash as normalize_indexer_info_hash, torrent_result, usenet_result,
+};
+pub use list::{
+    ListAccountExchange, ListAccountFlow, ListAccountList, ListAccountStatus, ListAuthBadge,
+    ListCredential, ListExternalId, ListMediaKind, ListNoteTone, ListPluginAccountRequest,
+    ListPluginAccountResponse, ListPluginFetchRequest, ListPluginFetchResponse,
+    ListPluginHealthRequest, ListPluginHealthResponse, ListPluginItem, ListProviderAuth,
+    ListProviderCapabilities, ListProviderDescriptor, ListProviderGroup, ListProviderItem,
+    ListProviderNote, ListProviderRating, ListProviderTile, ListSourceParam, ListSourceParamType,
+    ListUrlPattern, ListUrlPatternCapture,
 };
 pub use net::{
     SocketCloseRequest, SocketCloseResponse, SocketError, SocketErrorCode, SocketOpenRequest,
@@ -33,7 +43,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.11.0";
+pub const SDK_VERSION: &str = "3.12.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)
@@ -312,6 +322,7 @@ pub enum PluginKind {
     Notification,
     SubtitleProvider,
     ArchiveExtractor,
+    ListProvider,
 }
 
 impl PluginKind {
@@ -322,6 +333,7 @@ impl PluginKind {
             Self::Notification => "notification",
             Self::SubtitleProvider => "subtitle_provider",
             Self::ArchiveExtractor => "archive_extractor",
+            Self::ListProvider => "list_provider",
         }
     }
 }
@@ -366,6 +378,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(_) => PluginKind::Notification,
             ProviderDescriptor::Subtitle(_) => PluginKind::SubtitleProvider,
             ProviderDescriptor::ArchiveExtractor(_) => PluginKind::ArchiveExtractor,
+            ProviderDescriptor::ListProvider(_) => PluginKind::ListProvider,
         }
     }
 
@@ -376,6 +389,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(_) => PluginKind::Notification.as_str(),
             ProviderDescriptor::Subtitle(_) => PluginKind::SubtitleProvider.as_str(),
             ProviderDescriptor::ArchiveExtractor(_) => PluginKind::ArchiveExtractor.as_str(),
+            ProviderDescriptor::ListProvider(_) => PluginKind::ListProvider.as_str(),
         }
     }
 
@@ -386,6 +400,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.provider_type.as_str(),
             ProviderDescriptor::Subtitle(provider) => provider.provider_type.as_str(),
             ProviderDescriptor::ArchiveExtractor(provider) => provider.provider_type.as_str(),
+            ProviderDescriptor::ListProvider(provider) => provider.provider_type.as_str(),
         }
     }
 
@@ -396,6 +411,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.provider_aliases.as_slice(),
             ProviderDescriptor::Subtitle(provider) => provider.provider_aliases.as_slice(),
             ProviderDescriptor::ArchiveExtractor(provider) => provider.provider_aliases.as_slice(),
+            ProviderDescriptor::ListProvider(provider) => provider.provider_aliases.as_slice(),
         }
     }
 
@@ -406,6 +422,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.config_fields.as_slice(),
             ProviderDescriptor::Subtitle(provider) => provider.config_fields.as_slice(),
             ProviderDescriptor::ArchiveExtractor(provider) => provider.config_fields.as_slice(),
+            ProviderDescriptor::ListProvider(provider) => provider.config_fields.as_slice(),
         }
     }
 
@@ -416,6 +433,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => &mut provider.config_fields,
             ProviderDescriptor::Subtitle(provider) => &mut provider.config_fields,
             ProviderDescriptor::ArchiveExtractor(provider) => &mut provider.config_fields,
+            ProviderDescriptor::ListProvider(provider) => &mut provider.config_fields,
         }
     }
 
@@ -426,6 +444,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.allowed_hosts.as_slice(),
             ProviderDescriptor::Subtitle(provider) => provider.allowed_hosts.as_slice(),
             ProviderDescriptor::ArchiveExtractor(provider) => provider.allowed_hosts.as_slice(),
+            ProviderDescriptor::ListProvider(provider) => provider.allowed_hosts.as_slice(),
         }
     }
 
@@ -440,6 +459,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.default_base_url.as_deref(),
             ProviderDescriptor::Subtitle(provider) => provider.default_base_url.as_deref(),
             ProviderDescriptor::ArchiveExtractor(provider) => provider.default_base_url.as_deref(),
+            ProviderDescriptor::ListProvider(provider) => provider.default_base_url.as_deref(),
         }
     }
 
@@ -458,6 +478,7 @@ impl PluginDescriptor {
             ProviderDescriptor::Notification(provider) => provider.default_base_url = value,
             ProviderDescriptor::Subtitle(provider) => provider.default_base_url = value,
             ProviderDescriptor::ArchiveExtractor(provider) => provider.default_base_url = value,
+            ProviderDescriptor::ListProvider(provider) => provider.default_base_url = value,
         }
     }
 
@@ -495,6 +516,13 @@ impl PluginDescriptor {
             _ => None,
         }
     }
+
+    pub fn list_provider(&self) -> Option<&ListProviderDescriptor> {
+        match &self.provider {
+            ProviderDescriptor::ListProvider(provider) => Some(provider),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -505,6 +533,7 @@ pub enum ProviderDescriptor {
     Notification(NotificationDescriptor),
     Subtitle(SubtitleDescriptor),
     ArchiveExtractor(ArchiveExtractorDescriptor),
+    ListProvider(ListProviderDescriptor),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1302,6 +1331,7 @@ pub enum NotificationEventType {
     TitleDeleted,
     FileDeleted,
     FileDeletedForUpgrade,
+    FileRestored,
     PostProcessingCompleted,
     SubtitleDownloaded,
     SubtitleSearchFailed,
@@ -1313,6 +1343,13 @@ pub enum NotificationEventType {
     HealthRestored,
     ApplicationUpdate,
     ManualInteractionRequired,
+    TitleMoved,
+    ListTitleAdded,
+    ListRequestSubmitted,
+    ListItemHeld,
+    ListTitleLeft,
+    ListSyncFailed,
+    ListUnfollowed,
     Test,
 }
 
@@ -1329,6 +1366,7 @@ impl NotificationEventType {
             Self::TitleDeleted => "title_deleted",
             Self::FileDeleted => "file_deleted",
             Self::FileDeletedForUpgrade => "file_deleted_for_upgrade",
+            Self::FileRestored => "file_restored",
             Self::PostProcessingCompleted => "post_processing_completed",
             Self::SubtitleDownloaded => "subtitle_downloaded",
             Self::SubtitleSearchFailed => "subtitle_search_failed",
@@ -1340,6 +1378,13 @@ impl NotificationEventType {
             Self::HealthRestored => "health_restored",
             Self::ApplicationUpdate => "application_update",
             Self::ManualInteractionRequired => "manual_interaction_required",
+            Self::TitleMoved => "title_moved",
+            Self::ListTitleAdded => "list_title_added",
+            Self::ListRequestSubmitted => "list_request_submitted",
+            Self::ListItemHeld => "list_item_held",
+            Self::ListTitleLeft => "list_title_left",
+            Self::ListSyncFailed => "list_sync_failed",
+            Self::ListUnfollowed => "list_unfollowed",
             Self::Test => "test",
         }
     }
@@ -2607,6 +2652,34 @@ pub struct PluginNotificationManualInteraction {
     pub link: Option<String>,
 }
 
+/// Where a moved title came from and went to. Present on `title_moved`; each
+/// moved media file's old and new path is in `file.media_updates`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PluginNotificationTitleMove {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_library_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_library_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_library_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_library_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_path: Option<String>,
+    #[serde(default)]
+    pub completed_with_warnings: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PluginNotificationMediaRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2675,6 +2748,8 @@ pub struct PluginNotificationRequest {
     pub manual_interaction: Option<PluginNotificationManualInteraction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_request: Option<PluginNotificationMediaRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_move: Option<PluginNotificationTitleMove>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2965,6 +3040,12 @@ struct PluginSdkSchemaDocument {
     archive_process_result: PluginResult<ArchivePluginProcessResponse>,
     notification_request: PluginNotificationRequest,
     notification_result: PluginResult<PluginNotificationResponse>,
+    list_fetch_request: ListPluginFetchRequest,
+    list_fetch_result: PluginResult<ListPluginFetchResponse>,
+    list_account_request: ListPluginAccountRequest,
+    list_account_result: PluginResult<ListPluginAccountResponse>,
+    list_health_request: ListPluginHealthRequest,
+    list_health_result: PluginResult<ListPluginHealthResponse>,
 }
 
 pub fn plugin_sdk_schema_json() -> String {
@@ -3847,6 +3928,47 @@ mod tests {
     }
 
     #[test]
+    fn notification_title_move_payload_round_trips_and_stays_optional() {
+        let request = PluginNotificationRequest {
+            event_type: NotificationEventType::TitleMoved,
+            file: Some(PluginNotificationFile {
+                primary_path: Some("/root-b/Example Film (2020)/film.mkv".to_string()),
+                media_updates: vec![
+                    PluginNotificationMediaUpdate {
+                        path: "/root-a/Example Film (2020)/film.mkv".to_string(),
+                        update_type: NotificationMediaUpdateType::Deleted,
+                    },
+                    PluginNotificationMediaUpdate {
+                        path: "/root-b/Example Film (2020)/film.mkv".to_string(),
+                        update_type: NotificationMediaUpdateType::Created,
+                    },
+                ],
+            }),
+            title_move: Some(PluginNotificationTitleMove {
+                operation_type: Some("cross_library_transfer".to_string()),
+                source_library_name: Some("Library A".to_string()),
+                destination_library_name: Some("Library B".to_string()),
+                source_path: Some("/root-a/Example Film (2020)".to_string()),
+                destination_path: Some("/root-b/Example Film (2020)".to_string()),
+                ..PluginNotificationTitleMove::default()
+            }),
+            ..sample_notification_request()
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["event_type"], "title_moved");
+        assert_eq!(json["title_move"]["destination_library_name"], "Library B");
+        let parsed: PluginNotificationRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(parsed.title_move, request.title_move);
+
+        // A request serialized before the field existed still decodes.
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("title_move");
+        let parsed: PluginNotificationRequest = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.title_move.is_none());
+    }
+
+    #[test]
     fn committed_schema_matches_generated_types() {
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("schemas/plugin-sdk-v3.schema.json");
@@ -4360,6 +4482,7 @@ mod tests {
             application_update: None,
             manual_interaction: None,
             media_request: None,
+            title_move: None,
         }
     }
 

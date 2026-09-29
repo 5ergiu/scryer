@@ -43,7 +43,8 @@ score_entry["halfleech_bonus"] := 200 if {
   {
     id: "well-seeded-bonus",
     title: "Prefer well-seeded torrents",
-    description: "Boost releases with 10+ seeders, penalize those with fewer than 3",
+    description:
+      "Boost releases with 10+ seeders, penalize those with fewer than 3. Counts are the ones the indexer listed when the release was found or grabbed",
     category: "Torrent",
     regoSource: `import rego.v1
 
@@ -158,10 +159,14 @@ score_entry["preferred_release_group"] := 400 if {
   {
     id: "block-old-releases",
     title: "Penalize releases older than 1 year",
-    description: "Strongly penalize releases published more than 365 days ago",
+    description:
+      "Strongly penalize releases that were more than 365 days old when found or grabbed. Age is frozen at the grab, so a file never turns old by sitting in the library",
     category: "Penalties",
     regoSource: `import rego.v1
 
+# age_days is the age when the release was grabbed (or now, for a release
+# not yet grabbed). It is null for files that were scanned in, adopted, or
+# imported before listing facts were kept.
 score_entry["too_old"] := scryer.block_score() if {
     input.release.age_days > 365
 }`,

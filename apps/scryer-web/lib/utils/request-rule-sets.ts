@@ -260,6 +260,7 @@ const FALLBACK_REASON_LABEL_KEYS: Record<string, string> = {
   held: "requests.fallbackHeld",
   error: "requests.fallbackError",
   no_rule_matched: "requests.fallbackNoRuleMatched",
+  library_permission: "requests.fallbackLibraryPermission",
 };
 
 export function requestFallbackReasonLabelKey(reason: string): string | null {

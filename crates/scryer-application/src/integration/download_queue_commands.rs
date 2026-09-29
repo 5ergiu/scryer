@@ -187,8 +187,17 @@ async fn execute_delete_command(
     )
     .await
     {
-        Ok(crate::integration::workflow::FinalizeIgnoredOutcome::Finalized)
-        | Ok(crate::integration::workflow::FinalizeIgnoredOutcome::NoSubmission) => {}
+        Ok(crate::integration::workflow::FinalizeIgnoredOutcome::Finalized) => {}
+        Ok(crate::integration::workflow::FinalizeIgnoredOutcome::NoSubmission) => {
+            // No submission row, so no title to forget an accepted state
+            // for, but the cached client snapshots still list the item this
+            // delete is removing, and a snapshot may only answer for a queue
+            // nothing has touched.
+            app.runtime
+                .acquisition
+                .download_submission_guards
+                .invalidate_client_snapshots();
+        }
         Ok(crate::integration::workflow::FinalizeIgnoredOutcome::PreservedTerminal(state)) => {
             tracing::debug!(
                 client_type = %command.client_type,

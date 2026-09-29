@@ -35,6 +35,7 @@ fn submission(item_id: &str, title_id: &str) -> DownloadSubmission {
         release_size_bytes: None,
         request_signature: None,
         purpose: DownloadSubmissionPurpose::Standard,
+        release_listing_json: None,
     }
 }
 

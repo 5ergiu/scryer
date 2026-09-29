@@ -224,6 +224,9 @@ pub struct MergedSourceRetirement {
     pub operation_id: String,
     pub source_title_id: String,
     pub destination_title_id: String,
+    /// The source→destination map the merge committed with. The source
+    /// title's downloads follow it to the destination.
+    pub identity_map: crate::location::merge::map::MergeIdentityMap,
 }
 
 /// Runs the ordinary title-delete path's logical cleanup for a merged source
@@ -675,6 +678,7 @@ impl<'a> RootMoveReconciler<'a> {
             )));
         }
 
+        let identity_map = plan.require_identity_map()?.clone();
         execute_merge(merges, &plan).await?;
         // The merge is the plan's designed outcome, so it is stated, not warned
         // about (FR-064): the user confirmed it in the preview.
@@ -683,7 +687,7 @@ impl<'a> RootMoveReconciler<'a> {
             plan.summary.destination_title_name.as_deref(),
             plan.summary.source_records_dropped,
         ));
-        self.retire_merged_source(operation, planned, destination_title_id)
+        self.retire_merged_source(operation, planned, destination_title_id, identity_map)
             .await;
         Ok(())
     }
@@ -722,11 +726,13 @@ impl<'a> RootMoveReconciler<'a> {
         operation: &LocationOperation,
         planned: &RootMoveTitleExecution,
         destination_title_id: &str,
+        identity_map: crate::location::merge::map::MergeIdentityMap,
     ) {
         let request = MergedSourceRetirement {
             operation_id: operation.id.clone(),
             source_title_id: planned.title_id.clone(),
             destination_title_id: destination_title_id.to_string(),
+            identity_map,
         };
         if let Err(error) = self.retirer.retire_merged_source(request).await {
             tracing::warn!(
@@ -1447,6 +1453,7 @@ impl SourceRecycler for RecycleBinSourceRecycler {
             status: None,
             replacement_file_id: None,
             replacement_path: None,
+            media_row: None,
         };
 
         match crate::recycle_bin::recycle_file(config, source, manifest).await {

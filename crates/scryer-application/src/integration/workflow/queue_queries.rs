@@ -21,6 +21,8 @@ impl TrackedDownloadBackgroundWorkKind {
 }
 #[derive(Debug)]
 struct TrackedDownloadBackgroundWorkResult {
+    /// The cache key of the row the work was dispatched for.
+    download_id: scryer_domain::download_identity::DownloadId,
     id: String,
     kind: TrackedDownloadBackgroundWorkKind,
     outcome: Result<TrackedDownload, String>,
@@ -2054,6 +2056,7 @@ mod queue_query_unit_tests {
             release_size_bytes: None,
             request_signature: None,
             scope,
+            release_listing_json: None,
         }
     }
 

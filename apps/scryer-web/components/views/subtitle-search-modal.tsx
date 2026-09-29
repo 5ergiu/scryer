@@ -318,6 +318,7 @@ export function SubtitleSearchModal({
                   languageOptions={languageOptions}
                   onChange={(codes) => setLanguage(codes[0] ?? "")}
                   singleSelect
+                  modal
                   compact
                   disabled={!canSearchSubtitles}
                   triggerId="subtitle-search-language-trigger"

@@ -158,6 +158,7 @@ async fn seed_pending_release(
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     };
     let store =
         scryer_infrastructure_library::media::libraries::state_store::PendingReleaseStore::new(
@@ -314,6 +315,11 @@ async fn list_pending_releases_returns_only_waiting() {
     assert_eq!(pending[0].release_score, 500);
 }
 
+const FIRST_SIGHTING_LISTING: &str =
+    r#"{"v":1,"thumbs_up":1,"captured_at":"2026-01-01T00:00:00Z"}"#;
+const LATER_SIGHTING_LISTING: &str =
+    r#"{"v":1,"thumbs_up":2,"captured_at":"2026-01-02T00:00:00Z"}"#;
+
 #[tokio::test]
 async fn pending_release_roundtrips_indexer_provenance() {
     let ctx = TestContext::new().await;
@@ -353,6 +359,7 @@ async fn pending_release_roundtrips_indexer_provenance() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: Some(FIRST_SIGHTING_LISTING.to_string()),
     };
     let observation = scryer_application::PendingReleaseObservation {
         eligible_at: release.delay_until.clone(),
@@ -395,6 +402,8 @@ async fn pending_release_roundtrips_indexer_provenance() {
     let reported_publication_time = (now - Duration::minutes(30)).to_rfc3339();
     let mut hydrated_release = release.clone();
     hydrated_release.published_at = Some(reported_publication_time.clone());
+    // An observation without a snapshot in hand must not wipe the frozen one.
+    hydrated_release.release_listing_json = None;
     let hydrated_observation = scryer_application::PendingReleaseObservation {
         release_age_unknown: false,
         last_observed_at: (now + Duration::minutes(1)).to_rfc3339(),
@@ -409,9 +418,22 @@ async fn pending_release_roundtrips_indexer_provenance() {
         .insert_pending_release_observation(&hydrated_release, &hydrated_observation)
         .await
         .expect("valid publication timestamp should hydrate pending release");
+    let loaded = ctx
+        .library_state
+        .get_pending_release(&release.id)
+        .await
+        .expect("pending release should load after hydration")
+        .expect("pending release should remain active");
+    assert_eq!(
+        loaded.release_listing_json.as_deref(),
+        Some(FIRST_SIGHTING_LISTING),
+        "the published-date fill keeps the stored listing snapshot"
+    );
 
     let mut missing_again = hydrated_release;
     missing_again.published_at = None;
+    // A new sighting carries a fresh snapshot, which replaces the stored one.
+    missing_again.release_listing_json = Some(LATER_SIGHTING_LISTING.to_string());
     let missing_observation = scryer_application::PendingReleaseObservation {
         release_age_unknown: true,
         last_observed_at: (now + Duration::minutes(2)).to_rfc3339(),
@@ -421,6 +443,16 @@ async fn pending_release_roundtrips_indexer_provenance() {
         .insert_pending_release_observation(&missing_again, &missing_observation)
         .await
         .expect("later observation without publication timestamp should upsert");
+    let mut without_listing = missing_again.clone();
+    without_listing.release_listing_json = None;
+    let without_listing_observation = scryer_application::PendingReleaseObservation {
+        last_observed_at: (now + Duration::minutes(3)).to_rfc3339(),
+        ..missing_observation.clone()
+    };
+    store
+        .insert_pending_release_observation(&without_listing, &without_listing_observation)
+        .await
+        .expect("observation without a listing snapshot should upsert");
 
     let loaded = ctx
         .library_state
@@ -435,6 +467,11 @@ async fn pending_release_roundtrips_indexer_provenance() {
     assert!(
         !loaded.release_age_unknown,
         "a later incomplete observation must not erase a known publication time"
+    );
+    assert_eq!(
+        loaded.release_listing_json.as_deref(),
+        Some(LATER_SIGHTING_LISTING),
+        "a sighting replaces the snapshot; an upsert without one keeps it"
     );
 }
 
@@ -850,6 +887,7 @@ async fn download_submission_roundtrips_episode_scope() {
             scope: SubmissionScope::Episode {
                 episode_id: "episode-1".to_string(),
             },
+            release_listing_json: None,
         })
         .await
         .expect("record submission");

@@ -231,9 +231,10 @@ export function RequestMediaDialog({
   // exists while ADVANCED is the live choice.
   const advancedSelected = canRequestMonitorType && monitorType === "ADVANCED";
   const advancedTvdbId = String(result.tvdbId ?? "").trim();
+  const advancedSmgId = result.smgId ?? null;
   const advancedBlocksSubmit =
     advancedSelected &&
-    (!advancedTvdbId ||
+    ((!advancedTvdbId && !advancedSmgId) ||
       monitorSelectionLoading ||
       isMonitorSelectionEmpty(monitorSelection));
   const requestProfileOptions = React.useMemo(() => {
@@ -532,6 +533,7 @@ export function RequestMediaDialog({
           {advancedSelected ? (
             <MonitorSelectionPicker
               facet={facet}
+              smgId={advancedSmgId}
               tvdbId={advancedTvdbId}
               value={monitorSelection}
               onChange={setMonitorSelection}

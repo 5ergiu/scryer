@@ -257,6 +257,11 @@ impl AppUseCase {
             .filter(|plugin| plugin.descriptor.plugin_type() == "notification")
             .cloned()
             .collect::<Vec<_>>();
+        let list_plugins = runtime_plugins
+            .iter()
+            .filter(|plugin| plugin.descriptor.plugin_type() == "list_provider")
+            .cloned()
+            .collect::<Vec<_>>();
 
         // Collect provider_types of builtins the user has disabled
         // (must query all installations, not just enabled ones)
@@ -339,6 +344,14 @@ impl AppUseCase {
                 })?;
         }
 
+        self.services
+            .lists
+            .plugins
+            .reload_runtime_plugins(&list_plugins, &disabled_builtins)
+            .map_err(|e| {
+                AppError::Repository(format!("failed to reload list provider plugins: {e}"))
+            })?;
+
         Ok(())
     }
 }
@@ -399,6 +412,7 @@ impl AppUseCase {
                     enable_auto_search: true,
                     rate_limit_seconds: provider.rate_limit_seconds_for_provider(&pt),
                     rate_limit_burst: None,
+                    max_queries_per_minute: None,
                     disabled_until: None,
                     proxy_config_id: None,
                     download_client_id: None,

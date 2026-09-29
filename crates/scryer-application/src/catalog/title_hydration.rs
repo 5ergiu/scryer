@@ -1,7 +1,8 @@
 use super::*;
 use crate::catalog_workflow::{
-    HYDRATION_BULK_BATCH_SIZE, HydrationSource, HydrationTarget, extract_tvdb_id, movie_title_ref,
+    HYDRATION_BULK_BATCH_SIZE, HydrationSource, HydrationTarget, movie_title_ref, series_title_ref,
 };
+use crate::escalation_backoff::METADATA_GATEWAY_BATCH_BACKOFF_LADDER;
 use crate::polling_worker::PollingWorker;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -30,7 +31,6 @@ pub(crate) struct MovieSmgIdentityBackfillSummary {
 
 pub(crate) enum MovieSmgIdentityBackfillTick {
     Completed(MovieSmgIdentityBackfillSummary),
-    NotSupported,
     Cancelled,
     Failed(crate::AppError),
 }
@@ -134,9 +134,6 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
             _ = token.cancelled() => return MovieSmgIdentityBackfillTick::Cancelled,
             result = app.services.library.metadata_gateway.resolve_movie_titles(&references, false) => match result {
                 Ok(resolutions) => resolutions,
-                Err(error) if crate::catalog_workflow::movie_title_queries_not_supported(&error) => {
-                    return MovieSmgIdentityBackfillTick::NotSupported;
-                }
                 Err(error) => return MovieSmgIdentityBackfillTick::Failed(error),
             },
         };
@@ -204,26 +201,79 @@ pub(crate) async fn run_movie_smg_identity_backfill_tick(
     MovieSmgIdentityBackfillTick::Completed(summary)
 }
 
-async fn run_movie_smg_identity_backfill_phase(
+/// When the movie SMG identity backfill may run its next batch.
+///
+/// A completed batch is followed by the next one after
+/// [`MOVIE_SMG_IDENTITY_BACKFILL_TICK_INTERVAL`]. A failed batch leaves the
+/// cursor where it was, so the next batch would send the same titles again;
+/// consecutive failures therefore climb
+/// [`METADATA_GATEWAY_BATCH_BACKOFF_LADDER`], and a gateway `Retry-After`
+/// climbs it to the rung that covers the delay. A completed batch resets it.
+#[derive(Debug, Default)]
+pub(crate) struct MovieSmgIdentityBackfillSchedule {
+    next_at: Option<chrono::DateTime<chrono::Utc>>,
+    consecutive_failures: usize,
+}
+
+impl MovieSmgIdentityBackfillSchedule {
+    fn is_due(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.next_at.is_none_or(|next_at| now >= next_at)
+    }
+
+    fn after_success(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        self.consecutive_failures = 0;
+        self.next_at = Some(now + chrono_duration(MOVIE_SMG_IDENTITY_BACKFILL_TICK_INTERVAL));
+    }
+
+    /// Record a failed batch and return how long the backfill now waits.
+    fn after_failure(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        error: &crate::AppError,
+    ) -> chrono::Duration {
+        let ladder = METADATA_GATEWAY_BATCH_BACKOFF_LADDER;
+        let mut level = self.consecutive_failures;
+        if let Some(retry_after) = gateway_retry_after(error) {
+            level = ladder.level_covering(level, retry_after);
+        }
+        self.consecutive_failures = level + 1;
+        let delay = ladder.period(level);
+        self.next_at = Some(now + delay);
+        delay
+    }
+}
+
+/// The wait a failed gateway call asked for, if it named one: a `Retry-After`,
+/// or the rest of a cooldown the gateway's own client already recorded.
+fn gateway_retry_after(error: &crate::AppError) -> Option<Duration> {
+    match error {
+        crate::AppError::TemporaryUnavailable {
+            retry_after: Some(retry_after),
+            ..
+        } => Some(*retry_after),
+        _ => crate::RateLimitSignal::from_error(error).and_then(|signal| signal.retry_after),
+    }
+}
+
+fn chrono_duration(duration: Duration) -> chrono::Duration {
+    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+}
+
+pub(crate) async fn run_movie_smg_identity_backfill_phase(
     app: &AppUseCase,
     token: &tokio_util::sync::CancellationToken,
-    enabled: &mut bool,
-    last_tick: &mut Option<std::time::Instant>,
+    schedule: &mut MovieSmgIdentityBackfillSchedule,
 ) -> bool {
-    if !*enabled {
+    let now = app.runtime.environment.now();
+    if !schedule.is_due(now) {
         return true;
     }
-    if last_tick
-        .is_some_and(|last_tick| last_tick.elapsed() < MOVIE_SMG_IDENTITY_BACKFILL_TICK_INTERVAL)
-    {
-        return true;
-    }
-    *last_tick = Some(std::time::Instant::now());
 
     match run_movie_smg_identity_backfill_tick(app, token, MOVIE_SMG_IDENTITY_BACKFILL_MAX_BATCH)
         .await
     {
         MovieSmgIdentityBackfillTick::Completed(summary) => {
+            schedule.after_success(now);
             if summary.linked > 0 {
                 metrics::counter!("scryer_movie_smg_identity_backfill_linked_total")
                     .increment(summary.linked as u64);
@@ -246,17 +296,16 @@ async fn run_movie_smg_identity_backfill_phase(
             }
             true
         }
-        MovieSmgIdentityBackfillTick::NotSupported => {
-            *enabled = false;
-            warn!(
-                "movie SMG identity backfill disabled because the metadata gateway does not support title-id queries"
-            );
-            true
-        }
         MovieSmgIdentityBackfillTick::Cancelled => false,
         MovieSmgIdentityBackfillTick::Failed(error) => {
             metrics::counter!("scryer_movie_smg_identity_backfill_errors_total").increment(1);
-            warn!(error = %error, "movie SMG identity backfill batch failed");
+            let retry_in = schedule.after_failure(now, &error);
+            warn!(
+                error = %error,
+                consecutive_failures = schedule.consecutive_failures,
+                retry_in_secs = retry_in.num_seconds(),
+                "movie SMG identity backfill batch failed"
+            );
             true
         }
     }
@@ -267,8 +316,7 @@ pub async fn start_background_title_hydration_loop(
     token: tokio_util::sync::CancellationToken,
 ) {
     let worker = PollingWorker::new("title_hydration", token.clone());
-    let mut movie_smg_identity_backfill_enabled = true;
-    let mut movie_smg_identity_backfill_last_tick = None;
+    let mut movie_smg_identity_backfill_schedule = MovieSmgIdentityBackfillSchedule::default();
     info!(
         max_batch = TITLE_HYDRATION_MAX_BATCH,
         idle_poll_secs = TITLE_HYDRATION_IDLE_POLL_INTERVAL.as_secs(),
@@ -309,8 +357,7 @@ pub async fn start_background_title_hydration_loop(
                 && !run_movie_smg_identity_backfill_phase(
                     &app,
                     &token,
-                    &mut movie_smg_identity_backfill_enabled,
-                    &mut movie_smg_identity_backfill_last_tick,
+                    &mut movie_smg_identity_backfill_schedule,
                 )
                 .await
             {
@@ -384,7 +431,7 @@ pub async fn start_background_title_hydration_loop(
             let hydratable = match due_title.title.facet {
                 MediaFacet::Movie => requested_movie_ref.is_some(),
                 MediaFacet::Series | MediaFacet::Anime => {
-                    extract_tvdb_id(&due_title.title).is_some()
+                    series_title_ref(&due_title.title).is_some()
                 }
             };
             if !hydratable {
@@ -426,8 +473,7 @@ pub async fn start_background_title_hydration_loop(
                 && !run_movie_smg_identity_backfill_phase(
                     &app,
                     &token,
-                    &mut movie_smg_identity_backfill_enabled,
-                    &mut movie_smg_identity_backfill_last_tick,
+                    &mut movie_smg_identity_backfill_schedule,
                 )
                 .await
             {
@@ -456,24 +502,6 @@ pub async fn start_background_title_hydration_loop(
                 for title_id in outcome.hydrated_titles.keys() {
                     metrics::counter!("scryer_title_metadata_hydration_success_total").increment(1);
                     original_attempts.remove(title_id);
-                }
-
-                for title_id in outcome.deferred_titles {
-                    if let Err(error) = app
-                        .services
-                        .catalog
-                        .titles
-                        .clear_title_metadata_hydration_retry_state(&title_id)
-                        .await
-                    {
-                        warn!(
-                            hydration_source = HydrationSource::BackgroundDue.as_str(),
-                            title_id = %title_id,
-                            error = %error,
-                            "title hydration loop: failed to park title unsupported by the legacy metadata gateway"
-                        );
-                    }
-                    original_attempts.remove(&title_id);
                 }
 
                 for (title_id, reason) in outcome.failed_titles {
@@ -546,8 +574,7 @@ pub async fn start_background_title_hydration_loop(
             && !run_movie_smg_identity_backfill_phase(
                 &app,
                 &token,
-                &mut movie_smg_identity_backfill_enabled,
-                &mut movie_smg_identity_backfill_last_tick,
+                &mut movie_smg_identity_backfill_schedule,
             )
             .await
         {

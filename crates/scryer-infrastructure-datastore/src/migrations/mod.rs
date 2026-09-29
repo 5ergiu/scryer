@@ -8,6 +8,9 @@ mod blake3_identities_upgrade_tests;
 mod blocklist_release_identity_upgrade_tests;
 pub mod canonical_download_identity;
 pub mod event_storage;
+#[cfg(test)]
+#[path = "full_admin_manage_lists_upgrade_tests.rs"]
+mod full_admin_manage_lists_upgrade_tests;
 pub mod hook_ids;
 pub mod known_bad;
 #[cfg(test)]

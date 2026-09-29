@@ -76,6 +76,7 @@ fn submission_row(
         release_size_bytes: None,
         request_signature: None,
         scope,
+        release_listing_json: None,
     }
 }
 
@@ -454,6 +455,8 @@ async fn verified_retry_clears_failed_state_durably() {
         release_burned: false,
         started_at: Utc::now(),
         completed_at: Utc::now(),
+        upgrade: false,
+        upgrade_previous_path: None,
     };
     crate::import_workflow::reconcile_history_retry_result(
         &app, &mut td, &completed, &evidence, &result,

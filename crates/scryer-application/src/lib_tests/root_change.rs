@@ -309,6 +309,7 @@ impl RootChangeFixture {
                 status: None,
                 replacement_file_id: None,
                 replacement_path: None,
+                media_row: None,
             },
         )
         .await

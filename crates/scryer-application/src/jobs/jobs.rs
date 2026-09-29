@@ -414,6 +414,26 @@ fn next_hash_jittered_bucket(
         .unwrap_or_else(|| now + chrono::Duration::seconds(cadence))
 }
 
+/// The persisted incremental gate only advances when a reload or snapshot
+/// completes, so on quiet runs it can sit hours in the past. Printing it then
+/// would claim a "next" window that already elapsed; the gate is simply open.
+fn discovery_sync_evaluated_message(
+    subject_count: usize,
+    next_incremental: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    if next_incremental > now {
+        format!(
+            "Discovery sync evaluated {subject_count} local subjects; next incremental reload window at {}",
+            next_incremental.to_rfc3339()
+        )
+    } else {
+        format!(
+            "Discovery sync evaluated {subject_count} local subjects; incremental reload window is open"
+        )
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 struct HealthChecksSummary {
     total: usize,
@@ -1008,6 +1028,36 @@ impl AppUseCase {
             .collect())
     }
 
+    /// The most recent run of every listed job. A window of recent runs across
+    /// all jobs is filled by the frequent ones, so a job's last run is read
+    /// per job instead.
+    pub async fn list_latest_job_runs(&self, actor: &User) -> AppResult<Vec<JobRun>> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+        let active_runs = self.runtime.jobs.job_run_tracker.list_active().await;
+        let active_runs_by_id = active_runs
+            .into_iter()
+            .map(|run| (run.id.clone(), run))
+            .collect::<HashMap<_, _>>();
+
+        let mut runs = Vec::with_capacity(crate::jobs::ALL_JOB_KEYS.len());
+        for job_key in crate::jobs::ALL_JOB_KEYS {
+            let records = self
+                .services
+                .events
+                .job_runs
+                .list_job_runs(Some(job_key), 1)
+                .await?;
+            runs.extend(records.into_iter().map(|record| {
+                active_runs_by_id
+                    .get(&record.id)
+                    .cloned()
+                    .unwrap_or_else(|| JobRun::from_record(&record, None))
+            }));
+        }
+        Ok(runs)
+    }
+
     pub async fn discovery_sync_status(&self, actor: &User) -> AppResult<DiscoverySyncStatus> {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
@@ -1096,6 +1146,17 @@ impl AppUseCase {
     pub async fn trigger_job(&self, actor: &User, job_key: JobKey) -> AppResult<JobRun> {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
             .await?;
+        self.start_manual_job_run(actor, job_key).await
+    }
+
+    /// Start a manual run of `job_key` for `actor`. Callers own the permission
+    /// check: `trigger_job` requires system settings, while a narrower use
+    /// case (a list's "sync now") checks its own permission first.
+    pub(crate) async fn start_manual_job_run(
+        &self,
+        actor: &User,
+        job_key: JobKey,
+    ) -> AppResult<JobRun> {
         let hash_start = if job_key == JobKey::FullHashBackfill {
             let guard = self.runtime.jobs.full_hash_start_lock.lock().await;
             if self.runtime.jobs.full_hash_shutdown.is_cancelled() {
@@ -1492,6 +1553,14 @@ impl AppUseCase {
         trigger_source: JobTriggerSource,
     ) -> AppResult<()> {
         let now = self.runtime.environment.now();
+        // The metadata language change path owns the presentation revision
+        // bump; the sync run it triggers below re-checks it cheaply.
+        let language = self.metadata_language().await;
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&language, now)
+            .await?;
         let mut state = self
             .services
             .library
@@ -1500,6 +1569,9 @@ impl AppUseCase {
             .await?
             .unwrap_or_default();
         state.next_public_feed_eligible_at = Some(now);
+        state.next_context_snapshot_eligible_at = Some(now);
+        state.dirty_since = Some(now);
+        state.dirty_reason_mask |= 1;
         state.updated_at = now;
         self.services
             .library
@@ -1951,6 +2023,22 @@ impl AppUseCase {
                     Ok(JobExecutionOutcome::new(Some(summary_text), summary_json))
                 }
             }
+            JobKey::ListSync => {
+                let report = self.run_list_sync_job(Some(run_id.to_string())).await?;
+                crate::lists::sync::log_list_sync_report(&report);
+                let summary_json = serde_json::to_string(&report).ok();
+                let summary_text = crate::lists::list_sync_summary(&report);
+                // A failed list is a warning: the others still synced, and the
+                // failed subscription carries its own reason.
+                if report.failed > 0 {
+                    Ok(JobExecutionOutcome::warning(
+                        Some(summary_text),
+                        summary_json,
+                    ))
+                } else {
+                    Ok(JobExecutionOutcome::new(Some(summary_text), summary_json))
+                }
+            }
             JobKey::MediaServerSignalSync => {
                 let report = self.run_media_server_signal_sync_job().await?;
                 crate::media_server_signals::log_signal_sync_report(&report);
@@ -1983,9 +2071,7 @@ impl AppUseCase {
                     Some(summary.summary_text()),
                     serde_json::to_string(&summary).ok(),
                 );
-                if summary.cancelled {
-                    outcome.status_override = Some(JobRunStatus::Warning);
-                }
+                outcome.status_override = summary.run_status_override();
                 Ok(outcome)
             }
             JobKey::DiscoverySync => self.run_discovery_sync_job(run.trigger_source).await,
@@ -2064,9 +2150,15 @@ impl AppUseCase {
             ));
         }
 
-        let result = self
+        let result = match self
             .run_discovery_sync_job_with_lease(trigger_source, &lease_owner_id)
-            .await;
+            .await
+        {
+            Err(AppError::DiscoveryPresentationSuperseded { run_id }) => {
+                self.skip_superseded_discovery_run(&run_id).await
+            }
+            other => other,
+        };
         let released_at = self.runtime.environment.now();
         let release_result = self
             .services
@@ -2081,6 +2173,48 @@ impl AppUseCase {
             );
         }
         result
+    }
+
+    /// A language change landed while this run was building a generation for
+    /// the previous presentation. Its commit rolled back and the change already
+    /// marked discovery dirty, so the next run rebuilds it: this is a clean
+    /// skip, not a failure, and it must not enter the retry ladder.
+    async fn skip_superseded_discovery_run(&self, run_id: &str) -> AppResult<JobExecutionOutcome> {
+        info!(
+            run_id,
+            "discovery sync run superseded by a metadata language change; skipping its commit"
+        );
+        if let Some(mut run) = self
+            .services
+            .library
+            .discovery
+            .get_discovery_sync_run(run_id)
+            .await?
+        {
+            let now = self.runtime.environment.now();
+            run.status = "superseded".to_string();
+            run.completed_at = Some(now);
+            run.updated_at = now;
+            self.services
+                .library
+                .discovery
+                .upsert_discovery_sync_run(&run)
+                .await?;
+        } else {
+            // Every commit path persists its run as running before committing,
+            // so a missing row means that invariant broke and the skip would
+            // otherwise leave no run history.
+            warn!(
+                run_id,
+                "superseded discovery sync run has no persisted run row; nothing to mark superseded"
+            );
+        }
+        Ok(JobExecutionOutcome::new(
+            Some(
+                "Discovery sync skipped: the metadata language changed during the run".to_string(),
+            ),
+            Some(json!({ "superseded_run_id": run_id }).to_string()),
+        ))
     }
 
     async fn run_discovery_sync_job_with_lease(
@@ -2100,6 +2234,11 @@ impl AppUseCase {
             language: self.metadata_language().await,
             ..DiscoveryContextDefaults::default()
         };
+        self.services
+            .library
+            .discovery
+            .refresh_discovery_presentation(&defaults.language, now)
+            .await?;
         let existing_state = self
             .services
             .library
@@ -2572,10 +2711,10 @@ impl AppUseCase {
 
         Ok(JobExecutionOutcome::new(
             Some(if personalized_discovery_enabled {
-                format!(
-                    "Discovery sync evaluated {} local subjects; next incremental reload window at {}",
+                discovery_sync_evaluated_message(
                     library_context.subjects.len(),
-                    effective_next_incremental.to_rfc3339()
+                    effective_next_incremental,
+                    now,
                 )
             } else {
                 format!(
@@ -2959,6 +3098,12 @@ impl AppUseCase {
     ) -> AppResult<DiscoveryContextSnapshotRunSummary> {
         let mut resumed_run = None;
         if let Some(run_id) = state.inflight_context_snapshot_run_id.clone() {
+            let presentation_current = self
+                .services
+                .library
+                .discovery
+                .discovery_run_matches_presentation(&run_id)
+                .await?;
             match self
                 .services
                 .library
@@ -2966,7 +3111,13 @@ impl AppUseCase {
                 .get_discovery_sync_run(&run_id)
                 .await?
             {
-                Some(run) if run.smg_request_id.is_some() => {
+                Some(run)
+                    if presentation_current
+                        && run.smg_request_id.is_some()
+                        && crate::normalize_metadata_language_code(&run.language).as_deref()
+                            == Some(defaults.language.as_str())
+                        && run.region == defaults.region =>
+                {
                     resumed_run = Some(run);
                 }
                 _ => {
@@ -3636,7 +3787,7 @@ impl AppUseCase {
         Ok(seed)
     }
 
-    async fn finish_job_run(
+    pub(crate) async fn finish_job_run(
         &self,
         mut run: JobRunRecord,
         event_actor: DomainEventActor,
@@ -3664,10 +3815,11 @@ impl AppUseCase {
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
         let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        self.runtime
+        let rerun = self
+            .runtime
             .jobs
             .job_run_tracker
-            .upsert_active_run(JobRun::from_record(&updated, library_scan_progress))
+            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, library_scan_progress))
             .await;
         let payload = if matches!(run.status, JobRunStatus::Failed) {
             DomainEventPayload::JobRunFailed(JobRunFailedEventData {
@@ -3689,7 +3841,28 @@ impl AppUseCase {
                 payload,
             ))
             .await;
+        if let Some(actor) = rerun {
+            self.start_requested_rerun(actor, updated.job_key);
+        }
         Ok(())
+    }
+
+    /// Start the run asked for while the one that just ended was active.
+    /// Boxed with a named `Send` future so the job runner, which ends runs
+    /// here, does not recurse into its own future type.
+    fn start_requested_rerun(&self, actor: User, job_key: JobKey) {
+        let app = self.clone();
+        let start: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(async move {
+                if let Err(error) = app.start_manual_job_run(&actor, job_key).await {
+                    warn!(
+                        job_key = job_key.as_str(),
+                        error = %error,
+                        "could not start a job run requested while the job was running"
+                    );
+                }
+            });
+        tokio::spawn(start);
     }
 
     async fn fail_job_run(
@@ -3707,10 +3880,11 @@ impl AppUseCase {
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
         let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        self.runtime
+        let rerun = self
+            .runtime
             .jobs
             .job_run_tracker
-            .upsert_active_run(JobRun::from_record(&updated, None))
+            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, None))
             .await;
         let _ = self
             .append_domain_event(new_job_run_domain_event(
@@ -3723,6 +3897,9 @@ impl AppUseCase {
                 }),
             ))
             .await;
+        if let Some(actor) = rerun {
+            self.start_requested_rerun(actor, updated.job_key);
+        }
         Ok(())
     }
 }

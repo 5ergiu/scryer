@@ -30,9 +30,9 @@ use super::acquisition::{
 use super::*;
 use crate::acquisition_search_queries::{
     anidb_id_from_external_ids, build_movie_search_queries, build_search_queries,
-    community_numbering_context, community_numbering_queries, imdb_id_from_title,
-    mal_id_from_external_ids, movie_text_search_query, tmdb_id_from_external_ids,
-    tvdb_id_from_external_ids,
+    community_cour_anidb_id, community_numbering_context, community_numbering_queries,
+    imdb_id_from_title, mal_id_from_external_ids, movie_text_search_query,
+    tmdb_id_from_external_ids, tvdb_id_from_external_ids,
 };
 use crate::delay_profile::DelayProfile;
 use crate::quality::release_parser::ParseDisposition;
@@ -2038,19 +2038,76 @@ impl AppUseCase {
             })
     }
 
-    /// `reads`, when supplied, answers repeated collection lookups within one
-    /// title walk.
+    /// The AniDB id an episode search sends in place of the title-level one,
+    /// shared by the automatic and interactive lanes so both ask for the same
+    /// entry. In order: the episode's own scoped id, the id of the bridge cour
+    /// the episode sits in, then the id scoped to the episode's season. A TVDB
+    /// season spanning several cours has no season-scoped id, and the
+    /// title-level id callers fall back to names the first cour only. The first
+    /// two are read for anime only.
+    ///
+    /// `official` is the episode's TVDB (season, episode) when the caller has
+    /// it without a catalog row; otherwise it is read off `episode`. `reads`,
+    /// when supplied, answers repeated episode and collection lookups within
+    /// one title walk.
     pub(crate) async fn local_scoped_anidb_id_for_episode(
         &self,
+        title: &Title,
         episode: Option<&Episode>,
+        official: Option<(u32, u32)>,
         reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
     ) -> Option<String> {
-        let episode = episode?;
-        // Prefer season/collection-scoped AniDB mappings, then let callers fall
-        // back to the title-level AniDB ID.
-        let collection_id = episode.collection_id.as_deref()?;
+        if title.facet == MediaFacet::Anime {
+            if let Some(episode) = episode
+                && let Ok(episode_ids) = self.episode_external_ids(episode, reads).await
+                && let Some(anidb_id) = preferred_scoped_external_id(&episode_ids, "anidb")
+            {
+                return Some(anidb_id);
+            }
+
+            let official = official.or_else(|| {
+                let episode = episode?;
+                let season = episode.season_number.as_deref()?.trim().parse().ok()?;
+                let number = episode.episode_number.as_deref()?.trim().parse().ok()?;
+                Some((season, number))
+            });
+            if let Some((season, number)) = official
+                && let (Ok(season), Ok(number)) = (i32::try_from(season), i32::try_from(number))
+                && let Ok(bridge) = self
+                    .services
+                    .catalog
+                    .shows
+                    .get_anime_numbering_bridge(&title.id)
+                    .await
+                && let Some(anidb_id) =
+                    community_cour_anidb_id(title, season, number, bridge.as_ref())
+            {
+                return Some(anidb_id);
+            }
+        }
+
+        let collection_id = episode?.collection_id.as_deref()?;
         self.local_scoped_anidb_id_for_collection(collection_id, reads)
             .await
+    }
+
+    /// An episode's scoped external ids, from the walk's memo when it holds
+    /// the episode's title and from the store otherwise.
+    async fn episode_external_ids(
+        &self,
+        episode: &Episode,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        match reads.filter(|reads| reads.covers(&episode.title_id)) {
+            Some(reads) => reads.episode_external_ids(self, &episode.id).await,
+            None => {
+                self.services
+                    .catalog
+                    .shows
+                    .list_episode_external_ids(&episode.id)
+                    .await
+            }
+        }
     }
 
     async fn local_scoped_anidb_id_for_collection(
@@ -2100,7 +2157,9 @@ impl AppUseCase {
         };
 
         if item.media_type == "episode"
-            && let Some(anidb_id) = self.local_scoped_anidb_id_for_episode(episode, reads).await
+            && let Some(anidb_id) = self
+                .local_scoped_anidb_id_for_episode(title, episode, None, reads)
+                .await
         {
             let mut search_title = search_title;
             search_title.external_ids.retain(|id| {
@@ -2638,14 +2697,23 @@ impl AppUseCase {
             .as_deref()
             .and_then(crate::normalize::normalize_numeric_id);
         let anidb_id = self
-            .local_scoped_anidb_id_for_episode(episode_record.as_ref(), None)
+            .local_scoped_anidb_id_for_episode(
+                title,
+                episode_record.as_ref(),
+                Some((season_num, episode_num)),
+                None,
+            )
             .await
             .or(title_anidb_id);
 
+        // Every absolute number this search carries is on the title's one
+        // absolute scale; see `AbsoluteScale`.
+        let absolute_scale = self
+            .release_search_absolute_scale(title, episode_record.as_ref(), None)
+            .await?;
         let absolute_episode = episode_record
             .as_ref()
-            .and_then(|episode| episode.absolute_number.as_deref())
-            .and_then(|value| value.trim().parse::<u32>().ok());
+            .and_then(|episode| absolute_scale.episode_absolute(episode));
 
         let category = self.release_search_category_for_facet(&title.facet);
 
@@ -2682,6 +2750,7 @@ impl AppUseCase {
             season_num as i32,
             episode_num as i32,
             anime_numbering_bridge.as_ref(),
+            absolute_scale,
         ));
         let numbering_context = community_numbering_context(
             title,
@@ -2743,6 +2812,73 @@ impl AppUseCase {
         runtime_minutes: Option<i32>,
         reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
     ) -> AppResult<PendingReleaseSearchSubject> {
+        self.season_pack_search_subject(
+            title,
+            episode.and_then(|episode| episode.collection_id.as_deref()),
+            collection_download_submission_scope_for_wanted_item(item, episode),
+            season_num,
+            runtime_minutes,
+            reads,
+        )
+        .await
+    }
+
+    /// An operator's search for a whole season: the same season-pack subject
+    /// the automatic walk searches, anchored on the title's collection for
+    /// that season instead of a wanted item.
+    pub(crate) async fn resolve_release_search_subject_for_season(
+        &self,
+        title: &Title,
+        season: &str,
+    ) -> AppResult<ResolvedReleaseSearchSubject> {
+        let season_num = whole_season_number(season)?;
+
+        let collections = self
+            .services
+            .catalog
+            .shows
+            .list_collections_for_title(&title.id)
+            .await?;
+        let collection_id =
+            crate::acquisition::coverage::collection_id_for_season(&collections, season_num);
+        let season_episode_count = match collection_id.as_deref() {
+            Some(collection_id) => self
+                .services
+                .catalog
+                .shows
+                .list_episodes_for_collection(collection_id)
+                .await?
+                .len(),
+            None => 0,
+        };
+        let runtime_minutes = season_pack_runtime_minutes(title, season_episode_count);
+        let submission_scope = collection_id
+            .clone()
+            .map(|collection_id| SubmissionScope::Collection { collection_id })
+            .unwrap_or(SubmissionScope::Title);
+
+        self.season_pack_search_subject(
+            title,
+            collection_id.as_deref(),
+            submission_scope,
+            season_num,
+            runtime_minutes,
+            None,
+        )
+        .await?
+        .resolve(self)
+        .await
+    }
+
+    async fn season_pack_search_subject(
+        &self,
+        title: &Title,
+        collection_id: Option<&str>,
+        submission_scope: SubmissionScope,
+        season_num: u32,
+        runtime_minutes: Option<i32>,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> AppResult<PendingReleaseSearchSubject> {
         let imdb_id = imdb_id_from_title(title);
         let tvdb_id = tvdb_id_from_external_ids(&title.external_ids)
             .as_deref()
@@ -2750,8 +2886,7 @@ impl AppUseCase {
         let anidb_id = anidb_id_from_external_ids(&title.external_ids)
             .as_deref()
             .and_then(crate::normalize::normalize_numeric_id);
-        let collection_anidb_id = match episode.and_then(|episode| episode.collection_id.as_deref())
-        {
+        let collection_anidb_id = match collection_id {
             Some(collection_id) => {
                 self.local_scoped_anidb_id_for_collection(collection_id, reads)
                     .await
@@ -2795,9 +2930,7 @@ impl AppUseCase {
                 numbering_context: crate::IndexerSearchNumberingContext::default(),
                 absolute_episode: None,
                 subject_kind: ReleaseSearchSubjectKind::Season,
-                submission_scope: collection_download_submission_scope_for_wanted_item(
-                    item, episode,
-                ),
+                submission_scope,
             },
             // Results come back under any name the index holds for the title,
             // a cour name included, so the evidence is built from the index's
@@ -2882,22 +3015,25 @@ impl AppUseCase {
             search_title,
             item,
             episode,
+            None,
         )
-        .await
+        .await?
         .resolve(self)
         .await
     }
 
     /// [`Self::resolve_release_search_subject_for_wanted_item`] with the title
     /// evidence's identity ambiguity left for
-    /// [`PendingReleaseSearchSubject::resolve`].
+    /// [`PendingReleaseSearchSubject::resolve`]. `reads`, when supplied, is
+    /// the title walk's catalog memo.
     pub(crate) async fn resolve_pending_release_search_subject_for_wanted_item(
         &self,
         owner_title: &Title,
         search_title: &Title,
         item: &AcquisitionScopeState,
         episode: Option<&Episode>,
-    ) -> PendingReleaseSearchSubject {
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> AppResult<PendingReleaseSearchSubject> {
         // Anime whose community numbering differs from TVDB's needs the extra
         // community-numbered query forms; every other title reads `None` here
         // and searches exactly as before.
@@ -2908,28 +3044,34 @@ impl AppUseCase {
             .get_anime_numbering_bridge(&search_title.id)
             .await
             .unwrap_or_default();
+        // Every absolute number this subject carries is on the title's one
+        // absolute scale; see `AbsoluteScale`. A failed read fails this item
+        // rather than guessing the raw scale: a contiguous title searched on
+        // raw numbers vetoes its own correct absolute-numbered releases.
+        let absolute_scale = self
+            .release_search_absolute_scale(search_title, episode, reads)
+            .await?;
         let query_result = build_search_queries(
             search_title,
             item,
             episode,
             &self.facet_registry,
             anime_numbering_bridge.as_ref(),
+            absolute_scale,
         );
         let owner_facet = if item.media_type == "series_movie" {
             owner_title.facet.clone()
         } else {
             owner_facet_for_wanted_item(owner_title, item)
         };
-        let absolute_episode = episode
-            .and_then(|episode| episode.absolute_number.as_deref())
-            .and_then(|value| value.parse::<u32>().ok());
+        let absolute_episode = episode.and_then(|episode| absolute_scale.episode_absolute(episode));
         // Release groups name a posting after the cour, and the cour's name is
         // in the bridge rather than the catalog's aliases. The evidence has to
         // carry it or the walk proves nothing against its own results.
         let evidence_title =
             title_with_bridge_cour_titles(search_title, anime_numbering_bridge.as_ref());
 
-        PendingReleaseSearchSubject {
+        Ok(PendingReleaseSearchSubject {
             subject: ResolvedReleaseSearchSubject {
                 title_id: owner_title.id.clone(),
                 title_tags: owner_title.tags.clone(),
@@ -2964,8 +3106,90 @@ impl AppUseCase {
                 submission_scope: direct_download_submission_scope_for_wanted_item(item, episode),
             },
             evidence: PendingTitleEvidence::Ambiguity(search_title.clone()),
+        })
+    }
+
+    /// The absolute scale a search subject's numbers are read on, the same
+    /// rule as [`AbsoluteScale::for_catalog`](scryer_domain::AbsoluteScale::for_catalog).
+    /// The catalog is only asked when the answer is not already known; see
+    /// [`absolute_scale_known_without_lookup`].
+    /// A title walk already holds the title's episodes, so it reads the scale
+    /// off them rather than asking the catalog again.
+    async fn release_search_absolute_scale(
+        &self,
+        title: &Title,
+        episode: Option<&Episode>,
+        reads: Option<&crate::acquisition::title_reads::TitleCatalogReads>,
+    ) -> AppResult<scryer_domain::AbsoluteScale> {
+        if let Some(scale) = absolute_scale_known_without_lookup(title, episode) {
+            return Ok(scale);
+        }
+        match reads.filter(|reads| reads.covers(&title.id)) {
+            Some(reads) => Ok(scryer_domain::AbsoluteScale::for_catalog(
+                reads.episodes(self).await?.iter(),
+            )),
+            None => {
+                self.services
+                    .catalog
+                    .shows
+                    .absolute_scale_for_title(&title.id)
+                    .await
+            }
         }
     }
+}
+
+/// The search absolute scale when it needs no catalog read.
+///
+/// A searched episode that carries a contiguous number settles it: one such
+/// episode puts the whole title on the contiguous scale. Otherwise only anime
+/// is worth the read — absolute-numbered releases and the absolute query forms
+/// are an anime convention, so every other title keeps the raw scale it always
+/// searched on, without a query per wanted item.
+fn absolute_scale_known_without_lookup(
+    title: &Title,
+    episode: Option<&Episode>,
+) -> Option<scryer_domain::AbsoluteScale> {
+    let contiguous = scryer_domain::AbsoluteScale::Contiguous;
+    if episode
+        .and_then(|episode| contiguous.episode_absolute(episode))
+        .is_some_and(|number| number > 0)
+    {
+        return Some(contiguous);
+    }
+    (title.facet != MediaFacet::Anime).then_some(scryer_domain::AbsoluteScale::Raw)
+}
+
+/// The season number of an operator's whole-season search. Only a plain
+/// unsigned integer is accepted: a label such as "-1" or "2x5" names no season,
+/// and reading its digits alone would silently search a different one.
+fn whole_season_number(season: &str) -> AppResult<u32> {
+    let season = season.trim();
+    if season.is_empty() || !season.chars().all(|value| value.is_ascii_digit()) {
+        return Err(AppError::Validation("season must be a whole number".into()));
+    }
+    season
+        .parse::<u32>()
+        .map_err(|_| AppError::Validation("invalid season value".into()))
+}
+
+/// Expected runtime of a whole-season pack, the basis its size is scored on:
+/// the title's episode length times the season's episode count. A season with
+/// no known episodes falls back to the title's own runtime.
+pub(crate) fn season_pack_runtime_minutes(
+    title: &Title,
+    season_episode_count: usize,
+) -> Option<i32> {
+    if season_episode_count == 0 {
+        return title.runtime_minutes;
+    }
+    let episode_count = i32::try_from(season_episode_count).unwrap_or(i32::MAX);
+    Some(
+        title
+            .runtime_minutes
+            .unwrap_or(24)
+            .saturating_mul(episode_count),
+    )
 }
 
 /// A search subject whose title-match evidence is not finished.
@@ -3020,6 +3244,18 @@ impl PendingReleaseSearchSubject {
 mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, TaggedAlias, Title};
+
+    #[test]
+    fn a_whole_season_search_accepts_only_a_plain_season_number() {
+        assert_eq!(whole_season_number("2").ok(), Some(2));
+        assert_eq!(whole_season_number(" 02 ").ok(), Some(2));
+        for rejected in ["-1", "2x5", "", "  ", "S02", "1.5"] {
+            assert!(
+                matches!(whole_season_number(rejected), Err(AppError::Validation(_))),
+                "{rejected:?} must be refused"
+            );
+        }
+    }
 
     fn spelling_title(name: &str, language: &str) -> Title {
         let mut title = make_title();
@@ -3126,8 +3362,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -3248,11 +3486,51 @@ mod tests {
         );
         assert_eq!(
             spelling.locale,
-            Some(scryer_domain::title_spelling::JAPANESE_ROMANIZATION_TAG)
+            Some(scryer_domain::title_normalization::JAPANESE_ROMANIZATION_TAG)
         );
         assert!(
             !proof.requires_external_id,
             "a romanization proves identity on its own"
+        );
+    }
+
+    /// A topic particle written as two words (`de wa`) in the release name
+    /// matches an alias that writes it as one (`dewa`).
+    #[tokio::test]
+    async fn romanized_particle_spacing_matches_the_tagged_romaji_alias() {
+        let mut title = spelling_title("Sleepless Beneath the Starlit Sky", "eng");
+        title.facet = MediaFacet::Anime;
+        title.year = None;
+        title.imdb_id = None;
+        title.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Hoshizora no Kanata dewa Nemurenai".into(),
+            language: "x-jat".into(),
+        }];
+        let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
+
+        let spaced = make_candidate(
+            "[Synthgroup] Hoshizora no Kanata de wa Nemurenai - 03 (1080p) [ABCD1234].mkv",
+            None,
+        );
+        let matched = candidate_title_match(&spaced, &evidence)
+            .expect("the two-word particle spelling must match the one-word alias");
+        let spelling = matched
+            .evidence_match
+            .expect("evidence match")
+            .spelling
+            .expect("spelling evidence");
+        assert_eq!(
+            spelling.locale,
+            Some(scryer_domain::title_normalization::JAPANESE_ROMANIZATION_TAG)
+        );
+
+        let exact = make_candidate(
+            "[Synthgroup] Hoshizora no Kanata dewa Nemurenai - 03 (1080p) [ABCD1234].mkv",
+            None,
+        );
+        assert!(
+            candidate_title_match(&exact, &evidence).is_some(),
+            "the exact alias spelling must still match"
         );
     }
 
@@ -3287,6 +3565,60 @@ mod tests {
             candidate_title_match(&candidate, &evidence).is_none(),
             "a romanization two library titles answer to names neither of them"
         );
+    }
+
+    /// `to wa` and `towa` fold to one key, so two library titles whose aliases
+    /// differ only by that spacing are kept apart by their exact spellings and
+    /// by the competing-identity check, never by the fold.
+    #[tokio::test]
+    async fn romanized_particle_spacing_keeps_two_library_titles_apart() {
+        let mut spaced = spelling_title("Clouded Hill Unspoken", "eng");
+        spaced.facet = MediaFacet::Anime;
+        spaced.year = None;
+        spaced.imdb_id = None;
+        spaced.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Kumori no Oka to wa Iwanai".into(),
+            language: "x-jat".into(),
+        }];
+        let mut joined = spaced.clone();
+        joined.id = "joined".to_string();
+        joined.name = "Clouded Hill Forever".to_string();
+        joined.tagged_aliases = vec![scryer_domain::TaggedAlias {
+            name: "Kumori no Oka towa Iwanai".into(),
+            language: "x-jat".into(),
+        }];
+        let library = [spaced.clone(), joined.clone()];
+        let spaced_evidence = spelling_evidence(&spaced, &library).await;
+        let joined_evidence = spelling_evidence(&joined, &library).await;
+
+        let spaced_release = make_candidate(
+            "[Synthgroup] Kumori no Oka to wa Iwanai - 05 (1080p) [ABCD1234].mkv",
+            None,
+        );
+        let joined_release = make_candidate(
+            "[Synthgroup] Kumori no Oka towa Iwanai - 05 (1080p) [ABCD1234].mkv",
+            None,
+        );
+        assert!(candidate_title_match(&spaced_release, &spaced_evidence).is_some());
+        assert!(candidate_title_match(&spaced_release, &joined_evidence).is_none());
+        assert!(candidate_title_match(&joined_release, &joined_evidence).is_some());
+        assert!(candidate_title_match(&joined_release, &spaced_evidence).is_none());
+
+        // Literally neither alias, but folds equal to both.
+        let ambiguous = make_candidate(
+            "[Synthgroup] Kumori no Ooka towa Iwanai - 05 (1080p) [ABCD1234].mkv",
+            None,
+        );
+        let alone_evidence = spelling_evidence(&spaced, std::slice::from_ref(&spaced)).await;
+        assert!(
+            candidate_title_match(&ambiguous, &alone_evidence).is_some(),
+            "without a rival the folded spelling matches, so the rejections below come from the competitor check"
+        );
+        assert!(
+            candidate_title_match(&ambiguous, &spaced_evidence).is_none(),
+            "a spelling both titles fold to names neither of them"
+        );
+        assert!(candidate_title_match(&ambiguous, &joined_evidence).is_none());
     }
 
     #[tokio::test]
@@ -3400,6 +3732,7 @@ mod tests {
             ("ita", "L’amore in città"),
             ("por", "Coração de açúcar"),
             ("rus", "Майский вечер"),
+            ("ukr", "Ґанок і їжак"),
             ("zho", "流浪地球"),
             ("jpn", "ガラスの城"),
             ("kor", "한글 이야기"),
@@ -3427,6 +3760,8 @@ mod tests {
             ("ita", "L’amore nella città", "L'amore.nella.citxà"),
             ("por", "Coração de açúcar", "Coracao.de.acucar"),
             ("rus", "Далёкий тихий берег", "Далекий.тихий.берег"),
+            ("ukr", "За\u{301}мок на ґа\u{301}нку", "Замок.на.ґанку"),
+            ("ukr", "Їжачий тихий берег", "Іжачий.тихий.берег"),
         ] {
             let title = spelling_title(expected, language);
             let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
@@ -3603,6 +3938,7 @@ mod tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
     }
 
@@ -3664,6 +4000,7 @@ mod tests {
                 "/nzbget-downloads/completed/{release_title}/{release_title}.mkv"
             )),
             release_hash: None,
+            release_listing_json: None,
         }
     }
 
@@ -4184,8 +4521,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -4217,6 +4556,48 @@ mod tests {
         (item, episode)
     }
 
+    #[test]
+    fn the_search_absolute_scale_reads_the_catalog_only_for_anime_it_cannot_settle() {
+        use scryer_domain::AbsoluteScale;
+        let anime = make_title();
+        let (_, mut episode) = specials_wanted_item(&anime, "1", "51");
+        episode.absolute_number = Some("53".into());
+
+        // An anime episode without a contiguous number cannot settle the
+        // title's scale: another episode may carry one, so the catalog is read.
+        assert_eq!(
+            absolute_scale_known_without_lookup(&anime, Some(&episode)),
+            None
+        );
+        assert_eq!(absolute_scale_known_without_lookup(&anime, None), None);
+
+        // One contiguous episode puts the whole title on the contiguous scale.
+        episode.contiguous_absolute_number = Some(51);
+        assert_eq!(
+            absolute_scale_known_without_lookup(&anime, Some(&episode)),
+            Some(AbsoluteScale::Contiguous)
+        );
+
+        // Every other facet keeps the raw scale without a catalog read.
+        let mut series = make_title();
+        series.facet = MediaFacet::Series;
+        episode.contiguous_absolute_number = None;
+        assert_eq!(
+            absolute_scale_known_without_lookup(&series, Some(&episode)),
+            Some(AbsoluteScale::Raw)
+        );
+        assert_eq!(
+            absolute_scale_known_without_lookup(&series, None),
+            Some(AbsoluteScale::Raw)
+        );
+        let mut movie = make_title();
+        movie.facet = MediaFacet::Movie;
+        assert_eq!(
+            absolute_scale_known_without_lookup(&movie, None),
+            Some(AbsoluteScale::Raw)
+        );
+    }
+
     /// The source of the regression: the specials season used to be folded into
     /// "no season" here, which is what left the acceptance veto with nothing to
     /// compare a season-1 release against.
@@ -4233,6 +4614,7 @@ mod tests {
             Some(&episode),
             &crate::FacetRegistry::new(),
             None,
+            scryer_domain::AbsoluteScale::Raw,
         );
 
         assert_eq!(result.season, Some(0));
@@ -4262,6 +4644,7 @@ mod tests {
             Some(&episode),
             &crate::FacetRegistry::new(),
             None,
+            scryer_domain::AbsoluteScale::Raw,
         );
 
         assert_eq!(result.season, Some(2));
@@ -4479,8 +4862,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -5932,14 +6317,9 @@ mod tests {
         };
 
         // A true upgrade: every member is occupied and the pack clears the
-        // same-tier delta but not the old forced bypass — the exact shape the
-        // cooldown used to refuse, on a scope whose members landed an hour ago.
+        // same-tier delta by the smallest admitting margin — the shape a recency
+        // cooldown would refuse, on a scope whose members landed an hour ago.
         let upgrade = pack_scoring(incumbent_score + thresholds.same_tier_min_delta);
-        assert!(
-            thresholds.same_tier_min_delta < thresholds.forced_upgrade_delta_bypass,
-            "the upgrade case needs a delta that admits but would not have forced past \
-             the old cooldown"
-        );
         let fully_occupied = pack_admission(&episode_ids);
         assert_eq!(
             decide(&upgrade, &fully_occupied),

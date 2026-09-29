@@ -61,6 +61,9 @@ pub(super) struct StoredSettingsRepo {
     pub(super) read_error_key: Arc<Mutex<Option<String>>>,
     /// Every key read, in order, across every scope id. Shared by clones.
     read_log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every key written through `upsert_setting_json`, in order. Shared by
+    /// clones.
+    write_log: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 pub(super) type StoredSettingValues = Arc<Mutex<HashMap<(String, String, Option<String>), String>>>;
@@ -76,6 +79,21 @@ impl StoredSettingsRepo {
 
     pub(super) fn reset_read_log(&self) {
         self.read_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// The keys written since the last reset, in write order.
+    pub(super) fn write_log(&self) -> Vec<String> {
+        self.write_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn reset_write_log(&self) {
+        self.write_log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -163,6 +181,10 @@ impl SettingsRepository for StoredSettingsRepo {
         _source: &str,
         _updated_by_user_id: Option<String>,
     ) -> AppResult<()> {
+        self.write_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(key_name.to_string());
         self.values.lock().await.insert(
             (scope.to_string(), key_name.to_string(), scope_id),
             value_json,
@@ -363,6 +385,24 @@ pub(super) struct EmptySearchMetadataGateway;
 
 #[async_trait]
 impl MetadataGateway for EmptySearchMetadataGateway {
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<std::collections::HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        super::movie_title_batch_from_tvdb(self, queries, kind, language).await
+    }
+
     async fn search_tvdb(
         &self,
         _query: &str,
@@ -407,12 +447,6 @@ impl MetadataGateway for EmptySearchMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -514,6 +548,16 @@ impl MetadataGateway for BlockingBatchMetadataGateway {
             .collect())
     }
 
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        _kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        self.search_tvdb_batch(queries, language).await
+    }
+
     async fn search_tvdb_rich(
         &self,
         _query: &str,
@@ -537,12 +581,6 @@ impl MetadataGateway for BlockingBatchMetadataGateway {
     async fn get_movie(&self, _tvdb_id: i64, _language: &str) -> AppResult<MovieMetadata> {
         Err(AppError::NotFound(
             "movie metadata unavailable in test".into(),
-        ))
-    }
-
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(AppError::NotFound(
-            "series metadata unavailable in test".into(),
         ))
     }
 
@@ -813,6 +851,7 @@ impl IndexerConfigRepository for MockIndexerConfigRepo {
             derived_base_url,
             rate_limit_seconds,
             rate_limit_burst,
+            max_queries_per_minute,
             is_enabled,
             enable_interactive_search,
             enable_auto_search,
@@ -845,6 +884,9 @@ impl IndexerConfigRepository for MockIndexerConfigRepo {
         }
         if let Some(rate_limit_burst) = rate_limit_burst {
             item.rate_limit_burst = Some(rate_limit_burst);
+        }
+        if let Some(max_queries_per_minute) = max_queries_per_minute {
+            item.max_queries_per_minute = max_queries_per_minute;
         }
         if let Some(is_enabled) = is_enabled {
             item.is_enabled = is_enabled;

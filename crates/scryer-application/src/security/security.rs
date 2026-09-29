@@ -7,7 +7,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use super::*;
-use crate::services::{AppAssembly, ReleaseCandidatePasswordTicket, RuntimeFeature};
+use crate::quality::release_listing::ReleaseListingSnapshot;
+use crate::services::{
+    AppAssembly, ReleaseCandidateListingTicket, ReleaseCandidateListingTickets,
+    ReleaseCandidatePasswordTicket, RuntimeFeature,
+};
 use crate::types::{
     AuthenticatedTokenClaims, BackupDownloadTicket, BackupDownloadTokenClaims,
     JwtLibraryPermissionClaim, JwtSessionScope, LoginFailureTimingClass, OAuthAuthorizationSource,
@@ -43,6 +47,7 @@ impl AppUseCase {
             scryer_domain::AppPermission::ManagePermissions => "managePermissions",
             scryer_domain::AppPermission::ManageSystemSettings => "manageSystemSettings",
             scryer_domain::AppPermission::ManageCatalogSettings => "manageCatalogSettings",
+            scryer_domain::AppPermission::ManageLists => "manageLists",
         }
     }
 
@@ -261,6 +266,82 @@ impl AppUseCase {
         }
 
         Ok(Some(ticket.password.clone()))
+    }
+
+    /// Keeps the listing a search result was offered with, so a grab by its
+    /// token can persist it. Never fails minting: without a ticket the grab
+    /// simply records no snapshot.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "release candidate listing tickets bind the same claim fields as password tickets"
+    )]
+    fn store_release_candidate_listing_ticket(
+        &self,
+        actor: &User,
+        title_id: &str,
+        scope_kind: &str,
+        scope_id: Option<&str>,
+        source_hint: &str,
+        source_title: &str,
+        listing: Option<ReleaseListingSnapshot>,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Option<String> {
+        let listing = listing?;
+        let listing_ref = Self::release_candidate_password_ref().ok()?;
+        let mut tickets = self
+            .runtime
+            .acquisition
+            .release_candidate_listings
+            .lock()
+            .ok()?;
+        tickets.insert(
+            listing_ref.clone(),
+            ReleaseCandidateListingTicket {
+                actor_id: actor.id.clone(),
+                title_id: title_id.to_string(),
+                scope_kind: scope_kind.to_string(),
+                scope_id: scope_id.map(str::to_string),
+                source_hint: source_hint.to_string(),
+                source_title: source_title.to_string(),
+                listing,
+                expires_at,
+            },
+            now,
+            ReleaseCandidateListingTickets::MAX_ENTRIES,
+        );
+        Some(listing_ref)
+    }
+
+    /// A missing, expired, evicted or mismatched ticket reads as no snapshot;
+    /// it never fails the grab.
+    fn resolve_release_candidate_listing_ticket(
+        &self,
+        actor: &User,
+        title_id: &str,
+        claims: &ReleaseCandidateTokenClaims,
+        claimed_scope: &SubmissionScope,
+    ) -> Option<ReleaseListingSnapshot> {
+        let listing_ref = claims
+            .listing_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let (scope_kind, scope_id) = Self::submission_scope_claims(claimed_scope);
+        let tickets = self
+            .runtime
+            .acquisition
+            .release_candidate_listings
+            .lock()
+            .ok()?;
+        let ticket = tickets.get(listing_ref, Utc::now())?;
+        let bound = ticket.actor_id == actor.id
+            && ticket.title_id == title_id
+            && ticket.scope_kind == scope_kind
+            && ticket.scope_id == scope_id
+            && ticket.source_hint == claims.source_hint
+            && ticket.source_title == claims.source_title;
+        bound.then(|| ticket.listing.clone())
     }
 
     pub async fn apply_login_failure_timing(class: LoginFailureTimingClass, started_at: Instant) {
@@ -1050,6 +1131,7 @@ impl AppUseCase {
         title_id: &str,
         scope: &SubmissionScope,
         selection: &QueuedReleaseSelection,
+        listing: Option<ReleaseListingSnapshot>,
         signing_key: &[u8],
     ) -> AppResult<String> {
         let source_hint = selection
@@ -1084,6 +1166,17 @@ impl AppUseCase {
             selection.source_password.as_deref(),
             expires_at,
         )?;
+        let listing_ref = self.store_release_candidate_listing_ticket(
+            actor,
+            title_id,
+            scope_kind,
+            scope_id.as_deref(),
+            source_hint,
+            source_title,
+            listing,
+            now,
+            expires_at,
+        );
         let claims = ReleaseCandidateTokenClaims {
             sub: actor.id.clone(),
             exp,
@@ -1098,6 +1191,7 @@ impl AppUseCase {
             source_kind: selection.source_kind,
             source_title: source_title.to_string(),
             password_ref,
+            listing_ref,
             info_hash_hint: selection.info_hash_hint.clone(),
             size_bytes: selection.size_bytes,
             seeders: selection.seeders,
@@ -1161,6 +1255,8 @@ impl AppUseCase {
             title_id,
             scope,
             selection,
+            // No indexer listing in hand, so the token carries no ticket.
+            None,
             &signing_key,
         )
     }
@@ -1258,6 +1354,20 @@ impl AppUseCase {
         title_id: &str,
         token: &str,
     ) -> AppResult<(QueuedReleaseSelection, SubmissionScope)> {
+        let verified = self
+            .verify_release_candidate_token_with_listing(actor, title_id, token)
+            .await?;
+        Ok((verified.selection, verified.scope))
+    }
+
+    /// Verifies a candidate token and resolves the listing it was offered
+    /// with, if its ticket is still held.
+    pub(crate) async fn verify_release_candidate_token_with_listing(
+        &self,
+        actor: &User,
+        title_id: &str,
+        token: &str,
+    ) -> AppResult<VerifiedReleaseCandidate> {
         let signing_key = self.release_candidate_signing_key_for_actor(actor).await?;
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.validate_exp = true;
@@ -1318,8 +1428,11 @@ impl AppUseCase {
             &claimed_scope,
         )?;
 
-        Ok((
-            QueuedReleaseSelection {
+        let listing =
+            self.resolve_release_candidate_listing_ticket(actor, title_id, &claims, &claimed_scope);
+
+        Ok(VerifiedReleaseCandidate {
+            selection: QueuedReleaseSelection {
                 indexer_id: claims.indexer_id,
                 source_hint: Some(claims.source_hint),
                 source_kind: claims.source_kind,
@@ -1329,8 +1442,9 @@ impl AppUseCase {
                 size_bytes: claims.size_bytes,
                 seeders: claims.seeders,
             },
-            claimed_scope,
-        ))
+            scope: claimed_scope,
+            listing,
+        })
     }
 
     pub async fn authenticate_token(&self, token: &str) -> AppResult<User> {
@@ -1455,31 +1569,46 @@ impl AppUseCase {
         username: &str,
         password: &str,
     ) -> AppResult<User> {
-        self.authenticate_local_credentials(username, password)
+        self.authenticate_local_credentials(username, password, None)
             .await
             .map(|verified| verified.user)
     }
 
+    /// `client_ip` is only used to attribute failed attempts in the log.
     pub async fn authenticate_local_credentials(
         &self,
         username: &str,
         password: &str,
+        client_ip: Option<std::net::IpAddr>,
     ) -> AppResult<crate::types::VerifiedLocalCredentials> {
         let started_at = Instant::now();
         let username = Self::normalize_local_username(username);
+        // One stable line per failed attempt so operators can grep and alert on
+        // it. Never add the password or its hash here.
+        let log_failure = |reason: &'static str| {
+            tracing::warn!(
+                username,
+                client_ip = client_ip.map(|ip| ip.to_string()),
+                reason,
+                "login failed"
+            );
+        };
         if username.is_empty() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("missing_username");
             return Err(AppError::Validation("username is required".into()));
         }
         if password.is_empty() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("missing_password");
             return Err(AppError::Validation("password is required".into()));
         }
         if Self::is_reserved_recovery_username(username) && !self.recovery_admin_login_enabled() {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("recovery_login_disabled");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         }
 
@@ -1492,6 +1621,7 @@ impl AppUseCase {
         else {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("unknown_user");
             return Err(AppError::NotFound(format!("user {username} not found")));
         };
         let user = snapshot.user;
@@ -1509,12 +1639,14 @@ impl AppUseCase {
                 Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at)
                     .await;
             }
+            log_failure("account_disabled");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         }
 
         let Some(password_hash) = user.password_hash.as_ref() else {
             self.verify_dummy_login_password(password);
             Self::apply_login_failure_timing(LoginFailureTimingClass::FastMasked, started_at).await;
+            log_failure("no_local_password");
             return Err(AppError::Unauthorized("credentials unavailable".into()));
         };
 
@@ -1524,6 +1656,7 @@ impl AppUseCase {
                 started_at,
             )
             .await;
+            log_failure("invalid_password");
             return Err(AppError::Unauthorized("invalid credentials".into()));
         }
 
@@ -1586,4 +1719,11 @@ impl AppUseCase {
         self.refresh_cached_jwt_signing_key(updated_user).await?;
         Ok(())
     }
+}
+
+/// A verified candidate token plus the listing snapshot its ticket held.
+pub(crate) struct VerifiedReleaseCandidate {
+    pub selection: QueuedReleaseSelection,
+    pub scope: SubmissionScope,
+    pub listing: Option<ReleaseListingSnapshot>,
 }

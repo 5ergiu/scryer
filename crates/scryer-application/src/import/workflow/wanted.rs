@@ -74,6 +74,7 @@ async fn execute_resolved_episode_import(
     runtime_sample_mode: crate::post_download_gate::RuntimeSampleValidationMode,
     origin: crate::import_decide::ImportOrigin,
     announced_size_bytes: Option<i64>,
+    release_listing_json: Option<&str>,
     additional_import: bool,
     disc_selection: Option<&scryer_media_types::DiscSelection>,
 ) -> AppResult<EpisodeImportOutcome> {
@@ -137,6 +138,7 @@ async fn execute_resolved_episode_import(
             title,
             use_season_folders,
             &effective_parsed,
+            None,
             &ext,
             source_video,
             title_folder_path,
@@ -233,6 +235,7 @@ async fn execute_resolved_episode_import(
             original_file_path: Some(path_to_stored_string(source_video)),
             grabbed_release_title: Some(effective_parsed.raw_title.clone()),
             edition: effective_parsed.edition.clone(),
+            release_listing_json: release_listing_json.map(str::to_string),
             ..Default::default()
         };
         let media_file_id = file_result
@@ -274,6 +277,7 @@ async fn execute_resolved_episode_import(
             source_cleanup: file_result.source_cleanup.clone().map(Box::new),
             destination_permit: file_result.destination_permit(),
             size_bytes: Some(file_result.size_bytes as i64),
+            previous_path: None,
             // An additional file never reaches the gate, so it never earns one.
             blocklist_after_import: None,
         });
@@ -313,6 +317,7 @@ async fn execute_resolved_episode_import(
         title,
         use_season_folders,
         &precheck_parsed,
+        None,
         &precheck_ext,
         source_video,
         title_folder_path,
@@ -369,6 +374,7 @@ async fn execute_resolved_episode_import(
         is_filler,
         runtime_sample_validation,
         disc_selection,
+        release_listing_json,
     )
     .await
     {
@@ -381,7 +387,7 @@ async fn execute_resolved_episode_import(
                 return Ok(EpisodeImportOutcome::Skipped {
                     message: rejection.message.clone(),
                     reason_code: Some(rejection.recycle_reason.to_string()),
-                    skip_reason: Some(ImportSkipReason::PolicyMismatch),
+                    skip_reason: Some(rejection.review_hold_skip_reason()),
                     episode_ids: target_episode_ids.clone(),
                 });
             }
@@ -492,6 +498,7 @@ async fn execute_resolved_episode_import(
         title,
         use_season_folders,
         &effective_parsed,
+        prepared.accepted.analysis.as_ref(),
         &ext,
         source_video,
         title_folder_path,
@@ -541,6 +548,7 @@ async fn execute_resolved_episode_import(
         parsed: &announced_parsed,
         accepted: prepared.accepted.as_ref(),
         prior_rescore_changes: &prepared.rescore_changes,
+        release_listing_json: prepared.release_listing_json.as_deref(),
         landed_size_bytes: source_size,
         announced_size_bytes,
         is_filler,
@@ -657,6 +665,7 @@ async fn execute_resolved_episode_import(
                     source_cleanup: outcome.source_cleanup.clone(),
                     destination_permit: outcome.destination_permit.clone(),
                     size_bytes: Some(outcome.new_size_bytes),
+                    previous_path: outcome.previous_path.clone(),
                     blocklist_after_import,
                 });
             }
@@ -723,6 +732,7 @@ async fn execute_resolved_episode_import(
         original_file_path: Some(path_to_stored_string(source_video)),
         acquisition_score: Some(acq_score),
         scoring_log: post_download_score.scoring_log.clone(),
+        release_listing_json: prepared.release_listing_json.clone(),
         ..Default::default()
     };
     let media_file_id = file_result
@@ -802,6 +812,7 @@ async fn execute_resolved_episode_import(
         source_cleanup: file_result.source_cleanup.clone().map(Box::new),
         destination_permit: file_result.destination_permit(),
         size_bytes: Some(file_result.size_bytes as i64),
+        previous_path: None,
         blocklist_after_import,
     })
 }

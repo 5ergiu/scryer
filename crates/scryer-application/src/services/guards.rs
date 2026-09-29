@@ -18,44 +18,135 @@ const CACHED_SUBMISSION_STATE_MAX_AGE: std::time::Duration = std::time::Duration
 /// it (the cursor comes back next cycle), while the interactive job *waits*,
 /// because the operator asked for this title.
 ///
-/// That wait is bounded only in the sense that a cycle's pass finishes: a pass
-/// over a several-hundred-episode title that spends an inline query per episode
-/// scope can run for minutes. The job reports the wait as its own progress step
-/// so its UI says why nothing is happening, rather than the wait being written
-/// off as brief.
+/// The operator's wait must not be the length of a background pass. That pass
+/// trickles its indexer requests two seconds apart and walks a freshly added
+/// title season by season, so a fifty-episode season takes it minutes — and
+/// adding the title is exactly what wakes the cycle, so the operator's "search
+/// this season" click lands right behind it. A background holder therefore
+/// carries a yield token: the interactive acquirer cancels it, the walk stops
+/// at its next stage (an in-flight query is cancelled through the same token),
+/// and the lock passes to the operator. The cycle's cursor comes back to the
+/// title on a later pass. An interactive holder is never yielded; a second
+/// operator walk of the same title waits for the first.
 ///
 /// The table mirrors `DownloadSubmissionGuardTable`: weak handles so an
 /// unlocked title drops out of the map instead of accumulating.
 #[derive(Clone, Default)]
 pub struct AcquisitionTitleWalkLocks {
-    locks: Arc<tokio::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
+    locks: Arc<tokio::sync::Mutex<HashMap<String, std::sync::Weak<TitleWalkSlot>>>>,
+}
+
+/// One title's lock plus the yield token of a background holder.
+///
+/// The token is set together with the background try-lock, and cancelled
+/// together with the interactive try-lock, both under the table's mutex — so an
+/// interactive acquirer that finds the lock taken has cancelled the very walk
+/// that holds it, never a stale token from an earlier holder.
+#[derive(Default)]
+struct TitleWalkSlot {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    background_yield: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
+}
+
+impl TitleWalkSlot {
+    fn set_background_yield(&self, token: Option<tokio_util::sync::CancellationToken>) {
+        *self
+            .background_yield
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = token;
+    }
+}
+
+/// The held title lock. Keeps the slot alive so every waiter and try-locker of
+/// the title contends on this same mutex until the guard drops.
+pub(crate) struct TitleWalkGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _slot: Arc<TitleWalkSlot>,
 }
 
 impl AcquisitionTitleWalkLocks {
-    async fn handle(&self, title_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.locks.lock().await;
-        locks.retain(|_, lock| lock.strong_count() > 0);
+    fn slot(
+        locks: &mut HashMap<String, std::sync::Weak<TitleWalkSlot>>,
+        title_id: &str,
+    ) -> Arc<TitleWalkSlot> {
+        locks.retain(|_, slot| slot.strong_count() > 0);
         if let Some(existing) = locks.get(title_id).and_then(std::sync::Weak::upgrade) {
             return existing;
         }
-        let created = Arc::new(tokio::sync::Mutex::new(()));
+        let created = Arc::new(TitleWalkSlot::default());
         locks.insert(title_id.to_string(), Arc::downgrade(&created));
         created
     }
 
-    /// Wait for the title's walk lock. Used by the interactive job.
-    pub(crate) async fn acquire(&self, title_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.handle(title_id).await.lock_owned().await
+    /// Wait for the title's walk lock, telling a background holder to yield it.
+    /// Used by the interactive job.
+    pub(crate) async fn acquire(&self, title_id: &str) -> TitleWalkGuard {
+        let (slot, pending) = {
+            let mut locks = self.locks.lock().await;
+            let slot = Self::slot(&mut locks, title_id);
+            if let Some(token) = slot
+                .background_yield
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                token.cancel();
+            }
+            let mut pending = Box::pin(Arc::clone(&slot.lock).lock_owned());
+            // Queue on the mutex before the table is released. A queued waiter is
+            // handed the lock the moment the yielding holder drops it, ahead of
+            // any background try-lock — which is what makes the cancel above
+            // reach exactly one walk and never a successor.
+            match futures_util::poll!(pending.as_mut()) {
+                std::task::Poll::Ready(guard) => {
+                    return TitleWalkGuard {
+                        _guard: guard,
+                        _slot: slot,
+                    };
+                }
+                std::task::Poll::Pending => (slot, pending),
+            }
+        };
+        TitleWalkGuard {
+            _guard: pending.await,
+            _slot: slot,
+        }
     }
 
-    /// Take the title's walk lock if it is free, else `None`. Used by the
-    /// background cycle, which skips a title rather than blocking its whole
-    /// pass behind one operator-driven walk.
-    pub(crate) async fn try_acquire(
+    /// Take the title's walk lock if it is free, else `None`. The interactive
+    /// job's first attempt: it does not disturb a holder, so the job can say it
+    /// is waiting before it calls [`Self::acquire`].
+    pub(crate) async fn try_acquire(&self, title_id: &str) -> Option<TitleWalkGuard> {
+        let mut locks = self.locks.lock().await;
+        let slot = Self::slot(&mut locks, title_id);
+        let guard = Arc::clone(&slot.lock).try_lock_owned().ok()?;
+        slot.set_background_yield(None);
+        Some(TitleWalkGuard {
+            _guard: guard,
+            _slot: slot,
+        })
+    }
+
+    /// Take the title's walk lock for the background cycle if it is free, else
+    /// `None` — the cycle skips a title rather than blocking its whole pass
+    /// behind one operator-driven walk. The returned token is cancelled when an
+    /// operator's walk wants the title; the holder stops and drops the guard.
+    pub(crate) async fn try_acquire_background(
         &self,
         title_id: &str,
-    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        self.handle(title_id).await.try_lock_owned().ok()
+    ) -> Option<(TitleWalkGuard, tokio_util::sync::CancellationToken)> {
+        let mut locks = self.locks.lock().await;
+        let slot = Self::slot(&mut locks, title_id);
+        let guard = Arc::clone(&slot.lock).try_lock_owned().ok()?;
+        let token = tokio_util::sync::CancellationToken::new();
+        slot.set_background_yield(Some(token.clone()));
+        Some((
+            TitleWalkGuard {
+                _guard: guard,
+                _slot: slot,
+            },
+            token,
+        ))
     }
 }
 

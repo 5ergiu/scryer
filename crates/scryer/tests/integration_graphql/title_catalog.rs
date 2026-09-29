@@ -2440,8 +2440,10 @@ async fn graphql_titles_exclude_tba_or_incomplete_metadata_episodes_from_progres
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -2467,8 +2469,10 @@ async fn graphql_titles_exclude_tba_or_incomplete_metadata_episodes_from_progres
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -2494,8 +2498,10 @@ async fn graphql_titles_exclude_tba_or_incomplete_metadata_episodes_from_progres
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: chrono::Utc::now(),
@@ -2521,8 +2527,10 @@ async fn graphql_titles_exclude_tba_or_incomplete_metadata_episodes_from_progres
             is_filler: false,
             is_recap: false,
             absolute_number: None,
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: false,
             created_at: chrono::Utc::now(),
@@ -4408,6 +4416,7 @@ async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
                 role: scryer_application::PendingReleaseRole::Fallback,
                 last_decision_code: None,
                 release_age_unknown: false,
+                release_listing_json: None,
             })
             .await
             .expect("seed standby release");
@@ -4517,6 +4526,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
         role: scryer_application::PendingReleaseRole::Primary,
         last_decision_code: None,
         release_age_unknown: false,
+        release_listing_json: None,
     })
     .await
     .expect("seed pending release");
@@ -4539,6 +4549,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
             request_signature: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
             scope: scryer_application::SubmissionScope::Title,
+            release_listing_json: None,
         })
         .await
         .expect("seed download submission");
@@ -5223,5 +5234,373 @@ async fn graphql_series_movie_tags_patch_the_link_and_count_apart_from_titles() 
     assert_eq!(
         cleared["data"]["updateSeriesMovieTags"][0]["tags"],
         json!([])
+    );
+}
+
+#[tokio::test]
+async fn graphql_media_file_release_listing_reads_the_frozen_snapshot() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Listing Facts Movie",
+        MediaFacet::Movie,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+
+    let seeds = [
+        (
+            "/media/Listing.Facts.Movie.Snapshot.mkv",
+            Some(
+                r#"{"v":1,"published_at":"2026-03-01T00:00:00Z","thumbs_up":12,"thumbs_down":1,"is_password_protected":false,"indexer_languages":["en","de"],"extra":{"grabs":40,"tags":["internal"]},"captured_at":"2026-03-11T06:00:00Z"}"#,
+            ),
+        ),
+        ("/media/Listing.Facts.Movie.NoSnapshot.mkv", None),
+        (
+            "/media/Listing.Facts.Movie.Garbage.mkv",
+            Some("{not a snapshot"),
+        ),
+    ];
+    for (path, listing) in seeds {
+        ctx.media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: path.to_string(),
+                size_bytes: 2_048,
+                release_listing_json: listing.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .expect("seed media file");
+    }
+
+    let body = gql(
+        &ctx,
+        r#"query($id: ID!) {
+            title(id: $id) {
+                mediaFiles {
+                    filePath
+                    releaseListing {
+                        publishedAt
+                        ageDaysAtGrab
+                        thumbsUp
+                        thumbsDown
+                        isPasswordProtected
+                        indexerLanguages
+                        extra
+                        capturedAt
+                    }
+                }
+            }
+        }"#,
+        json!({ "id": title.id }),
+    )
+    .await;
+    assert_no_errors(&body);
+
+    let files = body["data"]["title"]["mediaFiles"]
+        .as_array()
+        .expect("media files");
+    let listing_of = |suffix: &str| {
+        files
+            .iter()
+            .find(|file| {
+                file["filePath"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(suffix))
+            })
+            .unwrap_or_else(|| panic!("media file {suffix} is listed"))["releaseListing"]
+            .clone()
+    };
+
+    let listing = listing_of(".Snapshot.mkv");
+    let instant = |field: &str| {
+        chrono::DateTime::parse_from_rfc3339(listing[field].as_str().expect("timestamp"))
+            .expect("rfc3339 timestamp")
+            .with_timezone(&Utc)
+    };
+    assert_eq!(
+        instant("publishedAt"),
+        chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z").unwrap()
+    );
+    assert_eq!(
+        instant("capturedAt"),
+        chrono::DateTime::parse_from_rfc3339("2026-03-11T06:00:00Z").unwrap()
+    );
+    assert_eq!(listing["ageDaysAtGrab"], 10);
+    assert_eq!(listing["thumbsUp"], 12);
+    assert_eq!(listing["thumbsDown"], 1);
+    assert_eq!(listing["isPasswordProtected"], false);
+    assert_eq!(listing["indexerLanguages"], json!(["en", "de"]));
+    assert_eq!(
+        listing["extra"],
+        json!({ "grabs": 40, "tags": ["internal"] })
+    );
+
+    assert_eq!(listing_of(".NoSnapshot.mkv"), Value::Null);
+    assert_eq!(listing_of(".Garbage.mkv"), Value::Null);
+}
+
+/// Serve the TMDB-primary series (SMG title 303, `tvdb_id: null`) through
+/// SMG's title surface: `searchTitles` finds it and `titles` answers it.
+async fn mount_tmdb_primary_series_title_surface(ctx: &TestContext) {
+    let fixture: Value = serde_json::from_str(&load_fixture("smg/titles_movie.json"))
+        .expect("titles fixture is JSON");
+    let series = fixture["data"]["titles"]["series"]
+        .as_array()
+        .and_then(|series| series.iter().find(|item| item["id"] == 303))
+        .expect("titles fixture carries SMG series 303")
+        .clone();
+    Mock::given(path("/graphql"))
+        .and(|request: &wiremock::Request| {
+            matches!(
+                smg_request_operation(request).0.as_deref(),
+                Some("SearchTitles" | "Titles")
+            )
+        })
+        .respond_with(move |request: &wiremock::Request| {
+            let (operation, variables) = smg_request_operation(request);
+            let body = if operation.as_deref() == Some("SearchTitles") {
+                json!({ "data": { "searchTitles": {
+                    "source": "smg",
+                    "query": variables["query"].clone(),
+                    "generated_at": "2026-09-27T00:00:00Z",
+                    "total_results": 1,
+                    "results": [{
+                        "title_id": 303,
+                        "kind": "series",
+                        "primary_source": "tmdb",
+                        "tvdb_id": null,
+                        "tmdb_id": 3030,
+                        "imdb_id": "",
+                        "external_ids": series["external_ids"].clone(),
+                        "name": series["name"].clone(),
+                        "slug": "tmdb-primary-series",
+                        "type": "series",
+                        "year": series["year"].clone(),
+                        "status": "Continuing",
+                        "overview": "A series whose primary identifier is TMDB.",
+                        "poster_url": "",
+                        "language": "eng",
+                        "runtime_minutes": 45,
+                        "popularity": 10.0,
+                        "sort_title": series["name"].clone(),
+                        "normalization_notes": []
+                    }]
+                } } })
+            } else {
+                let ids = variables["ids"].as_array().cloned().unwrap_or_default();
+                let served = ids.iter().any(|id| id == 303);
+                json!({ "data": { "titles": {
+                    "movies": [],
+                    "series": if served { vec![series.clone()] } else { Vec::new() },
+                    "missing_ids": ids.into_iter().filter(|id| id != 303).collect::<Vec<_>>(),
+                    "redirects": []
+                } } })
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        })
+        .with_priority(1)
+        .mount(&ctx.smg_server)
+        .await;
+}
+
+async fn smg_operation_count(ctx: &TestContext, operation: &str) -> usize {
+    ctx.smg_server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| smg_request_operation(request).0.as_deref() == Some(operation))
+        .count()
+}
+
+/// A TMDB-primary series has no TVDB id anywhere: it is found by
+/// `searchTitles`, added by its SMG title id, hydrated through `titles`, has
+/// its artwork refreshed by that id, and searched on indexers for an episode
+/// without a TVDB id.
+#[tokio::test]
+async fn graphql_tmdb_primary_series_is_added_hydrated_and_searched_by_smg_id() {
+    let ctx = TestContext::new().await;
+    mount_tmdb_primary_series_title_surface(&ctx).await;
+
+    let search = gql(
+        &ctx,
+        r#"query($query: String!, $type: MediaFacetValue!) {
+            searchMetadata(query: $query, type: $type) {
+                smgId tmdbId tvdbId name primarySource externalIds { source value }
+            }
+        }"#,
+        json!({ "query": "TMDB Primary Series", "type": "SERIES" }),
+    )
+    .await;
+    assert_no_errors(&search);
+    let found = &search["data"]["searchMetadata"][0];
+    assert_eq!(found["smgId"], 303);
+    assert_eq!(found["tmdbId"], 3030);
+    assert_eq!(found["tvdbId"], "");
+    assert_eq!(found["primarySource"], "tmdb");
+
+    let added = gql(
+        &ctx,
+        r#"mutation($input: AddTitleInput!) {
+            addTitle(input: $input) {
+                metadataHydrationState
+                title { id externalIds { source kind value } }
+            }
+        }"#,
+        json!({
+            "input": {
+                "name": found["name"].clone(),
+                "facet": "SERIES",
+                "monitored": true,
+                "tags": [],
+                "externalIds": [
+                    { "source": "smg", "kind": "title", "value": "303" },
+                    { "source": "tmdb", "kind": "series", "value": "3030" }
+                ],
+                "smgId": 303,
+                "tmdbId": 3030
+            }
+        }),
+    )
+    .await;
+    assert_no_errors(&added);
+    assert_eq!(
+        added["data"]["addTitle"]["metadataHydrationState"],
+        "PENDING"
+    );
+    let title_id = added["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("added title id")
+        .to_string();
+    assert!(
+        added["data"]["addTitle"]["title"]["externalIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().all(|id| id["source"] != "tvdb")),
+        "{added}"
+    );
+
+    let titles_before_hydration = smg_operation_count(&ctx, "Titles").await;
+    ctx.app
+        .hydrate_all_titles_for_current_language()
+        .await
+        .expect("hydrate the TMDB-primary series through the title surface");
+    assert!(smg_operation_count(&ctx, "Titles").await > titles_before_hydration);
+
+    let title = gql(
+        &ctx,
+        r#"query($id: String!) {
+            title(id: $id) {
+                name
+                collections { episodes { seasonNumber episodeNumber title } }
+            }
+        }"#,
+        json!({ "id": title_id }),
+    )
+    .await;
+    assert_no_errors(&title);
+    assert_eq!(title["data"]["title"]["name"], "TMDB Primary Series");
+    let episodes = title["data"]["title"]["collections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|collection| {
+            collection["episodes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        episodes.iter().any(|episode| episode["seasonNumber"] == "1"
+            && episode["episodeNumber"] == "1"
+            && episode["title"] == "Pilot"),
+        "{title}"
+    );
+
+    let titles_before_refresh = smg_operation_count(&ctx, "Titles").await;
+    let refresh = ctx
+        .app
+        .run_title_image_cache_refresh()
+        .await
+        .expect("refresh the TMDB-primary series artwork by its SMG title id");
+    assert_eq!(refresh.titles_scanned, 1);
+    assert!(smg_operation_count(&ctx, "Titles").await > titles_before_refresh);
+
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(load_fixture("nzbgeek/search_tv.json")),
+        )
+        .mount(&ctx.nzbgeek_server)
+        .await;
+    seed_typed_settings_definitions(&ctx).await;
+    let indexer = gql(
+        &ctx,
+        r#"mutation($input: CreateIndexerConfigInput!) {
+            createIndexerConfig(input: $input) { id }
+        }"#,
+        json!({
+            "input": {
+                "name": "TMDB Primary Series Indexer",
+                "providerType": "newznab",
+                "isEnabled": true,
+                "config": [
+                    { "key": "base_url", "stringValue": ctx.nzbgeek_server.uri() },
+                    { "key": "api_key", "stringValue": "synthetic-api-key" }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_no_errors(&indexer);
+
+    let releases = gql(
+        &ctx,
+        r#"query($input: SearchReleasesInput!) { searchReleases(input: $input) { title } }"#,
+        json!({ "input": { "titleId": title_id, "season": "1", "episode": "1" } }),
+    )
+    .await;
+    assert_no_errors(&releases);
+    let indexer_requests = ctx
+        .nzbgeek_server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert!(
+        !indexer_requests.is_empty(),
+        "the series searched an indexer"
+    );
+    for request in &indexer_requests {
+        let params = request
+            .url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert!(!params.contains_key("tvdbid"), "{}", request.url);
+    }
+    // The mock indexer advertises no id capabilities, so the episode search
+    // is a title-and-episode `tvsearch`; the unit tests in `search_queries`
+    // pin that the TMDB and IMDb ids are offered when an indexer takes them.
+    assert!(
+        indexer_requests.iter().any(|request| {
+            let params = request
+                .url
+                .query_pairs()
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect::<std::collections::HashMap<_, _>>();
+            params.get("t").map(String::as_str) == Some("tvsearch")
+                && params.get("q").map(String::as_str) == Some("TMDB Primary Series")
+                && params.get("season").map(String::as_str) == Some("1")
+                && params.get("ep").map(String::as_str) == Some("1")
+        }),
+        "{:?}",
+        indexer_requests
+            .iter()
+            .map(|request| request.url.to_string())
+            .collect::<Vec<_>>()
     );
 }

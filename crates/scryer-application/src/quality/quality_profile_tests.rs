@@ -2147,6 +2147,103 @@ fn dv_with_hdr_fallback_is_allowed_when_override_enabled() {
     );
 }
 
+fn hevc_below_4k_deltas(
+    name: &str,
+    persona: crate::scoring_weights::ScoringPersona,
+    allow_x265_non4k: Option<bool>,
+) -> (Vec<i32>, i32) {
+    let config = crate::quality::pack_test_support::test_scoring_config(
+        &persona,
+        &crate::scoring_weights::ScoringOverrides {
+            allow_x265_non4k,
+            ..crate::scoring_weights::ScoringOverrides::default()
+        },
+    );
+    let release = parse_release_metadata(name);
+    let d = crate::quality::pack_test_support::score_with_pack(
+        &QualityProfile::default(),
+        &release,
+        false,
+        &config,
+    );
+    let deltas = d
+        .scoring_log
+        .iter()
+        .filter(|entry| entry.code == "video_codec_hevc_below_4k")
+        .map(|entry| entry.delta)
+        .collect();
+    (deltas, d.preference_score)
+}
+
+#[test]
+fn allow_x265_non4k_removes_the_persona_hevc_penalty_below_4k() {
+    use crate::scoring_weights::ScoringPersona;
+    let name = "Quiet.Meridian.2024.1080p.WEB-DL.x265-FICTGRP";
+    for (persona, penalty) in [
+        (ScoringPersona::Balanced, -80),
+        (ScoringPersona::Audiophile, -150),
+        (ScoringPersona::Compatible, -40),
+    ] {
+        let (unset, unset_score) = hevc_below_4k_deltas(name, persona.clone(), None);
+        let (off, off_score) = hevc_below_4k_deltas(name, persona.clone(), Some(false));
+        let (on, on_score) = hevc_below_4k_deltas(name, persona.clone(), Some(true));
+        assert_eq!(unset, vec![penalty], "{persona:?}");
+        assert_eq!(off, vec![penalty], "{persona:?}");
+        assert!(on.is_empty(), "{persona:?}");
+        assert_eq!(unset_score, off_score, "{persona:?}");
+        assert_eq!(on_score - off_score, -penalty, "{persona:?}");
+    }
+}
+
+#[test]
+fn hevc_below_4k_penalty_ignores_4k_efficient_and_unlabelled_resolution() {
+    use crate::scoring_weights::ScoringPersona;
+    for toggle in [None, Some(false), Some(true)] {
+        let (at_4k, _) = hevc_below_4k_deltas(
+            "Quiet.Meridian.2024.2160p.WEB-DL.x265-FICTGRP",
+            ScoringPersona::Balanced,
+            toggle,
+        );
+        assert!(at_4k.is_empty(), "{toggle:?}");
+        let (efficient, _) = hevc_below_4k_deltas(
+            "Quiet.Meridian.2024.720p.WEB-DL.x265-FICTGRP",
+            ScoringPersona::Efficient,
+            toggle,
+        );
+        assert!(efficient.is_empty(), "{toggle:?}");
+        let (unlabelled, _) = hevc_below_4k_deltas(
+            "Quiet.Meridian.2024.WEB-DL.x265-FICTGRP",
+            ScoringPersona::Balanced,
+            toggle,
+        );
+        assert!(unlabelled.is_empty(), "{toggle:?}");
+    }
+    let (h264, _) = hevc_below_4k_deltas(
+        "Quiet.Meridian.2024.1080p.WEB-DL.x264-FICTGRP",
+        ScoringPersona::Audiophile,
+        None,
+    );
+    assert!(h264.is_empty());
+}
+
+#[test]
+fn hevc_below_4k_penalty_yields_to_an_operator_codec_allowlist() {
+    let mut profile = QualityProfile::default();
+    profile.criteria.video_codec_allowlist = vec![crate::release_parser::VideoCodec::H265];
+    let release = parse_release_metadata("Quiet.Meridian.2024.1080p.WEB-DL.x265-FICTGRP");
+    let d = crate::quality::pack_test_support::score_with_pack(
+        &profile,
+        &release,
+        false,
+        &balanced_scoring_config(),
+    );
+    assert!(
+        !d.scoring_log
+            .iter()
+            .any(|entry| entry.code == "video_codec_hevc_below_4k")
+    );
+}
+
 // ── Phase E: anime version bonus ─────────────────────────────────────────
 
 #[test]

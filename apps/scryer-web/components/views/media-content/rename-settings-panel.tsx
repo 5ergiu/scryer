@@ -34,7 +34,7 @@ const RENAME_MISSING_METADATA_POLICY_OPTIONS = [
 ];
 
 const COMMON_RENAME_TOKENS = [
-  "title", "year", "quality", "source",
+  "title", "title_with_year", "title_without_year", "year", "quality", "source",
   "video_codec", "audio_codec", "audio_channels", "group", "ext",
 ];
 const EXTERNAL_ID_RENAME_TOKENS = [
@@ -54,7 +54,7 @@ const VALID_EPISODE_RENAME_TOKENS = new Set([
   ...EXTERNAL_ID_RENAME_TOKENS,
 ]);
 const VALID_FOLDER_TOKENS = new Set([
-  "title", "year",
+  "title", "title_with_year", "title_without_year", "year",
   "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
 ]);
 const VALID_SEASON_FOLDER_TOKENS = new Set([
@@ -62,8 +62,14 @@ const VALID_SEASON_FOLDER_TOKENS = new Set([
   "season",
 ]);
 
+const TITLE_YEAR_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
+  { token: "title_with_year", labelKey: "settings.renameTokenTitleWithYear" },
+  { token: "title_without_year", labelKey: "settings.renameTokenTitleWithoutYear" },
+];
+
 const FOLDER_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "imdb_id", labelKey: "settings.renameTokenImdbId" },
   { token: "tmdb_id", labelKey: "settings.renameTokenTmdbId" },
@@ -79,6 +85,7 @@ const SEASON_FOLDER_TOKEN_DESCRIPTIONS = [
 
 const SHARED_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "quality", labelKey: "settings.renameTokenQuality" },
   { token: "source", labelKey: "settings.renameTokenSource" },
@@ -296,7 +303,8 @@ function validateFolderTemplate(
 }
 
 const RENAME_PREVIEW_MOVIE_SAMPLE: Record<string, string> = {
-  title: "The Grey Harbor", year: "2008", quality: "2160p", edition: "IMAX",
+  title: "The Grey Harbor", title_with_year: "The Grey Harbor (2008)",
+  title_without_year: "The Grey Harbor", year: "2008", quality: "2160p", edition: "IMAX",
   source: "BluRay", video_codec: "x265", audio_codec: "DTS-HD MA",
   audio_channels: "5.1", group: "FraMeSToR", ext: "mkv",
   imdb_id: "tt0468569", tmdb_id: "155", tvdb_id: "123456",
@@ -305,7 +313,8 @@ const RENAME_PREVIEW_MOVIE_SAMPLE: Record<string, string> = {
 };
 
 const RENAME_PREVIEW_SERIES_SAMPLE: Record<string, string> = {
-  title: "Harbor Lights", year: "1994", quality: "1080p", edition: "Director's Cut",
+  title: "Harbor Lights", title_with_year: "Harbor Lights (1994)",
+  title_without_year: "Harbor Lights", year: "1994", quality: "1080p", edition: "Director's Cut",
   source: "WEB-DL", video_codec: "x264", audio_codec: "AAC",
   audio_channels: "2.0", group: "NTb", ext: "mkv",
   imdb_id: "tt0108778", tmdb_id: "1668", tvdb_id: "79168",
@@ -315,7 +324,8 @@ const RENAME_PREVIEW_SERIES_SAMPLE: Record<string, string> = {
 };
 
 const RENAME_PREVIEW_ANIME_SAMPLE: Record<string, string> = {
-  title: "Tidebreaker", year: "1999", quality: "1080p", edition: "Director's Cut",
+  title: "Tidebreaker", title_with_year: "Tidebreaker (1999)",
+  title_without_year: "Tidebreaker", year: "1999", quality: "1080p", edition: "Director's Cut",
   source: "WEB-DL", video_codec: "x265", audio_codec: "AAC",
   audio_channels: "2.0", group: "SubsPlease", ext: "mkv",
   imdb_id: "tt0388629", tmdb_id: "37854", tvdb_id: "81797",

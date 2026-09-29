@@ -13,6 +13,8 @@ export type Facet = "MOVIE" | "SERIES" | "ANIME";
 
 export type ExternalId = {
   source: string;
+  /** Entity kind the id names at its source (`series`, `movie`, `title`), when stored. */
+  kind?: string | null;
   value: string;
 };
 
@@ -168,6 +170,20 @@ export type TitleMediaFileRecord = {
   edition?: string | null;
   originalFilePath?: string | null;
   releaseHash?: string | null;
+  releaseListing?: MediaFileReleaseListing | null;
+};
+
+/** Indexer listing facts frozen when Scryer grabbed the release a file came from. */
+export type MediaFileReleaseListing = {
+  publishedAt: string | null;
+  ageDaysAtGrab: number | null;
+  thumbsUp: number | null;
+  thumbsDown: number | null;
+  isPasswordProtected: boolean | null;
+  indexerLanguages: string[];
+  /** Indexer-specific scalars (or arrays of scalars), keyed by attribute name. */
+  extra: Record<string, unknown>;
+  capturedAt: string;
 };
 
 export type TitleReleaseBlocklistEntry = {

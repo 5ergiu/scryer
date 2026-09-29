@@ -37,6 +37,7 @@ mod configuration;
 mod discovery;
 mod identity;
 mod library;
+mod lists;
 mod location;
 mod maintenance_rules;
 mod request_rules;
@@ -48,6 +49,7 @@ pub use configuration::*;
 pub use discovery::*;
 pub use identity::*;
 pub use library::*;
+pub use lists::*;
 pub use location::*;
 pub use maintenance_rules::*;
 pub use request_rules::*;
@@ -591,6 +593,7 @@ mod tests {
             api_key_encrypted: None,
             rate_limit_seconds: None,
             rate_limit_burst: None,
+            max_queries_per_minute: None,
             disabled_until: None,
             is_enabled: true,
             enable_interactive_search: true,

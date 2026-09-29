@@ -2,6 +2,7 @@ use crate::integration::workflow::{extract_url_origin, source_provider_label};
 use crate::library_scan_progress::{
     reduce_library_scan_projection_event, replay_library_scan_projection,
 };
+use crate::url_redaction::REDACTED_SECRET as REDACTED_HISTORY_SECRET;
 use crate::{
     ActivityChannel, ActivityEvent, ActivityKind, ActivitySeverity, DownloadQueueItem, JobKey,
     JobRun, JobRunStatus, JobTriggerSource, LibraryScanSession, LibraryScanStatus,
@@ -190,6 +191,19 @@ pub(crate) fn activity_event_from_domain_event(event: &DomainEvent) -> Option<Ac
                 })
                 .unwrap_or_else(|| format!("Deleted media file for '{}'.", data.title.title_name)),
         ),
+        DomainEventPayload::MediaFileRestored(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Info,
+            data.media_updates
+                .first()
+                .map(|update| format!("Restored media file from the recycle bin: {}", update.path))
+                .unwrap_or_else(|| {
+                    format!(
+                        "Restored media file from the recycle bin for '{}'.",
+                        data.title.title_name
+                    )
+                }),
+        ),
         DomainEventPayload::MediaFileUpgraded(data) => (
             ActivityKind::FileUpgraded,
             ActivitySeverity::Success,
@@ -277,6 +291,37 @@ pub(crate) fn activity_event_from_domain_event(event: &DomainEvent) -> Option<Ac
             ActivitySeverity::Warning,
             format!("Subtitle search failed for '{}'.", data.title.title_name),
         ),
+        DomainEventPayload::ListTitleAdded(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Success,
+            format!(
+                "The list '{}' added '{}'.",
+                data.list.list_name, data.title.title_name
+            ),
+        ),
+        DomainEventPayload::ListRequestSubmitted(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Info,
+            list_request_submitted_message(data),
+        ),
+        DomainEventPayload::ListTitleLeft(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Info,
+            list_title_left_message(data),
+        ),
+        DomainEventPayload::ListSyncFailed(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Warning,
+            format!(
+                "The list '{}' could not sync: {}",
+                data.list.list_name, data.reason
+            ),
+        ),
+        DomainEventPayload::ListUnfollowed(data) => (
+            ActivityKind::SystemNotice,
+            ActivitySeverity::Info,
+            format!("Stopped following the list '{}'.", data.list.list_name),
+        ),
         _ => return None,
     };
 
@@ -324,16 +369,6 @@ pub(crate) fn title_history_records_from_domain_event(
         .collect()
 }
 
-const REDACTED_HISTORY_SECRET: &str = "[redacted]";
-
-fn history_api_key_query_param_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r#"(?i)(?P<prefix>\b(?:api_?key)=)(?P<value>[^&#\s"'<>),\]}]+)"#)
-            .expect("history api key regex should compile")
-    })
-}
-
 fn history_url_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
@@ -352,9 +387,7 @@ fn looks_like_history_secret_key(key: &str) -> bool {
 }
 
 fn redact_history_api_keys(raw: &str) -> String {
-    history_api_key_query_param_regex()
-        .replace_all(raw, format!("${{prefix}}{REDACTED_HISTORY_SECRET}"))
-        .into_owned()
+    crate::url_redaction::redact_url_credentials(raw)
 }
 
 fn redact_history_urls(raw: &str) -> String {
@@ -720,6 +753,31 @@ pub(crate) fn title_history_record_from_domain_event(
             None,
             None,
         ),
+        DomainEventPayload::MediaFileRestored(data) => (
+            Some(data.title.title_name.clone()),
+            Some(data.title.facet.clone()),
+            TitleHistoryEventType::FileRestored,
+            (data.media_updates.len() == 1)
+                .then(|| data.media_updates.first().map(|update| update.path.clone()))
+                .flatten(),
+            (data.media_updates.len() == 1)
+                .then(|| data.media_updates.first().map(|update| update.path.clone()))
+                .flatten(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            data.original_path.clone(),
+            data.media_updates.first().map(|update| update.path.clone()),
+        ),
         DomainEventPayload::MediaFileRenamed(data) => (
             Some(data.title.title_name.clone()),
             Some(data.title.facet.clone()),
@@ -907,7 +965,8 @@ pub(crate) fn history_event_from_domain_event(event: &DomainEvent) -> Option<His
         DomainEventPayload::DownloadFailed(_)
         | DomainEventPayload::ReleaseBlocklisted(_)
         | DomainEventPayload::ImportRejected(_)
-        | DomainEventPayload::SubtitleSearchFailed(_) => EventType::Error,
+        | DomainEventPayload::SubtitleSearchFailed(_)
+        | DomainEventPayload::ListSyncFailed(_) => EventType::Error,
         _ => EventType::ActionCompleted,
     };
 
@@ -987,6 +1046,7 @@ fn event_episode_ids(event: &DomainEvent) -> Vec<String> {
         DomainEventPayload::MediaFileAnalyzed(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileRenamed(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileDeleted(data) => data.episode_ids.iter(),
+        DomainEventPayload::MediaFileRestored(data) => data.episode_ids.iter(),
         DomainEventPayload::MediaFileUpgraded(data) => data.episode_ids.iter(),
         _ => return ids,
     };
@@ -1057,6 +1117,36 @@ fn metadata_hydration_activity(
             },
         ),
     }
+}
+
+pub(crate) fn list_request_submitted_message(
+    data: &scryer_domain::ListRequestSubmittedEventData,
+) -> String {
+    if data.held {
+        format!(
+            "The list '{}' requested '{}'; the request waits for review.",
+            data.list.list_name, data.title_name
+        )
+    } else {
+        format!(
+            "The list '{}' requested '{}'.",
+            data.list.list_name, data.title_name
+        )
+    }
+}
+
+pub(crate) fn list_title_left_message(data: &scryer_domain::ListTitleLeftEventData) -> String {
+    let outcome = match data.action {
+        scryer_domain::ListOnLeave::Keep | scryer_domain::ListOnLeave::Log => {
+            "it stays in the library"
+        }
+        scryer_domain::ListOnLeave::Unmonitor => "it is no longer monitored",
+        scryer_domain::ListOnLeave::Tag => "it was tagged left-list",
+    };
+    format!(
+        "'{}' left the list '{}'; {outcome}.",
+        data.title.title_name, data.list.list_name
+    )
 }
 
 fn import_requested_message(client_type: &str, source_ref: &str) -> String {
@@ -1415,6 +1505,7 @@ mod tests {
                     source_provider: None,
                     download_id: Some("download-1".to_string()),
                     episode_ids: vec!["episode-1".to_string()],
+                    release_facts: None,
                 }),
                 r#"{"type":"release_grabbed","data":{"title":{"title_name":"Fixture","facet":"series","external_ids":{"imdb_id":null,"tmdb_id":null,"tvdb_id":null,"anidb_id":null},"poster_url":null,"year":2024},"source_title":"Grab.Release","source_hint":"rss","source_provider":null,"download_id":"download-1","episode_ids":["episode-1"]}}"#,
                 ActivityKind::AcquisitionCandidateAccepted,
@@ -1469,8 +1560,9 @@ mod tests {
                     quality: Some("1080p".to_string()),
                     episode_ids: vec!["episode-1".to_string()],
                     size_bytes: Some(1024),
+                    upgrade: false,
                 }),
-                r#"{"type":"import_completed","data":{"title":{"title_name":"Fixture","facet":"series","external_ids":{"imdb_id":null,"tmdb_id":null,"tvdb_id":null,"anidb_id":null},"poster_url":null,"year":2024},"media_updates":[{"path":"/library/Fixture.mkv","update_type":"created"}],"imported_count":1,"import_id":"import-1","source_system":"nzbget","source_ref":"queue-1","source_title":"Imported.Release","source_path":"/downloads/Fixture.mkv","dest_path":"/library/Fixture.mkv","quality":"1080p","episode_ids":["episode-1"],"size_bytes":1024}}"#,
+                r#"{"type":"import_completed","data":{"title":{"title_name":"Fixture","facet":"series","external_ids":{"imdb_id":null,"tmdb_id":null,"tvdb_id":null,"anidb_id":null},"poster_url":null,"year":2024},"media_updates":[{"path":"/library/Fixture.mkv","update_type":"created"}],"imported_count":1,"import_id":"import-1","source_system":"nzbget","source_ref":"queue-1","source_title":"Imported.Release","source_path":"/downloads/Fixture.mkv","dest_path":"/library/Fixture.mkv","quality":"1080p","episode_ids":["episode-1"],"size_bytes":1024,"upgrade":false}}"#,
                 ActivityKind::SeriesEpisodeImported,
                 ActivitySeverity::Success,
                 "Imported 1 file for 'Fixture'.",
@@ -1572,6 +1664,7 @@ mod tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
 
@@ -1597,6 +1690,7 @@ mod tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         event.title_id = None;
@@ -1631,6 +1725,7 @@ mod tests {
                 source_provider: Some("Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         event.actor_kind = scryer_domain::DomainEventActorKind::User;
@@ -1833,6 +1928,7 @@ mod tests {
                     quality: Some("1080p".to_string()),
                     episode_ids: vec!["ep-1".to_string()],
                     size_bytes: Some(1_024),
+                    upgrade: false,
                 }),
             ),
             event(
@@ -1854,6 +1950,7 @@ mod tests {
                     quality: Some("2160p".to_string()),
                     episode_ids: vec!["ep-1".to_string()],
                     size_bytes: Some(4_096),
+                    upgrade: false,
                 }),
             ),
         ];
@@ -2083,6 +2180,7 @@ mod tests {
                     imported: 2,
                     skipped: 1,
                     unmatched: 0,
+                    relinked: 0,
                 }),
                 warning_message: None,
             }),

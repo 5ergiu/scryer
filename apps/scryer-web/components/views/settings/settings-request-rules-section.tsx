@@ -1,3 +1,4 @@
+import { regoDiagnostics } from "@/lib/utils/rego-diagnostics";
 import * as React from "react";
 import {
   AlertTriangle,
@@ -1426,6 +1427,7 @@ export function SettingsRequestRulesSection({
                         {t("settings.ruleRegoSource")}
                       </Label>
                       <LazyRegoEditor
+                        ruleFamily="request"
                         id="settings-request-rule-rego-source"
                         value={ruleSetDraft.regoSource}
                         onChange={(value) =>
@@ -1434,6 +1436,7 @@ export function SettingsRequestRulesSection({
                             regoSource: value,
                           }))
                         }
+                        diagnostics={regoDiagnostics(ruleSetDraft.regoSource, validationResult)}
                         minLines={12}
                         maxLines={35}
                       />

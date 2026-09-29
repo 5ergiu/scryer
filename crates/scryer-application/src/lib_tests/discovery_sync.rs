@@ -31,7 +31,7 @@ use crate::{
     DiscoverySyncStateRecord, DiscoveryTitle, DomainEventRepository, JobCategory, JobKey, JobRun,
     JobRunStatus, JobSection, JobTriggerSource, LibraryRootDraft, MetadataGateway,
     MetadataSearchItem, MetadataSearchQuery, MovieMetadata, MultiMetadataSearchResult,
-    RichMetadataSearchItem, SeriesMetadata, TitleRecommendationsInput,
+    RichMetadataSearchItem, TitleRecommendationsInput,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -50,6 +50,7 @@ fn canonical_genre_tags(labels: &[&str]) -> Vec<CanonicalMediaTag> {
         .map(|label| {
             let slug = label.to_ascii_lowercase().replace(' ', "-");
             CanonicalMediaTag {
+                affinity_signals: Vec::new(),
                 key: format!("canonical:genre:{slug}"),
                 category: "genre".to_string(),
                 name: (*label).to_string(),
@@ -141,6 +142,18 @@ fn rail_floor_padding_items(
                     .map(|theme| format!("canonical:theme:{}", theme.to_ascii_lowercase())),
             );
             item.matched_subject_keys = vec!["tmdb:movie:603".to_string()];
+            item.affinity_signals = themes
+                .iter()
+                .map(|theme| crate::DiscoveryAffinitySignalRecord {
+                    affinity_key: format!("affinity:theme:{}", theme.to_ascii_lowercase()),
+                    category: "theme".to_string(),
+                    tier: "strong".to_string(),
+                    confidence: 0.95,
+                    sources: vec!["mal".to_string()],
+                    rail_eligible: true,
+                    ..Default::default()
+                })
+                .collect();
             item
         })
         .collect()
@@ -150,6 +163,18 @@ fn canonical_theme_tags(labels: &[&str]) -> Vec<CanonicalMediaTag> {
     labels
         .iter()
         .map(|label| CanonicalMediaTag {
+            affinity_signals: vec![crate::DiscoveryAffinitySignalRecord {
+                affinity_key: format!(
+                    "affinity:theme:{}",
+                    label.to_ascii_lowercase().replace(' ', "-")
+                ),
+                category: "theme".to_string(),
+                tier: "strong".to_string(),
+                confidence: 1.0,
+                sources: vec!["anilist".to_string()],
+                rail_eligible: true,
+                ..Default::default()
+            }],
             key: format!(
                 "canonical:theme:{}",
                 label.to_ascii_lowercase().replace(' ', "-")
@@ -591,6 +616,16 @@ async fn discovery_home_and_items_use_local_rows_and_library_view_rbac() {
         true,
     );
     isekai_item.matched_subject_keys = linked_subject_keys.clone();
+    isekai_item.affinity_signals = vec![crate::DiscoveryAffinitySignalRecord {
+        affinity_key: "affinity:theme:isekai".to_string(),
+        category: "theme".to_string(),
+        tier: "strong".to_string(),
+        confidence: 0.95,
+        sources: vec!["mal".to_string()],
+        rail_eligible: true,
+        ..Default::default()
+    }];
+
     isekai_item
         .facet_terms
         .push("canonical:theme:isekai".to_string());
@@ -2847,7 +2882,7 @@ async fn metadata_language_change_refreshes_public_discovery_feed() {
     *discovery.state.lock().await = Some(DiscoverySyncStateRecord {
         last_success_generation_id: Some("snapshot-old".to_string()),
         last_public_feed_generation_id: Some("public-old".to_string()),
-        next_context_snapshot_eligible_at: Some(now - chrono::Duration::minutes(1)),
+        next_context_snapshot_eligible_at: Some(now + chrono::Duration::hours(24)),
         next_incremental_reload_eligible_at: Some(now + chrono::Duration::hours(4)),
         next_public_feed_eligible_at: Some(now + chrono::Duration::hours(24)),
         updated_at: now,
@@ -2899,6 +2934,45 @@ async fn metadata_language_change_refreshes_public_discovery_feed() {
         public_run.trigger_source,
         JobTriggerSource::SystemInternal.as_str()
     );
+}
+
+#[tokio::test]
+async fn discovery_sync_skips_a_superseded_public_feed_commit_without_failing() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let app = app.with_test_overrides(|builder| builder.with_discovery_store(discovery.clone()));
+    *discovery.supersede_public_feed_commits.lock().await = true;
+    let now = Utc::now();
+    *discovery.state.lock().await = Some(DiscoverySyncStateRecord {
+        updated_at: now,
+        ..DiscoverySyncStateRecord::default()
+    });
+
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("a superseded commit is a clean skip, not a job failure");
+
+    assert_eq!(gateway.public_feed_inputs.lock().await.len(), 1);
+    assert!(discovery.public_feed_commits.lock().await.is_empty());
+    let state = discovery
+        .state
+        .lock()
+        .await
+        .clone()
+        .expect("state should persist");
+    assert!(state.last_public_feed_generation_id.is_none());
+    assert_eq!(state.transient_failure_count, 0);
+    assert!(state.backoff_until.is_none());
+    let runs = discovery.runs.lock().await;
+    let public_runs = runs
+        .iter()
+        .filter(|run| run.kind == "public_feed")
+        .collect::<Vec<_>>();
+    assert_eq!(public_runs.len(), 1);
+    assert_eq!(public_runs[0].status, "superseded");
+    assert!(public_runs[0].error_text.is_none());
+    assert!(public_runs[0].completed_at.is_some());
 }
 
 #[tokio::test]
@@ -4907,6 +4981,7 @@ async fn discovery_sync_snapshot_dirty_clear_requires_inflight_fingerprint_match
         ..DiscoverySyncStateRecord::default()
     });
     let mut run = discovery_run_record("run-inflight", now, "deferred");
+    run.language = "eng".to_string();
     run.smg_request_id = Some("request-1".to_string());
     run.subject_fingerprint = Some("fingerprint-stale".to_string());
     run.completed_at = None;
@@ -4992,6 +5067,75 @@ async fn discovery_sync_unchanged_fingerprint_clears_pending_without_smg() {
     assert!(state.dirty_since.is_none());
     assert_eq!(state.dirty_reason_mask, 0);
     assert_eq!(state.last_seen_domain_event_sequence, Some(12));
+}
+
+#[tokio::test]
+async fn discovery_sync_quiet_run_does_not_report_an_elapsed_incremental_window() {
+    let gateway = Arc::new(SnapshotMetadataGateway::default());
+    let (app, _admin, _titles) = bootstrap_with_metadata_gateway_and_titles(gateway.clone());
+    let discovery = Arc::new(RecordingDiscoveryRepository::default());
+    let job_runs = Arc::new(super::support_catalog::RecordingJobRunRepo::default());
+    let app = app.with_test_overrides(|builder| {
+        builder
+            .with_discovery_store(discovery.clone())
+            .with_job_runs(job_runs.clone())
+    });
+    let now = Utc.timestamp_opt(100_000, 0).unwrap();
+    app.runtime.environment.set_fixed_now_for_tests(Some(now));
+    let fingerprint = crate::discovery::build_discovery_library_context(
+        &[],
+        crate::discovery::DiscoveryContextDefaults::default(),
+    )
+    .fingerprint;
+    let elapsed_window = now - chrono::Duration::hours(5);
+    let seeded_state = DiscoverySyncStateRecord {
+        last_success_generation_id: Some("generation-1".to_string()),
+        last_subject_fingerprint: Some(fingerprint),
+        last_context_snapshot_completed_at: Some(now - chrono::Duration::hours(6)),
+        next_context_snapshot_eligible_at: Some(now + chrono::Duration::days(1)),
+        next_incremental_reload_eligible_at: Some(elapsed_window),
+        last_public_feed_generation_id: Some("public-1".to_string()),
+        next_public_feed_eligible_at: Some(now + chrono::Duration::days(1)),
+        updated_at: now - chrono::Duration::hours(5),
+        ..DiscoverySyncStateRecord::default()
+    };
+    *discovery.state.lock().await = Some(seeded_state.clone());
+
+    app.run_scheduled_job_now(JobKey::DiscoverySync, JobTriggerSource::ScheduledInterval)
+        .await
+        .expect("discovery sync should run");
+
+    assert!(gateway.submitted_inputs.lock().await.is_empty());
+    assert!(gateway.change_inputs.lock().await.is_empty());
+    let runs =
+        crate::JobRunRepository::list_job_runs(job_runs.as_ref(), Some(JobKey::DiscoverySync), 10)
+            .await
+            .expect("job runs should list");
+    assert_eq!(runs.len(), 1);
+    let summary = runs[0]
+        .summary_text
+        .as_deref()
+        .expect("discovery sync should record a summary");
+    assert!(
+        !summary.contains(&elapsed_window.to_rfc3339()),
+        "summary must not report an elapsed window: {summary}"
+    );
+    assert!(
+        summary.contains("incremental reload window is open"),
+        "summary should say the window is open: {summary}"
+    );
+    // Only the message changes: the persisted gate is left for the next
+    // completed reload to advance.
+    let state = discovery
+        .state
+        .lock()
+        .await
+        .clone()
+        .expect("state should persist");
+    assert_eq!(
+        state.next_incremental_reload_eligible_at,
+        Some(elapsed_window)
+    );
 }
 
 #[tokio::test]
@@ -5306,10 +5450,6 @@ impl MetadataGateway for SnapshotMetadataGateway {
         Err(unused_gateway_call())
     }
 
-    async fn get_series(&self, _tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        Err(unused_gateway_call())
-    }
-
     async fn get_metadata_bulk(
         &self,
         _movie_tvdb_ids: &[i64],
@@ -5522,6 +5662,9 @@ struct RecordingDiscoveryRepository {
     // the personalized generation the caller asked for is the only observable
     // that proves the visibility gate was applied.
     filter_option_context_run_ids: Mutex<Vec<Option<String>>>,
+    // Simulates a metadata language change landing between the SMG fetch and
+    // the public-feed commit: the store rolls the commit back as superseded.
+    supersede_public_feed_commits: Mutex<bool>,
 }
 
 #[async_trait]
@@ -5536,6 +5679,18 @@ impl DiscoveryRepository for RecordingDiscoveryRepository {
     async fn upsert_discovery_sync_state(&self, state: &DiscoverySyncStateRecord) -> AppResult<()> {
         *self.state.lock().await = Some(state.clone());
         Ok(())
+    }
+
+    async fn refresh_discovery_presentation(
+        &self,
+        _language: &str,
+        _now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn discovery_run_matches_presentation(&self, _run_id: &str) -> AppResult<bool> {
+        Ok(true)
     }
 
     async fn try_acquire_discovery_sync_lease(
@@ -5723,6 +5878,11 @@ impl DiscoveryRepository for RecordingDiscoveryRepository {
         &self,
         commit: &DiscoveryPublicFeedCommit,
     ) -> AppResult<()> {
+        if *self.supersede_public_feed_commits.lock().await {
+            return Err(AppError::DiscoveryPresentationSuperseded {
+                run_id: commit.run.id.clone(),
+            });
+        }
         *self.state.lock().await = Some(commit.state.clone());
         self.runs.lock().await.push(commit.run.clone());
         self.sections
@@ -7014,6 +7174,7 @@ fn discovery_item_record(
         overview: None,
         content_type: Some(target_kind.to_string()),
         canonical_tags: canonical_genre_tags(genre_labels),
+        affinity_signals: Vec::new(),
         is_adult: false,
         content_ratings: Vec::new(),
         rating: Some(7.5),
@@ -7229,6 +7390,7 @@ fn test_discovery_title() -> DiscoveryTitle {
         background_url: String::new(),
         source_tags: Vec::new(),
         canonical_tags: Vec::new(),
+        affinity_signals: Vec::new(),
         is_adult: false,
         content_ratings: Vec::new(),
         sources: vec!["popular".to_string()],

@@ -1022,6 +1022,7 @@ fn test_media_file(path: &str) -> TitleMediaFile {
         edition: Some("IMAX Enhanced".to_string()),
         original_file_path: None,
         release_hash: None,
+        release_listing_json: None,
     }
 }
 
@@ -1069,6 +1070,489 @@ fn resolve_rename_common_metadata_uses_persisted_parsed_backup_when_analysis_mis
     assert_eq!(resolved.common.audio_codec, "TrueHD Atmos");
     assert_eq!(resolved.common.audio_channels, "7.1");
     assert_eq!(resolved.common.group, "NTb");
+}
+
+fn probed_series_analysis(channels: i32, layout: &str) -> crate::MediaFileAnalysis {
+    crate::MediaFileAnalysis {
+        details: scryer_media_types::AnalysisDetails {
+            revision: scryer_media_types::ANALYSIS_REVISION,
+            streams: vec![scryer_media_types::StreamDetail {
+                kind: scryer_media_types::StreamKind::Audio,
+                codec: Some("aac".to_string()),
+                channels: Some(channels),
+                metadata: scryer_media_types::StreamMetadata {
+                    channel_layout: Some(layout.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        video_codec: Some(crate::release_parser::VideoCodec::H264),
+        video_width: Some(1920),
+        video_height: Some(1080),
+        video_bitrate_kbps: None,
+        video_bit_depth: None,
+        video_hdr_format: None,
+        dovi_profile: None,
+        dovi_bl_compat_id: None,
+        video_frame_rate: None,
+        video_profile: None,
+        audio_codec: Some("aac".to_string()),
+        audio_profile: None,
+        audio_channels: Some(channels),
+        audio_bitrate_kbps: None,
+        audio_languages: vec!["eng".to_string()],
+        audio_streams: vec![crate::AudioStreamDetail {
+            codec: Some("aac".to_string()),
+            profile: None,
+            channels: Some(channels),
+            language: Some("eng".to_string()),
+            name: None,
+            bitrate_kbps: None,
+        }],
+        subtitle_languages: vec![],
+        subtitle_codecs: vec![],
+        subtitle_streams: vec![],
+        has_multiaudio: false,
+        duration_seconds: Some(1440),
+        num_chapters: None,
+        container_format: Some("matroska".to_string()),
+    }
+}
+
+/// The row import records for `analysis`: the same probe, and no stored
+/// fallbacks beyond what the release name already parses to.
+fn media_file_recorded_from_analysis(
+    path: &str,
+    episode_id: &str,
+    analysis: &crate::MediaFileAnalysis,
+) -> TitleMediaFile {
+    let mut media_file = test_media_file(path);
+    media_file.episode_id = Some(episode_id.to_string());
+    media_file.analysis_details = analysis.details.clone();
+    media_file.video_codec = analysis.video_codec;
+    media_file.video_width = analysis.video_width;
+    media_file.video_height = analysis.video_height;
+    media_file.audio_codec = analysis.audio_codec.clone();
+    media_file.audio_profile = analysis.audio_profile.clone();
+    media_file.audio_channels = analysis.audio_channels;
+    media_file.audio_streams = analysis.audio_streams.clone();
+    media_file.quality_label = None;
+    media_file.release_group = None;
+    media_file.source_type = None;
+    media_file.video_codec_parsed = None;
+    media_file.audio_codec_parsed = None;
+    media_file.audio_channels_parsed = None;
+    media_file.edition = None;
+    media_file
+}
+
+fn test_series_episode() -> Episode {
+    Episode {
+        id: "episode-1".to_string(),
+        title_id: "title-1".to_string(),
+        collection_id: None,
+        episode_type: scryer_domain::EpisodeType::Standard,
+        episode_number: Some("1".to_string()),
+        season_number: Some("1".to_string()),
+        episode_label: None,
+        title: Some("First Lantern".to_string()),
+        air_date: None,
+        duration_seconds: None,
+        has_multi_audio: false,
+        has_subtitle: false,
+        is_filler: false,
+        is_recap: false,
+        absolute_number: Some("1".to_string()),
+        contiguous_absolute_number: None,
+        overview: None,
+        tvdb_id: None,
+        tmdb_id: None,
+        image_url: None,
+        monitored: true,
+        created_at: Utc::now(),
+    }
+}
+
+fn library_series_tokens(
+    title: &Title,
+    media_file: &TitleMediaFile,
+    episode: &Episode,
+    parsed: &ParsedReleaseMetadata,
+) -> BTreeMap<String, String> {
+    let episodes_by_id = HashMap::from([(episode.id.clone(), episode.clone())]);
+    let source = GroupedTitleMediaFile {
+        file: media_file.clone(),
+        episode_ids: vec![episode.id.clone()],
+    };
+    let rename_metadata =
+        resolve_series_rename_metadata(&[], &HashMap::new(), &episodes_by_id, &source, parsed);
+    series_media_file_rename_tokens(title, media_file, parsed, "mkv", &rename_metadata)
+}
+
+#[test]
+fn import_and_library_rename_render_identical_series_tokens() {
+    let mut title = test_movie_title("Lantern Harbor");
+    title.facet = MediaFacet::Anime;
+    let episode = test_series_episode();
+    let release = "Lantern.Harbor.S01E01.1080p.WEB-DL.AAC2.0.H.264-Glimmerwick";
+    let parsed = parse_release_metadata(release);
+
+    for (channels, layout, expected_channels) in [(2, "stereo", "2.0"), (6, "5.1(side)", "5.1")] {
+        let analysis = probed_series_analysis(channels, layout);
+        let media_file = media_file_recorded_from_analysis(
+            &format!("/library/Lantern Harbor/{release}.mkv"),
+            &episode.id,
+            &analysis,
+        );
+
+        let import_tokens = crate::import_workflow::episode_import_rename_tokens(
+            &title,
+            &parsed,
+            Some(&analysis),
+            "mkv",
+            1,
+            "1",
+            episode.absolute_number.as_deref(),
+            episode.title.as_deref(),
+            None,
+        );
+        let library_tokens = library_series_tokens(&title, &media_file, &episode, &parsed);
+
+        assert_eq!(import_tokens, library_tokens, "{channels}-channel track");
+        assert_eq!(
+            import_tokens.get("audio_codec").map(String::as_str),
+            Some("AAC")
+        );
+        assert_eq!(
+            import_tokens.get("audio_channels").map(String::as_str),
+            Some(expected_channels)
+        );
+        assert_eq!(
+            import_tokens.get("absolute_episode").map(String::as_str),
+            Some("001")
+        );
+    }
+}
+
+#[test]
+fn import_and_library_rename_keep_the_year_in_series_file_titles() {
+    let episode = test_series_episode();
+    let release = "Lantern.Harbor.2018.S01E01.1080p.WEB-DL.AAC2.0.H.264-Glimmerwick";
+    let parsed = parse_release_metadata(release);
+    let analysis = probed_series_analysis(2, "stereo");
+    let media_file = media_file_recorded_from_analysis(
+        &format!("/library/Lantern Harbor (2018)/{release}.mkv"),
+        &episode.id,
+        &analysis,
+    );
+
+    for (facet, template) in [
+        (MediaFacet::Series, crate::DEFAULT_RENAME_TEMPLATE_SERIES),
+        (MediaFacet::Anime, crate::DEFAULT_RENAME_TEMPLATE_ANIME),
+    ] {
+        let mut title = test_movie_title("Lantern Harbor (2018)");
+        title.facet = facet.clone();
+        title.year = Some(2018);
+
+        let import_tokens = crate::import_workflow::episode_import_rename_tokens(
+            &title,
+            &parsed,
+            Some(&analysis),
+            "mkv",
+            1,
+            "1",
+            episode.absolute_number.as_deref(),
+            episode.title.as_deref(),
+            None,
+        );
+        let library_tokens = library_series_tokens(&title, &media_file, &episode, &parsed);
+
+        assert_eq!(import_tokens, library_tokens, "{facet:?}");
+        assert_eq!(
+            import_tokens.get("title").map(String::as_str),
+            Some("Lantern Harbor (2018)"),
+            "{facet:?}"
+        );
+        assert_eq!(
+            import_tokens.get("year").map(String::as_str),
+            Some("2018"),
+            "{facet:?}"
+        );
+
+        let rendered = render_rename_template(template, &import_tokens);
+        assert!(
+            rendered.starts_with("Lantern Harbor (2018) - S01E01"),
+            "{facet:?}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("(2018)").count(),
+            1,
+            "{facet:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn series_folder_keeps_a_single_year_when_the_title_name_carries_one() {
+    for facet in [MediaFacet::Series, MediaFacet::Anime] {
+        let mut title = test_movie_title("Lantern Harbor (2018)");
+        title.facet = facet.clone();
+        title.year = Some(2018);
+
+        let tokens = build_title_folder_tokens(&title, title.year);
+
+        assert_eq!(
+            render_title_folder_template(DEFAULT_FOLDER_TEMPLATE_SERIES, &tokens),
+            "Lantern Harbor (2018)",
+            "{facet:?}"
+        );
+    }
+}
+
+/// A catalog name with a year hint, one without but with a known year, and one
+/// with no year at all: (name, year, title_with_year, title_without_year).
+const TITLE_YEAR_CASES: [(&str, Option<i32>, &str, &str); 3] = [
+    (
+        "Lantern Harbor (2018)",
+        Some(2018),
+        "Lantern Harbor (2018)",
+        "Lantern Harbor",
+    ),
+    (
+        "Lantern Harbor",
+        Some(2018),
+        "Lantern Harbor (2018)",
+        "Lantern Harbor",
+    ),
+    ("Lantern Harbor", None, "Lantern Harbor", "Lantern Harbor"),
+];
+
+/// The file tokens each facet builds: import-time episode tokens for series and
+/// anime (checked against the library rename tokens), title tokens for movies.
+fn file_rename_tokens_for(title: &Title) -> BTreeMap<String, String> {
+    let parsed = parse_release_metadata("Lantern.Harbor.S01E01.1080p.WEB-DL-Glimmerwick");
+    if title.facet == MediaFacet::Movie {
+        return title_rename_tokens(title, None, &parsed, "mkv").0;
+    }
+    let episode = test_series_episode();
+    let analysis = probed_series_analysis(2, "stereo");
+    let media_file = media_file_recorded_from_analysis(
+        "/library/Lantern Harbor/Lantern.Harbor.S01E01.mkv",
+        &episode.id,
+        &analysis,
+    );
+    let import_tokens = crate::import_workflow::episode_import_rename_tokens(
+        title,
+        &parsed,
+        Some(&analysis),
+        "mkv",
+        1,
+        "1",
+        episode.absolute_number.as_deref(),
+        episode.title.as_deref(),
+        None,
+    );
+    let library_tokens = library_series_tokens(title, &media_file, &episode, &parsed);
+    assert_eq!(import_tokens, library_tokens, "{:?}", title.facet);
+    import_tokens
+}
+
+#[test]
+fn title_year_tokens_render_the_year_at_most_once_for_every_facet() {
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        for (name, year, with_year, without_year) in TITLE_YEAR_CASES {
+            let mut title = test_movie_title(name);
+            title.facet = facet.clone();
+            title.year = year;
+            let case = format!("{facet:?} {name:?} {year:?}");
+
+            let tokens = file_rename_tokens_for(&title);
+            assert_eq!(
+                tokens.get("title_with_year").map(String::as_str),
+                Some(with_year),
+                "{case}"
+            );
+            assert_eq!(
+                tokens.get("title_without_year").map(String::as_str),
+                Some(without_year),
+                "{case}"
+            );
+            let expected_title = if facet == MediaFacet::Movie {
+                without_year
+            } else {
+                name
+            };
+            assert_eq!(
+                tokens.get("title").map(String::as_str),
+                Some(expected_title),
+                "{case}"
+            );
+            assert_eq!(
+                tokens.get("year").map(String::as_str),
+                Some(
+                    year.map(|value| value.to_string())
+                        .unwrap_or_default()
+                        .as_str()
+                ),
+                "{case}"
+            );
+
+            let template = if facet == MediaFacet::Movie {
+                "{title_with_year} - {quality}.{ext}"
+            } else {
+                "{title_with_year} - S{season:2}E{episode:2} - {quality}.{ext}"
+            };
+            validate_rename_template_for_facet(template, &facet).expect("token is supported");
+            let rendered = render_rename_template(template, &tokens);
+            assert!(rendered.starts_with(with_year), "{case}: {rendered}");
+            assert!(rendered.matches("2018").count() <= 1, "{case}: {rendered}");
+
+            let without_template = "{title_without_year}{?year: ({year})}.{ext}";
+            validate_rename_template_for_facet(without_template, &facet)
+                .expect("token is supported");
+            let rendered = render_rename_template(without_template, &tokens);
+            let expected = match year {
+                Some(_) => "Lantern Harbor (2018).mkv",
+                None => "Lantern Harbor.mkv",
+            };
+            assert_eq!(rendered, expected, "{case}");
+        }
+    }
+}
+
+#[test]
+fn title_year_tokens_work_with_optional_groups_and_filters() {
+    let mut title = test_movie_title("Lantern Harbor (2018)");
+    title.facet = MediaFacet::Series;
+    let tokens = file_rename_tokens_for(&title);
+
+    let template =
+        "{?title_with_year:{title_with_year|space:.}} - {title_without_year|truncate:7}.{ext}";
+    validate_rename_template_for_facet(template, &MediaFacet::Series).expect("valid template");
+    assert_eq!(
+        render_rename_template(template, &tokens),
+        "Lantern.Harbor.(2018) - Lantern.mkv"
+    );
+}
+
+#[test]
+fn folder_templates_accept_title_year_tokens() {
+    for template in [
+        "{title_with_year}",
+        "{title_without_year} ({year})",
+        "{title_with_year|space:_} [{tmdb_id}]",
+    ] {
+        validate_title_folder_template(template).expect("title folder template");
+    }
+    validate_season_folder_template("{title_without_year} S{season:2}")
+        .expect("season folder template");
+    validate_specials_folder_template("{title_with_year} Specials")
+        .expect("specials folder template");
+
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        for (name, year, with_year, without_year) in TITLE_YEAR_CASES {
+            let mut title = test_movie_title(name);
+            title.facet = facet.clone();
+            title.year = year;
+            let case = format!("{facet:?} {name:?} {year:?}");
+            let tokens = build_title_folder_tokens(&title, year);
+
+            assert_eq!(
+                render_title_folder_template("{title_with_year}", &tokens),
+                with_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_title_folder_template("{title_without_year}", &tokens),
+                without_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_title_folder_template("{title}", &tokens),
+                without_year,
+                "{case}"
+            );
+            assert_eq!(
+                render_episode_folder_name(&title, 2, "{title_with_year} S{season:2}", "Specials"),
+                format!("{with_year} S02"),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn title_with_year_keeps_a_bracketed_year_and_ignores_a_year_inside_the_name() {
+    let mut bracketed = test_movie_title("Lantern Harbor [2018]");
+    bracketed.year = Some(2018);
+    let tokens = build_title_folder_tokens(&bracketed, bracketed.year);
+    assert_eq!(tokens["title_with_year"], "Lantern Harbor [2018]");
+    assert_eq!(tokens["title_without_year"], "Lantern Harbor");
+
+    let mut numbered = test_movie_title("Harbor 2049");
+    numbered.year = Some(2017);
+    let tokens = build_title_folder_tokens(&numbered, numbered.year);
+    assert_eq!(tokens["title_with_year"], "Harbor 2049 (2017)");
+    assert_eq!(tokens["title_without_year"], "Harbor 2049");
+}
+
+#[test]
+fn movie_rename_items_render_title_year_tokens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let current_path = dir
+        .path()
+        .join("Lantern.Harbor.2018.1080p.BluRay.x264-GROUP.mkv");
+    std::fs::write(&current_path, b"movie").expect("seed movie file");
+    let current_path = current_path.to_string_lossy().to_string();
+
+    let mut title = test_movie_title("Lantern Harbor (2018)");
+    title.year = Some(2018);
+    let collection = test_movie_collection(&current_path);
+    let media_file = test_media_file(&current_path);
+    let mut planning = RenamePlanningState::default();
+    let mut options = MovieRenamePlanOptions {
+        media_root: dir.path().to_str().expect("tempdir path"),
+        folder_template: "{title_with_year}",
+        template: "{title_with_year} - {title_without_year}.{ext}",
+        missing_metadata_policy: &RenameMissingMetadataPolicy::FallbackTitle,
+        planning: &mut planning,
+    };
+
+    let items =
+        build_movie_rename_plan_items(&title, vec![collection], vec![media_file], &mut options);
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].normalized_filename.as_deref(),
+        Some("Lantern Harbor (2018) - Lantern Harbor.mkv")
+    );
+}
+
+#[test]
+fn library_rename_never_renders_a_layout_word_as_audio_channels() {
+    let mut title = test_movie_title("Lantern Harbor");
+    title.facet = MediaFacet::Series;
+    let episode = test_series_episode();
+    let parsed = parse_release_metadata("Lantern.Harbor.S01E01");
+    let analysis = probed_series_analysis(2, "stereo");
+    let media_file = media_file_recorded_from_analysis(
+        "/library/Lantern Harbor/Lantern.Harbor.S01E01.mkv",
+        &episode.id,
+        &analysis,
+    );
+
+    let tokens = library_series_tokens(&title, &media_file, &episode, &parsed);
+
+    assert_eq!(
+        tokens.get("audio_channels").map(String::as_str),
+        Some("2.0")
+    );
+    assert!(
+        tokens.values().all(|value| !value.contains("stereo")),
+        "{tokens:?}"
+    );
 }
 
 #[test]

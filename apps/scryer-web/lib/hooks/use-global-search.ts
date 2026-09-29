@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useClient } from "urql";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import type { ExternalId, Facet, TitleRecord } from "@/lib/types";
+import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import type { ViewCategoryId } from "@/lib/types/quality-profiles";
 import type { LocaleCode } from "@/lib/i18n";
 import { useTranslate } from "@/lib/context/translate-context";
@@ -69,6 +70,10 @@ import type {
   RootFolderOption,
 } from "@/lib/types/titles";
 import { monitorSelectionInput } from "@/lib/utils/monitor-selection";
+import type {
+  TitleExternalRating,
+  TitleExternalRatingInput,
+} from "@/lib/utils/title-ratings";
 
 export type MetadataCatalogAddOptions = {
   libraryId?: string;
@@ -162,6 +167,18 @@ function metadataResultTvdbId(result: MetadataTvdbSearchItem): string {
 
 function metadataResultSmgId(result: MetadataTvdbSearchItem): string {
   return result.smgId == null ? "" : String(result.smgId).trim();
+}
+
+/**
+ * The key two search results are the same title under: the SMG title id when
+ * SMG supplied one, else the TVDB id. Empty when the result has neither, which
+ * a caller must treat as "unknown", never as equal to another empty key.
+ */
+function metadataResultIdentityKey(result: MetadataTvdbSearchItem): string {
+  const smgId = metadataResultSmgId(result);
+  if (smgId) return `smg:${smgId}`;
+  const tvdbId = metadataResultTvdbId(result);
+  return tvdbId ? `tvdb:${tvdbId}` : "";
 }
 
 function metadataResultCatalogLookupKeys(result: MetadataTvdbSearchItem): string[] {
@@ -386,7 +403,7 @@ export function submitMediaRequestInput(
     libraryId: options.libraryId.trim(),
     facet,
     title: result.name.trim(),
-    externalIds: metadataResultExternalIds(result),
+    externalIds: metadataResultExternalIds(result, facet),
     year: result.year ?? undefined,
     overview: result.overview || undefined,
     sortTitle: result.sortTitle || undefined,
@@ -396,7 +413,7 @@ export function submitMediaRequestInput(
     contentStatus: result.status || undefined,
     rating: result.rating ?? undefined,
     ratingSources: result.ratingSources,
-    externalRatings: result.externalRatings,
+    externalRatings: result.externalRatings?.map(mediaRequestExternalRatingInput),
     requestedQualityProfileId: options.requestedQualityProfileId || undefined,
     requestedMonitorType: options.requestedMonitorType || undefined,
     requestedMonitorSelection:
@@ -407,30 +424,20 @@ export function submitMediaRequestInput(
   };
 }
 
-function metadataResultExternalIds(result: MetadataTvdbSearchItem): ExternalId[] {
-  const smgId = metadataResultSmgId(result);
-  const tvdbId = String(result.tvdbId).trim();
-  const tmdbId = result.tmdbId == null ? "" : String(result.tmdbId).trim();
-  const imdbId = result.imdbId?.trim();
-  const seen = new Set<string>();
-  const ids: ExternalId[] = [];
-  for (const externalId of [
-    ...(result.externalIds ?? []),
-    ...(smgId ? [{ source: "smg", value: smgId }] : []),
-    ...(tvdbId ? [{ source: "tvdb", value: tvdbId }] : []),
-    ...(tmdbId ? [{ source: "tmdb", value: tmdbId }] : []),
-    ...(imdbId ? [{ source: "imdb", value: imdbId }] : []),
-  ]) {
-    const source = externalId.source.trim().toLowerCase();
-    const value = externalId.value.trim();
-    const key = `${source}:${value}`;
-    if (!source || !value || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    ids.push({ source, value });
-  }
-  return ids;
+// Objects read from urql query results carry `__typename`, and the server
+// rejects unknown input fields, so every object copied from a query result
+// into the request input is rebuilt from exactly the fields the input accepts.
+function mediaRequestExternalRatingInput(
+  rating: TitleExternalRating,
+): TitleExternalRatingInput {
+  return {
+    source: rating.source,
+    value: rating.value,
+    score: rating.score,
+    normalized: rating.normalized,
+    votes: rating.votes,
+    url: rating.url,
+  };
 }
 
 function librariesByFacetFromList(libraries: LibraryRecord[]): Record<Facet, LibraryRecord[]> {
@@ -919,7 +926,7 @@ export function useGlobalSearch({
       if (title.facet === "MOVIE" && !smgId && !tvdbId) {
         return title;
       }
-      if (title.facet !== "MOVIE" && !tvdbId) {
+      if (title.facet !== "MOVIE" && !smgId && !tvdbId) {
         return title;
       }
 
@@ -938,7 +945,8 @@ export function useGlobalSearch({
 
         const { data, error } = await client.query(metadataSeriesQuery, {
           input: {
-            tvdbId,
+            smgId: smgId ? Number(smgId) : undefined,
+            tvdbId: tvdbId || undefined,
             includeEpisodes: false,
             language: uiLanguage,
           },
@@ -1181,12 +1189,20 @@ export function useGlobalSearch({
           const animeResults = canViewCatalog
             ? filterCatalogedMetadataResults(rankedAnime, nextCatalogLookup)
             : rankedAnime;
-          const animeTvdbIds = new Set(animeResults.map((item) => metadataResultTvdbId(item)));
+          // A TMDB-primary result has no TVDB id, so results are told apart
+          // by SMG id first; an empty key never joins the set, or every
+          // TVDB-less series would be dropped as a duplicate of one anime.
+          const animeIdentityKeys = new Set(
+            animeResults.map(metadataResultIdentityKey).filter(Boolean),
+          );
           const seriesResults = (
             canViewCatalog
               ? filterCatalogedMetadataResults(rankedSeries, nextCatalogLookup)
               : rankedSeries
-          ).filter((item) => !animeTvdbIds.has(metadataResultTvdbId(item)));
+          ).filter((item) => {
+            const key = metadataResultIdentityKey(item);
+            return !key || !animeIdentityKeys.has(key);
+          });
           const nextMetadata: MetadataSearchResults = {
             movie: movieResults,
             series: seriesResults,
@@ -1198,7 +1214,14 @@ export function useGlobalSearch({
             const unchanged = Object.keys(nextMetadata).every((key) => {
               const prev = previous[key] ?? [];
               const next = nextMetadata[key] ?? [];
-              return prev.length === next.length && prev.every((item, i) => item.tvdbId === next[i]?.tvdbId);
+              return (
+                prev.length === next.length &&
+                prev.every(
+                  (item, i) =>
+                    next[i] !== undefined &&
+                    metadataResultIdentityKey(item) === metadataResultIdentityKey(next[i]),
+                )
+              );
             });
             return unchanged ? previous : nextMetadata;
           });
@@ -1484,7 +1507,7 @@ export function useGlobalSearch({
 
       const monitored = monitorTypeToMonitored(options.monitorType);
 
-      const externalIds = metadataResultExternalIds(result);
+      const externalIds = metadataResultExternalIds(result, facet);
       const requestKey = normalizeCatalogAddRequestKey(facet, externalIds);
       if (pendingCatalogAddKeysRef.current.has(requestKey)) {
         return null;
@@ -1592,7 +1615,7 @@ export function useGlobalSearch({
         return false;
       }
 
-      const externalIds = metadataResultExternalIds(result);
+      const externalIds = metadataResultExternalIds(result, facet);
       const requestKey = normalizeCatalogAddRequestKey(facet, externalIds);
       if (pendingRequestKeysRef.current.has(requestKey)) {
         return false;

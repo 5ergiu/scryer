@@ -11,6 +11,7 @@ import {
   Share2,
   SkipForward,
   Trash2,
+  Undo2,
   XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -27,6 +28,7 @@ export const TITLE_HISTORY_FILTERS = [
   "file_upgraded",
   "file_recycled",
   "file_deleted",
+  "file_restored",
   "file_renamed",
   "title_moved",
   "rematched",
@@ -112,6 +114,12 @@ const eventMeta: Record<string, EventMeta> = {
     labelKey: "history.fileDeleted",
     badgeClassName: "border-[var(--scry-danger-border)] bg-[var(--scry-danger-bg)] text-[var(--scry-danger-text)]",
   },
+  file_restored: {
+    icon: Undo2,
+    iconClassName: "text-[var(--scry-success-text-soft)]",
+    labelKey: "history.fileRestored",
+    badgeClassName: "border-[var(--scry-success-border)] bg-[var(--scry-success-bg)] text-[var(--scry-success-text)]",
+  },
   file_renamed: {
     icon: FileEdit,
     iconClassName: "text-[var(--scry-info-text-soft)]",
@@ -173,4 +181,40 @@ export function getTitleHistoryFilterLabel(
   translate: (key: string) => string,
 ): string {
   return getTitleHistoryEventLabel(eventType, translate);
+}
+
+// History rows are read straight from the domain event log, so each history
+// event type is produced by exactly these domain events. A history view
+// refetches when one of them arrives.
+const DOMAIN_EVENT_TYPES_BY_HISTORY_EVENT: Record<string, readonly string[]> = {
+  grabbed: ["RELEASE_GRABBED"],
+  download_failed: ["DOWNLOAD_FAILED"],
+  blocklisted: ["RELEASE_BLOCKLISTED"],
+  download_ignored: ["DOWNLOAD_IGNORED"],
+  scanned: ["MEDIA_FILE_ANALYZED"],
+  imported: ["IMPORT_COMPLETED"],
+  import_failed: ["IMPORT_REJECTED"],
+  import_skipped: ["IMPORT_REJECTED"],
+  file_upgraded: ["MEDIA_FILE_UPGRADED"],
+  file_recycled: ["MEDIA_FILE_DELETED"],
+  file_deleted: ["MEDIA_FILE_DELETED"],
+  file_renamed: ["MEDIA_FILE_RENAMED"],
+  file_restored: ["MEDIA_FILE_RESTORED"],
+  title_moved: ["TITLE_MOVED"],
+  rematched: ["TITLE_REMATCHED"],
+  seeding_started: ["SEEDING_STARTED"],
+  seeding_completed: ["SEEDING_COMPLETED"],
+};
+
+/** The domain event types that can add a row to a history view showing `historyEventTypes`. */
+export function domainEventTypesForHistoryEvents(
+  historyEventTypes: readonly string[],
+): string[] {
+  const types = new Set<string>();
+  for (const historyEventType of historyEventTypes) {
+    for (const domainEventType of DOMAIN_EVENT_TYPES_BY_HISTORY_EVENT[historyEventType] ?? []) {
+      types.add(domainEventType);
+    }
+  }
+  return [...types].sort();
 }

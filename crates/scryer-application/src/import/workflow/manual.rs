@@ -1361,9 +1361,16 @@ async fn preview_manual_import(
                 }
             }
 
-            // Anime absolute fallback
+            // Anime absolute fallback. A resolved numbering already named the
+            // catalog episode, and the absolute it stamped is the raw rendering
+            // number rather than the title's matching scale, so it must not be
+            // looked up again here.
             if suggested_episode_id.is_none()
                 && !numbering_ambiguous
+                && !matches!(
+                    numbering,
+                    crate::anime_numbering::NumberingResolution::Resolved(_)
+                )
                 && let Some(abs) = ep_meta.absolute_episode
             {
                 let abs_str = abs.to_string();
@@ -1375,7 +1382,8 @@ async fn preview_manual_import(
                     .await
                 {
                     suggested_episode_id = Some(episode.id.clone());
-                    suggested_episode_label = Some(manual_import_episode_label(&episode));
+                    suggested_episode_label =
+                        Some(manual_import_absolute_match_label(&episode, abs));
                 }
             }
         }
@@ -1676,6 +1684,26 @@ fn manual_import_multi_episode_label(episodes: &[scryer_domain::Episode]) -> Str
         numbering
     } else {
         format!("{numbering} · {titles}")
+    }
+}
+
+/// The label for a suggestion found by the file's absolute number. The label
+/// renders the episode's raw absolute like every other renderer; when the
+/// title matches on its contiguous scale and the file's number differs from
+/// that raw number, the label also names the number the file was matched on,
+/// so `- 51` suggesting `S01E51 · Absolute 53` does not read as a mismatch.
+fn manual_import_absolute_match_label(episode: &scryer_domain::Episode, matched: u32) -> String {
+    let label = manual_import_episode_label(episode);
+    let raw = episode
+        .absolute_number
+        .as_deref()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if raw.is_none_or(|raw| raw == matched) {
+        return label;
+    }
+    match label.split_once(" — ") {
+        Some((numbering, title)) => format!("{numbering} (file {matched}) — {title}"),
+        None => format!("{label} (file {matched})"),
     }
 }
 
@@ -2379,7 +2407,11 @@ fn manual_import_error_from_skip_reason(skip_reason: Option<ImportSkipReason>) -
     match skip_reason {
         Some(ImportSkipReason::DiskFull) => ImportErrorCode::DiskFull,
         Some(ImportSkipReason::PermissionDenied) => ImportErrorCode::PermissionDenied,
-        Some(ImportSkipReason::PolicyMismatch) => ImportErrorCode::PolicyMismatch,
+        // A rule-error hold reports its own skip reason for routing; to the
+        // operator it is the same policy refusal a review hold always was.
+        Some(ImportSkipReason::PolicyMismatch | ImportSkipReason::PostDownloadRuleBlocked) => {
+            ImportErrorCode::PolicyMismatch
+        }
         _ => ImportErrorCode::Unknown,
     }
 }
@@ -2813,6 +2845,7 @@ async fn execute_manual_series_movie_import(
                 grabbed_release_title: release_evidence.release_title(Some(source)),
                 grabbed_at: Some(started_at.to_rfc3339()),
                 edition: parsed.edition.clone(),
+                release_listing_json: release_evidence.release_listing_json().map(str::to_string),
                 ..Default::default()
             },
         )
@@ -3057,6 +3090,14 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
     // Total bytes across every file this manual import brought in; stays `None`
     // until at least one file reports a size.
     let mut imported_size_bytes: Option<i64> = None;
+    // Files this manual import landed as upgrades: the paths they
+    // replaced elsewhere, and the destinations that were replaced in place.
+    let mut upgrade_imported = false;
+    let mut upgrade_deleted_paths: Vec<String> = Vec::new();
+    let mut upgrade_in_place_paths: HashSet<String> = HashSet::new();
+    // Indexes into `results` of files whose importer already emitted Import
+    // Complete for them; the manual-level event covers only the rest.
+    let mut self_notified_results: HashSet<usize> = HashSet::new();
 
     for (mapping_index, mapping) in files.iter().enumerate() {
         let source = stored_path_to_path_buf(&mapping.file_path);
@@ -3181,6 +3222,12 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                     Ok(import_result) => {
                         let success = import_result.dest_path.is_some()
                             && import_result.error_message.is_none();
+                        // The movie import already sent its own Import Complete,
+                        // upgrade flag and all, so this file stays out of the
+                        // manual-level one below.
+                        if success {
+                            self_notified_results.insert(results.len());
+                        }
                         manual_import_file_result(
                             mapping,
                             success,
@@ -3373,6 +3420,7 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             crate::post_download_gate::RuntimeSampleValidationMode::BypassRuntimeSampleCheck,
             crate::import_decide::ImportOrigin::OperatorQueued,
             release_evidence.announced_size_bytes(),
+            release_evidence.release_listing_json(),
             false,
             mapping.disc_selection.as_ref(),
         )
@@ -3384,9 +3432,19 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                 reason_code,
                 size_bytes,
                 source_cleanup,
+                previous_path,
                 destination_permit: _destination_permit,
                 ..
             }) => {
+                if reason_code.as_deref() == Some("upgrade") {
+                    upgrade_imported = true;
+                    match previous_path {
+                        Some(previous_path) => upgrade_deleted_paths.push(previous_path),
+                        None => {
+                            upgrade_in_place_paths.insert(dest_path.clone());
+                        }
+                    }
+                }
                 if let Some(completed) = completed {
                     persist_file_import_artifact(
                         app,
@@ -3513,15 +3571,28 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         }
     }
 
-    let imported_updates: Vec<NotificationMediaUpdate> = results
-        .iter()
-        .filter(|result| result.success)
-        .filter_map(|result| {
-            result
-                .dest_path
-                .as_ref()
-                .map(|path| NotificationMediaUpdate::created(path.clone()))
-        })
+    // Successful files the manual-level Import Complete still has to report.
+    let manually_notified = || {
+        results
+            .iter()
+            .enumerate()
+            .filter(|(index, result)| result.success && !self_notified_results.contains(index))
+            .map(|(_, result)| result)
+    };
+    let imported_updates: Vec<scryer_domain::MediaPathUpdate> = upgrade_deleted_paths
+        .into_iter()
+        .map(deleted_media_update)
+        .chain(
+            manually_notified()
+                .filter_map(|result| result.dest_path.clone())
+                .map(|path| {
+                    if upgrade_in_place_paths.contains(&path) {
+                        modified_media_update(path)
+                    } else {
+                        created_media_update(path)
+                    }
+                }),
+        )
         .collect();
 
     let success_count = results.iter().filter(|r| r.success).count();
@@ -3548,9 +3619,10 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
         write_series_sidecars(app, &title, &full_folder_path, nfo_enabled).await;
     }
     let (terminal_status, _, _) = manual_import_terminal_status_and_error(&results);
-    if success_count > 0 && terminal_status == ImportStatus::Completed {
+    let manually_notified_count = manually_notified().count();
+    if manually_notified_count > 0 && terminal_status == ImportStatus::Completed {
         let mut episode_ids = Vec::new();
-        for result in results.iter().filter(|result| result.success) {
+        for result in manually_notified() {
             for episode_id in &result.episode_ids {
                 if !episode_ids.contains(episode_id) {
                     episode_ids.push(episode_id.clone());
@@ -3562,11 +3634,8 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
             &title,
             DomainEventPayload::ImportCompleted(ImportCompletedEventData {
                 title: title_context_snapshot(&title),
-                media_updates: imported_updates
-                    .into_iter()
-                    .map(|update| created_media_update(update.path))
-                    .collect(),
-                imported_count: success_count as i32,
+                media_updates: imported_updates,
+                imported_count: manually_notified_count as i32,
                 import_id: None,
                 source_system: completed.map(|download| download.client_type.clone()),
                 source_ref: completed.map(|download| download.download_client_item_id.clone()),
@@ -3576,13 +3645,13 @@ pub(crate) async fn execute_manual_import_with_release_evidence(
                         .map(|mapping| Path::new(mapping.file_path.as_str())),
                 ),
                 source_path: (files.len() == 1).then(|| files[0].file_path.clone()),
-                dest_path: results
-                    .iter()
-                    .find(|result| result.success)
+                dest_path: manually_notified()
+                    .next()
                     .and_then(|result| result.dest_path.clone()),
                 quality: None,
                 episode_ids,
                 size_bytes: imported_size_bytes,
+                upgrade: upgrade_imported,
             }),
         ))
         .await?;
@@ -3842,6 +3911,8 @@ impl QueuedManualImportOutcome {
             release_burned: false,
             started_at: now,
             completed_at: now,
+            upgrade: false,
+            upgrade_previous_path: None,
         };
         Self {
             status: ImportStatus::Skipped,
@@ -4129,8 +4200,10 @@ mod manual_preview_suggestion_tests {
             is_filler: false,
             is_recap: false,
             absolute_number: absolute_number.map(str::to_string),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -4161,6 +4234,28 @@ mod manual_preview_suggestion_tests {
         assert_eq!(
             manual_import_episode_label(&decorated),
             "S??E?? · Absolute 19 — Episode Title"
+        );
+    }
+
+    #[test]
+    fn manual_absolute_match_label_names_the_matched_number_when_it_is_not_the_raw_one() {
+        // Re:ZERO S01E51 carries raw absolute 53 but contiguous 51; a file
+        // named `- 51` matched it on the contiguous scale.
+        let mut episode = episode_for_label(Some("53"));
+        episode.episode_number = Some("51".to_string());
+        episode.contiguous_absolute_number = Some(51);
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 51),
+            "S01E51 · Absolute 53 (file 51) — Episode Title"
+        );
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 53),
+            "S01E51 · Absolute 53 — Episode Title"
+        );
+        episode.title = None;
+        assert_eq!(
+            manual_import_absolute_match_label(&episode, 51),
+            "S01E51 · Absolute 53 (file 51)"
         );
     }
 

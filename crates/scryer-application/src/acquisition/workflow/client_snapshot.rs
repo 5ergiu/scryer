@@ -137,8 +137,19 @@ pub(crate) enum StandbyRecoveryOutcome {
     /// again. Returning the submitted scope lets the cursor suppress exactly
     /// the recovered pack's coverage without reparsing the saved release.
     Recovered { scope: SubmissionScope },
-    /// The saved release is already active in a download client.
-    Active { scope: SubmissionScope },
+    /// Nothing was grabbed because the scope is already covered: a saved
+    /// release is already active in a download client, or a release queued or
+    /// grabbed for the scope is equal or better than the first saved result
+    /// judged for it. Saved rows within a covered scope are then left alone,
+    /// unjudged, and stay `Standby` for that release's failure; only rows that
+    /// reach beyond every covered scope are still walked. Not a grab, and not
+    /// counted as one. Sources whose artifact vanished earlier in the same
+    /// walk are returned, as for `Exhausted`: their rows are expired and no
+    /// later walk reports them again.
+    Active {
+        scope: SubmissionScope,
+        stale_indexer_ids: Vec<String>,
+    },
     /// The download client could not be consulted; the list is left intact for
     /// the next cycle. `refused` is set when a saved result was actually
     /// submitted and refused — an acquisition job counts that as a failed
@@ -1069,6 +1080,21 @@ pub(crate) async fn process_download_failure_for_download(
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
 ) -> FailureHandlingOutcome {
+    let outcome = handle_download_failure_for_download(app, canonical_download_id, context).await;
+    if outcome == FailureHandlingOutcome::Reopened {
+        app.runtime
+            .acquisition
+            .scope_reopened_since_walk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    outcome
+}
+
+async fn handle_download_failure_for_download(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    context: DownloadFailureContext,
+) -> FailureHandlingOutcome {
     let failed_submission =
         find_failed_submission_for_download(app, canonical_download_id, &context).await;
     if context.wanted_item.is_none() && failed_submission.is_none() {
@@ -1531,6 +1557,12 @@ async fn prune_standby_candidates(app: &AppUseCase) {
 /// `try_grab_pending_release` — the swarm and admission policy. Rows that no
 /// longer qualify are expired and skipped; the rows after a successful grab stay
 /// `Standby`, so if that grab fails too the walk continues down the same list.
+///
+/// A row refused because a queued release already covers its scope marks that
+/// scope covered. Later rows within a covered scope are skipped without being
+/// claimed or judged, so a covered scope costs one judged row per cycle; a
+/// row reaching beyond every covered scope (a pack with members still
+/// missing) is judged as usual.
 pub(crate) async fn try_saved_candidates(
     app: &AppUseCase,
     item: &AcquisitionScopeState,
@@ -1680,6 +1712,18 @@ pub(crate) async fn try_saved_candidates(
                     standby_releases.push(pending);
                 }
             }
+            // Client-refused rows are `waiting`, not `standby`, so the
+            // title-wide read above never saw them. Parse them the same way:
+            // a refused pack keeps its own span for the covered-scope skip
+            // rather than borrowing the walked episode's.
+            for pending in &standby_releases {
+                if title_standby_metadata.contains_key(&pending.id) {
+                    continue;
+                }
+                let metadata = parse_coverage(pending);
+                standby_scopes.insert(pending.id.clone(), metadata.3.clone());
+                title_standby_metadata.insert(pending.id.clone(), metadata);
+            }
 
             season_pack_ids.extend(
                 standby_releases
@@ -1715,12 +1759,25 @@ pub(crate) async fn try_saved_candidates(
         .load_title_release_blocklist_signatures(&item.title_id)
         .await;
     let mut stale_indexer_ids = HashSet::new();
+    let mut covered_scopes: Vec<SubmissionScope> = Vec::new();
 
     for standby in standby_releases {
         let standby_scope = standby_scopes
             .get(&standby.id)
             .cloned()
             .unwrap_or_else(|| item.submission_scope());
+        // A series pack's span may be unresolved (it then carries the walked
+        // item's scope) and can reach seasons no queued release covers, so it
+        // is always judged.
+        if !series_pack_ids.contains(&standby.id)
+            && covered_scopes
+                .iter()
+                .any(|covered| standby_scope_within(&standby_scope, covered))
+        {
+            // A queued release already covers everything this row would
+            // fetch. Leave it `Standby`, unclaimed and unjudged.
+            continue;
+        }
         if series_pack_ids.contains(&standby.id)
             && excluded_episode_ids.is_some_and(|excluded| {
                 episode_ids_for_scope(&standby_scope)
@@ -1734,6 +1791,74 @@ pub(crate) async fn try_saved_candidates(
         let mut effective_wanted = item.clone();
         effective_wanted.grabbed_release = None;
         effective_wanted.last_search_at = None;
+
+        let blocklisted = crate::app_usecase_discovery::is_release_blocklisted(
+            standby.indexer_id.as_deref(),
+            &standby.release_title,
+            standby.info_hash.as_deref(),
+            &db_blocklist,
+        );
+        // A pinned route (an indexer-to-client mapping) names the one client
+        // this release can reach. An unreadable queue then hides nothing worth
+        // deferring for — there is no second client that could already hold it
+        // — and parking here is what leaves the operator with no attempt row
+        // explaining why the pinned client never ran. Let the grab reach the
+        // router, which asks the pinned client and records its answer.
+        let blind_queue = dl_snapshot.queue_listing_failed();
+        let route_pinned = blind_queue
+            && !blocklisted
+            && app
+                .release_route_is_pinned(standby.indexer_id.as_deref())
+                .await;
+
+        // A `standby` row that would come out of this pass still `standby` is
+        // settled from reads before the claim, so a scope whose answer has not
+        // changed costs no writes: a blocklisted row, a release the client
+        // already holds, and a release a queued one covers. The claim is only
+        // taken for a pass that acts on the row. A client-refused row is
+        // `waiting` and leaves `standby` on every path, so it is claimed first
+        // as before.
+        let mut judged = None;
+        if standby.status == PendingReleaseStatus::Standby {
+            if blocklisted {
+                continue;
+            }
+            if !blind_queue && dl_snapshot.is_active(&standby.release_title) {
+                return StandbyRecoveryOutcome::Active {
+                    scope: standby_scope,
+                    stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
+                };
+            }
+            if !blind_queue || route_pinned {
+                let judgement = app
+                    .judge_pending_release(
+                        &effective_wanted,
+                        &standby,
+                        now,
+                        super::pending::PendingGrabTrigger::Automatic,
+                    )
+                    .await;
+                if let Ok(super::pending::PendingJudgement::Decided(
+                    super::pending::PendingGrabOutcome::QueueCovered {
+                        queued_release,
+                        reason,
+                        message,
+                    },
+                )) = &judgement
+                {
+                    log_saved_result_queue_covered(
+                        item,
+                        &standby,
+                        queued_release,
+                        reason,
+                        message,
+                    );
+                    covered_scopes.push(standby_scope);
+                    continue;
+                }
+                judged = Some(judgement);
+            }
+        }
 
         // From the row's own status: a client-refused row arrives here still
         // `waiting`, and a stale expectation would skip it.
@@ -1753,12 +1878,7 @@ pub(crate) async fn try_saved_candidates(
             continue;
         }
 
-        if crate::app_usecase_discovery::is_release_blocklisted(
-            standby.indexer_id.as_deref(),
-            &standby.release_title,
-            standby.info_hash.as_deref(),
-            &db_blocklist,
-        ) {
+        if blocklisted {
             // A blocklist entry is removable, so it is not evidence the release
             // is bad — only that the operator does not want it now. Keep the row
             // walkable rather than burning the corpus behind it.
@@ -1771,17 +1891,6 @@ pub(crate) async fn try_saved_candidates(
             continue;
         }
 
-        // A pinned route (an indexer-to-client mapping) names the one client
-        // this release can reach. An unreadable queue then hides nothing worth
-        // deferring for — there is no second client that could already hold it
-        // — and parking here is what leaves the operator with no attempt row
-        // explaining why the pinned client never ran. Let the grab reach the
-        // router, which asks the pinned client and records its answer.
-        let blind_queue = dl_snapshot.queue_listing_failed();
-        let route_pinned = blind_queue
-            && app
-                .release_route_is_pinned(standby.indexer_id.as_deref())
-                .await;
         if blind_queue && !route_pinned {
             // Cannot confirm the release isn't already active; keep the standby
             // for a later cycle rather than expiring it on an unknown signal.
@@ -1816,6 +1925,7 @@ pub(crate) async fn try_saved_candidates(
                 .await;
             return StandbyRecoveryOutcome::Active {
                 scope: standby_scope,
+                stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
             };
         }
 
@@ -1829,15 +1939,31 @@ pub(crate) async fn try_saved_candidates(
         // Automatic: no operator asked for this release, so it is judged against
         // current policy the same way the delay-expiry promoter judges its rows.
         // Reacquiring into a swarm too small to finish would just fail again.
-        match app
-            .try_grab_pending_release(
-                &effective_wanted,
-                &standby,
-                now,
-                super::pending::PendingGrabTrigger::Automatic,
-            )
-            .await
-        {
+        // A row judged before its claim is not judged twice.
+        let outcome = match judged {
+            Some(Ok(super::pending::PendingJudgement::Decided(outcome))) => Ok(outcome),
+            Some(Ok(super::pending::PendingJudgement::Admitted(admitted))) => {
+                app.grab_admitted_pending_release(
+                    &effective_wanted,
+                    &standby,
+                    now,
+                    super::pending::PendingGrabTrigger::Automatic,
+                    *admitted,
+                )
+                .await
+            }
+            Some(Err(error)) => Err(error),
+            None => {
+                app.try_grab_pending_release(
+                    &effective_wanted,
+                    &standby,
+                    now,
+                    super::pending::PendingGrabTrigger::Automatic,
+                )
+                .await
+            }
+        };
+        match outcome {
             Ok(super::pending::PendingGrabOutcome::Grabbed { scope }) => {
                 let grabbed_at = now.to_rfc3339();
                 let _ = app
@@ -1856,6 +1982,22 @@ pub(crate) async fn try_saved_candidates(
 
                 if let Ok(Some(title)) = app.services.catalog.titles.get_by_id(&item.title_id).await
                 {
+                    let indexer = app
+                        .grab_indexer_name(
+                            standby.indexer_id.as_deref(),
+                            standby.indexer_source.as_deref(),
+                        )
+                        .await;
+                    let release_facts = app
+                        .grabbed_release_facts(
+                            &standby.release_title,
+                            None,
+                            standby.release_size_bytes,
+                            standby.source_kind,
+                            indexer,
+                            None,
+                        )
+                        .await;
                     let _ = app
                         .append_domain_event(new_title_domain_event(
                             None,
@@ -1867,6 +2009,7 @@ pub(crate) async fn try_saved_candidates(
                                 source_provider: None,
                                 download_id: None,
                                 episode_ids: item.episode_id.iter().cloned().collect(),
+                                release_facts: Some(release_facts),
                             }),
                         ))
                         .await;
@@ -1897,6 +2040,34 @@ pub(crate) async fn try_saved_candidates(
                     refused,
                 };
             }
+            Ok(super::pending::PendingGrabOutcome::QueueCovered {
+                queued_release,
+                reason,
+                message,
+            }) => {
+                // Only a strict upgrade is fetched beside a queued release. This
+                // one is not, but it stays walkable: if the queued release fails,
+                // it is the next saved result for the scope. Every later row
+                // within this scope is skipped unjudged: a strict upgrade saved
+                // below this row waits until the queued release leaves the
+                // queue, rather than costing a claim, a submissions read and an
+                // admission pass each cycle. Rows reaching beyond the scope are
+                // still judged.
+                log_saved_result_queue_covered(
+                    item,
+                    &standby,
+                    &queued_release,
+                    &reason,
+                    &message,
+                );
+                let _ = app
+                    .services
+                    .workflow
+                    .pending_releases
+                    .update_pending_release_status(&standby.id, PendingReleaseStatus::Standby, None)
+                    .await;
+                covered_scopes.push(standby_scope);
+            }
             Ok(super::pending::PendingGrabOutcome::Parked) => {
                 return StandbyRecoveryOutcome::Parked {
                     scope: Some(standby_scope),
@@ -1924,8 +2095,62 @@ pub(crate) async fn try_saved_candidates(
         }
     }
 
-    StandbyRecoveryOutcome::Exhausted {
-        stale_indexer_ids: stale_indexer_ids.into_iter().collect(),
+    let stale_indexer_ids = stale_indexer_ids.into_iter().collect();
+    match covered_scopes.into_iter().next() {
+        Some(scope) => StandbyRecoveryOutcome::Active {
+            scope,
+            stale_indexer_ids,
+        },
+        None => StandbyRecoveryOutcome::Exhausted { stale_indexer_ids },
+    }
+}
+
+fn log_saved_result_queue_covered(
+    item: &AcquisitionScopeState,
+    standby: &PendingRelease,
+    queued_release: &str,
+    reason: &crate::admission::AdmissionRejectionReason,
+    message: &str,
+) {
+    debug!(
+        title_id = item.title_id.as_str(),
+        standby_release = standby.release_title.as_str(),
+        queued_release,
+        reason = ?reason,
+        detail = message,
+        "saved search result not grabbed: a queued release already covers this scope"
+    );
+}
+
+/// Whether a saved row's scope fetches nothing beyond a scope a queued release
+/// already covers. Decided from the scopes alone, with no catalog read: a
+/// single episode is never broader than the season it was saved under, and an
+/// episode set can span seasons so only a subset of a covered set counts. A
+/// title-scoped row is refused by any equal-or-better queued release that
+/// overlaps the title, whether or not that release covers every episode, so a
+/// covered title scope hides only another title-scoped row. A row that is not
+/// within is judged as usual, so an unknown pairing errs toward judging.
+fn standby_scope_within(row: &SubmissionScope, covered: &SubmissionScope) -> bool {
+    match covered {
+        SubmissionScope::Title => row == covered,
+        SubmissionScope::Collection { .. } => {
+            matches!(row, SubmissionScope::Episode { .. }) || row == covered
+        }
+        SubmissionScope::EpisodeSet { episode_ids } => match row {
+            SubmissionScope::Episode { episode_id } => episode_ids.contains(episode_id),
+            SubmissionScope::EpisodeSet {
+                episode_ids: row_ids,
+            } => row_ids.iter().all(|id| episode_ids.contains(id)),
+            _ => false,
+        },
+        SubmissionScope::Episode { episode_id } => match row {
+            SubmissionScope::Episode { episode_id: row_id } => row_id == episode_id,
+            SubmissionScope::EpisodeSet {
+                episode_ids: row_ids,
+            } => row_ids.iter().all(|id| id == episode_id),
+            _ => false,
+        },
+        SubmissionScope::SeriesMovie { .. } | SubmissionScope::Orphan => row == covered,
     }
 }
 
@@ -2060,6 +2285,7 @@ where
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
         };
 
         if app
@@ -2193,6 +2419,7 @@ mod client_snapshot_tests {
             role: crate::types::PendingReleaseRole::Fallback,
             last_decision_code: None,
             release_age_unknown: false,
+            release_listing_json: None,
         }
     }
 
@@ -2400,6 +2627,7 @@ mod client_snapshot_tests {
             scope: SubmissionScope::Episode {
                 episode_id: "ep-1".to_string(),
             },
+            release_listing_json: None,
         }
     }
 

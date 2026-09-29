@@ -446,7 +446,9 @@ async fn repeated_identical_release_decisions_update_in_place() {
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
             release_title: "Repeated Release 1080p".to_string(),
-            release_url: Some("https://indexer.invalid/repeated.nzb".to_string()),
+            release_url: Some(
+                "https://indexer.invalid/api?t=get&id=repeated&apikey=live-indexer-key".to_string(),
+            ),
             release_size_bytes: Some(4_096),
             decision_code: "queued_better_or_equal".to_string(),
             candidate_score,
@@ -482,6 +484,11 @@ async fn repeated_identical_release_decisions_update_in_place() {
     assert_eq!(
         stored[0].candidate_score, 12,
         "the surviving row carries the freshest scoring"
+    );
+    assert_eq!(
+        stored[0].release_url.as_deref(),
+        Some("https://indexer.invalid/api?t=get&id=repeated&apikey=[redacted]"),
+        "the ledger keeps the release URL but never the indexer key"
     );
     assert_eq!(
         stored[0].created_at.trim_end_matches("+00:00"),

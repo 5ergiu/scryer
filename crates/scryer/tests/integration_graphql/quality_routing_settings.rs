@@ -1,6 +1,70 @@
 use super::*;
 
 #[tokio::test]
+async fn graphql_dolby_vision_edits_survive_save_and_read() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    for allowed in [false, true, false, true] {
+        let update = gql(
+            &ctx,
+            r#"
+            mutation SaveQualityProfileSettings($input: SaveQualityProfileSettingsInput!) {
+              saveQualityProfileSettings(input: $input) {
+                profiles { id criteria { dolbyVisionAllowed detectedHdrAllowed } }
+              }
+            }
+            "#,
+            json!({
+                "input": {
+                    "profiles": [{
+                        "id": "dv-diagnostic",
+                        "name": "DV Diagnostic",
+                        "criteria": {
+                            "qualityTiers": ["1080P"],
+                            "archivalQuality": "1080P",
+                            "allowUnknownQuality": false,
+                            "sourceAllowlist": [],
+                            "sourceBlocklist": [],
+                            "videoCodecAllowlist": [],
+                            "videoCodecBlocklist": [],
+                            "audioCodecAllowlist": [],
+                            "audioCodecBlocklist": [],
+                            "dolbyVisionAllowed": allowed,
+                            "detectedHdrAllowed": true,
+                            "preferRemux": false,
+                            "allowBdDisk": true,
+                            "allowUpgrades": true,
+                            "scoringOverrides": {}
+                        }
+                    }],
+                    "globalProfileId": "dv-diagnostic",
+                    "categorySelections": [],
+                    "categoryPersonaSelections": [],
+                    "replaceExisting": true
+                }
+            }),
+        )
+        .await;
+        assert_no_errors(&update);
+        let saved = &update["data"]["saveQualityProfileSettings"]["profiles"][0];
+        assert_eq!(saved["criteria"]["dolbyVisionAllowed"], allowed);
+        assert_eq!(saved["criteria"]["detectedHdrAllowed"], true);
+
+        let read = gql(
+            &ctx,
+            "{ qualityProfileSettings { profiles { id criteria { dolbyVisionAllowed detectedHdrAllowed } } } }",
+            json!({}),
+        )
+        .await;
+        assert_no_errors(&read);
+        assert_eq!(
+            &read["data"]["qualityProfileSettings"]["profiles"][0],
+            saved
+        );
+    }
+}
+
+#[tokio::test]
 async fn graphql_quality_profile_settings_round_trip() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;

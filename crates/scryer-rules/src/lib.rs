@@ -35,3 +35,6 @@ pub(crate) use release::{
 
 #[cfg(test)]
 mod trash_pack_validation;
+
+#[cfg(test)]
+mod rego_editor_tests;

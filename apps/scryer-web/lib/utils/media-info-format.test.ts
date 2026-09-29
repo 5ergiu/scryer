@@ -12,8 +12,10 @@ import {
   audioTrackRows,
   chapterRows,
   formatDurationSeconds,
+  formatListingExtraValue,
   formatMediaFileSize,
   mediaFileBaseName,
+  mediaInfoReleaseListingSection,
   mediaInfoSections,
   resolveContainerFormat,
   resolveResolution,
@@ -288,6 +290,78 @@ test("mediaInfoSections builds the file, video and release tables", () => {
   assert.equal(value("media-info-release", "mediaInfo.acquisitionScore"), "1250");
   // The probe's own bookkeeping is not shown, even when the file has it.
   assert.deepEqual([...byId.keys()], ["media-info-file", "media-info-video", "media-info-release"]);
+});
+
+test("the release listing section shows the frozen listing facts, extras last in key order", () => {
+  const file = mediaFile({
+    releaseListing: {
+      publishedAt: "2026-03-01T00:00:00+00:00",
+      ageDaysAtGrab: 10,
+      thumbsUp: 12,
+      thumbsDown: 0,
+      isPasswordProtected: false,
+      indexerLanguages: ["English", "German"],
+      extra: {
+        zeta_flag: true,
+        grabs: 40,
+        tags: ["internal", "proper"],
+        nested: { a: 1 },
+        empty: null,
+        // Already shown as named rows, so never repeated as raw extras.
+        thumbs_up: 12,
+        thumbsdown: 0,
+        password_protected: false,
+      },
+      capturedAt: "2026-03-11T06:00:00+00:00",
+    },
+  });
+  const listing = mediaInfoReleaseListingSection(file, {
+    ...LABELS,
+    listingPublishedAt: "Mar 1, 2026",
+    listingCapturedAt: "Mar 11, 2026",
+    listingAgeAtGrab: "10 days",
+  });
+
+  assert.ok(listing);
+  assert.equal(listing.titleKey, "mediaInfo.sectionReleaseListing");
+  assert.deepEqual(
+    listing.rows.map((entry) => [entry.label ?? entry.labelKey, entry.value]),
+    [
+      ["mediaInfo.listingPublishedAt", "Mar 1, 2026"],
+      ["mediaInfo.listingAgeAtGrab", "10 days"],
+      ["mediaInfo.listingThumbsUp", "12"],
+      ["mediaInfo.listingThumbsDown", "0"],
+      ["mediaInfo.listingPasswordProtected", "No"],
+      ["mediaInfo.listingIndexerLanguages", "English, German"],
+      ["mediaInfo.listingCapturedAt", "Mar 11, 2026"],
+      ["grabs", "40"],
+      ["tags", "internal, proper"],
+      ["zeta_flag", "true"],
+    ],
+  );
+  assert.ok(mediaInfoSections(file, LABELS).some((entry) => entry.id === "media-info-release-listing"));
+});
+
+test("a file without a listing snapshot gets no release listing section", () => {
+  for (const releaseListing of [undefined, null]) {
+    const file = mediaFile({ releaseListing });
+    assert.equal(mediaInfoReleaseListingSection(file, LABELS), null);
+    assert.ok(!mediaInfoSections(file, LABELS).some((entry) => entry.id === "media-info-release-listing"));
+  }
+});
+
+test("formatListingExtraValue renders scalars and scalar lists, skipping the rest", () => {
+  assert.equal(formatListingExtraValue("x"), "x");
+  assert.equal(formatListingExtraValue("  padded  "), "padded");
+  assert.equal(formatListingExtraValue(""), null);
+  assert.equal(formatListingExtraValue("  "), null);
+  assert.equal(formatListingExtraValue(["", "  ", "b"]), "b");
+  assert.equal(formatListingExtraValue(3.5), "3.5");
+  assert.equal(formatListingExtraValue(false), "false");
+  assert.equal(formatListingExtraValue(["a", 1, null]), "a, 1");
+  assert.equal(formatListingExtraValue([]), null);
+  assert.equal(formatListingExtraValue(null), null);
+  assert.equal(formatListingExtraValue({ a: 1 }), null);
 });
 
 test("audioTrackRows describes each track, roles included", () => {

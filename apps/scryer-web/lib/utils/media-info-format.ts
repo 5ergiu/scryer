@@ -5,6 +5,7 @@ import type {
   MediaStreamMetadata,
 } from "../types/media-analysis.ts";
 import { hdrFormatPills } from "./media-format-pills.ts";
+import type { MediaFileReleaseListing } from "../types/titles.ts";
 
 export type AudioStreamDetail = {
   metadata?: Pick<MediaStreamMetadata, "channelLayout" | "disposition" | "programId"> &
@@ -65,6 +66,7 @@ export type MediaInfoFile = {
   edition?: string | null;
   originalFilePath?: string | null;
   releaseHash?: string | null;
+  releaseListing?: MediaFileReleaseListing | null;
 };
 
 /** A media file as the on-disk panel knows it: the badge facts plus its row identity. */
@@ -75,7 +77,8 @@ export type MediaInfoFileDetails = MediaInfoFile & {
   createdAt?: string | null;
 };
 
-export type MediaInfoRow = { labelKey: string; value: string };
+/** One label/value row. `label`, when set, is shown verbatim instead of translating `labelKey`. */
+export type MediaInfoRow = { labelKey: string; value: string; label?: string };
 export type MediaInfoSection = { id: string; titleKey: string; rows: MediaInfoRow[] };
 
 export type MediaInfoAudioTrackRow = {
@@ -385,6 +388,9 @@ function section(id: string, titleKey: string, rows: (MediaInfoRow | null)[]): M
 export type MediaInfoLabels = {
   added?: string | null;
   grabbedAt?: string | null;
+  listingPublishedAt?: string | null;
+  listingCapturedAt?: string | null;
+  listingAgeAtGrab?: string | null;
   yes: string;
   no: string;
 };
@@ -510,6 +516,73 @@ export function mediaInfoReleaseSection(
   ]);
 }
 
+/** A listing `extra` value as display text; blank, empty and nested values are skipped. */
+export function formatListingExtraValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed === "" ? null : trimmed;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => formatListingExtraValue(Array.isArray(item) ? null : item))
+      .filter((item): item is string => item != null);
+    return parts.length > 0 ? parts.join(", ") : null;
+  }
+  return null;
+}
+
+/** `extra` keys whose facts already have a named row, so they are not repeated raw. */
+const LISTING_EXTRA_KEYS_SHOWN_AS_NAMED_ROWS = new Set([
+  "thumbs_up",
+  "thumbs_down",
+  "thumbsup",
+  "thumbsdown",
+  "password_protected",
+  "password",
+]);
+
+/**
+ * The indexer listing facts frozen at grab time. Absent entirely when the
+ * file has no listing snapshot; `extra` entries follow the named facts, keyed
+ * by their raw attribute names in ascending order.
+ */
+export function mediaInfoReleaseListingSection(
+  file: MediaInfoFileDetails,
+  labels: MediaInfoLabels,
+): MediaInfoSection | null {
+  const listing = file.releaseListing;
+  if (!listing) return null;
+  const extraRows = Object.keys(listing.extra ?? {})
+    .filter((key) => !LISTING_EXTRA_KEYS_SHOWN_AS_NAMED_ROWS.has(key))
+    .sort()
+    .map((key): MediaInfoRow | null => {
+      const value = formatListingExtraValue(listing.extra[key]);
+      return value == null ? null : { labelKey: key, label: key, value };
+    });
+  return section("media-info-release-listing", "mediaInfo.sectionReleaseListing", [
+    row("mediaInfo.listingPublishedAt", labels.listingPublishedAt),
+    row("mediaInfo.listingAgeAtGrab", labels.listingAgeAtGrab),
+    row("mediaInfo.listingThumbsUp", listing.thumbsUp == null ? null : String(listing.thumbsUp)),
+    row(
+      "mediaInfo.listingThumbsDown",
+      listing.thumbsDown == null ? null : String(listing.thumbsDown),
+    ),
+    row(
+      "mediaInfo.listingPasswordProtected",
+      listing.isPasswordProtected == null
+        ? null
+        : listing.isPasswordProtected
+          ? labels.yes
+          : labels.no,
+    ),
+    row("mediaInfo.listingIndexerLanguages", listing.indexerLanguages.join(", ")),
+    row("mediaInfo.listingCapturedAt", labels.listingCapturedAt),
+    ...extraRows,
+  ]);
+}
+
 export function audioTrackRows(file: MediaInfoFile): MediaInfoAudioTrackRow[] {
   return audioStreamsForFile(file).map((stream, index) => {
     const disposition = stream.metadata?.disposition;
@@ -594,6 +667,7 @@ export function mediaInfoSections(
     mediaInfoFileSection(file, labels),
     mediaInfoVideoSection(file, labels),
     mediaInfoReleaseSection(file, labels),
+    mediaInfoReleaseListingSection(file, labels),
   ].filter((entry): entry is MediaInfoSection => entry != null);
 }
 

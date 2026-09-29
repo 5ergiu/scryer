@@ -278,6 +278,7 @@ fn payload_title(payload: &DomainEventPayload) -> Option<&TitleContextSnapshot> 
         DomainEventPayload::MediaFileAnalyzed(data) => Some(&data.title),
         DomainEventPayload::MediaFileRenamed(data) => Some(&data.title),
         DomainEventPayload::MediaFileDeleted(data) => Some(&data.title),
+        DomainEventPayload::MediaFileRestored(data) => Some(&data.title),
         DomainEventPayload::MediaFileUpgraded(data) => Some(&data.title),
         DomainEventPayload::AcquisitionSearchCompleted(data) => Some(&data.title),
         DomainEventPayload::AcquisitionCandidateRejected(data) => Some(&data.title),
@@ -288,6 +289,8 @@ fn payload_title(payload: &DomainEventPayload) -> Option<&TitleContextSnapshot> 
         DomainEventPayload::DownloadIgnored(data) => data.title.as_ref(),
         DomainEventPayload::SeedingStarted(data) => data.title.as_ref(),
         DomainEventPayload::SeedingCompleted(data) => data.title.as_ref(),
+        DomainEventPayload::ListTitleAdded(data) => Some(&data.title),
+        DomainEventPayload::ListTitleLeft(data) => Some(&data.title),
         _ => None,
     }
 }
@@ -472,6 +475,7 @@ mod tests {
             quality: None,
             episode_ids: Vec::new(),
             size_bytes,
+            upgrade: false,
         }
     }
 
@@ -528,6 +532,7 @@ mod tests {
             imported: 5,
             skipped: 2,
             unmatched: 3,
+            relinked: 0,
         }
     }
 
@@ -1091,6 +1096,7 @@ mod tests {
                 source_provider: None,
                 download_id: None,
                 episode_ids: Vec::new(),
+                release_facts: None,
             },
         ))]);
 
@@ -1155,6 +1161,7 @@ mod tests {
             }),
             DomainEventPayload::TitleDeleted(TitleDeletedEventData {
                 title: title.clone(),
+                deleted_paths: Vec::new(),
             }),
             DomainEventPayload::ConfigurationChanged(ConfigurationChangedEventData {
                 resource_type: "indexer".to_string(),
@@ -1178,6 +1185,7 @@ mod tests {
                 source_provider: None,
                 download_id: None,
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
             DomainEventPayload::DownloadFailed(download_failed(Some("sabnzbd"))),
             DomainEventPayload::ReleaseBlocklisted(ReleaseBlocklistedEventData {

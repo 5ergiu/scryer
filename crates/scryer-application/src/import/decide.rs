@@ -139,6 +139,9 @@ pub(crate) struct ImportDecisionInput<'a> {
     /// (`canonical_scoring::size_basis_bytes`); a real shortfall scores on what
     /// landed.
     pub announced_size_bytes: Option<i64>,
+    /// The listing snapshot the grab persisted with the submission, when this
+    /// import came from one. Scored with its age anchored at the grab.
+    pub release_listing_json: Option<&'a str>,
     pub is_filler: bool,
     /// Guard-failure policy for the source that queued this download.
     pub origin: ImportOrigin,
@@ -410,6 +413,7 @@ fn score_landed(
         crate::canonical_scoring::size_basis_bytes(size_bytes, input.announced_size_bytes),
         input.prior_rescore_changes,
         input.is_filler,
+        crate::canonical_scoring::ListingFacts::grabbed_from_json(input.release_listing_json),
     )
 }
 

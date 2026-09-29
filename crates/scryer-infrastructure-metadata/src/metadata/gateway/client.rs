@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,9 +18,9 @@ use scryer_application::{
     EpisodeMetadata, MdblistSummary, MetadataGateway, MetadataSearchItem, MetadataSearchQuery,
     MovieMetadata, MovieTitleBulkResult, MovieTitleRef, MultiMetadataSearchResult,
     RateLimitCooldownAction, RichMetadataSearchItem, SeasonMetadata, SeriesArtworkUrls,
-    SeriesMetadata, SettingsRepository, SmgScryerUpdateNotice, TitleArtworkUrls, TitleAward,
-    TitleCredit, TitleExternalRating, TitleRatingSummary, TitleRecommendationsInput,
-    TitleResolution,
+    SeriesMetadata, SeriesTitleBulkResult, SeriesTitleRef, SettingsRepository,
+    SmgScryerUpdateNotice, TitleArtworkUrls, TitleAward, TitleCredit, TitleExternalRating,
+    TitleExternalRef, TitleRatingSummary, TitleRecommendationsInput, TitleResolution,
 };
 use scryer_domain::{
     AnimeCommunitySeason, AnimeCommunitySeasonRange, AnimeNumberingBridge, CanonicalMediaTag,
@@ -76,6 +75,9 @@ impl ApqCache {
 use crate::metadata::response_body::{ResponseBodyPreview, read_response_body_preview};
 use crate::{graphql::metadata_gateway as graphql_docs, smg_enrollment};
 
+#[path = "client_lists.rs"]
+mod lists;
+
 /// SHA-256 of a GraphQL query document, for Automatic Persisted Queries.
 ///
 /// **Compatibility only.** The APQ protocol fixes the algorithm: the gateway
@@ -114,7 +116,6 @@ const OP_SEARCH_TVDB_BATCH: &str = "SearchTvdbBatch";
 const OP_SEARCH_TVDB_RICH: &str = "SearchTvdbRich";
 const OP_SEARCH_TVDB_MULTI: &str = "SearchTvdbMulti";
 const OP_GET_MOVIE: &str = "GetMovie";
-const OP_GET_SERIES: &str = "GetSeries";
 const OP_METADATA_BULK: &str = "MetadataBulk";
 const OP_TITLES: &str = "Titles";
 const OP_RESOLVE_TITLES: &str = "ResolveTitles";
@@ -281,25 +282,8 @@ const METADATA_GATEWAY_MAX_TITLE_BULK_BATCH: usize = METADATA_GATEWAY_MAX_METADA
 const METADATA_GATEWAY_MAX_TITLE_SEARCH_LIMIT: i32 = 25;
 const METADATA_GATEWAY_COMPATIBILITY_POLL_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const METADATA_GATEWAY_COMPATIBILITY_STARTUP_GUARD: Duration = Duration::from_secs(30 * 60);
-const TITLE_ID_CAPABILITY_REPROBE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const METADATA_GATEWAY_VERSION_COMPATIBILITY_PATH: &str = "/api/version-compatibility";
 const SCRYER_RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-static LEGACY_TITLE_ID_ONLY: AtomicBool = AtomicBool::new(false);
-static LEGACY_TITLE_ID_ONLY_LOGGED: AtomicBool = AtomicBool::new(false);
-static LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS: AtomicU64 = AtomicU64::new(0);
-
-/// The selections the title-id surface introduced, quoted the way a GraphQL
-/// validation error names an unknown field. A gateway that predates the surface
-/// answers any of them with `Cannot query field "<name>" on type "..."`, which
-/// is the capability signal the probe watches for.
-const TITLE_ID_UNKNOWN_FIELD_MARKERS: [&str; 5] = [
-    "\"titles\"",
-    "\"resolveTitles\"",
-    "\"searchTitles\"",
-    "\"searchTitlesBatch\"",
-    "\"title_id\"",
-];
 
 #[derive(Deserialize)]
 struct VersionCompatibilitySuccessResponse {
@@ -510,7 +494,6 @@ pub struct MetadataGatewayClient {
     search_rich_hash: String,
     search_multi_hash: String,
     movie_hash: String,
-    series_hash: String,
     titles_hash: String,
     resolve_titles_hash: String,
     search_titles_hash: String,
@@ -536,7 +519,6 @@ impl MetadataGatewayClient {
         let search_rich_hash = apq_hash(graphql_docs::SEARCH_TVDB_RICH_QUERY);
         let search_multi_hash = apq_hash(graphql_docs::SEARCH_TVDB_MULTI_QUERY);
         let movie_hash = apq_hash(graphql_docs::GET_MOVIE_QUERY);
-        let series_hash = apq_hash(graphql_docs::GET_SERIES_QUERY);
         let titles_hash = apq_hash(graphql_docs::TITLES_QUERY);
         let resolve_titles_hash = apq_hash(graphql_docs::RESOLVE_TITLES_QUERY);
         let search_titles_hash = apq_hash(graphql_docs::SEARCH_TITLES_QUERY);
@@ -572,7 +554,6 @@ impl MetadataGatewayClient {
             %search_rich_hash,
             %search_multi_hash,
             %movie_hash,
-            %series_hash,
             %title_recommendations_hash,
             %collection_completions_hash,
             %submit_discovery_context_snapshot_hash,
@@ -601,7 +582,6 @@ impl MetadataGatewayClient {
             search_rich_hash,
             search_multi_hash,
             movie_hash,
-            series_hash,
             titles_hash,
             resolve_titles_hash,
             search_titles_hash,
@@ -632,7 +612,6 @@ impl MetadataGatewayClient {
         let search_rich_hash = apq_hash(graphql_docs::SEARCH_TVDB_RICH_QUERY);
         let search_multi_hash = apq_hash(graphql_docs::SEARCH_TVDB_MULTI_QUERY);
         let movie_hash = apq_hash(graphql_docs::GET_MOVIE_QUERY);
-        let series_hash = apq_hash(graphql_docs::GET_SERIES_QUERY);
         let titles_hash = apq_hash(graphql_docs::TITLES_QUERY);
         let resolve_titles_hash = apq_hash(graphql_docs::RESOLVE_TITLES_QUERY);
         let search_titles_hash = apq_hash(graphql_docs::SEARCH_TITLES_QUERY);
@@ -676,7 +655,6 @@ impl MetadataGatewayClient {
             search_rich_hash,
             search_multi_hash,
             movie_hash,
-            series_hash,
             titles_hash,
             resolve_titles_hash,
             search_titles_hash,
@@ -1422,244 +1400,207 @@ impl MetadataGatewayClient {
         self.parse_graphql_response(&raw_text)
     }
 
-    fn title_id_queries_unsupported() -> AppError {
-        AppError::Repository("metadata gateway does not support title-id queries".into())
-    }
-
-    fn legacy_title_id_only() -> bool {
-        if !LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire) {
-            return false;
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let retry_after = LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS.load(Ordering::Acquire);
-        if now < retry_after {
-            return true;
-        }
-
-        // Re-open the capability latch for a gateway that might have moved off
-        // an old replica. A repeated unknown-field response immediately closes
-        // it again; a healthy response leaves title-id mode enabled.
-        let reprobing = LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS
-            .compare_exchange(
-                retry_after,
-                now.saturating_add(TITLE_ID_CAPABILITY_REPROBE_INTERVAL.as_secs()),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok();
-        if reprobing {
-            LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
-        }
-        !reprobing
-    }
-
-    fn observe_title_id_capability_success() {
-        LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
-        LEGACY_TITLE_ID_ONLY_LOGGED.store(false, Ordering::Release);
-        LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS.store(0, Ordering::Release);
-    }
-
-    /// Watches a legacy-compatible document's failure for the title-id fields it
-    /// asks for on top of the legacy shape.
-    fn observe_title_id_capability_error(error: &AppError) -> bool {
-        Self::observe_capability_error(error, false)
-    }
-
-    /// Watches a title-id operation's failure. Those documents only ever select a
-    /// title-id root field, so ANY unknown root-field validation error they draw
-    /// means the gateway predates the surface -- including the three operations
-    /// whose root field is not literally named `titles`.
-    fn observe_title_id_operation_error(error: &AppError) -> bool {
-        Self::observe_capability_error(error, true)
-    }
-
-    fn observe_capability_error(error: &AppError, any_unknown_query_field: bool) -> bool {
-        let message = error.to_string();
-        if !message.contains("Cannot query field") {
-            return false;
-        }
-        let unknown_title_field = TITLE_ID_UNKNOWN_FIELD_MARKERS
+    /// The `titles` flow shared by movies and series.
+    ///
+    /// Refs without an SMG title id are resolved first (`resolveTitles`, by
+    /// provider id). A stored SMG id the gateway reports missing without a
+    /// redirect is re-resolved once from the ref's TVDB/TMDB ids, so a deleted
+    /// SMG row does not park the title forever. `take` pulls the kind's items
+    /// out of one `titles` answer, keyed by SMG title id.
+    async fn fetch_titles_by_ref<T: Clone>(
+        &self,
+        refs: &[TitleRefInput],
+        kind: TitleFetchKind,
+        language: &str,
+        take: impl Fn(TitlesResult) -> Vec<(i64, T)>,
+    ) -> AppResult<TitleRefFetch<T>> {
+        let mut title_ids_by_ref = refs
             .iter()
-            .any(|marker| message.contains(marker))
-            || (any_unknown_query_field && message.contains("on type \"Query\""));
-        if !unknown_title_field {
-            return false;
+            .map(|reference| reference.id)
+            .collect::<Vec<_>>();
+        let mut missing_ref_indexes = HashSet::new();
+
+        let unresolved_refs = refs
+            .iter()
+            .enumerate()
+            .filter(|(_, reference)| reference.id.is_none())
+            .map(|(index, reference)| (index, reference.clone()))
+            .collect::<Vec<_>>();
+        if !unresolved_refs.is_empty() {
+            self.apply_title_ref_resolutions(
+                &unresolved_refs,
+                kind.resolve_kind(),
+                &mut title_ids_by_ref,
+                &mut missing_ref_indexes,
+            )
+            .await?;
         }
 
-        LEGACY_TITLE_ID_ONLY.store(true, Ordering::Release);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS.store(
-            now.saturating_add(TITLE_ID_CAPABILITY_REPROBE_INTERVAL.as_secs()),
-            Ordering::Release,
-        );
-        if !LEGACY_TITLE_ID_ONLY_LOGGED.swap(true, Ordering::AcqRel) {
-            warn!(
-                error = %message,
-                "metadata gateway does not support the title-id surface; using legacy metadata documents"
-            );
+        for (index, title_id) in title_ids_by_ref.iter().enumerate() {
+            if title_id.is_none() {
+                missing_ref_indexes.insert(index);
+            }
         }
-        true
-    }
 
-    fn legacy_metadata_query(query: &str) -> String {
-        let mut legacy = String::with_capacity(query.len());
-        let mut skipping_external_ids = false;
+        let unique_title_ids = title_ids_by_ref
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut items_by_smg_id = HashMap::new();
+        let mut redirects = Vec::new();
+        let mut redirect_targets = HashMap::new();
+        let mut missing_smg_ids = HashSet::new();
 
-        for line in query.lines() {
-            let trimmed = line.trim();
-            if trimmed == "title_id" {
+        self.fetch_title_chunks(
+            &unique_title_ids,
+            kind,
+            language,
+            &take,
+            &mut items_by_smg_id,
+            &mut redirects,
+            &mut redirect_targets,
+            &mut missing_smg_ids,
+        )
+        .await?;
+
+        // A stored SMG id can disappear without a redirect. Keep redirect
+        // handling above intact, but re-resolve a genuinely deleted id from
+        // its stable provider identity instead of repeatedly parking it.
+        let deleted_smg_refs = title_ids_by_ref
+            .iter()
+            .enumerate()
+            .filter_map(|(index, title_id)| {
+                let title_id = (*title_id)?;
+                let reference = refs.get(index)?;
+                (reference.id == Some(title_id)
+                    && !redirect_targets.contains_key(&title_id)
+                    && missing_smg_ids.contains(&title_id)
+                    && reference.has_stable_provider_id())
+                .then(|| {
+                    (
+                        index,
+                        TitleRefInput {
+                            id: None,
+                            external_ids: reference.external_ids.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !deleted_smg_refs.is_empty() {
+            self.apply_title_ref_resolutions(
+                &deleted_smg_refs,
+                kind.resolve_kind(),
+                &mut title_ids_by_ref,
+                &mut missing_ref_indexes,
+            )
+            .await?;
+
+            let refetched_title_ids = title_ids_by_ref
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|title_id| !unique_title_ids.contains(title_id))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.fetch_title_chunks(
+                &refetched_title_ids,
+                kind,
+                language,
+                &take,
+                &mut items_by_smg_id,
+                &mut redirects,
+                &mut redirect_targets,
+                &mut missing_smg_ids,
+            )
+            .await?;
+        }
+
+        let mut by_ref_index = HashMap::new();
+        for (index, title_id) in title_ids_by_ref.into_iter().enumerate() {
+            let Some(title_id) = title_id else {
+                continue;
+            };
+            let resolved_id = redirect_targets.get(&title_id).copied().unwrap_or(title_id);
+            if missing_smg_ids.contains(&title_id) || missing_smg_ids.contains(&resolved_id) {
+                missing_ref_indexes.insert(index);
                 continue;
             }
-            if trimmed.starts_with("external_ids {") {
-                if !trimmed.ends_with('}') {
-                    skipping_external_ids = true;
-                }
+            if let Some(item) = items_by_smg_id.get(&resolved_id) {
+                by_ref_index.insert(index, item.clone());
+            } else {
+                missing_ref_indexes.insert(index);
+            }
+        }
+
+        let mut missing_ref_indexes = missing_ref_indexes.into_iter().collect::<Vec<_>>();
+        missing_ref_indexes.sort_unstable();
+        Ok(TitleRefFetch {
+            by_ref_index,
+            redirects,
+            missing_ref_indexes,
+        })
+    }
+
+    /// Resolve `(original_index, ref)` pairs and record each outcome against
+    /// the original ref index.
+    async fn apply_title_ref_resolutions(
+        &self,
+        pending: &[(usize, TitleRefInput)],
+        kind: &'static str,
+        title_ids_by_ref: &mut [Option<i64>],
+        missing_ref_indexes: &mut HashSet<usize>,
+    ) -> AppResult<()> {
+        let inputs = pending
+            .iter()
+            .map(|(_, reference)| reference.clone())
+            .collect::<Vec<_>>();
+        for resolution in self.resolve_title_ref_inputs(&inputs, kind, false).await? {
+            let Some((original_index, _)) = pending.get(resolution.ref_index) else {
                 continue;
+            };
+            if resolution.resolved {
+                title_ids_by_ref[*original_index] = resolution.smg_id;
+            } else {
+                missing_ref_indexes.insert(*original_index);
             }
-            if skipping_external_ids {
-                if trimmed == "}" {
-                    skipping_external_ids = false;
-                }
-                continue;
-            }
-            legacy.push_str(line);
-            legacy.push('\n');
         }
-
-        legacy
+        Ok(())
     }
 
-    async fn execute_legacy_compatible_apq<T: serde::de::DeserializeOwned>(
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_title_chunks<T>(
         &self,
-        operation_name: &'static str,
-        query: &str,
-        hash: &str,
-        variables: serde_json::Value,
-    ) -> AppResult<T> {
-        let execute_legacy = || async {
-            let legacy_query = Self::legacy_metadata_query(query);
-            self.execute_graphql(json!({
-                "operationName": operation_name,
-                "query": legacy_query,
-                "variables": variables.clone(),
-            }))
-            .await
-        };
-
-        if Self::legacy_title_id_only() {
-            return execute_legacy().await;
-        }
-
-        match self
-            .execute_graphql_apq(operation_name, query, hash, variables.clone())
-            .await
-        {
-            Err(error) if Self::observe_title_id_capability_error(&error) => execute_legacy().await,
-            Ok(result) => {
-                Self::observe_title_id_capability_success();
-                Ok(result)
+        title_ids: &[i64],
+        kind: TitleFetchKind,
+        language: &str,
+        take: &impl Fn(TitlesResult) -> Vec<(i64, T)>,
+        items_by_smg_id: &mut HashMap<i64, T>,
+        redirects: &mut Vec<(i64, i64)>,
+        redirect_targets: &mut HashMap<i64, i64>,
+        missing_smg_ids: &mut HashSet<i64>,
+    ) -> AppResult<()> {
+        for ids in title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
+            let data: TitlesResponse = self
+                .execute_graphql_apq(
+                    OP_TITLES,
+                    graphql_docs::TITLES_QUERY,
+                    &self.titles_hash,
+                    kind.titles_variables(ids, language),
+                )
+                .await?;
+            for redirect in &data.titles.redirects {
+                redirect_targets.insert(redirect.from_id, redirect.to_id);
+                redirects.push((redirect.from_id, redirect.to_id));
             }
-            Err(error) => Err(error),
+            missing_smg_ids.extend(data.titles.missing_ids.iter().copied());
+            items_by_smg_id.extend(take(data.titles));
         }
-    }
-
-    async fn execute_legacy_compatible_post<T: serde::de::DeserializeOwned>(
-        &self,
-        operation_name: &'static str,
-        query: &str,
-        variables: serde_json::Value,
-    ) -> AppResult<T> {
-        let execute_legacy = || async {
-            let legacy_query = Self::legacy_metadata_query(query);
-            self.execute_graphql(json!({
-                "operationName": operation_name,
-                "query": legacy_query,
-                "variables": variables.clone(),
-            }))
-            .await
-        };
-
-        if Self::legacy_title_id_only() {
-            return execute_legacy().await;
-        }
-
-        match self
-            .execute_graphql(json!({
-                "operationName": operation_name,
-                "query": query,
-                "variables": variables,
-            }))
-            .await
-        {
-            Err(error) if Self::observe_title_id_capability_error(&error) => execute_legacy().await,
-            Ok(result) => {
-                Self::observe_title_id_capability_success();
-                Ok(result)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn execute_title_id_apq<T: serde::de::DeserializeOwned>(
-        &self,
-        operation_name: &'static str,
-        query: &str,
-        hash: &str,
-        variables: serde_json::Value,
-    ) -> AppResult<T> {
-        if Self::legacy_title_id_only() {
-            return Err(Self::title_id_queries_unsupported());
-        }
-
-        match self
-            .execute_graphql_apq(operation_name, query, hash, variables)
-            .await
-        {
-            Err(error) if Self::observe_title_id_operation_error(&error) => {
-                Err(Self::title_id_queries_unsupported())
-            }
-            Ok(result) => {
-                Self::observe_title_id_capability_success();
-                Ok(result)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn execute_title_id_post<T: serde::de::DeserializeOwned>(
-        &self,
-        operation_name: &'static str,
-        query: &str,
-        variables: serde_json::Value,
-    ) -> AppResult<T> {
-        if Self::legacy_title_id_only() {
-            return Err(Self::title_id_queries_unsupported());
-        }
-
-        match self
-            .execute_graphql(json!({
-                "operationName": operation_name,
-                "query": query,
-                "variables": variables,
-            }))
-            .await
-        {
-            Err(error) if Self::observe_title_id_operation_error(&error) => {
-                Err(Self::title_id_queries_unsupported())
-            }
-            Ok(result) => {
-                Self::observe_title_id_capability_success();
-                Ok(result)
-            }
-            Err(error) => Err(error),
-        }
+        Ok(())
     }
 
     async fn resolve_movie_title_refs(
@@ -1667,23 +1608,33 @@ impl MetadataGatewayClient {
         refs: &[MovieTitleRef],
         create_missing: bool,
     ) -> AppResult<Vec<TitleResolution>> {
+        let inputs = refs
+            .iter()
+            .map(title_ref_input_from_ref)
+            .collect::<Vec<_>>();
+        self.resolve_title_ref_inputs(&inputs, "movie", create_missing)
+            .await
+    }
+
+    async fn resolve_title_ref_inputs(
+        &self,
+        refs: &[TitleRefInput],
+        kind: &str,
+        create_missing: bool,
+    ) -> AppResult<Vec<TitleResolution>> {
         let mut resolutions = Vec::with_capacity(refs.len());
-        for (chunk_index, refs) in refs
+        for (chunk_index, inputs) in refs
             .chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH)
             .enumerate()
         {
-            let inputs = refs
-                .iter()
-                .map(title_ref_input_from_ref)
-                .collect::<Vec<_>>();
             let data: ResolveTitlesResponse = self
-                .execute_title_id_apq(
+                .execute_graphql_apq(
                     OP_RESOLVE_TITLES,
                     graphql_docs::RESOLVE_TITLES_QUERY,
                     &self.resolve_titles_hash,
                     json!({
                         "refs": inputs,
-                        "kind": "movie",
+                        "kind": kind,
                         "createMissing": create_missing,
                     }),
                 )
@@ -2141,16 +2092,16 @@ impl MetadataGatewayClient {
             let series_requested = chunk_series_ids.len();
 
             let data: MetadataBulkResponse = self
-                .execute_legacy_compatible_post(
-                    OP_METADATA_BULK,
-                    graphql_docs::METADATA_BULK_QUERY,
-                    json!({
+                .execute_graphql(json!({
+                    "operationName": OP_METADATA_BULK,
+                    "query": graphql_docs::METADATA_BULK_QUERY,
+                    "variables": {
                         "movieTvdbIds": chunk_movie_ids,
                         "seriesTvdbIds": chunk_series_ids,
                         "language": language,
                         "includeEpisodes": true,
-                    }),
-                )
+                    },
+                }))
                 .await?;
             let movie_count = data.metadata_bulk.movies.len();
             let series_count = data.metadata_bulk.series.len();
@@ -2361,9 +2312,21 @@ fn movie_metadata_from_item(m: MovieItem) -> MovieMetadata {
 }
 
 fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
+    let primary_source = if s.primary_source.trim().is_empty() {
+        if s.tvdb_id.is_some() {
+            "tvdb".to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        s.primary_source.trim().to_ascii_lowercase()
+    };
     SeriesMetadata {
         target_key: None,
-        tvdb_id: s.tvdb_id,
+        smg_id: s.id,
+        primary_source,
+        tvdb_id: s.tvdb_id.unwrap_or_default(),
+        tmdb_id: s.tmdb_id,
         name: s.name,
         sort_name: s.sort_name,
         slug: s.slug,
@@ -2391,7 +2354,8 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
             .seasons
             .into_iter()
             .map(|season| SeasonMetadata {
-                tvdb_id: season.tvdb_id,
+                tvdb_id: season.tvdb_id.unwrap_or_default(),
+                tmdb_id: season.tmdb_id,
                 number: season.number,
                 label: season.label,
                 episode_type: season.episode_type,
@@ -2401,7 +2365,8 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
             .episodes
             .into_iter()
             .map(|ep| EpisodeMetadata {
-                tvdb_id: ep.tvdb_id,
+                tvdb_id: ep.tvdb_id.unwrap_or_default(),
+                tmdb_id: ep.tmdb_id,
                 episode_number: ep.episode_number,
                 name: ep.name,
                 aired: ep.aired,
@@ -2410,6 +2375,7 @@ fn series_metadata_from_item(s: SeriesItem) -> SeriesMetadata {
                 is_recap: ep.is_recap,
                 overview: ep.overview,
                 absolute_number: ep.absolute_number,
+                contiguous_absolute_number: ep.contiguous_absolute_number,
                 season_number: ep.season_number,
                 image_url: ep.image_url,
             })
@@ -2510,12 +2476,12 @@ mod tests {
     use super::{
         ArtworkItem, InstanceAuth, MetadataExternalIdItem, MetadataGatewayClient,
         MetadataSearchQuery, MovieItem, MovieTitleRef, MtlsState, OP_DISCOVER_PUBLIC_FEED,
-        OP_GET_MOVIE, OP_GET_SERIES, OP_METADATA_BULK, OP_SEARCH_TVDB, OP_SEARCH_TVDB_BATCH,
-        OP_SEARCH_TVDB_MULTI, OP_SEARCH_TVDB_RICH, SearchTvdbBatchResult, SearchTvdbResponse,
-        SeriesItem, SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce, apq_cache_key,
-        apq_hash, build_bulk_artwork_url_query, build_search_tvdb_batch_query,
-        canonical_request_host, canonical_request_path_and_query, compatibility_poll_phase,
-        enrollment_retry_delay, external_ids_from_gateway, is_version_incompatible_response,
+        OP_GET_MOVIE, OP_METADATA_BULK, OP_SEARCH_TVDB, OP_SEARCH_TVDB_BATCH, OP_SEARCH_TVDB_MULTI,
+        OP_SEARCH_TVDB_RICH, SearchTvdbBatchResult, SearchTvdbResponse, SeriesItem, SeriesTitleRef,
+        SmgEnrollmentConfig, apply_instance_auth_headers_with_nonce, apq_cache_key, apq_hash,
+        build_bulk_artwork_url_query, build_search_tvdb_batch_query, canonical_request_host,
+        canonical_request_path_and_query, compatibility_poll_phase, enrollment_retry_delay,
+        external_ids_from_gateway, is_version_incompatible_response,
         map_metadata_gateway_outbound_error, movie_metadata_from_item,
         next_version_compatibility_poll_delay_at, normalize_artwork_url,
         normalize_optional_artwork_url, parse_version_compatibility_incompatible,
@@ -2536,10 +2502,6 @@ mod tests {
             {"source": "tvdb", "kind": "Series", "id": "307111", "key": "tvdb:series:307111"},
             {"source": "anidb", "kind": "anime", "id": "11851", "key": "anidb:anime:11851"},
             {"source": "smg", "kind": "title", "id": "3036496", "key": "smg:title:3036496"},
-            // A payload that carries only the composite key still yields a kind.
-            {"source": "tmdb", "id": "113082", "key": "tmdb:movie:113082"},
-            // An older gateway that sends neither stays kindless.
-            {"source": "trakt", "id": "9001"},
             // Blank source or id is dropped as before.
             {"source": "  ", "kind": "movie", "id": "1"},
             {"source": "imdb", "kind": "movie", "id": "   "}
@@ -2557,14 +2519,10 @@ mod tests {
                 "tvdb:series:307111".to_string(),
                 "anidb:anime:11851".to_string(),
                 "smg:title:3036496".to_string(),
-                "tmdb:movie:113082".to_string(),
-                "trakt:9001".to_string(),
             ]
         );
-        assert!(external_ids[4].kind.is_none());
     }
-    use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
     use crate::{
@@ -2598,7 +2556,6 @@ mod tests {
             }
             "search_tvdb_multi" => json!({ "query": "Fixture", "limit": 25, "language": "eng" }),
             "get_movie" => json!({ "tvdbId": 1, "language": "eng" }),
-            "get_series" => json!({ "id": "1", "includeEpisodes": true, "language": "eng" }),
             "metadata_bulk" => {
                 json!({ "movieTvdbIds": [], "seriesTvdbIds": (1..=50).collect::<Vec<_>>(), "language": "eng", "includeEpisodes": true })
             }
@@ -2661,7 +2618,6 @@ mod tests {
                 graphql_docs::SEARCH_TVDB_MULTI_QUERY,
             ),
             ("get_movie", OP_GET_MOVIE, graphql_docs::GET_MOVIE_QUERY),
-            ("get_series", OP_GET_SERIES, graphql_docs::GET_SERIES_QUERY),
             (
                 "metadata_bulk",
                 OP_METADATA_BULK,
@@ -2730,19 +2686,6 @@ mod tests {
             ),
         ];
         let mut cases = documents.into_iter().map(|(name, operation_name, query)| json!({ "name": name, "query": query, "operationName": operation_name, "variables": smg_fixture_variables(name) })).collect::<Vec<_>>();
-        for (name, operation_name, query) in documents.into_iter().filter(|(name, _, _)| {
-            matches!(
-                *name,
-                "search_tvdb"
-                    | "search_tvdb_batch"
-                    | "search_tvdb_rich"
-                    | "search_tvdb_multi"
-                    | "get_movie"
-                    | "metadata_bulk"
-            )
-        }) {
-            cases.push(json!({ "name": format!("legacy_{name}"), "query": MetadataGatewayClient::legacy_metadata_query(query), "operationName": operation_name, "variables": smg_fixture_variables(name) }));
-        }
         let movie_ids = (1..=100).collect::<Vec<_>>();
         let series_ids = (101..=200).collect::<Vec<_>>();
         cases.extend([
@@ -2760,21 +2703,21 @@ mod tests {
             let encoded = serde_json::to_vec_pretty(&corpus).expect("serialize fixture corpus");
             std::fs::write(path, encoded).expect("write fixture corpus");
         }
-        assert_eq!(corpus.len(), 29);
+        assert_eq!(corpus.len(), 22);
         assert_eq!(
-            corpus[6]["variables"]["movieTvdbIds"]
+            corpus[5]["variables"]["movieTvdbIds"]
                 .as_array()
                 .map(Vec::len),
             Some(0)
         );
         assert_eq!(
-            corpus[6]["variables"]["seriesTvdbIds"]
+            corpus[5]["variables"]["seriesTvdbIds"]
                 .as_array()
                 .map(Vec::len),
             Some(50)
         );
         assert_eq!(
-            corpus[26]["query"]
+            corpus[19]["query"]
                 .as_str()
                 .expect("movie query")
                 .matches(": movie(")
@@ -2782,7 +2725,7 @@ mod tests {
             100
         );
         assert_eq!(
-            corpus[27]["query"]
+            corpus[20]["query"]
                 .as_str()
                 .expect("series query")
                 .matches(": series(")
@@ -2790,12 +2733,12 @@ mod tests {
             100
         );
         assert_eq!(
-            corpus[28]["query"]
+            corpus[21]["query"]
                 .as_str()
                 .expect("combined query")
                 .matches(": movie(")
                 .count()
-                + corpus[28]["query"]
+                + corpus[21]["query"]
                     .as_str()
                     .expect("combined query")
                     .matches(": series(")
@@ -2958,16 +2901,6 @@ mod tests {
         })
     }
 
-    fn series_payload(tvdb_id: i64) -> serde_json::Value {
-        json!({
-            "data": {
-                "series": {
-                    "series": series_item_payload(tvdb_id)
-                }
-            }
-        })
-    }
-
     fn persisted_query_not_found_payload() -> serde_json::Value {
         json!({
             "errors": [
@@ -3020,11 +2953,6 @@ mod tests {
                 }
             }
         })
-    }
-
-    fn title_id_capability_test_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     fn unsigned_gateway_client(endpoint: String) -> MetadataGatewayClient {
@@ -3127,12 +3055,12 @@ mod tests {
         let queries = [
             graphql_docs::METADATA_BULK_QUERY,
             graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::TITLES_QUERY,
         ];
 
         assert!(graphql_docs::METADATA_BULK_QUERY.contains("metadataBulk"));
         assert!(graphql_docs::METADATA_BULK_QUERY.contains("external_ratings"));
-        assert!(graphql_docs::GET_SERIES_QUERY.contains("tagged_aliases"));
+        assert!(graphql_docs::TITLES_QUERY.contains("tagged_aliases"));
         assert!(
             queries
                 .iter()
@@ -3145,11 +3073,7 @@ mod tests {
     /// document the facts silently become empty everywhere, so pin the selections themselves.
     #[test]
     fn request_fact_selections_are_present_in_every_title_document() {
-        let queries = [
-            graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
-            graphql_docs::TITLES_QUERY,
-        ];
+        let queries = [graphql_docs::GET_MOVIE_QUERY, graphql_docs::TITLES_QUERY];
         for query in queries {
             for selection in [
                 "genres",
@@ -3394,6 +3318,117 @@ mod tests {
     }
 
     #[test]
+    fn series_mapper_carries_the_contiguous_absolute_scale() {
+        let episode =
+            |tvdb_id: i64, season: i32, number: i32, raw: &str, contiguous: Option<i32>| {
+                json!({
+                    "tvdb_id": tvdb_id, "episode_number": number, "season_number": season,
+                    "name": "", "aired": "", "runtime_minutes": 24, "is_filler": false,
+                    "is_recap": false, "overview": "", "absolute_number": raw,
+                    "contiguous_absolute_number": contiguous, "image_url": ""
+                })
+            };
+        let payload = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "episodes": [
+                    episode(8012, 1, 12, "12", Some(12)),
+                    episode(8900, 0, 1, "13", None),
+                    episode(8013, 1, 13, "14", Some(13))
+                ],
+                "episode_orders": [{
+                    "season_type": "absolute",
+                    "entries": [
+                        { "tvdb_id": 8013, "season_number": 1, "episode_number": 14, "absolute_number": 14, "contiguous_absolute_number": 13, "name": "" }
+                    ]
+                }],
+                "anime_numbering_bridge": {
+                    "generated_on": "2026-09-25",
+                    "corroborating_order": null,
+                    "seasons": [{
+                        "index": 2, "anidb_id": 4242, "anilist_id": null, "mal_id": null,
+                        "titles": ["Fixture Serial 2nd Season"],
+                        "ranges": [{
+                            "community_episode_start": 1, "community_episode_end": 12,
+                            "tvdb_season": 1, "tvdb_episode_start": 13, "tvdb_episode_end": 24
+                        }],
+                        "absolute_start": 14,
+                        "contiguous_absolute_start": 13,
+                        "episode_count": 12
+                    }]
+                }
+            }),
+        );
+        let item: SeriesItem = serde_json::from_value(payload).expect("series item should decode");
+
+        let series = series_metadata_from_item(item);
+
+        let contiguous = series
+            .episodes
+            .iter()
+            .map(|episode| {
+                (
+                    episode.absolute_number.as_str(),
+                    episode.contiguous_absolute_number,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contiguous,
+            vec![("12", Some(12)), ("13", None), ("14", Some(13))]
+        );
+        assert_eq!(
+            series.episode_orders[0].entries[0].contiguous_absolute_number,
+            Some(13)
+        );
+        let bridge = series
+            .anime_numbering_bridge
+            .expect("bridge should survive the mapper");
+        assert_eq!(bridge.seasons[0].absolute_start, Some(14));
+        assert_eq!(bridge.seasons[0].contiguous_absolute_start, Some(13));
+    }
+
+    #[test]
+    fn series_mapper_defaults_the_contiguous_scale_when_smg_omits_it() {
+        let payload = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "episodes": [{
+                    "tvdb_id": 8012, "episode_number": 12, "season_number": 1,
+                    "name": "", "aired": "", "runtime_minutes": 24, "is_filler": false,
+                    "is_recap": false, "overview": "", "absolute_number": "12", "image_url": ""
+                }],
+                "anime_numbering_bridge": {
+                    "generated_on": "2026-09-25",
+                    "seasons": [{
+                        "index": 1,
+                        "ranges": [{ "community_episode_start": 1, "tvdb_season": 1, "tvdb_episode_start": 1 }],
+                        "absolute_start": 1
+                    }]
+                }
+            }),
+        );
+        let item: SeriesItem = serde_json::from_value(payload).expect("series item should decode");
+
+        let series = series_metadata_from_item(item);
+
+        assert_eq!(series.episodes[0].contiguous_absolute_number, None);
+        let bridge = series.anime_numbering_bridge.expect("bridge");
+        assert_eq!(bridge.seasons[0].contiguous_absolute_start, None);
+    }
+
+    #[test]
+    fn series_queries_select_the_contiguous_absolute_scale() {
+        for query in [
+            graphql_docs::TITLES_QUERY,
+            graphql_docs::METADATA_BULK_QUERY,
+        ] {
+            assert!(query.contains("contiguous_absolute_number"));
+            assert!(query.contains("contiguous_absolute_start"));
+        }
+    }
+
+    #[test]
     fn series_mapper_defaults_episode_orders_when_smg_omits_them() {
         let item: SeriesItem = serde_json::from_value(minimal_series_item_fields())
             .expect("series item should decode");
@@ -3485,29 +3520,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_series_still_uses_single_title_query() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/graphql"))
-            .and(query_param("operationName", OP_GET_SERIES))
-            .respond_with(ResponseTemplate::new(200).set_body_json(series_payload(424536)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-
-        let series = client
-            .get_series(424536, "eng")
-            .await
-            .expect("single series request should still work");
-
-        assert_eq!(series.tvdb_id, 424536);
-        assert_eq!(series.name, "Fixture Series");
-        assert_eq!(series.target_key, None);
-        assert_fixture_credits(&series.credits);
-    }
-
-    #[tokio::test]
     async fn metadata_bulk_maps_credits_for_movies_and_series() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3571,7 +3583,7 @@ mod tests {
         let queries = [
             graphql_docs::METADATA_BULK_QUERY,
             graphql_docs::GET_MOVIE_QUERY,
-            graphql_docs::GET_SERIES_QUERY,
+            graphql_docs::TITLES_QUERY,
         ];
 
         for query in queries {
@@ -4169,6 +4181,30 @@ mod tests {
     }
 
     #[test]
+    fn affinity_signal_selections_request_smg_rail_eligibility() {
+        let queries = [
+            graphql_docs::DISCOVER_PUBLIC_FEED_QUERY,
+            graphql_docs::DISCOVERY_CONTEXT_SNAPSHOT_PAGE_QUERY,
+            graphql_docs::DISCOVERY_CONTEXT_CHANGES_QUERY,
+            graphql_docs::COLLECTION_COMPLETIONS_QUERY,
+            graphql_docs::TITLE_RECOMMENDATIONS_QUERY,
+            graphql_docs::GET_MOVIE_QUERY,
+            graphql_docs::METADATA_BULK_QUERY,
+            graphql_docs::TITLES_QUERY,
+        ];
+
+        for query in queries {
+            let selections = query.matches("affinity_signals {").count();
+            assert!(selections > 0);
+            assert_eq!(
+                query.matches("rail_eligible").count(),
+                selections,
+                "every affinity_signals selection must request rail_eligible"
+            );
+        }
+    }
+
+    #[test]
     fn discovery_title_applies_rating_provenance_as_external_ratings() {
         let mut item = scryer_application::DiscoveryTitle {
             rating_provenance: vec![scryer_application::DiscoveryRatingProvenance {
@@ -4596,6 +4632,35 @@ mod tests {
         assert!(graphql_docs::SEARCH_TITLES_BATCH_QUERY.contains("searchTitlesBatch"));
     }
 
+    /// SMG serves TMDB-primary series only to documents that declare the
+    /// capability, so every title-surface document Scryer sends
+    /// must carry it on its root field.
+    #[test]
+    fn every_title_surface_document_declares_tmdb_primary_series() {
+        for (field, document) in [
+            ("titles(", graphql_docs::TITLES_QUERY),
+            ("resolveTitles(", graphql_docs::RESOLVE_TITLES_QUERY),
+            ("searchTitles(", graphql_docs::SEARCH_TITLES_QUERY),
+            (
+                "searchTitlesMulti(",
+                graphql_docs::SEARCH_TITLES_MULTI_QUERY,
+            ),
+            (
+                "searchTitlesBatch(",
+                graphql_docs::SEARCH_TITLES_BATCH_QUERY,
+            ),
+        ] {
+            let root_call = document
+                .lines()
+                .find(|line| line.trim_start().starts_with(field))
+                .unwrap_or_else(|| panic!("{field} root field missing"));
+            assert!(
+                root_call.contains("clientCapabilities: [TMDB_PRIMARY_SERIES]"),
+                "{field} must declare TMDB_PRIMARY_SERIES: {root_call}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn get_movie_titles_chunks_below_the_gateway_id_limit() {
         // The gateway rejects `titles(ids:)` above fifty ids per request, so a
@@ -4603,7 +4668,6 @@ mod tests {
         // hundred titles at a time) must still be split into accepted chunks.
         const { assert!(super::METADATA_GATEWAY_MAX_TITLE_BULK_BATCH <= 50) };
 
-        let _guard = title_id_capability_test_lock().lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
@@ -4653,7 +4717,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_movie_titles_maps_tmdb_primary_movies_redirects_and_missing_ids() {
-        let _guard = title_id_capability_test_lock().lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
@@ -4696,118 +4759,213 @@ mod tests {
         assert_eq!(result.missing_ref_indexes, vec![1]);
     }
 
-    #[tokio::test]
-    async fn title_id_validation_error_flips_the_legacy_probe() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
-        super::LEGACY_TITLE_ID_ONLY_LOGGED.store(false, Ordering::Release);
+    fn tmdb_primary_series_titles_payload() -> serde_json::Value {
+        let series = merge_json(
+            minimal_series_item_fields(),
+            json!({
+                "id": 303,
+                "kind": "series",
+                "primary_source": "tmdb",
+                "tvdb_id": null,
+                "tmdb_id": 3030,
+                "name": "TMDB Primary Series",
+                "seasons": [
+                    { "tvdb_id": null, "tmdb_id": 71, "number": 1, "label": "Season 1", "episode_type": "official" }
+                ],
+                "episodes": [{
+                    "tvdb_id": null,
+                    "tmdb_id": 9101,
+                    "episode_number": 1,
+                    "season_number": 1,
+                    "name": "Pilot",
+                    "aired": "2024-01-01",
+                    "runtime_minutes": 42,
+                    "is_filler": false,
+                    "is_recap": false,
+                    "overview": "",
+                    "absolute_number": "",
+                    "contiguous_absolute_number": null,
+                    "image_url": ""
+                }],
+                "episode_orders": [{
+                    "season_type": "official",
+                    "seasons": [{ "season_number": 1, "name": "Season 1" }],
+                    "entries": [{
+                        "tvdb_id": null,
+                        "tmdb_id": 9101,
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "absolute_number": null,
+                        "contiguous_absolute_number": null,
+                        "name": "Pilot",
+                        "aired": "2024-01-01"
+                    }]
+                }],
+                "anime_numbering_bridge": null
+            }),
+        );
+        json!({
+            "data": {
+                "titles": {
+                    "movies": [],
+                    "series": [series],
+                    "missing_ids": [404],
+                    "redirects": [{ "from_id": 300, "to_id": 303 }]
+                }
+            }
+        })
+    }
 
+    #[tokio::test]
+    async fn get_series_titles_maps_tmdb_primary_series_redirects_and_missing_ids() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
             .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(tmdb_primary_series_titles_payload()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+
+        let result = client
+            .get_series_titles(
+                &[
+                    SeriesTitleRef {
+                        smg_id: Some(300),
+                        ..Default::default()
+                    },
+                    SeriesTitleRef {
+                        smg_id: Some(404),
+                        ..Default::default()
+                    },
+                ],
+                "eng",
+                true,
+                true,
+            )
+            .await
+            .expect("series title-id request should succeed");
+
+        let series = result.by_ref_index.get(&0).expect("redirected series");
+        assert_eq!(series.smg_id, Some(303));
+        assert_eq!(series.primary_source, "tmdb");
+        assert_eq!(series.tvdb_id, 0);
+        assert_eq!(series.tmdb_id, Some(3030));
+        assert_eq!(series.seasons[0].tvdb_id, 0);
+        assert_eq!(series.seasons[0].tmdb_id, Some(71));
+        assert_eq!(series.episodes[0].tvdb_id, 0);
+        assert_eq!(series.episodes[0].tmdb_id, Some(9101));
+        assert_eq!(series.episode_orders.len(), 1);
+        assert_eq!(series.episode_orders[0].entries[0].tvdb_id, 0);
+        assert_eq!(result.redirects, vec![(300, 303)]);
+        assert_eq!(result.missing_ref_indexes, vec![1]);
+
+        let requests = server.received_requests().await.expect("captured request");
+        let variables = requests[0]
+            .url
+            .query_pairs()
+            .find_map(|(name, value)| {
+                (name == "variables").then(|| {
+                    serde_json::from_str::<serde_json::Value>(&value).expect("variables JSON")
+                })
+            })
+            .expect("titles request carries variables");
+        assert_eq!(variables["includeEpisodes"], json!(true));
+        assert_eq!(variables["includeEpisodeOrders"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn get_series_titles_resolves_a_tvdb_series_without_an_smg_id_as_a_series() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_RESOLVE_TITLES))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errors": [{ "message": "Cannot query field \"titles\" on type \"Query\"." }]
+                "data": { "resolveTitles": [{
+                    "ref_index": 0,
+                    "resolved": true,
+                    "title_id": 505,
+                    "kind": "series",
+                    "primary_source": "tvdb",
+                    "redirected_from": null,
+                    "created": false,
+                    "external_ids": [],
+                    "reason": ""
+                }] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tvdb_series = merge_json(
+            minimal_series_item_fields(),
+            json!({ "id": 505, "kind": "series", "primary_source": "tvdb", "tmdb_id": 55 }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "titles": {
+                    "movies": [],
+                    "series": [tvdb_series],
+                    "missing_ids": [],
+                    "redirects": []
+                } }
             })))
             .expect(1)
             .mount(&server)
             .await;
         let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
 
-        let error = client
-            .get_movie_titles(
-                &[MovieTitleRef {
-                    smg_id: Some(202),
-                    tvdb_id: None,
-                    tmdb_id: None,
-                    imdb_id: None,
+        let result = client
+            .get_series_titles(
+                &[SeriesTitleRef {
+                    tvdb_id: Some(5151),
+                    ..Default::default()
                 }],
                 "eng",
+                true,
+                false,
             )
             .await
-            .expect_err("unknown title field should be unsupported");
-        assert!(
-            error
-                .to_string()
-                .contains("does not support title-id queries")
-        );
-        assert!(super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire));
+            .expect("series resolution then fetch should succeed");
 
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_string_contains(format!(
-                "\"operationName\":\"{}\"",
-                super::OP_SEARCH_TVDB
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_json(search_tvdb_payload()))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let legacy_search = client
-            .search_tvdb("fixture", "movie", None)
-            .await
-            .expect("legacy document should remain usable after the probe flips");
-        assert!(legacy_search.is_empty());
-        let requests = server
-            .received_requests()
-            .await
-            .expect("capture legacy fallback request");
-        let legacy_request = requests
+        let series = result.by_ref_index.get(&0).expect("resolved series");
+        assert_eq!(series.tvdb_id, 5151);
+        assert_eq!(series.smg_id, Some(505));
+        assert_eq!(series.primary_source, "tvdb");
+        let requests = server.received_requests().await.expect("captured requests");
+        let resolve_variables = requests
             .iter()
             .find(|request| {
-                request
-                    .body
-                    .windows(b"SearchTvdb".len())
-                    .any(|window| window == b"SearchTvdb")
+                request.url.query_pairs().any(|(name, value)| {
+                    name == "operationName" && value == super::OP_RESOLVE_TITLES
+                })
             })
-            .expect("legacy search request");
-        let legacy_body = std::str::from_utf8(&legacy_request.body).expect("legacy request UTF-8");
-        assert!(!legacy_body.contains("title_id"));
-
-        let error = client
-            .search_titles("fixture", "movie", 10, "eng", None)
-            .await
-            .expect_err("legacy-only client should reject title search without another request");
-        assert!(
-            error
-                .to_string()
-                .contains("does not support title-id queries")
+            .and_then(|request| {
+                request.url.query_pairs().find_map(|(name, value)| {
+                    (name == "variables").then(|| {
+                        serde_json::from_str::<serde_json::Value>(&value).expect("variables")
+                    })
+                })
+            })
+            .expect("resolve request variables");
+        assert_eq!(resolve_variables["kind"], json!("series"));
+        assert_eq!(
+            resolve_variables["refs"][0]["externalIds"][0],
+            json!({ "source": "tvdb", "kind": "series", "id": "5151" })
         );
-
-        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
-        super::LEGACY_TITLE_ID_ONLY_LOGGED.store(false, Ordering::Release);
-        super::LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS.store(0, Ordering::Release);
     }
 
-    fn reset_title_id_capability_probe() {
-        super::LEGACY_TITLE_ID_ONLY.store(false, Ordering::Release);
-        super::LEGACY_TITLE_ID_ONLY_LOGGED.store(false, Ordering::Release);
-        super::LEGACY_TITLE_ID_REPROBE_AFTER_UNIX_SECONDS.store(0, Ordering::Release);
-    }
-
-    #[tokio::test]
-    async fn healthy_title_id_response_reopens_the_legacy_capability_latch() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
-        super::LEGACY_TITLE_ID_ONLY.store(true, Ordering::Release);
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/graphql"))
-            .and(query_param("operationName", super::OP_TITLES))
-            .respond_with(ResponseTemplate::new(200).set_body_json(titles_payload()))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-
-        client
-            .get_movie_titles(&[movie_title_ref(100)], "eng")
-            .await
-            .expect("the re-probe should use the healthy title-id response");
-        assert!(!super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire));
-
-        reset_title_id_capability_probe();
+    #[test]
+    fn titles_document_selects_series_with_provider_typed_ids() {
+        let query = graphql_docs::TITLES_QUERY;
+        assert!(query.contains("movies {"));
+        assert!(query.contains("series {"));
+        assert!(query.contains("includeEpisodeOrders: $includeEpisodeOrders"));
+        assert!(query.contains("seasons { tvdb_id tmdb_id number label episode_type }"));
     }
 
     #[tokio::test]
@@ -4821,8 +4979,6 @@ mod tests {
             }
         }
 
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
@@ -4874,7 +5030,6 @@ mod tests {
 
         assert_eq!(result.by_ref_index[&0].smg_id, Some(202));
         assert!(result.missing_ref_indexes.is_empty());
-        reset_title_id_capability_probe();
     }
 
     fn unknown_root_field_error(field: &str) -> serde_json::Value {
@@ -4894,153 +5049,11 @@ mod tests {
         }
     }
 
-    /// An old gateway first met by `resolveTitles` names THAT field, not
-    /// `titles`. The probe has to recognise it or every caller keeps paying for
-    /// a request the gateway can never answer.
-    #[tokio::test]
-    async fn resolve_titles_unknown_root_field_flips_the_legacy_probe() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/graphql"))
-            .and(query_param("operationName", super::OP_RESOLVE_TITLES))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(unknown_root_field_error("resolveTitles")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-
-        let error = client
-            .resolve_movie_titles(&[movie_title_ref(202)], false)
-            .await
-            .expect_err("an unknown resolveTitles field is a capability error");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-        assert!(super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire));
-
-        // The flipped probe short-circuits the next caller without a request.
-        let error = client
-            .resolve_movie_titles(&[movie_title_ref(203)], false)
-            .await
-            .expect_err("a legacy-only gateway rejects title-id queries outright");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-
-        reset_title_id_capability_probe();
-    }
-
-    #[tokio::test]
-    async fn search_titles_unknown_root_field_flips_the_legacy_probe() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/graphql"))
-            .and(query_param("operationName", super::OP_SEARCH_TITLES))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(unknown_root_field_error("searchTitles")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-
-        let error = client
-            .search_titles("fixture", "movie", 10, "eng", None)
-            .await
-            .expect_err("an unknown searchTitles field is a capability error");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-        assert!(super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire));
-
-        let error = client
-            .search_titles("fixture", "movie", 10, "eng", None)
-            .await
-            .expect_err("a legacy-only gateway rejects title search outright");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-
-        reset_title_id_capability_probe();
-    }
-
-    #[tokio::test]
-    async fn search_titles_batch_unknown_root_field_flips_the_legacy_probe() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_string_contains(format!(
-                "\"operationName\":\"{}\"",
-                super::OP_SEARCH_TITLES_BATCH
-            )))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(unknown_root_field_error("searchTitlesBatch")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
-        let queries = vec![MetadataSearchQuery {
-            query: "Fixture Movie".to_string(),
-            type_hint: "movie".to_string(),
-            year: Some(2020),
-            imdb_id: None,
-            tmdb_id: None,
-            tvdb_id: None,
-        }];
-
-        let error = client
-            .search_titles_batch(&queries, "movie", "eng", false)
-            .await
-            .expect_err("an unknown searchTitlesBatch field is a capability error");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-        assert!(super::LEGACY_TITLE_ID_ONLY.load(Ordering::Acquire));
-
-        let error = client
-            .search_titles_batch(&queries, "movie", "eng", false)
-            .await
-            .expect_err("a legacy-only gateway rejects the title batch outright");
-        assert!(
-            matches!(&error, AppError::Repository(message)
-                if message == "metadata gateway does not support title-id queries"),
-            "unexpected error: {error}"
-        );
-
-        reset_title_id_capability_probe();
-    }
-
     /// Scryer's public search contract accepts 1..=100 and passes the limit
     /// through. A limit above the gateway's cap must be served at the cap, not
     /// turned into a validation error that fails the whole search.
     #[tokio::test]
     async fn search_titles_clamps_a_limit_above_the_gateway_cap() {
-        let _guard = title_id_capability_test_lock().lock().await;
-        reset_title_id_capability_probe();
-
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
@@ -5088,8 +5101,6 @@ mod tests {
             limits,
             vec![super::METADATA_GATEWAY_MAX_TITLE_SEARCH_LIMIT as i64, 1]
         );
-
-        reset_title_id_capability_probe();
     }
 
     #[tokio::test]
@@ -5155,8 +5166,95 @@ mod tests {
         }
     }
 
+    /// A title-surface error is an ordinary gateway error: it reaches the
+    /// caller with the gateway's own message, after exactly one request, and
+    /// leaves the next call to go to the gateway again.
     #[tokio::test]
-    async fn search_titles_multi_returns_errors_without_legacy_requests() {
+    async fn title_surface_errors_surface_unchanged_and_never_disable_later_calls() {
+        let error_body = json!({
+            "errors": [{ "message": "fixture title surface failure" }]
+        });
+        let server = MockServer::start().await;
+        for operation in [
+            super::OP_TITLES,
+            super::OP_RESOLVE_TITLES,
+            super::OP_SEARCH_TITLES,
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/graphql"))
+                .and(query_param("operationName", operation))
+                .respond_with(ResponseTemplate::new(200).set_body_json(error_body.clone()))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains(format!(
+                "\"operationName\":\"{}\"",
+                super::OP_SEARCH_TITLES_BATCH
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(error_body.clone()))
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+        let queries = vec![MetadataSearchQuery {
+            query: "Fixture Movie".to_string(),
+            type_hint: "movie".to_string(),
+            year: Some(2020),
+            imdb_id: None,
+            tmdb_id: None,
+            tvdb_id: None,
+        }];
+
+        // Each operation twice: the second call must reach the gateway too.
+        for _ in 0..2 {
+            let errors = [
+                client
+                    .get_movie_titles(&[movie_title_ref(202)], "eng")
+                    .await
+                    .map(|_| ())
+                    .expect_err("movie titles error"),
+                client
+                    .get_series_titles(
+                        &[SeriesTitleRef {
+                            smg_id: Some(303),
+                            ..Default::default()
+                        }],
+                        "eng",
+                        false,
+                        false,
+                    )
+                    .await
+                    .map(|_| ())
+                    .expect_err("series titles error"),
+                client
+                    .resolve_movie_titles(&[movie_title_ref(204)], false)
+                    .await
+                    .map(|_| ())
+                    .expect_err("resolve titles error"),
+                client
+                    .search_titles("fixture", "movie", 10, "eng", None)
+                    .await
+                    .map(|_| ())
+                    .expect_err("search titles error"),
+                client
+                    .search_titles_batch(&queries, "movie", "eng", false)
+                    .await
+                    .map(|_| ())
+                    .expect_err("search titles batch error"),
+            ];
+            for error in errors {
+                assert!(
+                    error.to_string().contains("fixture title surface failure"),
+                    "gateway error must surface unchanged, got {error}"
+                );
+            }
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn search_titles_multi_surfaces_gateway_errors_unchanged() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/graphql"))
@@ -5554,7 +5652,12 @@ struct TitlesResponse {
 
 #[derive(Deserialize)]
 struct TitlesResult {
+    #[serde(default)]
     movies: Vec<MovieItem>,
+    /// Absent from gateways and fixtures that predate series on the title
+    /// surface, and from documents that do not select it.
+    #[serde(default)]
+    series: Vec<SeriesItem>,
     #[serde(default)]
     missing_ids: Vec<i64>,
     #[serde(default)]
@@ -5603,7 +5706,7 @@ impl From<TitleResolutionItem> for TitleResolution {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TitleRefInput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5611,7 +5714,17 @@ struct TitleRefInput {
     external_ids: Vec<MetadataExternalIdInput>,
 }
 
-#[derive(Serialize)]
+impl TitleRefInput {
+    /// Whether the ref names a provider id stable enough to re-resolve a
+    /// deleted SMG title from (IMDb alone is not).
+    fn has_stable_provider_id(&self) -> bool {
+        self.external_ids
+            .iter()
+            .any(|external_id| matches!(external_id.source.as_str(), "tvdb" | "tmdb"))
+    }
+}
+
+#[derive(Clone, Serialize)]
 struct MetadataExternalIdInput {
     source: String,
     kind: String,
@@ -5619,37 +5732,99 @@ struct MetadataExternalIdInput {
 }
 
 fn title_ref_input_from_ref(reference: &MovieTitleRef) -> TitleRefInput {
+    title_ref_input(
+        reference.smg_id,
+        "movie",
+        reference.tvdb_id,
+        reference.tmdb_id,
+        reference.imdb_id.as_deref(),
+    )
+}
+
+fn series_title_ref_input_from_ref(reference: &SeriesTitleRef) -> TitleRefInput {
+    title_ref_input(
+        reference.smg_id,
+        "series",
+        reference.tvdb_id,
+        reference.tmdb_id,
+        reference.imdb_id.as_deref(),
+    )
+}
+
+fn title_ref_input(
+    smg_id: Option<i64>,
+    kind: &str,
+    tvdb_id: Option<i64>,
+    tmdb_id: Option<i64>,
+    imdb_id: Option<&str>,
+) -> TitleRefInput {
     let mut external_ids = Vec::with_capacity(3);
-    if let Some(tvdb_id) = reference.tvdb_id {
+    if let Some(tvdb_id) = tvdb_id {
         external_ids.push(MetadataExternalIdInput {
             source: "tvdb".to_string(),
-            kind: "movie".to_string(),
+            kind: kind.to_string(),
             id: tvdb_id.to_string(),
         });
     }
-    if let Some(tmdb_id) = reference.tmdb_id {
+    if let Some(tmdb_id) = tmdb_id {
         external_ids.push(MetadataExternalIdInput {
             source: "tmdb".to_string(),
-            kind: "movie".to_string(),
+            kind: kind.to_string(),
             id: tmdb_id.to_string(),
         });
     }
-    if let Some(imdb_id) = reference
-        .imdb_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(imdb_id) = imdb_id.map(str::trim).filter(|value| !value.is_empty()) {
         external_ids.push(MetadataExternalIdInput {
             source: "imdb".to_string(),
-            kind: "movie".to_string(),
-            id: imdb_id.trim().to_string(),
+            kind: kind.to_string(),
+            id: imdb_id.to_string(),
         });
     }
 
     TitleRefInput {
-        id: reference.smg_id,
+        id: smg_id,
         external_ids,
     }
+}
+
+/// Which half of a `titles` answer a title-id fetch reads, and what it asks for.
+#[derive(Clone, Copy, Debug)]
+enum TitleFetchKind {
+    Movie,
+    Series {
+        include_episodes: bool,
+        include_episode_orders: bool,
+    },
+}
+
+impl TitleFetchKind {
+    fn resolve_kind(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Series { .. } => "series",
+        }
+    }
+
+    fn titles_variables(self, ids: &[i64], language: &str) -> serde_json::Value {
+        match self {
+            Self::Movie => json!({ "ids": ids, "language": language }),
+            Self::Series {
+                include_episodes,
+                include_episode_orders,
+            } => json!({
+                "ids": ids,
+                "language": language,
+                "includeEpisodes": include_episodes,
+                "includeEpisodeOrders": include_episode_orders,
+            }),
+        }
+    }
+}
+
+struct TitleRefFetch<T> {
+    by_ref_index: HashMap<usize, T>,
+    redirects: Vec<(i64, i64)>,
+    missing_ref_indexes: Vec<usize>,
 }
 
 #[derive(Deserialize)]
@@ -5711,42 +5886,16 @@ struct MovieItem {
 struct MetadataExternalIdItem {
     source: String,
     /// The entity kind the id names at its source (`movie`, `series`,
-    /// `anime`, `title`, ...). SMG always selects it; a payload from an older
-    /// gateway may omit it.
-    #[serde(default)]
-    kind: Option<String>,
+    /// `anime`, `title`, ...). A blank kind leaves the id kindless.
+    kind: String,
     id: String,
-    /// SMG's own `source:kind:id` rendering, used as the fallback when a
-    /// payload carries `key` but no separate `kind`.
-    #[serde(default)]
-    key: Option<String>,
-}
-
-impl MetadataExternalIdItem {
-    /// The kind SMG reported, falling back to the middle segment of `key`.
-    fn resolved_kind(&self) -> Option<String> {
-        if let Some(kind) = self
-            .kind
-            .as_deref()
-            .and_then(scryer_domain::normalize_external_id_kind)
-        {
-            return Some(kind);
-        }
-        let key = self.key.as_deref()?;
-        let mut segments = key.split(':');
-        let (_source, kind, id) = (segments.next()?, segments.next()?, segments.next()?);
-        if id.trim().is_empty() {
-            return None;
-        }
-        scryer_domain::normalize_external_id_kind(kind)
-    }
 }
 
 fn external_ids_from_gateway(items: Vec<MetadataExternalIdItem>) -> Vec<ExternalId> {
     items
         .into_iter()
         .filter_map(|item| {
-            let kind = item.resolved_kind();
+            let kind = scryer_domain::normalize_external_id_kind(&item.kind);
             let source = item.source.trim();
             let value = item.id.trim();
             if source.is_empty() || value.is_empty() {
@@ -5926,6 +6075,8 @@ fn genres_from_gateway(genres: Vec<String>) -> Vec<String> {
 
 #[derive(Clone, Debug, Deserialize)]
 struct CanonicalTagItem {
+    #[serde(default)]
+    affinity_signals: Vec<scryer_domain::CanonicalMediaAffinitySignal>,
     key: String,
     category: String,
     name: String,
@@ -6018,6 +6169,7 @@ fn canonical_tags_from_gateway(items: Vec<CanonicalTagItem>) -> Vec<CanonicalMed
             }
 
             Some(CanonicalMediaTag {
+                affinity_signals: item.affinity_signals,
                 key: key.to_string(),
                 category: category.to_string(),
                 name: name.to_string(),
@@ -6169,18 +6321,18 @@ struct ArtworkEpisodeItem {
 }
 
 #[derive(Deserialize)]
-struct SeriesResponse {
-    series: SeriesResult,
-}
-
-#[derive(Deserialize)]
-struct SeriesResult {
-    series: SeriesItem,
-}
-
-#[derive(Deserialize)]
 struct SeriesItem {
-    tvdb_id: i64,
+    /// SMG's title id; only the `titles` operation selects it.
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    primary_source: String,
+    /// Always set by the TVDB-keyed documents; null for a TMDB-primary series
+    /// served by `titles`.
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     name: String,
     sort_name: String,
     slug: String,
@@ -6223,14 +6375,12 @@ struct SeriesItem {
     anime_mappings: Vec<AnimeMappingItem>,
     #[serde(default)]
     anime_movies: Vec<AnimeMovieItem>,
-    /// Absent on an SMG that predates the numbering bridge, and explicitly null
-    /// for a series with no qualifying community numbering.
+    /// Null for a series with no qualifying community numbering.
     #[serde(default)]
     anime_numbering_bridge: Option<AnimeNumberingBridgeItem>,
     /// TVDB's published episode orders (`official`, `alternate`, `dvd`, …).
-    /// Only present when the caller asked for them, and absent entirely on an
-    /// SMG that predates the field; `metadataBulk` has no argument for them at
-    /// all, so bulk hydration never carries orders.
+    /// Only present when the caller asked for them; `metadataBulk` has no
+    /// argument for them at all, so bulk hydration never carries orders.
     #[serde(default)]
     episode_orders: Vec<EpisodeOrderSetItem>,
 }
@@ -6245,14 +6395,17 @@ struct EpisodeOrderSetItem {
 
 #[derive(Deserialize)]
 struct EpisodeOrderEntryItem {
+    /// Null on a TMDB-primary series' single official order.
     #[serde(default)]
-    tvdb_id: i64,
+    tvdb_id: Option<i64>,
     #[serde(default)]
     season_number: Option<i32>,
     #[serde(default)]
     episode_number: Option<i32>,
     #[serde(default)]
     absolute_number: Option<i32>,
+    #[serde(default)]
+    contiguous_absolute_number: Option<i32>,
     #[serde(default)]
     name: String,
 }
@@ -6273,10 +6426,11 @@ fn episode_orders_from_gateway(items: Vec<EpisodeOrderSetItem>) -> Vec<EpisodeOr
                     .entries
                     .into_iter()
                     .map(|entry| EpisodeOrderEntry {
-                        tvdb_id: entry.tvdb_id,
+                        tvdb_id: entry.tvdb_id.unwrap_or_default(),
                         season_number: entry.season_number,
                         episode_number: entry.episode_number,
                         absolute_number: entry.absolute_number,
+                        contiguous_absolute_number: entry.contiguous_absolute_number,
                         name: entry.name,
                     })
                     .collect(),
@@ -6310,6 +6464,8 @@ struct AnimeCommunitySeasonItem {
     ranges: Vec<AnimeCommunitySeasonRangeItem>,
     #[serde(default)]
     absolute_start: Option<i32>,
+    #[serde(default)]
+    contiguous_absolute_start: Option<i32>,
     #[serde(default)]
     episode_count: Option<i32>,
 }
@@ -6359,6 +6515,7 @@ fn anime_numbering_bridge_from_gateway(
                     })
                     .collect(),
                 absolute_start: season.absolute_start,
+                contiguous_absolute_start: season.contiguous_absolute_start,
                 episode_count: season.episode_count,
             })
             .collect(),
@@ -6368,7 +6525,10 @@ fn anime_numbering_bridge_from_gateway(
 
 #[derive(Deserialize)]
 struct SeriesSeasonItem {
-    tvdb_id: i64,
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     number: i32,
     label: String,
     episode_type: String,
@@ -6376,7 +6536,10 @@ struct SeriesSeasonItem {
 
 #[derive(Deserialize)]
 struct SeriesEpisodeItem {
-    tvdb_id: i64,
+    #[serde(default)]
+    tvdb_id: Option<i64>,
+    #[serde(default)]
+    tmdb_id: Option<i64>,
     episode_number: i32,
     season_number: i32,
     name: String,
@@ -6386,6 +6549,8 @@ struct SeriesEpisodeItem {
     is_recap: bool,
     overview: String,
     absolute_number: String,
+    #[serde(default)]
+    contiguous_absolute_number: Option<i32>,
     #[serde(default)]
     image_url: String,
 }
@@ -6466,7 +6631,7 @@ impl MetadataGateway for MetadataGatewayClient {
         });
 
         let data: SearchTvdbResponse = self
-            .execute_legacy_compatible_apq(
+            .execute_graphql_apq(
                 OP_SEARCH_TVDB,
                 graphql_docs::SEARCH_TVDB_QUERY,
                 &self.search_hash,
@@ -6523,14 +6688,14 @@ impl MetadataGateway for MetadataGatewayClient {
                 })
                 .collect::<Vec<_>>();
             let data: SearchTvdbBatchResponse = self
-                .execute_legacy_compatible_post(
-                    OP_SEARCH_TVDB_BATCH,
-                    graphql_docs::SEARCH_TVDB_BATCH_QUERY,
-                    json!({
+                .execute_graphql(json!({
+                    "operationName": OP_SEARCH_TVDB_BATCH,
+                    "query": graphql_docs::SEARCH_TVDB_BATCH_QUERY,
+                    "variables": {
                         "requests": request_inputs,
                         "language": language,
-                    }),
-                )
+                    },
+                }))
                 .await?;
             let elapsed_ms = request_started_at.elapsed().as_millis() as u64;
             debug!(
@@ -6581,7 +6746,7 @@ impl MetadataGateway for MetadataGatewayClient {
                 results.insert(query_spec, items);
             }
 
-            tracing::info!(
+            tracing::debug!(
                 target: "import_scan_hint_debug",
                 request_count = chunk.len(),
                 exact_id_count,
@@ -6617,7 +6782,7 @@ impl MetadataGateway for MetadataGatewayClient {
         });
 
         let data: SearchTvdbRichResponse = self
-            .execute_legacy_compatible_apq(
+            .execute_graphql_apq(
                 OP_SEARCH_TVDB_RICH,
                 graphql_docs::SEARCH_TVDB_RICH_QUERY,
                 &self.search_rich_hash,
@@ -6663,7 +6828,7 @@ impl MetadataGateway for MetadataGatewayClient {
         });
 
         let data: SearchTvdbMultiResponse = self
-            .execute_legacy_compatible_apq(
+            .execute_graphql_apq(
                 OP_SEARCH_TVDB_MULTI,
                 graphql_docs::SEARCH_TVDB_MULTI_QUERY,
                 &self.search_multi_hash,
@@ -6709,7 +6874,7 @@ impl MetadataGateway for MetadataGatewayClient {
         });
 
         let data: MovieResponse = self
-            .execute_legacy_compatible_apq(
+            .execute_graphql_apq(
                 OP_GET_MOVIE,
                 graphql_docs::GET_MOVIE_QUERY,
                 &self.movie_hash,
@@ -6717,32 +6882,6 @@ impl MetadataGateway for MetadataGatewayClient {
             )
             .await?;
         Ok(movie_metadata_from_item(data.movie.movie))
-    }
-
-    async fn get_series(&self, tvdb_id: i64, language: &str) -> AppResult<SeriesMetadata> {
-        let variables = json!({
-            "id": tvdb_id.to_string(),
-            "includeEpisodes": true,
-            // Episode orders are what a release-numbering bridge is built from,
-            // and single-series hydration is the only caller that builds one.
-            "includeEpisodeOrders": true,
-            "language": language,
-        });
-
-        let data: SeriesResponse = self
-            .execute_graphql_apq(
-                OP_GET_SERIES,
-                graphql_docs::GET_SERIES_QUERY,
-                &self.series_hash,
-                variables,
-            )
-            .await?;
-        let s = data.series.series;
-
-        // One mapper, one place: `get_metadata_bulk` and `get_series` deserialize the same
-        // `SeriesItem`, so a widened selection cannot land in one read path and be dropped
-        // by the other.
-        Ok(series_metadata_from_item(s))
     }
 
     async fn get_metadata_bulk(
@@ -6796,185 +6935,67 @@ impl MetadataGateway for MetadataGatewayClient {
         if refs.is_empty() {
             return Ok(MovieTitleBulkResult::default());
         }
-        if Self::legacy_title_id_only() {
-            return Err(Self::title_id_queries_unsupported());
-        }
-
-        let mut title_ids_by_ref = refs
+        let inputs = refs
             .iter()
-            .map(|reference| reference.smg_id)
+            .map(title_ref_input_from_ref)
             .collect::<Vec<_>>();
-        let unresolved_refs = refs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, reference)| {
-                reference
-                    .smg_id
-                    .is_none()
-                    .then_some((index, reference.clone()))
+        let fetched = self
+            .fetch_titles_by_ref(&inputs, TitleFetchKind::Movie, language, |titles| {
+                titles
+                    .movies
+                    .into_iter()
+                    .filter_map(|movie| {
+                        let metadata = movie_metadata_from_item(movie);
+                        metadata.smg_id.map(|smg_id| (smg_id, metadata))
+                    })
+                    .collect()
             })
-            .collect::<Vec<_>>();
-        let mut missing_ref_indexes = HashSet::new();
-
-        if !unresolved_refs.is_empty() {
-            let resolution_refs = unresolved_refs
-                .iter()
-                .map(|(_, reference)| reference.clone())
-                .collect::<Vec<_>>();
-            for resolution in self
-                .resolve_movie_title_refs(&resolution_refs, false)
-                .await?
-            {
-                let Some((original_index, _)) = unresolved_refs.get(resolution.ref_index) else {
-                    continue;
-                };
-                if resolution.resolved {
-                    title_ids_by_ref[*original_index] = resolution.smg_id;
-                } else {
-                    missing_ref_indexes.insert(*original_index);
-                }
-            }
-        }
-
-        for (index, title_id) in title_ids_by_ref.iter().enumerate() {
-            if title_id.is_none() {
-                missing_ref_indexes.insert(index);
-            }
-        }
-
-        let unique_title_ids = title_ids_by_ref
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut movies_by_smg_id = HashMap::new();
-        let mut redirects = Vec::new();
-        let mut redirect_targets = HashMap::new();
-        let mut missing_smg_ids = HashSet::new();
-
-        for ids in unique_title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
-            let data: TitlesResponse = self
-                .execute_title_id_apq(
-                    OP_TITLES,
-                    graphql_docs::TITLES_QUERY,
-                    &self.titles_hash,
-                    json!({ "ids": ids, "language": language }),
-                )
-                .await?;
-            for redirect in data.titles.redirects {
-                redirect_targets.insert(redirect.from_id, redirect.to_id);
-                redirects.push((redirect.from_id, redirect.to_id));
-            }
-            missing_smg_ids.extend(data.titles.missing_ids);
-            for movie in data.titles.movies {
-                let metadata = movie_metadata_from_item(movie);
-                if let Some(smg_id) = metadata.smg_id {
-                    movies_by_smg_id.insert(smg_id, metadata);
-                }
-            }
-        }
-
-        // A stored SMG id can disappear without a redirect. Keep redirect
-        // handling above intact, but re-resolve a genuinely deleted id from
-        // its stable provider identity instead of repeatedly parking it.
-        let deleted_smg_refs = title_ids_by_ref
-            .iter()
-            .enumerate()
-            .filter_map(|(index, title_id)| {
-                let title_id = (*title_id)?;
-                let reference = refs.get(index)?;
-                (reference.smg_id == Some(title_id)
-                    && !redirect_targets.contains_key(&title_id)
-                    && missing_smg_ids.contains(&title_id)
-                    && (reference.tvdb_id.is_some() || reference.tmdb_id.is_some()))
-                .then(|| {
-                    (
-                        index,
-                        MovieTitleRef {
-                            smg_id: None,
-                            tvdb_id: reference.tvdb_id,
-                            tmdb_id: reference.tmdb_id,
-                            imdb_id: reference.imdb_id.clone(),
-                        },
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        if !deleted_smg_refs.is_empty() {
-            let resolution_refs = deleted_smg_refs
-                .iter()
-                .map(|(_, reference)| reference.clone())
-                .collect::<Vec<_>>();
-            for resolution in self
-                .resolve_movie_title_refs(&resolution_refs, false)
-                .await?
-            {
-                let Some((original_index, _)) = deleted_smg_refs.get(resolution.ref_index) else {
-                    continue;
-                };
-                if resolution.resolved {
-                    title_ids_by_ref[*original_index] = resolution.smg_id;
-                } else {
-                    missing_ref_indexes.insert(*original_index);
-                }
-            }
-
-            let refetched_title_ids = title_ids_by_ref
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|title_id| !unique_title_ids.contains(title_id))
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            for ids in refetched_title_ids.chunks(METADATA_GATEWAY_MAX_TITLE_BULK_BATCH) {
-                let data: TitlesResponse = self
-                    .execute_title_id_apq(
-                        OP_TITLES,
-                        graphql_docs::TITLES_QUERY,
-                        &self.titles_hash,
-                        json!({ "ids": ids, "language": language }),
-                    )
-                    .await?;
-                for redirect in data.titles.redirects {
-                    redirect_targets.insert(redirect.from_id, redirect.to_id);
-                    redirects.push((redirect.from_id, redirect.to_id));
-                }
-                missing_smg_ids.extend(data.titles.missing_ids);
-                for movie in data.titles.movies {
-                    let metadata = movie_metadata_from_item(movie);
-                    if let Some(smg_id) = metadata.smg_id {
-                        movies_by_smg_id.insert(smg_id, metadata);
-                    }
-                }
-            }
-        }
-
-        let mut by_ref_index = HashMap::new();
-        for (index, title_id) in title_ids_by_ref.into_iter().enumerate() {
-            let Some(title_id) = title_id else {
-                continue;
-            };
-            let resolved_id = redirect_targets.get(&title_id).copied().unwrap_or(title_id);
-            if missing_smg_ids.contains(&title_id) || missing_smg_ids.contains(&resolved_id) {
-                missing_ref_indexes.insert(index);
-                continue;
-            }
-            if let Some(movie) = movies_by_smg_id.get(&resolved_id) {
-                by_ref_index.insert(index, movie.clone());
-            } else {
-                missing_ref_indexes.insert(index);
-            }
-        }
-
-        let mut missing_ref_indexes = missing_ref_indexes.into_iter().collect::<Vec<_>>();
-        missing_ref_indexes.sort_unstable();
+            .await?;
         Ok(MovieTitleBulkResult {
-            by_ref_index,
-            redirects,
-            missing_ref_indexes,
+            by_ref_index: fetched.by_ref_index,
+            redirects: fetched.redirects,
+            missing_ref_indexes: fetched.missing_ref_indexes,
+        })
+    }
+
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        language: &str,
+        include_episodes: bool,
+        include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        if refs.is_empty() {
+            return Ok(SeriesTitleBulkResult::default());
+        }
+        let inputs = refs
+            .iter()
+            .map(series_title_ref_input_from_ref)
+            .collect::<Vec<_>>();
+        let fetched = self
+            .fetch_titles_by_ref(
+                &inputs,
+                TitleFetchKind::Series {
+                    include_episodes,
+                    include_episode_orders,
+                },
+                language,
+                |titles| {
+                    titles
+                        .series
+                        .into_iter()
+                        .filter_map(|series| {
+                            let metadata = series_metadata_from_item(series);
+                            metadata.smg_id.map(|smg_id| (smg_id, metadata))
+                        })
+                        .collect()
+                },
+            )
+            .await?;
+        Ok(SeriesTitleBulkResult {
+            by_ref_index: fetched.by_ref_index,
+            redirects: fetched.redirects,
+            missing_ref_indexes: fetched.missing_ref_indexes,
         })
     }
 
@@ -6987,6 +7008,45 @@ impl MetadataGateway for MetadataGatewayClient {
             return Ok(Vec::new());
         }
         self.resolve_movie_title_refs(refs, create_missing).await
+    }
+
+    async fn resolve_titles(
+        &self,
+        refs: &[TitleExternalRef],
+        kind: &str,
+        create_missing: bool,
+    ) -> AppResult<Vec<TitleResolution>> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.resolve_alias_title_refs(refs, kind, create_missing)
+            .await
+    }
+
+    async fn list_chart_catalog(
+        &self,
+        language: &str,
+    ) -> AppResult<Vec<scryer_application::lists::gateway::ListChartCatalogEntry>> {
+        self.fetch_list_chart_catalog(language).await
+    }
+
+    async fn list_chart_items(
+        &self,
+        provider: &str,
+        chart_key: &str,
+        scope: &str,
+        limit: i32,
+        language: &str,
+    ) -> AppResult<Vec<scryer_application::lists::gateway::ListChartItem>> {
+        self.fetch_list_chart_items(provider, chart_key, scope, limit, language)
+            .await
+    }
+
+    async fn list_imdb_user_list(
+        &self,
+        list_id: &str,
+    ) -> AppResult<Vec<scryer_application::lists::gateway::ListChartItem>> {
+        self.fetch_list_imdb_user_list(list_id).await
     }
 
     async fn search_titles_multi(
@@ -7028,9 +7088,8 @@ impl MetadataGateway for MetadataGatewayClient {
         // Scryer's public metadata search documents and clamps `limit` to
         // 1..=100 and passes it straight through, so a caller asking for more
         // than the gateway accepts must be served at the gateway's cap. A
-        // validation error here is not a capability error, so it would fail the
-        // whole search -- and in multi-search discard the series and anime
-        // results as well.
+        // validation error here would fail the whole search -- and in
+        // multi-search discard the series and anime results as well.
         let limit = limit.clamp(1, METADATA_GATEWAY_MAX_TITLE_SEARCH_LIMIT);
         if kind.trim().is_empty() {
             return Err(AppError::Validation(
@@ -7039,7 +7098,7 @@ impl MetadataGateway for MetadataGatewayClient {
         }
 
         let data: SearchTitlesResponse = self
-            .execute_title_id_apq(
+            .execute_graphql_apq(
                 OP_SEARCH_TITLES,
                 graphql_docs::SEARCH_TITLES_QUERY,
                 &self.search_titles_hash,
@@ -7092,16 +7151,16 @@ impl MetadataGateway for MetadataGatewayClient {
                 })
                 .collect::<Vec<_>>();
             let data: SearchTitlesBatchResponse = self
-                .execute_title_id_post(
-                    OP_SEARCH_TITLES_BATCH,
-                    graphql_docs::SEARCH_TITLES_BATCH_QUERY,
-                    json!({
+                .execute_graphql(json!({
+                    "operationName": OP_SEARCH_TITLES_BATCH,
+                    "query": graphql_docs::SEARCH_TITLES_BATCH_QUERY,
+                    "variables": {
                         "requests": request_inputs,
                         "kind": kind,
                         "language": language,
                         "createMissing": create_missing,
-                    }),
-                )
+                    },
+                }))
                 .await?;
             if data.search_titles_batch.len() != chunk.len() {
                 return Err(AppError::Repository(format!(

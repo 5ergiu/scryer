@@ -8,16 +8,13 @@ pub(crate) const EPISODE_PRE_AIR_WINDOW_HOURS: i64 = 6;
 
 /// Configurable thresholds for the acquisition upgrade policy.
 ///
-/// `cross_tier_min_delta` is gone. It existed because the quality tier used to
-/// be worth 3200/900/300 *inside* the score, so a whole-tier upgrade showed up
-/// as a delta above 1000 and the churn threshold had to be relaxed for it. Tier
-/// is now compared before score, in [`crate::admission`], so a delta only ever
-/// describes a same-tier comparison and one number covers it.
+/// Only a same-tier score delta is configurable. Tier is compared before score,
+/// in [`crate::admission`], so a better tier admits outright and a delta only
+/// ever describes a same-tier comparison. There is no upgrade cooldown, and so
+/// no large-delta bypass of one; [`crate::admission`] explains why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquisitionThresholds {
-    pub upgrade_cooldown_hours: i64,
     pub same_tier_min_delta: i32,
-    pub forced_upgrade_delta_bypass: i32,
 }
 
 impl Default for AcquisitionThresholds {
@@ -31,19 +28,13 @@ impl AcquisitionThresholds {
     pub fn for_persona(persona: &ScoringPersona) -> Self {
         match persona {
             ScoringPersona::Audiophile => Self {
-                upgrade_cooldown_hours: 12,
                 same_tier_min_delta: 50,
-                forced_upgrade_delta_bypass: 200,
             },
             ScoringPersona::Balanced | ScoringPersona::Compatible => Self {
-                upgrade_cooldown_hours: 24,
                 same_tier_min_delta: 200,
-                forced_upgrade_delta_bypass: 400,
             },
             ScoringPersona::Efficient => Self {
-                upgrade_cooldown_hours: 24,
                 same_tier_min_delta: 150,
-                forced_upgrade_delta_bypass: 500,
             },
         }
     }
@@ -150,22 +141,18 @@ mod tests {
     fn test_audiophile_thresholds_are_aggressive() {
         let t = AcquisitionThresholds::for_persona(&ScoringPersona::Audiophile);
         assert_eq!(t.same_tier_min_delta, 50);
-        assert_eq!(t.upgrade_cooldown_hours, 12);
-        assert_eq!(t.forced_upgrade_delta_bypass, 200);
     }
 
     #[test]
     fn test_balanced_thresholds_are_conservative() {
         let t = AcquisitionThresholds::for_persona(&ScoringPersona::Balanced);
         assert_eq!(t.same_tier_min_delta, 200);
-        assert_eq!(t.upgrade_cooldown_hours, 24);
     }
 
     #[test]
     fn test_efficient_thresholds_moderate() {
         let t = AcquisitionThresholds::for_persona(&ScoringPersona::Efficient);
         assert_eq!(t.same_tier_min_delta, 150);
-        assert_eq!(t.forced_upgrade_delta_bypass, 500);
     }
 
     #[test]

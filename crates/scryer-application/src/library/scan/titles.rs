@@ -275,7 +275,9 @@ pub(crate) fn find_existing_title_index_for_metadata_match(
     existing_titles_by_name: &TitleNameIndex,
     existing_titles_by_tvdb_id: &HashMap<String, usize>,
 ) -> Option<usize> {
-    if let Some(&index) = existing_titles_by_tvdb_id.get(&selected.tvdb_id) {
+    if !selected.tvdb_id.trim().is_empty()
+        && let Some(&index) = existing_titles_by_tvdb_id.get(&selected.tvdb_id)
+    {
         return Some(index);
     }
     let key = normalize_title_key(&selected.name);
@@ -289,6 +291,65 @@ pub(crate) fn find_existing_title_index_for_metadata_match(
                 .get(*index)
                 .is_some_and(|title| title_year_compatible(title, selected_year))
         })
+}
+
+/// The existing catalog series a metadata match refers to.
+///
+/// A TVDB-backed match binds by its TVDB id exactly as before. A match with no
+/// TVDB id (a TMDB-primary series) binds on SMG's title id, then its TMDB id,
+/// before falling back to the name and year. Those titles are rare, so they are
+/// found by walking the catalog rather than by another index.
+pub(crate) fn find_existing_series_title_index_for_metadata_match(
+    selected: &MetadataSearchItem,
+    existing_titles: &[Title],
+    existing_titles_by_name: &TitleNameIndex,
+    existing_titles_by_tvdb_id: &HashMap<String, usize>,
+) -> Option<usize> {
+    if selected.tvdb_id.trim().is_empty() {
+        let smg_id = selected.smg_id.map(|value| value.to_string());
+        let tmdb_id = selected
+            .external_ids
+            .iter()
+            .find(|external_id| {
+                external_id.source.eq_ignore_ascii_case("tmdb")
+                    && crate::normalize::external_id_kind_fits_facet(
+                        external_id,
+                        &MediaFacet::Series,
+                    )
+            })
+            .map(|external_id| external_id.value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        // TMDB reuses one number for a movie and a series, and an anime title
+        // also carries its mapped movies' TMDB ids (`tmdb:movie:N`), so a
+        // stored TMDB id binds only when it is kinded as a series or unkinded.
+        let has_id = |title: &Title, source: &str, value: &str| {
+            title.external_ids.iter().any(|external_id| {
+                external_id.source.eq_ignore_ascii_case(source)
+                    && external_id.value.trim() == value
+                    && crate::normalize::external_id_kind_fits_facet(
+                        external_id,
+                        &MediaFacet::Series,
+                    )
+            })
+        };
+        for (source, value) in [("smg", smg_id), ("tmdb", tmdb_id)] {
+            let Some(value) = value else {
+                continue;
+            };
+            if let Some(index) = existing_titles
+                .iter()
+                .position(|title| has_id(title, source, &value))
+            {
+                return Some(index);
+            }
+        }
+    }
+    find_existing_title_index_for_metadata_match(
+        selected,
+        existing_titles,
+        existing_titles_by_name,
+        existing_titles_by_tvdb_id,
+    )
 }
 
 pub(crate) fn find_existing_movie_title_index_for_metadata_match(

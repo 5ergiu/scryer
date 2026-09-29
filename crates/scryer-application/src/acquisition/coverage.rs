@@ -196,6 +196,9 @@ pub(crate) fn resolve_release_coverage(
                 .and_then(|value| value.parse::<u32>().ok())
                 .is_some_and(|season| episode.season_numbers.contains(&season))
     };
+    // Absolute numbers are matched on the title's one absolute scale; see
+    // `AbsoluteScale`.
+    let scale = scryer_domain::AbsoluteScale::for_catalog(episodes);
     if covered.is_empty() && !episode.absolute_episode_numbers.is_empty() {
         let wanted = episode
             .absolute_episode_numbers
@@ -203,10 +206,7 @@ pub(crate) fn resolve_release_coverage(
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
         for catalog_episode in episodes {
-            let absolute = catalog_episode
-                .absolute_number
-                .as_deref()
-                .and_then(|value| value.parse::<u32>().ok());
+            let absolute = scale.episode_absolute(catalog_episode);
             if within_named_seasons(catalog_episode)
                 && absolute.is_some_and(|number| wanted.contains(&number))
             {
@@ -219,10 +219,7 @@ pub(crate) fn resolve_release_coverage(
         && let Some(absolute_episode) = episode.absolute_episode
     {
         for catalog_episode in episodes {
-            let absolute = catalog_episode
-                .absolute_number
-                .as_deref()
-                .and_then(|value| value.parse::<u32>().ok());
+            let absolute = scale.episode_absolute(catalog_episode);
             if within_named_seasons(catalog_episode) && absolute == Some(absolute_episode) {
                 covered.push(catalog_episode.id.clone());
             }
@@ -286,10 +283,12 @@ pub(crate) fn parsed_numbering_contradicts_episode(
     false
 }
 
-/// [`parsed_numbering_contradicts_episode`] against a catalog episode record.
+/// [`parsed_numbering_contradicts_episode`] against a catalog episode record,
+/// whose absolute number is read on the title's absolute `scale`.
 pub(crate) fn parsed_release_contradicts_requested_episode(
     parsed: &ParsedReleaseMetadata,
     requested: &Episode,
+    scale: scryer_domain::AbsoluteScale,
 ) -> bool {
     let Some(episode) = parsed.episode.as_ref() else {
         return false;
@@ -303,10 +302,7 @@ pub(crate) fn parsed_release_contradicts_requested_episode(
             .episode_number
             .as_deref()
             .and_then(|value| value.parse::<u32>().ok()),
-        requested
-            .absolute_number
-            .as_deref()
-            .and_then(|value| value.parse::<u32>().ok()),
+        scale.episode_absolute(requested),
         episode,
     )
 }
@@ -647,7 +643,7 @@ fn coverage_from_episode_ids(mut episode_ids: Vec<String>) -> Option<ReleaseCove
     }
 }
 
-fn collection_id_for_season(collections: &[Collection], season: u32) -> Option<String> {
+pub(crate) fn collection_id_for_season(collections: &[Collection], season: u32) -> Option<String> {
     collections
         .iter()
         .find(|collection| collection.collection_index.trim().parse::<u32>().ok() == Some(season))
@@ -732,8 +728,10 @@ mod tests {
             is_filler: false,
             is_recap: false,
             absolute_number: absolute.map(str::to_string),
+            contiguous_absolute_number: None,
             overview: None,
             tvdb_id: None,
+            tmdb_id: None,
             image_url: None,
             monitored: true,
             created_at: Utc::now(),
@@ -933,15 +931,18 @@ mod tests {
         );
         assert!(parsed_release_contradicts_requested_episode(
             &parsed,
-            &episodes[2]
+            &episodes[2],
+            scryer_domain::AbsoluteScale::Raw,
         ));
         assert!(!parsed_release_contradicts_requested_episode(
             &parsed,
-            &episodes[0]
+            &episodes[0],
+            scryer_domain::AbsoluteScale::Raw,
         ));
         assert!(!parsed_release_contradicts_requested_episode(
             &parsed,
-            &episodes[1]
+            &episodes[1],
+            scryer_domain::AbsoluteScale::Raw,
         ));
     }
 
@@ -1172,13 +1173,15 @@ mod tests {
         });
         assert!(parsed_release_contradicts_requested_episode(
             &mismatched,
-            &requested
+            &requested,
+            scryer_domain::AbsoluteScale::Raw,
         ));
 
         let unnumbered = ParsedReleaseMetadata::empty("release", "test");
         assert!(!parsed_release_contradicts_requested_episode(
             &unnumbered,
-            &requested
+            &requested,
+            scryer_domain::AbsoluteScale::Raw,
         ));
     }
 

@@ -736,8 +736,9 @@ jobs:
           export SCRYER_SMG_GRAPHQL_URL="https://smg.scryer.media/graphql"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
           export RUST_MIN_STACK="4194304"
-          if [ "$NEXTEST_LANE" = "scryer-graphql" ]; then
+          if [ "$NEXTEST_LANE" = "scryer-graphql" ] || [ "$NEXTEST_LANE" = "scryer-binaries" ]; then
             # Unoptimized generated GraphQL dispatch plus nested scans exceeds 4 MiB.
+            # The binary's Arr-compat tests run the same GraphQL mutations for parity.
             export RUST_MIN_STACK="16777216"
           fi
           python3 .github/scripts/nextest_matrix.py run "$NEXTEST_LANE" 2>&1 | tee rust-nextest.log

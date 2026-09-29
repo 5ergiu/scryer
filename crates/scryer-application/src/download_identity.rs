@@ -384,14 +384,18 @@ pub(crate) async fn resolve_observed_client_job_memoized(
         .lock()
         .await;
     // A live resolution can itself have mutated the registry (it attaches or
-    // mints bindings). Anything decided against the older generation is
-    // retired rather than carried forward.
+    // mints bindings), and a concurrent writer can have moved it while this
+    // one ran. Anything decided against the older generation is retired rather
+    // than carried forward, this resolution included: it is returned, but the
+    // next tick resolves the row again against the current registry.
     let generation_now = app.runtime.acquisition.download_registry_generation();
     if cache.generation() != generation_now {
         cache.reset_to_generation(generation_now);
     }
     cache.prune();
-    cache.insert(key, &resolution);
+    if generation_now == generation {
+        cache.insert(key, &resolution);
+    }
     MemoizedObservation {
         resolution,
         submission_lookup_missed: false,

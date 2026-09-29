@@ -38,6 +38,7 @@ pub(crate) const fn retention_class_for_domain_event_type(
         | DomainEventType::MediaFileAnalyzed
         | DomainEventType::MediaFileRenamed
         | DomainEventType::MediaFileDeleted
+        | DomainEventType::MediaFileRestored
         | DomainEventType::MediaFileUpgraded
         | DomainEventType::ImportRequested
         | DomainEventType::ImportRecoveryCompleted
@@ -46,7 +47,12 @@ pub(crate) const fn retention_class_for_domain_event_type(
         | DomainEventType::SubtitleDownloaded
         | DomainEventType::SubtitleSearchFailed
         | DomainEventType::SeedingStarted
-        | DomainEventType::SeedingCompleted => DomainEventRetentionClass::UserFacingHistory,
+        | DomainEventType::SeedingCompleted
+        | DomainEventType::ListTitleAdded
+        | DomainEventType::ListRequestSubmitted
+        | DomainEventType::ListTitleLeft
+        | DomainEventType::ListSyncFailed
+        | DomainEventType::ListUnfollowed => DomainEventRetentionClass::UserFacingHistory,
         DomainEventType::LibraryScanStarted
         | DomainEventType::LibraryScanTitleDiscovered
         | DomainEventType::LibraryScanDeltaRecorded

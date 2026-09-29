@@ -98,6 +98,41 @@ struct StrategyExecutionOutcome {
     retry_after: Option<std::time::Duration>,
     rate_limited: bool,
     timed_out: bool,
+    /// Set when the strategy was not dispatched because the indexer's
+    /// pacing slot lay further out than an interactive search waits; carries
+    /// how long the wait would have been.
+    over_query_budget: Option<std::time::Duration>,
+}
+
+/// Strategies of one plan tier whose pacing slots come together, dispatched
+/// to the plugin as one plan once they do.
+struct PacedPlanSlice {
+    dispatch_at: tokio::time::Instant,
+    strategies: Vec<PreparedSearchStrategy>,
+    slots: Vec<PacingSlot>,
+}
+
+/// A plan strategy that never reached the indexer: paced out, cancelled, or
+/// past the search deadline before its slot came.
+fn undispatched_plan_outcome(
+    strategy: PreparedSearchStrategy,
+    error: AppError,
+    over_query_budget: Option<std::time::Duration>,
+) -> StrategyExecutionOutcome {
+    StrategyExecutionOutcome {
+        strategy_id: strategy.strategy_id,
+        label: strategy.labels.first().cloned().unwrap_or_default(),
+        labels: strategy.labels,
+        title_guard_mode: strategy.title_guard_mode,
+        response: Err(error),
+        page_reservation: None,
+        request_fired: false,
+        elapsed: std::time::Duration::ZERO,
+        retry_after: None,
+        rate_limited: false,
+        timed_out: false,
+        over_query_budget,
+    }
 }
 
 enum StrategyTierOutcomes {
@@ -610,6 +645,7 @@ impl SearchDiagnosticsContext {
                     candidate,
                     response.grab_current,
                     response.grab_max,
+                    now,
                 ),
                 created_at: now,
                 reusable_until: now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS),
@@ -864,6 +900,7 @@ fn normalized_candidate(
     candidate: &IndexerSearchResult,
     grab_current: Option<u32>,
     grab_max: Option<u32>,
+    now: DateTime<Utc>,
 ) -> NormalizedIndexerSearchCandidate {
     NormalizedIndexerSearchCandidate {
         provider_ref: candidate.guid.clone(),
@@ -902,6 +939,7 @@ fn normalized_candidate(
         protected: candidate_extra_bool(candidate, "protected"),
         tags: candidate_extra_strings(candidate, "tags"),
         provider_categories: candidate_extra_strings(candidate, "provider_categories"),
+        release_listing_json: scryer_application::search_result_listing_json(candidate, now),
     }
 }
 
@@ -1005,6 +1043,9 @@ fn reusable_candidate_from_record(
         auto_eligible: None,
         auto_decision_code: None,
         auto_decision_summary: None,
+        // The columns above rebuild only part of `extra`; rules read the
+        // listing facts from the snapshot stored with the result.
+        release_listing_json: normalized.release_listing_json,
     })
 }
 
@@ -1251,6 +1292,9 @@ enum IndexerSkipReason {
     DeadlineExpired,
     /// Every automatic strategy was learned-suppressed.
     StrategiesSuppressed,
+    /// An interactive search found the indexer's next pacing slot further out
+    /// than it waits.
+    QueryBudgetExceeded,
 }
 
 impl IndexerSkipReason {
@@ -1269,6 +1313,7 @@ impl IndexerSkipReason {
             Self::ClientSetupFailed => "client_setup_failed",
             Self::DeadlineExpired => "deadline_expired",
             Self::StrategiesSuppressed => "strategies_suppressed",
+            Self::QueryBudgetExceeded => "query_budget_exceeded",
         }
     }
 
@@ -1289,6 +1334,7 @@ impl IndexerSkipReason {
             Self::ClientSetupFailed => "client setup failed",
             Self::DeadlineExpired => "candidate deadline expired while queued",
             Self::StrategiesSuppressed => "all automatic search strategies are learned-suppressed",
+            Self::QueryBudgetExceeded => "over its query budget for an interactive search",
         }
     }
 }
@@ -1749,25 +1795,48 @@ fn query_ends_with_absolute_number(query: &str) -> bool {
 fn is_freetext_strategy_label(label: &str) -> bool {
     matches!(
         label,
-        "freetext" | "freetext_alias" | ANIME_ABSOLUTE_TEXT_LABEL | ANIME_COUR_TEXT_LABEL
+        "freetext"
+            | "freetext_alias"
+            | ANIME_ABSOLUTE_TEXT_LABEL
+            | ANIME_COUR_TEXT_LABEL
+            | ANIME_COUR_NAME_TEXT_LABEL
     )
 }
 
 /// An anime text query that asks for the episode by an absolute or
-/// cour-relative number rather than by its official coordinates.
+/// cour-relative number under the series name rather than by its official
+/// coordinates.
 const ANIME_ABSOLUTE_TEXT_LABEL: &str = "freetext_anime_abs";
 /// An anime text query that asks for the episode under the community cour's
 /// own season and episode numbering.
 const ANIME_COUR_TEXT_LABEL: &str = "freetext_anime_cour";
+/// An anime text query that asks for the episode under a cour's own name with
+/// its cour-relative episode number.
+const ANIME_COUR_NAME_TEXT_LABEL: &str = "freetext_anime_cour_name";
 
-/// The numbering form a text strategy asks under. Automatic search keeps one
-/// strategy per form so the community and absolute query forms survive the
-/// tier split next to the plain one.
-fn auto_text_numbering_form(label: &str) -> &'static str {
+/// The episode numbering a strategy asks under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoNumberingForm {
+    /// The official season and episode coordinates, or no episode numbering.
+    Official,
+    /// An absolute (or cour-relative) episode number.
+    Absolute,
+    /// The community cour's own season and episode numbering.
+    Community,
+    /// A cour's own name with its cour-relative episode number.
+    CourName,
+}
+
+/// The numbering form a strategy asks under. Automatic anime search keeps one
+/// strategy per form in each tier, so the absolute ID query runs next to the
+/// season/episode one, and the community, cour-name and absolute text query
+/// forms survive the tier split next to the plain one.
+fn auto_numbering_form(label: &str) -> AutoNumberingForm {
     match label {
-        ANIME_ABSOLUTE_TEXT_LABEL => ANIME_ABSOLUTE_TEXT_LABEL,
-        ANIME_COUR_TEXT_LABEL => ANIME_COUR_TEXT_LABEL,
-        _ => "",
+        "ids_abs" | ANIME_ABSOLUTE_TEXT_LABEL => AutoNumberingForm::Absolute,
+        ANIME_COUR_TEXT_LABEL => AutoNumberingForm::Community,
+        ANIME_COUR_NAME_TEXT_LABEL => AutoNumberingForm::CourName,
+        _ => AutoNumberingForm::Official,
     }
 }
 
@@ -1784,6 +1853,7 @@ fn learning_strategy_key(label: &str) -> Option<&'static str> {
         | "freetext_alias"
         | ANIME_ABSOLUTE_TEXT_LABEL
         | ANIME_COUR_TEXT_LABEL
+        | ANIME_COUR_NAME_TEXT_LABEL
         | "fallback" => Some("v2:freetext"),
         _ => None,
     }
@@ -1938,9 +2008,12 @@ fn split_auto_strategy_tiers(
     }
 
     // One anime episode is posted under several numberings, and each numbering
-    // is a different question to the indexer. Keeping a single text strategy
-    // there would throw away the community and absolute query forms, so
-    // automatic anime search keeps the best strategy of every numbering form.
+    // is a different question to the indexer. An indexer can index a release
+    // under its season/episode numbering only, so the absolute ID query alone
+    // misses it, and a usable absolute result keeps the text fallback from
+    // running. Keeping a single strategy per tier would throw those query
+    // forms away, so automatic anime search keeps the best strategy of every
+    // numbering form in both tiers.
     let keep_every_numbering_form = facet == "anime";
 
     let mut primary_candidates = Vec::new();
@@ -1954,7 +2027,7 @@ fn split_auto_strategy_tiers(
         }
     }
 
-    let take_text = |candidates: &mut Vec<SearchStrategy>| -> Vec<SearchStrategy> {
+    let take_tier = |candidates: &mut Vec<SearchStrategy>| -> Vec<SearchStrategy> {
         if keep_every_numbering_form {
             take_best_auto_strategy_per_numbering_form(candidates)
         } else {
@@ -1963,25 +2036,24 @@ fn split_auto_strategy_tiers(
     };
 
     if primary_candidates.is_empty() {
-        return (take_text(&mut fallback_candidates), Vec::new());
+        return (take_tier(&mut fallback_candidates), Vec::new());
     }
 
-    let primary = take_best_auto_strategy(&mut primary_candidates)
-        .into_iter()
-        .collect();
-    let fallback = take_text(&mut fallback_candidates);
+    let primary = take_tier(&mut primary_candidates);
+    let fallback = take_tier(&mut fallback_candidates);
 
     (primary, fallback)
 }
 
 /// The best strategy of each distinct numbering form, ordered by rank so the
-/// plain title query still leads.
+/// best-ranked query (the absolute ID query, or the plain title query) still
+/// leads.
 fn take_best_auto_strategy_per_numbering_form(
     strategies: &mut Vec<SearchStrategy>,
 ) -> Vec<SearchStrategy> {
-    let mut forms: Vec<&'static str> = Vec::new();
+    let mut forms: Vec<AutoNumberingForm> = Vec::new();
     for strategy in strategies.iter() {
-        let form = auto_text_numbering_form(&strategy.label);
+        let form = auto_numbering_form(&strategy.label);
         if !forms.contains(&form) {
             forms.push(form);
         }
@@ -1993,7 +2065,7 @@ fn take_best_auto_strategy_per_numbering_form(
             let index = strategies
                 .iter()
                 .enumerate()
-                .filter(|(_, strategy)| auto_text_numbering_form(&strategy.label) == form)
+                .filter(|(_, strategy)| auto_numbering_form(&strategy.label) == form)
                 .min_by_key(|(_, strategy)| auto_strategy_rank(strategy))
                 .map(|(index, _)| index)?;
             Some(strategies.remove(index))
@@ -2023,8 +2095,9 @@ fn auto_strategy_rank(strategy: &SearchStrategy) -> (u8, u8) {
         "fallback" => (1, 2),
         ANIME_ABSOLUTE_TEXT_LABEL => (1, 3),
         ANIME_COUR_TEXT_LABEL => (1, 4),
+        ANIME_COUR_NAME_TEXT_LABEL => (1, 5),
         _ if !strategy.ids.is_empty() => (0, 4),
-        _ => (1, 5),
+        _ => (1, 6),
     }
 }
 
@@ -2105,17 +2178,37 @@ const BACKGROUND_INDEXER_REQUEST_INTERVAL: std::time::Duration = std::time::Dura
 struct IndexerPacing {
     domain_key: String,
     interval: std::time::Duration,
+    /// The provider's sustained query budget. It belongs to the provider, not
+    /// to a lane, so every intent draws on it.
+    max_queries_per_minute: Option<u32>,
+    /// The longest a request waits for its slot. An interactive search has a
+    /// user waiting on it, so a slot further out than this skips the indexer
+    /// for that search instead of holding it for minutes. Background intents
+    /// have no deadline to defend and always wait.
+    max_wait: Option<std::time::Duration>,
+}
+
+/// The longest an interactive search waits for one indexer's pacing slot.
+const INTERACTIVE_PACING_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An indexer's next pacing slot lies further out than the request may wait.
+/// Nothing was reserved: the skipped request spends none of the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacingWaitExceeded {
+    wait: std::time::Duration,
 }
 
 impl IndexerPacing {
     /// The configured interval always applies. Background intents additionally
     /// obey the trickle floor, so a provider that declares a *slower* limit
     /// keeps it while one that declares a faster one (or none) still trickles.
+    /// Only an interactive search caps how long it waits for a slot.
     fn resolve(config: &IndexerConfig, intent: SchedulerIntent) -> Self {
         let configured = std::time::Duration::from_secs(
             config.rate_limit_seconds.unwrap_or_default().max(0) as u64,
         );
-        let interval = if matches!(intent, SchedulerIntent::InteractiveSearch) {
+        let interactive = matches!(intent, SchedulerIntent::InteractiveSearch);
+        let interval = if interactive {
             configured
         } else {
             configured.max(BACKGROUND_INDEXER_REQUEST_INTERVAL)
@@ -2123,6 +2216,88 @@ impl IndexerPacing {
         Self {
             domain_key: config.rate_limit_domain_key(),
             interval,
+            max_queries_per_minute: config
+                .max_queries_per_minute
+                .filter(|budget| *budget >= 1)
+                .map(|budget| u32::try_from(budget).unwrap_or(u32::MAX)),
+            max_wait: interactive.then_some(INTERACTIVE_PACING_MAX_WAIT),
+        }
+    }
+}
+
+/// The span a query budget counts over.
+const QUERY_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One domain's query budget as a log of the dispatch instants it has
+/// promised, oldest first.
+///
+/// A new request goes no earlier than 60 s after the budget-th most recent
+/// promised dispatch, so no 60 s window ever holds more requests than the
+/// budget, however they arrive. Slots are promised before the request sleeps;
+/// a request dropped before its slot comes takes its entry back out.
+#[derive(Debug, Default)]
+struct QueryBudgetLog {
+    /// `(dispatch instant, reservation id)`, sorted by instant.
+    promised: std::collections::VecDeque<(tokio::time::Instant, u64)>,
+}
+
+impl QueryBudgetLog {
+    /// The earliest instant at or after `now` that keeps every 60 s window at
+    /// or under `budget`. Entries a request at `now` can no longer share a
+    /// window with are forgotten first.
+    fn earliest_slot(&mut self, budget: usize, now: tokio::time::Instant) -> tokio::time::Instant {
+        while self
+            .promised
+            .front()
+            .is_some_and(|(at, _)| *at + QUERY_BUDGET_WINDOW <= now)
+        {
+            self.promised.pop_front();
+        }
+        match self.promised.len().checked_sub(budget) {
+            Some(index) => (self.promised[index].0 + QUERY_BUDGET_WINDOW).max(now),
+            None => now,
+        }
+    }
+
+    fn promise(&mut self, at: tokio::time::Instant, id: u64) {
+        let position = self
+            .promised
+            .partition_point(|(existing, _)| *existing <= at);
+        self.promised.insert(position, (at, id));
+    }
+
+    fn release(&mut self, id: u64) {
+        self.promised.retain(|(_, existing)| *existing != id);
+    }
+}
+
+#[derive(Default)]
+struct IndexerRateLimiterState {
+    next_request: HashMap<String, tokio::time::Instant>,
+    budgets: HashMap<String, QueryBudgetLog>,
+    next_reservation_id: u64,
+}
+
+/// Releases a promised budget slot if the request that holds it is dropped
+/// before the slot comes, so a cancelled search does not spend the budget.
+struct QueryBudgetReservation {
+    state: Arc<std::sync::Mutex<IndexerRateLimiterState>>,
+    domain_key: String,
+    id: u64,
+    dispatched: bool,
+}
+
+impl Drop for QueryBudgetReservation {
+    fn drop(&mut self) {
+        if self.dispatched {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(log) = state.budgets.get_mut(&self.domain_key) {
+            log.release(self.id);
         }
     }
 }
@@ -2130,36 +2305,157 @@ impl IndexerPacing {
 /// Per-rate-limit-domain request spacing.
 ///
 /// Host-level default pacing is owned by scryer-outbound-http; this limiter
-/// carries the per-indexer intervals that sit below it — the provider's own
-/// declared limit and the background trickle floor.
+/// carries the per-indexer limits that sit below it — the provider's own
+/// declared interval, its query budget, and the background trickle floor —
+/// and slows a domain to half pace while it recovers from a rate limit.
 #[derive(Clone)]
 struct IndexerRateLimiter {
-    next_request: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
+    state: Arc<std::sync::Mutex<IndexerRateLimiterState>>,
+    registry: RateLimitRegistry,
 }
 
 impl IndexerRateLimiter {
     fn new() -> Self {
+        Self::with_registry(RateLimitRegistry::indexers())
+    }
+
+    fn with_registry(registry: RateLimitRegistry) -> Self {
         Self {
-            next_request: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(std::sync::Mutex::new(IndexerRateLimiterState::default())),
+            registry,
         }
     }
 
-    /// Wait until this domain's next slot. A zero interval is ignored so the
-    /// shared outbound host RPS limiter stays the sole pacing owner for
-    /// interactive work against an indexer that declares no limit.
-    async fn acquire(&self, pacing: &IndexerPacing) {
-        if pacing.interval.is_zero() {
-            return;
+    /// Wait until this domain's next slot: the later of its interval slot and
+    /// the first moment its query budget has room in every 60 s window.
+    ///
+    /// A zero interval with no budget is ignored so the shared outbound host
+    /// RPS limiter stays the sole pacing owner for interactive work against an
+    /// indexer that declares no limit. While the domain has served a fallback
+    /// rate-limit cooldown but not yet proven its ladder rung, the interval
+    /// doubles (a zero one becomes the background trickle) and the budget is
+    /// halved.
+    ///
+    /// When the slot lies further out than the pacing's `max_wait`, nothing is
+    /// reserved and the request is refused at once with the wait it would
+    /// have needed.
+    async fn acquire(&self, pacing: &IndexerPacing) -> Result<(), PacingWaitExceeded> {
+        self.reserve(pacing)?.wait().await;
+        Ok(())
+    }
+
+    /// Reserve this domain's next slot without waiting for it, under the same
+    /// rules as [`Self::acquire`]. The slot is spent once [`PacingSlot::wait`]
+    /// completes; dropping it before then gives its budget entry back.
+    fn reserve(&self, pacing: &IndexerPacing) -> Result<PacingSlot, PacingWaitExceeded> {
+        let recovering = self
+            .registry
+            .destination_recovering(&DestinationKey::from(pacing.domain_key.as_str()));
+        let interval = match (recovering, pacing.interval.is_zero()) {
+            (false, _) => pacing.interval,
+            (true, true) => BACKGROUND_INDEXER_REQUEST_INTERVAL,
+            (true, false) => pacing.interval.saturating_mul(2),
+        };
+        if recovering {
+            debug!(
+                indexer_domain = %pacing.domain_key,
+                interval_ms = interval.as_millis() as u64,
+                "indexer is recovering from a rate limit; pacing at half speed"
+            );
+        }
+        if interval.is_zero() && pacing.max_queries_per_minute.is_none() {
+            return Ok(PacingSlot {
+                dispatch_at: tokio::time::Instant::now(),
+                reservation: None,
+            });
         }
 
-        let scheduled_at = {
+        // The guard is built only after the lock is released: its `Drop`
+        // relocks the same mutex, so an unwind inside the block must not drop it.
+        let (dispatch_at, reservation_id) = {
             let now = tokio::time::Instant::now();
-            let mut map = self.next_request.lock().await;
-            let scheduled_at = map.get(&pacing.domain_key).copied().unwrap_or(now).max(now);
-            map.insert(pacing.domain_key.clone(), scheduled_at + pacing.interval);
-            scheduled_at
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut dispatch_at = if interval.is_zero() {
+                now
+            } else {
+                state
+                    .next_request
+                    .get(&pacing.domain_key)
+                    .copied()
+                    .unwrap_or(now)
+                    .max(now)
+            };
+            let budget = pacing.max_queries_per_minute.map(|budget| {
+                let budget = budget as usize;
+                if recovering {
+                    (budget / 2).max(1)
+                } else {
+                    budget
+                }
+            });
+            match budget {
+                Some(budget) => {
+                    let log = state.budgets.entry(pacing.domain_key.clone()).or_default();
+                    dispatch_at = dispatch_at.max(log.earliest_slot(budget, now));
+                }
+                None => {
+                    state.budgets.remove(&pacing.domain_key);
+                }
+            }
+            // Refuse before promising anything, so a request that will not
+            // wait leaves both the budget and the interval slot untouched.
+            let wait = dispatch_at.saturating_duration_since(now);
+            if pacing.max_wait.is_some_and(|max_wait| wait > max_wait) {
+                return Err(PacingWaitExceeded { wait });
+            }
+            let reservation_id = budget.map(|_| {
+                let id = state.next_reservation_id;
+                state.next_reservation_id += 1;
+                state
+                    .budgets
+                    .entry(pacing.domain_key.clone())
+                    .or_default()
+                    .promise(dispatch_at, id);
+                id
+            });
+            if !interval.is_zero() {
+                let next_slot = dispatch_at.checked_add(interval).unwrap_or(dispatch_at);
+                state
+                    .next_request
+                    .insert(pacing.domain_key.clone(), next_slot);
+            }
+            (dispatch_at, reservation_id)
         };
-        tokio::time::sleep_until(scheduled_at).await;
+        let reservation = reservation_id.map(|id| QueryBudgetReservation {
+            state: self.state.clone(),
+            domain_key: pacing.domain_key.clone(),
+            id,
+            dispatched: false,
+        });
+        Ok(PacingSlot {
+            dispatch_at,
+            reservation,
+        })
+    }
+}
+
+/// One reserved pacing slot for one indexer request.
+struct PacingSlot {
+    dispatch_at: tokio::time::Instant,
+    reservation: Option<QueryBudgetReservation>,
+}
+
+impl PacingSlot {
+    /// Wait until the slot comes; the request is then dispatched and its
+    /// budget entry stays spent.
+    async fn wait(mut self) {
+        tokio::time::sleep_until(self.dispatch_at).await;
+        if let Some(reservation) = self.reservation.as_mut() {
+            reservation.dispatched = true;
+        }
     }
 }
 
@@ -2775,13 +3071,38 @@ impl MultiIndexerSearchClient {
         is_rss_request: bool,
         learning_context: Option<&IndexerSearchLearningContext>,
     ) -> Arc<Semaphore> {
-        let background_pass = mode == SearchMode::Auto
-            && (is_rss_request
-                || learning_context.is_some_and(|context| context.candidate_reuse_allowed));
-        if background_pass {
+        if Self::is_background_pass(mode, is_rss_request, learning_context) {
             self.background_search_limit.clone()
         } else {
             self.interactive_search_limit.clone()
+        }
+    }
+
+    /// Whether a search pass belongs to a machine-initiated sweep (RSS or a
+    /// consenting convergence lane) rather than to someone waiting on it.
+    fn is_background_pass(
+        mode: SearchMode,
+        is_rss_request: bool,
+        learning_context: Option<&IndexerSearchLearningContext>,
+    ) -> bool {
+        mode == SearchMode::Auto
+            && (is_rss_request
+                || learning_context.is_some_and(|context| context.candidate_reuse_allowed))
+    }
+
+    /// The pacing class for a pass's indexer requests. It follows the same
+    /// lane split as the search semaphore: an operator's Auto-mode search (for
+    /// example a title walk someone started) is paced as interactive, while
+    /// RSS and the background convergence lanes keep the background trickle.
+    fn pacing_intent(
+        mode: SearchMode,
+        is_rss_request: bool,
+        learning_context: Option<&IndexerSearchLearningContext>,
+    ) -> SchedulerIntent {
+        if is_rss_request || Self::is_background_pass(mode, is_rss_request, learning_context) {
+            Self::scheduler_intent(mode, is_rss_request)
+        } else {
+            SchedulerIntent::InteractiveSearch
         }
     }
 
@@ -3149,7 +3470,26 @@ impl MultiIndexerSearchClient {
                 )
                 .await
                 {
-                    Ok(()) => {}
+                    Ok(Ok(())) => {}
+                    Ok(Err(PacingWaitExceeded { wait })) => {
+                        return StrategyExecutionOutcome {
+                            strategy_id: strategy_id.clone(),
+                            labels: strategy_labels.clone(),
+                            label: strategy_label,
+                            title_guard_mode,
+                            request_fired: false,
+                            response: Err(AppError::Repository(format!(
+                                "indexer is over its query budget; next slot in {}s",
+                                wait.as_secs()
+                            ))),
+                            page_reservation: None,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out: false,
+                            over_query_budget: Some(wait),
+                        };
+                    }
                     Err(SearchWindowError::Cancelled) => {
                         return StrategyExecutionOutcome {
                             strategy_id: strategy_id.clone(),
@@ -3163,6 +3503,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         };
                     }
                     Err(SearchWindowError::DeadlineExpired) => {
@@ -3180,6 +3521,7 @@ impl MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         };
                     }
                 }
@@ -3260,6 +3602,7 @@ impl MultiIndexerSearchClient {
                                         retry_after: None,
                                         rate_limited: false,
                                         timed_out: false,
+                                        over_query_budget: None,
                                     };
                                 }
                                 reservation = page_sink.reserve() => reservation,
@@ -3279,6 +3622,7 @@ impl MultiIndexerSearchClient {
                                     retry_after: None,
                                     rate_limited: false,
                                     timed_out: false,
+                                    over_query_budget: None,
                                 };
                             };
                             Some(reservation)
@@ -3298,6 +3642,7 @@ impl MultiIndexerSearchClient {
                             retry_after,
                             rate_limited,
                             timed_out,
+                            over_query_budget: None,
                         };
                     }
                     Err(SearchPermitError::Cancelled) => {
@@ -3323,6 +3668,7 @@ impl MultiIndexerSearchClient {
                     retry_after: None,
                     rate_limited: false,
                     timed_out: false,
+                    over_query_budget: None,
                 }
             });
         }
@@ -3362,286 +3708,62 @@ impl MultiIndexerSearchClient {
         let plan_cancel_token = context.cancel_token.child_token();
         let cancel_on_drop = plan_cancel_token.clone();
         let controller = tokio::spawn(async move {
-            let plan_id = uuid::Uuid::new_v4().to_string();
-            let mut expected = strategies
-                .iter()
-                .map(|strategy| (strategy.strategy_id.clone(), strategy.clone()))
-                .collect::<HashMap<_, _>>();
-            let requests = strategies
-                .iter()
-                .map(|strategy| strategy.request.clone())
-                .collect();
-
-            let permit = match initial_permit {
-                Some(permit) => Ok(permit),
-                None => {
-                    acquire_search_permit(
-                        context.search_limit.clone(),
-                        &plan_cancel_token,
-                        context.deadline_at,
-                    )
-                    .await
-                }
-            };
-            let permit = match permit {
-                Ok(permit) => permit,
-                Err(error) => {
-                    let timed_out = matches!(error, SearchPermitError::DeadlineExpired);
-                    let message = match error {
-                        SearchPermitError::Cancelled => {
-                            "indexer strategy plan canceled".to_string()
-                        }
-                        SearchPermitError::DeadlineExpired => {
-                            "indexer search timed out before plan dispatch".to_string()
-                        }
-                        SearchPermitError::Closed(error) => {
-                            format!("indexer search limiter closed: {error}")
-                        }
-                    };
-                    for strategy in expected.into_values() {
-                        if outcome_tx
-                            .send(StrategyExecutionOutcome {
-                                strategy_id: strategy.strategy_id,
-                                label: strategy.labels.first().cloned().unwrap_or_default(),
-                                labels: strategy.labels,
-                                title_guard_mode: strategy.title_guard_mode,
-                                response: Err(AppError::Repository(message.clone())),
-                                page_reservation: None,
-                                request_fired: false,
-                                elapsed: std::time::Duration::ZERO,
-                                retry_after: None,
-                                rate_limited: false,
-                                timed_out,
-                            })
-                            .await
-                            .is_err()
+            // The plugin fires a plan's strategies itself and the host cannot
+            // gate the requests inside it, so every strategy reserves its
+            // pacing slot here, up front and in order — as the legacy tier's
+            // concurrently spawned strategies do — and the tier is dispatched
+            // as one plan per group of strategies whose slots come together.
+            // An unpaced indexer keeps a single plan; a paced one sends each
+            // strategy when its own slot comes. N strategies cost N slots.
+            let mut slices = Vec::<PacedPlanSlice>::new();
+            for strategy in strategies {
+                match context.rate_limiter.reserve(&context.pacing) {
+                    Ok(slot) => match slices.last_mut() {
+                        Some(slice)
+                            if slot.dispatch_at
+                                <= slice.dispatch_at.max(tokio::time::Instant::now()) =>
                         {
-                            plan_cancel_token.cancel();
-                            break;
+                            slice.strategies.push(strategy);
+                            slice.slots.push(slot);
                         }
-                    }
-                    return;
-                }
-            };
-
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-            let event_sink = IndexerSearchStrategyEventSink::new(event_tx);
-            let request = IndexerSearchPlanRequest {
-                plan_id: plan_id.clone(),
-                strategies: requests,
-            };
-            let client = context.client.clone();
-            let operation = context.operation;
-            let mode = context.mode;
-            let request_cancel = plan_cancel_token.child_token();
-            let request_deadline =
-                effective_request_deadline(context.search_timeout, context.deadline_at);
-            let request_window_cancel = plan_cancel_token.clone();
-            let started_at = std::time::Instant::now();
-            let invocation = tokio::spawn(async move {
-                let _permit = permit;
-                match within_search_window(
-                    client.search_plan(request, mode, operation, request_cancel, event_sink),
-                    &request_window_cancel,
-                    Some(request_deadline),
-                )
-                .await
-                {
-                    Ok(result) => (result, false),
-                    Err(SearchWindowError::Cancelled) => (
-                        Err(AppError::canceled("indexer strategy plan canceled")),
-                        false,
-                    ),
-                    Err(SearchWindowError::DeadlineExpired) => (
-                        Err(AppError::Repository("indexer search plan timed out".into())),
-                        true,
-                    ),
-                }
-            });
-
-            let mut invocation = Some(invocation);
-            let mut invocation_result = None;
-            let mut emitted = HashSet::new();
-            let mut protocol_error = None::<String>;
-            while invocation.is_some() || !event_rx.is_closed() || !event_rx.is_empty() {
-                tokio::select! {
-                    event = event_rx.recv(), if !event_rx.is_closed() || !event_rx.is_empty() => {
-                        let Some(IndexerSearchStrategyEvent { strategy_id, response }) = event else {
-                            continue;
-                        };
-                        let Some(strategy) = expected.get(&strategy_id).cloned() else {
-                            protocol_error = Some(format!("indexer strategy plan emitted unknown strategy {strategy_id}"));
-                            continue;
-                        };
-                        if !emitted.insert(strategy_id.clone()) {
-                            protocol_error = Some(format!("indexer strategy plan emitted duplicate strategy {strategy_id}"));
-                            continue;
-                        }
-                        let rate_limit_signal = response
-                            .as_ref()
-                            .err()
-                            .and_then(rate_limit_signal_from_error);
-                        let retry_after = response.as_ref().err().and_then(|error| {
-                            strategy_retry_after(error, rate_limit_signal.as_ref())
-                        });
-                        let page_reservation = if response
-                            .as_ref()
-                            .is_ok_and(|response| !response.results.is_empty())
-                        {
-                            tokio::select! {
-                                _ = plan_cancel_token.cancelled() => None,
-                                reservation = page_sink.reserve() => reservation,
-                            }
-                        } else {
-                            None
-                        };
-                        if outcome_tx
-                            .send(StrategyExecutionOutcome {
-                                strategy_id,
-                                label: strategy.labels.first().cloned().unwrap_or_default(),
-                                labels: strategy.labels,
-                                title_guard_mode: strategy.title_guard_mode,
-                                request_fired: true,
-                                response,
-                                page_reservation,
-                                elapsed: started_at.elapsed(),
-                                retry_after,
-                                rate_limited: rate_limit_signal.is_some(),
-                                timed_out: false,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            plan_cancel_token.cancel();
-                            break;
-                        }
-                    }
-                    joined = async { invocation.as_mut().expect("guarded invocation").await }, if invocation.is_some() => {
-                        invocation_result = Some(match joined {
-                            Ok(result) => result,
-                            Err(error) => (
-                                Err(AppError::Repository(format!("indexer strategy plan task failed: {error}"))),
-                                false,
-                            ),
-                        });
-                        invocation = None;
-                    }
-                }
-                if invocation.is_none() && event_rx.is_empty() {
-                    break;
-                }
-            }
-
-            let (summary, timed_out) = invocation_result.unwrap_or_else(|| {
-                (
-                    Err(AppError::Repository(
-                        "indexer strategy plan ended without a summary".to_string(),
-                    )),
-                    false,
-                )
-            });
-            let invocation_error = match summary {
-                Ok(summary) => {
-                    if summary.plan_id != plan_id {
-                        protocol_error =
-                            Some("indexer strategy plan summary ID mismatch".to_string());
-                    }
-                    let summary_id_count = summary.emitted_strategy_ids.len();
-                    let summary_ids = summary
-                        .emitted_strategy_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>();
-                    if summary_ids.len() != summary_id_count || summary_ids != emitted {
-                        protocol_error = Some(
-                            "indexer strategy plan summary did not match emitted events"
-                                .to_string(),
+                        _ => slices.push(PacedPlanSlice {
+                            dispatch_at: slot.dispatch_at,
+                            strategies: vec![strategy],
+                            slots: vec![slot],
+                        }),
+                    },
+                    Err(PacingWaitExceeded { wait }) => {
+                        let outcome = undispatched_plan_outcome(
+                            strategy,
+                            AppError::Repository(format!(
+                                "indexer is over its query budget; next slot in {}s",
+                                wait.as_secs()
+                            )),
+                            Some(wait),
                         );
-                    } else if emitted.len() != expected.len()
-                        || expected
-                            .keys()
-                            .any(|strategy_id| !emitted.contains(strategy_id))
-                    {
-                        protocol_error =
-                            Some("indexer strategy plan omitted a submitted strategy".to_string());
-                    }
-                    None
-                }
-                Err(error) => Some(error.to_string()),
-            };
-
-            if let Some(error) = protocol_error.as_deref() {
-                if outcome_tx
-                    .send(StrategyExecutionOutcome {
-                        strategy_id: format!("protocol:{plan_id}"),
-                        label: "protocol".to_string(),
-                        labels: vec!["protocol".to_string()],
-                        title_guard_mode: TitleGuardMode::SkipTitleMatch,
-                        response: Err(AppError::Repository(error.to_string())),
-                        page_reservation: None,
-                        request_fired: true,
-                        elapsed: started_at.elapsed(),
-                        retry_after: None,
-                        rate_limited: false,
-                        timed_out,
-                    })
-                    .await
-                    .is_err()
-                {
-                    plan_cancel_token.cancel();
-                    return;
-                }
-                for strategy in expected.values() {
-                    if outcome_tx
-                        .send(StrategyExecutionOutcome {
-                            strategy_id: strategy.strategy_id.clone(),
-                            label: strategy.labels.first().cloned().unwrap_or_default(),
-                            labels: strategy.labels.clone(),
-                            title_guard_mode: strategy.title_guard_mode,
-                            response: Err(AppError::Repository(error.to_string())),
-                            page_reservation: None,
-                            request_fired: true,
-                            elapsed: started_at.elapsed(),
-                            retry_after: None,
-                            rate_limited: false,
-                            timed_out,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        plan_cancel_token.cancel();
-                        return;
-                    }
-                }
-            } else {
-                for strategy_id in &emitted {
-                    expected.remove(strategy_id);
-                }
-                let missing_error = invocation_error
-                    .as_deref()
-                    .unwrap_or("indexer strategy plan omitted a strategy result");
-                for strategy in expected.into_values() {
-                    if outcome_tx
-                        .send(StrategyExecutionOutcome {
-                            strategy_id: strategy.strategy_id,
-                            label: strategy.labels.first().cloned().unwrap_or_default(),
-                            labels: strategy.labels,
-                            title_guard_mode: strategy.title_guard_mode,
-                            response: Err(AppError::Repository(missing_error.to_string())),
-                            page_reservation: None,
-                            request_fired: true,
-                            elapsed: started_at.elapsed(),
-                            retry_after: None,
-                            rate_limited: false,
-                            timed_out,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        plan_cancel_token.cancel();
-                        return;
+                        if outcome_tx.send(outcome).await.is_err() {
+                            plan_cancel_token.cancel();
+                            return;
+                        }
                     }
                 }
             }
+
+            let mut initial_permit = initial_permit;
+            let slices = slices
+                .into_iter()
+                .map(|slice| {
+                    Self::run_paced_plan_slice(
+                        &context,
+                        slice,
+                        initial_permit.take(),
+                        &page_sink,
+                        &outcome_tx,
+                        &plan_cancel_token,
+                    )
+                })
+                .collect::<Vec<_>>();
+            futures_util::future::join_all(slices).await;
         });
 
         StrategyTierOutcomes::Plan(StrategyPlanOutcomeStream {
@@ -3649,6 +3771,352 @@ impl MultiIndexerSearchClient {
             controller,
             cancel_token: cancel_on_drop,
         })
+    }
+
+    /// Wait for one slice's pacing slots, then dispatch its strategies as one
+    /// plan. A slice that never reaches its slot reports each strategy as not
+    /// dispatched, exactly as the legacy tier does.
+    async fn run_paced_plan_slice(
+        context: &StrategyTierContext,
+        slice: PacedPlanSlice,
+        initial_permit: Option<OwnedSemaphorePermit>,
+        page_sink: &IndexerSearchPageSink,
+        outcome_tx: &tokio::sync::mpsc::Sender<StrategyExecutionOutcome>,
+        plan_cancel_token: &CancellationToken,
+    ) {
+        let PacedPlanSlice {
+            strategies, slots, ..
+        } = slice;
+        // Pace before taking a concurrency permit, like the legacy tier.
+        let paced = within_search_window(
+            async move {
+                for slot in slots {
+                    slot.wait().await;
+                }
+            },
+            plan_cancel_token,
+            context.deadline_at,
+        )
+        .await;
+        if let Err(error) = paced {
+            for strategy in strategies {
+                let response = match error {
+                    SearchWindowError::Cancelled => AppError::canceled("indexer strategy canceled"),
+                    SearchWindowError::DeadlineExpired => {
+                        AppError::Repository("indexer search timed out before dispatch".into())
+                    }
+                };
+                if outcome_tx
+                    .send(undispatched_plan_outcome(strategy, response, None))
+                    .await
+                    .is_err()
+                {
+                    plan_cancel_token.cancel();
+                    return;
+                }
+            }
+            return;
+        }
+        Self::dispatch_plan_slice(
+            context,
+            strategies,
+            initial_permit,
+            page_sink,
+            outcome_tx,
+            plan_cancel_token,
+        )
+        .await;
+    }
+
+    async fn dispatch_plan_slice(
+        context: &StrategyTierContext,
+        strategies: Vec<PreparedSearchStrategy>,
+        initial_permit: Option<OwnedSemaphorePermit>,
+        page_sink: &IndexerSearchPageSink,
+        outcome_tx: &tokio::sync::mpsc::Sender<StrategyExecutionOutcome>,
+        plan_cancel_token: &CancellationToken,
+    ) {
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let mut expected = strategies
+            .iter()
+            .map(|strategy| (strategy.strategy_id.clone(), strategy.clone()))
+            .collect::<HashMap<_, _>>();
+        let requests = strategies
+            .iter()
+            .map(|strategy| strategy.request.clone())
+            .collect();
+
+        let permit = match initial_permit {
+            Some(permit) => Ok(permit),
+            None => {
+                acquire_search_permit(
+                    context.search_limit.clone(),
+                    plan_cancel_token,
+                    context.deadline_at,
+                )
+                .await
+            }
+        };
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) => {
+                let timed_out = matches!(error, SearchPermitError::DeadlineExpired);
+                let message = match error {
+                    SearchPermitError::Cancelled => "indexer strategy plan canceled".to_string(),
+                    SearchPermitError::DeadlineExpired => {
+                        "indexer search timed out before plan dispatch".to_string()
+                    }
+                    SearchPermitError::Closed(error) => {
+                        format!("indexer search limiter closed: {error}")
+                    }
+                };
+                for strategy in expected.into_values() {
+                    if outcome_tx
+                        .send(StrategyExecutionOutcome {
+                            strategy_id: strategy.strategy_id,
+                            label: strategy.labels.first().cloned().unwrap_or_default(),
+                            labels: strategy.labels,
+                            title_guard_mode: strategy.title_guard_mode,
+                            response: Err(AppError::Repository(message.clone())),
+                            page_reservation: None,
+                            request_fired: false,
+                            elapsed: std::time::Duration::ZERO,
+                            retry_after: None,
+                            rate_limited: false,
+                            timed_out,
+                            over_query_budget: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        plan_cancel_token.cancel();
+                        break;
+                    }
+                }
+                return;
+            }
+        };
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let event_sink = IndexerSearchStrategyEventSink::new(event_tx);
+        let request = IndexerSearchPlanRequest {
+            plan_id: plan_id.clone(),
+            strategies: requests,
+        };
+        let client = context.client.clone();
+        let operation = context.operation;
+        let mode = context.mode;
+        let request_cancel = plan_cancel_token.child_token();
+        let request_deadline =
+            effective_request_deadline(context.search_timeout, context.deadline_at);
+        let request_window_cancel = plan_cancel_token.clone();
+        let started_at = std::time::Instant::now();
+        let invocation = tokio::spawn(async move {
+            let _permit = permit;
+            match within_search_window(
+                client.search_plan(request, mode, operation, request_cancel, event_sink),
+                &request_window_cancel,
+                Some(request_deadline),
+            )
+            .await
+            {
+                Ok(result) => (result, false),
+                Err(SearchWindowError::Cancelled) => (
+                    Err(AppError::canceled("indexer strategy plan canceled")),
+                    false,
+                ),
+                Err(SearchWindowError::DeadlineExpired) => (
+                    Err(AppError::Repository("indexer search plan timed out".into())),
+                    true,
+                ),
+            }
+        });
+
+        let mut invocation = Some(invocation);
+        let mut invocation_result = None;
+        let mut emitted = HashSet::new();
+        let mut protocol_error = None::<String>;
+        while invocation.is_some() || !event_rx.is_closed() || !event_rx.is_empty() {
+            tokio::select! {
+                event = event_rx.recv(), if !event_rx.is_closed() || !event_rx.is_empty() => {
+                    let Some(IndexerSearchStrategyEvent { strategy_id, response }) = event else {
+                        continue;
+                    };
+                    let Some(strategy) = expected.get(&strategy_id).cloned() else {
+                        protocol_error = Some(format!("indexer strategy plan emitted unknown strategy {strategy_id}"));
+                        continue;
+                    };
+                    if !emitted.insert(strategy_id.clone()) {
+                        protocol_error = Some(format!("indexer strategy plan emitted duplicate strategy {strategy_id}"));
+                        continue;
+                    }
+                    let rate_limit_signal = response
+                        .as_ref()
+                        .err()
+                        .and_then(rate_limit_signal_from_error);
+                    let retry_after = response.as_ref().err().and_then(|error| {
+                        strategy_retry_after(error, rate_limit_signal.as_ref())
+                    });
+                    let page_reservation = if response
+                        .as_ref()
+                        .is_ok_and(|response| !response.results.is_empty())
+                    {
+                        tokio::select! {
+                            _ = plan_cancel_token.cancelled() => None,
+                            reservation = page_sink.reserve() => reservation,
+                        }
+                    } else {
+                        None
+                    };
+                    if outcome_tx
+                        .send(StrategyExecutionOutcome {
+                            strategy_id,
+                            label: strategy.labels.first().cloned().unwrap_or_default(),
+                            labels: strategy.labels,
+                            title_guard_mode: strategy.title_guard_mode,
+                            request_fired: true,
+                            response,
+                            page_reservation,
+                            elapsed: started_at.elapsed(),
+                            retry_after,
+                            rate_limited: rate_limit_signal.is_some(),
+                            timed_out: false,
+                            over_query_budget: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        plan_cancel_token.cancel();
+                        break;
+                    }
+                }
+                joined = async { invocation.as_mut().expect("guarded invocation").await }, if invocation.is_some() => {
+                    invocation_result = Some(match joined {
+                        Ok(result) => result,
+                        Err(error) => (
+                            Err(AppError::Repository(format!("indexer strategy plan task failed: {error}"))),
+                            false,
+                        ),
+                    });
+                    invocation = None;
+                }
+            }
+            if invocation.is_none() && event_rx.is_empty() {
+                break;
+            }
+        }
+
+        let (summary, timed_out) = invocation_result.unwrap_or_else(|| {
+            (
+                Err(AppError::Repository(
+                    "indexer strategy plan ended without a summary".to_string(),
+                )),
+                false,
+            )
+        });
+        let invocation_error = match summary {
+            Ok(summary) => {
+                if summary.plan_id != plan_id {
+                    protocol_error = Some("indexer strategy plan summary ID mismatch".to_string());
+                }
+                let summary_id_count = summary.emitted_strategy_ids.len();
+                let summary_ids = summary
+                    .emitted_strategy_ids
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                if summary_ids.len() != summary_id_count || summary_ids != emitted {
+                    protocol_error = Some(
+                        "indexer strategy plan summary did not match emitted events".to_string(),
+                    );
+                } else if emitted.len() != expected.len()
+                    || expected
+                        .keys()
+                        .any(|strategy_id| !emitted.contains(strategy_id))
+                {
+                    protocol_error =
+                        Some("indexer strategy plan omitted a submitted strategy".to_string());
+                }
+                None
+            }
+            Err(error) => Some(error.to_string()),
+        };
+
+        if let Some(error) = protocol_error.as_deref() {
+            if outcome_tx
+                .send(StrategyExecutionOutcome {
+                    strategy_id: format!("protocol:{plan_id}"),
+                    label: "protocol".to_string(),
+                    labels: vec!["protocol".to_string()],
+                    title_guard_mode: TitleGuardMode::SkipTitleMatch,
+                    response: Err(AppError::Repository(error.to_string())),
+                    page_reservation: None,
+                    request_fired: true,
+                    elapsed: started_at.elapsed(),
+                    retry_after: None,
+                    rate_limited: false,
+                    timed_out,
+                    over_query_budget: None,
+                })
+                .await
+                .is_err()
+            {
+                plan_cancel_token.cancel();
+                return;
+            }
+            for strategy in expected.values() {
+                if outcome_tx
+                    .send(StrategyExecutionOutcome {
+                        strategy_id: strategy.strategy_id.clone(),
+                        label: strategy.labels.first().cloned().unwrap_or_default(),
+                        labels: strategy.labels.clone(),
+                        title_guard_mode: strategy.title_guard_mode,
+                        response: Err(AppError::Repository(error.to_string())),
+                        page_reservation: None,
+                        request_fired: true,
+                        elapsed: started_at.elapsed(),
+                        retry_after: None,
+                        rate_limited: false,
+                        timed_out,
+                        over_query_budget: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    plan_cancel_token.cancel();
+                    return;
+                }
+            }
+        } else {
+            for strategy_id in &emitted {
+                expected.remove(strategy_id);
+            }
+            let missing_error = invocation_error
+                .as_deref()
+                .unwrap_or("indexer strategy plan omitted a strategy result");
+            for strategy in expected.into_values() {
+                if outcome_tx
+                    .send(StrategyExecutionOutcome {
+                        strategy_id: strategy.strategy_id,
+                        label: strategy.labels.first().cloned().unwrap_or_default(),
+                        labels: strategy.labels,
+                        title_guard_mode: strategy.title_guard_mode,
+                        response: Err(AppError::Repository(missing_error.to_string())),
+                        page_reservation: None,
+                        request_fired: true,
+                        elapsed: started_at.elapsed(),
+                        retry_after: None,
+                        rate_limited: false,
+                        timed_out,
+                        over_query_budget: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    plan_cancel_token.cancel();
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -4030,7 +4498,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         config.name.as_str(),
                         IndexerSkipReason::RoutingDisabled,
                     );
-                    info!(
+                    debug!(
                         indexer = config.name.as_str(),
                         "skipping indexer: disabled for scope via routing config"
                     );
@@ -4393,7 +4861,7 @@ impl IndexerClient for MultiIndexerSearchClient {
             if matches!(resolved_caps.id_dispatch_mode, IdDispatchMode::QueryOnly)
                 && let Some(reason) = resolved_caps.query_only_reason
             {
-                info!(
+                tracing::debug!(
                     indexer = config.name.as_str(),
                     transport = resolved_caps
                         .transport_kind
@@ -4588,7 +5056,15 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 )
                                 .await
                                 {
-                                    Ok(()) => {}
+                                    Ok(Ok(())) => {}
+                                    // Background RSS pacing always waits for its
+                                    // slot; this arm only keeps the match total.
+                                    Ok(Err(PacingWaitExceeded { wait })) => {
+                                        return Err(format!(
+                                            "RSS indexer is over its query budget; next slot in {}s",
+                                            wait.as_secs()
+                                        ));
+                                    }
                                     Err(SearchWindowError::Cancelled) => {
                                         return Err("RSS indexer search canceled".to_string());
                                     }
@@ -4813,6 +5289,10 @@ impl IndexerClient for MultiIndexerSearchClient {
             }
 
             let mut strategies = Vec::new();
+            let series_name = numbering_context
+                .anime
+                .as_ref()
+                .map(|anime| anime.canonical_title.as_str());
             for strategy_query in &queries {
                 strategies.extend(build_strategies(&StrategyParams {
                     query: strategy_query,
@@ -4827,6 +5307,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                     text_dispatch_mode: resolved_caps.text_dispatch_mode,
                     is_alias_query: false,
                     facet_omitted,
+                    series_name,
                 }));
 
                 if facet == "anime"
@@ -4846,6 +5327,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         text_dispatch_mode: resolved_caps.text_dispatch_mode,
                         is_alias_query: true,
                         facet_omitted,
+                        series_name,
                     }));
                 }
             }
@@ -4988,8 +5470,10 @@ impl IndexerClient for MultiIndexerSearchClient {
             let fallback_strategies = fallback_strategies.clone();
             let search_limit = search_limit.clone();
             let rate_limiter = self.rate_limiter.clone();
-            let pacing =
-                IndexerPacing::resolve(config, Self::scheduler_intent(mode, is_rss_request));
+            let pacing = IndexerPacing::resolve(
+                config,
+                Self::pacing_intent(mode, is_rss_request, learning_context.as_ref()),
+            );
             let task_cancel_token = cancel_token.child_token();
             let scheduler_lease_for_task = scheduler_lease.clone();
             let live_search_admitted = scheduler_lease_for_task.is_some();
@@ -5016,6 +5500,10 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let mut batch_had_timeout = false;
                 let mut batch_health = StrategyBatchHealth::default();
                 let mut quota_observation = IndexerQuotaObservation::default();
+                // The shortest wait among strategies an interactive search
+                // declined to pace for; set means the indexer was over its
+                // query budget for this search.
+                let mut query_budget_wait: Option<std::time::Duration> = None;
 
                 let primary_context = StrategyTierContext {
                         client: client.clone(),
@@ -5100,12 +5588,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                             retry_after: None,
                             rate_limited: false,
                             timed_out: false,
+                            over_query_budget: None,
                         },
                     };
                     batch_had_timeout |= outcome.timed_out;
                     if !outcome.request_fired {
                         all_strategies_complete = false;
                         only_unattested_incompleteness = false;
+                        if let Some(wait) = outcome.over_query_budget {
+                            query_budget_wait =
+                                Some(query_budget_wait.map_or(wait, |known| known.min(wait)));
+                        }
                         if outcome.response.as_ref().is_err_and(|err| err.is_canceled()) {
                             return (
                                 indexer_id,
@@ -5344,13 +5837,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                     }
                 }
 
-                if should_run_fallback_tier(
-                    mode,
-                    primary_usable_result_count,
-                    primary_attempted,
-                    primary_had_error,
-                    &fallback_strategies,
-                ) {
+                // An indexer over its query budget is skipped for the rest of
+                // this search: its fallback would be refused the same way.
+                if query_budget_wait.is_none()
+                    && should_run_fallback_tier(
+                        mode,
+                        primary_usable_result_count,
+                        primary_attempted,
+                        primary_had_error,
+                        &fallback_strategies,
+                    )
+                {
                     debug!(
                         indexer = indexer_name.as_str(),
                         facet = facet.as_str(),
@@ -5435,12 +5932,17 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 retry_after: None,
                                 rate_limited: false,
                                 timed_out: false,
+                                over_query_budget: None,
                             },
                         };
                         batch_had_timeout |= outcome.timed_out;
                         if !outcome.request_fired {
                             all_strategies_complete = false;
                             only_unattested_incompleteness = false;
+                            if let Some(wait) = outcome.over_query_budget {
+                                query_budget_wait =
+                                    Some(query_budget_wait.map_or(wait, |known| known.min(wait)));
+                            }
                             if outcome.response.as_ref().is_err_and(|err| err.is_canceled()) {
                                 return (
                                     indexer_id,
@@ -5726,6 +6228,16 @@ impl IndexerClient for MultiIndexerSearchClient {
                     );
                 }
 
+                if !any_strategy_fired && query_budget_wait.is_some() {
+                    log_indexer_skip(
+                        mode,
+                        is_rss_request,
+                        indexer_name.as_str(),
+                        IndexerSkipReason::QueryBudgetExceeded,
+                        None,
+                    );
+                }
+
                 let task_indexer_outcomes = scheduler_blocked_outcome
                     .filter(|_| !all_strategies_complete)
                     .map(|outcome| IndexerQueryOutcome {
@@ -5746,9 +6258,13 @@ impl IndexerClient for MultiIndexerSearchClient {
                             IndexerSearchCompletion::Complete
                         } else {
                             IndexerSearchCompletion::Partial {
-                                reason: only_unattested_incompleteness
-                                    .then_some(IndexerSearchIncompleteReason::Unattested),
-                                retry_after: scheduler_retry_after,
+                                reason: if query_budget_wait.is_some() {
+                                    Some(IndexerSearchIncompleteReason::QueryBudgetExhausted)
+                                } else {
+                                    only_unattested_incompleteness
+                                        .then_some(IndexerSearchIncompleteReason::Unattested)
+                                },
+                                retry_after: scheduler_retry_after.or(query_budget_wait),
                             }
                         },
                         api_current: quota_observation.api_current,
@@ -6011,6 +6527,10 @@ struct StrategyParams<'a> {
     /// The caller asked for a facet-less search: text strategies keep the
     /// borrowed facet for capability resolution but do not send it.
     facet_omitted: bool,
+    /// The series' own name when the search carries an anime numbering
+    /// bridge. A dashed anime episode query under any other name asks under a
+    /// cour's own name.
+    series_name: Option<&'a str>,
 }
 
 /// The query facet controls text-search endpoint shape. The ID facet controls
@@ -6118,13 +6638,24 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
     });
     // A dashed anime episode can be cour-relative or absolute. Keep it in
     // the text query without adding coordinates from a different numbering.
-    let dashed_anime_episode = query_facet == "anime"
-        && query.rsplit_once(" - ").is_some_and(|(title, number)| {
-            let number = number.trim();
-            !title.trim().is_empty()
+    let dashed_anime_title = query
+        .rsplit_once(" - ")
+        .filter(|_| query_facet == "anime")
+        .and_then(|(title, number)| {
+            let (title, number) = (title.trim(), number.trim());
+            (!title.is_empty()
                 && !number.is_empty()
-                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(title)
         });
+    let dashed_anime_episode = dashed_anime_title.is_some();
+    // A dashed query under a name other than the series' own asks under a
+    // cour's name, which is a separate question to the indexer.
+    let dashed_cour_name = dashed_anime_title.is_some_and(|title| {
+        p.series_name
+            .map(str::trim)
+            .is_some_and(|series_name| !title.eq_ignore_ascii_case(series_name))
+    });
     let community_coordinates = terminal_coordinates
         .filter(|_| matches!(query_facet, "series" | "anime"))
         .filter(|(query_season, query_episode, _)| {
@@ -6138,6 +6669,8 @@ fn build_strategies(p: &StrategyParams<'_>) -> Vec<SearchStrategy> {
     // order, which `community_coordinates` above already admits.
     let anime_numbering_label = if is_alias_query {
         None
+    } else if dashed_cour_name {
+        Some(ANIME_COUR_NAME_TEXT_LABEL)
     } else if query_facet == "anime"
         && (dashed_anime_episode || query_ends_with_absolute_number(query))
     {
@@ -6575,15 +7108,12 @@ fn exact_cour_mapping_covers_requested_episode(
     else {
         return false;
     };
-    let Ok(cour_index) = u32::try_from(cour.index) else {
-        return false;
-    };
-    if cour_index == 0
+    if cour.index <= 0
         || parsed_episode
             .season
             .into_iter()
             .chain(parsed_episode.season_numbers.iter().copied())
-            .any(|season| season != 1 && season != cour_index)
+            .any(|season| !cour.admits_season_token(season))
     {
         return false;
     }
@@ -6841,6 +7371,7 @@ mod tests {
             retry_after: None,
             rate_limited: false,
             timed_out: false,
+            over_query_budget: None,
         };
 
         assert!(strategy_execution_is_complete(&execution(
@@ -7464,6 +7995,7 @@ mod tests {
             api_key_encrypted: None,
             rate_limit_seconds: Some(0),
             rate_limit_burst: None,
+            max_queries_per_minute: None,
             disabled_until: None,
             is_enabled: true,
             enable_interactive_search: true,
@@ -8388,7 +8920,48 @@ mod tests {
             auto_eligible: None,
             auto_decision_code: None,
             auto_decision_summary: None,
+            release_listing_json: None,
         }
+    }
+
+    #[test]
+    fn a_replayed_result_keeps_the_listing_facts_rules_read() {
+        let mut live = search_result("Synthetic.Release.2024.1080p.WEB-DL-GRP");
+        live.published_at = Some("2024-01-01T00:00:00Z".into());
+        live.thumbs_down = Some(3);
+        for (key, value) in [
+            ("protocol", serde_json::json!("torrent")),
+            ("freeleech", serde_json::json!(true)),
+            ("downloadvolumefactor", serde_json::json!(0.5)),
+            ("newznab_profile_id", serde_json::json!("synthetic-profile")),
+            ("password_protected", serde_json::json!(true)),
+            ("magnet_url", serde_json::json!("magnet:?xt=urn:btih:0000")),
+        ] {
+            live.extra.insert(key.to_string(), value);
+        }
+
+        let stored = ReusableIndexerSearchCandidate {
+            normalized: normalized_candidate(&live, None, None, Utc::now()),
+        };
+        let replayed = reusable_candidate_from_record(stored, &mock_indexer_config())
+            .expect("the stored result rehydrates");
+
+        let listing: serde_json::Value = serde_json::from_str(
+            replayed
+                .release_listing_json
+                .as_deref()
+                .expect("the replayed result carries its listing"),
+        )
+        .expect("the listing is JSON");
+        assert_eq!(listing["published_at"], "2024-01-01T00:00:00Z");
+        assert_eq!(listing["thumbs_down"], 3);
+        assert_eq!(listing["is_password_protected"], true);
+        let extra = &listing["extra"];
+        assert_eq!(extra["protocol"], "torrent");
+        assert_eq!(extra["freeleech"], true);
+        assert_eq!(extra["downloadvolumefactor"], 0.5);
+        assert_eq!(extra["newznab_profile_id"], "synthetic-profile");
+        assert!(extra.get("magnet_url").is_none(), "listing: {listing}");
     }
 
     fn prepared_strategy(strategy_id: &str) -> PreparedSearchStrategy {
@@ -9652,6 +10225,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactive_search_skips_an_indexer_over_its_query_budget() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.max_queries_per_minute = Some(1);
+
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_| response_with_titles(&["12.Lanterns.of.Winter.2013"])),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: movie_caps(),
+            }),
+        );
+        let search = || {
+            multi.search(
+                "12 Lanterns of Winter".to_string(),
+                HashMap::from([("imdb_id".to_string(), "tt12004567".to_string())]),
+                None,
+                Some("movie".to_string()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                None,
+                None,
+                None,
+                vec![],
+            )
+        };
+
+        let first = search().await.expect("first search should succeed");
+        assert_eq!(first.results.len(), 1);
+        assert_eq!(calls.lock().expect("calls").len(), 1);
+
+        // The one query this minute is spent; the next slot is about a
+        // minute out, past what an interactive search waits.
+        let second = search().await.expect("second search should succeed");
+        assert!(second.results.is_empty());
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "an over-budget indexer is not asked"
+        );
+        let outcome = second
+            .indexer_outcomes
+            .iter()
+            .find(|outcome| outcome.indexer_id == "idx-1")
+            .expect("the skipped indexer reports an outcome");
+        match outcome.outcome {
+            IndexerSearchOutcome::Partial {
+                empty: true,
+                reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+                retry_after: Some(retry_after),
+            } => assert!(
+                retry_after > INTERACTIVE_PACING_MAX_WAIT,
+                "retry after {retry_after:?}"
+            ),
+            other => panic!("expected an over-budget outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn direct_newznab_caps_snapshot_can_widen_ids_when_live_caps_allow_it() {
         let mut config = mock_indexer_config();
         config.provider_type = "newznab".into();
@@ -9768,6 +10410,7 @@ mod tests {
             text_dispatch_mode: resolved.text_dispatch_mode,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
         assert!(strategies.iter().any(|strategy| {
             strategy.label == "ids_sxex"
@@ -11117,6 +11760,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::None,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);
@@ -11152,6 +11796,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::None,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);
@@ -11955,6 +12600,463 @@ mod tests {
         }
     }
 
+    /// A strategy-plan client that answers every strategy with an empty
+    /// complete page and records when each plan was dispatched and which
+    /// strategies it carried.
+    #[derive(Default)]
+    struct PacedPlanIndexerClient {
+        plans: StdMutex<Vec<(tokio::time::Instant, Vec<String>)>>,
+    }
+
+    impl PacedPlanIndexerClient {
+        /// Each plan as (seconds since `since`, strategy ids).
+        fn plans_since(&self, since: tokio::time::Instant) -> Vec<(u64, Vec<String>)> {
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .iter()
+                .map(|(at, ids)| (at.duration_since(since).as_secs(), ids.clone()))
+                .collect()
+        }
+
+        fn dispatched_strategy_count(&self) -> usize {
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .iter()
+                .map(|(_, ids)| ids.len())
+                .sum()
+        }
+    }
+
+    #[async_trait]
+    impl IndexerClient for PacedPlanIndexerClient {
+        fn search_plan_capability(&self) -> Option<IndexerSearchPlanCapability> {
+            Some(IndexerSearchPlanCapability {
+                version: 1,
+                max_parallel_strategies: 4,
+            })
+        }
+
+        async fn search_plan(
+            &self,
+            request: IndexerSearchPlanRequest,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _cancel_token: CancellationToken,
+            event_sink: IndexerSearchStrategyEventSink,
+        ) -> AppResult<IndexerSearchPlanSummary> {
+            let ids = request
+                .strategies
+                .iter()
+                .map(|strategy| strategy.strategy_id.clone())
+                .collect::<Vec<_>>();
+            self.plans
+                .lock()
+                .expect("plan log mutex")
+                .push((tokio::time::Instant::now(), ids.clone()));
+            for strategy_id in &ids {
+                event_sink
+                    .send(IndexerSearchStrategyEvent {
+                        strategy_id: strategy_id.clone(),
+                        response: Ok(IndexerSearchResponse {
+                            completion: IndexerSearchCompletion::Complete,
+                            indexer_outcomes: Vec::new(),
+                            results: Vec::new(),
+                            api_current: None,
+                            api_max: None,
+                            grab_current: None,
+                            grab_max: None,
+                        }),
+                    })
+                    .await
+                    .expect("plan event receiver should remain open");
+            }
+            Ok(IndexerSearchPlanSummary {
+                plan_id: request.plan_id,
+                emitted_strategy_ids: ids,
+            })
+        }
+
+        async fn search(
+            &self,
+            _query: String,
+            _ids: HashMap<String, String>,
+            _category: Option<String>,
+            _facet: Option<String>,
+            _id_search_facet: Option<String>,
+            _newznab_categories: Option<Vec<String>>,
+            _indexer_routing: Option<IndexerRoutingPlan>,
+            _mode: SearchMode,
+            _operation: IndexerErrorOperation,
+            _season: Option<u32>,
+            _episode: Option<u32>,
+            _absolute_episode: Option<u32>,
+            _year: Option<i32>,
+            _tagged_aliases: Vec<scryer_domain::TaggedAlias>,
+            _learning_context: Option<IndexerSearchLearningContext>,
+            _cancel_token: CancellationToken,
+        ) -> AppResult<IndexerSearchResponse> {
+            Err(AppError::Repository("unary search was not expected".into()))
+        }
+    }
+
+    /// Generous failure bound for a paced plan tier on the paused clock.
+    const PACED_PLAN_BOUND: std::time::Duration = std::time::Duration::from_secs(600);
+
+    fn paced_plan_context(
+        client: Arc<dyn IndexerClient>,
+        limiter: &IndexerRateLimiter,
+        pacing: IndexerPacing,
+        cancel_token: CancellationToken,
+        deadline_at: Option<tokio::time::Instant>,
+    ) -> StrategyTierContext {
+        StrategyTierContext {
+            client,
+            search_limit: Arc::new(Semaphore::new(4)),
+            rate_limiter: limiter.clone(),
+            search_timeout: std::time::Duration::from_secs(30),
+            pacing,
+            category: None,
+            per_indexer_categories: None,
+            prowlarr_nab_proxy: false,
+            mode: SearchMode::Auto,
+            operation: IndexerErrorOperation::AutomaticSearch,
+            year: None,
+            tagged_aliases: Vec::new(),
+            cancel_token,
+            deadline_at,
+        }
+    }
+
+    fn paced_plan_tier(
+        context: StrategyTierContext,
+        strategy_ids: &[&str],
+    ) -> StrategyTierOutcomes {
+        let (page_tx, _page_rx) = tokio::sync::mpsc::channel(4);
+        MultiIndexerSearchClient::execute_plan_strategy_tier(
+            context,
+            strategy_ids
+                .iter()
+                .map(|strategy_id| prepared_strategy(strategy_id))
+                .collect(),
+            None,
+            IndexerSearchPageSink::new(page_tx, 4),
+        )
+    }
+
+    async fn drain_plan_outcomes(
+        outcomes: &mut StrategyTierOutcomes,
+    ) -> Vec<StrategyExecutionOutcome> {
+        tokio::time::timeout(PACED_PLAN_BOUND, async {
+            let mut collected = Vec::new();
+            while let Some(outcome) = outcomes.join_next().await {
+                collected.push(outcome.expect("plan controller does not use join tasks"));
+            }
+            collected
+        })
+        .await
+        .expect("the plan tier should finish")
+    }
+
+    async fn run_paced_plan_tier(
+        client: &Arc<PacedPlanIndexerClient>,
+        limiter: &IndexerRateLimiter,
+        pacing: IndexerPacing,
+        strategy_ids: &[&str],
+    ) -> Vec<StrategyExecutionOutcome> {
+        let context = paced_plan_context(
+            client.clone(),
+            limiter,
+            pacing,
+            CancellationToken::new(),
+            None,
+        );
+        drain_plan_outcomes(&mut paced_plan_tier(context, strategy_ids)).await
+    }
+
+    fn plan(at_secs: u64, strategy_ids: &[&str]) -> (u64, Vec<String>) {
+        (
+            at_secs,
+            strategy_ids.iter().map(|id| id.to_string()).collect(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unpaced_plan_tier_dispatches_one_plan() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            test_pacing("plan-unpaced", 0),
+            &["first", "second", "third"],
+        )
+        .await;
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![plan(0, &["first", "second", "third"])]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_plan_tier_trickles_one_strategy_per_slot() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        let pacing = IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes =
+            run_paced_plan_tier(&client, &limiter, pacing, &["first", "second", "third"]).await;
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![
+                plan(0, &["first"]),
+                plan(2, &["second"]),
+                plan(4, &["third"]),
+            ],
+            "the plugin must not fire a background tier faster than the trickle"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_waits_out_a_configured_interval() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = Some(5);
+        let pacing = IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes =
+            run_paced_plan_tier(&client, &limiter, pacing, &["first", "second", "third"]).await;
+
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![
+                plan(0, &["first"]),
+                plan(5, &["second"]),
+                plan(10, &["third"]),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_spends_one_budget_slot_per_strategy() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let pacing = budgeted_pacing("plan-budget", 0, 2);
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            pacing.clone(),
+            &["first", "second", "third"],
+        )
+        .await;
+
+        assert!(outcomes.iter().all(strategy_execution_is_complete));
+        assert_eq!(
+            client.plans_since(started_at),
+            vec![plan(0, &["first", "second"]), plan(60, &["third"])],
+            "two a minute: the third strategy waits for the first to leave the window"
+        );
+
+        // The tier's three dispatches are on the budget: the next request
+        // waits for the 60 s one to leave the window.
+        let next = sequential_dispatches(&limiter, &pacing, 2, started_at).await;
+        assert_dispatches(&next, &[60.0, 120.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_plan_tier_skips_strategies_past_the_wait_cap() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+
+        let outcomes = run_paced_plan_tier(
+            &client,
+            &limiter,
+            interactive_budgeted_pacing("plan-interactive", 1),
+            &["first", "second"],
+        )
+        .await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+        let skipped = outcomes
+            .iter()
+            .find(|outcome| outcome.strategy_id == "second")
+            .expect("the skipped strategy reports an outcome");
+        assert!(!skipped.request_fired, "{skipped:?}");
+        assert_eq!(
+            skipped.over_query_budget,
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert!(!skipped.timed_out && !skipped.rate_limited, "{skipped:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_plan_tier_ends_its_pacing_wait_at_once() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let pacing = budgeted_pacing("plan-cancel", 0, 1);
+        let cancel_token = CancellationToken::new();
+        let started_at = tokio::time::Instant::now();
+        let mut outcomes = paced_plan_tier(
+            paced_plan_context(
+                client.clone(),
+                &limiter,
+                pacing.clone(),
+                cancel_token.clone(),
+                None,
+            ),
+            &["first", "second"],
+        );
+
+        let first = tokio::time::timeout(PACED_PLAN_BOUND, outcomes.join_next())
+            .await
+            .expect("the first strategy should dispatch at once")
+            .expect("the plan tier reports the first strategy")
+            .expect("plan controller does not use join tasks");
+        assert_eq!(first.strategy_id, "first");
+        assert!(strategy_execution_is_complete(&first));
+
+        // The second strategy is waiting for its 60 s budget slot.
+        cancel_token.cancel();
+        let rest = drain_plan_outcomes(&mut outcomes).await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].strategy_id, "second");
+        assert!(!rest[0].request_fired);
+        assert!(
+            rest[0]
+                .response
+                .as_ref()
+                .is_err_and(|error| error.is_canceled()),
+            "{:?}",
+            rest[0]
+        );
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+
+        // The cancelled strategy gave its budget slot back.
+        let next = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&next, &[60.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plan_tier_pacing_wait_stops_at_the_search_deadline() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let started_at = tokio::time::Instant::now();
+        let deadline_at = started_at + std::time::Duration::from_secs(10);
+
+        let outcomes = drain_plan_outcomes(&mut paced_plan_tier(
+            paced_plan_context(
+                client.clone(),
+                &limiter,
+                test_pacing("plan-deadline", 60),
+                CancellationToken::new(),
+                Some(deadline_at),
+            ),
+            &["first", "second"],
+        ))
+        .await;
+
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(10));
+        assert_eq!(client.plans_since(started_at), vec![plan(0, &["first"])]);
+        let late = outcomes
+            .iter()
+            .find(|outcome| outcome.strategy_id == "second")
+            .expect("the late strategy reports an outcome");
+        assert!(!late.request_fired, "{late:?}");
+        assert!(late.over_query_budget.is_none());
+        assert!(
+            late.response
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("before dispatch")),
+            "{late:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_search_skips_a_plan_indexer_over_its_query_budget() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.max_queries_per_minute = Some(1);
+
+        let client = Arc::new(PacedPlanIndexerClient::default());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client: client.clone(),
+                caps: movie_caps(),
+            }),
+        );
+        let search = || {
+            multi.search(
+                "12 Lanterns of Winter".to_string(),
+                HashMap::from([("imdb_id".to_string(), "tt12004567".to_string())]),
+                None,
+                Some("movie".to_string()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                None,
+                None,
+                None,
+                vec![],
+            )
+        };
+
+        search().await.expect("first search should succeed");
+        assert_eq!(
+            client.dispatched_strategy_count(),
+            1,
+            "one query a minute: the plan path sends one strategy"
+        );
+
+        let second = search().await.expect("second search should succeed");
+        assert_eq!(
+            client.dispatched_strategy_count(),
+            1,
+            "an over-budget plan indexer is not asked"
+        );
+        let outcome = second
+            .indexer_outcomes
+            .iter()
+            .find(|outcome| outcome.indexer_id == "idx-1")
+            .expect("the skipped indexer reports an outcome");
+        match outcome.outcome {
+            IndexerSearchOutcome::Partial {
+                empty: true,
+                reason: Some(IndexerSearchIncompleteReason::QueryBudgetExhausted),
+                retry_after: Some(retry_after),
+            } => assert!(
+                retry_after > INTERACTIVE_PACING_MAX_WAIT,
+                "retry after {retry_after:?}"
+            ),
+            other => panic!("expected an over-budget outcome, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn record_failure_retry_after_never_undercuts_the_ladder() {
         let tracker = IndexerBackoffTracker::new();
@@ -12302,6 +13404,7 @@ mod tests {
                         text_dispatch_mode: mode,
                         is_alias_query,
                         facet_omitted: false,
+                        series_name: None,
                     });
                     let text = strategies
                         .iter()
@@ -12381,6 +13484,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 3);
@@ -12432,6 +13536,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: false,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 2);
@@ -12929,6 +14034,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn operator_auto_searches_are_paced_as_interactive() {
+        let background = IndexerSearchLearningContext {
+            title_id: "title-1".into(),
+            facet: "series".into(),
+            subject_kind: ReleaseSearchSubjectKind::Episode,
+            search_session_id: "session".into(),
+            background_value: Some(0.5),
+            candidate_reuse_allowed: true,
+        };
+        let operator = IndexerSearchLearningContext {
+            candidate_reuse_allowed: false,
+            background_value: None,
+            ..background.clone()
+        };
+        let intent = |mode, is_rss, context: Option<&IndexerSearchLearningContext>| {
+            MultiIndexerSearchClient::pacing_intent(mode, is_rss, context)
+        };
+
+        assert_eq!(
+            intent(SearchMode::Auto, false, Some(&operator)),
+            SchedulerIntent::InteractiveSearch,
+            "an operator-started walk is paced for the person waiting on it"
+        );
+        assert_eq!(
+            intent(SearchMode::Auto, false, Some(&background)),
+            SchedulerIntent::BackgroundAcquisition,
+            "the background convergence walk keeps the trickle"
+        );
+        assert_eq!(
+            intent(SearchMode::Auto, true, None),
+            SchedulerIntent::BackgroundRss
+        );
+        assert_eq!(
+            intent(SearchMode::Interactive, false, Some(&background)),
+            SchedulerIntent::InteractiveSearch
+        );
+
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        let operator_pacing =
+            IndexerPacing::resolve(&config, intent(SearchMode::Auto, false, Some(&operator)));
+        assert_eq!(operator_pacing.interval, std::time::Duration::ZERO);
+        assert_eq!(operator_pacing.max_wait, Some(INTERACTIVE_PACING_MAX_WAIT));
+        let background_pacing =
+            IndexerPacing::resolve(&config, intent(SearchMode::Auto, false, Some(&background)));
+        assert_eq!(
+            background_pacing.interval,
+            BACKGROUND_INDEXER_REQUEST_INTERVAL
+        );
+        assert_eq!(background_pacing.max_wait, None);
+    }
+
     #[tokio::test]
     async fn learned_outcome_suppresses_empty_id_after_working_alternative() {
         let repo: StdArc<dyn IndexerSearchLearningRepository> =
@@ -13018,6 +14176,187 @@ mod tests {
             .expect("ids_abs record");
 
         assert!(!abs_record.suppressed);
+    }
+
+    #[tokio::test]
+    async fn learned_cour_name_text_result_is_a_working_alternative_and_text_is_never_suppressed() {
+        let repo: StdArc<dyn IndexerSearchLearningRepository> =
+            StdArc::new(InMemorySearchLearningRepository::default());
+        let context = IndexerSearchLearningContext {
+            title_id: "title-1".into(),
+            facet: "anime".into(),
+            subject_kind: ReleaseSearchSubjectKind::Episode,
+            search_session_id: "test-session".into(),
+            background_value: None,
+            candidate_reuse_allowed: true,
+        };
+
+        record_strategy_learning_outcome(
+            &repo,
+            Some(&context),
+            SearchMode::Auto,
+            "idx",
+            "Indexer",
+            ANIME_COUR_NAME_TEXT_LABEL,
+            1,
+        )
+        .await;
+        for label in ["ids_abs", ANIME_ABSOLUTE_TEXT_LABEL] {
+            for _ in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD {
+                record_strategy_learning_outcome(
+                    &repo,
+                    Some(&context),
+                    SearchMode::Auto,
+                    "idx",
+                    "Indexer",
+                    label,
+                    0,
+                )
+                .await;
+            }
+        }
+
+        let records = repo
+            .list_for_title("idx", "title-1", "anime")
+            .await
+            .expect("learning records");
+        let text_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:freetext")
+            .expect("shared text record");
+        assert_eq!(text_record.usable_successes, 1);
+        assert_eq!(
+            text_record.empty_successes,
+            LEARNED_EMPTY_SUPPRESSION_THRESHOLD
+        );
+        assert!(!text_record.suppressed);
+
+        let abs_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:ids_abs")
+            .expect("ids_abs record");
+        assert!(abs_record.suppressed);
+
+        let other_title = IndexerSearchLearningContext {
+            title_id: "title-2".into(),
+            ..context
+        };
+        record_strategy_learning_outcome(
+            &repo,
+            Some(&other_title),
+            SearchMode::Auto,
+            "idx",
+            "Indexer",
+            "ids_sxex",
+            1,
+        )
+        .await;
+        for _ in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD {
+            record_strategy_learning_outcome(
+                &repo,
+                Some(&other_title),
+                SearchMode::Auto,
+                "idx",
+                "Indexer",
+                ANIME_COUR_NAME_TEXT_LABEL,
+                0,
+            )
+            .await;
+        }
+        let records = repo
+            .list_for_title("idx", "title-2", "anime")
+            .await
+            .expect("learning records");
+        let text_record = records
+            .iter()
+            .find(|record| record.key.strategy_key == "v2:freetext")
+            .expect("shared text record");
+        assert_eq!(text_record.usable_successes, 0);
+        assert_eq!(
+            text_record.empty_successes,
+            LEARNED_EMPTY_SUPPRESSION_THRESHOLD
+        );
+        assert!(!text_record.suppressed, "text forms are never suppressed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn automatic_anime_search_learns_both_id_forms_and_suppresses_the_empty_one() {
+        let repo: StdArc<dyn IndexerSearchLearningRepository> =
+            StdArc::new(InMemorySearchLearningRepository::default());
+        let (client, calls) = scripted_search_client(anime_caps(), |call| {
+            if call.ids.contains_key("anidb_id") && call.season == Some(2) {
+                response_with_titles(&["Blade.Summit.S02E03.720p.WEB-DL"])
+            } else {
+                response_with_titles(&[])
+            }
+        });
+        let client = client.with_search_learning_repository(repo.clone());
+
+        let run = |session: usize| {
+            let client = &client;
+            async move {
+                let context = IndexerSearchLearningContext {
+                    title_id: "title-1".into(),
+                    facet: "anime".into(),
+                    subject_kind: ReleaseSearchSubjectKind::Episode,
+                    search_session_id: format!("session-{session}"),
+                    background_value: None,
+                    candidate_reuse_allowed: false,
+                };
+                <MultiIndexerSearchClient as IndexerClient>::search(
+                    client,
+                    "Blade Summit S02E03".into(),
+                    HashMap::from([("anidb_id".to_string(), "1535".to_string())]),
+                    Some("anime".into()),
+                    Some("anime".into()),
+                    None,
+                    None,
+                    None,
+                    SearchMode::Auto,
+                    IndexerErrorOperation::AutomaticSearch,
+                    Some(2),
+                    Some(3),
+                    Some(21),
+                    None,
+                    vec![],
+                    Some(context),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("automatic search should succeed")
+            }
+        };
+
+        for session in 0..LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize {
+            let response = run(session).await;
+            assert_eq!(response.results.len(), 1, "session {session}");
+        }
+
+        let records = repo
+            .list_for_title("idx-1", "title-1", "anime")
+            .await
+            .expect("learning records");
+        let record = |key: &str| records.iter().find(|record| record.key.strategy_key == key);
+        let sxex = record("v2:ids_sxex").expect("ids_sxex is learned next to ids_abs");
+        assert_eq!(sxex.usable_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert!(!sxex.suppressed);
+        let abs = record("v2:ids_abs").expect("ids_abs record");
+        assert_eq!(abs.empty_successes, LEARNED_EMPTY_SUPPRESSION_THRESHOLD);
+        assert_eq!(abs.usable_successes, 0);
+        assert!(abs.suppressed);
+        assert!(
+            record("v2:freetext").is_none_or(|text| text.usable_successes == 0),
+            "no text query succeeded"
+        );
+
+        calls.lock().expect("call log mutex").clear();
+        run(LEARNED_EMPTY_SUPPRESSION_THRESHOLD as usize).await;
+        let calls = calls.lock().expect("call log mutex");
+        assert!(
+            calls.iter().all(|call| call.absolute_episode.is_none()),
+            "the suppressed absolute ID query is skipped"
+        );
+        assert!(calls.iter().any(|call| call.ids.contains_key("anidb_id")));
     }
 
     #[tokio::test]
@@ -13269,10 +14608,54 @@ mod tests {
     }
 
     #[test]
-    fn auto_strategy_tier_prefers_absolute_id_and_reserves_freetext() {
+    fn auto_anime_strategy_tier_keeps_both_id_numbering_forms_and_reserves_freetext() {
         let (primary, fallback) = split_strategy_tiers(
             SearchMode::Auto,
             "anime",
+            vec![
+                strategy_with_label("ids_sxex"),
+                strategy_with_label("freetext"),
+                strategy_with_label("ids_abs"),
+            ],
+        );
+
+        assert_eq!(
+            primary
+                .iter()
+                .map(|strategy| strategy.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ids_abs", "ids_sxex"]
+        );
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].label, "freetext");
+    }
+
+    #[test]
+    fn auto_anime_strategy_tier_keeps_the_single_id_form_it_has() {
+        for label in ["ids_abs", "ids_sxex", "ids"] {
+            let (primary, fallback) = split_strategy_tiers(
+                SearchMode::Auto,
+                "anime",
+                vec![strategy_with_label(label), strategy_with_label("freetext")],
+            );
+
+            assert_eq!(
+                primary
+                    .iter()
+                    .map(|strategy| strategy.label.as_str())
+                    .collect::<Vec<_>>(),
+                vec![label],
+                "label {label}"
+            );
+            assert_eq!(fallback.len(), 1, "label {label}");
+        }
+    }
+
+    #[test]
+    fn auto_non_anime_strategy_tier_keeps_one_id_strategy() {
+        let (primary, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "series",
             vec![
                 strategy_with_label("ids_sxex"),
                 strategy_with_label("freetext"),
@@ -13335,6 +14718,164 @@ mod tests {
         assert_eq!(labels, vec!["freetext", "freetext_anime_abs"]);
     }
 
+    fn cour_name_test_caps() -> IndexerProviderCapabilities {
+        IndexerProviderCapabilities {
+            supported_ids: HashMap::from([
+                ("anime".into(), vec!["anidb_id".into()]),
+                ("series".into(), vec!["tvdb_id".into()]),
+            ]),
+            season_param: Some("s".into()),
+            episode_param: Some("ep".into()),
+            query_param: Some("q".into()),
+            search_inputs: vec![
+                IndexerSearchInputCapability::TitleQuery,
+                IndexerSearchInputCapability::Season,
+                IndexerSearchInputCapability::Episode,
+                IndexerSearchInputCapability::AbsoluteEpisode,
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn cour_name_test_strategies(
+        queries: &[&str],
+        facet: &str,
+        series_name: Option<&str>,
+    ) -> Vec<SearchStrategy> {
+        let caps = cour_name_test_caps();
+        let ids = HashMap::from([("anidb_id".to_string(), "40117".to_string())]);
+        queries
+            .iter()
+            .flat_map(|query| {
+                build_strategies(&StrategyParams {
+                    query,
+                    query_facet: facet,
+                    id_facet: facet,
+                    ids: &ids,
+                    season: Some(1),
+                    episode: Some(14),
+                    absolute_episode: Some(14),
+                    caps: &caps,
+                    id_dispatch_mode: IdDispatchMode::Aggregate,
+                    text_dispatch_mode: TextDispatchMode::FacetScoped,
+                    is_alias_query: false,
+                    facet_omitted: false,
+                    series_name,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn auto_anime_strategy_tier_keeps_cour_name_query_next_to_absolute_and_community_pair() {
+        let strategies = cour_name_test_strategies(
+            &[
+                "Lantern Verge 014",
+                "Lantern Verge S01E14",
+                "Lantern Verge",
+                "Lantern Verge S02E03",
+                "Ember Tide Arc - 03",
+                "Lantern Verge - 14",
+            ],
+            "anime",
+            Some("Lantern Verge"),
+        );
+
+        let (primary, fallback) = split_strategy_tiers(SearchMode::Auto, "anime", strategies);
+
+        assert_eq!(
+            primary
+                .iter()
+                .map(|strategy| strategy.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ids_abs", "ids_sxex"]
+        );
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|strategy| (strategy.label.as_str(), strategy.request_query.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("freetext", "Lantern Verge S01E14"),
+                ("freetext_anime_abs", "Lantern Verge 014"),
+                ("freetext_anime_cour", "Lantern Verge S02E03"),
+                ("freetext_anime_cour_name", "Ember Tide Arc - 03"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dashed_query_under_the_series_name_stays_in_the_absolute_form() {
+        for query in ["Lantern Verge - 14", "lantern verge - 14"] {
+            let strategies = cour_name_test_strategies(&[query], "anime", Some("Lantern Verge"));
+            let text = strategies
+                .iter()
+                .find(|strategy| strategy.label.starts_with("freetext"))
+                .expect("a text strategy");
+            assert_eq!(text.label, "freetext_anime_abs", "query {query}");
+        }
+
+        let (_, fallback) = split_strategy_tiers(
+            SearchMode::Auto,
+            "anime",
+            cour_name_test_strategies(
+                &["Lantern Verge 014", "Lantern Verge - 14"],
+                "anime",
+                Some("Lantern Verge"),
+            ),
+        );
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|strategy| strategy.request_query.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Lantern Verge 014"]
+        );
+    }
+
+    #[test]
+    fn cour_name_query_needs_the_series_name_and_the_anime_facet() {
+        let without_bridge = cour_name_test_strategies(&["Ember Tide Arc - 03"], "anime", None);
+        assert!(
+            without_bridge
+                .iter()
+                .any(|strategy| strategy.label == "freetext_anime_abs")
+        );
+
+        let series =
+            cour_name_test_strategies(&["Ember Tide Arc - 03"], "series", Some("Lantern Verge"));
+        let text = series
+            .iter()
+            .find(|strategy| strategy.label.starts_with("freetext"))
+            .expect("a text strategy");
+        assert_eq!(text.label, "freetext");
+        assert_eq!(
+            (text.season, text.episode, text.absolute_episode),
+            (Some(1), Some(14), Some(14))
+        );
+    }
+
+    #[test]
+    fn cour_name_strategy_carries_no_coordinates() {
+        let strategies =
+            cour_name_test_strategies(&["Ember Tide Arc - 03"], "anime", Some("Lantern Verge"));
+        let text = strategies
+            .iter()
+            .find(|strategy| strategy.label == "freetext_anime_cour_name")
+            .expect("a cour-name text strategy");
+        assert_eq!(text.request_query, "Ember Tide Arc - 03");
+        assert_eq!(
+            (text.season, text.episode, text.absolute_episode),
+            (None, None, None)
+        );
+        assert!(text.ids.is_empty());
+        assert_eq!(
+            learning_strategy_key(&text.label),
+            Some("v2:freetext"),
+            "the cour-name form learns under the shared text key"
+        );
+    }
+
     #[test]
     fn series_auto_strategy_tier_still_keeps_one_text_strategy() {
         let (primary, fallback) = split_strategy_tiers(
@@ -13392,6 +14933,7 @@ mod tests {
                 text_dispatch_mode: TextDispatchMode::FacetScoped,
                 is_alias_query: false,
                 facet_omitted: false,
+                series_name: None,
             });
             let text = strategies
                 .iter()
@@ -13431,6 +14973,7 @@ mod tests {
                 text_dispatch_mode: TextDispatchMode::FacetScoped,
                 is_alias_query: false,
                 facet_omitted: false,
+                series_name: None,
             });
             let text = strategies
                 .iter()
@@ -13535,6 +15078,8 @@ mod tests {
         IndexerPacing {
             domain_key: "indexer-1".into(),
             interval: std::time::Duration::ZERO,
+            max_queries_per_minute: None,
+            max_wait: None,
         }
     }
 
@@ -13542,6 +15087,15 @@ mod tests {
         IndexerPacing {
             domain_key: domain_key.into(),
             interval: std::time::Duration::from_secs(interval_secs),
+            max_queries_per_minute: None,
+            max_wait: None,
+        }
+    }
+
+    fn budgeted_pacing(domain_key: &str, interval_secs: u64, per_minute: u32) -> IndexerPacing {
+        IndexerPacing {
+            max_queries_per_minute: Some(per_minute),
+            ..test_pacing(domain_key, interval_secs)
         }
     }
 
@@ -13552,15 +15106,24 @@ mod tests {
 
         let (first, second, third) = tokio::join!(
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
             async {
-                limiter.acquire(&test_pacing("idx", 2)).await;
+                limiter
+                    .acquire(&test_pacing("idx", 2))
+                    .await
+                    .expect("an uncapped request waits for its slot");
                 started_at.elapsed()
             },
         );
@@ -13584,23 +15147,31 @@ mod tests {
         let limiter = IndexerRateLimiter::new();
         let unpaced = test_pacing("idx", 0);
 
-        limiter.acquire(&unpaced).await;
+        limiter
+            .acquire(&unpaced)
+            .await
+            .expect("an uncapped request waits for its slot");
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             limiter.acquire(&unpaced),
         )
         .await
-        .expect("a zero interval should not pace; host RPS owns default pacing");
+        .expect("a zero interval should not pace; host RPS owns default pacing")
+        .expect("an uncapped request waits for its slot");
 
-        limiter.acquire(&test_pacing("idx", 1)).await;
+        limiter
+            .acquire(&test_pacing("idx", 1))
+            .await
+            .expect("an uncapped request waits for its slot");
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             limiter.acquire(&test_pacing("other-idx", 1)),
         )
         .await
-        .expect("a different rate-limit domain should have an independent pacing schedule");
+        .expect("a different rate-limit domain should have an independent pacing schedule")
+        .expect("an uncapped request waits for its slot");
     }
 
     #[test]
@@ -13668,6 +15239,340 @@ mod tests {
         );
     }
 
+    /// Acquire `count` slots one after another and return each dispatch time
+    /// in seconds since `since`. On the paused clock these are exact.
+    async fn sequential_dispatches(
+        limiter: &IndexerRateLimiter,
+        pacing: &IndexerPacing,
+        count: usize,
+        since: tokio::time::Instant,
+    ) -> Vec<f64> {
+        let mut dispatches = Vec::with_capacity(count);
+        for _ in 0..count {
+            limiter
+                .acquire(pacing)
+                .await
+                .expect("an uncapped request waits for its slot");
+            dispatches.push(since.elapsed().as_secs_f64());
+        }
+        dispatches
+    }
+
+    fn assert_dispatches(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (actual_at, expected_at) in actual.iter().zip(expected) {
+            assert!(
+                (actual_at - expected_at).abs() < 0.001,
+                "dispatched at {actual:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    async fn is_ready<F: Future + Unpin>(future: &mut F) -> bool {
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::pin::Pin::new(&mut *future).poll(cx).is_ready())
+        })
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_query_budget_slides_over_the_last_minute() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let pacing = budgeted_pacing("budget-idx", 0, 3);
+        let started_at = tokio::time::Instant::now();
+
+        let first = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&first, &[0.0]);
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        let rest = sequential_dispatches(&limiter, &pacing, 2, started_at).await;
+        assert_dispatches(&rest, &[30.0, 30.0]);
+
+        // The window slides: the fourth waits for the first to leave it, not
+        // for the top of the next minute and not for the 30 s pair.
+        let mut fourth = Box::pin(limiter.acquire(&pacing));
+        assert!(!is_ready(&mut fourth).await, "the budget is spent");
+        tokio::time::advance(std::time::Duration::from_millis(29_900)).await;
+        assert!(
+            !is_ready(&mut fourth).await,
+            "the first request is still in the window"
+        );
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        assert!(is_ready(&mut fourth).await);
+
+        let fifth = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&fifth, &[90.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_query_budgets_are_per_rate_limit_domain() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let started_at = tokio::time::Instant::now();
+
+        let spent =
+            sequential_dispatches(&limiter, &budgeted_pacing("budget-a", 0, 2), 2, started_at)
+                .await;
+        assert_dispatches(&spent, &[0.0, 0.0]);
+
+        let other =
+            sequential_dispatches(&limiter, &budgeted_pacing("budget-b", 0, 2), 2, started_at)
+                .await;
+        assert_dispatches(&other, &[0.0, 0.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_without_a_budget_is_the_interval_alone() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let started_at = tokio::time::Instant::now();
+
+        let unpaced =
+            sequential_dispatches(&limiter, &test_pacing("free-idx", 0), 10, started_at).await;
+        assert_dispatches(&unpaced, &[0.0; 10]);
+
+        let paced =
+            sequential_dispatches(&limiter, &test_pacing("paced-idx", 2), 4, started_at).await;
+        assert_dispatches(&paced, &[0.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_waits_for_the_later_of_interval_and_budget() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let started_at = tokio::time::Instant::now();
+
+        // Ten a minute: the 2 s interval sets the pace for the first ten, then
+        // the eleventh waits for the first to leave the window, and the
+        // interval takes over again from that dispatch.
+        let dispatches = sequential_dispatches(
+            &limiter,
+            &budgeted_pacing("combined-idx", 2, 10),
+            12,
+            started_at,
+        )
+        .await;
+        assert_dispatches(
+            &dispatches,
+            &[
+                0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 60.0, 62.0,
+            ],
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_never_exceeds_the_budget_in_any_minute() {
+        const BUDGET: u32 = 4;
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let started_at = tokio::time::Instant::now();
+        let interactive = budgeted_pacing("window-idx", 0, BUDGET);
+        let background = budgeted_pacing("window-idx", 2, BUDGET);
+
+        let requests = (0..3 * BUDGET).map(|index| {
+            let limiter = limiter.clone();
+            let pacing = if index % 2 == 0 {
+                interactive.clone()
+            } else {
+                background.clone()
+            };
+            async move {
+                limiter
+                    .acquire(&pacing)
+                    .await
+                    .expect("an uncapped request waits for its slot");
+                started_at.elapsed().as_secs_f64()
+            }
+        });
+        let mut dispatches = futures_util::future::join_all(requests).await;
+        dispatches.sort_by(f64::total_cmp);
+
+        assert!(
+            *dispatches.last().unwrap() <= 180.0,
+            "the burst drains within three minutes: {dispatches:?}"
+        );
+        for window_start in &dispatches {
+            let in_window = dispatches
+                .iter()
+                .filter(|at| **at >= *window_start && **at < *window_start + 60.0 - 1e-9)
+                .count();
+            assert!(
+                in_window <= BUDGET as usize,
+                "{in_window} dispatches in the minute from {window_start}: {dispatches:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_releases_the_slot_of_a_dropped_request() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let pacing = budgeted_pacing("dropped-idx", 0, 2);
+        let started_at = tokio::time::Instant::now();
+
+        let first = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let second = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&[first[0], second[0]], &[0.0, 10.0]);
+
+        // Promised the 60 s slot, then cancelled before it came.
+        let mut cancelled = Box::pin(limiter.acquire(&pacing));
+        assert!(!is_ready(&mut cancelled).await);
+        drop(cancelled);
+
+        // Had the cancelled request kept its slot this one would wait until 70 s.
+        let next = sequential_dispatches(&limiter, &pacing, 1, started_at).await;
+        assert_dispatches(&next, &[60.0]);
+    }
+
+    fn interactive_budgeted_pacing(domain_key: &str, per_minute: u32) -> IndexerPacing {
+        IndexerPacing {
+            max_wait: Some(INTERACTIVE_PACING_MAX_WAIT),
+            ..budgeted_pacing(domain_key, 0, per_minute)
+        }
+    }
+
+    #[test]
+    fn only_interactive_pacing_caps_its_wait() {
+        let mut config = mock_indexer_config();
+        config.max_queries_per_minute = Some(1);
+
+        assert_eq!(
+            IndexerPacing::resolve(&config, SchedulerIntent::InteractiveSearch).max_wait,
+            Some(INTERACTIVE_PACING_MAX_WAIT),
+        );
+        for intent in [
+            SchedulerIntent::BackgroundAcquisition,
+            SchedulerIntent::BackgroundRss,
+        ] {
+            assert_eq!(
+                IndexerPacing::resolve(&config, intent).max_wait,
+                None,
+                "{intent:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_pacing_refuses_a_long_wait_at_once_without_spending_budget() {
+        use futures_util::FutureExt as _;
+
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let interactive = interactive_budgeted_pacing("capped-idx", 1);
+        let started_at = tokio::time::Instant::now();
+
+        limiter
+            .acquire(&interactive)
+            .now_or_never()
+            .expect("the first slot is free")
+            .expect("the first slot is within the cap");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+
+        // The budget has room again at 60 s: a 50 s wait is past the cap.
+        for _ in 0..3 {
+            let refused = limiter
+                .acquire(&interactive)
+                .now_or_never()
+                .expect("an over-cap wait is refused without waiting");
+            assert_eq!(
+                refused,
+                Err(PacingWaitExceeded {
+                    wait: std::time::Duration::from_secs(50)
+                })
+            );
+        }
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(10));
+
+        // The refusals reserved nothing: an uncapped request still gets the
+        // 60 s slot rather than one pushed out behind them.
+        let background = budgeted_pacing("capped-idx", 0, 1);
+        let next = sequential_dispatches(&limiter, &background, 1, started_at).await;
+        assert_dispatches(&next, &[60.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_pacing_waits_out_a_short_wait() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let interactive = interactive_budgeted_pacing("short-wait-idx", 1);
+        let started_at = tokio::time::Instant::now();
+
+        let first = sequential_dispatches(&limiter, &interactive, 1, started_at).await;
+        assert_dispatches(&first, &[0.0]);
+        tokio::time::advance(std::time::Duration::from_secs(40)).await;
+
+        // The next slot is 20 s away, inside the cap: the request waits for it.
+        let mut waiting = Box::pin(limiter.acquire(&interactive));
+        assert!(!is_ready(&mut waiting).await, "the slot has not come yet");
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+        assert_eq!(waiting.await, Ok(()));
+        assert_eq!(started_at.elapsed(), std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_pacing_waits_out_a_long_wait() {
+        let limiter = IndexerRateLimiter::with_registry(RateLimitRegistry::isolated_indexers());
+        let mut config = mock_indexer_config();
+        config.rate_limit_seconds = None;
+        config.max_queries_per_minute = Some(1);
+        let background = IndexerPacing::resolve(&config, SchedulerIntent::BackgroundAcquisition);
+        let started_at = tokio::time::Instant::now();
+
+        let dispatches = sequential_dispatches(&limiter, &background, 2, started_at).await;
+        assert_dispatches(&dispatches, &[0.0, 60.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_halves_while_a_domain_recovers_from_a_rate_limit() {
+        let registry = RateLimitRegistry::isolated_indexers();
+        let limiter = IndexerRateLimiter::with_registry(registry.clone());
+        let interval_domain = "recovering-a";
+        let budget_domain = "recovering-b";
+        for domain in [interval_domain, budget_domain] {
+            let (cooldown, _) = registry
+                .record_destination_fallback_cooldown(&DestinationKey::from(domain))
+                .await;
+            assert_eq!(cooldown, std::time::Duration::from_secs(60));
+            assert!(
+                !registry.destination_recovering(&DestinationKey::from(domain)),
+                "the cooldown itself is not recovery"
+            );
+        }
+
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        let recovering_from = tokio::time::Instant::now();
+        assert!(registry.destination_recovering(&DestinationKey::from(interval_domain)));
+
+        let doubled = sequential_dispatches(
+            &limiter,
+            &test_pacing(interval_domain, 2),
+            2,
+            recovering_from,
+        )
+        .await;
+        assert_dispatches(&doubled, &[0.0, 4.0]);
+
+        // An interactive search with no interval and a 3/min budget is slowed
+        // too: it trickles at 2 s, and the budget halves to one a minute.
+        let budget_from = tokio::time::Instant::now();
+        let halved = sequential_dispatches(
+            &limiter,
+            &budgeted_pacing(budget_domain, 0, 3),
+            2,
+            budget_from,
+        )
+        .await;
+        assert_dispatches(&halved, &[0.0, 60.0]);
+
+        // Past the rung's proving point a success clears it and the domain is
+        // back to its own pace.
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        registry.note_destination_success(&DestinationKey::from(interval_domain));
+        assert!(!registry.destination_recovering(&DestinationKey::from(interval_domain)));
+        let recovered_from = tokio::time::Instant::now();
+        let normal = sequential_dispatches(
+            &limiter,
+            &test_pacing(interval_domain, 2),
+            2,
+            recovered_from,
+        )
+        .await;
+        assert_dispatches(&normal, &[0.0, 2.0]);
+    }
+
     #[test]
     fn anime_alias_strategy_is_freetext_only_and_skips_ids() {
         let caps = IndexerProviderCapabilities {
@@ -13698,6 +15603,7 @@ mod tests {
             text_dispatch_mode: TextDispatchMode::FacetScoped,
             is_alias_query: true,
             facet_omitted: false,
+            series_name: None,
         });
 
         assert_eq!(strategies.len(), 1);

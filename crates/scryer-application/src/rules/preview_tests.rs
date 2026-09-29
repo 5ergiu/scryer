@@ -26,8 +26,10 @@ fn request(title_id: String, source: &str) -> RuleSetTestRequest {
         copy_disables_source: false,
         title_id,
         episode_id: None,
-        release_name: "Preview.Movie.2024.1080p.WEB-DL.DDP5.1-GROUP".into(),
+        release_name: Some("Preview.Movie.2024.1080p.WEB-DL.DDP5.1-GROUP".into()),
         size_bytes: None,
+        listing: RuleSetTestListingInput::default(),
+        media_file_id: None,
     }
 }
 
@@ -266,7 +268,7 @@ async fn preview_rejects_invalid_title_and_oversized_release_before_any_persiste
 
     let title = movie(&app, &user).await;
     let mut oversized = request(title.id, "import rego.v1");
-    oversized.release_name = "x".repeat(4097);
+    oversized.release_name = Some("x".repeat(4097));
     let oversized = app
         .test_rule_set(&user, oversized)
         .await
@@ -671,7 +673,10 @@ async fn preview_preserves_cross_rule_references_and_active_engine() {
         .resolve_canonical_scoring_context(&title, &profile)
         .await;
     let parsed = crate::release_parser::parse_release_metadata_for_target(
-        &request(title.id.clone(), "").release_name,
+        request(title.id.clone(), "")
+            .release_name
+            .as_deref()
+            .unwrap(),
         &crate::release_parser::build_release_parse_context_for_title(&title, &[], Some("movie")),
     );
     let normal = crate::canonical_scoring::score_release(
@@ -823,13 +828,13 @@ async fn preview_uses_series_and_anime_context_without_rewriting_numbering() {
             .await
             .unwrap();
         probe.episode_id = Some(episode.id);
-        probe.release_name = "Preview.Show.S01E01.1080p.WEB-DL-GROUP".into();
+        probe.release_name = Some("Preview.Show.S01E01.1080p.WEB-DL-GROUP".into());
         let result = app.test_rule_set(&user, probe.clone()).await.unwrap();
         assert_eq!(result.draft_contribution.score, 37, "{result:?}");
         assert_eq!(result.profile_name, "1080P");
         assert_eq!(result.context.language.as_deref(), Some("jpn"));
         assert_eq!(result.context.episode_label.as_deref(), Some("S01E01"));
-        probe.release_name = "Preview.Show.S02E09.1080p.WEB-DL-GROUP".into();
+        probe.release_name = Some("Preview.Show.S02E09.1080p.WEB-DL-GROUP".into());
         let numbered = app.test_rule_set(&user, probe).await.unwrap();
         assert_eq!(numbered.parsed.season.as_deref(), Some("2"));
         assert_eq!(numbered.parsed.episode.as_deref(), Some("9"));

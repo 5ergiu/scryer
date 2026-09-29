@@ -1,3 +1,4 @@
+import { regoDiagnostics, regoSourceLine } from "@/lib/utils/rego-diagnostics";
 import * as React from "react";
 import {
   BookOpen,
@@ -39,10 +40,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  LazyRegoEditor,
-  type RegoEditorDiagnostic,
-} from "@/components/common/lazy-rego-editor";
+import { LazyRegoEditor } from "@/components/common/lazy-rego-editor";
 import { RenderBooleanIcon } from "@/components/common/boolean-icon";
 import {
   Table,
@@ -112,31 +110,24 @@ type RefField = { field: string; type: string; descKey: string };
 
 type RefSectionDef = { titleKey: string; path: string; fields: RefField[] };
 const REF_SECTIONS = ruleInputContract.sections as RefSectionDef[];
-// The validator prepends one hidden import line before compiling user-authored Rego.
-const RULE_VALIDATION_HIDDEN_LINE_OFFSET = 1;
-
-function toVisibleRuleLine(line: number): number {
-  return Math.max(1, line - RULE_VALIDATION_HIDDEN_LINE_OFFSET);
-}
-
-function adjustRuleValidationLocations(text: string): string {
+function adjustRuleValidationLocations(text: string, source: string): string {
   return text.replace(/(\S+\.rego:)(\d+)(:\d+)/g, (_, prefix: string, lineText: string, suffix: string) => {
     const line = Number.parseInt(lineText, 10);
     return Number.isFinite(line)
-      ? `${prefix}${toVisibleRuleLine(line)}${suffix}`
+      ? `${prefix}${regoSourceLine(source, line)}${suffix}`
       : `${prefix}${lineText}${suffix}`;
   });
 }
 
-function formatRuleValidationError(error: string): string {
+function formatRuleValidationError(error: string, source: string): string {
   const normalized = error.replace(/\r\n/g, "\n").trim();
   if (normalized.includes("\n")) {
-    return adjustRuleValidationLocations(normalized).replace(
+    return adjustRuleValidationLocations(normalized, source).replace(
       /^(\s*)(\d+)(\s+\|)/gm,
       (match, prefix: string, lineText: string, suffix: string) => {
         const line = Number.parseInt(lineText, 10);
         return Number.isFinite(line)
-          ? `${prefix}${toVisibleRuleLine(line)}${suffix}`
+          ? `${prefix}${regoSourceLine(source, line)}${suffix}`
           : match;
       },
     );
@@ -147,16 +138,16 @@ function formatRuleValidationError(error: string): string {
     return normalized;
   }
 
-  const [location, lineNumber, source, ...hintParts] = parts;
+  const [location, lineNumber, sourceText, ...hintParts] = parts;
   const rawLine = Number.parseInt(lineNumber, 10);
   const visibleLineNumber = Number.isFinite(rawLine)
-    ? String(toVisibleRuleLine(rawLine))
+    ? String(regoSourceLine(source, rawLine))
     : lineNumber;
   const gutterWidth = Math.max(visibleLineNumber.length, 1);
   const columnMatch = location.match(/:(\d+):(\d+)(?:\D*$|$)/);
   const column = columnMatch ? Number.parseInt(columnMatch[2] ?? "", 10) : null;
   const hint = hintParts.join(" | ").trim();
-  const visibleLocation = adjustRuleValidationLocations(location.trim());
+  const visibleLocation = adjustRuleValidationLocations(location.trim(), source);
   const locationMatch = visibleLocation.match(/^(.*?:)\s*(-->\s+.+)$/);
   const locationLines = locationMatch
     ? [locationMatch[1], locationMatch[2]]
@@ -172,72 +163,10 @@ function formatRuleValidationError(error: string): string {
   return [
     ...locationLines,
     `${" ".repeat(gutterWidth)} |`,
-    `${visibleLineNumber.padStart(gutterWidth)} | ${source.trim()}`,
+    `${visibleLineNumber.padStart(gutterWidth)} | ${sourceText.trim()}`,
     `${" ".repeat(gutterWidth)} | ${pointer}`,
     trailingDiagnostic,
   ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
-function locationForReportedRulePath(
-  error: string,
-  regoSource: string,
-): RegoEditorDiagnostic | null {
-  const pathMatch = error.match(
-    /(?:Unknown|Unsupported dynamic) rule input path '([^']+)'/,
-  );
-  const path = pathMatch?.[1];
-  if (!path) {
-    return null;
-  }
-
-  const offset = regoSource.indexOf(path);
-  if (offset < 0) {
-    return null;
-  }
-
-  const beforePath = regoSource.slice(0, offset);
-  const line = beforePath.split("\n").length;
-  const lastNewline = beforePath.lastIndexOf("\n");
-  return {
-    line,
-    column: offset - lastNewline,
-    message: formatRuleValidationError(error),
-  };
-}
-
-function parseRuleValidationDiagnostic(
-  error: string,
-  regoSource: string,
-): RegoEditorDiagnostic | null {
-  const match = error.match(/\S+\.rego:(\d+):(\d+)/);
-  if (!match) {
-    return locationForReportedRulePath(error, regoSource);
-  }
-
-  const rawLine = Number.parseInt(match[1] ?? "", 10);
-  const column = Number.parseInt(match[2] ?? "", 10);
-  if (!Number.isFinite(rawLine) || rawLine < 1) {
-    return null;
-  }
-
-  return {
-    line: toVisibleRuleLine(rawLine),
-    column: Number.isFinite(column) && column > 0 ? column : null,
-    message: formatRuleValidationError(error),
-  };
-}
-
-function getRuleValidationDiagnostics(
-  validationResult: RuleValidationResult | null,
-  regoSource: string,
-): RegoEditorDiagnostic[] {
-  if (!validationResult || validationResult.valid) {
-    return [];
-  }
-
-  return validationResult.errors
-    .map((error) => parseRuleValidationDiagnostic(error, regoSource))
-    .filter((diagnostic): diagnostic is RegoEditorDiagnostic => Boolean(diagnostic));
 }
 
 function RefFieldTable({ section }: { section: RefSectionDef }) {
@@ -496,6 +425,7 @@ function RulesContextReference() {
               {t("settings.refOutputIntro")}
             </p>
             <LazyRegoEditor
+              ruleFamily="release"
               id="settings-rules-output-format-example"
               value={RULE_OUTPUT_EXAMPLE}
               onChange={ignoreRulesReferenceCodeChange}
@@ -1005,7 +935,7 @@ export function SettingsRulesSection({
   const [isArrImportOpen, setIsArrImportOpen] = React.useState(false);
   const [isTestScoringOpen, setIsTestScoringOpen] = React.useState(false);
   const validationDiagnostics = React.useMemo(
-    () => getRuleValidationDiagnostics(validationResult, ruleSetDraft.regoSource),
+    () => regoDiagnostics(ruleSetDraft.regoSource, validationResult),
     [ruleSetDraft.regoSource, validationResult],
   );
 
@@ -1231,6 +1161,7 @@ export function SettingsRulesSection({
                     </div>
                   ) : null}
                   <LazyRegoEditor
+                    ruleFamily="release"
                     id="settings-rule-rego-source"
                     autoFocus={focusEditor}
                     onAutoFocus={onEditorFocused}
@@ -1284,7 +1215,7 @@ export function SettingsRulesSection({
                             key={i}
                             className="overflow-x-auto whitespace-pre rounded-[9px] border border-[var(--scry-danger-border)] bg-[var(--scry-danger-bg)] p-3 font-mono font-[var(--font-code)] text-[12px] leading-5 text-[var(--scry-danger-text)]"
                           >
-                            {formatRuleValidationError(err)}
+                            {formatRuleValidationError(err, ruleSetDraft.regoSource)}
                           </pre>
                         ))}
                       </div>

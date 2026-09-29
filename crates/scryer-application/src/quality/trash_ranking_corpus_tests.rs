@@ -152,7 +152,7 @@ fn evaluate_locale_pack(
         &decision,
         ReleaseRuntimeInfo {
             size_bytes: Some(4_000_000_000),
-            published_at: None,
+            age_days: None,
             thumbs_up: None,
             thumbs_down: None,
             is_password_protected: None,

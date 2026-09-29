@@ -4,20 +4,23 @@ use crate::acquisition::convergence::{
 };
 
 const ACQUISITION_ENABLED_KEY: &str = "acquisition.enabled";
-const ACQUISITION_UPGRADE_COOLDOWN_HOURS_KEY: &str = "acquisition.upgrade_cooldown_hours";
 const ACQUISITION_SAME_TIER_MIN_DELTA_KEY: &str = "acquisition.same_tier_min_delta";
-const ACQUISITION_CROSS_TIER_MIN_DELTA_KEY: &str = "acquisition.cross_tier_min_delta";
-const ACQUISITION_FORCED_UPGRADE_DELTA_BYPASS_KEY: &str = "acquisition.forced_upgrade_delta_bypass";
 const ACQUISITION_POLL_INTERVAL_SECONDS_KEY: &str = "acquisition.poll_interval_seconds";
+pub(crate) const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk_interval_seconds";
+/// Download-client failure check cadence when nothing is stored.
+pub(crate) const DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS: i32 = 60;
+/// Catalog walk cadence when nothing is stored.
+pub(crate) const DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS: i32 = 300;
 
 #[derive(Debug, Clone)]
 pub struct AcquisitionSettings {
     pub enabled: bool,
-    pub upgrade_cooldown_hours: i32,
     pub same_tier_min_delta: i32,
-    pub cross_tier_min_delta: i32,
-    pub forced_upgrade_delta_bypass: i32,
+    /// How often the download clients are read and failed grabs are handled.
     pub poll_interval_seconds: i32,
+    /// How often the catalog is scanned for missing and upgradable scopes and
+    /// a batch of titles is walked. Wakes still walk at once.
+    pub walk_interval_seconds: i32,
     /// Per-cycle evaluation cost ceiling for the convergence cursor — how many scopes may be evaluated per tick, not a rate limiter.
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Dormant slow re-converge backstop: coverage older than
@@ -25,18 +28,16 @@ pub struct AcquisitionSettings {
     pub long_tail_reconverge_days: i32,
 }
 impl AcquisitionSettings {
-    /// The subset of these settings the acquisition gates actually read.
+    /// The subset of these settings the acquisition gates read.
     ///
-    /// `cross_tier_min_delta` is deliberately absent: since the quality tier
-    /// left the score, a better tier admits outright in [`crate::admission`] and
-    /// no delta threshold ever sees a cross-tier comparison. The setting and its
-    /// GraphQL field are retained so stored values and clients keep working;
-    /// nothing reads them.
+    /// Rows left behind by earlier releases under
+    /// `acquisition.upgrade_cooldown_hours`, `acquisition.cross_tier_min_delta`
+    /// and `acquisition.forced_upgrade_delta_bypass` are never loaded: no gate
+    /// consults them any more, so they were removed rather than kept as inert
+    /// knobs.
     pub fn thresholds(&self) -> AcquisitionThresholds {
         AcquisitionThresholds {
-            upgrade_cooldown_hours: self.upgrade_cooldown_hours as i64,
             same_tier_min_delta: self.same_tier_min_delta,
-            forced_upgrade_delta_bypass: self.forced_upgrade_delta_bypass,
         }
     }
 }
@@ -47,26 +48,20 @@ impl AppUseCase {
                 .read_setting_bool_value(ACQUISITION_ENABLED_KEY, None)
                 .await?
                 .unwrap_or(true),
-            upgrade_cooldown_hours: self
-                .read_setting_i64_value(ACQUISITION_UPGRADE_COOLDOWN_HOURS_KEY, None)
-                .await?
-                .unwrap_or(24) as i32,
             same_tier_min_delta: self
                 .read_setting_i64_value(ACQUISITION_SAME_TIER_MIN_DELTA_KEY, None)
                 .await?
                 .unwrap_or(120) as i32,
-            cross_tier_min_delta: self
-                .read_setting_i64_value(ACQUISITION_CROSS_TIER_MIN_DELTA_KEY, None)
-                .await?
-                .unwrap_or(30) as i32,
-            forced_upgrade_delta_bypass: self
-                .read_setting_i64_value(ACQUISITION_FORCED_UPGRADE_DELTA_BYPASS_KEY, None)
-                .await?
-                .unwrap_or(400) as i32,
             poll_interval_seconds: self
                 .read_setting_i64_value(ACQUISITION_POLL_INTERVAL_SECONDS_KEY, None)
                 .await?
-                .unwrap_or(60) as i32,
+                .unwrap_or(DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS as i64)
+                as i32,
+            walk_interval_seconds: self
+                .read_setting_i64_value(ACQUISITION_WALK_INTERVAL_SECONDS_KEY, None)
+                .await?
+                .unwrap_or(DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS as i64)
+                as i32,
             long_tail_backfill_max_scopes_per_cycle: self
                 .read_setting_i64_value(
                     ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY,
@@ -103,11 +98,7 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageCatalogSettings)
             .await?;
 
-        if settings.upgrade_cooldown_hours < 0
-            || settings.same_tier_min_delta < 0
-            || settings.cross_tier_min_delta < 0
-            || settings.forced_upgrade_delta_bypass < 0
-        {
+        if settings.same_tier_min_delta < 0 {
             return Err(AppError::Validation(
                 "acquisition thresholds cannot be negative".to_string(),
             ));
@@ -115,6 +106,11 @@ impl AppUseCase {
         if settings.poll_interval_seconds < 1 {
             return Err(AppError::Validation(
                 "acquisition poll interval must be at least 1 second".to_string(),
+            ));
+        }
+        if settings.walk_interval_seconds < 1 {
+            return Err(AppError::Validation(
+                "acquisition walk interval must be at least 1 second".to_string(),
             ));
         }
         if settings.long_tail_backfill_max_scopes_per_cycle < 1 {
@@ -135,32 +131,20 @@ impl AppUseCase {
         )
         .await?;
         self.upsert_system_setting_json(
-            ACQUISITION_UPGRADE_COOLDOWN_HOURS_KEY,
-            &settings.upgrade_cooldown_hours,
-            Some(actor.id.clone()),
-        )
-        .await?;
-        self.upsert_system_setting_json(
             ACQUISITION_SAME_TIER_MIN_DELTA_KEY,
             &settings.same_tier_min_delta,
             Some(actor.id.clone()),
         )
         .await?;
         self.upsert_system_setting_json(
-            ACQUISITION_CROSS_TIER_MIN_DELTA_KEY,
-            &settings.cross_tier_min_delta,
-            Some(actor.id.clone()),
-        )
-        .await?;
-        self.upsert_system_setting_json(
-            ACQUISITION_FORCED_UPGRADE_DELTA_BYPASS_KEY,
-            &settings.forced_upgrade_delta_bypass,
-            Some(actor.id.clone()),
-        )
-        .await?;
-        self.upsert_system_setting_json(
             ACQUISITION_POLL_INTERVAL_SECONDS_KEY,
             &settings.poll_interval_seconds,
+            Some(actor.id.clone()),
+        )
+        .await?;
+        self.upsert_system_setting_json(
+            ACQUISITION_WALK_INTERVAL_SECONDS_KEY,
+            &settings.walk_interval_seconds,
             Some(actor.id.clone()),
         )
         .await?;
@@ -186,11 +170,9 @@ impl AppUseCase {
         .await;
         let _ = self.runtime.events.settings_changed_broadcast.send(vec![
             ACQUISITION_ENABLED_KEY.to_string(),
-            ACQUISITION_UPGRADE_COOLDOWN_HOURS_KEY.to_string(),
             ACQUISITION_SAME_TIER_MIN_DELTA_KEY.to_string(),
-            ACQUISITION_CROSS_TIER_MIN_DELTA_KEY.to_string(),
-            ACQUISITION_FORCED_UPGRADE_DELTA_BYPASS_KEY.to_string(),
             ACQUISITION_POLL_INTERVAL_SECONDS_KEY.to_string(),
+            ACQUISITION_WALK_INTERVAL_SECONDS_KEY.to_string(),
             ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY.to_string(),
             ACQUISITION_LONG_TAIL_RECONVERGE_DAYS_KEY.to_string(),
         ]);

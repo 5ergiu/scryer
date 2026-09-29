@@ -534,6 +534,7 @@ mod title_history_filter_tests {
                     quality: None,
                     episode_ids: vec![],
                     size_bytes: None,
+                    upgrade: false,
                 })
             };
             let mut event = event_with_payload(id, payload);
@@ -583,6 +584,7 @@ mod title_history_filter_tests {
                 destination_path: Some("/new/Film".into()),
                 completed_with_warnings: true,
                 detail: Some("Kept both versions of season.nfo".into()),
+                media_updates: Vec::new(),
             }),
         );
         let (first, replay) = tokio::join!(
@@ -691,6 +693,7 @@ mod title_history_filter_tests {
                 source_provider: Some("Configured Indexer".to_string()),
                 download_id: Some("download-1".to_string()),
                 episode_ids: Vec::new(),
+                release_facts: None,
             }),
         );
         untitled.title_id = None;
@@ -923,6 +926,7 @@ mod title_history_filter_tests {
                         source_provider: None,
                         download_id: Some("download-1".to_string()),
                         episode_ids: Vec::new(),
+                        release_facts: None,
                     }),
                 ),
             ])

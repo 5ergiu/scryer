@@ -9,6 +9,8 @@ struct MediaRequestMetadataGateway {
     /// Counts every read that would have crossed the wire to SMG, so the enrichment cache can be
     /// shown to collapse a preview and a submit into one call (FR-021).
     detail_calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// Every `resolveTitles` call as `(kind, create_missing)`.
+    resolve_calls: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
 
 impl MediaRequestMetadataGateway {
@@ -68,17 +70,6 @@ impl MetadataGateway for MediaRequestMetadataGateway {
             .ok_or_else(|| AppError::NotFound(format!("movie {tvdb_id}")))
     }
 
-    async fn get_series(&self, tvdb_id: i64, _language: &str) -> AppResult<SeriesMetadata> {
-        self.record_detail_call();
-        if self.fail_detail {
-            return Err(AppError::Repository("series metadata unavailable".into()));
-        }
-        self.series
-            .get(&tvdb_id)
-            .cloned()
-            .ok_or_else(|| AppError::NotFound(format!("series {tvdb_id}")))
-    }
-
     async fn get_metadata_bulk(
         &self,
         movie_tvdb_ids: &[i64],
@@ -134,6 +125,79 @@ impl MetadataGateway for MediaRequestMetadataGateway {
             });
             if let Some(movie) = movie {
                 result.by_ref_index.insert(ref_index, movie.clone());
+            } else {
+                result.missing_ref_indexes.push(ref_index);
+            }
+        }
+        Ok(result)
+    }
+
+    async fn resolve_titles(
+        &self,
+        refs: &[TitleExternalRef],
+        kind: &str,
+        create_missing: bool,
+    ) -> AppResult<Vec<TitleResolution>> {
+        self.resolve_calls
+            .lock()
+            .expect("resolve calls lock")
+            .push((kind.to_string(), create_missing));
+        Ok(refs
+            .iter()
+            .enumerate()
+            .map(|(ref_index, reference)| {
+                let smg_id = self
+                    .series
+                    .values()
+                    .find(|series| {
+                        reference.external_ids.iter().any(|external_id| {
+                            external_id.source == "tmdb"
+                                && series.tmdb_id.map(|id| id.to_string()).as_deref()
+                                    == Some(external_id.value.as_str())
+                        })
+                    })
+                    .and_then(|series| series.smg_id);
+                TitleResolution {
+                    ref_index,
+                    resolved: smg_id.is_some(),
+                    smg_id,
+                    kind: kind.to_string(),
+                    primary_source: "tmdb".to_string(),
+                    redirected_from: None,
+                    created: create_missing && smg_id.is_some(),
+                    external_ids: Vec::new(),
+                    reason: String::new(),
+                }
+            })
+            .collect())
+    }
+
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        _language: &str,
+        _include_episodes: bool,
+        _include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        self.record_detail_call();
+        if self.fail_detail {
+            return Err(AppError::Repository("series metadata unavailable".into()));
+        }
+        let mut result = SeriesTitleBulkResult::default();
+        for (ref_index, series_ref) in refs.iter().enumerate() {
+            let series = self.series.values().find(|series| {
+                series_ref
+                    .smg_id
+                    .is_some_and(|smg_id| series.smg_id == Some(smg_id))
+                    || series_ref
+                        .tvdb_id
+                        .is_some_and(|tvdb_id| series.tvdb_id == tvdb_id)
+                    || series_ref
+                        .tmdb_id
+                        .is_some_and(|tmdb_id| series.tmdb_id == Some(tmdb_id))
+            });
+            if let Some(series) = series {
+                result.by_ref_index.insert(ref_index, series.clone());
             } else {
                 result.missing_ref_indexes.push(ref_index);
             }
@@ -764,6 +828,47 @@ async fn submit_media_request_enriches_tmdb_only_movie_from_title_ref() {
             ("tmdb", "810021"),
             ("tvdb", "91021"),
         ],
+    );
+}
+
+/// A series request that names only a TMDB id asks SMG to resolve (and, if
+/// needed, create) the series, then enriches it by the SMG title id it gets
+/// back. The series has no TVDB id at all.
+#[tokio::test]
+async fn submit_media_request_resolves_tmdb_only_series_by_smg_title_id() {
+    let harness = bootstrap_media_request_app();
+    let smg_id = 1_880_303;
+    let tmdb_id = 880_303;
+    let mut series = make_series_metadata(0, "TMDB Request Series");
+    series.smg_id = Some(smg_id);
+    series.tmdb_id = Some(tmdb_id);
+    let gateway = MediaRequestMetadataGateway {
+        series: HashMap::from([(smg_id, series)]),
+        ..Default::default()
+    };
+    let resolve_calls = gateway.resolve_calls.clone();
+    let app = harness
+        .app
+        .with_test_overrides(|builder| builder.with_metadata_gateway(Arc::new(gateway)));
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+    let mut input = media_request_input(library_id, 0);
+    input.facet = MediaFacet::Series;
+    input.title = "TMDB Request Series".to_string();
+    input.external_ids = vec![ExternalId::with_kind("tmdb", "series", tmdb_id.to_string())];
+
+    app.submit_media_request(&harness.user, input)
+        .await
+        .expect("TMDB-only series request should enrich");
+
+    assert_eq!(
+        resolve_calls.lock().expect("resolve calls lock").as_slice(),
+        &[("series".to_string(), true)]
+    );
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_external_ids(
+        &requests[0].external_ids,
+        &[("smg", "1880303"), ("tmdb", "880303")],
     );
 }
 
@@ -2126,6 +2231,7 @@ fn snapshot_award() -> crate::TitleAward {
 
 fn adult_canonical_tag() -> scryer_domain::CanonicalMediaTag {
     scryer_domain::CanonicalMediaTag {
+        affinity_signals: Vec::new(),
         key: "canonical:genre:fixture".to_string(),
         category: "genre".to_string(),
         name: "Fixture".to_string(),
@@ -2438,4 +2544,161 @@ fn enrichment_cache_key_ignores_external_id_order_and_case() {
         ),
         "the same identifiers under a different facet are a different subject"
     );
+}
+
+#[tokio::test]
+async fn a_held_list_request_waits_for_review_despite_auto_approve() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let owner = library_permission_user(
+        "list-owner",
+        &library_id,
+        &[scryer_domain::LibraryPermission::AutoApproveRequests],
+    );
+    let mut input = media_request_input(library_id, 9031);
+    input.origin = scryer_domain::MediaRequestOrigin::PublicList {
+        subscription_id: "public-list-one".to_string(),
+    };
+    input.admission = crate::MediaRequestAdmission::HoldForReview;
+
+    harness
+        .app
+        .submit_media_request(&owner, input)
+        .await
+        .expect("held request should be admitted");
+
+    assert!(harness.titles.store.lock().await.is_empty());
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].status, MediaRequestStatus::Pending);
+    assert_eq!(
+        requests[0].origin,
+        scryer_domain::MediaRequestOrigin::PublicList {
+            subscription_id: "public-list-one".to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_title_manager_sees_and_cancels_their_own_held_request() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let owner = library_permission_user(
+        "managing-list-owner",
+        &library_id,
+        &[scryer_domain::LibraryPermission::ManageTitles],
+    );
+    let other_manager = library_permission_user(
+        "another-manager",
+        &library_id,
+        &[scryer_domain::LibraryPermission::ManageTitles],
+    );
+    let mut input = media_request_input(library_id, 9035);
+    input.origin = scryer_domain::MediaRequestOrigin::PublicList {
+        subscription_id: "public-list-one".to_string(),
+    };
+    input.admission = crate::MediaRequestAdmission::HoldForReview;
+    let outcome = harness
+        .app
+        .submit_media_request(&owner, input)
+        .await
+        .expect("held request should be admitted");
+
+    let mine = harness
+        .app
+        .list_my_media_requests(
+            &owner,
+            ListMediaRequestsInput {
+                facet: Some(MediaFacet::Movie),
+                library_ids: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("owner should list their requests");
+    assert_eq!(
+        mine.iter().map(|request| &request.id).collect::<Vec<_>>(),
+        vec![&outcome.request_id]
+    );
+
+    let refused = harness
+        .app
+        .cancel_my_media_request(&other_manager, &outcome.request_id)
+        .await
+        .expect_err("a manager who did not file the request cannot withdraw it");
+    assert!(matches!(refused, AppError::Unauthorized(_)));
+
+    let canceled = harness
+        .app
+        .cancel_my_media_request(&owner, &outcome.request_id)
+        .await
+        .expect("owner should cancel their held request");
+    assert_eq!(canceled, 1);
+    let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].status, MediaRequestStatus::Canceled);
+}
+
+#[tokio::test]
+async fn dismissing_a_public_list_request_excludes_the_title_from_that_list() {
+    use crate::lists::test_support::{membership, subscription};
+
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    *harness.lists.subscriptions.lock().unwrap() = vec![subscription("public-list-one")];
+    let mut input = media_request_input(library_id, 9032);
+    input.origin = scryer_domain::MediaRequestOrigin::PublicList {
+        subscription_id: "public-list-one".to_string(),
+    };
+    input.admission = crate::MediaRequestAdmission::HoldForReview;
+    let outcome = harness
+        .app
+        .submit_media_request(&harness.user, input)
+        .await
+        .expect("held request should be admitted");
+    let mut row = membership(
+        "public-list-one",
+        "item-one",
+        scryer_domain::ListMembershipState::Held,
+    );
+    row.request_id = Some(outcome.request_id.clone());
+    harness.lists.insert_rows(vec![row]);
+
+    harness
+        .app
+        .dismiss_media_request(&harness.manager, &outcome.request_id)
+        .await
+        .expect("dismiss should succeed");
+
+    let exclusions = harness.lists.exclusions.lock().unwrap().clone();
+    assert_eq!(exclusions.len(), 1);
+    assert_eq!(
+        exclusions[0].scope,
+        scryer_domain::ListExclusionScope::List {
+            subscription_id: "public-list-one".to_string()
+        }
+    );
+    assert_eq!(exclusions[0].display_title, "Glass Harbor");
+    assert_eq!(
+        harness.lists.row("public-list-one", "item-one").state,
+        scryer_domain::ListMembershipState::Excluded
+    );
+}
+
+#[tokio::test]
+async fn dismissing_a_manual_request_creates_no_exclusion() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let outcome = harness
+        .app
+        .submit_media_request(&harness.user, media_request_input(library_id, 9033))
+        .await
+        .expect("request should be admitted");
+
+    harness
+        .app
+        .dismiss_media_request(&harness.manager, &outcome.request_id)
+        .await
+        .expect("dismiss should succeed");
+
+    assert!(harness.lists.exclusions.lock().unwrap().is_empty());
 }

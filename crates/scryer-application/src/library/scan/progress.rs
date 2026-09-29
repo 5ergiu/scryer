@@ -1387,6 +1387,7 @@ fn apply_library_scan_delta_fields(
             imported: non_negative_usize(summary.imported),
             skipped: non_negative_usize(summary.skipped),
             unmatched: non_negative_usize(summary.unmatched),
+            relinked: non_negative_usize(summary.relinked),
         };
         if data.summary_is_delta {
             session
@@ -1431,6 +1432,7 @@ fn apply_library_scan_completed(
         imported: summary.imported.max(0) as usize,
         skipped: summary.skipped.max(0) as usize,
         unmatched: summary.unmatched.max(0) as usize,
+        relinked: summary.relinked.max(0) as usize,
     });
     session.warning_message = data.warning_message.clone();
 
@@ -1481,6 +1483,7 @@ fn apply_library_scan_canceled(
             imported: non_negative_usize(summary.imported),
             skipped: non_negative_usize(summary.skipped),
             unmatched: non_negative_usize(summary.unmatched),
+            relinked: non_negative_usize(summary.relinked),
         });
     }
 
@@ -2047,6 +2050,7 @@ mod tests {
                     imported: 1,
                     skipped: 0,
                     unmatched: 1,
+                    relinked: 0,
                 },
             )
             .await
@@ -2061,6 +2065,7 @@ mod tests {
                     imported: 2,
                     skipped: 1,
                     unmatched: 0,
+                    relinked: 0,
                 },
             )
             .await
@@ -2074,6 +2079,7 @@ mod tests {
                 imported: 3,
                 skipped: 1,
                 unmatched: 1,
+                relinked: 0,
             })
         );
     }
@@ -2103,6 +2109,7 @@ mod tests {
                     imported: 1,
                     skipped: 0,
                     unmatched: 0,
+                    relinked: 0,
                 });
                 session.warning_message = Some(
                     "Imported Sonarr/Radarr monitored state could not be applied after this scan."
@@ -2156,6 +2163,7 @@ mod tests {
                         imported: 2,
                         skipped: 1,
                         unmatched: 1,
+                        relinked: 0,
                     }),
                     summary_is_delta: false,
                 },
@@ -2182,6 +2190,7 @@ mod tests {
                 imported: 2,
                 skipped: 1,
                 unmatched: 1,
+                relinked: 0,
             })
         );
     }
@@ -2280,6 +2289,7 @@ mod tests {
                         imported: 1,
                         skipped: 0,
                         unmatched: 0,
+                        relinked: 0,
                     }),
                     summary_is_delta: false,
                 },
@@ -2412,6 +2422,7 @@ mod tests {
                         imported: 1,
                         skipped: 0,
                         unmatched: 0,
+                        relinked: 0,
                     }),
                     summary_is_delta: false,
                 }),

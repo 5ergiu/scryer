@@ -135,7 +135,9 @@ pub async fn retry_failed_import(
         );
         let handle = app.runtime.acquisition.tracked_download_handle.clone();
         let mut tracked = if let Some(handle) = handle.as_ref() {
-            handle.begin_history_retry(tracked_id.clone()).await?
+            handle
+                .begin_history_retry(tracked_id.clone(), download_id)
+                .await?
         } else {
             None
         };
@@ -182,7 +184,9 @@ pub async fn retry_failed_import(
                 ));
             }
             if let Some(handle) = handle.as_ref() {
-                handle.publish_history_retry(tracked_id.clone()).await?;
+                handle
+                    .publish_history_retry(tracked_id.clone(), download_id)
+                    .await?;
             }
             let (result, refusal) = execute_history_retry(
                 &app,
@@ -215,7 +219,9 @@ pub async fn retry_failed_import(
         .await;
         // An execution or reconciliation failure leaves the durable claim for recovery.
         if let Some(handle) = handle {
-            handle.finish_history_retry(tracked_id, finished).await?;
+            handle
+                .finish_history_retry(tracked_id, download_id, finished)
+                .await?;
         }
         outcome
     })
@@ -2391,6 +2397,10 @@ pub(crate) fn completed_import_result_is_retryable(result: &ImportResult) -> boo
                     | ImportSkipReason::ArchiveExtractionTimedOut
             )
         ),
+        // A post-download rule outcome is a decision, never a transient
+        // execution failure. Its message quotes operator-authored rule names
+        // and rule source, so the message allowlist must not be consulted.
+        _ if result.skip_reason == Some(ImportSkipReason::PostDownloadRuleBlocked) => false,
         _ => {
             matches!(
                 result.skip_reason,

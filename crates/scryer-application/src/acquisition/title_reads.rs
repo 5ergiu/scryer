@@ -31,6 +31,7 @@ pub(crate) struct TitleCatalogReads {
     media_files: OnceCell<Arc<Vec<TitleMediaFile>>>,
     collection_episodes: Mutex<HashMap<String, Arc<Vec<Episode>>>>,
     collection_external_ids: Mutex<HashMap<String, Arc<Vec<ScopedExternalId>>>>,
+    episode_external_ids: OnceCell<Arc<HashMap<String, Vec<ScopedExternalId>>>>,
     scoped_media_files: Mutex<HashMap<Vec<String>, Arc<Vec<EpisodeScopedMediaFile>>>>,
 }
 
@@ -43,6 +44,7 @@ impl TitleCatalogReads {
             media_files: OnceCell::new(),
             collection_episodes: Mutex::new(HashMap::new()),
             collection_external_ids: Mutex::new(HashMap::new()),
+            episode_external_ids: OnceCell::new(),
             scoped_media_files: Mutex::new(HashMap::new()),
         }
     }
@@ -150,6 +152,37 @@ impl TitleCatalogReads {
             .entry(collection_id.to_string())
             .or_insert_with(|| Arc::clone(&ids));
         Ok(ids)
+    }
+
+    /// One episode's scoped external ids, exactly as
+    /// `list_episode_external_ids` returns them. The first ask reads the whole
+    /// title's episode ids in one query; every episode stage of an anime walk
+    /// asks for its own AniDB mapping.
+    pub(crate) async fn episode_external_ids(
+        &self,
+        app: &AppUseCase,
+        episode_id: &str,
+    ) -> AppResult<Vec<ScopedExternalId>> {
+        let by_episode = self
+            .episode_external_ids
+            .get_or_try_init(|| async {
+                let rows = app
+                    .services
+                    .catalog
+                    .shows
+                    .list_episode_external_ids_for_title(&self.title_id)
+                    .await?;
+                let mut by_episode: HashMap<String, Vec<ScopedExternalId>> = HashMap::new();
+                for row in rows {
+                    by_episode
+                        .entry(row.scope_id.clone())
+                        .or_default()
+                        .push(row);
+                }
+                Ok::<_, crate::AppError>(Arc::new(by_episode))
+            })
+            .await?;
+        Ok(by_episode.get(episode_id).cloned().unwrap_or_default())
     }
 
     /// `list_live_media_files_for_episode_ids` for this title, memoized per

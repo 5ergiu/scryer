@@ -41,6 +41,10 @@ import {
   selectedLibraryIdsToQueryValue,
 } from "@/lib/utils/library-filter";
 import { buildOverviewDetailPath } from "@/lib/utils/routing";
+import {
+  metadataResultExternalIds,
+  type KindedExternalIdInput,
+} from "@/lib/utils/metadata-result-external-ids";
 import { LoadingMark } from "@/components/common/loading-mark";
 
 type PendingImportsContainerProps = {
@@ -70,10 +74,7 @@ type MetadataSearchResult = {
   existingTitleId?: string | null;
 };
 
-type ExternalIdInput = {
-  source: string;
-  value: string;
-};
+type ExternalIdInput = KindedExternalIdInput;
 
 type PendingImportResolveTitleInput = {
   name: string;
@@ -162,34 +163,6 @@ function summarizePendingImport(item: PendingImportItem, t: Translate): string {
   return parts.join(" • ");
 }
 
-function metadataResultExternalIds(result: MetadataSearchResult): ExternalIdInput[] {
-  const smgId = result.smgId == null ? "" : String(result.smgId).trim();
-  const tvdbId = String(result.tvdbId).trim();
-  const tmdbId = result.tmdbId == null ? "" : String(result.tmdbId).trim();
-  const imdbId = result.imdbId?.trim();
-  const seen = new Set<string>();
-  const ids: ExternalIdInput[] = [];
-
-  for (const externalId of [
-    ...(result.externalIds ?? []),
-    ...(smgId ? [{ source: "smg", value: smgId }] : []),
-    ...(tvdbId ? [{ source: "tvdb", value: tvdbId }] : []),
-    ...(tmdbId ? [{ source: "tmdb", value: tmdbId }] : []),
-    ...(imdbId ? [{ source: "imdb", value: imdbId }] : []),
-  ]) {
-    const source = externalId.source.trim().toLowerCase();
-    const value = externalId.value.trim();
-    const key = `${source}:${value}`;
-    if (!source || !value || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    ids.push({ source, value });
-  }
-
-  return ids;
-}
-
 function buildPendingImportResolveTitleInput(
   item: PendingImportItem,
   result: MetadataSearchResult,
@@ -200,7 +173,7 @@ function buildPendingImportResolveTitleInput(
     libraryId: item.libraryId,
     monitored: false,
     tags: [],
-    externalIds: metadataResultExternalIds(result),
+    externalIds: metadataResultExternalIds(result, item.facet),
     smgId: result.smgId ?? undefined,
     tvdbId: result.tvdbId.trim() || undefined,
     tmdbId: result.tmdbId ?? undefined,

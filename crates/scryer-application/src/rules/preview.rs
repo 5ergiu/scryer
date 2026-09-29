@@ -1,8 +1,15 @@
 //! Read-only title-aware scoring previews for the rule editor.
 
-use chrono::Utc;
-use scryer_domain::{AppPermission, Id, MediaFacet, RuleSet, User};
+use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
+use scryer_domain::{AppPermission, Id, MediaFacet, RuleSet, User};
+use serde_json::Value;
+
+use crate::canonical_scoring::ListingFacts;
+use crate::quality::release_listing::{
+    ReleaseListingSnapshot, bounded_extra, bounded_indexer_languages,
+};
 use crate::{AppError, AppResult, AppUseCase};
 
 /// The unsaved fields from the scoring-rule editor.
@@ -26,8 +33,118 @@ pub struct RuleSetTestRequest {
     pub copy_disables_source: bool,
     pub title_id: String,
     pub episode_id: Option<String>,
-    pub release_name: String,
+    /// Release name to parse and score. Exactly one of this and
+    /// `media_file_id` is required.
+    pub release_name: Option<String>,
     pub size_bytes: Option<i64>,
+    /// Indexer listing facts for `release_name`, as a live listing would
+    /// report them. Absent values stay unknown, exactly as a listing that
+    /// lacks them. Not accepted with `media_file_id`.
+    pub listing: RuleSetTestListingInput,
+    /// Stored media file of the selected title to score from its row and its
+    /// frozen listing snapshot, instead of a release name.
+    pub media_file_id: Option<String>,
+}
+
+/// Indexer listing facts supplied to the tester for a release name.
+#[derive(Clone, Debug, Default)]
+pub struct RuleSetTestListingInput {
+    /// Publish time, in any form a live listing's is kept in: RFC 2822
+    /// (a newznab `pubDate`) or RFC 3339.
+    pub published_at: Option<String>,
+    pub thumbs_up: Option<i32>,
+    pub thumbs_down: Option<i32>,
+    pub is_password_protected: Option<bool>,
+    pub indexer_languages: Option<Vec<String>>,
+    /// Indexer-specific scalars; bounded the same way a live listing's are.
+    pub extra: Option<serde_json::Map<String, Value>>,
+}
+
+impl RuleSetTestListingInput {
+    fn is_empty(&self) -> bool {
+        self.published_at.is_none()
+            && self.thumbs_up.is_none()
+            && self.thumbs_down.is_none()
+            && self.is_password_protected.is_none()
+            && self.indexer_languages.is_none()
+            && self.extra.is_none()
+    }
+
+    /// The snapshot a never-grabbed candidate with these facts would be
+    /// scored with at `now`.
+    fn snapshot(&self, now: DateTime<Utc>) -> ReleaseListingSnapshot {
+        let extra: HashMap<String, Value> = self
+            .extra
+            .as_ref()
+            .map(|extra| {
+                extra
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ReleaseListingSnapshot {
+            published_at: self
+                .published_at
+                .as_deref()
+                .map(|raw| raw.trim().to_string()),
+            thumbs_up: self.thumbs_up,
+            thumbs_down: self.thumbs_down,
+            is_password_protected: self.is_password_protected,
+            indexer_languages: bounded_indexer_languages(self.indexer_languages.iter().flatten()),
+            extra: bounded_extra(&extra),
+            captured_at: now,
+        }
+    }
+}
+
+/// The listing facts a preview scored with, and the age rules saw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuleSetTestListingFacts {
+    pub published_at: Option<String>,
+    /// `input.release.age_days`: the age at `captured_at` for a stored file,
+    /// the age now for a tested release name.
+    pub age_days: Option<i64>,
+    pub thumbs_up: Option<i32>,
+    pub thumbs_down: Option<i32>,
+    pub is_password_protected: Option<bool>,
+    pub indexer_languages: Vec<String>,
+    pub extra: BTreeMap<String, Value>,
+    pub captured_at: DateTime<Utc>,
+}
+
+impl RuleSetTestListingFacts {
+    fn from_facts(facts: &ListingFacts) -> Self {
+        let snapshot = &facts.snapshot;
+        Self {
+            published_at: snapshot.published_at.clone(),
+            age_days: snapshot.age_days(facts.anchor),
+            thumbs_up: snapshot.thumbs_up,
+            thumbs_down: snapshot.thumbs_down,
+            is_password_protected: snapshot.is_password_protected,
+            indexer_languages: snapshot.indexer_languages.clone(),
+            extra: snapshot.extra.clone(),
+            captured_at: snapshot.captured_at,
+        }
+    }
+}
+
+/// What a preview scores: a release name as a fresh candidate, or a stored
+/// file exactly as its landed bar is derived.
+enum PreviewSubject {
+    Release {
+        name: String,
+        size_bytes: Option<i64>,
+        listing: ListingFacts,
+    },
+    StoredFile {
+        file: Box<crate::TitleMediaFile>,
+        /// Every episode the file is linked to; its size basis.
+        episode_ids: Vec<String>,
+        /// The episodes its bar is scored for: the selected episode, else
+        /// the whole span. Empty for a file bound to no episode.
+        scoring_episode_ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +214,14 @@ pub struct RuleSetTestDraftContribution {
 
 #[derive(Clone, Debug)]
 pub struct RuleSetTestResult {
+    /// The release name that was scored: the supplied one, or a stored file's
+    /// grabbed release title (its file name when it has none).
+    pub release_name: String,
+    /// The stored file that was scored, when testing one.
+    pub media_file_id: Option<String>,
+    /// Listing facts rules read. `None` for a stored file without a listing
+    /// snapshot: every listing fact was unknown.
+    pub listing: Option<RuleSetTestListingFacts>,
     pub score: i32,
     pub allowed: bool,
     pub blocked: bool,
@@ -123,18 +248,62 @@ impl AppUseCase {
     pub async fn test_rule_set(
         &self,
         actor: &User,
-        request: RuleSetTestRequest,
+        mut request: RuleSetTestRequest,
     ) -> AppResult<RuleSetTestResult> {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
+        normalize_preview_subject(&mut request);
         validate_preview_request(&request)?;
 
         let title = self
             .get_title(actor, &request.title_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("title {}", request.title_id)))?;
+        let now = self.runtime.environment.now();
 
-        let episode = match request.episode_id.as_deref() {
+        // A stored file is loaded only through the title the actor was just
+        // allowed to view. It is scored for the selected episode, else over
+        // its whole episode span.
+        let stored_file = match request.media_file_id.as_deref() {
+            Some(media_file_id) => {
+                let rows: Vec<crate::TitleMediaFile> = self
+                    .services
+                    .library
+                    .media_files
+                    .list_media_files_for_title(&title.id)
+                    .await?
+                    .into_iter()
+                    .filter(|row| row.id == media_file_id)
+                    .collect();
+                let mut episode_ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|row| row.episode_id.clone())
+                    .collect();
+                episode_ids.sort();
+                episode_ids.dedup();
+                let file = rows.into_iter().next().ok_or_else(|| {
+                    AppError::NotFound(format!("media file {media_file_id} of title {}", title.id))
+                })?;
+                if let Some(episode_id) = request.episode_id.as_deref()
+                    && !episode_ids.iter().any(|id| id == episode_id)
+                {
+                    return Err(AppError::Validation(format!(
+                        "media file {media_file_id} does not cover episode {episode_id}"
+                    )));
+                }
+                Some((file, episode_ids))
+            }
+            None => None,
+        };
+        let episode_id = request.episode_id.clone().or_else(|| {
+            stored_file.as_ref().and_then(|(file, episode_ids)| {
+                file.episode_id
+                    .clone()
+                    .or_else(|| episode_ids.first().cloned())
+            })
+        });
+
+        let episode = match episode_id.as_deref() {
             Some(episode_id) => {
                 let episode = self
                     .services
@@ -158,7 +327,11 @@ impl AppUseCase {
                 "an episode cannot be selected when testing a movie rule".into(),
             ));
         }
-        if matches!(title.facet, MediaFacet::Series | MediaFacet::Anime) && episode.is_none() {
+        // A stored file bound to no episode is scored over the whole file.
+        if matches!(title.facet, MediaFacet::Series | MediaFacet::Anime)
+            && episode.is_none()
+            && stored_file.is_none()
+        {
             return Err(AppError::Validation(
                 "an episode is required when testing a series or anime rule".into(),
             ));
@@ -345,9 +518,25 @@ impl AppUseCase {
         let compute_episode = episode.clone();
         let compute_draft = draft.clone();
         let compute_draft_id = draft_id.clone();
-        let compute_release_name = request.release_name.clone();
-        let compute_size_bytes = request.size_bytes;
-        let (parsed, preview) = tokio::task::spawn_blocking(move || -> AppResult<_> {
+        let subject = match (stored_file, request.release_name.clone()) {
+            (Some((file, episode_ids)), _) => PreviewSubject::StoredFile {
+                file: Box::new(file),
+                scoring_episode_ids: match request.episode_id.clone() {
+                    Some(episode_id) => vec![episode_id],
+                    None => episode_ids.clone(),
+                },
+                episode_ids,
+            },
+            (None, Some(name)) => PreviewSubject::Release {
+                name,
+                size_bytes: request.size_bytes,
+                // A tester candidate has never been grabbed: its age is
+                // measured now, like any live search result.
+                listing: ListingFacts::candidate(request.listing.snapshot(now), now),
+            },
+            (None, None) => unreachable!("validated preview subject"),
+        };
+        let scored_subject = tokio::task::spawn_blocking(move || -> AppResult<ScoredSubject> {
             let rewritten_source = scryer_rules::rewrite_package_declaration(
                 &compute_draft.rego_source,
                 &compute_draft_id,
@@ -371,7 +560,6 @@ impl AppUseCase {
                     validation.errors.join("\n- ")
                 )));
             }
-            let now = Utc::now();
             let mut rule_sets = rule_sets;
             // A saved rule already sits in the enabled snapshot under its own
             // identity; only a draft needs to be appended for evaluation.
@@ -397,54 +585,129 @@ impl AppUseCase {
             let engine = AppUseCase::build_user_rules_engine_for_purpose(
                 rule_sets, plugin_policies, super::metrics::Purpose::Preview,
             )?;
-            let raw_parsed = crate::release_parser::parse_release_metadata_for_target(
-                &compute_release_name,
-                &crate::release_parser::build_release_parse_context_for_title(
-                    &compute_title,
-                    &episodes,
-                    Some(compute_title.facet.as_str()),
-                ),
-            );
-            let parsed = crate::quality::canonical_context::announced_metadata_for_title(
-                &compute_title,
-                &raw_parsed,
-                context.required_audio_languages(),
-                None,
-            );
-            let coverage = crate::acquisition_coverage::resolve_release_coverage(
-                &raw_parsed,
-                &episodes,
-                &collections,
-                compute_episode.as_ref(),
-            );
-            let size_basis = crate::acquisition_coverage::coverage_size_basis(
-                &coverage,
-                &parsed,
-                &episodes,
-                context.default_runtime_minutes(),
-            );
-            let preview_context = context.view(
-                size_basis,
-                compute_episode.as_ref().is_some_and(|item| item.is_filler),
-            );
-            let preview_context = crate::canonical_scoring::ScoringContext {
-                rules: (!engine.is_empty()).then_some(&engine),
-                ..preview_context
-            };
-            let preview = crate::canonical_scoring::score_release_preview(
-                &crate::canonical_scoring::ReleaseEvidence::announced(
-                    parsed.clone(),
-                    compute_size_bytes,
-                ),
-                &preview_context,
-            );
-            Ok((parsed, preview))
+            match subject {
+                PreviewSubject::Release {
+                    name,
+                    size_bytes,
+                    listing,
+                } => {
+                    let raw_parsed = crate::release_parser::parse_release_metadata_for_target(
+                        &name,
+                        &crate::release_parser::build_release_parse_context_for_title(
+                            &compute_title,
+                            &episodes,
+                            Some(compute_title.facet.as_str()),
+                        ),
+                    );
+                    let parsed = crate::quality::canonical_context::announced_metadata_for_title(
+                        &compute_title,
+                        &raw_parsed,
+                        context.required_audio_languages(),
+                        None,
+                    );
+                    let coverage = crate::acquisition_coverage::resolve_release_coverage(
+                        &raw_parsed,
+                        &episodes,
+                        &collections,
+                        compute_episode.as_ref(),
+                    );
+                    let size_basis = crate::acquisition_coverage::coverage_size_basis(
+                        &coverage,
+                        &parsed,
+                        &episodes,
+                        context.default_runtime_minutes(),
+                    );
+                    let is_filler = compute_episode.as_ref().is_some_and(|item| item.is_filler);
+                    let preview_context = crate::canonical_scoring::ScoringContext {
+                        rules: (!engine.is_empty()).then_some(&engine),
+                        ..context.view(size_basis, is_filler)
+                    };
+                    let facts = RuleSetTestListingFacts::from_facts(&listing);
+                    let preview = crate::canonical_scoring::score_release_preview(
+                        &crate::canonical_scoring::ReleaseEvidence::announced(
+                            parsed.clone(),
+                            size_bytes,
+                        )
+                        .with_listing(Some(listing)),
+                        &preview_context,
+                    );
+                    Ok(ScoredSubject {
+                        release_name: name,
+                        media_file_id: None,
+                        parsed,
+                        size_bytes,
+                        listing: Some(facts),
+                        preview,
+                    })
+                }
+                PreviewSubject::StoredFile {
+                    file,
+                    episode_ids,
+                    scoring_episode_ids,
+                } => {
+                    // The same basis the file's landed bar is derived on.
+                    let size_basis = if episode_ids.is_empty() {
+                        crate::quality_profile::CoverageSizeBasis::default()
+                    } else {
+                        crate::acquisition_coverage::episode_span_size_basis(
+                            &episodes,
+                            &episode_ids,
+                            context.default_runtime_minutes(),
+                        )
+                    };
+                    // Scored exactly as its landed bar is: the file's whole
+                    // span as the size basis, never a filler view, and a disc
+                    // scoped to the episodes being judged.
+                    let preview_context = crate::canonical_scoring::ScoringContext {
+                        rules: (!engine.is_empty()).then_some(&engine),
+                        ..context.view(size_basis, false)
+                    };
+                    let preview = if scoring_episode_ids.is_empty() {
+                        crate::canonical_scoring::score_media_file_preview(&file, &preview_context)
+                    } else {
+                        crate::canonical_scoring::score_media_file_for_episodes_preview(
+                            &file,
+                            &scoring_episode_ids,
+                            &preview_context,
+                        )
+                    };
+                    let listing = ListingFacts::grabbed_from_json(
+                        file.release_listing_json.as_deref(),
+                    );
+                    Ok(ScoredSubject {
+                        release_name: stored_file_release_name(&file),
+                        media_file_id: Some(file.id.clone()),
+                        parsed: crate::canonical_scoring::announced_parse_from_media_file(&file),
+                        size_bytes: Some(crate::canonical_scoring::size_basis_bytes(
+                            file.size_bytes,
+                            file.announced_size_bytes,
+                        )),
+                        listing: listing.as_ref().map(RuleSetTestListingFacts::from_facts),
+                        preview,
+                    })
+                }
+            }
         })
         .await
         .map_err(|error| {
             AppError::Repository(format!("scoring preview worker failed: {error}"))
         })??;
 
+        let ScoredSubject {
+            release_name,
+            media_file_id,
+            parsed,
+            size_bytes,
+            listing,
+            preview,
+        } = scored_subject;
+        // The pass that set the score: the analyzed one for a stored file
+        // that was probed, the announced one otherwise.
+        let decision = preview
+            .scored
+            .analyzed_decision
+            .as_ref()
+            .unwrap_or(&preview.scored.announced_decision);
         let mut errors = preview
             .rule_errors
             .iter()
@@ -454,15 +717,15 @@ impl AppUseCase {
                 rule_set_id: Some(error.rule_set_id.clone()),
             })
             .collect::<Vec<_>>();
-        if let Some(error) = preview.engine_error {
+        if let Some(error) = preview.engine_error.as_ref() {
             errors.push(RuleSetTestError {
                 code: "rules_engine_error".into(),
-                message: error,
+                message: error.clone(),
                 rule_set_id: None,
             });
         }
         let mut rule_sets = preview_rule_sets(
-            &preview.scored.announced_decision.scoring_log,
+            &decision.scoring_log,
             &preview.rule_errors,
             &draft_id,
             !saved_rule_test,
@@ -474,10 +737,9 @@ impl AppUseCase {
             &draft,
             &draft_id,
             title.facet.as_str(),
-            &preview.scored.announced_decision.scoring_log,
+            &decision.scoring_log,
             &preview.rule_errors,
         );
-        let decision = &preview.scored.announced_decision;
         let library_name = self
             .services
             .catalog
@@ -487,6 +749,9 @@ impl AppUseCase {
             .map(|library| library.name);
 
         Ok(RuleSetTestResult {
+            release_name,
+            media_file_id,
+            listing,
             score: preview.scored.total,
             allowed: decision.allowed,
             blocked: !decision.allowed,
@@ -517,7 +782,7 @@ impl AppUseCase {
                     .and_then(|episode| episode.first_episode())
                     .map(|episode| episode.to_string()),
                 edition: parsed.edition,
-                size_bytes: request.size_bytes,
+                size_bytes,
                 release_group: parsed.release_group,
                 video_codec: parsed.video_codec.map(|codec| codec.to_string()),
                 audio: parsed.audio.map(|audio| audio.to_string()),
@@ -540,22 +805,110 @@ impl AppUseCase {
     }
 }
 
+/// Trim the stored-file id once, so a blank id means "no stored file" in both
+/// validation and the loader.
+fn normalize_preview_subject(request: &mut RuleSetTestRequest) {
+    request.media_file_id = request
+        .media_file_id
+        .take()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+}
+
 fn validate_preview_request(request: &RuleSetTestRequest) -> AppResult<()> {
     const MAX_RELEASE_NAME_BYTES: usize = 4 * 1024;
-    if request.title_id.trim().is_empty() || request.release_name.trim().is_empty() {
-        return Err(AppError::Validation(
-            "title and release name are required".into(),
-        ));
+    const MAX_INDEXER_LANGUAGES: usize = 64;
+    const MAX_INDEXER_LANGUAGE_BYTES: usize = 64;
+    if request.title_id.trim().is_empty() {
+        return Err(AppError::Validation("a title is required".into()));
     }
-    if request.release_name.len() > MAX_RELEASE_NAME_BYTES {
-        return Err(AppError::Validation(
-            "release name is too large for a scoring preview".into(),
-        ));
+    let release_name = request
+        .release_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty());
+    let media_file_id = request
+        .media_file_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty());
+    match (release_name, media_file_id) {
+        (Some(_), Some(_)) => {
+            return Err(AppError::Validation(
+                "test either a release name or a stored media file, not both".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(AppError::Validation(
+                "title and either a release name or a stored media file are required".into(),
+            ));
+        }
+        (Some(name), None) if name.len() > MAX_RELEASE_NAME_BYTES => {
+            return Err(AppError::Validation(
+                "release name is too large for a scoring preview".into(),
+            ));
+        }
+        (None, Some(_)) if request.size_bytes.is_some() || !request.listing.is_empty() => {
+            return Err(AppError::Validation(
+                "a stored media file is scored from its own size and listing facts; \
+                 size and listing inputs apply only to a release name"
+                    .into(),
+            ));
+        }
+        _ => {}
     }
     if request.size_bytes.is_some_and(|size| size < 0) {
         return Err(AppError::Validation("size bytes cannot be negative".into()));
     }
+    let listing = &request.listing;
+    if let Some(raw) = listing.published_at.as_deref()
+        && crate::quality_profile::parse_published_at(raw.trim()).is_none()
+    {
+        return Err(AppError::Validation(format!(
+            "published at must be an RFC 2822 or RFC 3339 timestamp, got {raw:?}"
+        )));
+    }
+    if listing.thumbs_up.is_some_and(|votes| votes < 0)
+        || listing.thumbs_down.is_some_and(|votes| votes < 0)
+    {
+        return Err(AppError::Validation("votes cannot be negative".into()));
+    }
+    if let Some(languages) = listing.indexer_languages.as_ref()
+        && (languages.len() > MAX_INDEXER_LANGUAGES
+            || languages
+                .iter()
+                .any(|language| language.len() > MAX_INDEXER_LANGUAGE_BYTES))
+    {
+        return Err(AppError::Validation(
+            "indexer languages are too large for a scoring preview".into(),
+        ));
+    }
     Ok(())
+}
+
+/// The name a stored file's release is shown as: the release it was grabbed
+/// as, else its file name.
+fn stored_file_release_name(file: &crate::TitleMediaFile) -> String {
+    if let Some(title) = file
+        .grabbed_release_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+    {
+        return title.to_string();
+    }
+    crate::stored_paths::stored_path_to_path_buf(&file.file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| file.file_path.clone())
+}
+
+/// One scored preview subject, carried out of the blocking worker.
+struct ScoredSubject {
+    release_name: String,
+    media_file_id: Option<String>,
+    parsed: crate::ParsedReleaseMetadata,
+    size_bytes: Option<i64>,
+    listing: Option<RuleSetTestListingFacts>,
+    preview: crate::canonical_scoring::ScoredReleasePreview,
 }
 
 fn is_rule_diagnostic(
@@ -641,7 +994,10 @@ fn preview_rule_sets(
                     messages: Vec::new(),
                     entries: Vec::new(),
                 });
-        result.messages.push(error.message.clone());
+        // A probed file runs rules once per evidence pass; one message each.
+        if !result.messages.contains(&error.message) {
+            result.messages.push(error.message.clone());
+        }
     }
     results.into_values().collect()
 }

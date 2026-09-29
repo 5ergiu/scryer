@@ -494,6 +494,7 @@ fn jellyfin_notification_payload(
         application_update: None,
         manual_interaction: None,
         media_request: None,
+        title_move: None,
     }
 }
 
@@ -525,6 +526,7 @@ fn test_notification_payload() -> NotificationPayload {
         application_update: None,
         manual_interaction: None,
         media_request: None,
+        title_move: None,
     }
 }
 
@@ -544,7 +546,7 @@ fn lifecycle_metadata(
         })
         .collect::<Vec<_>>();
 
-    // Mirrors `primary_file_path` in the dispatcher: the reported path is the file that now
+    // Mirrors the dispatcher's primary-path rule: the reported path is the file that now
     // exists, so a rename (old deleted first, new created second) reports the new path.
     let primary_path = updates
         .iter()
@@ -663,6 +665,7 @@ fn import_completed_event_data(
         quality: None,
         episode_ids,
         size_bytes: None,
+        upgrade: false,
     }
 }
 
@@ -1242,6 +1245,7 @@ async fn notification_event_types_query_returns_only_dispatchable_subscription_e
             "health_restored",
             "title_added",
             "title_deleted",
+            "title_moved",
             "grab",
             "download",
             "import_complete",
@@ -1250,6 +1254,7 @@ async fn notification_event_types_query_returns_only_dispatchable_subscription_e
             "rename",
             "file_deleted_for_upgrade",
             "file_deleted",
+            "file_restored",
             "post_processing_completed",
             "subtitle_downloaded",
             "subtitle_search_failed",
@@ -1257,6 +1262,12 @@ async fn notification_event_types_query_returns_only_dispatchable_subscription_e
             "media_request_approved",
             "media_request_rejected",
             "media_request_canceled",
+            "list_title_added",
+            "list_item_held",
+            "list_request_submitted",
+            "list_title_left",
+            "list_sync_failed",
+            "list_unfollowed",
         ]
     );
 }
@@ -1978,6 +1989,7 @@ async fn notification_dispatcher_delivers_release_grabbed() {
             source_provider: Some("rss".to_string()),
             download_id: Some("download-1".to_string()),
             episode_ids: vec!["episode-1".to_string()],
+            release_facts: None,
         }),
     ))
     .await
@@ -1996,6 +2008,7 @@ async fn notification_dispatcher_delivers_release_grabbed() {
         Some(NotificationReleasePayload {
             source_title: Some("Grabbed.Show.S01E01.1080p.WEB-DL".to_string()),
             source_hint: Some("rss".to_string()),
+            indexer: Some("rss".to_string()),
             ..Default::default()
         })
     );
@@ -2164,6 +2177,7 @@ async fn notification_dispatcher_delivers_title_deleted() {
         "series",
         DomainEventPayload::TitleDeleted(TitleDeletedEventData {
             title: title_context("Removed Show", "series", DomainExternalIds::default()),
+            deleted_paths: Vec::new(),
         }),
     ))
     .await

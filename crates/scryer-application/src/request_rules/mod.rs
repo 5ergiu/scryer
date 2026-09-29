@@ -39,9 +39,9 @@ pub mod read_model;
 pub mod service;
 
 pub use arbitration::{
-    Arbitration, ArbitrationReason, FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_NO_RULE_MATCHED,
-    FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
-    legacy_outcome,
+    Arbitration, ArbitrationReason, FALLBACK_ERROR, FALLBACK_HELD, FALLBACK_LIBRARY_PERMISSION,
+    FALLBACK_NO_RULE_MATCHED, FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER, ScopedError,
+    ScopedVote, arbitrate, legacy_outcome,
 };
 pub use engine::{RequestRuleScope, RequestRulesEngineCache, RequestRulesEngineHandle};
 pub use evaluation::{
