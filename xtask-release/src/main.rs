@@ -3119,7 +3119,7 @@ fn sync_builtin_plugin(
     })?;
     let wasm_digest = required_blake3_digest("builtin wasm", &artifact.wasm_digests)?;
     require_blake3_bytes("builtin wasm", wasm_digest, &wasm_bytes)?;
-    let mut descriptor = release_builtin_descriptor_loader(ctx)?
+    let descriptor = release_builtin_descriptor_loader(ctx)?
         .load_descriptor_from_wasm_bytes(&wasm_bytes)
         .map_err(|error| anyhow!("failed to describe builtin {}: {error}", spec.plugin_id))?;
     if descriptor.id != spec.plugin_id {
@@ -3142,8 +3142,9 @@ fn sync_builtin_plugin(
         &descriptor.sdk_version,
         &descriptor.sdk_constraint,
     )?;
-    descriptor.sdk_version = scryer_plugin_sdk::SDK_VERSION.to_string();
-    descriptor.sdk_constraint = scryer_plugin_sdk::current_sdk_constraint();
+    // The descriptor is written as the guest reports it. The host compares the
+    // initialized component against this JSON on every boot, so restamping the
+    // SDK fields made the two disagree once the host SDK passed the plugin's.
 
     let paths = builtin_asset_paths_in(output_dir, spec);
     for path in [&paths.wasm, &paths.descriptor_json, &paths.description] {
