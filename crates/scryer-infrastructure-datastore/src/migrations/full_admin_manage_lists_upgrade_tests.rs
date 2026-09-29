@@ -85,8 +85,15 @@ async fn the_upgrade_grants_manage_lists_to_existing_full_admins_only() {
 
     let (current, untouched_at) = mask(&pool, "already-current").await;
     assert_eq!(current, LEGACY_FULL_ADMIN | MANAGE_LISTS);
-    assert_eq!(untouched_at, "2026-01-01T00:00:00Z", "a current mask is left alone");
+    assert_eq!(
+        untouched_at, "2026-01-01T00:00:00Z",
+        "a current mask is left alone"
+    );
 
-    assert_eq!(mask(&pool, "user-manager").await.0, 3, "a partial mask is not promoted");
+    assert_eq!(
+        mask(&pool, "user-manager").await.0,
+        3,
+        "a partial mask is not promoted"
+    );
     assert_eq!(mask(&pool, "member").await.0, 0);
 }

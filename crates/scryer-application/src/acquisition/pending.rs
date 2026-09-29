@@ -1390,12 +1390,14 @@ impl AppUseCase {
                 _ => PendingGrabOutcome::Rejected,
             }));
         }
-        Ok(PendingJudgement::Admitted(Box::new(AdmittedPendingRelease {
-            title,
-            pending_scope,
-            candidate_score,
-            incumbent_best_score: admission.best_score(),
-        })))
+        Ok(PendingJudgement::Admitted(Box::new(
+            AdmittedPendingRelease {
+                title,
+                pending_scope,
+                candidate_score,
+                incumbent_best_score: admission.best_score(),
+            },
+        )))
     }
 
     /// The grab half of [`Self::try_grab_pending_release`]: the delay hold and
